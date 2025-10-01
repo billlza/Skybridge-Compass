@@ -10,8 +10,16 @@ allprojects {
     }
 }
 
-java {
-    toolchain {
-        languageVersion = JavaLanguageVersion.of(21)
+// 配置所有子项目的 Java 版本
+subprojects {
+    afterEvaluate {
+        if (hasProperty("android")) {
+            extensions.configure<com.android.build.gradle.BaseExtension> {
+                compileOptions {
+                    sourceCompatibility = JavaVersion.VERSION_21
+                    targetCompatibility = JavaVersion.VERSION_21
+                }
+            }
+        }
     }
 }

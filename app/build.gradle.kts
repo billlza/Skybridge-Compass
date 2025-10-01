@@ -1,6 +1,7 @@
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.jetbrains.kotlin.android)
+    id("org.jetbrains.kotlin.plugin.compose") version "2.0.20"
 }
 
 android {
@@ -35,16 +36,8 @@ android {
         targetCompatibility = JavaVersion.VERSION_21
     }
     
-    kotlinOptions {
-        jvmTarget = "21"
-    }
-    
     buildFeatures {
         compose = true
-    }
-    
-    composeOptions {
-        kotlinCompilerExtensionVersion = "1.5.8"
     }
     
     packaging {
