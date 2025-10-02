@@ -15,7 +15,8 @@ data class NavigationItem(
 )
 
 /**
- * 主导航项列表 - 包含天气和AI功能
+ * 主导航项列表 - 简化为六个必需目标页面
+ * 按照 ChatGPT 要求的顺序：主控制台、附近设备、文件传输、远程桌面、AI助手、系统设置
  */
 val navigationItems = listOf(
     NavigationItem(
@@ -24,30 +25,9 @@ val navigationItems = listOf(
         icon = Icons.Default.Home
     ),
     NavigationItem(
-        route = "system_monitor",
-        title = "系统监控",
-        icon = Icons.Default.Monitor,
-        isSelected = true  // 默认选中
-    ),
-    NavigationItem(
-        route = "weather_center",
-        title = "天气中心",
-        icon = Icons.Default.Cloud
-    ),
-    NavigationItem(
-        route = "weather_settings",
-        title = "天气设置",
-        icon = Icons.Default.CloudQueue
-    ),
-    NavigationItem(
-        route = "ai_assistant",
-        title = "AI助手",
-        icon = Icons.Default.Psychology
-    ),
-    NavigationItem(
-        route = "remote_desktop",
-        title = "远程桌面",
-        icon = Icons.Default.Computer
+        route = "device_discovery",
+        title = "附近设备",
+        icon = Icons.Default.DeviceHub
     ),
     NavigationItem(
         route = "file_transfer",
@@ -55,18 +35,18 @@ val navigationItems = listOf(
         icon = Icons.Default.CloudUpload
     ),
     NavigationItem(
-        route = "device_discovery",
-        title = "设备发现",
-        icon = Icons.Default.DeviceHub
+        route = "remote_desktop",
+        title = "远程桌面",
+        icon = Icons.Default.Computer
     ),
     NavigationItem(
-        route = "node6_dashboard",
-        title = "Node 6",
-        icon = Icons.Default.Dashboard
+        route = "ai_assistant",
+        title = "AI助手",
+        icon = Icons.Default.Psychology
     ),
     NavigationItem(
         route = "user_settings",
-        title = "用户设置",
+        title = "系统设置",
         icon = Icons.Default.Settings
     )
 )
