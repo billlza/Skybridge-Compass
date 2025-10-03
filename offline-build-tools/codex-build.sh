@@ -28,6 +28,27 @@ if [ ! -d "$ANDROID_HOME" ]; then
     exit 1
 fi
 
+# 安装 AGP 8.6.1 到离线缓存
+echo ""
+echo "=== 安装 AGP 8.6.1 到离线缓存 ==="
+if [ -f "agp-cache/install-agp.sh" ]; then
+    cd agp-cache
+    ./install-agp.sh
+    cd ..
+    echo "✅ AGP 8.6.1 安装完成"
+else
+    echo "警告: 未找到 AGP 安装脚本"
+fi
+
+# 验证 AGP 安装
+echo ""
+echo "=== 验证 AGP 安装 ==="
+if [ -f "agp-cache/verify-agp.sh" ]; then
+    cd agp-cache
+    ./verify-agp.sh
+    cd ..
+fi
+
 echo ""
 echo "=== 开始 CodeX 离线构建 ==="
 
