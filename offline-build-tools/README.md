@@ -43,7 +43,7 @@ chmod +x gradlew *.sh
 ### 3. 手动构建
 ```bash
 # 设置环境变量
-export JAVA_HOME=/Library/Java/JavaVirtualMachines/jdk-21.jdk/Contents/Home
+export JAVA_HOME=${JAVA_HOME:-$(dirname $(dirname $(readlink -f $(which java))))}
 export ANDROID_HOME=/path/to/android/sdk
 
 # 安装 AGP 到离线缓存

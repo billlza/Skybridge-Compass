@@ -16,7 +16,7 @@
 ### Java 环境
 - **Java 版本**: 21 LTS (兼容 Java 25 LTS)
 - **JVM 配置**: -Xmx4096m -Dfile.encoding=UTF-8 -XX:+UseG1GC
-- **Java Home**: /Library/Java/JavaVirtualMachines/jdk-21.jdk/Contents/Home
+- **Java Home**: 系统自动检测
 
 ### Android 配置
 - **Target SDK**: 35
@@ -103,7 +103,7 @@ android.nonTransitiveRClass=true
 kotlin.code.style=official
 
 # Java 环境
-org.gradle.java.home=/Library/Java/JavaVirtualMachines/jdk-21.jdk/Contents/Home
+org.gradle.java.home=系统自动检测
 ```
 
 ### 依赖管理
