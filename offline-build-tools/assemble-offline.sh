@@ -1,18 +1,10 @@
 #!/bin/bash
-echo "=== CodeX 专用离线构建脚本 (AGP 8.7.3) ==="
+echo "=== 云桥司南离线构建脚本 ==="
 echo ""
 
-# 读取配置文件
-if [ -f "codex-build.properties" ]; then
-    source codex-build.properties
-    echo "已加载配置文件"
-else
-    echo "警告: 未找到 codex-build.properties 文件"
-fi
-
 # 设置环境变量
-export JAVA_HOME=${java.home:-/Library/Java/JavaVirtualMachines/jdk-21.jdk/Contents/Home}
-export ANDROID_HOME=${android.sdk.path:-/Users/macbookpro/Library/Android/sdk}
+export JAVA_HOME=/Library/Java/JavaVirtualMachines/jdk-21.jdk/Contents/Home
+export ANDROID_HOME=/Users/macbookpro/Library/Android/sdk
 
 echo "Java Home: $JAVA_HOME"
 echo "Android SDK: $ANDROID_HOME"
@@ -40,17 +32,8 @@ else
     echo "警告: 未找到 AGP 8.7.3 安装脚本"
 fi
 
-# 验证 AGP 安装
 echo ""
-echo "=== 验证 AGP 8.7.3 安装 ==="
-if [ -f "agp-cache-8.7.3/verify-agp-8.7.3.sh" ]; then
-    cd agp-cache-8.7.3
-    ./verify-agp-8.7.3.sh
-    cd ..
-fi
-
-echo ""
-echo "=== 开始 CodeX 离线构建 (AGP 8.7.3) ==="
+echo "=== 开始离线构建 ==="
 
 # 执行构建
 ./gradlew assembleDebug \
