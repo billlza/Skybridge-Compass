@@ -84,3 +84,51 @@ else
     echo "检查构建日志..."
     exit 1
 fi
+
+# 检测 Xcode 工具链可用性
+echo "=== 检测 Xcode 工具链 ==="
+if command -v xcodebuild >/dev/null 2>&1; then
+    echo "✅ Xcode 环境可用，支持全平台构建"
+    BUILD_IOS=true
+    xcodebuild -version
+else
+    echo "⚠️  CodeX 环境，Xcode 工具链不可用"
+    echo "    - xcodebuild: 不可用"
+    echo "    - iOS SDK: 不可用"
+    echo "    - 仅支持 Android 构建"
+    BUILD_IOS=false
+fi
+
+# 检测 Flutter 环境
+echo ""
+echo "=== 检测 Flutter 环境 ==="
+if command -v flutter >/dev/null 2>&1; then
+    echo "✅ Flutter 环境可用"
+    flutter --version
+    
+    # 根据 Xcode 可用性选择构建方式
+    if [ "$BUILD_IOS" = "true" ]; then
+        echo "📱 构建全平台版本 (Android + iOS)"
+        cd flutter_app
+        flutter build apk
+        flutter build ios --no-codesign
+        cd ..
+    else
+        echo "📱 构建 Android 版本 (CodeX 环境)"
+        cd flutter_app
+        flutter build apk --no-ios
+        cd ..
+    fi
+else
+    echo "⚠️  Flutter 环境不可用，跳过 Flutter 构建"
+fi
+
+# 构建 Android 主项目
+echo ""
+echo "=== 构建 Android 主项目 ==="
+if [ -f "app/build.gradle.kts" ]; then
+    echo "✅ 构建 Android Kotlin/Compose 应用"
+    ./gradlew assembleDebug --no-daemon --offline
+else
+    echo "⚠️  未找到 Android 项目文件"
+fi
