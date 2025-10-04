@@ -59,7 +59,10 @@ data class DiscoveredDevice(
     val lastSeen: Long = System.currentTimeMillis(),
     val trustLevel: Float = 0.5f,
     val connectionQuality: Float = 0.8f,
-    val rssi: Int = 0
+    val rssi: Int = 0,
+    val platform: BridgeDevicePlatform = BridgeDevicePlatform.UNKNOWN,
+    val compatibilityRemark: String = "",
+    val transports: Set<BridgeTransportHint> = emptySet()
 ) {
     fun isExpired(timeoutMs: Long = 300000L): Boolean {
         return System.currentTimeMillis() - lastSeen > timeoutMs
@@ -67,9 +70,10 @@ data class DiscoveredDevice(
 }
 
 class DeviceDiscoveryManager(private val context: Context) {
-    
+
     private val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
     private val bluetoothAdapter = BluetoothAdapter.getDefaultAdapter()
+    private val compatibilityManager = CrossPlatformCompatibilityManager()
     
     private val _discoveredDevices = MutableStateFlow<List<DiscoveredDevice>>(emptyList())
     val discoveredDevices: StateFlow<List<DiscoveredDevice>> = _discoveredDevices.asStateFlow()
@@ -384,14 +388,23 @@ class DeviceDiscoveryManager(private val context: Context) {
                         val rssi = intent.getShortExtra(BluetoothDevice.EXTRA_RSSI, Short.MIN_VALUE).toInt()
                         
                         device?.let {
+                            if (compatibilityManager.shouldExclude(it.name, it.address)) {
+                                return@let
+                            }
+                            val platform = compatibilityManager.resolvePlatform(it.name, it.address)
                             val discoveredDevice = DiscoveredDevice(
                                 deviceId = it.address,
                                 deviceName = it.name ?: "Unknown Bluetooth Device",
-                                deviceType = "bluetooth",
+                                deviceType = platformLabel(platform),
                                 ipAddress = "",
                                 capabilities = estimateBluetoothCapabilities(it),
                                 discoveryProtocol = "bluetooth_classic",
-                                rssi = rssi
+                                rssi = rssi,
+                                platform = platform,
+                                compatibilityRemark = compatibilityManager.remarkFor(platform),
+                                transports = compatibilityManager.transportsFor(platform).ifEmpty {
+                                    setOf(BridgeTransportHint.UniversalBridge)
+                                }
                             )
                             addDiscoveredDevice(discoveredDevice)
                         }
@@ -430,14 +443,23 @@ class DeviceDiscoveryManager(private val context: Context) {
                     }
                     
                     val device = scanResult.device
+                    if (compatibilityManager.shouldExclude(device.name, device.address)) {
+                        return
+                    }
+                    val platform = compatibilityManager.resolvePlatform(device.name, device.address)
                     val discoveredDevice = DiscoveredDevice(
                         deviceId = device.address,
                         deviceName = device.name ?: "Unknown BLE Device",
-                        deviceType = "ble",
+                        deviceType = platformLabel(platform),
                         ipAddress = "",
                         capabilities = estimateBLECapabilities(scanResult),
                         discoveryProtocol = "bluetooth_le",
-                        rssi = scanResult.rssi
+                        rssi = scanResult.rssi,
+                        platform = platform,
+                        compatibilityRemark = compatibilityManager.remarkFor(platform),
+                        transports = compatibilityManager.transportsFor(platform).ifEmpty {
+                            setOf(BridgeTransportHint.UniversalBridge)
+                        }
                     )
                     addDiscoveredDevice(discoveredDevice)
                 }
@@ -549,16 +571,25 @@ class DeviceDiscoveryManager(private val context: Context) {
             if (openPort > 0) {
                 // 尝试获取设备信息
                 val deviceName = getDeviceNameFromIP(ip)
+                if (compatibilityManager.shouldExclude(deviceName, null)) {
+                    return@withContext null
+                }
+                val platform = compatibilityManager.resolvePlatform(deviceName, null)
                 val capabilities = estimateNetworkDeviceCapabilities(ip, openPort)
-                
+
                 DiscoveredDevice(
                     deviceId = ip,
                     deviceName = deviceName,
-                    deviceType = "network",
+                    deviceType = platformLabel(platform),
                     ipAddress = ip,
                     port = openPort,
                     capabilities = capabilities,
-                    discoveryProtocol = "network_scan"
+                    discoveryProtocol = "network_scan",
+                    platform = platform,
+                    compatibilityRemark = compatibilityManager.remarkFor(platform),
+                    transports = compatibilityManager.transportsFor(platform).ifEmpty {
+                        setOf(BridgeTransportHint.UniversalBridge)
+                    }
                 )
             } else {
                 null
@@ -686,10 +717,14 @@ class DeviceDiscoveryManager(private val context: Context) {
                 }
             }
             
+            if (compatibilityManager.shouldExclude(deviceName, deviceType)) {
+                return
+            }
+            val platform = compatibilityManager.resolvePlatform(deviceName, deviceType)
             val device = DiscoveredDevice(
                 deviceId = ip,
                 deviceName = deviceName,
-                deviceType = deviceType,
+                deviceType = platformLabel(platform),
                 ipAddress = ip,
                 capabilities = DeviceCapabilities(
                     computePower = 50,
@@ -697,9 +732,14 @@ class DeviceDiscoveryManager(private val context: Context) {
                     storageCapacity = 16384L,
                     networkBandwidth = 100
                 ),
-                discoveryProtocol = "upnp"
+                discoveryProtocol = "upnp",
+                platform = platform,
+                compatibilityRemark = compatibilityManager.remarkFor(platform),
+                transports = compatibilityManager.transportsFor(platform).ifEmpty {
+                    setOf(BridgeTransportHint.UniversalBridge)
+                }
             )
-            
+
             addDiscoveredDevice(device)
         } catch (e: Exception) {
             e.printStackTrace()
@@ -719,6 +759,19 @@ class DeviceDiscoveryManager(private val context: Context) {
      */
     private fun updateDeviceList() {
         _discoveredDevices.value = deviceMap.values.toList().sortedByDescending { it.lastSeen }
+    }
+
+    private fun platformLabel(platform: BridgeDevicePlatform): String {
+        return when (platform) {
+            BridgeDevicePlatform.ANDROID -> "Android"
+            BridgeDevicePlatform.IOS -> "iOS"
+            BridgeDevicePlatform.IPADOS -> "iPadOS"
+            BridgeDevicePlatform.MAC -> "macOS"
+            BridgeDevicePlatform.WINDOWS -> "Windows"
+            BridgeDevicePlatform.LINUX -> "Linux"
+            BridgeDevicePlatform.CHROME_OS -> "ChromeOS"
+            BridgeDevicePlatform.UNKNOWN -> "universal"
+        }
     }
     
     /**

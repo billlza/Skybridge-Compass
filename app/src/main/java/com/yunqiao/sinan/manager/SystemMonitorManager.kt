@@ -15,6 +15,7 @@ import android.net.NetworkCapabilities
 import android.bluetooth.BluetoothAdapter
 import android.location.LocationManager
 import androidx.annotation.RequiresApi
+import com.yunqiao.sinan.widget.StatusWidgetUpdater
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import java.io.*
@@ -71,14 +72,15 @@ class SystemMonitorManager(private val context: Context) {
         isMonitoring = true
         monitoringJob = CoroutineScope(Dispatchers.IO).launch {
             while (isMonitoring) {
-                try {
-                    val metrics = collectSystemMetrics()
-                    _systemMetrics.value = metrics
-                    delay(intervalMs)
-                } catch (e: Exception) {
-                    // 记录错误但继续监控
-                    e.printStackTrace()
-                    delay(intervalMs)
+                    try {
+                        val metrics = collectSystemMetrics()
+                        _systemMetrics.value = metrics
+                        StatusWidgetUpdater.onMetricsUpdated(context.applicationContext, metrics)
+                        delay(intervalMs)
+                    } catch (e: Exception) {
+                        // 记录错误但继续监控
+                        e.printStackTrace()
+                        delay(intervalMs)
                 }
             }
         }

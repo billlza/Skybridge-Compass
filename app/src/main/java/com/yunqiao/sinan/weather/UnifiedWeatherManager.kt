@@ -22,6 +22,7 @@ class UnifiedWeatherManager private constructor(
     private val weatherManager = WeatherManager(context)
     private val weatherEffectManager = WeatherEffectManager.getInstance()
     private val wallpaperManager = WeatherWallpaperManager.getInstance(context)
+    private val renderingOptimizer = WeatherRenderingOptimizer(context)
     
     // SharedPreferences用于配置存储
     private val prefs: SharedPreferences = context.getSharedPreferences(
@@ -57,6 +58,12 @@ class UnifiedWeatherManager private constructor(
                 
                 // 初始化效果管理器
                 weatherEffectManager.initialize()
+
+                // 侦测渲染能力
+                val renderingProfile = withContext(Dispatchers.Default) {
+                    renderingOptimizer.detect()
+                }
+                weatherEffectManager.updateRenderingProfile(renderingProfile)
                 
                 // 安全地监听天气数据变化
                 launch {
@@ -130,10 +137,17 @@ class UnifiedWeatherManager private constructor(
         systemStatus: WeatherSystemStatus? = null
     ) {
         val currentState = _unifiedWeatherState.value
-        
+
+        val resolvedWeatherInfo = weatherInfo ?: currentState.weatherInfo
+        val resolvedLocationInfo = locationInfo ?: currentState.locationInfo
+
+        if ((weatherInfo != null || locationInfo != null) && resolvedWeatherInfo.condition.lowercase() != "unknown") {
+            weatherEffectManager.refreshVisuals(resolvedWeatherInfo, resolvedLocationInfo)
+        }
+
         _unifiedWeatherState.value = currentState.copy(
-            weatherInfo = weatherInfo ?: currentState.weatherInfo,
-            locationInfo = locationInfo ?: currentState.locationInfo,
+            weatherInfo = resolvedWeatherInfo,
+            locationInfo = resolvedLocationInfo,
             isUpdating = isUpdating ?: currentState.isUpdating,
             systemStatus = systemStatus ?: currentState.systemStatus,
             lastUpdateTime = System.currentTimeMillis()

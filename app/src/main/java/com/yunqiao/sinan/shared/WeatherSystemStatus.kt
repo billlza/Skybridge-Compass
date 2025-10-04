@@ -14,13 +14,16 @@ data class WeatherSystemStatus(
     val humidity: Float = 50.0f,
     val pressure: Float = 1013.25f,
     val visibility: Float = 10.0f,
-    val timestamp: Long = System.currentTimeMillis()
+    val timestamp: Long = System.currentTimeMillis(),
+    val cityName: String = "",
+    val country: String = "",
+    val conditionLabel: String = "",
+    val effectLabel: String = ""
 )
 
 enum class WeatherMode {
     AUTO,
     MANUAL,
-    SIMULATION,
     DISABLED
 }
 

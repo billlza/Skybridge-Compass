@@ -29,6 +29,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.lerp
 import androidx.compose.ui.unit.sp
 import com.yunqiao.sinan.data.NavigationItem
 import com.yunqiao.sinan.ui.theme.AnimatedColors
@@ -48,11 +49,12 @@ fun SideNavigation(
     selectedRoute: String,
     onItemClick: (String) -> Unit,
     onThemeChange: ((Boolean, Boolean) -> Unit)? = null,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    drawerProgress: Float = 1f
 ) {
     val isDarkTheme = LocalThemeIsDark.current
     val colorScheme = MaterialTheme.colorScheme
-    
+
     // 动态背景动画
     val infiniteTransition = rememberInfiniteTransition(label = "background")
     val backgroundShimmer by infiniteTransition.animateFloat(
@@ -65,13 +67,18 @@ fun SideNavigation(
         label = "shimmer"
     )
     
+    val progress = drawerProgress.coerceIn(0f, 1f)
+    val glassBlur = lerp(0.5.dp, 18.dp, progress)
+    val elevation = lerp(0.dp, 12.dp, progress)
+    val overlayAlpha = 0.72f + 0.2f * progress
+
     Surface(
         modifier = modifier
             .fillMaxHeight()
             .width(280.dp),
         shape = RoundedCornerShape(topEnd = 24.dp, bottomEnd = 24.dp),
         color = Color.Transparent,
-        tonalElevation = 0.dp
+        tonalElevation = elevation
     ) {
         Box(
             modifier = Modifier
@@ -79,9 +86,9 @@ fun SideNavigation(
                 .background(
                     brush = Brush.verticalGradient(
                         colors = listOf(
-                            colorScheme.surface.copy(alpha = 0.95f),
-                            colorScheme.surface.copy(alpha = 0.98f),
-                            colorScheme.surface.copy(alpha = 0.95f)
+                            colorScheme.surface.copy(alpha = overlayAlpha),
+                            colorScheme.surface.copy(alpha = overlayAlpha + 0.08f),
+                            colorScheme.surface.copy(alpha = overlayAlpha)
                         ),
                         startY = 0f,
                         endY = Float.POSITIVE_INFINITY
@@ -89,7 +96,7 @@ fun SideNavigation(
                     shape = RoundedCornerShape(topEnd = 24.dp, bottomEnd = 24.dp)
                 )
                 // 毛玻璃效果
-                .blur(radius = 0.5.dp)
+                .blur(radius = glassBlur)
                 .border(
                     width = 1.dp,
                     brush = Brush.verticalGradient(
@@ -102,6 +109,11 @@ fun SideNavigation(
                     shape = RoundedCornerShape(topEnd = 24.dp, bottomEnd = 24.dp)
                 )
                 .clip(RoundedCornerShape(topEnd = 24.dp, bottomEnd = 24.dp))
+                .graphicsLayer {
+                    val offset = (1f - progress) * -24f
+                    translationX = offset
+                    alpha = 0.85f + 0.15f * progress
+                }
                 .padding(vertical = 32.dp, horizontal = 20.dp)
         ) {
             Column {

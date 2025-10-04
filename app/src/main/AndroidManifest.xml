@@ -54,7 +54,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
     
-    <!-- Node 6 新增权限 -->
+    <!-- 运营枢纽新增权限 -->
     <!-- 前台服务权限 - Android 14+ 类型化 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING" />
@@ -95,18 +95,30 @@
         android:theme="@style/Theme.YunQiaoSiNan"
         android:enableOnBackInvokedCallback="true"
         android:localeConfig="@xml/locales_config"
-        tools:targetApi="35">
-        <activity
-            android:name=".MainActivity"
-            android:exported="true"
-            android:label="@string/app_name"
-            android:theme="@style/Theme.YunQiaoSiNan">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
+        tools:targetApi="36">
+          <activity
+              android:name=".MainActivity"
+              android:exported="true"
+              android:label="@string/app_name"
+              android:theme="@style/Theme.YunQiaoSiNan">
+              <intent-filter>
+                  <action android:name="android.intent.action.MAIN" />
 
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-        </activity>
-    </application>
+                  <category android:name="android.intent.category.LAUNCHER" />
+              </intent-filter>
+          </activity>
+
+          <receiver
+              android:name=".widget.StatusWidgetProvider"
+              android:exported="false">
+              <intent-filter>
+                  <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+              </intent-filter>
+
+              <meta-data
+                  android:name="android.appwidget.provider"
+                  android:resource="@xml/status_widget_info" />
+          </receiver>
+      </application>
 
 </manifest>

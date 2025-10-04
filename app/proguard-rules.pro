@@ -20,7 +20,7 @@
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
 
-# === ARM64优化和Android 13-15适配规则 ===
+# === ARM64优化和Android 13-16适配规则 ===
 
 # Keep Kotlin classes
 -keep class kotlin.** { *; }
@@ -28,7 +28,7 @@
 -dontwarn kotlin.**
 -dontwarn kotlinx.**
 
-# Keep Compose classes - Android 15兼容
+# Keep Compose classes - Android 16兼容
 -keep class androidx.compose.** { *; }
 -keep class androidx.compose.runtime.** { *; }
 -keep class androidx.compose.ui.** { *; }
@@ -62,13 +62,13 @@
 
 # Keep all model/data classes
 -keep class com.yunqiao.sinan.data.** { *; }
--keep class com.yunqiao.sinan.node6.model.** { *; }
+-keep class com.yunqiao.sinan.operationshub.model.** { *; }
 -keep class com.yunqiao.sinan.shared.** { *; }
 
 # Keep managers and services
 -keep class com.yunqiao.sinan.manager.** { *; }
--keep class com.yunqiao.sinan.node6.manager.** { *; }
--keep class com.yunqiao.sinan.node6.service.** { *; }
+-keep class com.yunqiao.sinan.operationshub.manager.** { *; }
+-keep class com.yunqiao.sinan.operationshub.service.** { *; }
 -keep class com.yunqiao.sinan.weather.** { *; }
 
 # Accompanist库优化

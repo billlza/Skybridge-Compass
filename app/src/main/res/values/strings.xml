@@ -1,13 +1,3 @@
-<?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">云桥司南</string>
-    <string name="device_online">在线</string>
-    <string name="device_count">%d devices · deviceCount</string>
-    <string name="main_control">主控制台</string>
-    <string name="remote_desktop">远程桌面</string>
-    <string name="file_transfer">文件传输</string>
-    <string name="device_management">设备管理</string>
-    <string name="system_monitor">系统监控</string>
-    <string name="user_settings">用户设置</string>
-    <string name="skybridge_compass">SkyBridge Compass</string>
 </resources>

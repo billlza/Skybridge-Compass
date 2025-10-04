@@ -1,10 +1,12 @@
 package com.yunqiao.sinan.ui.screen
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -18,6 +20,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.yunqiao.sinan.manager.BridgeTransportHint
 import com.yunqiao.sinan.manager.DeviceDiscoveryManager
 import com.yunqiao.sinan.manager.DiscoveredDevice
 import com.yunqiao.sinan.ui.theme.GlassColors
@@ -222,6 +225,14 @@ private fun DeviceCard(device: DiscoveredDevice) {
                         fontSize = 14.sp,
                         color = Color(0xFF00E5FF)
                     )
+
+                    if (device.compatibilityRemark.isNotEmpty()) {
+                        Text(
+                            text = device.compatibilityRemark,
+                            fontSize = 12.sp,
+                            color = Color.White.copy(alpha = 0.8f)
+                        )
+                    }
                     
                     if (device.ipAddress.isNotEmpty()) {
                         Text(
@@ -265,7 +276,11 @@ private fun DeviceCard(device: DiscoveredDevice) {
             
             // 设备能力信息
             DeviceCapabilitiesInfo(device)
-            
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            TransportCapabilityChips(device)
+
             Spacer(modifier = Modifier.height(12.dp))
             
             // 设备操作和状态
@@ -348,6 +363,84 @@ private fun DeviceCapabilitiesInfo(device: DiscoveredDevice) {
                 Icons.Default.Psychology
             )
         }
+    }
+}
+
+@Composable
+private fun TransportCapabilityChips(device: DiscoveredDevice) {
+    val transports = if (device.transports.isEmpty()) {
+        setOf(BridgeTransportHint.UniversalBridge)
+    } else {
+        device.transports
+    }
+    val scrollState = rememberScrollState()
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(scrollState),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        transports.forEach { hint ->
+            AssistChip(
+                onClick = {},
+                leadingIcon = {
+                    Icon(
+                        imageVector = transportHintIcon(hint),
+                        contentDescription = null,
+                        tint = Color.White
+                    )
+                },
+                label = {
+                    Text(
+                        text = transportHintLabel(hint),
+                        color = Color.White,
+                        fontSize = 12.sp
+                    )
+                },
+                colors = AssistChipDefaults.assistChipColors(
+                    containerColor = transportHintColor(hint).copy(alpha = 0.28f)
+                )
+            )
+        }
+    }
+}
+
+private fun transportHintLabel(hint: BridgeTransportHint): String {
+    return when (hint) {
+        BridgeTransportHint.WifiDirect -> "Wi-Fi直连"
+        BridgeTransportHint.Lan -> "局域网"
+        BridgeTransportHint.Cloud -> "云桥中继"
+        BridgeTransportHint.UltraWideband -> "超宽带"
+        BridgeTransportHint.Bluetooth -> "蓝牙"
+        BridgeTransportHint.Nfc -> "NFC"
+        BridgeTransportHint.AirPlay -> "AirPlay"
+        BridgeTransportHint.UniversalBridge -> "跨端"
+    }
+}
+
+private fun transportHintIcon(hint: BridgeTransportHint): ImageVector {
+    return when (hint) {
+        BridgeTransportHint.WifiDirect -> Icons.Default.WifiTethering
+        BridgeTransportHint.Lan -> Icons.Default.Cable
+        BridgeTransportHint.Cloud -> Icons.Default.Cloud
+        BridgeTransportHint.UltraWideband -> Icons.Default.WifiTethering
+        BridgeTransportHint.Bluetooth -> Icons.Default.Bluetooth
+        BridgeTransportHint.Nfc -> Icons.Default.Nfc
+        BridgeTransportHint.AirPlay -> Icons.Default.Cast
+        BridgeTransportHint.UniversalBridge -> Icons.Default.Devices
+    }
+}
+
+private fun transportHintColor(hint: BridgeTransportHint): Color {
+    return when (hint) {
+        BridgeTransportHint.WifiDirect -> Color(0xFF00E5FF)
+        BridgeTransportHint.Lan -> Color(0xFF4CAF50)
+        BridgeTransportHint.Cloud -> Color(0xFF7E57C2)
+        BridgeTransportHint.UltraWideband -> Color(0xFFFFC400)
+        BridgeTransportHint.Bluetooth -> Color(0xFF3D5AFE)
+        BridgeTransportHint.Nfc -> Color(0xFF26A69A)
+        BridgeTransportHint.AirPlay -> Color(0xFF7E57C2)
+        BridgeTransportHint.UniversalBridge -> Color(0xFF8E24AA)
     }
 }
 

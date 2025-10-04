@@ -171,10 +171,6 @@ class WeatherManager(private val context: Context) {
                 true
             }
             else -> {
-                // 权限不足时使用模拟数据
-                CoroutineScope(Dispatchers.IO).launch {
-                    updateWithMockData()
-                }
                 isInitialized = true
                 false
             }
@@ -379,15 +375,11 @@ class WeatherManager(private val context: Context) {
      */
     private suspend fun updateWeatherData(lat: Double, lon: Double) = withContext(Dispatchers.IO) {
         val apiKey = getWeatherApiKey()
-        
-        if (apiKey == "demo_api_key" || apiKey.isEmpty()) {
-            // 使用模拟数据进行演示
-            updateWithMockData()
-            return@withContext
-        }
-        
+
+        require(apiKey.isNotBlank() && apiKey != "demo_api_key") { "缺少有效的天气服务 API Key" }
+
         _isUpdating.value = true
-        
+
         try {
             // 尝试使用OpenWeatherMap API（更常用的免费API）
             if (apiKey.length == 32) { // OpenWeatherMap API key length
@@ -399,8 +391,7 @@ class WeatherManager(private val context: Context) {
             
         } catch (e: Exception) {
             e.printStackTrace()
-            // 发生错误时使用模拟数据
-            updateWithMockData()
+            throw e
         } finally {
             _isUpdating.value = false
         }
@@ -639,39 +630,6 @@ class WeatherManager(private val context: Context) {
             e.printStackTrace()
             return WeatherInfo()
         }
-    }
-    
-    /**
-     * 使用模拟数据（用于演示）
-     */
-    private fun updateWithMockData() {
-        val mockWeather = WeatherInfo(
-            temperature = 22.5f,
-            humidity = 65,
-            pressure = 1013.2f,
-            windSpeed = 12.5f,
-            windDirection = 180,
-            visibility = 10.0f,
-            uvIndex = 5,
-            condition = "部分多云",
-            conditionCode = 1003,
-            cityName = "北京",
-            country = "中国",
-            localTime = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date()),
-            sunrise = "06:30",
-            sunset = "18:45",
-            forecast = listOf(
-                ForecastDay("2025-09-23", 25f, 18f, "晴天", 1000, 10, 60, 8f),
-                ForecastDay("2025-09-24", 23f, 16f, "多云", 1003, 30, 70, 12f),
-                ForecastDay("2025-09-25", 20f, 14f, "小雨", 1183, 80, 85, 15f)
-            ),
-            airQuality = AirQuality(
-                co = 0.3f, no2 = 25f, o3 = 45f, so2 = 8f,
-                pm2_5 = 12f, pm10 = 18f, aqi = 2, quality = "良好"
-            )
-        )
-        
-        _weatherInfo.value = mockWeather
     }
     
     /**

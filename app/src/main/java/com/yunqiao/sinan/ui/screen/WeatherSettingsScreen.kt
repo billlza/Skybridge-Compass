@@ -233,7 +233,6 @@ private fun UpdateSettingsSection(
             subtitle = when (weatherConfig.weatherMode) {
                 WeatherMode.AUTO -> "自动模式"
                 WeatherMode.MANUAL -> "手动模式"
-                WeatherMode.SIMULATION -> "模拟模式"
                 WeatherMode.DISABLED -> "已禁用"
             },
             onClick = { showModeDialog = true },
@@ -654,7 +653,6 @@ private fun WeatherModeDialog(
     val modes = listOf(
         WeatherMode.AUTO to "自动模式",
         WeatherMode.MANUAL to "手动模式",
-        WeatherMode.SIMULATION to "模拟模式",
         WeatherMode.DISABLED to "已禁用"
     )
     
