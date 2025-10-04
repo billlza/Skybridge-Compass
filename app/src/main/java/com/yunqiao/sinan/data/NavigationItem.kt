@@ -15,14 +15,14 @@ data class NavigationItem(
 )
 
 /**
- * 主导航项列表 - 包含天气和AI功能
+ * 主导航项列表 - 简化为六个必需目标页面
+ * 按照 ChatGPT 要求的顺序：主控制台、附近设备、文件传输、远程桌面、AI助手、系统设置
  */
 val navigationItems = listOf(
     NavigationItem(
         route = "main_control",
         title = "主控制台",
-        icon = Icons.Default.Home,
-        isSelected = true
+        icon = Icons.Default.Home
     ),
     NavigationItem(
         route = "device_discovery",

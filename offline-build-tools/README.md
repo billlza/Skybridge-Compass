@@ -1,0 +1,80 @@
+# 云桥司南离线构建工具包
+
+## 概述
+这个工具包包含了在 CodeX 等无网络环境下构建 Android APK 所需的所有组件，包括 Android Gradle Plugin 8.6.1 的离线缓存。
+
+## 包含内容
+- `gradle/` - Gradle Wrapper 文件
+- `gradlew` - Gradle Wrapper 脚本 (Unix/Linux/macOS)
+- `gradlew.bat` - Gradle Wrapper 脚本 (Windows)
+- `offline-build.sh` - 离线构建脚本
+- `codex-build.sh` - CodeX 专用构建脚本
+- `codex-build.properties` - CodeX 配置文件
+- `agp-cache/` - Android Gradle Plugin 8.6.1 离线缓存
+  - `agp-8.6.1.properties` - AGP 配置
+  - `install-agp.sh` - AGP 安装脚本
+  - `verify-agp.sh` - AGP 验证脚本
+
+## 使用方法
+
+### 1. 环境要求
+- Java 21 LTS
+- Android SDK (API 35)
+- 无网络环境
+
+### 2. 构建步骤
+```bash
+# 进入项目根目录
+cd /path/to/project
+
+# 复制工具包到项目根目录
+cp -r offline-build-tools/* .
+
+# 设置执行权限
+chmod +x gradlew *.sh
+
+# 运行 CodeX 构建脚本（推荐）
+./codex-build.sh
+
+# 或运行通用离线构建脚本
+./offline-build.sh
+```
+
+### 3. 手动构建
+```bash
+# 设置环境变量
+export JAVA_HOME=${JAVA_HOME:-$(dirname $(dirname $(readlink -f $(which java))))}
+export ANDROID_HOME=/path/to/android/sdk
+
+# 安装 AGP 到离线缓存
+cd agp-cache
+./install-agp.sh
+cd ..
+
+# 执行构建
+./gradlew assembleDebug --offline --console=plain
+```
+
+## AGP 8.6.1 离线支持
+- 自动安装 AGP 8.6.1 到本地缓存
+- 支持完全离线构建
+- 包含元数据文件确保依赖解析
+
+## 注意事项
+- 确保所有依赖已预下载到本地缓存
+- 构建过程中不会访问网络
+- 适用于 CodeX 等受限环境
+- AGP 8.6.1 已包含在离线缓存中
+
+## 故障排除
+如果构建失败，请检查：
+1. Java 环境是否正确配置
+2. Android SDK 路径是否正确
+3. AGP 是否已正确安装到缓存
+4. 项目依赖是否完整
+
+## 版本信息
+- Gradle: 9.0.0
+- Android Gradle Plugin: 8.6.1
+- Kotlin: 2.0.20
+- Compose BOM: 2024.12.01

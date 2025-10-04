@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 主色调 -->
+    <color name="primary">#1976D2</color>
+    <color name="primary_dark">#0D47A1</color>
+    <color name="accent">#03DAC5</color>
+    
+    <!-- 背景色 -->
+    <color name="background_dark">#121212</color>
+    <color name="surface_dark">#1E1E1E</color>
+    <color name="surface_variant">#2D2D2D</color>
+    
+    <!-- 液态玻璃效果 -->
+    <color name="glass_background">#B3000000</color> <!-- 70% 透明黑色 -->
+    <color name="glass_border">#33FFFFFF</color> <!-- 20% 透明白色 -->
+    <color name="glass_highlight">#1AFFFFFF</color> <!-- 10% 透明白色 -->
+    
+    <!-- 渐变色 -->
+    <color name="gradient_start">#1976D2</color>
+    <color name="gradient_end">#42A5F5</color>
+    <color name="gradient_selected_start">#1565C0</color>
+    <color name="gradient_selected_end">#2196F3</color>
+    
+    <!-- 文本色 -->
+    <color name="text_primary">#FFFFFF</color>
+    <color name="text_secondary">#B3FFFFFF</color>
+    <color name="text_hint">#66FFFFFF</color>
+    
+    <!-- 状态色 -->
+    <color name="success">#4CAF50</color>
+    <color name="warning">#FF9800</color>
+    <color name="error">#F44336</color>
+    
+    <!-- 通用色 -->
+    <color name="white">#FFFFFF</color>
+    <color name="black">#000000</color>
+    <color name="transparent">#00000000</color>
+</resources>
