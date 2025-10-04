@@ -90,3 +90,19 @@ lint/tmp/
 
 # Android Profiling
 *.hprof
+YunQiaoSiNan/gradle-local-repo/
+
+# Build directories
+build/
+.gradle/
+gradle-local-repo/
+
+# Large files
+*.jar
+*.aar
+*.apk
+*.aab
+
+# Cache directories
+.cache/
+*.cache
