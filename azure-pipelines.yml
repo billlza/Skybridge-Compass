@@ -1,0 +1,291 @@
+# Azure DevOps Pipeline for Skybridge Compass Windows App
+
+trigger:
+- main
+- develop
+
+pr:
+- main
+
+variables:
+  buildConfiguration: 'Release'
+  buildPlatform: 'x64'
+  windowsSdkVersion: '10.0.22621.0'
+  cppWinRTVersion: '2.0.240111.4'
+  windowsAppSDKVersion: '1.5.240311000'
+
+stages:
+- stage: Build
+  displayName: 'Build Stage'
+  jobs:
+  - job: BuildWindows
+    displayName: 'Build Windows Application'
+    pool:
+      vmImage: 'windows-latest'
+    
+    steps:
+    - task: NuGetToolInstaller@1
+      displayName: 'Install NuGet'
+      
+    - task: NuGetCommand@2
+      displayName: 'Restore NuGet packages'
+      inputs:
+        restoreSolution: 'SkybridgeCompassApp.sln'
+        
+    - task: MSBuild@1
+      displayName: 'Build solution'
+      inputs:
+        solution: 'SkybridgeCompassApp.sln'
+        platform: '$(buildPlatform)'
+        configuration: '$(buildConfiguration)'
+        msbuildArguments: |
+          /p:WindowsAppSDKSelfContained=true
+          /p:WindowsAppSDKVersion=$(windowsAppSDKVersion)
+          /p:WindowsAppSDKFrameworkPackageRedist=true
+          /p:WindowsSDKVersion=$(windowsSdkVersion)
+          /p:CppWinRTVersion=$(cppWinRTVersion)
+          /verbosity:minimal
+          
+    - task: VSTest@2
+      displayName: 'Run tests'
+      inputs:
+        testSelector: 'testAssemblies'
+        testAssemblyVer2: |
+          **\*Test*.dll
+          !**\*TestAdapter.dll
+          !**\obj\**
+        searchFolder: '$(System.DefaultWorkingDirectory)'
+        resultsFolder: '$(Agent.TempDirectory)\TestResults'
+        runSettingsFile: 'TestSettings.runsettings'
+        
+    - task: PublishTestResults@2
+      displayName: 'Publish test results'
+      inputs:
+        testResultsFormat: 'VSTest'
+        testResultsFiles: '**/*.trx'
+        testRunTitle: 'Windows App Tests'
+        mergeTestResults: true
+        failTaskOnFailedTests: true
+        
+    - task: PublishCodeCoverageResults@1
+      displayName: 'Publish code coverage'
+      inputs:
+        codeCoverageTool: 'Cobertura'
+        summaryFileLocation: '$(Agent.TempDirectory)\TestResults\coverage.cobertura.xml'
+        reportDirectory: '$(Agent.TempDirectory)\TestResults\CodeCoverage'
+        
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish build artifacts'
+      inputs:
+        pathToPublish: '$(Build.ArtifactStagingDirectory)'
+        artifactName: 'windows-app'
+        publishLocation: 'Container'
+
+- stage: Test
+  displayName: 'Test Stage'
+  dependsOn: Build
+  condition: succeeded()
+  jobs:
+  - job: PerformanceTest
+    displayName: 'Performance Testing'
+    pool:
+      vmImage: 'windows-latest'
+      
+    steps:
+    - task: DownloadBuildArtifacts@0
+      displayName: 'Download build artifacts'
+      inputs:
+        buildType: 'current'
+        downloadType: 'single'
+        artifactName: 'windows-app'
+        downloadPath: '$(System.ArtifactsDirectory)'
+        
+    - task: PowerShell@2
+      displayName: 'Install performance tools'
+      inputs:
+        targetType: 'inline'
+        script: |
+          choco install -y windows-performance-toolkit
+          choco install -y procmon
+          
+    - task: PowerShell@2
+      displayName: 'Run performance tests'
+      inputs:
+        targetType: 'inline'
+        script: |
+          # Start performance monitoring
+          xperf -start -on DiagEasy
+          
+          # Run the application
+          Start-Process -FilePath "$(System.ArtifactsDirectory)\windows-app\bin\$(buildConfiguration)\$(buildPlatform)\SkybridgeCompassApp.exe" -Wait
+          
+          # Stop performance monitoring
+          xperf -stop -d performance.etl
+          
+          # Generate report
+          xperf -i performance.etl -o performance.csv -a dumper
+          
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish performance results'
+      inputs:
+        pathToPublish: '$(System.DefaultWorkingDirectory)'
+        artifactName: 'performance-results'
+        publishLocation: 'Container'
+
+  - job: SecurityTest
+    displayName: 'Security Testing'
+    pool:
+      vmImage: 'windows-latest'
+      
+    steps:
+    - task: DownloadBuildArtifacts@0
+      displayName: 'Download build artifacts'
+      inputs:
+        buildType: 'current'
+        downloadType: 'single'
+        artifactName: 'windows-app'
+        downloadPath: '$(System.ArtifactsDirectory)'
+        
+    - task: PowerShell@2
+      displayName: 'Run Windows Defender scan'
+      inputs:
+        targetType: 'inline'
+        script: |
+          # Run Windows Defender scan
+          MpCmdRun.exe -Scan -ScanType 3 -File "$(System.ArtifactsDirectory)\windows-app\bin\$(buildConfiguration)\$(buildPlatform)\SkybridgeCompassApp.exe"
+          
+          # Check scan results
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Windows Defender scan found threats"
+            exit 1
+          }
+          
+    - task: PowerShell@2
+      displayName: 'Run static analysis'
+      inputs:
+        targetType: 'inline'
+        script: |
+          # Install static analysis tools
+          choco install -y cppcheck
+          choco install -y clang-tools
+          
+          # Run CppCheck
+          cppcheck --enable=all --xml --xml-version=2 . 2> cppcheck-results.xml
+          
+          # Run Clang Static Analyzer
+          clang-tidy --format-style=file --export-fixes=clang-tidy-fixes.yaml *.cpp
+          
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish security results'
+      inputs:
+        pathToPublish: '$(System.DefaultWorkingDirectory)'
+        artifactName: 'security-results'
+        publishLocation: 'Container'
+
+- stage: Deploy
+  displayName: 'Deploy Stage'
+  dependsOn: Test
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+  jobs:
+  - job: CreatePackage
+    displayName: 'Create MSIX Package'
+    pool:
+      vmImage: 'windows-latest'
+      
+    steps:
+    - task: DownloadBuildArtifacts@0
+      displayName: 'Download build artifacts'
+      inputs:
+        buildType: 'current'
+        downloadType: 'single'
+        artifactName: 'windows-app'
+        downloadPath: '$(System.ArtifactsDirectory)'
+        
+    - task: PowerShell@2
+      displayName: 'Create MSIX package'
+      inputs:
+        targetType: 'inline'
+        script: |
+          # Create MSIX package
+          makeappx pack /d "$(System.ArtifactsDirectory)\windows-app\bin\$(buildConfiguration)\$(buildPlatform)" /p SkybridgeCompassApp.msix
+          
+          # Verify package
+          makeappx unpack /p SkybridgeCompassApp.msix /d temp-unpack
+          
+    - task: PowerShell@2
+      displayName: 'Sign MSIX package'
+      inputs:
+        targetType: 'inline'
+        script: |
+          # Sign the package
+          signtool sign /f $(signingCertificate) /p $(signingCertificatePassword) SkybridgeCompassApp.msix
+          
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish MSIX package'
+      inputs:
+        pathToPublish: '$(System.DefaultWorkingDirectory)'
+        artifactName: 'msix-package'
+        publishLocation: 'Container'
+
+  - job: DeployToStore
+    displayName: 'Deploy to Microsoft Store'
+    pool:
+      vmImage: 'windows-latest'
+      
+    steps:
+    - task: DownloadBuildArtifacts@0
+      displayName: 'Download MSIX package'
+      inputs:
+        buildType: 'current'
+        downloadType: 'single'
+        artifactName: 'msix-package'
+        downloadPath: '$(System.ArtifactsDirectory)'
+        
+    - task: PowerShell@2
+      displayName: 'Upload to Microsoft Store'
+      inputs:
+        targetType: 'inline'
+        script: |
+          # Install Microsoft Store submission tools
+          choco install -y microsoft-store-submission-tool
+          
+          # Upload to store
+          msstore upload --package SkybridgeCompassApp.msix --app-id $(storeAppId) --tenant-id $(storeTenantId) --client-id $(storeClientId) --client-secret $(storeClientSecret)
+          
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish deployment results'
+      inputs:
+        pathToPublish: '$(System.DefaultWorkingDirectory)'
+        artifactName: 'deployment-results'
+        publishLocation: 'Container'
+
+- stage: Notify
+  displayName: 'Notification Stage'
+  dependsOn: Deploy
+  condition: always()
+  jobs:
+  - job: SendNotification
+    displayName: 'Send Notification'
+    pool:
+      vmImage: 'ubuntu-latest'
+      
+    steps:
+    - task: PowerShell@2
+      displayName: 'Send success notification'
+      condition: succeeded()
+      inputs:
+        targetType: 'inline'
+        script: |
+          Write-Host "✅ Build and deployment completed successfully!"
+          Write-Host "📦 MSIX package created and uploaded"
+          Write-Host "🚀 Application deployed to Microsoft Store"
+          
+    - task: PowerShell@2
+      displayName: 'Send failure notification'
+      condition: failed()
+      inputs:
+        targetType: 'inline'
+        script: |
+          Write-Host "❌ Build or deployment failed"
+          Write-Host "🔍 Check the logs for details"
+          exit 1
