@@ -19,6 +19,7 @@ out/
 
 # Gradle files
 .gradle/
+.gradle-offline/
 build/
 
 # Local configuration file (sdk path, etc)
@@ -49,6 +50,9 @@ captures/
 .idea/modules.xml
 # Comment next line if keeping position of elements in Navigation Editor is relevant for you
 .idea/navEditor.xml
+
+# macOS
+.DS_Store
 
 # Keystore files
 # Uncomment the following lines if you do not want to check your keystore files in.
@@ -86,3 +90,24 @@ lint/tmp/
 
 # Android Profiling
 *.hprof
+YunQiaoSiNan/gradle-local-repo/
+
+# Build directories
+build/
+.gradle/
+gradle-local-repo/
+
+# Large files
+*.jar
+*.aar
+*.apk
+*.aab
+
+# Cache directories
+.cache/
+*.cache
+
+# Gradle本地仓库和构建产物
+YunQiaoSiNan/gradle-local-repo/
+YunQiaoSiNan/build/
+YunQiaoSiNan/app/build/
