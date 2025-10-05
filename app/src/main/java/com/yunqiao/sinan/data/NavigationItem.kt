@@ -22,6 +22,8 @@ val navigationItems = listOf(
     NavigationItem(
         route = "main_control",
         title = "主控制台",
+        icon = Icons.Default.Home,
+        isSelected = true
         icon = Icons.Default.Home
     ),
     NavigationItem(
