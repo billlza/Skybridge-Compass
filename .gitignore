@@ -106,3 +106,8 @@ gradle-local-repo/
 # Cache directories
 .cache/
 *.cache
+
+# Gradle本地仓库和构建产物
+YunQiaoSiNan/gradle-local-repo/
+YunQiaoSiNan/build/
+YunQiaoSiNan/app/build/
