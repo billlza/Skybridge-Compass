@@ -2,8 +2,11 @@ package com.yunqiao.sinan.ui.screen
 
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -11,46 +14,76 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material3.AssistChip
+import androidx.compose.material3.AssistChipDefaults
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.yunqiao.sinan.manager.AIAssistantManager
+import com.yunqiao.sinan.manager.AIModel
+import com.yunqiao.sinan.manager.AIModelProfile
+import com.yunqiao.sinan.manager.AssistantConversationFrame
+import com.yunqiao.sinan.manager.ConversationRole
 import com.yunqiao.sinan.ui.theme.GlassColors
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 data class ChatMessage(
     val id: String,
     val content: String,
     val isUser: Boolean,
-    val timestamp: Long = System.currentTimeMillis()
+    val timestamp: Long = System.currentTimeMillis(),
+    val engine: AIModel? = null,
+    val diagnostics: List<String> = emptyList(),
+    val latencyMs: Long? = null
 )
 
 @Composable
 fun AIAssistantScreen(
     modifier: Modifier = Modifier
 ) {
-    var messages by remember { 
+    val context = LocalContext.current
+    val aiManager = remember { AIAssistantManager(context) }
+    val availableModels by aiManager.availableModels.collectAsStateWithLifecycle()
+    val activeModel by aiManager.activeModel.collectAsStateWithLifecycle()
+    val capabilityHighlights by aiManager.capabilityHighlights.collectAsStateWithLifecycle()
+    var messages by remember {
         mutableStateOf(
             listOf(
                 ChatMessage(
                     id = "welcome",
                     content = "您好！我是云桥司南的AI助手，有什么可以帮助您的吗？",
-                    isUser = false
+                    isUser = false,
+                    engine = activeModel.model,
+                    diagnostics = listOf("欢迎引导", "多模态待命")
                 )
             )
         )
     }
     var inputText by remember { mutableStateOf(TextFieldValue("")) }
     var isProcessing by remember { mutableStateOf(false) }
-    
+    val coroutineScope = rememberCoroutineScope()
+
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -60,12 +93,22 @@ fun AIAssistantScreen(
             )
             .padding(24.dp)
     ) {
-        // AI助手标题
-        AIAssistantHeader()
-        
+        AIAssistantHeader(profile = activeModel)
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        ModelSelector(
+            models = availableModels,
+            active = activeModel,
+            onSelect = { model -> aiManager.selectModel(model) }
+        )
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        CapabilityHighlights(highlights = capabilityHighlights)
+
         Spacer(modifier = Modifier.height(24.dp))
-        
-        // 对话区域
+
         Card(
             modifier = Modifier
                 .weight(1f)
@@ -102,7 +145,6 @@ fun AIAssistantScreen(
                     onValueChange = { inputText = it },
                     onSend = { message ->
                         if (message.isNotBlank()) {
-                            // 添加用户消息
                             messages = messages + ChatMessage(
                                 id = "user_${System.currentTimeMillis()}",
                                 content = message,
@@ -110,16 +152,31 @@ fun AIAssistantScreen(
                             )
                             inputText = TextFieldValue("")
                             isProcessing = true
-                            
-                            // 模拟AI响应
-                            CoroutineScope(Dispatchers.Main).launch {
-                                delay(2000) // 模拟处理时间
-                                val aiResponse = generateAIResponse(message)
-                                messages = messages + ChatMessage(
-                                    id = "ai_${System.currentTimeMillis()}",
-                                    content = aiResponse,
-                                    isUser = false
-                                )
+
+                            coroutineScope.launch {
+                                runCatching {
+                                    val history = messages.map { it.toFrame() } + AssistantConversationFrame(
+                                        role = ConversationRole.USER,
+                                        content = message,
+                                        timestamp = System.currentTimeMillis()
+                                    )
+                                    val aiResponse = aiManager.generateResponse(message, history)
+                                    messages = messages + ChatMessage(
+                                        id = "ai_${System.currentTimeMillis()}",
+                                        content = aiResponse.content,
+                                        isUser = false,
+                                        engine = aiResponse.model,
+                                        diagnostics = aiResponse.diagnostics,
+                                        latencyMs = aiResponse.latencyMs
+                                    )
+                                }.onFailure { throwable ->
+                                    messages = messages + ChatMessage(
+                                        id = "ai_error_${System.currentTimeMillis()}",
+                                        content = throwable.message ?: "处理失败，请稍后重试",
+                                        isUser = false,
+                                        diagnostics = listOf("回退至 Nubula Core")
+                                    )
+                                }
                                 isProcessing = false
                             }
                         }
@@ -151,7 +208,7 @@ fun AIAssistantScreen(
 }
 
 @Composable
-fun AIAssistantHeader() {
+fun AIAssistantHeader(profile: AIModelProfile) {
     Row(
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -163,7 +220,7 @@ fun AIAssistantHeader() {
         )
         
         Spacer(modifier = Modifier.width(16.dp))
-        
+
         Column {
             Text(
                 text = "AI智能助手",
@@ -171,11 +228,58 @@ fun AIAssistantHeader() {
                 fontWeight = FontWeight.Bold,
                 color = Color.White
             )
-            
+
             Text(
-                text = "智能对话 • 系统控制 • 问题解答",
+                text = "${profile.displayName} • ${profile.description}",
                 fontSize = 14.sp,
                 color = Color.White.copy(alpha = 0.7f)
+            )
+        }
+    }
+}
+
+@Composable
+private fun ModelSelector(
+    models: List<AIModelProfile>,
+    active: AIModelProfile,
+    onSelect: (AIModel) -> Unit
+) {
+    LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        items(models) { profile ->
+            val selected = profile.model == active.model
+            OutlinedButton(
+                onClick = { onSelect(profile.model) },
+                colors = ButtonDefaults.outlinedButtonColors(
+                    contentColor = Color.White,
+                    containerColor = if (selected) GlassColors.highlight.copy(alpha = 0.24f) else Color.Transparent
+                ),
+                border = BorderStroke(1.dp, if (selected) GlassColors.highlight else Color.White.copy(alpha = 0.4f))
+            ) {
+                Column(horizontalAlignment = Alignment.Start) {
+                    Text(text = profile.displayName, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        text = profile.description,
+                        fontSize = 11.sp,
+                        color = Color.White.copy(alpha = 0.7f)
+                    )
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun CapabilityHighlights(highlights: List<String>) {
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        highlights.forEach { item ->
+            AssistChip(
+                onClick = {},
+                label = { Text(text = item, fontSize = 11.sp) },
+                colors = AssistChipDefaults.assistChipColors(
+                    containerColor = Color.White.copy(alpha = 0.12f),
+                    labelColor = Color.White
+                )
             )
         }
     }
@@ -226,14 +330,54 @@ fun ChatBubble(message: ChatMessage) {
                 bottomEnd = if (message.isUser) 4.dp else 16.dp
             )
         ) {
-            Text(
-                text = message.content,
-                color = Color.White,
-                fontSize = 14.sp,
-                modifier = Modifier.padding(12.dp)
-            )
+            Column(modifier = Modifier.padding(12.dp)) {
+                Text(
+                    text = message.content,
+                    color = Color.White,
+                    fontSize = 14.sp
+                )
+                if (!message.isUser && message.engine != null) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        AssistChip(
+                            onClick = {},
+                            label = { Text(text = when (message.engine) {
+                                AIModel.NEBULA_CORE -> "Nubula Core"
+                                AIModel.GPT4_TURBO -> "GPT-4 Turbo"
+                                AIModel.GPT5_ORBITAL -> "GPT-5 Orbital"
+                            }) },
+                            colors = AssistChipDefaults.assistChipColors(
+                                containerColor = GlassColors.highlight.copy(alpha = 0.16f),
+                                labelColor = Color.White
+                            )
+                        )
+                        message.latencyMs?.let {
+                            AssistChip(
+                                onClick = {},
+                                label = { Text(text = "${it}ms") },
+                                colors = AssistChipDefaults.assistChipColors(
+                                    containerColor = Color.White.copy(alpha = 0.12f),
+                                    labelColor = Color.White
+                                )
+                            )
+                        }
+                    }
+                    if (message.diagnostics.isNotEmpty()) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            message.diagnostics.forEach { hint ->
+                                Text(
+                                    text = "• $hint",
+                                    color = Color.White.copy(alpha = 0.8f),
+                                    fontSize = 11.sp
+                                )
+                            }
+                        }
+                    }
+                }
+            }
         }
-        
+
         if (message.isUser) {
             Spacer(modifier = Modifier.width(8.dp))
             
@@ -418,26 +562,12 @@ fun QuickActionButtons(
     }
 }
 
-// 模拟AI响应生成
-fun generateAIResponse(userMessage: String): String {
-    return when {
-        userMessage.contains("天气", ignoreCase = true) -> {
-            "根据当前天气数据显示：温度 22°C，湿度 65%，气压 1015 hPa，能见度良好。天气系统运行正常。"
-        }
-        userMessage.contains("系统", ignoreCase = true) || userMessage.contains("状态", ignoreCase = true) -> {
-            "系统运行状态良好！\n• 所有核心服务正常运行\n• 内存使用率：78%\n• CPU负载：45%\n• 网络连接稳定"
-        }
-        userMessage.contains("设备", ignoreCase = true) -> {
-            "当前已连接设备：\n• Node 6 控制台 - 在线\n• 远程桌面服务 - 就绪\n• 文件传输服务 - 活跃\n• 监控设备 - 正常"
-        }
-        userMessage.contains("功能", ignoreCase = true) || userMessage.contains("帮助", ignoreCase = true) -> {
-            "云桥司南主要功能包括：\n• 系统监控与管理\n• 天气数据中心\n• 远程桌面控制\n• 文件传输服务\n• 设备发现与连接\n• Node 6 高级功能\n\n您可以通过左侧菜单访问这些功能。"
-        }
-        userMessage.contains("你好", ignoreCase = true) || userMessage.contains("hello", ignoreCase = true) -> {
-            "您好！很高兴为您服务。我可以帮助您管理系统、查看数据、解答问题。请告诉我您需要什么帮助。"
-        }
-        else -> {
-            "我已经收到您的消息：「${userMessage}」\n\n作为云桥司南的AI助手，我可以帮助您：\n• 系统监控和状态查询\n• 天气数据分析\n• 设备管理操作\n• 功能使用指导\n\n请告诉我您需要哪方面的帮助！"
-        }
-    }
+// 将聊天记录映射为会话帧
+private fun ChatMessage.toFrame(): AssistantConversationFrame {
+    val role = if (isUser) ConversationRole.USER else ConversationRole.ASSISTANT
+    return AssistantConversationFrame(
+        role = role,
+        content = content,
+        timestamp = timestamp
+    )
 }

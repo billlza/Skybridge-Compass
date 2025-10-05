@@ -25,8 +25,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.yunqiao.sinan.data.ConnectionStatus
+import com.yunqiao.sinan.data.BatteryChargeStatus
 import com.yunqiao.sinan.data.DeviceStatusManager
+import com.yunqiao.sinan.data.formatTemperatureC
 import com.yunqiao.sinan.data.formatUptime
+import com.yunqiao.sinan.data.getThermalStatusText
 import com.yunqiao.sinan.data.rememberDeviceStatusManager
 import com.yunqiao.sinan.ui.theme.GlassColors
 import kotlinx.coroutines.delay
@@ -118,7 +121,6 @@ private fun SystemOverviewCard(deviceStatus: com.yunqiao.sinan.data.DeviceStatus
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                // CPU使用率
                 StatusMetric(
                     title = "CPU",
                     value = "${(deviceStatus.cpuUsage * 100).toInt()}%",
@@ -129,8 +131,18 @@ private fun SystemOverviewCard(deviceStatus: com.yunqiao.sinan.data.DeviceStatus
                         else -> Color(0xFFF44336)
                     }
                 )
-                
-                // 内存使用率
+
+                StatusMetric(
+                    title = "GPU",
+                    value = "${(deviceStatus.gpuUsage * 100).toInt()}%",
+                    icon = Icons.Default.Speed,
+                    color = when {
+                        deviceStatus.gpuUsage < 0.5f -> Color(0xFF4CAF50)
+                        deviceStatus.gpuUsage < 0.8f -> Color(0xFFFF9800)
+                        else -> Color(0xFFF44336)
+                    }
+                )
+
                 StatusMetric(
                     title = "内存",
                     value = "${(deviceStatus.memoryUsage * 100).toInt()}%",
@@ -141,16 +153,47 @@ private fun SystemOverviewCard(deviceStatus: com.yunqiao.sinan.data.DeviceStatus
                         else -> Color(0xFFF44336)
                     }
                 )
-                
-                // 连接设备
+
+                val batteryColor = when {
+                    (deviceStatus.batteryLevel ?: 0) > 50 -> Color(0xFF4CAF50)
+                    (deviceStatus.batteryLevel ?: 0) > 20 -> Color(0xFFFF9800)
+                    else -> Color(0xFFF44336)
+                }
                 StatusMetric(
-                    title = "设备",
-                    value = "${deviceStatus.connectedDevicesCount}",
-                    icon = Icons.Default.Devices,
-                    color = Color(0xFF2196F3)
+                    title = "电池",
+                    value = deviceStatus.batteryLevel?.let { "$it%" } ?: "--",
+                    icon = if (deviceStatus.batteryStatus == BatteryChargeStatus.CHARGING) Icons.Default.BatteryChargingFull else Icons.Default.BatteryFull,
+                    color = batteryColor
                 )
-                
-                // 运行时间
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                StatusMetric(
+                    title = "CPU温度",
+                    value = formatTemperatureC(deviceStatus.cpuTemperatureC),
+                    icon = Icons.Default.Thermostat,
+                    color = Color(0xFF4FC3F7)
+                )
+
+                StatusMetric(
+                    title = "GPU温度",
+                    value = formatTemperatureC(deviceStatus.gpuTemperatureC),
+                    icon = Icons.Default.Whatshot,
+                    color = Color(0xFFFF7043)
+                )
+
+                StatusMetric(
+                    title = "热状态",
+                    value = getThermalStatusText(deviceStatus.thermalStatus),
+                    icon = Icons.Default.Thermostat,
+                    color = Color(0xFFFFA726)
+                )
+
                 StatusMetric(
                     title = "运行时间",
                     value = formatUptime(deviceStatus.uptime),
@@ -251,7 +294,7 @@ private fun QuickActionsSection(onNavigate: (String) -> Unit = {}) {
                     title = "网络测试",
                     icon = Icons.Default.NetworkCheck,
                     color = Color(0xFFF44336)
-                ) { onNavigate("node6_dashboard") }
+                ) { onNavigate("operations_hub_dashboard") }
             )
             items(actions) { action ->
                 QuickActionCard(action = action)
