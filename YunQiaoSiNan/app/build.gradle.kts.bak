@@ -1,0 +1,157 @@
+plugins {
+    alias(libs.plugins.android.application)
+    alias(libs.plugins.kotlin.android)
+    alias(libs.plugins.kotlin.compose)
+}
+
+android {
+    namespace = "com.yunqiao.sinan"
+    compileSdk = 35
+
+    defaultConfig {
+        applicationId = "com.yunqiao.sinan"
+        minSdk = 33  // Android 13.0+ for optimal performance
+        targetSdk = 35
+        versionCode = 6
+        versionName = "1.0-node6"
+
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        vectorDrawables {
+            useSupportLibrary = true
+        }
+
+        ndk {
+            // 只包含Android支持的架构
+            abiFilters.addAll(listOf("arm64-v8a", "armeabi-v7a"))
+        }
+    }
+
+    buildTypes {
+        release {
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
+        }
+        debug {
+            isMinifyEnabled = false
+            applicationIdSuffix = ".debug"
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_1_8
+        targetCompatibility = JavaVersion.VERSION_1_8
+    }
+
+    kotlinOptions {
+        jvmTarget = "1.8"
+    }
+
+    buildFeatures {
+        compose = true
+    }
+
+    composeOptions {
+        kotlinCompilerExtensionVersion = "1.5.15"
+    }
+
+    packaging {
+        resources {
+            excludes += "/META-INF/{AL2.0,LGPL2.1}"
+            
+            // === 完全排除所有非Android平台的库 ===
+            
+            // 1. 排除所有macOS文件
+            excludes += "**/macosx-*/**"
+            excludes += "**/*.dylib"
+            
+            // 2. 排除所有Windows文件  
+            excludes += "**/windows-*/**"
+            excludes += "**/*.dll"
+            excludes += "**/*.exe"
+            
+            // 3. 排除所有Linux桌面版文件
+            excludes += "**/linux-x86_64/**"
+            excludes += "**/linux-x86/**"
+            excludes += "**/linux-ppc64le/**"
+            excludes += "**/linux-armhf/**"
+            excludes += "**/linux-arm64/**"  // 注意：这是Linux ARM64，不是Android ARM64
+            
+            // 4. 排除具体的ByteDeco大型库
+            excludes += "org/bytedeco/ffmpeg/linux-*/**"
+            excludes += "org/bytedeco/ffmpeg/windows-*/**" 
+            excludes += "org/bytedeco/ffmpeg/macosx-*/**"
+            
+            excludes += "org/bytedeco/openblas/linux-*/**"
+            excludes += "org/bytedeco/openblas/windows-*/**"
+            excludes += "org/bytedeco/openblas/macosx-*/**"
+            
+            excludes += "org/bytedeco/opencv/linux-*/**"
+            excludes += "org/bytedeco/opencv/windows-*/**"
+            excludes += "org/bytedeco/opencv/macosx-*/**"
+            
+            excludes += "org/bytedeco/librealsense2/**"  // 完全不需要Intel实感摄像头
+            
+            // 5. 保留Android必要的库（避免冲突）
+            pickFirsts += "**/libc++_shared.so"
+            pickFirsts += "**/libfbjni.so"
+            pickFirsts += "**/libglog.so"
+        }
+    }
+}
+
+dependencies {
+    implementation(libs.androidx.core.ktx)
+    implementation(libs.androidx.lifecycle.runtime.ktx)
+    implementation(libs.androidx.activity.compose)
+    implementation(platform(libs.androidx.compose.bom))
+    implementation(libs.androidx.ui)
+    implementation(libs.androidx.ui.graphics)
+    implementation(libs.androidx.ui.tooling.preview)
+    implementation(libs.androidx.material3)
+    implementation(libs.androidx.material.icons.extended)
+    implementation(libs.androidx.navigation.compose)
+    implementation(libs.androidx.lifecycle.viewmodel.compose)
+    
+    // Accompanist for system UI control
+    implementation(libs.accumpanist.systemuicontroller)
+    implementation(libs.accumpanist.navigation.animation)
+    
+    // Coroutines
+    implementation(libs.kotlinx.coroutines.core)
+    implementation(libs.kotlinx.coroutines.android)
+    
+    // Network
+    implementation(libs.okhttp)
+    implementation(libs.retrofit)
+    
+    // Image loading
+    implementation(libs.coil.compose)
+    
+    // Node 6 专用依赖
+    // Permission handling
+    implementation("com.google.accompanist:accompanist-permissions:0.32.0")
+    
+    // Network utilities
+    implementation("com.squareup.okhttp3:logging-interceptor:4.12.0")
+    
+    // JSON processing
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.0")
+    
+    // File operations
+    implementation("commons-io:commons-io:2.11.0")
+    
+    // Encryption
+    implementation("androidx.security:security-crypto:1.1.0-alpha06")
+    
+    testImplementation(libs.junit)
+    androidTestImplementation(libs.androidx.junit)
+    androidTestImplementation(libs.androidx.espresso.core)
+    androidTestImplementation(platform(libs.androidx.compose.bom))
+    androidTestImplementation(libs.androidx.ui.test.junit4)
+    debugImplementation(libs.androidx.ui.tooling)
+    debugImplementation(libs.androidx.ui.test.manifest)
+}
