@@ -1,0 +1,127 @@
+#pragma once
+
+// 配置头文件 - 自动生成
+// 此文件由 CMake 自动生成，请勿手动修改
+
+// 平台检测
+#cmakedefine IS_WINDOWS
+#cmakedefine IS_LINUX
+#cmakedefine IS_MACOS
+
+// 功能开关
+#cmakedefine USE_WINDOWS_SDK
+#cmakedefine USE_CPP_WINRT
+#cmakedefine USE_WINUI3
+#cmakedefine USE_WINDOWS_APP_SDK
+
+// 版本信息
+#define PROJECT_VERSION_MAJOR @PROJECT_VERSION_MAJOR@
+#define PROJECT_VERSION_MINOR @PROJECT_VERSION_MINOR@
+#define PROJECT_VERSION_PATCH @PROJECT_VERSION_PATCH@
+#define PROJECT_VERSION "@PROJECT_VERSION@"
+
+// 构建信息
+#define BUILD_TYPE "@CMAKE_BUILD_TYPE@"
+#define BUILD_DATE "@BUILD_DATE@"
+#define BUILD_HOST "@BUILD_HOST@"
+
+// 路径信息
+#define PROJECT_SOURCE_DIR "@CMAKE_SOURCE_DIR@"
+#define PROJECT_BINARY_DIR "@CMAKE_BINARY_DIR@"
+#define INSTALL_PREFIX "@CMAKE_INSTALL_PREFIX@"
+
+// 编译器信息
+#define COMPILER_ID "@CMAKE_CXX_COMPILER_ID@"
+#define COMPILER_VERSION "@CMAKE_CXX_COMPILER_VERSION@"
+
+// 功能检测宏
+#ifdef USE_WINDOWS_SDK
+    #define HAS_WINDOWS_SDK 1
+#else
+    #define HAS_WINDOWS_SDK 0
+#endif
+
+#ifdef USE_CPP_WINRT
+    #define HAS_CPP_WINRT 1
+#else
+    #define HAS_CPP_WINRT 0
+#endif
+
+#ifdef USE_WINUI3
+    #define HAS_WINUI3 1
+#else
+    #define HAS_WINUI3 0
+#endif
+
+#ifdef USE_WINDOWS_APP_SDK
+    #define HAS_WINDOWS_APP_SDK 1
+#else
+    #define HAS_WINDOWS_APP_SDK 0
+#endif
+
+// 运行时检测函数
+inline bool IsWindowsSDKAvailable() {
+    return HAS_WINDOWS_SDK != 0;
+}
+
+inline bool IsCppWinRTAvailable() {
+    return HAS_CPP_WINRT != 0;
+}
+
+inline bool IsWinUI3Available() {
+    return HAS_WINUI3 != 0;
+}
+
+inline bool IsWindowsAppSDKAvailable() {
+    return HAS_WINDOWS_APP_SDK != 0;
+}
+
+// 平台检测函数
+inline bool IsWindowsPlatform() {
+#ifdef IS_WINDOWS
+    return true;
+#else
+    return false;
+#endif
+}
+
+inline bool IsLinuxPlatform() {
+#ifdef IS_LINUX
+    return true;
+#else
+    return false;
+#endif
+}
+
+inline bool IsMacOSPlatform() {
+#ifdef IS_MACOS
+    return true;
+#else
+    return false;
+#endif
+}
+
+// 构建信息函数
+inline const char* GetProjectVersion() {
+    return PROJECT_VERSION;
+}
+
+inline const char* GetBuildType() {
+    return BUILD_TYPE;
+}
+
+inline const char* GetBuildDate() {
+    return BUILD_DATE;
+}
+
+inline const char* GetBuildHost() {
+    return BUILD_HOST;
+}
+
+inline const char* GetCompilerId() {
+    return COMPILER_ID;
+}
+
+inline const char* GetCompilerVersion() {
+    return COMPILER_VERSION;
+}
