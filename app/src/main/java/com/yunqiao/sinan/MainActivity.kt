@@ -33,6 +33,7 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.lifecycle.lifecycleScope
+import com.yunqiao.sinan.compat.PermissionCompatibilityHelper
 import com.yunqiao.sinan.data.auth.UserAccount
 import com.yunqiao.sinan.manager.DeviceDiscoveryManager
 import com.yunqiao.sinan.manager.UserAccountManager
@@ -69,6 +70,7 @@ class MainActivity : ComponentActivity() {
     private var isActivityDestroyed = false // Activity销毁状态
     private var currentPermissionDialog: AlertDialog? = null // 当前权限对话框引用
     private lateinit var userAccountManager: UserAccountManager
+    private val permissionCompatibilityHelper by lazy { PermissionCompatibilityHelper(this) }
     private val deviceDiscoveryManager: DeviceDiscoveryManager by lazy {
         DeviceDiscoveryManager(applicationContext)
     }
@@ -230,7 +232,8 @@ class MainActivity : ComponentActivity() {
         
         try {
             // 1. 首先检查普通权限
-            val deniedNormalPermissions = requiredPermissions.filter { permission ->
+            val runtimePermissions = permissionCompatibilityHelper.filterRequestable(requiredPermissions)
+            val deniedNormalPermissions = runtimePermissions.filter { permission ->
                 ContextCompat.checkSelfPermission(this, permission) != PackageManager.PERMISSION_GRANTED
             }
             
@@ -250,9 +253,15 @@ class MainActivity : ComponentActivity() {
                 }
                 else -> {
                     // 所有权限都已获得
-                    Log.d(TAG, "All permissions granted")
-                    resetPermissionState()
-                    initializeApplication()
+                    if (permissionCompatibilityHelper.hasAllPermissions(runtimePermissions)) {
+                        Log.d(TAG, "All permissions granted")
+                        resetPermissionState()
+                        initializeApplication()
+                    } else {
+                        Log.d(TAG, "No runtime permissions required, proceeding with initialization")
+                        resetPermissionState()
+                        initializeApplication()
+                    }
                 }
             }
         } catch (exception: Exception) {
@@ -302,16 +311,19 @@ class MainActivity : ComponentActivity() {
                 return
             }
             
-            val deniedPermissions = permissions.filter { !it.value }.keys
+            val relevantResults = permissions.filterKeys { permission ->
+                permissionCompatibilityHelper.isRequestablePermission(permission)
+            }
+            val deniedPermissions = relevantResults.filter { !it.value }.keys
             val permanentlyDenied = deniedPermissions.filter { permission ->
                 !ActivityCompat.shouldShowRequestPermissionRationale(this, permission)
             }
-            
+
             when {
                 deniedPermissions.isEmpty() -> {
                     Log.d(TAG, "All normal permissions granted")
                     hasPermissionDenied = false
-                    
+
                     // 普通权限都通过了，检查是否需要MANAGE_EXTERNAL_STORAGE权限
                     val needsStoragePermission = needsManageExternalStoragePermission() && !hasManageExternalStoragePermission()
                     
