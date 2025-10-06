@@ -38,6 +38,7 @@ import java.net.Socket
 import java.net.SocketTimeoutException
 import java.util.Locale
 import java.util.UUID
+import kotlin.math.coerceIn
 import kotlin.math.max
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException

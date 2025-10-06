@@ -32,6 +32,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import com.yunqiao.sinan.compat.PermissionCompatibilityHelper
 import com.yunqiao.sinan.data.auth.UserAccount
@@ -74,6 +75,7 @@ class MainActivity : ComponentActivity() {
     private val deviceDiscoveryManager: DeviceDiscoveryManager by lazy {
         DeviceDiscoveryManager(applicationContext)
     }
+    private var isDeviceDiscoveryInitialized = false
     
     // 定义所需权限列表 - 修复版本，分离特殊权限
     private val requiredPermissions = mutableListOf<String>().apply {
@@ -763,7 +765,6 @@ class MainActivity : ComponentActivity() {
         withContext(Dispatchers.IO) {
             try {
                 Log.d(TAG, "Initializing device discovery manager")
-                val discoveryManager = deviceDiscoveryManager
                 val hasWifiPermission = ContextCompat.checkSelfPermission(
                     this@MainActivity,
                     Manifest.permission.ACCESS_WIFI_STATE
@@ -786,13 +787,36 @@ class MainActivity : ComponentActivity() {
                 if (!hasWifiPermission && !hasBluetoothPermission) {
                     throw IllegalStateException("缺少附近设备发现所需的无线权限")
                 }
-                discoveryManager.startDiscovery()
-                Log.d(TAG, "Device discovery manager initialized and discovery started")
+                isDeviceDiscoveryInitialized = true
+                if (lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+                    withContext(Dispatchers.Main) {
+                        deviceDiscoveryManager.startDiscovery()
+                        Log.d(TAG, "Device discovery manager initialized and discovery started")
+                    }
+                } else {
+                    Log.d(TAG, "Device discovery manager initialized; waiting for lifecycle start to begin discovery")
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to initialize device discovery manager", e)
                 throw e
             }
         }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        if (isDeviceDiscoveryInitialized) {
+            deviceDiscoveryManager.startDiscovery()
+            Log.d(TAG, "Device discovery started in onStart")
+        }
+    }
+
+    override fun onStop() {
+        if (isDeviceDiscoveryInitialized) {
+            deviceDiscoveryManager.stopDiscovery()
+            Log.d(TAG, "Device discovery stopped in onStop")
+        }
+        super.onStop()
     }
     
     /**

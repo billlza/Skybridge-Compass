@@ -31,6 +31,7 @@ import java.nio.ByteBuffer
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.abs
+import kotlin.math.coerceAtMost
 import kotlin.math.coerceIn
 import kotlin.math.max
 import kotlin.math.min

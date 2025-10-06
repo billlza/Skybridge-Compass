@@ -294,16 +294,20 @@ class DeviceDiscoveryManager(private val context: Context) {
         discoveryJob = CoroutineScope(Dispatchers.IO).launch {
             while (isDiscovering) {
                 try {
-                    // 并行执行多种发现协议
-                    launch { discoverNetworkDevices() }
-                    launch { discoverBluetoothDevices() }
-                    launch { discoverWifiP2pDevices() }
-                    launch { discoverUPnPDevices() }
-                    
+                    supervisorScope {
+                        // 并行执行多种发现协议，并保证单个任务的异常不会终止整体扫描
+                        launch { runCatching { discoverNetworkDevices() }.onFailure { it.printStackTrace() } }
+                        launch { runCatching { discoverBluetoothDevices() }.onFailure { it.printStackTrace() } }
+                        launch { runCatching { discoverWifiP2pDevices() }.onFailure { it.printStackTrace() } }
+                        launch { runCatching { discoverUPnPDevices() }.onFailure { it.printStackTrace() } }
+                    }
+
                     // 清理过期设备
                     cleanupExpiredDevices()
-                    
+
                     delay(10000) // 每10秒扫描一次
+                } catch (e: CancellationException) {
+                    throw e
                 } catch (e: Exception) {
                     e.printStackTrace()
                     delay(5000)
