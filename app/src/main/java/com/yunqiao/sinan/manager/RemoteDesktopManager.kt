@@ -31,7 +31,6 @@ import java.nio.ByteBuffer
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.abs
-import kotlin.math.coerceAtLeast
 import kotlin.math.coerceIn
 import kotlin.math.max
 import kotlin.math.min
@@ -161,9 +160,9 @@ private class PerformanceEngineWrapper(
         val boost = stats.rttMs < 60f && stats.jitterMs < 18f && stats.frameRate > targetFps * 0.75f
         val frameDrop = stats.frameRate < targetFps * 0.6f
         dynamicBitrate = when {
-            degrade -> (dynamicBitrate * 0.82f).coerceAtLeast(MIN_BITRATE.toFloat())
+            degrade -> max(dynamicBitrate * 0.82f, MIN_BITRATE.toFloat())
             boost -> (dynamicBitrate * 1.08f).coerceAtMost(MAX_BITRATE.toFloat())
-            frameDrop -> (dynamicBitrate * 0.9f).coerceAtLeast(MIN_BITRATE.toFloat())
+            frameDrop -> max(dynamicBitrate * 0.9f, MIN_BITRATE.toFloat())
             else -> dynamicBitrate
         }
         return dynamicBitrate.toInt()
@@ -176,19 +175,19 @@ private class PerformanceEngineWrapper(
         currentFrameHeight: Int
     ): ConnectionStats {
         val now = SystemClock.elapsedRealtime()
-        val elapsed = (now - lastSampleTime).coerceAtLeast(1L)
+        val elapsed = max(now - lastSampleTime, 1L)
         lastSampleTime = now
-        val txBytes = TrafficStats.getUidTxBytes(processUid).coerceAtLeast(0L)
-        val rxBytes = TrafficStats.getUidRxBytes(processUid).coerceAtLeast(0L)
-        val txDelta = (txBytes - lastTxBytes).coerceAtLeast(0L)
-        val rxDelta = (rxBytes - lastRxBytes).coerceAtLeast(0L)
+        val txBytes = max(TrafficStats.getUidTxBytes(processUid), 0L)
+        val rxBytes = max(TrafficStats.getUidRxBytes(processUid), 0L)
+        val txDelta = max(txBytes - lastTxBytes, 0L)
+        val rxDelta = max(rxBytes - lastRxBytes, 0L)
         lastTxBytes = txBytes
         lastRxBytes = rxBytes
 
-        val txPackets = TrafficStats.getUidTxPackets(processUid).coerceAtLeast(0L)
-        val rxPackets = TrafficStats.getUidRxPackets(processUid).coerceAtLeast(0L)
-        val txPacketsDelta = (txPackets - lastTxPackets).coerceAtLeast(0L)
-        val rxPacketsDelta = (rxPackets - lastRxPackets).coerceAtLeast(0L)
+        val txPackets = max(TrafficStats.getUidTxPackets(processUid), 0L)
+        val rxPackets = max(TrafficStats.getUidRxPackets(processUid), 0L)
+        val txPacketsDelta = max(txPackets - lastTxPackets, 0L)
+        val rxPacketsDelta = max(rxPackets - lastRxPackets, 0L)
         lastTxPackets = txPackets
         lastRxPackets = rxPackets
 
@@ -209,7 +208,7 @@ private class PerformanceEngineWrapper(
             bytesReceived = rxBytes,
             packetsSent = txPackets,
             packetsReceived = rxPackets,
-            packetsLost = (txPacketsDelta - rxPacketsDelta).coerceAtLeast(0L),
+            packetsLost = max(txPacketsDelta - rxPacketsDelta, 0L),
             rttMs = latency,
             jitterMs = smoothedJitter,
             bitrateKbps = smoothedBitrate,
@@ -224,11 +223,11 @@ private class PerformanceEngineWrapper(
     fun currentBitrate(): Int = dynamicBitrate.toInt()
 
     private fun computeCpuUsage(elapsedMs: Long): Float {
-        val elapsed = elapsedMs.coerceAtLeast(1L)
+        val elapsed = max(elapsedMs, 1L)
         val processCpu = Process.getElapsedCpuTime()
-        val diff = (processCpu - lastCpuTime).coerceAtLeast(0L)
+        val diff = max(processCpu - lastCpuTime, 0L)
         lastCpuTime = processCpu
-        val processors = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
+        val processors = max(Runtime.getRuntime().availableProcessors(), 1)
         val usage = diff.toFloat() / (elapsed * processors)
         return usage.coerceIn(0f, 1f)
     }
@@ -236,8 +235,8 @@ private class PerformanceEngineWrapper(
     private fun computeMemoryUsage(): Float {
         val info = ActivityManager.MemoryInfo()
         activityManager.getMemoryInfo(info)
-        val total = info.totalMem.toFloat().coerceAtLeast(1f)
-        val used = (info.totalMem - info.availMem).toFloat().coerceAtLeast(0f)
+        val total = max(info.totalMem.toFloat(), 1f)
+        val used = max((info.totalMem - info.availMem).toFloat(), 0f)
         return (used / total).coerceIn(0f, 1f)
     }
 
@@ -297,7 +296,7 @@ class RemoteDesktopManager(private val context: Context) {
     private var capturedFrameHeight = 0
 
     @Volatile
-    private var adaptiveFrameIntervalMs = (1000f / config.targetFps).roundToLong().coerceAtLeast(8L)
+    private var adaptiveFrameIntervalMs = max((1000f / config.targetFps).roundToLong(), 8L)
 
     @Volatile
     private var adaptiveCompressionQuality = config.compressionQuality
@@ -539,8 +538,10 @@ class RemoteDesktopManager(private val context: Context) {
                     config.targetFps.toFloat()
                 }
                 val targetFps = _tierProfile.value.clampFrameRate(desiredFps, mode)
-                val targetBitrate = (linkQualityState.throughputMbps * LOSSLESS_BITRATE_BIAS).toInt()
-                    .coerceAtLeast(MIN_LOSSLESS_BITRATE)
+                val targetBitrate = max(
+                    (linkQualityState.throughputMbps * LOSSLESS_BITRATE_BIAS).toInt(),
+                    MIN_LOSSLESS_BITRATE
+                )
                 val pipeline = HardwareMirrorPipeline(targetWidth, targetHeight, targetFps, targetBitrate)
                 if (pipeline.prepare()) {
                     val surface = pipeline.inputSurface
@@ -682,21 +683,20 @@ class RemoteDesktopManager(private val context: Context) {
             else -> 1f
         }
         val boostedMultiplier = Android16PlatformBoost.boostedFrameMultiplier(quality, baseMultiplier)
-        val baseFps = (config.targetFps.toFloat() * boostedMultiplier)
-            .coerceAtLeast(config.targetFps * 0.5f)
-            .coerceAtMost(MAX_ULTRA_FPS.toFloat())
+        val baseFpsUnclamped = config.targetFps.toFloat() * boostedMultiplier
+        val baseFps = min(max(baseFpsUnclamped, config.targetFps * 0.5f), MAX_ULTRA_FPS.toFloat())
         val mode = _activeMode.value
         val clampedFps = _tierProfile.value.clampFrameRate(baseFps, mode)
-        adaptiveFrameIntervalMs = (1000f / clampedFps).roundToLong().coerceAtLeast(8L)
+        adaptiveFrameIntervalMs = max((1000f / clampedFps).roundToLong(), 8L)
         adaptiveCompressionQuality = when {
             quality.supportsLossless -> 100
             quality.throughputMbps > 360f -> (config.compressionQuality + 12).coerceAtMost(96)
             quality.throughputMbps > 200f -> (config.compressionQuality + 6).coerceAtMost(92)
-            quality.throughputMbps < 80f -> (config.compressionQuality * 0.82f).roundToInt().coerceAtLeast(58)
+            quality.throughputMbps < 80f -> max((config.compressionQuality * 0.82f).roundToInt(), 58)
             else -> config.compressionQuality
         }
         if (quality.supportsLossless) {
-            val targetBitrate = (quality.throughputMbps * LOSSLESS_BITRATE_BIAS).toInt().coerceAtLeast(MIN_LOSSLESS_BITRATE)
+            val targetBitrate = max((quality.throughputMbps * LOSSLESS_BITRATE_BIAS).toInt(), MIN_LOSSLESS_BITRATE)
             val boostedBitrate = Android16PlatformBoost.elevatedBitrate(targetBitrate, quality)
             hardwarePipeline?.updateBitrate(boostedBitrate)
         }
@@ -754,22 +754,21 @@ class RemoteDesktopManager(private val context: Context) {
     }
 
     private fun updateAdaptiveParameters(recommendedBitrate: Int) {
-        val base = config.targetBitrate.toFloat().coerceAtLeast(1f)
+        val base = max(config.targetBitrate.toFloat(), 1f)
         val rawRatio = (recommendedBitrate.toFloat() / base).coerceIn(0.4f, 1.6f)
-        val tunedMultiplier = Android16PlatformBoost.boostedFrameMultiplier(linkQualityState, rawRatio.coerceAtLeast(0.5f))
+        val tunedMultiplier = Android16PlatformBoost.boostedFrameMultiplier(linkQualityState, max(rawRatio, 0.5f))
         val mode = _activeMode.value
-        val candidateFps = (config.targetFps.toFloat() * tunedMultiplier)
-            .coerceAtLeast(config.targetFps * 0.5f)
-            .coerceAtMost(MAX_ULTRA_FPS.toFloat())
+        val candidateFpsUnclamped = config.targetFps.toFloat() * tunedMultiplier
+        val candidateFps = min(max(candidateFpsUnclamped, config.targetFps * 0.5f), MAX_ULTRA_FPS.toFloat())
         val targetFps = _tierProfile.value.clampFrameRate(candidateFps, mode)
-        adaptiveFrameIntervalMs = (1000f / targetFps).roundToLong().coerceAtLeast(8L)
+        adaptiveFrameIntervalMs = max((1000f / targetFps).roundToLong(), 8L)
         val tunedQuality = if (Android16PlatformBoost.isAndroid16 && linkQualityState.supportsLossless) {
             (config.compressionQuality * rawRatio * 1.12f).roundToInt().coerceIn(60, 98)
         } else {
             (config.compressionQuality * rawRatio).roundToInt().coerceIn(48, 95)
         }
         adaptiveCompressionQuality = tunedQuality
-        val baseBitrate = (recommendedBitrate * 1000).coerceAtLeast(MIN_LOSSLESS_BITRATE)
+        val baseBitrate = max((recommendedBitrate * 1000), MIN_LOSSLESS_BITRATE)
         val boostedBitrate = Android16PlatformBoost.elevatedBitrate(baseBitrate, linkQualityState)
         hardwarePipeline?.updateBitrate(boostedBitrate)
     }
@@ -1011,9 +1010,9 @@ class RemoteDesktopManager(private val context: Context) {
         val modeShort = min(mode.width, mode.height).toFloat()
         val scaleLong = min(1f, modeLong / deviceLong)
         val scaleShort = min(1f, modeShort / deviceShort)
-        val scale = min(scaleLong, scaleShort).coerceAtLeast(0.5f)
-        val width = (deviceWidth * scale).roundToInt().coerceAtLeast(720)
-        val height = (deviceHeight * scale).roundToInt().coerceAtLeast(480)
+        val scale = max(min(scaleLong, scaleShort), 0.5f)
+        val width = max((deviceWidth * scale).roundToInt(), 720)
+        val height = max((deviceHeight * scale).roundToInt(), 480)
         return width to height
     }
 

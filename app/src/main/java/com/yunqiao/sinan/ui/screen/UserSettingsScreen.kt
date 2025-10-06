@@ -35,12 +35,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import kotlin.math.coerceAtLeast
 import com.yunqiao.sinan.data.getThermalStatusText
 import com.yunqiao.sinan.manager.PerformanceProfile
 import com.yunqiao.sinan.manager.PerformanceProfileController
 import kotlin.math.roundToInt
 import java.util.Locale
+import kotlin.math.max
 
 @Composable
 fun UserSettingsScreen(
@@ -316,7 +316,7 @@ private fun formatTargetDuration(target: Long?): String {
         "自动调节"
     } else {
         val millis = target / 1_000_000.0
-        val fps = (1_000_000_000.0 / target).roundToInt().coerceAtLeast(1)
+        val fps = max((1_000_000_000.0 / target).roundToInt(), 1)
         String.format(Locale.getDefault(), "%.1f ms (%d FPS)", millis, fps)
     }
 }

@@ -5,10 +5,11 @@ import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.le.BluetoothLeScanner
 import android.bluetooth.le.ScanCallback
-import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
-import android.bluetooth.le.ScanSettings
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
@@ -96,7 +97,8 @@ class DeviceDiscoveryManager(private val context: Context) {
     private var bluetoothLeScanner: BluetoothLeScanner? = null
     private var bluetoothScanCallback: ScanCallback? = null
     private var isBleScanning: Boolean = false
-    private var bluetoothClassicScanCallback: ScanCallback? = null
+    private var bluetoothClassicReceiver: BroadcastReceiver? = null
+    private var isClassicScanning: Boolean = false
     
     // WiFi P2P相关
     private var wifiP2pManager: WifiP2pManager? = null
@@ -399,60 +401,71 @@ class DeviceDiscoveryManager(private val context: Context) {
         if (!hasBluetoothPermission()) return@withContext
         
         try {
-            // 经典蓝牙发现
             discoverClassicBluetooth()
-            
-            // BLE设备发现
             discoverBLEDevices()
-            
         } catch (e: Exception) {
             e.printStackTrace()
         }
     }
-    
+
     /**
      * 经典蓝牙发现
      */
     private fun discoverClassicBluetooth() {
-        if (bluetoothAdapter?.isEnabled != true || bluetoothLeScanner == null || !hasBluetoothPermission()) {
+        if (bluetoothAdapter?.isEnabled != true || !hasBluetoothPermission()) {
+            return
+        }
+        if (isClassicScanning) {
             return
         }
 
-        bluetoothClassicScanCallback?.let { existingCallback ->
-            if (hasBluetoothPermission()) {
-                bluetoothLeScanner?.stopScan(existingCallback)
-            }
-        }
-
-        bluetoothClassicScanCallback = object : ScanCallback() {
-            override fun onScanResult(callbackType: Int, result: ScanResult?) {
-                handleClassicScanResult(result)
-            }
-
-            override fun onBatchScanResults(results: MutableList<ScanResult>?) {
-                results?.forEach { result ->
-                    handleClassicScanResult(result)
+        val receiver = bluetoothClassicReceiver ?: object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                val action = intent?.action ?: return
+                when (action) {
+                    BluetoothDevice.ACTION_FOUND -> {
+                        val device = intent.getParcelableExtra<BluetoothDevice>(BluetoothDevice.EXTRA_DEVICE)
+                        val rssi = intent.getShortExtra(BluetoothDevice.EXTRA_RSSI, Short.MIN_VALUE).toInt()
+                        if (device != null) {
+                            handleClassicDevice(device, rssi)
+                        }
+                    }
+                    BluetoothAdapter.ACTION_DISCOVERY_FINISHED -> {
+                        stopClassicScan()
+                    }
                 }
             }
+        }.also { created ->
+            bluetoothClassicReceiver = created
         }
 
-        val settingsBuilder = ScanSettings.Builder()
-            .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            settingsBuilder.setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)
-            settingsBuilder.setMatchMode(ScanSettings.MATCH_MODE_AGGRESSIVE)
+        val filter = IntentFilter().apply {
+            addAction(BluetoothDevice.ACTION_FOUND)
+            addAction(BluetoothAdapter.ACTION_DISCOVERY_FINISHED)
         }
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            settingsBuilder.setLegacy(true)
+        try {
+            context.registerReceiver(receiver, filter)
+        } catch (e: IllegalArgumentException) {
+            Log.w("DeviceDiscoveryManager", "Receiver already registered", e)
         }
 
-        val settings = settingsBuilder.build()
-
-        if (hasBluetoothPermission()) {
-            bluetoothLeScanner?.startScan(emptyList<ScanFilter>(), settings, bluetoothClassicScanCallback)
+        val started = if (ActivityCompat.checkSelfPermission(
+                context,
+                Manifest.permission.BLUETOOTH_SCAN
+            ) == PackageManager.PERMISSION_GRANTED
+        ) {
+            bluetoothAdapter?.startDiscovery() == true
+        } else {
+            false
         }
+
+        if (!started) {
+            stopClassicScan()
+            return
+        }
+
+        isClassicScanning = true
     }
 
     /**
@@ -820,12 +833,8 @@ class DeviceDiscoveryManager(private val context: Context) {
      * 清理过期设备
      */
     private fun cleanupExpiredDevices() {
-        val iterator = deviceMap.iterator()
-        while (iterator.hasNext()) {
-            val entry = iterator.next()
-            if (entry.value.isExpired()) {
-                iterator.remove()
-            }
+        deviceMap.entries.removeIf { entry ->
+            entry.value.isExpired()
         }
         updateDeviceList()
     }
@@ -834,14 +843,27 @@ class DeviceDiscoveryManager(private val context: Context) {
      * 停止蓝牙扫描
      */
     private fun stopBluetoothScan() {
-        bluetoothClassicScanCallback?.let { callback ->
-            if (hasBluetoothPermission()) {
-                bluetoothLeScanner?.stopScan(callback)
+        stopClassicScan()
+        stopBleScan()
+    }
+
+    private fun stopClassicScan() {
+        if (ActivityCompat.checkSelfPermission(
+                context,
+                Manifest.permission.BLUETOOTH_SCAN
+            ) == PackageManager.PERMISSION_GRANTED
+        ) {
+            bluetoothAdapter?.cancelDiscovery()
+        }
+        bluetoothClassicReceiver?.let { receiver ->
+            try {
+                context.unregisterReceiver(receiver)
+            } catch (e: IllegalArgumentException) {
+                Log.w("DeviceDiscoveryManager", "Receiver already unregistered", e)
             }
         }
-        bluetoothClassicScanCallback = null
-
-        stopBleScan()
+        bluetoothClassicReceiver = null
+        isClassicScanning = false
     }
 
     private fun stopBleScan() {
@@ -858,16 +880,12 @@ class DeviceDiscoveryManager(private val context: Context) {
         isBleScanning = false
     }
 
-    private fun handleClassicScanResult(result: ScanResult?) {
-        if (result == null) {
-            return
-        }
+    private fun handleClassicDevice(device: BluetoothDevice, rssi: Int) {
         if (!hasBluetoothConnectPermission()) {
             return
         }
 
-        val device = result.device ?: return
-        val deviceName = device.name ?: result.scanRecord?.deviceName
+        val deviceName = device.name
         if (compatibilityManager.shouldExclude(deviceName, device.address)) {
             return
         }
@@ -880,7 +898,7 @@ class DeviceDiscoveryManager(private val context: Context) {
             ipAddress = "",
             capabilities = estimateBluetoothCapabilities(device),
             discoveryProtocol = "bluetooth_classic",
-            rssi = result.rssi,
+            rssi = rssi,
             platform = platform,
             compatibilityRemark = compatibilityManager.remarkFor(platform),
             transports = compatibilityManager.transportsFor(platform).ifEmpty {

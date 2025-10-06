@@ -40,11 +40,23 @@ class WeatherRenderingOptimizer(private val context: Context) {
     private val displayManager = context.getSystemService(DisplayManager::class.java)
 
     fun detect(): WeatherRenderingProfile {
-        val display = displayManager?.getDisplay(Display.DEFAULT_DISPLAY)
-        val hdrCapabilities = display?.hdrCapabilities
+        val display = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            displayManager?.getDisplay(Display.DEFAULT_DISPLAY)
+        } else {
+            null
+        }
+        val hdrCapabilities = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            display?.hdrCapabilities
+        } else {
+            null
+        }
         val hdrTypes = hdrCapabilities?.supportedHdrTypes?.toList().orEmpty()
         val hdrSupported = hdrTypes.isNotEmpty()
-        val maxNits = hdrCapabilities?.maximumMasteringLuminance ?: 600f
+        val maxNits = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            hdrCapabilities?.desiredMaxLuminance ?: 600f
+        } else {
+            600f
+        }
         val vendor = detectVendor()
         val rayTracingLevel = detectRayTracingLevel()
         val rayTracingSupported = rayTracingLevel != WeatherRayTracingLevel.NONE
@@ -95,12 +107,16 @@ class WeatherRenderingOptimizer(private val context: Context) {
     }
 
     private fun detectRayTracingLevel(): WeatherRayTracingLevel {
-        val featureName = if (Build.VERSION.SDK_INT >= 34) PackageManager.FEATURE_RAY_TRACING else "android.hardware.ray_tracing"
+        val featureName = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            PackageManager.FEATURE_RAY_TRACING
+        } else {
+            "android.hardware.ray_tracing"
+        }
         if (!packageManager.hasSystemFeature(featureName)) {
             return WeatherRayTracingLevel.NONE
         }
         val supportsVulkan13 = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            packageManager.hasSystemFeature(PackageManager.FEATURE_VULKAN_LEVEL, 3)
+            packageManager.hasSystemFeature(PackageManager.FEATURE_VULKAN_HARDWARE_LEVEL, 3)
         } else {
             false
         }

@@ -12,6 +12,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlin.math.max
 
 /**
  * 运营枢纽主管理器
@@ -610,7 +611,7 @@ class OperationsHubManager(private val context: Context) {
             val score = when {
                 devices.isEmpty() -> 0.5f
                 onlineDevices == 0 -> 0.3f
-                else -> (onlineDevices.toFloat() / devices.size.toFloat()).coerceAtLeast(0.1f)
+                else -> max(onlineDevices.toFloat() / devices.size.toFloat(), 0.1f)
             }
             
             ComponentDiagnostic(
