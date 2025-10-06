@@ -45,6 +45,7 @@ import com.yunqiao.sinan.weather.UnifiedWeatherManager
 import com.yunqiao.sinan.weather.UnifiedWeatherState
 import com.yunqiao.sinan.weather.WeatherConfig
 import kotlinx.coroutines.launch
+import kotlin.math.coerceIn
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

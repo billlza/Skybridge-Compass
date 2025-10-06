@@ -414,11 +414,12 @@ class DeviceStatusManager(private val context: Context? = null) {
     private fun readHardwareTemperature(type: Int): Float? {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return null
         val manager = hardwarePropertiesManager ?: return null
+        val unavailable = runCatching { HardwarePropertiesManager.TEMPERATURE_UNAVAILABLE.toFloat() }
+            .getOrDefault(Float.NaN)
         return runCatching {
             @Suppress("DEPRECATION")
-            val readings = manager.getDeviceTemperatures(type, HardwarePropertiesManager.TEMPERATURE_CURRENT)
-            val unavailable = HardwarePropertiesManager.TEMPERATURE_UNAVAILABLE.toFloat()
-            readings?.firstOrNull { !it.isNaN() && it != unavailable }
+            manager.getDeviceTemperatures(type, HardwarePropertiesManager.TEMPERATURE_CURRENT)
+                ?.firstOrNull { !it.isNaN() && it != unavailable }
         }.getOrNull()
     }
 
