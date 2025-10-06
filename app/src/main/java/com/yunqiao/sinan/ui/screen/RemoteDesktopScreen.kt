@@ -29,6 +29,7 @@ import com.yunqiao.sinan.manager.BridgeDevice
 import com.yunqiao.sinan.manager.BridgeLinkQuality
 import com.yunqiao.sinan.manager.BridgeTransport
 import com.yunqiao.sinan.manager.BridgeTransportHint
+import com.yunqiao.sinan.manager.ConnectionStats
 import com.yunqiao.sinan.manager.RemoteDesktopManager
 import com.yunqiao.sinan.manager.RemoteDesktopResolutionMode
 import com.yunqiao.sinan.manager.RemoteDesktopTierProfile
