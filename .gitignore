@@ -8,3 +8,7 @@ local.properties
 
 # Offline gradle dist (do not commit)
 third_party/gradle/*.zip
+
+# Do not commit offline caches
+third_party/m2repository/**
+third_party/gradle/*.zip
