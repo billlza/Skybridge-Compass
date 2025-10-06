@@ -20,9 +20,9 @@ import java.net.InetAddress
 import java.net.NetworkInterface
 import java.text.SimpleDateFormat
 import java.util.*
-import kotlin.math.coerceAtLeast
 import kotlin.math.coerceIn
 import kotlin.math.roundToInt
+import kotlin.math.max
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalContext
@@ -182,22 +182,22 @@ class DeviceStatusManager(private val context: Context? = null) {
         return try {
             val now = SystemClock.elapsedRealtime()
             val elapsed = now - lastSampleTimestamp
-            val totalTx = TrafficStats.getTotalTxBytes().coerceAtLeast(0L)
-            val totalRx = TrafficStats.getTotalRxBytes().coerceAtLeast(0L)
+            val totalTx = max(TrafficStats.getTotalTxBytes(), 0L)
+            val totalRx = max(TrafficStats.getTotalRxBytes(), 0L)
             if (elapsed <= 0 || lastSampleTimestamp == 0L) {
                 lastSampleTimestamp = now
                 lastTxBytes = totalTx
                 lastRxBytes = totalRx
                 0f to 0f
             } else {
-                val txDelta = (totalTx - lastTxBytes).coerceAtLeast(0L)
-                val rxDelta = (totalRx - lastRxBytes).coerceAtLeast(0L)
+                val txDelta = max(totalTx - lastTxBytes, 0L)
+                val rxDelta = max(totalRx - lastRxBytes, 0L)
                 lastSampleTimestamp = now
                 lastTxBytes = totalTx
                 lastRxBytes = totalRx
                 val upload = (txDelta * 8f * 1000f) / (elapsed * 1024f)
                 val download = (rxDelta * 8f * 1000f) / (elapsed * 1024f)
-                upload.coerceAtLeast(0f) to download.coerceAtLeast(0f)
+                max(upload, 0f) to max(download, 0f)
             }
         } catch (e: Exception) {
             0f to 0f

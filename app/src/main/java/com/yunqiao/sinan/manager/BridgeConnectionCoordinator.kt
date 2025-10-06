@@ -38,7 +38,7 @@ import java.net.Socket
 import java.net.SocketTimeoutException
 import java.util.Locale
 import java.util.UUID
-import kotlin.math.coerceAtLeast
+import kotlin.math.max
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
@@ -530,7 +530,7 @@ class BridgeConnectionCoordinator(context: Context) {
         val latency = if (info.groupFormed) DIRECT_BASE_LATENCY else DEFAULT_DIRECT_LATENCY
         val supportsLossless = isLosslessCandidate(device.signalLevel, linkSpeed.toInt())
         val throughputFactor = if (supportsLossless) ULTRA_WIFI_THROUGHPUT_FACTOR else WIFI_THROUGHPUT_FACTOR
-        val throughput = (linkSpeed * throughputFactor).coerceAtLeast(MIN_THROUGHPUT)
+        val throughput = max(linkSpeed * throughputFactor, MIN_THROUGHPUT)
         val hint = if (supportsLossless) BridgeTransportHint.UltraWideband else BridgeTransportHint.WifiDirect
         return BridgeLinkQuality(
             hint = hint,
@@ -547,7 +547,7 @@ class BridgeConnectionCoordinator(context: Context) {
             val start = SystemClock.elapsedRealtime()
             val reachable = host.isReachable(LAN_PROBE_TIMEOUT_MS)
             if (reachable) {
-                (SystemClock.elapsedRealtime() - start).toInt().coerceAtLeast(MIN_LATENCY)
+                max((SystemClock.elapsedRealtime() - start).toInt(), MIN_LATENCY)
             } else {
                 DEFAULT_LAN_LATENCY
             }
@@ -556,7 +556,7 @@ class BridgeConnectionCoordinator(context: Context) {
         }
         val linkSpeed = wifiManager?.connectionInfo?.linkSpeed?.toFloat()?.takeIf { it > 0f }
             ?: DEFAULT_WIFI_LINK_SPEED
-        val throughput = (linkSpeed * LAN_THROUGHPUT_FACTOR).coerceAtLeast(MIN_THROUGHPUT)
+        val throughput = max(linkSpeed * LAN_THROUGHPUT_FACTOR, MIN_THROUGHPUT)
         val supportsLossless = linkSpeed >= LOSSLESS_LINK_SPEED_MIN
         return BridgeLinkQuality(
             hint = BridgeTransportHint.Lan,
@@ -569,8 +569,8 @@ class BridgeConnectionCoordinator(context: Context) {
 
     private fun estimateBluetoothQuality(device: BridgeDevice): BridgeLinkQuality {
         val signalFactor = (device.signalLevel + 1).coerceIn(1, 5)
-        val throughput = (DEFAULT_BLUETOOTH_THROUGHPUT * signalFactor).coerceAtLeast(MIN_BLUETOOTH_THROUGHPUT)
-        val latency = (DEFAULT_BLUETOOTH_LATENCY - signalFactor * 2).coerceAtLeast(MIN_LATENCY)
+        val throughput = max(DEFAULT_BLUETOOTH_THROUGHPUT * signalFactor, MIN_BLUETOOTH_THROUGHPUT)
+        val latency = max(DEFAULT_BLUETOOTH_LATENCY - signalFactor * 2, MIN_LATENCY)
         return BridgeLinkQuality(
             hint = BridgeTransportHint.Bluetooth,
             latencyMs = latency,
@@ -582,7 +582,7 @@ class BridgeConnectionCoordinator(context: Context) {
 
     private fun estimateNfcQuality(device: BridgeDevice): BridgeLinkQuality {
         val throughput = DEFAULT_NFC_THROUGHPUT
-        val latency = (DEFAULT_NFC_LATENCY - device.signalLevel).coerceAtLeast(MIN_LATENCY)
+        val latency = max(DEFAULT_NFC_LATENCY - device.signalLevel, MIN_LATENCY)
         return BridgeLinkQuality(
             hint = BridgeTransportHint.Nfc,
             latencyMs = latency,

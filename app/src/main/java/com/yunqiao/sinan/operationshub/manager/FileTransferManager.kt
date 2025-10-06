@@ -12,6 +12,7 @@ import java.net.Socket
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.math.max
 import kotlin.math.min
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -75,7 +76,7 @@ class FileTransferManager(private val context: Context) {
             latencyMs < 90 -> 36L
             else -> 48L
         }
-        preferredChunkSizeBytes = chunk.coerceAtLeast(MIN_CHUNK_BYTES)
+        preferredChunkSizeBytes = max(chunk, MIN_CHUNK_BYTES)
         preferredDelayMs = delayMs
     }
 
