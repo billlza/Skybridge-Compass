@@ -21,6 +21,7 @@ import java.net.NetworkInterface
 import java.text.SimpleDateFormat
 import java.util.*
 import kotlin.math.coerceAtLeast
+import kotlin.math.coerceIn
 import kotlin.math.roundToInt
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
@@ -411,11 +412,13 @@ class DeviceStatusManager(private val context: Context? = null) {
     }
 
     private fun readHardwareTemperature(type: Int): Float? {
-        if (hardwarePropertiesManager == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return null
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return null
+        val manager = hardwarePropertiesManager ?: return null
         return runCatching {
             @Suppress("DEPRECATION")
-            val readings = hardwarePropertiesManager.getDeviceTemperatures(type, HardwarePropertiesManager.TEMPERATURE_CURRENT)
-            readings?.firstOrNull { !it.isNaN() && it != HardwarePropertiesManager.TEMPERATURE_UNAVAILABLE.toFloat() }
+            val readings = manager.getDeviceTemperatures(type, HardwarePropertiesManager.TEMPERATURE_CURRENT)
+            val unavailable = HardwarePropertiesManager.TEMPERATURE_UNAVAILABLE.toFloat()
+            readings?.firstOrNull { !it.isNaN() && it != unavailable }
         }.getOrNull()
     }
 

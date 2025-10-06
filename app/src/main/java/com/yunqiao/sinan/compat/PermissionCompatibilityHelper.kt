@@ -91,15 +91,8 @@ class PermissionCompatibilityHelper(private val context: Context) {
             return false
         }
         val info = try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                packageManager.getPermissionInfo(
-                    permission,
-                    PackageManager.ComponentInfoFlags.of(0)
-                )
-            } else {
-                @Suppress("DEPRECATION")
-                packageManager.getPermissionInfo(permission, 0)
-            }
+            @Suppress("DEPRECATION")
+            packageManager.getPermissionInfo(permission, 0)
         } catch (error: Exception) {
             Log.w(TAG, "Permission $permission metadata not available", error)
             return true
