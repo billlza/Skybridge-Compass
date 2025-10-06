@@ -1,0 +1,221 @@
+[
+  {
+    "id": "device_control_basic",
+    "intents": ["connect", "disconnect", "连接", "断开"],
+    "patterns": [
+      "connect to {device}",
+      "disconnect from {device}",
+      "连接到{device}",
+      "断开{device}连接",
+      "连接{device}",
+      "断开{device}"
+    ],
+    "entities": ["device"],
+    "action": "device.control",
+    "description": {
+      "zh": "设备连接控制",
+      "en": "Device connection control"
+    },
+    "examples": {
+      "zh": [
+        "连接到我的电脑",
+        "连接手机",
+        "断开笔记本连接"
+      ],
+      "en": [
+        "connect to my computer",
+        "connect phone",
+        "disconnect from laptop"
+      ]
+    },
+    "requiredEntities": ["device"],
+    "optionalEntities": [],
+    "constraints": {
+      "device": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 50
+      }
+    }
+  },
+  {
+    "id": "file_transfer_basic",
+    "intents": ["send", "transfer", "发送", "传输"],
+    "patterns": [
+      "send {file} to {device}",
+      "transfer {file} to {device}",
+      "发送{file}到{device}",
+      "传输{file}到{device}",
+      "给{device}发送{file}"
+    ],
+    "entities": ["file", "device"],
+    "action": "file.transfer",
+    "description": {
+      "zh": "文件传输",
+      "en": "File transfer"
+    },
+    "examples": {
+      "zh": [
+        "发送文档到电脑",
+        "传输照片到手机",
+        "给服务器发送报告"
+      ],
+      "en": [
+        "send document to computer",
+        "transfer photo to phone",
+        "send report to server"
+      ]
+    },
+    "requiredEntities": ["file", "device"],
+    "optionalEntities": [],
+    "constraints": {
+      "file": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 100
+      },
+      "device": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 50
+      }
+    }
+  },
+  {
+    "id": "system_monitor_basic",
+    "intents": ["check", "monitor", "status", "检查", "监控", "状态"],
+    "patterns": [
+      "check {metric}",
+      "monitor {metric}",
+      "show {metric} status",
+      "检查{metric}",
+      "监控{metric}",
+      "查看{metric}状态",
+      "显示{metric}信息"
+    ],
+    "entities": ["metric"],
+    "action": "system.monitor",
+    "description": {
+      "zh": "系统监控",
+      "en": "System monitoring"
+    },
+    "examples": {
+      "zh": [
+        "检查CPU使用率",
+        "监控内存",
+        "查看网络状态",
+        "显示电池信息"
+      ],
+      "en": [
+        "check CPU usage",
+        "monitor memory",
+        "show network status",
+        "display battery info"
+      ]
+    },
+    "requiredEntities": ["metric"],
+    "optionalEntities": [],
+    "constraints": {
+      "metric": {
+        "type": "string",
+        "allowedValues": [
+          "CPU", "cpu", "处理器",
+          "memory", "内存",
+          "disk", "硬盘", "磁盘",
+          "network", "网络",
+          "battery", "电池",
+          "temperature", "温度"
+        ]
+      }
+    }
+  },
+  {
+    "id": "media_control",
+    "intents": ["play", "pause", "stop", "播放", "暂停", "停止"],
+    "patterns": [
+      "play {media}",
+      "pause {media}",
+      "stop {media}",
+      "播放{media}",
+      "暂停{media}",
+      "停止{media}",
+      "打开{media}"
+    ],
+    "entities": ["media"],
+    "action": "media.control",
+    "description": {
+      "zh": "媒体控制",
+      "en": "Media control"
+    },
+    "examples": {
+      "zh": [
+        "播放音乐",
+        "暂停视频",
+        "停止播放",
+        "打开电影"
+      ],
+      "en": [
+        "play music",
+        "pause video",
+        "stop playing",
+        "open movie"
+      ]
+    },
+    "requiredEntities": [],
+    "optionalEntities": ["media"],
+    "constraints": {
+      "media": {
+        "type": "string",
+        "allowedValues": [
+          "music", "音乐", "歌曲",
+          "video", "视频", "电影",
+          "audio", "音频",
+          "song", "歌"
+        ]
+      }
+    }
+  },
+  {
+    "id": "app_control",
+    "intents": ["open", "close", "launch", "打开", "关闭", "启动"],
+    "patterns": [
+      "open {app}",
+      "close {app}",
+      "launch {app}",
+      "start {app}",
+      "打开{app}",
+      "关闭{app}",
+      "启动{app}",
+      "运行{app}"
+    ],
+    "entities": ["app"],
+    "action": "app.control",
+    "description": {
+      "zh": "应用控制",
+      "en": "Application control"
+    },
+    "examples": {
+      "zh": [
+        "打开浏览器",
+        "关闭游戏",
+        "启动聊天软件",
+        "运行编辑器"
+      ],
+      "en": [
+        "open browser",
+        "close game",
+        "launch chat app",
+        "start editor"
+      ]
+    },
+    "requiredEntities": ["app"],
+    "optionalEntities": [],
+    "constraints": {
+      "app": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 50
+      }
+    }
+  }
+]
