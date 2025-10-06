@@ -5,3 +5,6 @@ local.properties
 .DS_Store
 **/build/
 *.iml
+
+# Offline gradle dist (do not commit)
+third_party/gradle/*.zip
