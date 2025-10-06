@@ -95,6 +95,7 @@ class DeviceDiscoveryManager(private val context: Context) {
     // 蓝牙扫描相关
     private var bluetoothLeScanner: BluetoothLeScanner? = null
     private var bluetoothScanCallback: ScanCallback? = null
+    private var isBleScanning: Boolean = false
     private var bluetoothClassicScanCallback: ScanCallback? = null
     
     // WiFi P2P相关
@@ -460,6 +461,10 @@ class DeviceDiscoveryManager(private val context: Context) {
     private fun discoverBLEDevices() {
         if (bluetoothLeScanner == null || !hasBluetoothPermission()) return
         
+        if (isBleScanning) {
+            stopBleScan()
+        }
+
         bluetoothScanCallback = object : ScanCallback() {
             override fun onScanResult(callbackType: Int, result: ScanResult?) {
                 result?.let { scanResult ->
@@ -496,15 +501,22 @@ class DeviceDiscoveryManager(private val context: Context) {
             
             override fun onScanFailed(errorCode: Int) {
                 super.onScanFailed(errorCode)
+                isBleScanning = false
             }
         }
-        
+
         if (ActivityCompat.checkSelfPermission(
                 context,
                 Manifest.permission.BLUETOOTH_SCAN
             ) == PackageManager.PERMISSION_GRANTED
         ) {
-            bluetoothLeScanner?.startScan(bluetoothScanCallback)
+            try {
+                bluetoothLeScanner?.startScan(bluetoothScanCallback)
+                isBleScanning = true
+            } catch (e: IllegalStateException) {
+                isBleScanning = false
+                Log.w("DeviceDiscoveryManager", "Unable to start BLE scan", e)
+            }
         }
     }
     
@@ -828,6 +840,10 @@ class DeviceDiscoveryManager(private val context: Context) {
         }
         bluetoothClassicScanCallback = null
 
+        stopBleScan()
+    }
+
+    private fun stopBleScan() {
         bluetoothScanCallback?.let { callback ->
             if (ActivityCompat.checkSelfPermission(
                     context,
@@ -838,6 +854,7 @@ class DeviceDiscoveryManager(private val context: Context) {
             }
         }
         bluetoothScanCallback = null
+        isBleScanning = false
     }
 
     private fun handleClassicScanResult(result: ScanResult?) {
