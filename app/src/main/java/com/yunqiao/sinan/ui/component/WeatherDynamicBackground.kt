@@ -10,7 +10,6 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
-import androidx.compose.foundation.layout.BoxScope.align
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -31,11 +30,11 @@ import androidx.compose.ui.unit.dp
 import com.yunqiao.sinan.shared.WeatherEffectType
 import com.yunqiao.sinan.shared.WeatherVisualState
 import kotlin.math.PI
-import kotlin.math.coerceAtLeast
 import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.math.sin
 import kotlin.random.Random
+import kotlin.math.max
 
 @Composable
 fun WeatherDynamicBackground(
@@ -128,7 +127,7 @@ private fun SnowfallLayer(
     val density = (visualState.particleDensity * shading).coerceIn(0.2f, 2.2f)
     val particleCount = remember(density, frontLayer, shading) {
         val base = if (frontLayer) 140 else 100
-        (base * density).roundToInt().coerceAtLeast(40)
+        max((base * density).roundToInt(), 40)
     }
     val particles = remember(visualState.effectType, particleCount, frontLayer) {
         List(particleCount) { index ->
@@ -142,7 +141,7 @@ private fun SnowfallLayer(
         }
     }
     val duration = remember(density) {
-        (12000 / density.coerceAtLeast(0.25f)).roundToInt()
+        (12000 / max(density, 0.25f)).roundToInt()
     }
     val transition = rememberInfiniteTransition(label = "snowfall_transition")
     val progress by transition.animateFloat(
@@ -190,7 +189,7 @@ private fun RainLayer(
     val particleCount = remember(density, storm, frontLayer, shading) {
         val base = if (storm) 320 else 220
         val layerMultiplier = if (frontLayer) 1.2f else 1f
-        (base * density * layerMultiplier).roundToInt().coerceAtLeast(120)
+        max((base * density * layerMultiplier).roundToInt(), 120)
     }
     val particles = remember(visualState.effectType, particleCount, storm, frontLayer) {
         List(particleCount) { index ->

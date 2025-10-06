@@ -48,6 +48,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -318,6 +319,7 @@ private fun TransferOverviewCard(
                     BridgeTransportHint.WifiDirect -> if (linkQuality.isDirect) "热点直连" else "Wi-Fi"
                     BridgeTransportHint.Lan -> "局域网"
                     BridgeTransportHint.Cloud -> "云桥"
+                    BridgeTransportHint.UniversalBridge -> "通用桥接"
                 }
                 val accessIcon = when (linkQuality.hint) {
                     BridgeTransportHint.UltraWideband -> Icons.Default.WifiTethering
@@ -327,6 +329,7 @@ private fun TransferOverviewCard(
                     BridgeTransportHint.WifiDirect -> Icons.Default.WifiTethering
                     BridgeTransportHint.Lan -> Icons.Default.Cable
                     BridgeTransportHint.Cloud -> Icons.Default.Cloud
+                    BridgeTransportHint.UniversalBridge -> Icons.Default.HighQuality
                 }
                 MetricChip(
                     label = "链路",
@@ -500,6 +503,7 @@ private fun transportHintLabel(hint: BridgeTransportHint): String {
         BridgeTransportHint.WifiDirect -> "Wi-Fi 直连"
         BridgeTransportHint.Lan -> "局域网"
         BridgeTransportHint.Cloud -> "云桥"
+        BridgeTransportHint.UniversalBridge -> "通用桥接"
     }
 }
 

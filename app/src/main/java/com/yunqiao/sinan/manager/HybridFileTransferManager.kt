@@ -13,7 +13,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlin.math.coerceAtLeast
+import kotlin.math.max
 import kotlin.math.roundToInt
 import com.yunqiao.sinan.operationshub.manager.FileTransferManager
 import com.yunqiao.sinan.operationshub.manager.FileTransferTask
@@ -163,12 +163,12 @@ class HybridFileTransferManager(context: Context) {
             quality.throughputMbps > 120f -> 1.2f
             else -> 1f
         }
-        val imageMax = (96f * multiplier).roundToInt().coerceAtLeast(48)
-        val videoMax = (960f * multiplier).roundToInt().coerceAtLeast(256)
-        val audioMax = (220f * multiplier).roundToInt().coerceAtLeast(96)
-        val docMax = (64f * multiplier).roundToInt().coerceAtLeast(32)
-        val archiveMax = (512f * multiplier).roundToInt().coerceAtLeast(128)
-        val appMax = (384f * multiplier).roundToInt().coerceAtLeast(96)
+        val imageMax = max((96f * multiplier).roundToInt(), 48)
+        val videoMax = max((960f * multiplier).roundToInt(), 256)
+        val audioMax = max((220f * multiplier).roundToInt(), 96)
+        val docMax = max((64f * multiplier).roundToInt(), 32)
+        val archiveMax = max((512f * multiplier).roundToInt(), 128)
+        val appMax = max((384f * multiplier).roundToInt(), 96)
         return listOf(
             TransferMediaCapability(
                 category = TransferCategory.IMAGE,
