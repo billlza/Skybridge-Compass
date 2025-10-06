@@ -1,5 +1,6 @@
 package com.yunqiao.sinan.ui.component
 
+import android.os.PowerManager
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
@@ -25,11 +26,12 @@ import androidx.lifecycle.LifecycleEventObserver
 import com.yunqiao.sinan.data.*
 import com.yunqiao.sinan.ui.theme.ModernGlassColors
 import com.yunqiao.sinan.ui.theme.ModernShapes
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.Locale
+import kotlin.math.roundToInt
 
 /**
  * 现代化设备状态栏组件，显示在线状态和设备数量
@@ -440,7 +442,8 @@ private fun ModernSystemMetric(
     modifier: Modifier = Modifier
 ) {
     val colorScheme = MaterialTheme.colorScheme
-    val percentage = (value * 100).toInt()
+    val clampedValue = value.coerceIn(0f, 1f)
+    val percentage = (clampedValue * 100).roundToInt()
 
     val metricColor = when {
         value < 0.5f -> ModernGlassColors.successGradientStart
@@ -474,11 +477,25 @@ private fun ModernSystemMetric(
         Spacer(modifier = Modifier.height(6.dp))
 
         Text(
-            text = "${percentage.coerceIn(0, 100)}%",
+            text = "$percentage%",
             style = MaterialTheme.typography.titleMedium,
             color = metricColor,
             fontWeight = FontWeight.SemiBold
         )
+
+        Spacer(modifier = Modifier.height(4.dp))
+
+        LinearProgressIndicator(
+            progress = { clampedValue },
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(4.dp)
+                .clip(ModernShapes.small),
+            color = metricColor,
+            trackColor = colorScheme.surfaceVariant.copy(alpha = 0.3f)
+        )
+
+        Spacer(modifier = Modifier.height(2.dp))
     }
 }
 
@@ -701,28 +718,5 @@ private fun formatBandwidth(valueKbps: Float): String {
         String.format(Locale.getDefault(), "%.2f Mbps", mbps)
     } else {
         String.format(Locale.getDefault(), "%.0f Kbps", valueKbps)
-    }
-}
-        
-        Spacer(modifier = Modifier.height(4.dp))
-        
-        LinearProgressIndicator(
-            progress = { value },
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(4.dp)
-                .clip(ModernShapes.small),
-            color = metricColor,
-            trackColor = colorScheme.surfaceVariant.copy(alpha = 0.3f)
-        )
-        
-        Spacer(modifier = Modifier.height(2.dp))
-        
-        Text(
-            text = "$percentage%",
-            style = MaterialTheme.typography.labelSmall,
-            color = metricColor,
-            fontWeight = FontWeight.Medium
-        )
     }
 }

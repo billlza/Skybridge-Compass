@@ -14,6 +14,7 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.flow.update
 import java.util.Locale
+import kotlin.math.coerceIn
 import kotlin.math.roundToInt
 
 /**

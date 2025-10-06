@@ -6,6 +6,7 @@ import android.hardware.display.DisplayManager
 import android.os.Build
 import android.view.Display
 import java.util.Locale
+import kotlin.math.coerceIn
 
 data class WeatherRenderingProfile(
     val hdrSupported: Boolean = false,

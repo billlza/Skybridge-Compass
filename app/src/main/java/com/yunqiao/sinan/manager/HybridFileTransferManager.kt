@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlin.math.coerceAtLeast
 import kotlin.math.roundToInt
 import com.yunqiao.sinan.operationshub.manager.FileTransferManager
 import com.yunqiao.sinan.operationshub.manager.FileTransferTask

@@ -35,6 +35,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlin.math.coerceAtLeast
 import com.yunqiao.sinan.data.getThermalStatusText
 import com.yunqiao.sinan.manager.PerformanceProfile
 import com.yunqiao.sinan.manager.PerformanceProfileController

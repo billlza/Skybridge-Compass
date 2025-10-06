@@ -30,6 +30,7 @@ import androidx.compose.ui.unit.dp
 import com.yunqiao.sinan.shared.WeatherEffectType
 import com.yunqiao.sinan.shared.WeatherVisualState
 import kotlin.math.PI
+import kotlin.math.coerceAtLeast
 import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.math.sin
