@@ -501,7 +501,8 @@ class DeviceDiscoveryManager(private val context: Context) {
             
             override fun onScanFailed(errorCode: Int) {
                 super.onScanFailed(errorCode)
-                isBleScanning = false
+                Log.w("DeviceDiscoveryManager", "BLE scan failed with error $errorCode")
+                stopBleScan()
             }
         }
 
