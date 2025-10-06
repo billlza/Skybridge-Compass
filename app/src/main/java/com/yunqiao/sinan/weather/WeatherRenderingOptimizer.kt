@@ -95,7 +95,12 @@ class WeatherRenderingOptimizer(private val context: Context) {
     }
 
     private fun detectVendor(): WeatherSocVendor {
-        val manufacturer = (if (Build.SOC_MANUFACTURER.isNullOrBlank()) Build.MANUFACTURER else Build.SOC_MANUFACTURER).orEmpty()
+        val socManufacturer = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            Build.SOC_MANUFACTURER
+        } else {
+            null
+        }
+        val manufacturer = (socManufacturer?.takeIf { it.isNotBlank() } ?: Build.MANUFACTURER).orEmpty()
         val lower = manufacturer.lowercase(Locale.ROOT)
         return when {
             lower.contains("qualcomm") || lower.contains("snapdragon") -> WeatherSocVendor.QUALCOMM
@@ -115,11 +120,12 @@ class WeatherRenderingOptimizer(private val context: Context) {
         if (!packageManager.hasSystemFeature(featureName)) {
             return WeatherRayTracingLevel.NONE
         }
-        val supportsVulkan13 = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            packageManager.hasSystemFeature(PackageManager.FEATURE_VULKAN_HARDWARE_LEVEL, 3)
+        val supportsAdvancedVulkan = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            packageManager.hasSystemFeature(PackageManager.FEATURE_VULKAN_HARDWARE_LEVEL) &&
+                packageManager.hasSystemFeature(PackageManager.FEATURE_VULKAN_HARDWARE_VERSION)
         } else {
             false
         }
-        return if (supportsVulkan13) WeatherRayTracingLevel.ENHANCED else WeatherRayTracingLevel.BASELINE
+        return if (supportsAdvancedVulkan) WeatherRayTracingLevel.ENHANCED else WeatherRayTracingLevel.BASELINE
     }
 }

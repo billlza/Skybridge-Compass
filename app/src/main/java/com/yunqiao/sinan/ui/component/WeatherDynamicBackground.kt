@@ -30,11 +30,12 @@ import androidx.compose.ui.unit.dp
 import com.yunqiao.sinan.shared.WeatherEffectType
 import com.yunqiao.sinan.shared.WeatherVisualState
 import kotlin.math.PI
+import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.math.sin
 import kotlin.random.Random
-import kotlin.math.max
+import kotlin.math.coerceIn
 
 @Composable
 fun WeatherDynamicBackground(

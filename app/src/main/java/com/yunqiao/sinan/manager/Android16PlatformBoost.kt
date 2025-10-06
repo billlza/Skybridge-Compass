@@ -1,6 +1,7 @@
 package com.yunqiao.sinan.manager
 
 import android.os.Build
+import kotlin.math.coerceAtMost
 import kotlin.math.max
 import kotlin.math.roundToInt
 

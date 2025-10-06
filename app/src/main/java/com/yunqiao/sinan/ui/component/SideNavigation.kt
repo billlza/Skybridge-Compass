@@ -37,6 +37,7 @@ import com.yunqiao.sinan.ui.theme.LocalThemeIsDark
 import com.yunqiao.sinan.ui.theme.LocalUseDynamicColor
 import com.yunqiao.sinan.ui.theme.ModernGlassColors
 import com.yunqiao.sinan.ui.theme.ModernShapes
+import kotlin.math.coerceIn
 
 /**
  * 现代化液态玻璃效果侧边栏
