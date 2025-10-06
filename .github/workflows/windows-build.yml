@@ -1,0 +1,272 @@
+name: Windows Build and Test
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  BUILD_CONFIGURATION: Release
+  PLATFORM: x64
+
+jobs:
+  # 代码质量检查
+  code-quality:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+        
+    - name: Install dependencies
+      run: |
+        pip install flake8 black isort mypy
+        pip install -r requirements.txt
+        
+    - name: Code formatting check
+      run: |
+        black --check .
+        isort --check-only .
+        
+    - name: Linting
+      run: |
+        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+        
+    - name: Type checking
+      run: |
+        mypy . --ignore-missing-imports
+
+  # Windows 应用构建
+  windows-build:
+    runs-on: windows-latest
+    needs: code-quality
+    strategy:
+      matrix:
+        configuration: [Debug, Release]
+        platform: [x64, x86]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v1
+      
+    - name: Setup Windows SDK
+      uses: microsoft/setup-windows-sdk@v1
+      with:
+        version: '10.0.22621.0'
+        
+    - name: Setup Visual Studio
+      uses: microsoft/setup-vs@v1
+      with:
+        vs-version: '17.0'
+        
+    - name: Setup C++/WinRT
+      run: |
+        nuget install Microsoft.Windows.CppWinRT -Version 2.0.240111.4 -OutputDirectory packages
+        
+    - name: Setup Windows App SDK
+      run: |
+        nuget install Microsoft.WindowsAppSDK -Version 1.5.240311000 -OutputDirectory packages
+        
+    - name: Restore NuGet packages
+      run: |
+        nuget restore SkybridgeCompassApp.sln
+        
+    - name: Build solution
+      run: |
+        msbuild SkybridgeCompassApp.sln ^
+          /p:Configuration=${{ matrix.configuration }} ^
+          /p:Platform=${{ matrix.platform }} ^
+          /p:WindowsAppSDKSelfContained=true ^
+          /p:WindowsAppSDKVersion=1.5.240311000 ^
+          /p:WindowsAppSDKFrameworkPackageRedist=true ^
+          /verbosity:minimal
+          
+    - name: Run tests
+      run: |
+        vstest.console.exe TestResults\*.trx
+        
+    - name: Code coverage
+      run: |
+        OpenCover.Console.exe -target:"vstest.console.exe" -targetargs:"TestResults\*.trx" -output:coverage.xml
+        
+    - name: Upload test results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: test-results-${{ matrix.configuration }}-${{ matrix.platform }}
+        path: TestResults/
+        
+    - name: Upload coverage
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: coverage-${{ matrix.configuration }}-${{ matrix.platform }}
+        path: coverage.xml
+        
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: windows-app-${{ matrix.configuration }}-${{ matrix.platform }}
+        path: |
+          bin/${{ matrix.configuration }}/${{ matrix.platform }}/
+          obj/${{ matrix.configuration }}/${{ matrix.platform }}/
+
+  # 性能测试
+  performance-test:
+    runs-on: windows-latest
+    needs: windows-build
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Download build artifacts
+      uses: actions/download-artifact@v3
+      with:
+        name: windows-app-Release-x64
+        path: build/
+        
+    - name: Setup performance tools
+      run: |
+        choco install -y windows-performance-toolkit
+        
+    - name: Run performance tests
+      run: |
+        xperf -start -on DiagEasy
+        .\build\bin\Release\x64\SkybridgeCompassApp.exe
+        xperf -stop -d performance.etl
+        
+    - name: Upload performance results
+      uses: actions/upload-artifact@v3
+      with:
+        name: performance-results
+        path: performance.etl
+
+  # 安全扫描
+  security-scan:
+    runs-on: windows-latest
+    needs: windows-build
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Download build artifacts
+      uses: actions/download-artifact@v3
+      with:
+        name: windows-app-Release-x64
+        path: build/
+        
+    - name: Run Windows Defender scan
+      run: |
+        MpCmdRun.exe -Scan -ScanType 3 -File "build\bin\Release\x64\SkybridgeCompassApp.exe"
+        
+    - name: Run CodeQL analysis
+      uses: github/codeql-action/init@v2
+      with:
+        languages: cpp
+        
+    - name: Perform CodeQL analysis
+      uses: github/codeql-action/analyze@v2
+      
+    - name: Upload security results
+      uses: actions/upload-artifact@v3
+      with:
+        name: security-results
+        path: |
+          security-scan-results/
+          codeql-results/
+
+  # 部署准备
+  deploy-prep:
+    runs-on: windows-latest
+    needs: [windows-build, performance-test, security-scan]
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Download build artifacts
+      uses: actions/download-artifact@v3
+      with:
+        name: windows-app-Release-x64
+        path: build/
+        
+    - name: Create MSIX package
+      run: |
+        makeappx pack /d build\bin\Release\x64 /p SkybridgeCompassApp.msix
+        
+    - name: Sign MSIX package
+      run: |
+        signtool sign /f certificate.pfx /p ${{ secrets.CERTIFICATE_PASSWORD }} SkybridgeCompassApp.msix
+        
+    - name: Upload MSIX package
+      uses: actions/upload-artifact@v3
+      with:
+        name: msix-package
+        path: SkybridgeCompassApp.msix
+        
+    - name: Create release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: SkybridgeCompassApp.msix
+        tag_name: v${{ github.run_number }}
+        name: Release v${{ github.run_number }}
+        body: |
+          ## Skybridge Compass Windows App
+          
+          ### Features
+          - ICMP latency sampling
+          - TLS certificate validation
+          - Device discovery
+          - Zero-trust status
+          - Firewall policy coordination
+          - Defender scan integration
+          
+          ### Installation
+          1. Download the MSIX package
+          2. Install using Windows Package Manager: `winget install SkybridgeCompassApp.msix`
+          3. Or double-click to install
+          
+          ### System Requirements
+          - Windows 10 version 1903 or later
+          - Windows 11 recommended
+          - 4GB RAM minimum
+          - 100MB disk space
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # 通知
+  notify:
+    runs-on: ubuntu-latest
+    needs: [deploy-prep]
+    if: always()
+    
+    steps:
+    - name: Notify success
+      if: needs.deploy-prep.result == 'success'
+      run: |
+        echo "✅ Build and deployment completed successfully!"
+        echo "📦 MSIX package created and uploaded"
+        echo "🚀 Release created: v${{ github.run_number }}"
+        
+    - name: Notify failure
+      if: needs.deploy-prep.result == 'failure'
+      run: |
+        echo "❌ Build or deployment failed"
+        echo "🔍 Check the logs for details"
+        exit 1
