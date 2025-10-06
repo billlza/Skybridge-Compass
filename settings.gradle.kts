@@ -8,15 +8,8 @@ if (System.getProperty("org.gradle.java.home").isNullOrBlank() && codexJavaHome 
     System.setProperty("org.gradle.java.home", codexJavaHome.absolutePath)
 }
 
-val offlineRepository = rootDir.resolve("third_party/m2repository")
-
 pluginManagement {
     repositories {
-        if (offlineRepository.isDirectory) {
-            maven {
-                url = offlineRepository.toURI()
-            }
-        }
         google()
         mavenCentral()
         gradlePluginPortal()
@@ -25,10 +18,9 @@ pluginManagement {
 dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
-        if (offlineRepository.isDirectory) {
-            maven {
-                url = offlineRepository.toURI()
-            }
+        val offlineRepo = File(rootDir, "third_party/m2repository")
+        if (offlineRepo.isDirectory) {
+            maven { url = uri(offlineRepo) }
         }
         google()
         mavenCentral()
@@ -37,3 +29,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "YunQiaoSiNan"
 include(":app")
+
