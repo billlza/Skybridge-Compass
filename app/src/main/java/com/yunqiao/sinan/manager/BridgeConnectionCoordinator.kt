@@ -8,12 +8,13 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
+import android.net.MacAddress
 import android.net.wifi.WifiManager
 import android.net.wifi.p2p.WifiP2pConfig
 import android.net.wifi.p2p.WifiP2pDeviceList
 import android.net.wifi.p2p.WifiP2pInfo
 import android.net.wifi.p2p.WifiP2pManager
-import android.net.wifi.p2p.WpsInfo
+import android.net.wifi.WpsInfo
 import android.os.Build
 import android.os.Looper
 import android.os.SystemClock
@@ -403,10 +404,13 @@ class BridgeConnectionCoordinator(context: Context) {
         val channel = wifiChannel ?: return null
 
         val config = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val address = runCatching { MacAddress.fromString(device.deviceAddress) }.getOrNull()
             WifiP2pConfig.Builder()
-                .setDeviceAddress(device.deviceAddress)
-                .enablePersistentMode(false)
-                .setGroupOperatingBand(WifiP2pConfig.GROUP_OWNER_BAND_AUTO)
+                .apply {
+                    address?.let { setDeviceAddress(it) }
+                    setGroupOperatingBand(WifiP2pConfig.GROUP_OWNER_BAND_AUTO)
+                    enablePersistentMode(false)
+                }
                 .build()
         } else {
             @Suppress("DEPRECATION")
@@ -474,7 +478,7 @@ class BridgeConnectionCoordinator(context: Context) {
         val dhcp = wifiManager?.dhcpInfo
         if (dhcp != null) {
             val gateway = intToIp(dhcp.gateway)
-            val prefix = gateway.substringBeforeLast('.', prefix = gateway)
+            val prefix = gateway.substringBeforeLast('.', gateway)
             results += listOf("$prefix.1", "$prefix.100", "$prefix.101")
         }
         return results.distinct()
