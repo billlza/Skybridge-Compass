@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="accent">#03DAC5</color>
+    <color name="background_dark">#121212</color>
+    <color name="black">#000000</color>
+    <color name="error">#F44336</color>
+    <color name="glass_background">#B3000000</color>
+    <color name="glass_border">#33FFFFFF</color>
+    <color name="glass_highlight">#1AFFFFFF</color>
+    <color name="gradient_end">#42A5F5</color>
+    <color name="gradient_selected_end">#2196F3</color>
+    <color name="gradient_selected_start">#1565C0</color>
+    <color name="gradient_start">#1976D2</color>
+    <color name="primary">#1976D2</color>
+    <color name="primary_dark">#0D47A1</color>
+    <color name="success">#4CAF50</color>
+    <color name="surface_dark">#1E1E1E</color>
+    <color name="surface_variant">#2D2D2D</color>
+    <color name="text_hint">#66FFFFFF</color>
+    <color name="text_primary">#FFFFFF</color>
+    <color name="text_secondary">#B3FFFFFF</color>
+    <color name="transparent">#00000000</color>
+    <color name="warning">#FF9800</color>
+    <color name="white">#FFFFFF</color>
+    <string name="app_name">云桥司南</string>
+    <style name="Theme.YunQiaoSiNan" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowDrawsSystemBarBackgrounds">true</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarDividerColor">@android:color/transparent</item>
+        <item name="android:windowTranslucentStatus">true</item>
+        <item name="android:windowTranslucentNavigation">true</item>
+        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:enforceStatusBarContrast">false</item>
+        <item name="android:enforceNavigationBarContrast">false</item>
+        <item name="android:forceDarkAllowed">false</item>
+        <item name="android:fitsSystemWindows">false</item>
+        <item name="android:windowContentTransitions">true</item>
+        <item name="android:windowAllowEnterTransitionOverlap">true</item>
+        <item name="android:windowAllowReturnTransitionOverlap">true</item>
+        <item name="android:windowSharedElementEnterTransition">@android:transition/move</item>
+        <item name="android:windowSharedElementReturnTransition">@android:transition/move</item>
+        <item name="android:homeAsUpIndicator">@android:color/transparent</item>
+        <item name="android:colorEdgeEffect">@android:color/transparent</item>
+    </style>
+</resources>

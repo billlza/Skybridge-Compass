@@ -1,0 +1,28 @@
+{
+    "logs": [
+        {
+            "outputFile": "com.yunqiao.sinan.app-mergeDebugResources-55:/values-night-v8/values-night-v8.xml",
+            "map": [
+                {
+                    "source": "/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/res/values-night/themes.xml",
+                    "from": {
+                        "startLines": "1",
+                        "startColumns": "4",
+                        "startOffsets": "63",
+                        "endLines": "24",
+                        "endColumns": "12",
+                        "endOffsets": "1786"
+                    },
+                    "to": {
+                        "startLines": "2",
+                        "startColumns": "4",
+                        "startOffsets": "55",
+                        "endLines": "25",
+                        "endColumns": "12",
+                        "endOffsets": "1778"
+                    }
+                }
+            ]
+        }
+    ]
+}

@@ -1,0 +1,334 @@
+1<?xml version="1.0" encoding="utf-8"?>
+2<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+3    package="com.yunqiao.sinan.debug"
+4    android:versionCode="11"
+5    android:versionName="2.11-permission-fix" >
+6
+7    <uses-sdk
+8        android:minSdkVersion="33"
+9        android:targetSdkVersion="36" />
+10
+11    <!-- 基础权限 -->
+12    <uses-permission android:name="android.permission.INTERNET" />
+12-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:7:5-67
+12-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:7:22-64
+13    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+13-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:8:5-79
+13-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:8:22-76
+14    <uses-permission android:name="android.permission.WAKE_LOCK" />
+14-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:9:5-68
+14-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:9:22-65
+15    <uses-permission android:name="android.permission.VIBRATE" />
+15-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:10:5-66
+15-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:10:22-63
+16
+17    <!-- Android 13+ 细粒度媒体权限 -->
+18    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+18-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:13:5-76
+18-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:13:22-73
+19    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+19-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:14:5-75
+19-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:14:22-72
+20    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+20-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:15:5-75
+20-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:15:22-72
+21    <uses-permission
+21-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:16:5-17:51
+22        android:name="android.permission.READ_EXTERNAL_STORAGE"
+22-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:16:22-77
+23        android:maxSdkVersion="32" />
+23-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:17:22-48
+24    <uses-permission
+24-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:18:5-19:51
+25        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+25-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:18:22-78
+26        android:maxSdkVersion="29" />
+26-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:19:22-48
+27
+28    <!-- 摄像头和音频权限 -->
+29    <uses-permission android:name="android.permission.CAMERA" />
+29-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:22:5-65
+29-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:22:22-62
+30    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+30-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:23:5-71
+30-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:23:22-68
+31
+32    <!-- WiFi和网络权限 -->
+33    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+33-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:26:5-76
+33-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:26:22-73
+34    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+34-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:27:5-76
+34-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:27:22-73
+35
+36    <!-- Android 13+ 附近WiFi设备权限 -->
+37    <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" />
+37-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:30:5-78
+37-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:30:22-75
+38
+39    <!-- 蓝牙权限 - Android 12+ 新权限模型 -->
+40    <uses-permission
+40-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:33:5-34:51
+41        android:name="android.permission.BLUETOOTH"
+41-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:33:22-65
+42        android:maxSdkVersion="30" />
+42-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:34:22-48
+43    <uses-permission
+43-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:35:5-36:51
+44        android:name="android.permission.BLUETOOTH_ADMIN"
+44-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:35:22-71
+45        android:maxSdkVersion="30" />
+45-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:36:22-48
+46    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
+46-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:37:5-73
+46-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:37:22-70
+47    <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
+47-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:38:5-78
+47-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:38:22-75
+48    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+48-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:39:5-76
+48-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:39:22-73
+49
+50    <!-- 位置权限 - 天气功能需要 -->
+51    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+51-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:42:5-81
+51-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:42:22-78
+52    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+52-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:43:5-79
+52-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:43:22-76
+53    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
+53-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:44:5-85
+53-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:44:22-82
+54
+55    <!-- 壁纸权限 -->
+56    <uses-permission android:name="android.permission.SET_WALLPAPER" />
+56-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:47:5-72
+56-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:47:22-69
+57    <uses-permission android:name="android.permission.SET_WALLPAPER_HINTS" />
+57-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:48:5-78
+57-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:48:22-75
+58
+59    <!-- Android 13+ 通知权限 -->
+60    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+60-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:51:5-77
+60-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:51:22-74
+61
+62    <!-- Android 14+ 新增权限 -->
+63    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+63-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:54:5-94
+63-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:54:22-91
+64    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+64-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:55:5-81
+64-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:55:22-78
+65
+66    <!-- 运营枢纽新增权限 -->
+67    <!-- 前台服务权限 - Android 14+ 类型化 -->
+68    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+68-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:59:5-77
+68-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:59:22-74
+69    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING" />
+69-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:60:5-94
+69-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:60:22-91
+70    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+70-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:61:5-94
+70-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:61:22-91
+71    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SYSTEM_EXEMPTED" />
+71-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:62:5-93
+71-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:62:22-90
+72
+73    <!-- 系统监控相关权限 -->
+74    <uses-permission android:name="android.permission.GET_TASKS" />
+74-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:65:5-68
+74-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:65:22-65
+75    <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS" />
+75-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:66:5-67:60
+75-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:66:22-75
+76    <uses-permission android:name="android.permission.BATTERY_STATS" />
+76-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:68:5-69:60
+76-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:68:22-69
+77    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+77-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:70:5-75
+77-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:70:22-72
+78    <uses-permission android:name="android.permission.DEVICE_POWER" />
+78-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:71:5-72:60
+78-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:71:22-68
+79
+80    <!-- 网络诊断权限 -->
+81    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
+81-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:75:5-79
+81-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:75:22-76
+82
+83    <!-- 远程桌面相关权限 -->
+84    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+84-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:78:5-78
+84-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:78:22-75
+85    <uses-permission android:name="android.permission.CAPTURE_AUDIO_OUTPUT" />
+85-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:79:5-80:60
+85-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:79:22-76
+86
+87    <!-- 文件传输优化权限 -->
+88    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+88-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:83:5-84:53
+88-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:83:22-79
+89
+90    <permission
+90-->[androidx.core:core:1.13.1] /Users/macbookpro/.gradle/caches/9.0.0/transforms/4dbb30b40b27d13b83aef65ed802ccd5/transformed/core-1.13.1/AndroidManifest.xml:22:5-24:47
+91        android:name="com.yunqiao.sinan.debug.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"
+91-->[androidx.core:core:1.13.1] /Users/macbookpro/.gradle/caches/9.0.0/transforms/4dbb30b40b27d13b83aef65ed802ccd5/transformed/core-1.13.1/AndroidManifest.xml:23:9-81
+92        android:protectionLevel="signature" />
+92-->[androidx.core:core:1.13.1] /Users/macbookpro/.gradle/caches/9.0.0/transforms/4dbb30b40b27d13b83aef65ed802ccd5/transformed/core-1.13.1/AndroidManifest.xml:24:9-44
+93
+94    <uses-permission android:name="com.yunqiao.sinan.debug.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION" />
+94-->[androidx.core:core:1.13.1] /Users/macbookpro/.gradle/caches/9.0.0/transforms/4dbb30b40b27d13b83aef65ed802ccd5/transformed/core-1.13.1/AndroidManifest.xml:26:5-97
+94-->[androidx.core:core:1.13.1] /Users/macbookpro/.gradle/caches/9.0.0/transforms/4dbb30b40b27d13b83aef65ed802ccd5/transformed/core-1.13.1/AndroidManifest.xml:26:22-94
+95
+96    <application
+96-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:87:5-122:21
+97        android:allowBackup="true"
+97-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:88:9-35
+98        android:appComponentFactory="androidx.core.app.CoreComponentFactory"
+98-->[androidx.core:core:1.13.1] /Users/macbookpro/.gradle/caches/9.0.0/transforms/4dbb30b40b27d13b83aef65ed802ccd5/transformed/core-1.13.1/AndroidManifest.xml:28:18-86
+99        android:dataExtractionRules="@xml/data_extraction_rules"
+99-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:89:9-65
+100        android:debuggable="true"
+101        android:enableOnBackInvokedCallback="true"
+101-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:96:9-51
+102        android:extractNativeLibs="false"
+103        android:fullBackupContent="@xml/backup_rules"
+103-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:90:9-54
+104        android:icon="@mipmap/ic_launcher"
+104-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:91:9-43
+105        android:label="@string/app_name"
+105-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:92:9-41
+106        android:localeConfig="@xml/locales_config"
+106-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:97:9-51
+107        android:roundIcon="@mipmap/ic_launcher_round"
+107-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:93:9-54
+108        android:supportsRtl="true"
+108-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:94:9-35
+109        android:theme="@style/Theme.YunQiaoSiNan" >
+109-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:95:9-50
+110        <activity
+110-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:99:11-109:22
+111            android:name="com.yunqiao.sinan.MainActivity"
+111-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:100:15-43
+112            android:exported="true"
+112-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:101:15-38
+113            android:label="@string/app_name"
+113-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:102:15-47
+114            android:theme="@style/Theme.YunQiaoSiNan" >
+114-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:103:15-56
+115            <intent-filter>
+115-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:104:15-108:31
+116                <action android:name="android.intent.action.MAIN" />
+116-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:105:19-71
+116-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:105:27-68
+117
+118                <category android:name="android.intent.category.LAUNCHER" />
+118-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:107:19-79
+118-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:107:29-76
+119            </intent-filter>
+120        </activity>
+121
+122        <receiver
+122-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:111:11-121:22
+123            android:name="com.yunqiao.sinan.widget.StatusWidgetProvider"
+123-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:112:15-58
+124            android:exported="false" >
+124-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:113:15-39
+125            <intent-filter>
+125-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:114:15-116:31
+126                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+126-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:115:19-86
+126-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:115:27-83
+127            </intent-filter>
+128
+129            <meta-data
+129-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:118:15-120:64
+130                android:name="android.appwidget.provider"
+130-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:119:19-60
+131                android:resource="@xml/status_widget_info" />
+131-->/Users/macbookpro/Desktop/yunqiao-sinan-workspace/app/src/main/AndroidManifest.xml:120:19-61
+132        </receiver>
+133
+134        <provider
+134-->[androidx.emoji2:emoji2:1.3.0] /Users/macbookpro/.gradle/caches/9.0.0/transforms/54c9e17002137bfc51a7ce0a919f8c7e/transformed/jetified-emoji2-1.3.0/AndroidManifest.xml:24:9-32:20
+135            android:name="androidx.startup.InitializationProvider"
+135-->[androidx.emoji2:emoji2:1.3.0] /Users/macbookpro/.gradle/caches/9.0.0/transforms/54c9e17002137bfc51a7ce0a919f8c7e/transformed/jetified-emoji2-1.3.0/AndroidManifest.xml:25:13-67
+136            android:authorities="com.yunqiao.sinan.debug.androidx-startup"
+136-->[androidx.emoji2:emoji2:1.3.0] /Users/macbookpro/.gradle/caches/9.0.0/transforms/54c9e17002137bfc51a7ce0a919f8c7e/transformed/jetified-emoji2-1.3.0/AndroidManifest.xml:26:13-68
+137            android:exported="false" >
+137-->[androidx.emoji2:emoji2:1.3.0] /Users/macbookpro/.gradle/caches/9.0.0/transforms/54c9e17002137bfc51a7ce0a919f8c7e/transformed/jetified-emoji2-1.3.0/AndroidManifest.xml:27:13-37
+138            <meta-data
+138-->[androidx.emoji2:emoji2:1.3.0] /Users/macbookpro/.gradle/caches/9.0.0/transforms/54c9e17002137bfc51a7ce0a919f8c7e/transformed/jetified-emoji2-1.3.0/AndroidManifest.xml:29:13-31:52
+139                android:name="androidx.emoji2.text.EmojiCompatInitializer"
+139-->[androidx.emoji2:emoji2:1.3.0] /Users/macbookpro/.gradle/caches/9.0.0/transforms/54c9e17002137bfc51a7ce0a919f8c7e/transformed/jetified-emoji2-1.3.0/AndroidManifest.xml:30:17-75
+140                android:value="androidx.startup" />
+140-->[androidx.emoji2:emoji2:1.3.0] /Users/macbookpro/.gradle/caches/9.0.0/transforms/54c9e17002137bfc51a7ce0a919f8c7e/transformed/jetified-emoji2-1.3.0/AndroidManifest.xml:31:17-49
+141            <meta-data
+141-->[androidx.lifecycle:lifecycle-process:2.8.7] /Users/macbookpro/.gradle/caches/9.0.0/transforms/1e2d8c48a675b64697cc8a8af2b8ffd4/transformed/jetified-lifecycle-process-2.8.7/AndroidManifest.xml:29:13-31:52
+142                android:name="androidx.lifecycle.ProcessLifecycleInitializer"
+142-->[androidx.lifecycle:lifecycle-process:2.8.7] /Users/macbookpro/.gradle/caches/9.0.0/transforms/1e2d8c48a675b64697cc8a8af2b8ffd4/transformed/jetified-lifecycle-process-2.8.7/AndroidManifest.xml:30:17-78
+143                android:value="androidx.startup" />
+143-->[androidx.lifecycle:lifecycle-process:2.8.7] /Users/macbookpro/.gradle/caches/9.0.0/transforms/1e2d8c48a675b64697cc8a8af2b8ffd4/transformed/jetified-lifecycle-process-2.8.7/AndroidManifest.xml:31:17-49
+144            <meta-data
+144-->[androidx.profileinstaller:profileinstaller:1.3.1] /Users/macbookpro/.gradle/caches/9.0.0/transforms/37d9ca886fee343322a4ed8e412becef/transformed/jetified-profileinstaller-1.3.1/AndroidManifest.xml:29:13-31:52
+145                android:name="androidx.profileinstaller.ProfileInstallerInitializer"
+145-->[androidx.profileinstaller:profileinstaller:1.3.1] /Users/macbookpro/.gradle/caches/9.0.0/transforms/37d9ca886fee343322a4ed8e412becef/transformed/jetified-profileinstaller-1.3.1/AndroidManifest.xml:30:17-85
+146                android:value="androidx.startup" />
+146-->[androidx.profileinstaller:profileinstaller:1.3.1] /Users/macbookpro/.gradle/caches/9.0.0/transforms/37d9ca886fee343322a4ed8e412becef/transformed/jetified-profileinstaller-1.3.1/AndroidManifest.xml:31:17-49
+147        </provider>
+148
+149        <activity
+149-->[androidx.compose.ui:ui-tooling-android:1.7.3] /Users/macbookpro/.gradle/caches/9.0.0/transforms/55dd0e9076662c9b2f4aab6628225efa/transformed/jetified-ui-tooling-release/AndroidManifest.xml:23:9-25:39
+150            android:name="androidx.compose.ui.tooling.PreviewActivity"
+150-->[androidx.compose.ui:ui-tooling-android:1.7.3] /Users/macbookpro/.gradle/caches/9.0.0/transforms/55dd0e9076662c9b2f4aab6628225efa/transformed/jetified-ui-tooling-release/AndroidManifest.xml:24:13-71
+151            android:exported="true" />
+151-->[androidx.compose.ui:ui-tooling-android:1.7.3] /Users/macbookpro/.gradle/caches/9.0.0/transforms/55dd0e9076662c9b2f4aab6628225efa/transformed/jetified-ui-tooling-release/AndroidManifest.xml:25:13-36
+152        <activity
+152-->[androidx.compose.ui:ui-test-manifest:1.7.3] /Users/macbookpro/.gradle/caches/9.0.0/transforms/8af0d49fe624035aed94c4e851627ae4/transformed/jetified-ui-test-manifest-1.7.3/AndroidManifest.xml:23:9-25:39
+153            android:name="androidx.activity.ComponentActivity"
+153-->[androidx.compose.ui:ui-test-manifest:1.7.3] /Users/macbookpro/.gradle/caches/9.0.0/transforms/8af0d49fe624035aed94c4e851627ae4/transformed/jetified-ui-test-manifest-1.7.3/AndroidManifest.xml:24:13-63
+154            android:exported="true" />
+154-->[androidx.compose.ui:ui-test-manifest:1.7.3] /Users/macbookpro/.gradle/caches/9.0.0/transforms/8af0d49fe624035aed94c4e851627ae4/transformed/jetified-ui-test-manifest-1.7.3/AndroidManifest.xml:25:13-36
+155
+156        <receiver
+156-->[androidx.profileinstaller:profileinstaller:1.3.1] /Users/macbookpro/.gradle/caches/9.0.0/transforms/37d9ca886fee343322a4ed8e412becef/transformed/jetified-profileinstaller-1.3.1/AndroidManifest.xml:34:9-52:20
+157            android:name="androidx.profileinstaller.ProfileInstallReceiver"
+157-->[androidx.profileinstaller:profileinstaller:1.3.1] /Users/macbookpro/.gradle/caches/9.0.0/transforms/37d9ca886fee343322a4ed8e412becef/transformed/jetified-profileinstaller-1.3.1/AndroidManifest.xml:35:13-76
+158            android:directBootAware="false"
+158-->[androidx.profileinstaller:profileinstaller:1.3.1] /Users/macbookpro/.gradle/caches/9.0.0/transforms/37d9ca886fee343322a4ed8e412becef/transformed/jetified-profileinstaller-1.3.1/AndroidManifest.xml:36:13-44
+159            android:enabled="true"
+159-->[androidx.profileinstaller:profileinstaller:1.3.1] /Users/macbookpro/.gradle/caches/9.0.0/transforms/37d9ca886fee343322a4ed8e412becef/transformed/jetified-profileinstaller-1.3.1/AndroidManifest.xml:37:13-35
+160            android:exported="true"
+160-->[androidx.profileinstaller:profileinstaller:1.3.1] /Users/macbookpro/.gradle/caches/9.0.0/transforms/37d9ca886fee343322a4ed8e412becef/transformed/jetified-profileinstaller-1.3.1/AndroidManifest.xml:38:13-36
+161            android:permission="android.permission.DUMP" >
+161-->[androidx.profileinstaller:profileinstaller:1.3.1] /Users/macbookpro/.gradle/caches/9.0.0/transforms/37d9ca886fee343322a4ed8e412becef/transformed/jetified-profileinstaller-1.3.1/AndroidManifest.xml:39:13-57
+162            <intent-filter>
+162-->[androidx.profileinstaller:profileinstaller:1.3.1] /Users/macbookpro/.gradle/caches/9.0.0/transforms/37d9ca886fee343322a4ed8e412becef/transformed/jetified-profileinstaller-1.3.1/AndroidManifest.xml:40:13-42:29
+163                <action android:name="androidx.profileinstaller.action.INSTALL_PROFILE" />
+163-->[androidx.profileinstaller:profileinstaller:1.3.1] /Users/macbookpro/.gradle/caches/9.0.0/transforms/37d9ca886fee343322a4ed8e412becef/transformed/jetified-profileinstaller-1.3.1/AndroidManifest.xml:41:17-91
+163-->[androidx.profileinstaller:profileinstaller:1.3.1] /Users/macbookpro/.gradle/caches/9.0.0/transforms/37d9ca886fee343322a4ed8e412becef/transformed/jetified-profileinstaller-1.3.1/AndroidManifest.xml:41:25-88
+164            </intent-filter>
+165            <intent-filter>
+165-->[androidx.profileinstaller:profileinstaller:1.3.1] /Users/macbookpro/.gradle/caches/9.0.0/transforms/37d9ca886fee343322a4ed8e412becef/transformed/jetified-profileinstaller-1.3.1/AndroidManifest.xml:43:13-45:29
+166                <action android:name="androidx.profileinstaller.action.SKIP_FILE" />
+166-->[androidx.profileinstaller:profileinstaller:1.3.1] /Users/macbookpro/.gradle/caches/9.0.0/transforms/37d9ca886fee343322a4ed8e412becef/transformed/jetified-profileinstaller-1.3.1/AndroidManifest.xml:44:17-85
+166-->[androidx.profileinstaller:profileinstaller:1.3.1] /Users/macbookpro/.gradle/caches/9.0.0/transforms/37d9ca886fee343322a4ed8e412becef/transformed/jetified-profileinstaller-1.3.1/AndroidManifest.xml:44:25-82
+167            </intent-filter>
+168            <intent-filter>
+168-->[androidx.profileinstaller:profileinstaller:1.3.1] /Users/macbookpro/.gradle/caches/9.0.0/transforms/37d9ca886fee343322a4ed8e412becef/transformed/jetified-profileinstaller-1.3.1/AndroidManifest.xml:46:13-48:29
+169                <action android:name="androidx.profileinstaller.action.SAVE_PROFILE" />
+169-->[androidx.profileinstaller:profileinstaller:1.3.1] /Users/macbookpro/.gradle/caches/9.0.0/transforms/37d9ca886fee343322a4ed8e412becef/transformed/jetified-profileinstaller-1.3.1/AndroidManifest.xml:47:17-88
+169-->[androidx.profileinstaller:profileinstaller:1.3.1] /Users/macbookpro/.gradle/caches/9.0.0/transforms/37d9ca886fee343322a4ed8e412becef/transformed/jetified-profileinstaller-1.3.1/AndroidManifest.xml:47:25-85
+170            </intent-filter>
+171            <intent-filter>
+171-->[androidx.profileinstaller:profileinstaller:1.3.1] /Users/macbookpro/.gradle/caches/9.0.0/transforms/37d9ca886fee343322a4ed8e412becef/transformed/jetified-profileinstaller-1.3.1/AndroidManifest.xml:49:13-51:29
+172                <action android:name="androidx.profileinstaller.action.BENCHMARK_OPERATION" />
+172-->[androidx.profileinstaller:profileinstaller:1.3.1] /Users/macbookpro/.gradle/caches/9.0.0/transforms/37d9ca886fee343322a4ed8e412becef/transformed/jetified-profileinstaller-1.3.1/AndroidManifest.xml:50:17-95
+172-->[androidx.profileinstaller:profileinstaller:1.3.1] /Users/macbookpro/.gradle/caches/9.0.0/transforms/37d9ca886fee343322a4ed8e412becef/transformed/jetified-profileinstaller-1.3.1/AndroidManifest.xml:50:25-92
+173            </intent-filter>
+174        </receiver>
+175    </application>
+176
+177</manifest>
