@@ -1,19 +1,35 @@
-# 离线构建关键依赖
+# 离线构建最小依赖包
+
+## 重要说明
+
+⚠️ **这个包只包含构建APK的最小必要依赖，不是完整的离线构建方案！**
+
+## 包含的依赖
+
+- Android Gradle Plugin 8.9.0
+- Kotlin 2.0.20 核心库
+- Compose BOM 2024.09.02
+- 基础 AndroidX 库
 
 ## 使用方法
 
-1. 将 `third_party/essential/` 目录复制到你的项目根目录
-2. 运行 `./scripts/codex-env-check.sh` 检查环境
-3. 运行 `./scripts/codex-build-offline.sh assembleDebug` 构建
+1. **解压到项目根目录**：
+   ```bash
+   # 将 third_party/essential/ 复制到项目根目录
+   cp -r third_party/essential/ ./
+   ```
 
-## 包含的关键依赖
+2. **运行离线构建**：
+   ```bash
+   ./scripts/codex-env-check.sh
+   ./scripts/codex-build-offline.sh assembleDebug
+   ```
 
-- Android Gradle Plugin 8.9.0
-- Kotlin 2.0.20
-- Compose BOM 2024.09.02
-- 核心 AndroidX 库
+## 限制
 
-注意：完整依赖列表请参考 `scripts/codex-generate-deps.sh`
+- 只包含核心依赖，可能仍需要网络下载部分依赖
+- 主要用于减少网络依赖，不是完全离线构建
+- 建议在CodeX环境中先运行一次在线构建，然后使用此包
 
 ## 文件结构
 
@@ -26,7 +42,3 @@ third_party/essential/
     ├── org.jetbrains.kotlin/
     └── androidx.compose/
 ```
-
-## 离线构建说明
-
-这些文件是从本地 Gradle 缓存中提取的关键依赖，用于在 CodeX Linux 环境中进行离线构建。
