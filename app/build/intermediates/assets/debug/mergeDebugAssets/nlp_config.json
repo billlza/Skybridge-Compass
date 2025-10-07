@@ -1,0 +1,26 @@
+{
+  "maxHistorySize": 100,
+  "defaultLanguage": "zh",
+  "confidenceThreshold": 0.7,
+  "maxSuggestions": 5,
+  "contextWindowSize": 5,
+  "enableFuzzyMatching": true,
+  "enableLearning": true,
+  "cacheSize": 1000,
+  "features": {
+    "enableVoiceInput": true,
+    "enableMultiLanguage": true,
+    "enableContextAware": true,
+    "enableSmartSuggestions": true
+  },
+  "performance": {
+    "maxProcessingTime": 5000,
+    "enableCaching": true,
+    "enableProfiling": false
+  },
+  "logging": {
+    "level": "INFO",
+    "enableFileLogging": false,
+    "logPath": "/data/nlp_logs/"
+  }
+}

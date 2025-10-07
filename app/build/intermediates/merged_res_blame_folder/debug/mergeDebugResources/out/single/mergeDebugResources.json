@@ -1,0 +1,70 @@
+[
+    {
+        "merged": "com.yunqiao.sinan.app-debug-57:/mipmap_ic_launcher_round.png.flat",
+        "source": "com.yunqiao.sinan.app-main-59:/mipmap/ic_launcher_round.png"
+    },
+    {
+        "merged": "com.yunqiao.sinan.app-debug-57:/xml_status_widget_info.xml.flat",
+        "source": "com.yunqiao.sinan.app-main-59:/xml/status_widget_info.xml"
+    },
+    {
+        "merged": "com.yunqiao.sinan.app-debug-57:/drawable_ic_launcher_foreground.xml.flat",
+        "source": "com.yunqiao.sinan.app-main-59:/drawable/ic_launcher_foreground.xml"
+    },
+    {
+        "merged": "com.yunqiao.sinan.app-debug-57:/mipmap_ic_launcher.png.flat",
+        "source": "com.yunqiao.sinan.app-main-59:/mipmap/ic_launcher.png"
+    },
+    {
+        "merged": "com.yunqiao.sinan.app-debug-57:/xml_data_extraction_rules.xml.flat",
+        "source": "com.yunqiao.sinan.app-main-59:/xml/data_extraction_rules.xml"
+    },
+    {
+        "merged": "com.yunqiao.sinan.app-debug-57:/drawable_ic_launcher_background.xml.flat",
+        "source": "com.yunqiao.sinan.app-main-59:/drawable/ic_launcher_background.xml"
+    },
+    {
+        "merged": "com.yunqiao.sinan.app-debug-57:/drawable_snow_day_1.xml.flat",
+        "source": "com.yunqiao.sinan.app-main-59:/drawable/snow_day_1.xml"
+    },
+    {
+        "merged": "com.yunqiao.sinan.app-debug-57:/mipmap-anydpi-v26_ic_launcher_round.xml.flat",
+        "source": "com.yunqiao.sinan.app-main-59:/mipmap-anydpi-v26/ic_launcher_round.xml"
+    },
+    {
+        "merged": "com.yunqiao.sinan.app-debug-57:/xml_locales_config.xml.flat",
+        "source": "com.yunqiao.sinan.app-main-59:/xml/locales_config.xml"
+    },
+    {
+        "merged": "com.yunqiao.sinan.app-debug-57:/drawable_rainy_day_1.xml.flat",
+        "source": "com.yunqiao.sinan.app-main-59:/drawable/rainy_day_1.xml"
+    },
+    {
+        "merged": "com.yunqiao.sinan.app-debug-57:/drawable_sunny_day_1.xml.flat",
+        "source": "com.yunqiao.sinan.app-main-59:/drawable/sunny_day_1.xml"
+    },
+    {
+        "merged": "com.yunqiao.sinan.app-debug-57:/layout_widget_status_summary.xml.flat",
+        "source": "com.yunqiao.sinan.app-main-59:/layout/widget_status_summary.xml"
+    },
+    {
+        "merged": "com.yunqiao.sinan.app-debug-57:/drawable_clear_night_1.xml.flat",
+        "source": "com.yunqiao.sinan.app-main-59:/drawable/clear_night_1.xml"
+    },
+    {
+        "merged": "com.yunqiao.sinan.app-debug-57:/xml_backup_rules.xml.flat",
+        "source": "com.yunqiao.sinan.app-main-59:/xml/backup_rules.xml"
+    },
+    {
+        "merged": "com.yunqiao.sinan.app-debug-57:/drawable_cloudy_day_1.xml.flat",
+        "source": "com.yunqiao.sinan.app-main-59:/drawable/cloudy_day_1.xml"
+    },
+    {
+        "merged": "com.yunqiao.sinan.app-debug-57:/drawable_default_gradient_1.xml.flat",
+        "source": "com.yunqiao.sinan.app-main-59:/drawable/default_gradient_1.xml"
+    },
+    {
+        "merged": "com.yunqiao.sinan.app-debug-57:/mipmap-anydpi-v26_ic_launcher.xml.flat",
+        "source": "com.yunqiao.sinan.app-main-59:/mipmap-anydpi-v26/ic_launcher.xml"
+    }
+]
