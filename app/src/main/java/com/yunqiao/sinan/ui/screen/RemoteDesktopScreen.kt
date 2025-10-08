@@ -173,7 +173,7 @@ private fun RemoteDesktopHeader(
     val statusColor = when (connectionStatus) {
         "connected" -> Color(0xFF4CAF50)
         "connecting" -> Color(0xFFFFC107)
-        else -> Color.White.copy(alpha = 0.6f)
+        else -> remoteSecondary(alpha = 0.6f)
     }
 
     Card(
@@ -196,7 +196,7 @@ private fun RemoteDesktopHeader(
                         text = "远程桌面",
                         fontSize = 24.sp,
                         fontWeight = FontWeight.Bold,
-                        color = Color.White
+                        color = remotePrimary()
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
@@ -206,7 +206,7 @@ private fun RemoteDesktopHeader(
                             "智能调度WebRTC + QUIC混合引擎"
                         },
                         fontSize = 13.sp,
-                        color = Color.White.copy(alpha = 0.72f)
+                        color = remoteSecondary(alpha = 0.72f)
                     )
                 }
 
@@ -225,12 +225,12 @@ private fun RemoteDesktopHeader(
                     Text(
                         text = statusText,
                         fontSize = 12.sp,
-                        color = Color.White.copy(alpha = 0.8f)
+                        color = remoteSecondary(alpha = 0.8f)
                     )
                     Text(
                         text = "档位：${tierProfile.displayName}",
                         fontSize = 11.sp,
-                        color = Color.White.copy(alpha = 0.6f)
+                        color = remoteSecondary(alpha = 0.6f)
                     )
                 }
             }
@@ -245,12 +245,12 @@ private fun RemoteDesktopHeader(
                         Icon(
                             imageVector = Icons.Default.Speed,
                             contentDescription = null,
-                            tint = Color.White
+                            tint = remotePrimary()
                         )
                     },
                     colors = AssistChipDefaults.assistChipColors(
-                        containerColor = Color.White.copy(alpha = 0.08f),
-                        labelColor = Color.White
+                        containerColor = remoteAccent(alpha = 0.08f),
+                        labelColor = remotePrimary()
                     )
                 )
                 Spacer(modifier = Modifier.height(12.dp))
@@ -277,7 +277,7 @@ private fun TransportStatusCard(
                 text = "链路概览",
                 fontSize = 16.sp,
                 fontWeight = FontWeight.Bold,
-                color = Color.White
+                color = remotePrimary()
             )
             Spacer(modifier = Modifier.height(12.dp))
 
@@ -304,12 +304,12 @@ private fun TransportStatusCard(
                         text = transport.label(),
                         fontSize = 15.sp,
                         fontWeight = FontWeight.SemiBold,
-                        color = Color.White
+                        color = remotePrimary()
                     )
                     Text(
                         text = transport.description(),
                         fontSize = 12.sp,
-                        color = Color.White.copy(alpha = 0.7f),
+                        color = remoteSecondary(alpha = 0.7f),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
@@ -317,7 +317,7 @@ private fun TransportStatusCard(
                 Text(
                     text = "端口 ${transport.portDisplay()}",
                     fontSize = 12.sp,
-                    color = Color.White.copy(alpha = 0.6f)
+                    color = remoteSecondary(alpha = 0.6f)
                 )
             }
 
@@ -398,7 +398,7 @@ private fun ConnectionControlPanel(
                 text = "实时表现",
                 fontSize = 16.sp,
                 fontWeight = FontWeight.Bold,
-                color = Color.White
+                color = remotePrimary()
             )
 
             Spacer(modifier = Modifier.height(12.dp))
@@ -432,7 +432,7 @@ private fun ConnectionControlPanel(
                     Text(
                         text = "选择附近设备或输入账号即可发起连接",
                         fontSize = 12.sp,
-                        color = Color.White.copy(alpha = 0.65f)
+                        color = remoteSecondary(alpha = 0.65f)
                     )
                 }
             }
@@ -452,7 +452,7 @@ private fun ConnectionStatusItem(
         Icon(
             imageVector = icon,
             contentDescription = null,
-            tint = Color.White,
+            tint = remotePrimary(),
             modifier = Modifier.size(22.dp)
         )
         Spacer(modifier = Modifier.height(4.dp))
@@ -460,12 +460,12 @@ private fun ConnectionStatusItem(
             text = value,
             fontSize = 12.sp,
             fontWeight = FontWeight.Medium,
-            color = Color.White
+            color = remotePrimary()
         )
         Text(
             text = label,
             fontSize = 10.sp,
-            color = Color.White.copy(alpha = 0.7f)
+            color = remoteSecondary(alpha = 0.7f)
         )
     }
 }
@@ -476,8 +476,26 @@ private fun SectionTitle(text: String) {
         text = text,
         fontSize = 16.sp,
         fontWeight = FontWeight.SemiBold,
-        color = Color.White
+        color = remotePrimary()
     )
+}
+
+@Composable
+private fun remotePrimary(alpha: Float = 1f): Color {
+    val scheme = MaterialTheme.colorScheme
+    return scheme.onSurface.copy(alpha = alpha.coerceIn(0f, 1f))
+}
+
+@Composable
+private fun remoteSecondary(alpha: Float = 0.7f): Color {
+    val scheme = MaterialTheme.colorScheme
+    return scheme.onSurfaceVariant.copy(alpha = alpha.coerceIn(0f, 1f))
+}
+
+@Composable
+private fun remoteAccent(alpha: Float = 1f): Color {
+    val scheme = MaterialTheme.colorScheme
+    return scheme.primary.copy(alpha = alpha.coerceIn(0f, 1f))
 }
 
 @Composable
@@ -498,18 +516,18 @@ private fun ProximityDeviceCard(
                     text = device.displayName,
                     fontSize = 16.sp,
                     fontWeight = FontWeight.SemiBold,
-                    color = Color.White,
+                    color = remotePrimary(),
                     modifier = Modifier.weight(1f)
                 )
                 AssistChip(
                     onClick = {},
                     leadingIcon = {
-                        Icon(Icons.Default.SignalWifi4Bar, contentDescription = null, tint = Color.White)
+                        Icon(Icons.Default.SignalWifi4Bar, contentDescription = null, tint = remotePrimary())
                     },
                     label = {
-                        Text("信号 ${device.signalLevel}", color = Color.White)
+                        Text("信号 ${device.signalLevel}", color = remotePrimary())
                     },
-                    colors = AssistChipDefaults.assistChipColors(containerColor = Color.White.copy(alpha = 0.08f))
+                    colors = AssistChipDefaults.assistChipColors(containerColor = remoteAccent(alpha = 0.08f))
                 )
             }
 
@@ -518,7 +536,7 @@ private fun ProximityDeviceCard(
             Text(
                 text = "地址 ${device.deviceAddress}",
                 fontSize = 12.sp,
-                color = Color.White.copy(alpha = 0.7f)
+                color = remoteSecondary(alpha = 0.7f)
             )
 
             Spacer(modifier = Modifier.height(12.dp))
@@ -543,10 +561,10 @@ private fun ProximityDeviceCard(
                                         BridgeTransportHint.Lan -> "LAN"
                                         BridgeTransportHint.Cloud -> "Relay"
                                     },
-                                    color = Color.White
+                                    color = remotePrimary()
                                 )
                             },
-                            colors = AssistChipDefaults.assistChipColors(containerColor = Color.White.copy(alpha = 0.06f))
+                            colors = AssistChipDefaults.assistChipColors(containerColor = remoteAccent(alpha = 0.06f))
                         )
                     }
                 }
@@ -589,13 +607,13 @@ private fun RemoteAccountCard(
                     text = "账号 ${account.accountId}",
                     fontSize = 16.sp,
                     fontWeight = FontWeight.SemiBold,
-                    color = Color.White,
+                    color = remotePrimary(),
                     modifier = Modifier.weight(1f)
                 )
                 Text(
                     text = "${account.throughputMbps.toInt()} Mbps",
                     fontSize = 12.sp,
-                    color = Color.White.copy(alpha = 0.7f)
+                    color = remoteSecondary(alpha = 0.7f)
                 )
             }
 
@@ -604,7 +622,7 @@ private fun RemoteAccountCard(
             Text(
                 text = "中继 ${account.relayId}",
                 fontSize = 12.sp,
-                color = Color.White.copy(alpha = 0.65f)
+                color = remoteSecondary(alpha = 0.65f)
             )
 
             Spacer(modifier = Modifier.height(12.dp))
@@ -617,7 +635,7 @@ private fun RemoteAccountCard(
                 Text(
                     text = "时延 ${account.latencyMs} ms",
                     fontSize = 12.sp,
-                    color = Color.White.copy(alpha = 0.7f)
+                    color = remoteSecondary(alpha = 0.7f)
                 )
                 Button(
                     onClick = onConnect,
@@ -648,7 +666,7 @@ private fun ManualAccountConnectBlock(
                 text = "输入云桥账号",
                 fontSize = 16.sp,
                 fontWeight = FontWeight.Bold,
-                color = Color.White
+                color = remotePrimary()
             )
             Spacer(modifier = Modifier.height(12.dp))
             OutlinedTextField(
@@ -657,11 +675,11 @@ private fun ManualAccountConnectBlock(
                 label = { Text("账号 ID") },
                 singleLine = true,
                 colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = Color.White.copy(alpha = 0.8f),
-                    unfocusedBorderColor = Color.White.copy(alpha = 0.5f),
-                    focusedTextColor = Color.White,
-                    unfocusedTextColor = Color.White,
-                    cursorColor = Color.White
+                    focusedBorderColor = remoteSecondary(alpha = 0.8f),
+                    unfocusedBorderColor = remoteSecondary(alpha = 0.5f),
+                    focusedTextColor = remotePrimary(),
+                    unfocusedTextColor = remotePrimary(),
+                    cursorColor = remotePrimary()
                 ),
                 modifier = Modifier.fillMaxWidth()
             )
@@ -696,12 +714,12 @@ private fun TransportBadge(transport: BridgeTransport) {
                     text = transport.label(),
                     fontSize = 13.sp,
                     fontWeight = FontWeight.SemiBold,
-                    color = Color.White
+                    color = remotePrimary()
                 )
                 Text(
                     text = transport.description(),
                     fontSize = 10.sp,
-                    color = Color.White.copy(alpha = 0.72f),
+                    color = remoteSecondary(alpha = 0.72f),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
@@ -733,7 +751,7 @@ private fun QualitySettingsPanel(
                 text = "画质设置",
                 fontSize = 16.sp,
                 fontWeight = FontWeight.Bold,
-                color = Color.White
+                color = remotePrimary()
             )
 
             Spacer(modifier = Modifier.height(12.dp))
@@ -741,14 +759,14 @@ private fun QualitySettingsPanel(
             Text(
                 text = "当前档位：${profile.displayName}",
                 fontSize = 12.sp,
-                color = Color.White.copy(alpha = 0.7f)
+                color = remoteSecondary(alpha = 0.7f)
             )
 
             val activeLabel = activeMode?.let { "${it.label} ${it.width}x${it.height}" } ?: "未选择"
             Text(
                 text = "当前分辨率：$activeLabel",
                 fontSize = 11.sp,
-                color = Color.White.copy(alpha = 0.6f)
+                color = remoteSecondary(alpha = 0.6f)
             )
 
             Spacer(modifier = Modifier.height(10.dp))
@@ -757,7 +775,7 @@ private fun QualitySettingsPanel(
                 Text(
                     text = "暂无可用画质档位",
                     fontSize = 11.sp,
-                    color = Color.White.copy(alpha = 0.6f)
+                    color = remoteSecondary(alpha = 0.6f)
                 )
             } else {
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -780,12 +798,12 @@ private fun QualitySettingsPanel(
                 Text(
                     text = "编码器: H.265",
                     fontSize = 12.sp,
-                    color = Color.White.copy(alpha = 0.7f)
+                    color = remoteSecondary(alpha = 0.7f)
                 )
                 Text(
                     text = "比特率: 自适应",
                     fontSize = 12.sp,
-                    color = Color.White.copy(alpha = 0.7f)
+                    color = remoteSecondary(alpha = 0.7f)
                 )
             }
         }
@@ -805,7 +823,7 @@ private fun QualityOption(
             modifier = Modifier
                 .size(48.dp)
                 .background(
-                    color = if (isSelected) Color(0xFF00E5FF) else Color.White.copy(alpha = 0.1f),
+                    color = if (isSelected) Color(0xFF00E5FF) else remoteSecondary(alpha = 0.1f),
                     shape = RoundedCornerShape(8.dp)
                 )
                 .clickable { onClick() },
@@ -815,19 +833,19 @@ private fun QualityOption(
                 text = mode.label,
                 fontSize = 12.sp,
                 fontWeight = FontWeight.Bold,
-                color = if (isSelected) Color.Black else Color.White
+                color = if (isSelected) Color.Black else remotePrimary()
             )
         }
         Spacer(modifier = Modifier.height(4.dp))
         Text(
             text = "${mode.width}x${mode.height}",
             fontSize = 10.sp,
-            color = Color.White.copy(alpha = 0.7f)
+            color = remoteSecondary(alpha = 0.7f)
         )
         Text(
             text = "帧率 ${mode.frameRates.joinToString("/")}",
             fontSize = 9.sp,
-            color = Color.White.copy(alpha = 0.6f)
+            color = remoteSecondary(alpha = 0.6f)
         )
     }
 }
@@ -848,7 +866,7 @@ private fun EmptyDevicesState() {
             Icon(
                 imageVector = Icons.Default.Computer,
                 contentDescription = null,
-                tint = Color.White.copy(alpha = 0.5f),
+                tint = remoteSecondary(alpha = 0.5f),
                 modifier = Modifier.size(64.dp)
             )
             
@@ -858,7 +876,7 @@ private fun EmptyDevicesState() {
                 text = "未发现可连接设备",
                 fontSize = 18.sp,
                 fontWeight = FontWeight.Bold,
-                color = Color.White
+                color = remotePrimary()
             )
             
             Spacer(modifier = Modifier.height(8.dp))
@@ -866,7 +884,7 @@ private fun EmptyDevicesState() {
             Text(
                 text = "请确保目标设备已启动远程桌面服务",
                 fontSize = 14.sp,
-                color = Color.White.copy(alpha = 0.7f)
+                color = remoteSecondary(alpha = 0.7f)
             )
         }
     }

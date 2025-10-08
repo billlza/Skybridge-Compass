@@ -268,13 +268,13 @@ private fun TransferOverviewCard(
                 text = "文件传输",
                 fontSize = 22.sp,
                 fontWeight = FontWeight.Bold,
-                color = Color.White
+                color = transferPrimary()
             )
             Spacer(modifier = Modifier.height(6.dp))
             Text(
                 text = if (isProximity) "近距优先：自动建立免外网高速通道" else "智能路由：云桥中继与局域网自适应",
                 fontSize = 13.sp,
-                color = Color.White.copy(alpha = 0.72f)
+                color = transferSecondary(alpha = 0.72f)
             )
 
             Spacer(modifier = Modifier.height(18.dp))
@@ -360,7 +360,7 @@ private fun MediaCapabilitySection(
         shape = RoundedCornerShape(18.dp)
     ) {
         Column(modifier = Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-            Text(text = "媒体极速通道", fontSize = 18.sp, fontWeight = FontWeight.SemiBold, color = Color.White)
+            Text(text = "媒体极速通道", fontSize = 18.sp, fontWeight = FontWeight.SemiBold, color = transferPrimary())
             LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 items(capabilities) { capability ->
                     MediaCapabilityCard(capability = capability, onStart = { onStart(capability.category) })
@@ -384,24 +384,24 @@ private fun MediaCapabilityCard(capability: TransferMediaCapability, onStart: ()
     ) {
         Column(modifier = Modifier.width(220.dp).padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Icon(imageVector = categoryIcon(capability.category), contentDescription = null, tint = Color.White)
-                Text(text = capability.label, fontSize = 16.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                Icon(imageVector = categoryIcon(capability.category), contentDescription = null, tint = transferPrimary())
+                Text(text = capability.label, fontSize = 16.sp, fontWeight = FontWeight.Bold, color = transferPrimary())
             }
-            Text(text = capability.description, fontSize = 12.sp, color = Color.White.copy(alpha = 0.72f))
-            Text(text = "格式：${capability.preferredExtensions.joinToString(" / ")}", fontSize = 11.sp, color = Color.White.copy(alpha = 0.7f))
+            Text(text = capability.description, fontSize = 12.sp, color = transferSecondary(alpha = 0.72f))
+            Text(text = "格式：${capability.preferredExtensions.joinToString(" / ")}", fontSize = 11.sp, color = transferSecondary(alpha = 0.7f))
             FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 capability.recommendedTransports.forEach { hint ->
                     AssistChip(
                         onClick = {},
                         label = { Text(text = transportHintLabel(hint), fontSize = 10.sp) },
                         colors = AssistChipDefaults.assistChipColors(
-                            containerColor = Color.White.copy(alpha = 0.14f),
-                            labelColor = Color.White
+                            containerColor = transferAccent(alpha = 0.14f),
+                            labelColor = transferPrimary()
                         )
                     )
                 }
             }
-            Text(text = "建议大小：${capability.maxSizeMb} MB", fontSize = 11.sp, color = Color.White.copy(alpha = 0.8f))
+            Text(text = "建议大小：${capability.maxSizeMb} MB", fontSize = 11.sp, color = transferSecondary(alpha = 0.8f))
             Button(onClick = onStart, modifier = Modifier.fillMaxWidth()) {
                 Text(text = "一键传输")
             }
@@ -442,12 +442,12 @@ private fun CategoryDistributionRow(distribution: Map<TransferCategory, Int>) {
             AssistChip(
                 onClick = {},
                 leadingIcon = {
-                    Icon(imageVector = categoryIcon(category), contentDescription = null, tint = Color.White)
+                    Icon(imageVector = categoryIcon(category), contentDescription = null, tint = transferPrimary())
                 },
                 label = { Text(text = "${categoryLabel(category)} ${count}", fontSize = 11.sp) },
                 colors = AssistChipDefaults.assistChipColors(
-                    containerColor = Color.White.copy(alpha = 0.12f),
-                    labelColor = Color.White
+                    containerColor = transferAccent(alpha = 0.12f),
+                    labelColor = transferPrimary()
                 )
             )
         }
@@ -512,15 +512,15 @@ private fun OverviewMetric(title: String, value: String, icon: ImageVector) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Surface(
             shape = CircleShape,
-            color = Color.White.copy(alpha = 0.1f)
+            color = transferSecondary(alpha = 0.1f)
         ) {
             Box(modifier = Modifier.size(44.dp), contentAlignment = Alignment.Center) {
-                Icon(imageVector = icon, contentDescription = null, tint = Color.White)
+                Icon(imageVector = icon, contentDescription = null, tint = transferPrimary())
             }
         }
         Spacer(modifier = Modifier.height(6.dp))
-        Text(text = value, fontSize = 14.sp, fontWeight = FontWeight.Medium, color = Color.White)
-        Text(text = title, fontSize = 12.sp, color = Color.White.copy(alpha = 0.7f))
+        Text(text = value, fontSize = 14.sp, fontWeight = FontWeight.Medium, color = transferPrimary())
+        Text(text = title, fontSize = 12.sp, color = transferSecondary(alpha = 0.7f))
     }
 }
 
@@ -542,20 +542,20 @@ private fun ProximityTransferCard(
                     text = device.displayName,
                     fontSize = 16.sp,
                     fontWeight = FontWeight.SemiBold,
-                    color = Color.White,
+                    color = transferPrimary(),
                     modifier = Modifier.weight(1f)
                 )
                 Text(
                     text = "信号 ${device.signalLevel}",
                     fontSize = 12.sp,
-                    color = Color.White.copy(alpha = 0.7f)
+                    color = transferSecondary(alpha = 0.7f)
                 )
             }
             Spacer(modifier = Modifier.height(8.dp))
             Text(
                 text = "地址 ${device.deviceAddress}",
                 fontSize = 12.sp,
-                color = Color.White.copy(alpha = 0.6f)
+                color = transferSecondary(alpha = 0.6f)
             )
             Spacer(modifier = Modifier.height(12.dp))
             Button(
@@ -588,20 +588,20 @@ private fun RemoteTransferCard(
                     text = "账号 ${account.accountId}",
                     fontSize = 16.sp,
                     fontWeight = FontWeight.SemiBold,
-                    color = Color.White,
+                    color = transferPrimary(),
                     modifier = Modifier.weight(1f)
                 )
                 Text(
                     text = "${account.throughputMbps.toInt()} Mbps",
                     fontSize = 12.sp,
-                    color = Color.White.copy(alpha = 0.7f)
+                    color = transferSecondary(alpha = 0.7f)
                 )
             }
             Spacer(modifier = Modifier.height(8.dp))
             Text(
                 text = "中继 ${account.relayId}",
                 fontSize = 12.sp,
-                color = Color.White.copy(alpha = 0.6f)
+                color = transferSecondary(alpha = 0.6f)
             )
             Spacer(modifier = Modifier.height(12.dp))
             Button(
@@ -632,7 +632,7 @@ private fun ManualRelayCard(
                 text = "自定义账号中转",
                 fontSize = 16.sp,
                 fontWeight = FontWeight.Bold,
-                color = Color.White
+                color = transferPrimary()
             )
             Spacer(modifier = Modifier.height(10.dp))
             OutlinedTextField(
@@ -641,11 +641,11 @@ private fun ManualRelayCard(
                 label = { Text("云桥账号") },
                 singleLine = true,
                 colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = Color.White.copy(alpha = 0.8f),
-                    unfocusedBorderColor = Color.White.copy(alpha = 0.5f),
-                    focusedTextColor = Color.White,
-                    unfocusedTextColor = Color.White,
-                    cursorColor = Color.White
+                    focusedBorderColor = transferSecondary(alpha = 0.8f),
+                    unfocusedBorderColor = transferSecondary(alpha = 0.5f),
+                    focusedTextColor = transferPrimary(),
+                    unfocusedTextColor = transferPrimary(),
+                    cursorColor = transferPrimary()
                 ),
                 modifier = Modifier.fillMaxWidth()
             )
@@ -681,13 +681,13 @@ private fun ActiveTransferItem(
                     text = task.fileName,
                     fontSize = 15.sp,
                     fontWeight = FontWeight.SemiBold,
-                    color = Color.White,
+                    color = transferPrimary(),
                     modifier = Modifier.weight(1f)
                 )
                 Text(
                     text = "${"%.1f".format(task.currentSpeed)} MB/s",
                     fontSize = 12.sp,
-                    color = Color.White.copy(alpha = 0.7f)
+                    color = transferSecondary(alpha = 0.7f)
                 )
             }
             Spacer(modifier = Modifier.height(8.dp))
@@ -704,10 +704,10 @@ private fun ActiveTransferItem(
                 Text(
                     text = "${categoryLabel(task.category)} · 已传输 ${task.transferredBytes / (1024 * 1024)} MB",
                     fontSize = 12.sp,
-                    color = Color.White.copy(alpha = 0.7f)
+                    color = transferSecondary(alpha = 0.7f)
                 )
                 TextButton(onClick = onCancel) {
-                    Text(text = "取消", color = Color.White)
+                    Text(text = "取消", color = transferPrimary())
                 }
             }
         }
@@ -738,14 +738,14 @@ private fun HistoryTransferItem(task: FileTransferTask, highlightColor: Color) {
                     text = task.fileName,
                     fontSize = 14.sp,
                     fontWeight = FontWeight.Medium,
-                    color = Color.White,
+                    color = transferPrimary(),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
                 Text(
                     text = "${categoryLabel(task.category)} · ${endpointLabel(task.endpoint)}",
                     fontSize = 12.sp,
-                    color = Color.White.copy(alpha = 0.6f),
+                    color = transferSecondary(alpha = 0.6f),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
@@ -769,6 +769,24 @@ private fun SectionTitle(text: String) {
         text = text,
         fontSize = 16.sp,
         fontWeight = FontWeight.SemiBold,
-        color = Color.White
+        color = transferPrimary()
     )
+}
+
+@Composable
+private fun transferPrimary(alpha: Float = 1f): Color {
+    val scheme = MaterialTheme.colorScheme
+    return scheme.onSurface.copy(alpha = alpha.coerceIn(0f, 1f))
+}
+
+@Composable
+private fun transferSecondary(alpha: Float = 0.7f): Color {
+    val scheme = MaterialTheme.colorScheme
+    return scheme.onSurfaceVariant.copy(alpha = alpha.coerceIn(0f, 1f))
+}
+
+@Composable
+private fun transferAccent(alpha: Float = 1f): Color {
+    val scheme = MaterialTheme.colorScheme
+    return scheme.primary.copy(alpha = alpha.coerceIn(0f, 1f))
 }
