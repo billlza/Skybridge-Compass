@@ -77,7 +77,7 @@ fun MainControlScreen(
         
         item {
             // 快速操作
-            QuickActionsSection()
+            QuickActionsSection(onNavigate = onNavigate)
         }
         
         item {

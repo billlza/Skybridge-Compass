@@ -89,7 +89,7 @@ private fun WeatherBackLayer(visualState: WeatherVisualState) {
 }
 
 @Composable
-private fun WeatherFrontLayer(visualState: WeatherVisualState) {
+private fun BoxScope.WeatherFrontLayer(visualState: WeatherVisualState) {
     if (visualState.mistAlpha > 0f) {
         FogLayer(visualState, backLayer = false)
     }
@@ -261,7 +261,7 @@ private fun FogLayer(visualState: WeatherVisualState, backLayer: Boolean) {
 }
 
 @Composable
-private fun PuddleLayer(visualState: WeatherVisualState) {
+private fun BoxScope.PuddleLayer(visualState: WeatherVisualState) {
     if (visualState.puddleLevel <= 0f) return
 
     val puddleHeight = remember(visualState.puddleLevel) {

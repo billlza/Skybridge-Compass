@@ -1,10 +1,11 @@
 # 合并与依赖校验快速指南
 
-为了顺利把当前 `work` 分支的最新代码同步到你本地环境，并解决常见的导入或依赖缺失问题，可依照以下步骤操作。
+为了顺利把当前 `work` 分支的最新代码同步到你本地环境，并解决常见的导入或依赖缺失问题，可依照以下步骤操作。请确保起点为最新的远程提交 `56aafae2`（旧的 `5d73058e` 已废弃）。
 
 ## 1. 同步最新提交
-1. `git fetch origin work`
-2. 在本地特性分支上执行 `git rebase origin/work`（或使用 `git merge origin/work`）。
+1. `git fetch origin`
+2. 确认 `git rev-parse origin/work` 输出 `56aafae2`。
+3. 在本地特性分支上执行 `git rebase origin/work`（或使用 `git merge origin/work`）。
 3. 如果出现冲突，优先保留「Incoming」(来自 `work` 分支) 的修改，这些内容包含了我们补充的 Compose/Android 导入与修复后的 UI 代码。
 
 ## 2. 解决冲突后的验证

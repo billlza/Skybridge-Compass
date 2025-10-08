@@ -13,6 +13,7 @@ import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -33,6 +34,7 @@ import com.yunqiao.sinan.data.NavigationItem
 import com.yunqiao.sinan.data.navigationItems
 import com.yunqiao.sinan.data.rememberDeviceStatusManager
 import com.yunqiao.sinan.data.auth.UserAccount
+import com.yunqiao.sinan.data.notification.SystemNotification
 import com.yunqiao.sinan.ui.component.DeviceStatusBar
 import com.yunqiao.sinan.ui.component.MainWeatherWidget
 import com.yunqiao.sinan.ui.component.NotificationBell
@@ -53,7 +55,16 @@ fun MainScreen(
     onThemeChange: ((Boolean, Boolean) -> Unit)? = null,
     currentAccount: UserAccount? = null
 ) {
-    var selectedRoute by remember { mutableStateOf("main_control") }
+    val drawerRoutes = remember(navigationItems) { navigationItems.map { it.route }.toSet() }
+    val supportedRoutes = remember(drawerRoutes) {
+        drawerRoutes + setOf(
+            "system_monitor",
+            "weather_center",
+            "weather_settings",
+            "operations_hub_dashboard"
+        )
+    }
+    var selectedRoute by rememberSaveable { mutableStateOf(navigationItems.firstOrNull()?.route ?: "main_control") }
     val deviceStatusManager = rememberDeviceStatusManager()
     val deviceStatus by deviceStatusManager.deviceStatus.collectAsState()
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
@@ -63,13 +74,19 @@ fun MainScreen(
     val notificationCenter = remember { NotificationCenter() }
     val notifications by notificationCenter.notifications.collectAsState()
 
+    LaunchedEffect(supportedRoutes, selectedRoute) {
+        if (selectedRoute !in supportedRoutes) {
+            selectedRoute = navigationItems.firstOrNull()?.route ?: "main_control"
+        }
+    }
+
     LaunchedEffect(deviceStatus) {
         notificationCenter.onDeviceStatusChanged(deviceStatus)
     }
     
     // 天气管理器 - 安全初始化
     val context = LocalContext.current
-    val weatherManager = remember { 
+    val weatherManager = remember {
         try {
             UnifiedWeatherManager.getInstance(context)
         } catch (e: Exception) {
@@ -79,6 +96,8 @@ fun MainScreen(
     }
     val weatherState by (weatherManager?.unifiedWeatherState?.collectAsState() ?: remember { mutableStateOf(UnifiedWeatherState()) })
     val weatherConfig by (weatherManager?.weatherConfig?.collectAsState() ?: remember { mutableStateOf(WeatherConfig()) })
+
+    val safeDrawingPadding = WindowInsets.safeDrawing.asPaddingValues()
     
     // 背景动画
     val infiniteTransition = rememberInfiniteTransition(label = "background")
@@ -114,7 +133,9 @@ fun MainScreen(
                     navigationItems = navigationItems,
                     selectedRoute = selectedRoute,
                     onItemClick = { route ->
-                        selectedRoute = route
+                        if (route != selectedRoute) {
+                            selectedRoute = if (route in supportedRoutes) route else navigationItems.firstOrNull()?.route ?: "main_control"
+                        }
                         scope.launch { drawerState.close() }
                     },
                     onThemeChange = onThemeChange,
@@ -167,6 +188,7 @@ fun MainScreen(
                         Column(
                             modifier = Modifier
                                 .fillMaxSize()
+                                .padding(safeDrawingPadding)
                                 .padding(horizontal = 24.dp, vertical = 16.dp)
                         ) {
                             ModernTopAppBar(
@@ -185,7 +207,11 @@ fun MainScreen(
                                 showWeather = weatherConfig.showInMainScreen,
                                 onWeatherClick = {
                                     selectedRoute = "weather_center"
-                                }
+                                },
+                                notifications = notifications,
+                                onMarkAllNotificationsRead = { notificationCenter.markAllRead() },
+                                onNotificationRead = { notificationCenter.markAsRead(it) },
+                                currentAccount = currentAccount
                             )
 
                             Spacer(modifier = Modifier.height(24.dp))
@@ -193,7 +219,12 @@ fun MainScreen(
                             ModernMainContentArea(
                                 selectedRoute = selectedRoute,
                                 deviceStatusManager = deviceStatusManager,
-                                onNavigate = { route -> selectedRoute = route },
+                                onNavigate = { route ->
+                                    val resolvedRoute = if (route in supportedRoutes) route else navigationItems.firstOrNull()?.route ?: "main_control"
+                                    if (resolvedRoute != selectedRoute) {
+                                        selectedRoute = resolvedRoute
+                                    }
+                                },
                                 modifier = Modifier.weight(1f)
                             )
                         }
@@ -223,10 +254,14 @@ fun ModernTopAppBar(
     weatherSummary: com.yunqiao.sinan.weather.WeatherSummary,
     showWeather: Boolean = true,
     onWeatherClick: () -> Unit = {},
+    notifications: List<SystemNotification>,
+    onMarkAllNotificationsRead: () -> Unit,
+    onNotificationRead: (String) -> Unit,
+    currentAccount: UserAccount?,
     modifier: Modifier = Modifier
 ) {
     val colorScheme = MaterialTheme.colorScheme
-    
+
     // 按钮动画
     val menuButtonScale by animateFloatAsState(
         targetValue = 1f,
@@ -237,133 +272,232 @@ fun ModernTopAppBar(
         label = "menu_scale"
     )
     
-    Column(
-        modifier = modifier.fillMaxWidth(),
-        verticalArrangement = Arrangement.spacedBy(20.dp)
-    ) {
-        // 第一行：菜单按钮 + 标题 + 设备状态
-        Row(
+    BoxWithConstraints(modifier = modifier.fillMaxWidth()) {
+        val isCompact = maxWidth < 600.dp
+        Column(
             modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically
+            verticalArrangement = Arrangement.spacedBy(if (isCompact) 16.dp else 20.dp)
         ) {
-            // 现代化菜单按钮
-            Surface(
-                onClick = onMenuClick,
-                modifier = Modifier
-                    .size(56.dp)
-                    .graphicsLayer {
-                        scaleX = menuButtonScale
-                        scaleY = menuButtonScale
-                    },
-                shape = CircleShape,
-                color = Color.Transparent,
-                border = BorderStroke(1.dp, colorScheme.primary.copy(alpha = 0.35f))
-            ) {
-                Box(
-                    contentAlignment = Alignment.Center,
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(
-                            brush = Brush.linearGradient(
-                                colors = listOf(
-                                    colorScheme.primary.copy(alpha = 0.28f),
-                                    colorScheme.primary.copy(alpha = 0.12f)
-                                )
-                            ),
-                            shape = CircleShape
-                        )
+            if (isCompact) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(16.dp)
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.Menu,
-                        contentDescription = "打开菜单",
-                        tint = colorScheme.onPrimary,
-                        modifier = Modifier.size(24.dp)
+                    Surface(
+                        onClick = onMenuClick,
+                        modifier = Modifier
+                            .size(48.dp)
+                            .graphicsLayer {
+                                scaleX = menuButtonScale
+                                scaleY = menuButtonScale
+                            },
+                        shape = CircleShape,
+                        color = Color.Transparent,
+                        border = BorderStroke(1.dp, colorScheme.primary.copy(alpha = 0.35f))
+                    ) {
+                        Box(
+                            contentAlignment = Alignment.Center,
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(
+                                    brush = Brush.linearGradient(
+                                        colors = listOf(
+                                            colorScheme.primary.copy(alpha = 0.28f),
+                                            colorScheme.primary.copy(alpha = 0.12f)
+                                        )
+                                    ),
+                                    shape = CircleShape
+                                )
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Menu,
+                                contentDescription = "打开菜单",
+                                tint = colorScheme.onPrimary,
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
+                    }
+
+                    Column(
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        val pageTitle = when (selectedRoute) {
+                            "main_control" -> "主控制台"
+                            "system_monitor" -> "系统监控"
+                            "weather_center" -> "天气中心"
+                            "weather_settings" -> "天气设置"
+                            "ai_assistant" -> "AI智能助手"
+                            "remote_desktop" -> "远程桌面"
+                            "file_transfer" -> "文件传输"
+                            "device_discovery" -> "附近设备"
+                            "operations_hub_dashboard" -> "运营中枢"
+                            "user_settings" -> "系统设置"
+                            else -> "云桥司南"
+                        }
+
+                        Text(
+                            text = pageTitle,
+                            style = MaterialTheme.typography.headlineSmall,
+                            color = colorScheme.onSurface,
+                            fontWeight = FontWeight.Bold
+                        )
+
+                        Text(
+                            text = "SkyBridge Compass",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colorScheme.onSurface.copy(alpha = 0.7f)
+                        )
+                    }
+
+                    NotificationBell(
+                        notifications = notifications,
+                        onMarkAllRead = onMarkAllNotificationsRead,
+                        onNotificationRead = onNotificationRead
                     )
                 }
-            }
-            
-            Spacer(modifier = Modifier.width(20.dp))
-            
-            // 页面标题区域
-            Column(
-                modifier = Modifier.weight(1f)
-            ) {
-                val pageTitle = when (selectedRoute) {
-                    "main_control" -> "主控制台"
-                    "system_monitor" -> "系统监控"
-                    "weather_center" -> "天气中心"
-                    "weather_settings" -> "天气设置"
-                    "ai_assistant" -> "AI智能助手"
-                    "remote_desktop" -> "远程桌面"
-                    "file_transfer" -> "文件传输"
-                    "device_discovery" -> "附近设备"
-                    "operations_hub_dashboard" -> "运营中枢"
-                    "user_settings" -> "系统设置"
-                    else -> "云桥司南"
-                }
-                
-                Text(
-                    text = pageTitle,
-                    style = MaterialTheme.typography.headlineMedium,
-                    color = colorScheme.onSurface,
-                    fontWeight = FontWeight.Bold
-                )
-                
-                Text(
-                    text = "SkyBridge Compass",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = colorScheme.onSurface.copy(alpha = 0.7f)
-                )
-            }
 
-            Spacer(modifier = Modifier.width(20.dp))
-
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                NotificationBell(
-                    notifications = notifications,
-                    onMarkAllRead = { notificationCenter.markAllRead() },
-                    onNotificationRead = { notificationCenter.markAsRead(it) }
-                )
                 currentAccount?.let {
                     UserAccountSummary(account = it)
                 }
+
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = ModernShapes.large,
+                    color = colorScheme.surfaceContainer,
+                    tonalElevation = 2.dp
+                ) {
+                    DeviceStatusBar(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        deviceStatusManager = deviceStatusManager
+                    )
+                }
+            } else {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Surface(
+                        onClick = onMenuClick,
+                        modifier = Modifier
+                            .size(56.dp)
+                            .graphicsLayer {
+                                scaleX = menuButtonScale
+                                scaleY = menuButtonScale
+                            },
+                        shape = CircleShape,
+                        color = Color.Transparent,
+                        border = BorderStroke(1.dp, colorScheme.primary.copy(alpha = 0.35f))
+                    ) {
+                        Box(
+                            contentAlignment = Alignment.Center,
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(
+                                    brush = Brush.linearGradient(
+                                        colors = listOf(
+                                            colorScheme.primary.copy(alpha = 0.28f),
+                                            colorScheme.primary.copy(alpha = 0.12f)
+                                        )
+                                    ),
+                                    shape = CircleShape
+                                )
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Menu,
+                                contentDescription = "打开菜单",
+                                tint = colorScheme.onPrimary,
+                                modifier = Modifier.size(24.dp)
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.width(20.dp))
+
+                    Column(
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        val pageTitle = when (selectedRoute) {
+                            "main_control" -> "主控制台"
+                            "system_monitor" -> "系统监控"
+                            "weather_center" -> "天气中心"
+                            "weather_settings" -> "天气设置"
+                            "ai_assistant" -> "AI智能助手"
+                            "remote_desktop" -> "远程桌面"
+                            "file_transfer" -> "文件传输"
+                            "device_discovery" -> "附近设备"
+                            "operations_hub_dashboard" -> "运营中枢"
+                            "user_settings" -> "系统设置"
+                            else -> "云桥司南"
+                        }
+
+                        Text(
+                            text = pageTitle,
+                            style = MaterialTheme.typography.headlineMedium,
+                            color = colorScheme.onSurface,
+                            fontWeight = FontWeight.Bold
+                        )
+
+                        Text(
+                            text = "SkyBridge Compass",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = colorScheme.onSurface.copy(alpha = 0.7f)
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.width(20.dp))
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        NotificationBell(
+                            notifications = notifications,
+                            onMarkAllRead = onMarkAllNotificationsRead,
+                            onNotificationRead = onNotificationRead
+                        )
+                        currentAccount?.let {
+                            UserAccountSummary(account = it)
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.width(20.dp))
+
+                    Surface(
+                        modifier = Modifier.weight(1f),
+                        shape = ModernShapes.large,
+                        color = colorScheme.surfaceContainer,
+                        tonalElevation = 2.dp
+                    ) {
+                        DeviceStatusBar(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp),
+                            deviceStatusManager = deviceStatusManager
+                        )
+                    }
+                }
             }
 
-            Spacer(modifier = Modifier.width(20.dp))
-
-            // 设备状态栏（简化版）
-            Surface(
-                shape = ModernShapes.large,
-                color = colorScheme.surfaceContainer,
-                tonalElevation = 2.dp
-            ) {
-                DeviceStatusBar(
-                    modifier = Modifier.padding(12.dp),
-                    deviceStatusManager = deviceStatusManager
-                )
-            }
-        }
-        
-        // 第二行：天气组件（如果启用）
-        if (showWeather && selectedRoute != "weather_center" && selectedRoute != "weather_settings") {
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                shape = ModernShapes.large,
-                color = colorScheme.surfaceContainer,
-                tonalElevation = 4.dp,
-                onClick = onWeatherClick
-            ) {
-                MainWeatherWidget(
-                    weatherSummary = weatherSummary,
-                    onWeatherClick = onWeatherClick,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp),
-                    isCompact = false
-                )
+            if (showWeather && selectedRoute != "weather_center" && selectedRoute != "weather_settings") {
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = ModernShapes.large,
+                    color = colorScheme.surfaceContainer,
+                    tonalElevation = 4.dp,
+                    onClick = onWeatherClick
+                ) {
+                    MainWeatherWidget(
+                        weatherSummary = weatherSummary,
+                        onWeatherClick = onWeatherClick,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        isCompact = isCompact
+                    )
+                }
             }
         }
     }

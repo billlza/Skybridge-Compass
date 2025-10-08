@@ -286,7 +286,8 @@ class RemoteDesktopManager(private val context: Context) {
     val activeMode: StateFlow<RemoteDesktopResolutionMode> = _activeMode.asStateFlow()
     private var preferredModeId: String? = null
 
-    private val sessionMap = mutableMapOf<String, RemoteSession>()
+    private val sessionMap = ConcurrentHashMap<String, RemoteSession>()
+    private val sessionSockets = ConcurrentHashMap<String, Socket>()
     private var serverSocket: ServerSocket? = null
     private var serverJob: Job? = null
     private var mediaProjection: MediaProjection? = null
@@ -369,13 +370,11 @@ class RemoteDesktopManager(private val context: Context) {
         }
 
         try {
-            // 启动TCP服务器
             serverSocket = ServerSocket(port)
             _isServerRunning.value = true
             currentServerPort = port
-            
-            // 启动服务器监听循环
-            serverJob = launch {
+
+            serverJob = scope.launch {
                 while (_isServerRunning.value) {
                     try {
                         val clientSocket = serverSocket?.accept()
@@ -389,10 +388,9 @@ class RemoteDesktopManager(private val context: Context) {
                     }
                 }
             }
-            
-            // 启动性能监控
+
             startPerformanceMonitoring()
-            
+
             true
         } catch (e: Exception) {
             _isServerRunning.value = false
@@ -407,9 +405,10 @@ class RemoteDesktopManager(private val context: Context) {
     suspend fun stopServer() = withContext(Dispatchers.IO) {
         _isServerRunning.value = false
         
-        // 关闭所有会话
         sessionMap.clear()
         _activeSessions.value = emptyList()
+        sessionSockets.values.forEach { closeSilently(it) }
+        sessionSockets.clear()
         
         // 停止服务器
         serverJob?.cancel()
@@ -425,15 +424,18 @@ class RemoteDesktopManager(private val context: Context) {
      * 处理客户端连接
      */
     private suspend fun handleClientConnection(clientSocket: Socket) = withContext(Dispatchers.IO) {
+        var sessionId: String? = null
+        var registered = false
         try {
-            val sessionId = generateSessionId()
+            val generatedId = generateSessionId()
+            sessionId = generatedId
             val baseSession = RemoteSession(
-                sessionId = sessionId,
+                sessionId = generatedId,
                 clientAddress = clientSocket.inetAddress.hostAddress ?: "unknown",
                 clientPort = clientSocket.port,
                 isActive = true
             )
-            
+
             val handshakeStart = SystemClock.elapsedRealtime()
             val webrtcConnected = webrtcEngine?.establishConnection(clientSocket) == true
             val handshakeLatency = webrtcEngine?.consumeHandshakeLatency()?.takeIf { it > 0 } ?: (SystemClock.elapsedRealtime() - handshakeStart)
@@ -443,22 +445,31 @@ class RemoteDesktopManager(private val context: Context) {
                     latency = handshakeLatency.toFloat(),
                     lastActivity = System.currentTimeMillis()
                 )
-                sessionMap[sessionId] = session
+                sessionMap[generatedId] = session
+                sessionSockets[generatedId] = clientSocket
+                registered = true
                 updateActiveSessions()
-                // 启动QUIC传输（如果启用）
                 if (config.enableQUIC) {
                     quicTransport?.startConnection(
                         clientSocket.inetAddress.hostAddress ?: "",
                         clientSocket.port
                     )
                 }
-                
-                // 开始屏幕流传输
-                startScreenStreaming(sessionId, clientSocket)
+                startScreenStreaming(generatedId, clientSocket)
+            } else {
+                closeSilently(clientSocket)
             }
-            
+
         } catch (e: Exception) {
             e.printStackTrace()
+            val id = sessionId
+            if (registered && id != null) {
+                sessionMap.remove(id)
+                updateActiveSessions()
+                closeSessionSocket(id, clientSocket)
+            } else {
+                closeSilently(clientSocket)
+            }
         }
     }
     
@@ -466,14 +477,15 @@ class RemoteDesktopManager(private val context: Context) {
      * 开始屏幕流传输
      */
     private suspend fun startScreenStreaming(sessionId: String, clientSocket: Socket) = withContext(Dispatchers.IO) {
-        try {
-            // 设置屏幕捕获
-            if (!setupScreenCapture()) {
-                return@withContext
-            }
-            
-            // 启动帧发送循环
-            launch {
+        scope.launch(Dispatchers.IO) {
+            try {
+                if (!setupScreenCapture()) {
+                    sessionMap.remove(sessionId)
+                    updateActiveSessions()
+                    closeSessionSocket(sessionId, clientSocket)
+                    return@launch
+                }
+
                 while (sessionMap.containsKey(sessionId) && _isServerRunning.value) {
                     try {
                         val frame = captureFrame()
@@ -481,22 +493,21 @@ class RemoteDesktopManager(private val context: Context) {
                             sendFrame(sessionId, frame, clientSocket)
                             updateSessionStats(sessionId)
                         }
-                        
+
                         delay(adaptiveFrameIntervalMs)
-                        
+
                     } catch (e: Exception) {
                         e.printStackTrace()
                         break
                     }
                 }
-                
-                // 清理会话
+            } catch (e: Exception) {
+                e.printStackTrace()
+            } finally {
                 sessionMap.remove(sessionId)
                 updateActiveSessions()
+                closeSessionSocket(sessionId, clientSocket)
             }
-            
-        } catch (e: Exception) {
-            e.printStackTrace()
         }
     }
     
@@ -654,9 +665,9 @@ class RemoteDesktopManager(private val context: Context) {
             
         } catch (e: Exception) {
             e.printStackTrace()
-            // 连接断开，移除会话
             sessionMap.remove(sessionId)
             updateActiveSessions()
+            closeSessionSocket(sessionId, socket)
         }
     }
     
@@ -885,16 +896,30 @@ class RemoteDesktopManager(private val context: Context) {
     fun disconnectSession(sessionId: String) {
         sessionMap.remove(sessionId)
         updateActiveSessions()
+        closeSessionSocket(sessionId)
     }
     
     /**
      * 断开所有会话
      */
     fun disconnectAllSessions() {
+        sessionMap.keys.forEach { closeSessionSocket(it) }
         sessionMap.clear()
         updateActiveSessions()
     }
-    
+
+    private fun closeSessionSocket(sessionId: String, fallback: Socket? = null) {
+        val socket = sessionSockets.remove(sessionId) ?: fallback
+        closeSilently(socket)
+    }
+
+    private fun closeSilently(socket: Socket?) {
+        try {
+            socket?.close()
+        } catch (_: Exception) {
+        }
+    }
+
     /**
      * 连接到指定设备
      */
