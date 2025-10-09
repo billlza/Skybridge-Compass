@@ -9,6 +9,7 @@ local.properties
 # Offline gradle dist (do not commit)
 third_party/gradle/*.zip
 
-# Do not commit offline caches
-third_party/m2repository/**
-third_party/gradle/*.zip
+# Android Profiling
+*.hprof
+
+ios/SkybridgeCompass/SkybridgeCompass/Resources/Assets.xcassets/AppIcon.appiconset/AppIcon.png
