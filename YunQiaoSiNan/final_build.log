@@ -1,0 +1,94 @@
+To honour the JVM settings for this build a single-use Daemon process will be forked. For more on this, please refer to https://docs.gradle.org/8.11/userguide/gradle_daemon.html#sec:disabling_the_daemon in the Gradle documentation.
+Daemon will be stopped at the end of the build 
+Configuration on demand is an incubating feature.
+> Task :app:preBuild UP-TO-DATE
+> Task :app:preDebugBuild UP-TO-DATE
+> Task :app:mergeDebugNativeDebugMetadata NO-SOURCE
+> Task :app:checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :app:checkDebugAarMetadata UP-TO-DATE
+> Task :app:generateDebugResValues UP-TO-DATE
+> Task :app:mapDebugSourceSetPaths UP-TO-DATE
+> Task :app:generateDebugResources UP-TO-DATE
+> Task :app:mergeDebugResources UP-TO-DATE
+> Task :app:packageDebugResources UP-TO-DATE
+> Task :app:parseDebugLocalResources UP-TO-DATE
+> Task :app:createDebugCompatibleScreenManifests UP-TO-DATE
+> Task :app:extractDeepLinksDebug UP-TO-DATE
+> Task :app:processDebugMainManifest UP-TO-DATE
+> Task :app:processDebugManifest UP-TO-DATE
+> Task :app:processDebugManifestForPackage UP-TO-DATE
+> Task :app:processDebugResources UP-TO-DATE
+
+> Task :app:compileDebugKotlin
+e: file:///workspace/YunQiaoSiNan/app/src/main/java/com/yunqiao/sinan/ui/component/DeviceStatusBar.kt:123:34 Smart cast to 'kotlin.Int' is impossible, because 'batteryLevel' is a delegated property.
+e: file:///workspace/YunQiaoSiNan/app/src/main/java/com/yunqiao/sinan/ui/screen/MainControlScreen.kt:124:42 Unresolved reference 'Cpu'.
+e: file:///workspace/YunQiaoSiNan/app/src/main/java/com/yunqiao/sinan/ui/screen/Node6DashboardScreen.kt:189:25 Function 'component1()' is ambiguous for this expression: 
+fun <T> Array<out T>.component1(): T
+fun ByteArray.component1(): Byte
+fun ShortArray.component1(): Short
+fun IntArray.component1(): Int
+fun LongArray.component1(): Long
+fun FloatArray.component1(): Float
+fun DoubleArray.component1(): Double
+fun BooleanArray.component1(): Boolean
+fun CharArray.component1(): Char
+fun <T> List<T>.component1(): T
+fun <K, V> Map.Entry<K, V>.component1(): K
+fun UIntArray.component1(): UInt
+fun ULongArray.component1(): ULong
+fun UByteArray.component1(): UByte
+fun UShortArray.component1(): UShort.
+e: file:///workspace/YunQiaoSiNan/app/src/main/java/com/yunqiao/sinan/ui/screen/Node6DashboardScreen.kt:189:25 Function 'component2()' is ambiguous for this expression: 
+fun <T> Array<out T>.component2(): T
+fun ByteArray.component2(): Byte
+fun ShortArray.component2(): Short
+fun IntArray.component2(): Int
+fun LongArray.component2(): Long
+fun FloatArray.component2(): Float
+fun DoubleArray.component2(): Double
+fun BooleanArray.component2(): Boolean
+fun CharArray.component2(): Char
+fun <T> List<T>.component2(): T
+fun <K, V> Map.Entry<K, V>.component2(): V
+fun UIntArray.component2(): UInt
+fun ULongArray.component2(): ULong
+fun UByteArray.component2(): UByte
+fun UShortArray.component2(): UShort.
+e: file:///workspace/YunQiaoSiNan/app/src/main/java/com/yunqiao/sinan/ui/screen/Node6DashboardScreen.kt:190:29 Argument type mismatch: actual type is 'kotlin.Pair<androidx.compose.ui.graphics.Color, kotlin.String>', but 'K' was expected.
+e: file:///workspace/YunQiaoSiNan/app/src/main/java/com/yunqiao/sinan/ui/screen/Node6DashboardScreen.kt:191:37 Argument type mismatch: actual type is 'kotlin.Pair<androidx.compose.ui.graphics.Color, kotlin.String>', but 'K' was expected.
+e: file:///workspace/YunQiaoSiNan/app/src/main/java/com/yunqiao/sinan/ui/screen/Node6DashboardScreen.kt:192:30 Argument type mismatch: actual type is 'kotlin.Pair<androidx.compose.ui.graphics.Color, kotlin.String>', but 'K' was expected.
+e: file:///workspace/YunQiaoSiNan/app/src/main/java/com/yunqiao/sinan/ui/screen/Node6DashboardScreen.kt:193:29 Argument type mismatch: actual type is 'kotlin.Pair<A, B>', but 'K' was expected.
+e: file:///workspace/YunQiaoSiNan/app/src/main/java/com/yunqiao/sinan/ui/screen/Node6DashboardScreen.kt:193:35 Unresolved reference 'Orange'.
+e: file:///workspace/YunQiaoSiNan/app/src/main/java/com/yunqiao/sinan/ui/screen/Node6DashboardScreen.kt:193:42 Cannot infer type for this parameter. Please specify it explicitly.
+e: file:///workspace/YunQiaoSiNan/app/src/main/java/com/yunqiao/sinan/ui/screen/Node6DashboardScreen.kt:194:30 Argument type mismatch: actual type is 'kotlin.Pair<androidx.compose.ui.graphics.Color, kotlin.String>', but 'K' was expected.
+e: file:///workspace/YunQiaoSiNan/app/src/main/java/com/yunqiao/sinan/ui/screen/Node6DashboardScreen.kt:298:21 Unresolved reference 'SystemPerformanceData'.
+e: file:///workspace/YunQiaoSiNan/app/src/main/java/com/yunqiao/sinan/ui/screen/Node6DashboardScreen.kt:303:33 Unresolved reference 'timestamp'.
+e: file:///workspace/YunQiaoSiNan/app/src/main/java/com/yunqiao/sinan/ui/screen/Node6DashboardScreen.kt:304:38 Unresolved reference 'timestamp'.
+e: file:///workspace/YunQiaoSiNan/app/src/main/java/com/yunqiao/sinan/ui/screen/Node6DashboardScreen.kt:312:44 Unresolved reference 'cpuUsage'.
+e: file:///workspace/YunQiaoSiNan/app/src/main/java/com/yunqiao/sinan/ui/screen/Node6DashboardScreen.kt:313:44 Unresolved reference 'cpuUsage'.
+e: file:///workspace/YunQiaoSiNan/app/src/main/java/com/yunqiao/sinan/ui/screen/Node6DashboardScreen.kt:317:44 Unresolved reference 'memoryUsage'.
+e: file:///workspace/YunQiaoSiNan/app/src/main/java/com/yunqiao/sinan/ui/screen/Node6DashboardScreen.kt:318:44 Unresolved reference 'memoryUsage'.
+e: file:///workspace/YunQiaoSiNan/app/src/main/java/com/yunqiao/sinan/ui/screen/Node6DashboardScreen.kt:322:44 Unresolved reference 'storageUsage'.
+e: file:///workspace/YunQiaoSiNan/app/src/main/java/com/yunqiao/sinan/ui/screen/Node6DashboardScreen.kt:323:44 Unresolved reference 'storageUsage'.
+e: file:///workspace/YunQiaoSiNan/app/src/main/java/com/yunqiao/sinan/ui/screen/Node6DashboardScreen.kt:325:28 Unresolved reference 'batteryLevel'.
+e: file:///workspace/YunQiaoSiNan/app/src/main/java/com/yunqiao/sinan/ui/screen/Node6DashboardScreen.kt:325:42 Cannot infer type for this parameter. Please specify it explicitly.
+e: file:///workspace/YunQiaoSiNan/app/src/main/java/com/yunqiao/sinan/ui/screen/Node6DashboardScreen.kt:325:48 Cannot infer type for this parameter. Please specify it explicitly.
+e: file:///workspace/YunQiaoSiNan/app/src/main/java/com/yunqiao/sinan/ui/screen/Node6DashboardScreen.kt:329:45 'operator' modifier is required on 'FirNamedFunctionSymbol kotlin/compareTo' in 'compareTo'.
+
+> Task :app:compileDebugKotlin FAILED
+
+FAILURE: Build failed with an exception.
+
+* What went wrong:
+Execution failed for task ':app:compileDebugKotlin'.
+> A failure occurred while executing org.jetbrains.kotlin.compilerRunner.GradleCompilerRunnerWithWorkers$GradleKotlinCompilerWorkAction
+   > Compilation error. See log for more details
+
+* Try:
+> Run with --stacktrace option to get the stack trace.
+> Run with --info or --debug option to get more log output.
+> Run with --scan to get full insights.
+> Get more help at https://help.gradle.org.
+
+BUILD FAILED in 32s
+14 actionable tasks: 1 executed, 13 up-to-date

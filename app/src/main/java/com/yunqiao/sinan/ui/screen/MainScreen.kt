@@ -2,7 +2,9 @@ package com.yunqiao.sinan.ui.screen
 
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.*
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -10,43 +12,60 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.collectAsState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.lerp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.input.pointer.pointerInput
 import com.yunqiao.sinan.data.DeviceStatusManager
 import com.yunqiao.sinan.data.NavigationItem
 import com.yunqiao.sinan.data.navigationItems
 import com.yunqiao.sinan.data.rememberDeviceStatusManager
+import com.yunqiao.sinan.data.auth.UserAccount
 import com.yunqiao.sinan.ui.component.DeviceStatusBar
 import com.yunqiao.sinan.ui.component.MainWeatherWidget
+import com.yunqiao.sinan.ui.component.NotificationBell
 import com.yunqiao.sinan.ui.component.SideNavigation
 import com.yunqiao.sinan.ui.theme.LocalThemeIsDark
 import com.yunqiao.sinan.ui.theme.ModernGlassColors
 import com.yunqiao.sinan.ui.theme.ModernShapes
+import com.yunqiao.sinan.manager.NotificationCenter
 import com.yunqiao.sinan.weather.UnifiedWeatherManager
 import com.yunqiao.sinan.weather.UnifiedWeatherState
 import com.yunqiao.sinan.weather.WeatherConfig
 import kotlinx.coroutines.launch
+import kotlin.math.coerceIn
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainScreen(
-    onThemeChange: ((Boolean, Boolean) -> Unit)? = null
+    onThemeChange: ((Boolean, Boolean) -> Unit)? = null,
+    currentAccount: UserAccount? = null
 ) {
-    var selectedRoute by remember { mutableStateOf("system_monitor") }
+    var selectedRoute by remember { mutableStateOf("main_control") }
     val deviceStatusManager = rememberDeviceStatusManager()
+    val deviceStatus by deviceStatusManager.deviceStatus.collectAsState()
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
     val colorScheme = MaterialTheme.colorScheme
     val isDarkTheme = LocalThemeIsDark.current
+    val notificationCenter = remember { NotificationCenter() }
+    val notifications by notificationCenter.notifications.collectAsState()
+
+    LaunchedEffect(deviceStatus) {
+        notificationCenter.onDeviceStatusChanged(deviceStatus)
+    }
     
     // 天气管理器 - 安全初始化
     val context = LocalContext.current
@@ -74,91 +93,119 @@ fun MainScreen(
     )
     
     // 使用现代化的抽屉式导航
-    ModalNavigationDrawer(
-        drawerState = drawerState,
-        drawerContent = {
-            // 现代化侧边栏
-            SideNavigation(
-                navigationItems = navigationItems,
-                selectedRoute = selectedRoute,
-                onItemClick = { route ->
-                    selectedRoute = route
-                    scope.launch {
-                        drawerState.close()
-                    }
-                },
-                onThemeChange = onThemeChange,
-                modifier = Modifier.fillMaxSize()
-            )
-        }
-    ) {
-        // 主内容区域 - 现代化设计
-        Surface(
-            modifier = Modifier.fillMaxSize(),
-            color = colorScheme.background
+    val drawerProgress by animateFloatAsState(
+        targetValue = if (drawerState.isOpen) 1f else 0f,
+        animationSpec = tween(300),
+        label = "drawer_progress"
+    )
+    val shellBlur by animateDpAsState(
+        targetValue = lerp(0.dp, 12.dp, drawerProgress.coerceIn(0f, 1f)),
+        animationSpec = tween(300),
+        label = "shell_blur"
+    )
+    val density = LocalDensity.current
+    val translationOffset = with(density) { 56.dp.toPx() }
+
+    Box {
+        ModalNavigationDrawer(
+            drawerState = drawerState,
+            drawerContent = {
+                SideNavigation(
+                    navigationItems = navigationItems,
+                    selectedRoute = selectedRoute,
+                    onItemClick = { route ->
+                        selectedRoute = route
+                        scope.launch { drawerState.close() }
+                    },
+                    onThemeChange = onThemeChange,
+                    modifier = Modifier.fillMaxSize(),
+                    drawerProgress = drawerProgress
+                )
+            },
+            scrimColor = Color.Transparent
         ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(
-                        brush = if (isDarkTheme) {
-                            Brush.radialGradient(
-                                colors = listOf(
-                                    colorScheme.surface,
-                                    colorScheme.background,
-                                    colorScheme.surfaceVariant
-                                ),
-                                center = androidx.compose.ui.geometry.Offset(
-                                    x = backgroundOffset * 1000f,
-                                    y = backgroundOffset * 800f
-                                )
-                            )
-                        } else {
-                            Brush.linearGradient(
-                                colors = listOf(
-                                    colorScheme.surfaceContainerHighest,
-                                    colorScheme.surface,
-                                    colorScheme.surfaceContainer
-                                )
-                            )
-                        }
-                    )
-            ) {
-                Column(
+            Box(modifier = Modifier.fillMaxSize()) {
+                Surface(
                     modifier = Modifier
                         .fillMaxSize()
-                        .padding(horizontal = 24.dp, vertical = 16.dp)
-                ) {
-                    // 现代化顶部栏
-                    ModernTopAppBar(
-                        selectedRoute = selectedRoute,
-                        onMenuClick = {
-                            scope.launch {
-                                if (drawerState.isClosed) {
-                                    drawerState.open()
-                                } else {
-                                    drawerState.close()
-                                }
-                            }
+                        .blur(shellBlur)
+                        .graphicsLayer {
+                            translationX = translationOffset * drawerProgress
+                            val scaleDelta = 0.02f * drawerProgress
+                            scaleX = 1f - scaleDelta
+                            scaleY = 1f - scaleDelta
                         },
-                        deviceStatusManager = deviceStatusManager,
-                        weatherSummary = weatherManager?.getWeatherSummary() ?: com.yunqiao.sinan.weather.WeatherSummary(),
-                        showWeather = weatherConfig.showInMainScreen,
-                        onWeatherClick = {
-                            selectedRoute = "weather_center"
+                    color = colorScheme.background
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(
+                                brush = if (isDarkTheme) {
+                                    Brush.radialGradient(
+                                        colors = listOf(
+                                            colorScheme.surface,
+                                            colorScheme.background,
+                                            colorScheme.surfaceVariant
+                                        ),
+                                        center = androidx.compose.ui.geometry.Offset(
+                                            x = backgroundOffset * 1000f,
+                                            y = backgroundOffset * 800f
+                                        )
+                                    )
+                                } else {
+                                    Brush.linearGradient(
+                                        colors = listOf(
+                                            colorScheme.surfaceContainerHighest,
+                                            colorScheme.surface,
+                                            colorScheme.surfaceContainer
+                                        )
+                                    )
+                                }
+                            )
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(horizontal = 24.dp, vertical = 16.dp)
+                        ) {
+                            ModernTopAppBar(
+                                selectedRoute = selectedRoute,
+                                onMenuClick = {
+                                    scope.launch {
+                                        if (drawerState.isClosed) {
+                                            drawerState.open()
+                                        } else {
+                                            drawerState.close()
+                                        }
+                                    }
+                                },
+                                deviceStatusManager = deviceStatusManager,
+                                weatherSummary = weatherManager?.getWeatherSummary() ?: com.yunqiao.sinan.weather.WeatherSummary(),
+                                showWeather = weatherConfig.showInMainScreen,
+                                onWeatherClick = {
+                                    selectedRoute = "weather_center"
+                                }
+                            )
+
+                            Spacer(modifier = Modifier.height(24.dp))
+
+                            ModernMainContentArea(
+                                selectedRoute = selectedRoute,
+                                deviceStatusManager = deviceStatusManager,
+                                onNavigate = { route -> selectedRoute = route },
+                                modifier = Modifier.weight(1f)
+                            )
                         }
-                    )
-                    
-                    Spacer(modifier = Modifier.height(24.dp))
-                    
-                    // 主内容区域
-                    ModernMainContentArea(
-                        selectedRoute = selectedRoute,
-                        deviceStatusManager = deviceStatusManager,
-                        onNavigate = { route -> selectedRoute = route },
-                        modifier = Modifier.weight(1f)
-                    )
+                    }
                 }
+
+                GlassDrawerScrim(
+                    progress = drawerProgress,
+                    onDismiss = {
+                        scope.launch { drawerState.close() }
+                    }
+                )
             }
         }
     }
@@ -209,17 +256,27 @@ fun ModernTopAppBar(
                         scaleY = menuButtonScale
                     },
                 shape = CircleShape,
-                color = colorScheme.primaryContainer,
-                tonalElevation = 6.dp
+                color = Color.Transparent,
+                border = BorderStroke(1.dp, colorScheme.primary.copy(alpha = 0.35f))
             ) {
                 Box(
                     contentAlignment = Alignment.Center,
-                    modifier = Modifier.fillMaxSize()
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(
+                            brush = Brush.linearGradient(
+                                colors = listOf(
+                                    colorScheme.primary.copy(alpha = 0.28f),
+                                    colorScheme.primary.copy(alpha = 0.12f)
+                                )
+                            ),
+                            shape = CircleShape
+                        )
                 ) {
                     Icon(
                         imageVector = Icons.Default.Menu,
                         contentDescription = "打开菜单",
-                        tint = colorScheme.onPrimaryContainer,
+                        tint = colorScheme.onPrimary,
                         modifier = Modifier.size(24.dp)
                     )
                 }
@@ -239,9 +296,9 @@ fun ModernTopAppBar(
                     "ai_assistant" -> "AI智能助手"
                     "remote_desktop" -> "远程桌面"
                     "file_transfer" -> "文件传输"
-                    "device_discovery" -> "设备发现"
-                    "node6_dashboard" -> "Node 6 控制台"
-                    "user_settings" -> "用户设置"
+                    "device_discovery" -> "附近设备"
+                    "operations_hub_dashboard" -> "运营中枢"
+                    "user_settings" -> "系统设置"
                     else -> "云桥司南"
                 }
                 
@@ -258,7 +315,25 @@ fun ModernTopAppBar(
                     color = colorScheme.onSurface.copy(alpha = 0.7f)
                 )
             }
-            
+
+            Spacer(modifier = Modifier.width(20.dp))
+
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                NotificationBell(
+                    notifications = notifications,
+                    onMarkAllRead = { notificationCenter.markAllRead() },
+                    onNotificationRead = { notificationCenter.markAsRead(it) }
+                )
+                currentAccount?.let {
+                    UserAccountSummary(account = it)
+                }
+            }
+
+            Spacer(modifier = Modifier.width(20.dp))
+
             // 设备状态栏（简化版）
             Surface(
                 shape = ModernShapes.large,
@@ -290,6 +365,39 @@ fun ModernTopAppBar(
                     isCompact = false
                 )
             }
+        }
+    }
+}
+
+@Composable
+fun UserAccountSummary(account: UserAccount) {
+    val colorScheme = MaterialTheme.colorScheme
+    val displayName = remember(account) {
+        account.starAccount?.takeIf { it.isNotBlank() }
+            ?: account.email?.takeIf { it.isNotBlank() }
+            ?: account.phoneNumber?.takeIf { it.isNotBlank() }
+            ?: "星云用户"
+    }
+    Surface(
+        shape = ModernShapes.large,
+        tonalElevation = 2.dp,
+        color = colorScheme.surfaceContainerHigh
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp)
+        ) {
+            Text(
+                text = displayName,
+                style = MaterialTheme.typography.titleSmall,
+                color = colorScheme.onSurface,
+                fontWeight = FontWeight.SemiBold
+            )
+            Text(
+                text = "nubula ID ${account.nubulaId}",
+                style = MaterialTheme.typography.bodySmall,
+                color = colorScheme.onSurfaceVariant
+            )
         }
     }
 }
@@ -353,9 +461,9 @@ fun ModernMainContentArea(
                         modifier = Modifier.fillMaxSize()
                     )
                 }
-                "node6_dashboard" -> {
-                    // Node 6 控制台
-                    Node6DashboardScreen(
+                "operations_hub_dashboard" -> {
+                    // 运营中枢
+                    OperationsHubDashboardScreen(
                         modifier = Modifier.fillMaxSize(),
                         onNavigate = onNavigate
                     )
@@ -484,4 +592,31 @@ fun ModernPlaceholderContent(
             )
         }
     }
+}
+
+@Composable
+private fun GlassDrawerScrim(
+    progress: Float,
+    onDismiss: () -> Unit
+) {
+    if (progress <= 0f) {
+        return
+    }
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .blur(24.dp)
+            .graphicsLayer { alpha = progress * 0.65f }
+            .background(
+                brush = Brush.verticalGradient(
+                    colors = listOf(
+                        Color.Black.copy(alpha = 0.45f),
+                        Color.Black.copy(alpha = 0.25f)
+                    )
+                )
+            )
+            .pointerInput(onDismiss) {
+                detectTapGestures { onDismiss() }
+            }
+    )
 }

@@ -11,10 +11,13 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.wifi.WifiManager
 import android.net.wifi.p2p.WifiP2pDevice
 import android.net.wifi.p2p.WifiP2pManager
 import android.os.Build
+import android.util.Log
 import androidx.core.app.ActivityCompat
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
@@ -59,7 +62,10 @@ data class DiscoveredDevice(
     val lastSeen: Long = System.currentTimeMillis(),
     val trustLevel: Float = 0.5f,
     val connectionQuality: Float = 0.8f,
-    val rssi: Int = 0
+    val rssi: Int = 0,
+    val platform: BridgeDevicePlatform = BridgeDevicePlatform.UNKNOWN,
+    val compatibilityRemark: String = "",
+    val transports: Set<BridgeTransportHint> = emptySet()
 ) {
     fun isExpired(timeoutMs: Long = 300000L): Boolean {
         return System.currentTimeMillis() - lastSeen > timeoutMs
@@ -67,9 +73,10 @@ data class DiscoveredDevice(
 }
 
 class DeviceDiscoveryManager(private val context: Context) {
-    
-    private val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+
+    private val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
     private val bluetoothAdapter = BluetoothAdapter.getDefaultAdapter()
+    private val compatibilityManager = CrossPlatformCompatibilityManager()
     
     private val _discoveredDevices = MutableStateFlow<List<DiscoveredDevice>>(emptyList())
     val discoveredDevices: StateFlow<List<DiscoveredDevice>> = _discoveredDevices.asStateFlow()
@@ -89,6 +96,9 @@ class DeviceDiscoveryManager(private val context: Context) {
     // 蓝牙扫描相关
     private var bluetoothLeScanner: BluetoothLeScanner? = null
     private var bluetoothScanCallback: ScanCallback? = null
+    private var isBleScanning: Boolean = false
+    private var bluetoothClassicReceiver: BroadcastReceiver? = null
+    private var isClassicScanning: Boolean = false
     
     // WiFi P2P相关
     private var wifiP2pManager: WifiP2pManager? = null
@@ -284,16 +294,20 @@ class DeviceDiscoveryManager(private val context: Context) {
         discoveryJob = CoroutineScope(Dispatchers.IO).launch {
             while (isDiscovering) {
                 try {
-                    // 并行执行多种发现协议
-                    launch { discoverNetworkDevices() }
-                    launch { discoverBluetoothDevices() }
-                    launch { discoverWifiP2pDevices() }
-                    launch { discoverUPnPDevices() }
-                    
+                    supervisorScope {
+                        // 并行执行多种发现协议，并保证单个任务的异常不会终止整体扫描
+                        launch { runCatching { discoverNetworkDevices() }.onFailure { it.printStackTrace() } }
+                        launch { runCatching { discoverBluetoothDevices() }.onFailure { it.printStackTrace() } }
+                        launch { runCatching { discoverWifiP2pDevices() }.onFailure { it.printStackTrace() } }
+                        launch { runCatching { discoverUPnPDevices() }.onFailure { it.printStackTrace() } }
+                    }
+
                     // 清理过期设备
                     cleanupExpiredDevices()
-                    
+
                     delay(10000) // 每10秒扫描一次
+                } catch (e: CancellationException) {
+                    throw e
                 } catch (e: Exception) {
                     e.printStackTrace()
                     delay(5000)
@@ -318,12 +332,51 @@ class DeviceDiscoveryManager(private val context: Context) {
      */
     private suspend fun discoverNetworkDevices() = withContext(Dispatchers.IO) {
         try {
-            val wifiInfo = wifiManager.connectionInfo
-            val dhcpInfo = wifiManager.dhcpInfo
-            
-            // 获取网络信息
+            val wifi = wifiManager ?: run {
+                Log.w("DeviceDiscoveryManager", "Wi-Fi service unavailable, skipping LAN discovery")
+                return@withContext
+            }
+
+            val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+            val activeNetwork = connectivityManager?.activeNetwork
+            val networkCapabilities = activeNetwork?.let { connectivityManager.getNetworkCapabilities(it) }
+            val hasWifiTransport = networkCapabilities?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+            val wifiInfo = try {
+                wifi.connectionInfo
+            } catch (securityException: SecurityException) {
+                Log.w(
+                    "DeviceDiscoveryManager",
+                    "Missing permissions for Wi-Fi info: ${securityException.message}"
+                )
+                null
+            }
+            if (!hasWifiTransport || wifiInfo == null || wifiInfo.networkId == -1) {
+                Log.w("DeviceDiscoveryManager", "Wi-Fi network unavailable, skipping LAN discovery")
+                return@withContext
+            }
+            val dhcpInfo = try {
+                wifi.dhcpInfo
+            } catch (securityException: SecurityException) {
+                Log.w(
+                    "DeviceDiscoveryManager",
+                    "Missing permissions for DHCP info: ${securityException.message}"
+                )
+                null
+            } ?: run {
+                Log.w("DeviceDiscoveryManager", "Missing DHCP info, skipping LAN discovery")
+                return@withContext
+            }
+            if (dhcpInfo.gateway == 0) {
+                Log.w("DeviceDiscoveryManager", "Invalid gateway, skipping LAN discovery")
+                return@withContext
+            }
+
             val gateway = intToIp(dhcpInfo.gateway)
             val subnet = getSubnetFromGateway(gateway)
+            if (subnet.isEmpty()) {
+                Log.w("DeviceDiscoveryManager", "Unable to derive subnet from gateway $gateway")
+                return@withContext
+            }
             
             // 扫描局域网IP范围
             val jobs = mutableListOf<Job>()
@@ -352,72 +405,83 @@ class DeviceDiscoveryManager(private val context: Context) {
         if (!hasBluetoothPermission()) return@withContext
         
         try {
-            // 经典蓝牙发现
             discoverClassicBluetooth()
-            
-            // BLE设备发现
             discoverBLEDevices()
-            
         } catch (e: Exception) {
             e.printStackTrace()
         }
     }
-    
+
     /**
      * 经典蓝牙发现
      */
     private fun discoverClassicBluetooth() {
-        if (bluetoothAdapter?.isEnabled != true) return
-        
-        val bluetoothReceiver = object : BroadcastReceiver() {
+        if (bluetoothAdapter?.isEnabled != true || !hasBluetoothPermission()) {
+            return
+        }
+        if (isClassicScanning) {
+            return
+        }
+
+        val receiver = bluetoothClassicReceiver ?: object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
-                when (intent?.action) {
+                val action = intent?.action ?: return
+                when (action) {
                     BluetoothDevice.ACTION_FOUND -> {
-                        if (ActivityCompat.checkSelfPermission(
-                                context!!,
-                                Manifest.permission.BLUETOOTH_CONNECT
-                            ) != PackageManager.PERMISSION_GRANTED
-                        ) {
-                            return
-                        }
                         val device = intent.getParcelableExtra<BluetoothDevice>(BluetoothDevice.EXTRA_DEVICE)
                         val rssi = intent.getShortExtra(BluetoothDevice.EXTRA_RSSI, Short.MIN_VALUE).toInt()
-                        
-                        device?.let {
-                            val discoveredDevice = DiscoveredDevice(
-                                deviceId = it.address,
-                                deviceName = it.name ?: "Unknown Bluetooth Device",
-                                deviceType = "bluetooth",
-                                ipAddress = "",
-                                capabilities = estimateBluetoothCapabilities(it),
-                                discoveryProtocol = "bluetooth_classic",
-                                rssi = rssi
-                            )
-                            addDiscoveredDevice(discoveredDevice)
+                        if (device != null) {
+                            handleClassicDevice(device, rssi)
                         }
+                    }
+                    BluetoothAdapter.ACTION_DISCOVERY_FINISHED -> {
+                        stopClassicScan()
                     }
                 }
             }
+        }.also { created ->
+            bluetoothClassicReceiver = created
         }
-        
-        val filter = IntentFilter(BluetoothDevice.ACTION_FOUND)
-        context.registerReceiver(bluetoothReceiver, filter)
-        
-        if (ActivityCompat.checkSelfPermission(
+
+        val filter = IntentFilter().apply {
+            addAction(BluetoothDevice.ACTION_FOUND)
+            addAction(BluetoothAdapter.ACTION_DISCOVERY_FINISHED)
+        }
+
+        try {
+            context.registerReceiver(receiver, filter)
+        } catch (e: IllegalArgumentException) {
+            Log.w("DeviceDiscoveryManager", "Receiver already registered", e)
+        }
+
+        val started = if (ActivityCompat.checkSelfPermission(
                 context,
                 Manifest.permission.BLUETOOTH_SCAN
             ) == PackageManager.PERMISSION_GRANTED
         ) {
-            bluetoothAdapter.startDiscovery()
+            bluetoothAdapter?.startDiscovery() == true
+        } else {
+            false
         }
+
+        if (!started) {
+            stopClassicScan()
+            return
+        }
+
+        isClassicScanning = true
     }
-    
+
     /**
      * BLE设备发现
      */
     private fun discoverBLEDevices() {
         if (bluetoothLeScanner == null || !hasBluetoothPermission()) return
         
+        if (isBleScanning) {
+            stopBleScan()
+        }
+
         bluetoothScanCallback = object : ScanCallback() {
             override fun onScanResult(callbackType: Int, result: ScanResult?) {
                 result?.let { scanResult ->
@@ -430,14 +494,23 @@ class DeviceDiscoveryManager(private val context: Context) {
                     }
                     
                     val device = scanResult.device
+                    if (compatibilityManager.shouldExclude(device.name, device.address)) {
+                        return
+                    }
+                    val platform = compatibilityManager.resolvePlatform(device.name, device.address)
                     val discoveredDevice = DiscoveredDevice(
                         deviceId = device.address,
                         deviceName = device.name ?: "Unknown BLE Device",
-                        deviceType = "ble",
+                        deviceType = platformLabel(platform),
                         ipAddress = "",
                         capabilities = estimateBLECapabilities(scanResult),
                         discoveryProtocol = "bluetooth_le",
-                        rssi = scanResult.rssi
+                        rssi = scanResult.rssi,
+                        platform = platform,
+                        compatibilityRemark = compatibilityManager.remarkFor(platform),
+                        transports = compatibilityManager.transportsFor(platform).ifEmpty {
+                            setOf(BridgeTransportHint.UniversalBridge)
+                        }
                     )
                     addDiscoveredDevice(discoveredDevice)
                 }
@@ -445,15 +518,23 @@ class DeviceDiscoveryManager(private val context: Context) {
             
             override fun onScanFailed(errorCode: Int) {
                 super.onScanFailed(errorCode)
+                Log.w("DeviceDiscoveryManager", "BLE scan failed with error $errorCode")
+                stopBleScan()
             }
         }
-        
+
         if (ActivityCompat.checkSelfPermission(
                 context,
                 Manifest.permission.BLUETOOTH_SCAN
             ) == PackageManager.PERMISSION_GRANTED
         ) {
-            bluetoothLeScanner?.startScan(bluetoothScanCallback)
+            try {
+                bluetoothLeScanner?.startScan(bluetoothScanCallback)
+                isBleScanning = true
+            } catch (e: IllegalStateException) {
+                isBleScanning = false
+                Log.w("DeviceDiscoveryManager", "Unable to start BLE scan", e)
+            }
         }
     }
     
@@ -549,16 +630,25 @@ class DeviceDiscoveryManager(private val context: Context) {
             if (openPort > 0) {
                 // 尝试获取设备信息
                 val deviceName = getDeviceNameFromIP(ip)
+                if (compatibilityManager.shouldExclude(deviceName, null)) {
+                    return@withContext null
+                }
+                val platform = compatibilityManager.resolvePlatform(deviceName, null)
                 val capabilities = estimateNetworkDeviceCapabilities(ip, openPort)
-                
+
                 DiscoveredDevice(
                     deviceId = ip,
                     deviceName = deviceName,
-                    deviceType = "network",
+                    deviceType = platformLabel(platform),
                     ipAddress = ip,
                     port = openPort,
                     capabilities = capabilities,
-                    discoveryProtocol = "network_scan"
+                    discoveryProtocol = "network_scan",
+                    platform = platform,
+                    compatibilityRemark = compatibilityManager.remarkFor(platform),
+                    transports = compatibilityManager.transportsFor(platform).ifEmpty {
+                        setOf(BridgeTransportHint.UniversalBridge)
+                    }
                 )
             } else {
                 null
@@ -686,10 +776,14 @@ class DeviceDiscoveryManager(private val context: Context) {
                 }
             }
             
+            if (compatibilityManager.shouldExclude(deviceName, deviceType)) {
+                return
+            }
+            val platform = compatibilityManager.resolvePlatform(deviceName, deviceType)
             val device = DiscoveredDevice(
                 deviceId = ip,
                 deviceName = deviceName,
-                deviceType = deviceType,
+                deviceType = platformLabel(platform),
                 ipAddress = ip,
                 capabilities = DeviceCapabilities(
                     computePower = 50,
@@ -697,9 +791,14 @@ class DeviceDiscoveryManager(private val context: Context) {
                     storageCapacity = 16384L,
                     networkBandwidth = 100
                 ),
-                discoveryProtocol = "upnp"
+                discoveryProtocol = "upnp",
+                platform = platform,
+                compatibilityRemark = compatibilityManager.remarkFor(platform),
+                transports = compatibilityManager.transportsFor(platform).ifEmpty {
+                    setOf(BridgeTransportHint.UniversalBridge)
+                }
             )
-            
+
             addDiscoveredDevice(device)
         } catch (e: Exception) {
             e.printStackTrace()
@@ -720,17 +819,26 @@ class DeviceDiscoveryManager(private val context: Context) {
     private fun updateDeviceList() {
         _discoveredDevices.value = deviceMap.values.toList().sortedByDescending { it.lastSeen }
     }
+
+    private fun platformLabel(platform: BridgeDevicePlatform): String {
+        return when (platform) {
+            BridgeDevicePlatform.ANDROID -> "Android"
+            BridgeDevicePlatform.IOS -> "iOS"
+            BridgeDevicePlatform.IPADOS -> "iPadOS"
+            BridgeDevicePlatform.MAC -> "macOS"
+            BridgeDevicePlatform.WINDOWS -> "Windows"
+            BridgeDevicePlatform.LINUX -> "Linux"
+            BridgeDevicePlatform.CHROME_OS -> "ChromeOS"
+            BridgeDevicePlatform.UNKNOWN -> "universal"
+        }
+    }
     
     /**
      * 清理过期设备
      */
     private fun cleanupExpiredDevices() {
-        val iterator = deviceMap.iterator()
-        while (iterator.hasNext()) {
-            val entry = iterator.next()
-            if (entry.value.isExpired()) {
-                iterator.remove()
-            }
+        deviceMap.entries.removeIf { entry ->
+            entry.value.isExpired()
         }
         updateDeviceList()
     }
@@ -739,6 +847,30 @@ class DeviceDiscoveryManager(private val context: Context) {
      * 停止蓝牙扫描
      */
     private fun stopBluetoothScan() {
+        stopClassicScan()
+        stopBleScan()
+    }
+
+    private fun stopClassicScan() {
+        if (ActivityCompat.checkSelfPermission(
+                context,
+                Manifest.permission.BLUETOOTH_SCAN
+            ) == PackageManager.PERMISSION_GRANTED
+        ) {
+            bluetoothAdapter?.cancelDiscovery()
+        }
+        bluetoothClassicReceiver?.let { receiver ->
+            try {
+                context.unregisterReceiver(receiver)
+            } catch (e: IllegalArgumentException) {
+                Log.w("DeviceDiscoveryManager", "Receiver already unregistered", e)
+            }
+        }
+        bluetoothClassicReceiver = null
+        isClassicScanning = false
+    }
+
+    private fun stopBleScan() {
         bluetoothScanCallback?.let { callback ->
             if (ActivityCompat.checkSelfPermission(
                     context,
@@ -749,6 +881,42 @@ class DeviceDiscoveryManager(private val context: Context) {
             }
         }
         bluetoothScanCallback = null
+        isBleScanning = false
+    }
+
+    private fun handleClassicDevice(device: BluetoothDevice, rssi: Int) {
+        if (!hasBluetoothConnectPermission()) {
+            return
+        }
+
+        val deviceName = device.name
+        if (compatibilityManager.shouldExclude(deviceName, device.address)) {
+            return
+        }
+
+        val platform = compatibilityManager.resolvePlatform(deviceName, device.address)
+        val discoveredDevice = DiscoveredDevice(
+            deviceId = device.address,
+            deviceName = deviceName ?: "Unknown Bluetooth Device",
+            deviceType = platformLabel(platform),
+            ipAddress = "",
+            capabilities = estimateBluetoothCapabilities(device),
+            discoveryProtocol = "bluetooth_classic",
+            rssi = rssi,
+            platform = platform,
+            compatibilityRemark = compatibilityManager.remarkFor(platform),
+            transports = compatibilityManager.transportsFor(platform).ifEmpty {
+                setOf(BridgeTransportHint.UniversalBridge)
+            }
+        )
+        addDiscoveredDevice(discoveredDevice)
+    }
+
+    private fun hasBluetoothConnectPermission(): Boolean {
+        return ActivityCompat.checkSelfPermission(
+            context,
+            Manifest.permission.BLUETOOTH_CONNECT
+        ) == PackageManager.PERMISSION_GRANTED
     }
     
     /**

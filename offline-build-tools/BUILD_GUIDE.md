@@ -72,3 +72,60 @@ cp -r offline-build-tools/* .
 - [项目状态报告](project-status.md)
 - [静态分析脚本](static-analysis.sh)
 - [离线验证脚本](offline-verify.sh)
+
+## Xcode 工具链限制
+
+### 问题说明
+CodeX 环境报告：
+```
+xcodebuild (not run; macOS/Xcode tooling is unavailable in the container environment)
+```
+
+### 原因分析
+- **容器环境**: CodeX 运行在 Linux 容器中
+- **工具限制**: 无法运行 macOS 专用工具 (xcodebuild, xcrun)
+- **平台支持**: 仅支持 Android 构建，不支持 iOS 构建
+
+### 解决方案
+
+#### 1. 使用 CodeX 专用 Flutter 构建脚本
+```bash
+# 自动检测环境并选择构建方式
+./codex-flutter-build.sh
+```
+
+#### 2. 手动构建 Android 版本
+```bash
+# 进入 Flutter 项目
+cd flutter_app
+
+# 安装依赖
+flutter pub get
+
+# 仅构建 Android (跳过 iOS)
+flutter build apk --release --no-ios
+```
+
+#### 3. 构建 Android 主项目
+```bash
+# 构建 Kotlin/Compose 应用
+./gradlew assembleDebug
+```
+
+### 环境检测
+脚本会自动检测：
+- ✅ Flutter 环境可用性
+- ⚠️  Xcode 工具链可用性
+- 📱 根据环境选择构建方式
+
+### 构建结果
+- **CodeX 环境**: 仅生成 Android APK
+- **完整环境**: 生成 Android APK + iOS 应用
+- **构建日志**: 显示详细的构建过程
+
+### 故障排除
+如果遇到 Xcode 相关错误：
+1. 确认在 CodeX 环境中运行
+2. 使用 `--no-ios` 参数跳过 iOS 构建
+3. 检查 Flutter 环境配置
+4. 查看构建日志获取详细信息

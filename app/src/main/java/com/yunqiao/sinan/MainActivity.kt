@@ -2,10 +2,13 @@ package com.yunqiao.sinan
 
 import android.Manifest
 import android.app.AlertDialog
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -29,16 +32,29 @@ import androidx.compose.ui.unit.dp
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
-import kotlinx.coroutines.*
+import com.yunqiao.sinan.compat.PermissionCompatibilityHelper
+import com.yunqiao.sinan.data.auth.UserAccount
+import com.yunqiao.sinan.manager.DeviceDiscoveryManager
+import com.yunqiao.sinan.manager.UserAccountManager
+import com.yunqiao.sinan.ui.screen.LoginScreen
 import com.yunqiao.sinan.ui.screen.MainScreen
 import com.yunqiao.sinan.ui.theme.YunQiaoSiNanTheme
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import android.hardware.display.DisplayManager
+import android.media.projection.MediaProjectionManager
 
 class MainActivity : ComponentActivity() {
     
     companion object {
         private const val TAG = "MainActivity"
         private const val PERMISSION_REQUEST_CODE = 1001
+        private const val SYSTEM_NOTIFICATION_CHANNEL = "yunqiao_system"
     }
     
     // 简化的状态管理
@@ -46,13 +62,20 @@ class MainActivity : ComponentActivity() {
     private var initializationMessage by mutableStateOf("准备初始化...")
     private var isInitializationComplete by mutableStateOf(false)
     private var initializationError by mutableStateOf<String?>(null)
-    
+    private var authenticatedAccount by mutableStateOf<UserAccount?>(null)
+
     // 管理器初始化状态
     private var isInitialized = false
     private var hasPermissionDenied = false
     private var isPermissionCheckInProgress = false // 防止重复权限检查
     private var isActivityDestroyed = false // Activity销毁状态
     private var currentPermissionDialog: AlertDialog? = null // 当前权限对话框引用
+    private lateinit var userAccountManager: UserAccountManager
+    private val permissionCompatibilityHelper by lazy { PermissionCompatibilityHelper(this) }
+    private val deviceDiscoveryManager: DeviceDiscoveryManager by lazy {
+        DeviceDiscoveryManager(applicationContext)
+    }
+    private var isDeviceDiscoveryInitialized = false
     
     // 定义所需权限列表 - 修复版本，分离特殊权限
     private val requiredPermissions = mutableListOf<String>().apply {
@@ -158,10 +181,17 @@ class MainActivity : ComponentActivity() {
             // 基础初始化
             super.onCreate(savedInstanceState)
             enableEdgeToEdge()
-            
+
             // 设置状态栏透明
             WindowCompat.setDecorFitsSystemWindows(window, false)
-            
+
+            userAccountManager = UserAccountManager(applicationContext)
+            lifecycleScope.launch {
+                userAccountManager.currentUser.collectLatest { user ->
+                    authenticatedAccount = user
+                }
+            }
+
             // 立即设置加载UI
             setupLoadingUI()
             
@@ -204,7 +234,8 @@ class MainActivity : ComponentActivity() {
         
         try {
             // 1. 首先检查普通权限
-            val deniedNormalPermissions = requiredPermissions.filter { permission ->
+            val runtimePermissions = permissionCompatibilityHelper.filterRequestable(requiredPermissions)
+            val deniedNormalPermissions = runtimePermissions.filter { permission ->
                 ContextCompat.checkSelfPermission(this, permission) != PackageManager.PERMISSION_GRANTED
             }
             
@@ -224,9 +255,15 @@ class MainActivity : ComponentActivity() {
                 }
                 else -> {
                     // 所有权限都已获得
-                    Log.d(TAG, "All permissions granted")
-                    resetPermissionState()
-                    initializeApplication()
+                    if (permissionCompatibilityHelper.hasAllPermissions(runtimePermissions)) {
+                        Log.d(TAG, "All permissions granted")
+                        resetPermissionState()
+                        initializeApplication()
+                    } else {
+                        Log.d(TAG, "No runtime permissions required, proceeding with initialization")
+                        resetPermissionState()
+                        initializeApplication()
+                    }
                 }
             }
         } catch (exception: Exception) {
@@ -276,16 +313,19 @@ class MainActivity : ComponentActivity() {
                 return
             }
             
-            val deniedPermissions = permissions.filter { !it.value }.keys
+            val relevantResults = permissions.filterKeys { permission ->
+                permissionCompatibilityHelper.isRequestablePermission(permission)
+            }
+            val deniedPermissions = relevantResults.filter { !it.value }.keys
             val permanentlyDenied = deniedPermissions.filter { permission ->
                 !ActivityCompat.shouldShowRequestPermissionRationale(this, permission)
             }
-            
+
             when {
                 deniedPermissions.isEmpty() -> {
                     Log.d(TAG, "All normal permissions granted")
                     hasPermissionDenied = false
-                    
+
                     // 普通权限都通过了，检查是否需要MANAGE_EXTERNAL_STORAGE权限
                     val needsStoragePermission = needsManageExternalStoragePermission() && !hasManageExternalStoragePermission()
                     
@@ -662,11 +702,17 @@ class MainActivity : ComponentActivity() {
         withContext(Dispatchers.IO) {
             try {
                 Log.d(TAG, "Initializing network manager")
-                delay(200) // 模拟网络状态检查
-                
-                // 检查网络连接状态
                 val connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-                Log.d(TAG, "Network manager initialized")
+                val activeNetwork = connectivityManager.activeNetwork
+                    ?: throw IllegalStateException("当前无可用网络")
+                val capabilities = connectivityManager.getNetworkCapabilities(activeNetwork)
+                    ?: throw IllegalStateException("无法获取网络能力")
+                if (!capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) {
+                    throw IllegalStateException("当前网络不具备互联网访问能力")
+                }
+                connectivityManager.getLinkProperties(activeNetwork)
+                    ?: throw IllegalStateException("网络链路信息缺失")
+                Log.d(TAG, "Network manager initialized with capabilities: $capabilities")
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to initialize network manager", e)
                 throw e
@@ -681,16 +727,30 @@ class MainActivity : ComponentActivity() {
         withContext(Dispatchers.IO) {
             try {
                 Log.d(TAG, "Initializing storage manager")
-                delay(200) // 模拟存储权限验证和目录创建
-                
-                // 验证存储权限并创建必要目录
                 val hasStoragePermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                     Environment.isExternalStorageManager()
                 } else {
-                    ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+                    ContextCompat.checkSelfPermission(
+                        this@MainActivity,
+                        Manifest.permission.READ_EXTERNAL_STORAGE
+                    ) == PackageManager.PERMISSION_GRANTED
                 }
-                
-                Log.d(TAG, "Storage manager initialized, permission: $hasStoragePermission")
+                if (!hasStoragePermission) {
+                    throw IllegalStateException("缺少外部存储访问权限")
+                }
+
+                val targetDirs = listOfNotNull(
+                    getExternalFilesDir(null)?.resolve("transfers"),
+                    getExternalFilesDir(null)?.resolve("logs"),
+                    filesDir.resolve("cache"),
+                    filesDir.resolve("telemetry")
+                )
+                targetDirs.forEach { dir ->
+                    if (!dir.exists() && !dir.mkdirs()) {
+                        throw IllegalStateException("无法创建目录: ${dir.absolutePath}")
+                    }
+                }
+                Log.d(TAG, "Storage manager initialized, directories ready")
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to initialize storage manager", e)
                 throw e
@@ -705,24 +765,58 @@ class MainActivity : ComponentActivity() {
         withContext(Dispatchers.IO) {
             try {
                 Log.d(TAG, "Initializing device discovery manager")
-                delay(200) // 模拟WiFi和蓝牙组件初始化
-                
-                // 检查WiFi权限
-                val hasWifiPermission = ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.ACCESS_WIFI_STATE) == PackageManager.PERMISSION_GRANTED
-                
-                // 检查蓝牙权限
+                val hasWifiPermission = ContextCompat.checkSelfPermission(
+                    this@MainActivity,
+                    Manifest.permission.ACCESS_WIFI_STATE
+                ) == PackageManager.PERMISSION_GRANTED
                 val hasBluetoothPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                    ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED
+                    ContextCompat.checkSelfPermission(
+                        this@MainActivity,
+                        Manifest.permission.BLUETOOTH_SCAN
+                    ) == PackageManager.PERMISSION_GRANTED &&
+                        ContextCompat.checkSelfPermission(
+                            this@MainActivity,
+                            Manifest.permission.BLUETOOTH_CONNECT
+                        ) == PackageManager.PERMISSION_GRANTED
                 } else {
-                    ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.BLUETOOTH) == PackageManager.PERMISSION_GRANTED
+                    ContextCompat.checkSelfPermission(
+                        this@MainActivity,
+                        Manifest.permission.BLUETOOTH
+                    ) == PackageManager.PERMISSION_GRANTED
                 }
-                
-                Log.d(TAG, "Device discovery manager initialized, WiFi: $hasWifiPermission, Bluetooth: $hasBluetoothPermission")
+                if (!hasWifiPermission && !hasBluetoothPermission) {
+                    throw IllegalStateException("缺少附近设备发现所需的无线权限")
+                }
+                isDeviceDiscoveryInitialized = true
+                if (lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+                    withContext(Dispatchers.Main) {
+                        deviceDiscoveryManager.startDiscovery()
+                        Log.d(TAG, "Device discovery manager initialized and discovery started")
+                    }
+                } else {
+                    Log.d(TAG, "Device discovery manager initialized; waiting for lifecycle start to begin discovery")
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to initialize device discovery manager", e)
                 throw e
             }
         }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        if (isDeviceDiscoveryInitialized) {
+            deviceDiscoveryManager.startDiscovery()
+            Log.d(TAG, "Device discovery started in onStart")
+        }
+    }
+
+    override fun onStop() {
+        if (isDeviceDiscoveryInitialized) {
+            deviceDiscoveryManager.stopDiscovery()
+            Log.d(TAG, "Device discovery stopped in onStop")
+        }
+        super.onStop()
     }
     
     /**
@@ -732,15 +826,29 @@ class MainActivity : ComponentActivity() {
         withContext(Dispatchers.IO) {
             try {
                 Log.d(TAG, "Initializing media manager")
-                delay(200) // 模拟摄像头和音频组件初始化
-                
-                // 检查摄像头权限
-                val hasCameraPermission = ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
-                
-                // 检查音频权限
-                val hasAudioPermission = ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
-                
-                Log.d(TAG, "Media manager initialized, Camera: $hasCameraPermission, Audio: $hasAudioPermission")
+                val hasCameraPermission = ContextCompat.checkSelfPermission(
+                    this@MainActivity,
+                    Manifest.permission.CAMERA
+                ) == PackageManager.PERMISSION_GRANTED
+                val hasAudioPermission = ContextCompat.checkSelfPermission(
+                    this@MainActivity,
+                    Manifest.permission.RECORD_AUDIO
+                ) == PackageManager.PERMISSION_GRANTED
+                if (!hasCameraPermission || !hasAudioPermission) {
+                    throw IllegalStateException("缺少媒体采集所需的关键权限")
+                }
+
+                val projectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as? MediaProjectionManager
+                    ?: throw IllegalStateException("无法获取MediaProjection服务")
+                val displayManager = getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager
+                    ?: throw IllegalStateException("无法获取DisplayManager")
+                val audioManager = getSystemService(Context.AUDIO_SERVICE)
+                    ?: throw IllegalStateException("无法获取音频服务")
+
+                Log.d(
+                    TAG,
+                    "Media manager initialized with projectionManager=$projectionManager displayManager=$displayManager audioManager=$audioManager"
+                )
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to initialize media manager", e)
                 throw e
@@ -755,16 +863,30 @@ class MainActivity : ComponentActivity() {
         withContext(Dispatchers.IO) {
             try {
                 Log.d(TAG, "Initializing background services")
-                delay(200) // 模拟后台服务启动
-                
-                // 检查通知权限
                 val hasNotificationPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+                    ContextCompat.checkSelfPermission(
+                        this@MainActivity,
+                        Manifest.permission.POST_NOTIFICATIONS
+                    ) == PackageManager.PERMISSION_GRANTED
                 } else {
-                    true // Android 13以下默认有通知权限
+                    true
                 }
-                
-                Log.d(TAG, "Background services initialized, Notification: $hasNotificationPermission")
+                if (!hasNotificationPermission) {
+                    throw IllegalStateException("缺少通知权限，无法启动通知中心")
+                }
+
+                val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    val channel = NotificationChannel(
+                        SYSTEM_NOTIFICATION_CHANNEL,
+                        "系统通知",
+                        NotificationManager.IMPORTANCE_DEFAULT
+                    ).apply {
+                        description = "云桥司南运行状态与连接提示"
+                    }
+                    notificationManager.createNotificationChannel(channel)
+                }
+                Log.d(TAG, "Background services initialized with notification channels")
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to initialize background services", e)
                 throw e
@@ -830,14 +952,11 @@ class MainActivity : ComponentActivity() {
         withContext(Dispatchers.IO) {
             try {
                 Log.d(TAG, "Initializing network manager in safe mode")
-                delay(200)
-                
-                // 只进行基础网络检查，不需要特殊权限
                 val connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+                connectivityManager.activeNetwork ?: Log.w(TAG, "No active network during safe initialization")
                 Log.d(TAG, "Safe network manager initialized")
             } catch (e: Exception) {
                 Log.w(TAG, "Failed to initialize safe network manager", e)
-                // 降级模式下不抛出异常
             }
         }
     }
@@ -860,12 +979,21 @@ class MainActivity : ComponentActivity() {
                     color = MaterialTheme.colorScheme.background
                 ) {
                     if (isInitializationComplete) {
-                        MainScreen(
-                            onThemeChange = { dark, dynamic ->
-                                isDarkTheme = dark
-                                useDynamicColor = dynamic
-                            }
-                        )
+                        val account = authenticatedAccount
+                        if (account != null) {
+                            MainScreen(
+                                onThemeChange = { dark, dynamic ->
+                                    isDarkTheme = dark
+                                    useDynamicColor = dynamic
+                                },
+                                currentAccount = account
+                            )
+                        } else {
+                            LoginScreen(
+                                userAccountManager = userAccountManager,
+                                onAuthenticated = { authenticatedAccount = it }
+                            )
+                        }
                     } else {
                         InitializationScreen(
                             progress = initializationProgress,
