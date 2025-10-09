@@ -1,0 +1,677 @@
+// !$*UTF8*$!
+{
+archiveVersion = 1;
+classes = {
+};
+objectVersion = 56;
+objects = {
+
+/* Begin PBXBuildFile section */
+7E4CC300282C4D3F00A1D2F6 /* SkybridgeCompassApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E4CC2E0282C4D3E00A1D2F6 /* SkybridgeCompassApp.swift */; };
+7E4CC301282C4D3F00A1D2F6 /* DashboardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E4CC2E1282C4D3E00A1D2F6 /* DashboardView.swift */; };
+7E4CC302282C4D3F00A1D2F6 /* ActivityStatusView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E4CC2E2282C4D3E00A1D2F6 /* ActivityStatusView.swift */; };
+7E4CC303282C4D3F00A1D2F6 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E4CC2E3282C4D3E00A1D2F6 /* SettingsView.swift */; };
+7E4CC304282C4D3F00A1D2F6 /* RemoteShellView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E4CC2E4282C4D3E00A1D2F6 /* RemoteShellView.swift */; };
+7E4CC305282C4D3F00A1D2F6 /* StatusModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E4CC2E5282C4D3E00A1D2F6 /* StatusModels.swift */; };
+7E4CC306282C4D3F00A1D2F6 /* DashboardViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E4CC2E6282C4D3E00A1D2F6 /* DashboardViewModel.swift */; };
+7E4CC307282C4D3F00A1D2F6 /* DeviceStatusService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E4CC2E7282C4D3E00A1D2F6 /* DeviceStatusService.swift */; };
+7E4CC308282C4D3F00A1D2F6 /* RemoteShellService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E4CC2E8282C4D3E00A1D2F6 /* RemoteShellService.swift */; };
+7E4CC309282C4D3F00A1D2F6 /* DeviceStatusStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E4CC2E9282C4D3E00A1D2F6 /* DeviceStatusStore.swift */; };
+7E4CC30A282C4D3F00A1D2F6 /* Duration+Extensions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E4CC2EA282C4D3E00A1D2F6 /* Duration+Extensions.swift */; };
+7E4CC30B282C4D3F00A1D2F6 /* View+LiquidGlass.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E4CC2EB282C4D3E00A1D2F6 /* View+LiquidGlass.swift */; };
+7E4CC30C282C4D3F00A1D2F6 /* DeviceStatusActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E4CC2EC282C4D3E00A1D2F6 /* DeviceStatusActivity.swift */; };
+7E4CC30D282C4D3F00A1D2F6 /* QuickStatusIntent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E4CC2ED282C4D3E00A1D2F6 /* QuickStatusIntent.swift */; };
+7E4CC30E282C4D3F00A1D2F6 /* DeviceStatusWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E4CC2F0282C4D3E00A1D2F6 /* DeviceStatusWidget.swift */; };
+7E4CC30F282C4D3F00A1D2F6 /* SkybridgeCompassWidgetBundle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E4CC2F1282C4D3E00A1D2F6 /* SkybridgeCompassWidgetBundle.swift */; };
+7E4CC310282C4D3F00A1D2F6 /* StatusModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E4CC2E5282C4D3E00A1D2F6 /* StatusModels.swift */; };
+7E4CC311282C4D3F00A1D2F6 /* DeviceStatusStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E4CC2E9282C4D3E00A1D2F6 /* DeviceStatusStore.swift */; };
+7E4CC312282C4D3F00A1D2F6 /* Duration+Extensions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E4CC2EA282C4D3E00A1D2F6 /* Duration+Extensions.swift */; };
+7E4CC313282C4D3F00A1D2F6 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 7E4CC2F8282C4D3E00A1D2F6 /* Assets.xcassets */; };
+7E4CC3A7282C4D4000A1D2F6 /* OperationsModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E4CC3A2282C4D4000A1D2F6 /* OperationsModels.swift */; };
+7E4CC3A8282C4D4000A1D2F6 /* OperationsServices.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E4CC3A3282C4D4000A1D2F6 /* OperationsServices.swift */; };
+7E4CC3A9282C4D4000A1D2F6 /* RemoteDesktopView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E4CC3A4282C4D4000A1D2F6 /* RemoteDesktopView.swift */; };
+7E4CC3AA282C4D4000A1D2F6 /* FileTransferView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E4CC3A5282C4D4000A1D2F6 /* FileTransferView.swift */; };
+7E4CC3AB282C4D4000A1D2F6 /* CompassAPIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E4CC3A6282C4D4000A1D2F6 /* CompassAPIClient.swift */; };
+7E4CC2DE282C4D3F00A1D2F6 /* SkybridgeCompassWidgets.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = 7E4CC2D9282C4D3D00A1D2F6 /* SkybridgeCompassWidgets.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+7E4CC2DF282C4D3F00A1D2F6 /* PBXContainerItemProxy */ = {
+isa = PBXContainerItemProxy;
+containerPortal = 7E4CC2A5282C4D3D00A1D2F6 /* Project object */;
+proxyType = 1;
+remoteGlobalIDString = 7E4CC2CF282C4D3D00A1D2F6;
+remoteInfo = SkybridgeCompassWidgets;
+};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+7E4CC2DC282C4D3F00A1D2F6 /* Embed App Extensions */ = {
+isa = PBXCopyFilesBuildPhase;
+buildActionMask = 2147483647;
+dstPath = "";
+dstSubfolderSpec = 13;
+files = (
+7E4CC2DE282C4D3F00A1D2F6 /* SkybridgeCompassWidgets.appex in Embed App Extensions */,
+);
+name = "Embed App Extensions";
+runOnlyForDeploymentPostprocessing = 0;
+};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+7E4CC2C6282C4D3D00A1D2F6 /* Skybridge Compass.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Skybridge Compass.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+7E4CC2D9282C4D3D00A1D2F6 /* SkybridgeCompassWidgets.appex */ = {isa = PBXFileReference; explicitFileType = wrapper.app-extension; includeInIndex = 0; path = SkybridgeCompassWidgets.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+7E4CC2E0282C4D3E00A1D2F6 /* SkybridgeCompassApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkybridgeCompassApp.swift; sourceTree = "<group>"; };
+7E4CC2E1282C4D3E00A1D2F6 /* DashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardView.swift; sourceTree = "<group>"; };
+7E4CC2E2282C4D3E00A1D2F6 /* ActivityStatusView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActivityStatusView.swift; sourceTree = "<group>"; };
+7E4CC2E3282C4D3E00A1D2F6 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+7E4CC2E4282C4D3E00A1D2F6 /* RemoteShellView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteShellView.swift; sourceTree = "<group>"; };
+7E4CC2E5282C4D3E00A1D2F6 /* StatusModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusModels.swift; sourceTree = "<group>"; };
+7E4CC2E6282C4D3E00A1D2F6 /* DashboardViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardViewModel.swift; sourceTree = "<group>"; };
+7E4CC2E7282C4D3E00A1D2F6 /* DeviceStatusService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceStatusService.swift; sourceTree = "<group>"; };
+7E4CC2E8282C4D3E00A1D2F6 /* RemoteShellService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteShellService.swift; sourceTree = "<group>"; };
+7E4CC2E9282C4D3E00A1D2F6 /* DeviceStatusStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceStatusStore.swift; sourceTree = "<group>"; };
+7E4CC2EA282C4D3E00A1D2F6 /* Duration+Extensions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Duration+Extensions.swift"; sourceTree = "<group>"; };
+7E4CC2EB282C4D3E00A1D2F6 /* View+LiquidGlass.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "View+LiquidGlass.swift"; sourceTree = "<group>"; };
+7E4CC2EC282C4D3E00A1D2F6 /* DeviceStatusActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceStatusActivity.swift; sourceTree = "<group>"; };
+7E4CC2ED282C4D3E00A1D2F6 /* QuickStatusIntent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickStatusIntent.swift; sourceTree = "<group>"; };
+7E4CC2F0282C4D3E00A1D2F6 /* DeviceStatusWidget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceStatusWidget.swift; sourceTree = "<group>"; };
+7E4CC2F1282C4D3E00A1D2F6 /* SkybridgeCompassWidgetBundle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkybridgeCompassWidgetBundle.swift; sourceTree = "<group>"; };
+7E4CC2F8282C4D3E00A1D2F6 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+7E4CC2F9282C4D3E00A1D2F6 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+7E4CC2FA282C4D3E00A1D2F6 /* WidgetInfo.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = WidgetInfo.plist; sourceTree = "<group>"; };
+7E4CC3A2282C4D4000A1D2F6 /* OperationsModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OperationsModels.swift; sourceTree = "<group>"; };
+7E4CC3A3282C4D4000A1D2F6 /* OperationsServices.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OperationsServices.swift; sourceTree = "<group>"; };
+7E4CC3A4282C4D4000A1D2F6 /* RemoteDesktopView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteDesktopView.swift; sourceTree = "<group>"; };
+7E4CC3A5282C4D4000A1D2F6 /* FileTransferView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileTransferView.swift; sourceTree = "<group>"; };
+7E4CC3A6282C4D4000A1D2F6 /* CompassAPIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompassAPIClient.swift; sourceTree = "<group>"; };
+7E4CC3B7282C4D4000A1D2F6 /* GenerateAppIcon.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Scripts/GenerateAppIcon.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+7E4CC2B8282C4D3D00A1D2F6 /* Frameworks */ = {
+isa = PBXFrameworksBuildPhase;
+buildActionMask = 2147483647;
+files = (
+);
+runOnlyForDeploymentPostprocessing = 0;
+};
+7E4CC2D2282C4D3D00A1D2F6 /* Frameworks */ = {
+isa = PBXFrameworksBuildPhase;
+buildActionMask = 2147483647;
+files = (
+);
+runOnlyForDeploymentPostprocessing = 0;
+};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+7E4CC2A4282C4D3D00A1D2F6 = {
+isa = PBXGroup;
+children = (
+7E4CC2AA282C4D3D00A1D2F6 /* SkybridgeCompass */,
+7E4CC2A8282C4D3D00A1D2F6 /* Products */,
+);
+sourceTree = "<group>";
+};
+7E4CC2A8282C4D3D00A1D2F6 /* Products */ = {
+isa = PBXGroup;
+children = (
+7E4CC2C6282C4D3D00A1D2F6 /* Skybridge Compass.app */,
+7E4CC2D9282C4D3D00A1D2F6 /* SkybridgeCompassWidgets.appex */,
+);
+name = Products;
+sourceTree = "<group>";
+};
+7E4CC2AA282C4D3D00A1D2F6 /* SkybridgeCompass */ = {
+isa = PBXGroup;
+children = (
+        7E4CC2B7282C4D3E00A1D2F6 /* Sources */,
+        7E4CC2B5282C4D3E00A1D2F6 /* Resources */,
+        7E4CC2F6282C4D3E00A1D2F6 /* Supporting */,
+        7E4CC3B8282C4D4000A1D2F6 /* Scripts */,
+);
+path = SkybridgeCompass;
+sourceTree = "<group>";
+};
+7E4CC2B5282C4D3E00A1D2F6 /* Resources */ = {
+isa = PBXGroup;
+children = (
+7E4CC2F8282C4D3E00A1D2F6 /* Assets.xcassets */,
+);
+path = Resources;
+sourceTree = "<group>";
+};
+7E4CC2F6282C4D3E00A1D2F6 /* Supporting */ = {
+    isa = PBXGroup;
+    children = (
+        7E4CC2F9282C4D3E00A1D2F6 /* Info.plist */,
+        7E4CC2FA282C4D3E00A1D2F6 /* WidgetInfo.plist */,
+    );
+    path = Supporting;
+    sourceTree = "<group>";
+};
+7E4CC3B8282C4D4000A1D2F6 /* Scripts */ = {
+    isa = PBXGroup;
+    children = (
+        7E4CC3B7282C4D4000A1D2F6 /* GenerateAppIcon.swift */,
+    );
+    path = Scripts;
+    sourceTree = "<group>";
+};
+7E4CC2B7282C4D3E00A1D2F6 /* Sources */ = {
+isa = PBXGroup;
+children = (
+7E4CC2EE282C4D3E00A1D2F6 /* App */,
+7E4CC2AB282C4D3E00A1D2F6 /* Features */,
+7E4CC2AE282C4D3E00A1D2F6 /* Models */,
+7E4CC2AF282C4D3E00A1D2F6 /* Services */,
+7E4CC2B0282C4D3E00A1D2F6 /* ViewModels */,
+7E4CC2B1282C4D3E00A1D2F6 /* Utilities */,
+7E4CC2B2282C4D3E00A1D2F6 /* LiveActivities */,
+7E4CC2B3282C4D3E00A1D2F6 /* Intents */,
+7E4CC2B4282C4D3E00A1D2F6 /* Widgets */,
+);
+path = .;
+sourceTree = "<group>";
+};
+7E4CC2EE282C4D3E00A1D2F6 /* App */ = {
+isa = PBXGroup;
+children = (
+7E4CC2E0282C4D3E00A1D2F6 /* SkybridgeCompassApp.swift */,
+);
+name = App;
+sourceTree = "<group>";
+};
+7E4CC2AB282C4D3E00A1D2F6 /* Features */ = {
+isa = PBXGroup;
+children = (
+7E4CC2AC282C4D3E00A1D2F6 /* Dashboard */,
+7E4CC2AD282C4D3E00A1D2F6 /* RemoteShell */,
+);
+path = Features;
+sourceTree = "<group>";
+};
+7E4CC2AC282C4D3E00A1D2F6 /* Dashboard */ = {
+    isa = PBXGroup;
+    children = (
+        7E4CC2E1282C4D3E00A1D2F6 /* DashboardView.swift */,
+        7E4CC2E2282C4D3E00A1D2F6 /* ActivityStatusView.swift */,
+        7E4CC2E3282C4D3E00A1D2F6 /* SettingsView.swift */,
+        7E4CC3A4282C4D4000A1D2F6 /* RemoteDesktopView.swift */,
+        7E4CC3A5282C4D4000A1D2F6 /* FileTransferView.swift */,
+    );
+    path = Dashboard;
+    sourceTree = "<group>";
+};
+7E4CC2AD282C4D3E00A1D2F6 /* RemoteShell */ = {
+isa = PBXGroup;
+children = (
+7E4CC2E4282C4D3E00A1D2F6 /* RemoteShellView.swift */,
+);
+path = RemoteShell;
+sourceTree = "<group>";
+};
+7E4CC2AE282C4D3E00A1D2F6 /* Models */ = {
+    isa = PBXGroup;
+    children = (
+        7E4CC2E5282C4D3E00A1D2F6 /* StatusModels.swift */,
+        7E4CC3A2282C4D4000A1D2F6 /* OperationsModels.swift */,
+    );
+    path = Models;
+    sourceTree = "<group>";
+};
+7E4CC2AF282C4D3E00A1D2F6 /* Services */ = {
+    isa = PBXGroup;
+    children = (
+        7E4CC2E7282C4D3E00A1D2F6 /* DeviceStatusService.swift */,
+        7E4CC2E8282C4D3E00A1D2F6 /* RemoteShellService.swift */,
+        7E4CC3A3282C4D4000A1D2F6 /* OperationsServices.swift */,
+    );
+    path = Services;
+    sourceTree = "<group>";
+};
+7E4CC2B0282C4D3E00A1D2F6 /* ViewModels */ = {
+isa = PBXGroup;
+children = (
+7E4CC2E6282C4D3E00A1D2F6 /* DashboardViewModel.swift */,
+);
+path = ViewModels;
+sourceTree = "<group>";
+};
+7E4CC2B1282C4D3E00A1D2F6 /* Utilities */ = {
+    isa = PBXGroup;
+    children = (
+        7E4CC2E9282C4D3E00A1D2F6 /* DeviceStatusStore.swift */,
+        7E4CC2EA282C4D3E00A1D2F6 /* Duration+Extensions.swift */,
+        7E4CC2EB282C4D3E00A1D2F6 /* View+LiquidGlass.swift */,
+        7E4CC3A6282C4D4000A1D2F6 /* CompassAPIClient.swift */,
+    );
+    path = Utilities;
+    sourceTree = "<group>";
+};
+7E4CC2B2282C4D3E00A1D2F6 /* LiveActivities */ = {
+isa = PBXGroup;
+children = (
+7E4CC2EC282C4D3E00A1D2F6 /* DeviceStatusActivity.swift */,
+);
+path = LiveActivities;
+sourceTree = "<group>";
+};
+7E4CC2B3282C4D3E00A1D2F6 /* Intents */ = {
+isa = PBXGroup;
+children = (
+7E4CC2ED282C4D3E00A1D2F6 /* QuickStatusIntent.swift */,
+);
+path = Intents;
+sourceTree = "<group>";
+};
+7E4CC2B4282C4D3E00A1D2F6 /* Widgets */ = {
+isa = PBXGroup;
+children = (
+7E4CC2F0282C4D3E00A1D2F6 /* DeviceStatusWidget.swift */,
+7E4CC2F1282C4D3E00A1D2F6 /* SkybridgeCompassWidgetBundle.swift */,
+);
+path = Widgets;
+sourceTree = "<group>";
+};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+7E4CC2B6282C4D3D00A1D2F6 /* Skybridge Compass */ = {
+isa = PBXNativeTarget;
+buildConfigurationList = 7E4CC345282C4D3F00A1D2F6 /* Build configuration list for PBXNativeTarget "Skybridge Compass" */;
+buildPhases = (
+        7E4CC2B7282C4D3D00A1D2F6 /* Sources */,
+        7E4CC2B8282C4D3D00A1D2F6 /* Frameworks */,
+        7E4CC3B9282C4D4000A1D2F6 /* Generate App Icon */,
+        7E4CC2B9282C4D3D00A1D2F6 /* Resources */,
+        7E4CC2DC282C4D3F00A1D2F6 /* Embed App Extensions */,
+);
+buildRules = (
+);
+dependencies = (
+7E4CC2DD282C4D3F00A1D2F6 /* PBXTargetDependency */,
+);
+name = "Skybridge Compass";
+productName = "Skybridge Compass";
+productReference = 7E4CC2C6282C4D3D00A1D2F6 /* Skybridge Compass.app */;
+productType = "com.apple.product-type.application";
+};
+7E4CC2CF282C4D3D00A1D2F6 /* SkybridgeCompassWidgets */ = {
+    isa = PBXNativeTarget;
+    buildConfigurationList = 7E4CC348282C4D3F00A1D2F6 /* Build configuration list for PBXNativeTarget "SkybridgeCompassWidgets" */;
+    buildPhases = (
+        7E4CC2D0282C4D3D00A1D2F6 /* Sources */,
+        7E4CC2D2282C4D3D00A1D2F6 /* Frameworks */,
+        7E4CC2D1282C4D3D00A1D2F6 /* Resources */,
+    );
+    buildRules = (
+    );
+    dependencies = (
+    );
+    name = SkybridgeCompassWidgets;
+    productName = SkybridgeCompassWidgets;
+    productReference = 7E4CC2D9282C4D3D00A1D2F6 /* SkybridgeCompassWidgets.appex */;
+    productType = "com.apple.product-type.app-extension";
+};
+/* End PBXNativeTarget section */
+
+/* Begin PBXShellScriptBuildPhase section */
+7E4CC3B9282C4D4000A1D2F6 /* Generate App Icon */ = {
+    isa = PBXShellScriptBuildPhase;
+    buildActionMask = 2147483647;
+    files = (
+    );
+    inputPaths = (
+    );
+    name = "Generate App Icon";
+    outputPaths = (
+    );
+    runOnlyForDeploymentPostprocessing = 0;
+    shellPath = /bin/sh;
+    shellScript = "SCRIPT_DIR=\"${PROJECT_DIR}/SkybridgeCompass/Scripts\"\nICONSET=\"${PROJECT_DIR}/SkybridgeCompass/Resources/Assets.xcassets/AppIcon.appiconset\"\nSCRIPT=\"${SCRIPT_DIR}/GenerateAppIcon.swift\"\nOUTPUT=\"${ICONSET}/AppIcon.png\"\nif [ -f \"$SCRIPT\" ]; then\n  if [ ! -f \"$OUTPUT\" ]; then\n    echo \"Generating Skybridge Compass app icon via script\"\n    /usr/bin/swift \"$SCRIPT\" \"$OUTPUT\"\n  fi\nelse\n  echo \"warning: Missing GenerateAppIcon.swift\" 1>&2\nfi\n";
+};
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXProject section */
+7E4CC2A5282C4D3D00A1D2F6 /* Project object */ = {
+isa = PBXProject;
+attributes = {
+LastSwiftUpdateCheck = 1600;
+LastUpgradeCheck = 1600;
+TargetAttributes = {
+7E4CC2B6282C4D3D00A1D2F6 = {
+SystemCapabilities = {
+com.apple.ApplicationGroups.iOS = {
+enabled = 1;
+};
+};
+};
+};
+};
+buildConfigurationList = 7E4CC342282C4D3F00A1D2F6 /* Build configuration list for PBXProject "SkybridgeCompass" */;
+compatibilityVersion = "Xcode 15.0";
+developmentRegion = en;
+hasScannedForEncodings = 0;
+knownRegions = (
+en,
+Base,
+"zh-Hans",
+);
+mainGroup = 7E4CC2A4282C4D3D00A1D2F6;
+productRefGroup = 7E4CC2A8282C4D3D00A1D2F6 /* Products */;
+projectDirPath = "";
+projectRoot = "";
+targets = (
+7E4CC2B6282C4D3D00A1D2F6 /* Skybridge Compass */,
+7E4CC2CF282C4D3D00A1D2F6 /* SkybridgeCompassWidgets */,
+);
+};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+7E4CC2B9282C4D3D00A1D2F6 /* Resources */ = {
+isa = PBXResourcesBuildPhase;
+buildActionMask = 2147483647;
+files = (
+7E4CC313282C4D3F00A1D2F6 /* Assets.xcassets in Resources */,
+);
+runOnlyForDeploymentPostprocessing = 0;
+};
+7E4CC2D1282C4D3D00A1D2F6 /* Resources */ = {
+isa = PBXResourcesBuildPhase;
+buildActionMask = 2147483647;
+files = (
+);
+runOnlyForDeploymentPostprocessing = 0;
+};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+7E4CC2B7282C4D3D00A1D2F6 /* Sources */ = {
+isa = PBXSourcesBuildPhase;
+buildActionMask = 2147483647;
+files = (
+7E4CC30D282C4D3F00A1D2F6 /* QuickStatusIntent.swift in Sources */,
+7E4CC30C282C4D3F00A1D2F6 /* DeviceStatusActivity.swift in Sources */,
+7E4CC304282C4D3F00A1D2F6 /* RemoteShellView.swift in Sources */,
+7E4CC303282C4D3F00A1D2F6 /* SettingsView.swift in Sources */,
+7E4CC302282C4D3F00A1D2F6 /* ActivityStatusView.swift in Sources */,
+7E4CC309282C4D3F00A1D2F6 /* DeviceStatusStore.swift in Sources */,
+7E4CC30B282C4D3F00A1D2F6 /* View+LiquidGlass.swift in Sources */,
+7E4CC307282C4D3F00A1D2F6 /* DeviceStatusService.swift in Sources */,
+            7E4CC30A282C4D3F00A1D2F6 /* Duration+Extensions.swift in Sources */,
+            7E4CC305282C4D3F00A1D2F6 /* StatusModels.swift in Sources */,
+            7E4CC308282C4D3F00A1D2F6 /* RemoteShellService.swift in Sources */,
+            7E4CC300282C4D3F00A1D2F6 /* SkybridgeCompassApp.swift in Sources */,
+            7E4CC301282C4D3F00A1D2F6 /* DashboardView.swift in Sources */,
+            7E4CC306282C4D3F00A1D2F6 /* DashboardViewModel.swift in Sources */,
+            7E4CC3A7282C4D4000A1D2F6 /* OperationsModels.swift in Sources */,
+            7E4CC3A8282C4D4000A1D2F6 /* OperationsServices.swift in Sources */,
+            7E4CC3A9282C4D4000A1D2F6 /* RemoteDesktopView.swift in Sources */,
+            7E4CC3AA282C4D4000A1D2F6 /* FileTransferView.swift in Sources */,
+            7E4CC3AB282C4D4000A1D2F6 /* CompassAPIClient.swift in Sources */,
+);
+runOnlyForDeploymentPostprocessing = 0;
+};
+7E4CC2D0282C4D3D00A1D2F6 /* Sources */ = {
+isa = PBXSourcesBuildPhase;
+buildActionMask = 2147483647;
+files = (
+7E4CC30E282C4D3F00A1D2F6 /* DeviceStatusWidget.swift in Sources */,
+7E4CC30F282C4D3F00A1D2F6 /* SkybridgeCompassWidgetBundle.swift in Sources */,
+7E4CC310282C4D3F00A1D2F6 /* StatusModels.swift in Sources */,
+7E4CC311282C4D3F00A1D2F6 /* DeviceStatusStore.swift in Sources */,
+7E4CC312282C4D3F00A1D2F6 /* Duration+Extensions.swift in Sources */,
+);
+runOnlyForDeploymentPostprocessing = 0;
+};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+7E4CC2DD282C4D3F00A1D2F6 /* PBXTargetDependency */ = {
+isa = PBXTargetDependency;
+target = 7E4CC2CF282C4D3D00A1D2F6 /* SkybridgeCompassWidgets */;
+targetProxy = 7E4CC2DF282C4D3F00A1D2F6 /* PBXContainerItemProxy */;
+};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+7E4CC340282C4D3F00A1D2F6 /* Debug */ = {
+isa = XCBuildConfiguration;
+buildSettings = {
+ALWAYS_SEARCH_USER_PATHS = NO;
+CLANG_ANALYZER_NONNULL = YES;
+CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+CLANG_ENABLE_MODULES = YES;
+CLANG_ENABLE_OBJC_ARC = YES;
+CLANG_ENABLE_OBJC_WEAK = YES;
+CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+CLANG_WARN_BOOL_CONVERSION = YES;
+CLANG_WARN_COMMA = YES;
+CLANG_WARN_CONSTANT_CONVERSION = YES;
+CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+CLANG_WARN_EMPTY_BODY = YES;
+CLANG_WARN_ENUM_CONVERSION = YES;
+CLANG_WARN_INFINITE_RECURSION = YES;
+CLANG_WARN_INT_CONVERSION = YES;
+CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+CLANG_WARN_STRICT_PROTOTYPES = YES;
+CLANG_WARN_SUSPICIOUS_MOVE = YES;
+CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+CODE_SIGN_IDENTITY = "Apple Development";
+COPY_PHASE_STRIP = NO;
+DEBUG_INFORMATION_FORMAT = dwarf;
+ENABLE_STRICT_OBJC_MSGSEND = YES;
+ENABLE_TESTABILITY = YES;
+GCC_C_LANGUAGE_STANDARD = gnu17;
+GCC_DYNAMIC_NO_PIC = NO;
+GCC_NO_COMMON_BLOCKS = YES;
+GCC_OPTIMIZATION_LEVEL = 0;
+GCC_PREPROCESSOR_DEFINITIONS = (
+"DEBUG=1",
+"$(inherited)",
+);
+GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+GCC_WARN_UNDECLARED_SELECTOR = YES;
+GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+GCC_WARN_UNUSED_FUNCTION = YES;
+GCC_WARN_UNUSED_VARIABLE = YES;
+               IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+ONLY_ACTIVE_ARCH = YES;
+SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+SWIFT_VERSION = 6.0;
+TARGETED_DEVICE_FAMILY = "1,2";
+};
+name = Debug;
+};
+7E4CC341282C4D3F00A1D2F6 /* Release */ = {
+isa = XCBuildConfiguration;
+buildSettings = {
+ALWAYS_SEARCH_USER_PATHS = NO;
+CLANG_ANALYZER_NONNULL = YES;
+CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+CLANG_ENABLE_MODULES = YES;
+CLANG_ENABLE_OBJC_ARC = YES;
+CLANG_ENABLE_OBJC_WEAK = YES;
+CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+CLANG_WARN_BOOL_CONVERSION = YES;
+CLANG_WARN_COMMA = YES;
+CLANG_WARN_CONSTANT_CONVERSION = YES;
+CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+CLANG_WARN_EMPTY_BODY = YES;
+CLANG_WARN_ENUM_CONVERSION = YES;
+CLANG_WARN_INFINITE_RECURSION = YES;
+CLANG_WARN_INT_CONVERSION = YES;
+CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+CLANG_WARN_STRICT_PROTOTYPES = YES;
+CLANG_WARN_SUSPICIOUS_MOVE = YES;
+CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+CODE_SIGN_IDENTITY = "Apple Distribution";
+COPY_PHASE_STRIP = NO;
+ENABLE_NS_ASSERTIONS = NO;
+ENABLE_STRICT_OBJC_MSGSEND = YES;
+GCC_C_LANGUAGE_STANDARD = gnu17;
+GCC_NO_COMMON_BLOCKS = YES;
+GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+GCC_WARN_UNDECLARED_SELECTOR = YES;
+GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+GCC_WARN_UNUSED_FUNCTION = YES;
+GCC_WARN_UNUSED_VARIABLE = YES;
+               IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+MTL_ENABLE_DEBUG_INFO = NO;
+SWIFT_COMPILATION_MODE = wholemodule;
+SWIFT_OPTIMIZATION_LEVEL = "-O";
+SWIFT_VERSION = 6.0;
+TARGETED_DEVICE_FAMILY = "1,2";
+};
+name = Release;
+};
+7E4CC343282C4D3F00A1D2F6 /* Debug */ = {
+isa = XCBuildConfiguration;
+buildSettings = {
+ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+CODE_SIGN_STYLE = Automatic;
+CURRENT_PROJECT_VERSION = 1;
+DEVELOPMENT_TEAM = "";
+GENERATE_INFOPLIST_FILE = NO;
+INFOPLIST_FILE = SkybridgeCompass/Supporting/Info.plist;
+INFOPLIST_KEY_CFBundleDisplayName = "云桥司南";
+               IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+LD_RUNPATH_SEARCH_PATHS = (
+"$(inherited)",
+"@executable_path/Frameworks",
+);
+MARKETING_VERSION = 1.0;
+PRODUCT_BUNDLE_IDENTIFIER = com.skybridge.compass;
+PRODUCT_NAME = "Skybridge Compass";
+SWIFT_EMIT_LOC_STRINGS = YES;
+SWIFT_VERSION = 6.0;
+SUPPORTS_MACCATALYST = NO;
+TARGETED_DEVICE_FAMILY = "1,2";
+};
+name = Debug;
+};
+7E4CC344282C4D3F00A1D2F6 /* Release */ = {
+isa = XCBuildConfiguration;
+buildSettings = {
+ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+CODE_SIGN_STYLE = Automatic;
+CURRENT_PROJECT_VERSION = 1;
+DEVELOPMENT_TEAM = "";
+GENERATE_INFOPLIST_FILE = NO;
+INFOPLIST_FILE = SkybridgeCompass/Supporting/Info.plist;
+INFOPLIST_KEY_CFBundleDisplayName = "云桥司南";
+               IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+LD_RUNPATH_SEARCH_PATHS = (
+"$(inherited)",
+"@executable_path/Frameworks",
+);
+MARKETING_VERSION = 1.0;
+PRODUCT_BUNDLE_IDENTIFIER = com.skybridge.compass;
+PRODUCT_NAME = "Skybridge Compass";
+SWIFT_EMIT_LOC_STRINGS = YES;
+SWIFT_VERSION = 6.0;
+SUPPORTS_MACCATALYST = NO;
+TARGETED_DEVICE_FAMILY = "1,2";
+};
+name = Release;
+};
+7E4CC346282C4D3F00A1D2F6 /* Debug */ = {
+isa = XCBuildConfiguration;
+buildSettings = {
+CODE_SIGN_STYLE = Automatic;
+CURRENT_PROJECT_VERSION = 1;
+DEVELOPMENT_TEAM = "";
+GENERATE_INFOPLIST_FILE = NO;
+INFOPLIST_FILE = SkybridgeCompass/Supporting/WidgetInfo.plist;
+               IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+LD_RUNPATH_SEARCH_PATHS = (
+"$(inherited)",
+"@executable_path/Frameworks",
+"@executable_path/../../Frameworks",
+);
+MARKETING_VERSION = 1.0;
+PRODUCT_BUNDLE_IDENTIFIER = com.skybridge.compass.widgets;
+PRODUCT_NAME = SkybridgeCompassWidgets;
+SKIP_INSTALL = YES;
+SWIFT_VERSION = 6.0;
+TARGETED_DEVICE_FAMILY = "1,2";
+};
+name = Debug;
+};
+7E4CC347282C4D3F00A1D2F6 /* Release */ = {
+isa = XCBuildConfiguration;
+buildSettings = {
+CODE_SIGN_STYLE = Automatic;
+CURRENT_PROJECT_VERSION = 1;
+DEVELOPMENT_TEAM = "";
+GENERATE_INFOPLIST_FILE = NO;
+INFOPLIST_FILE = SkybridgeCompass/Supporting/WidgetInfo.plist;
+               IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+LD_RUNPATH_SEARCH_PATHS = (
+"$(inherited)",
+"@executable_path/Frameworks",
+"@executable_path/../../Frameworks",
+);
+MARKETING_VERSION = 1.0;
+PRODUCT_BUNDLE_IDENTIFIER = com.skybridge.compass.widgets;
+PRODUCT_NAME = SkybridgeCompassWidgets;
+SKIP_INSTALL = YES;
+SWIFT_VERSION = 6.0;
+TARGETED_DEVICE_FAMILY = "1,2";
+};
+name = Release;
+};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+7E4CC342282C4D3F00A1D2F6 /* Build configuration list for PBXProject "SkybridgeCompass" */ = {
+isa = XCConfigurationList;
+buildConfigurations = (
+7E4CC340282C4D3F00A1D2F6 /* Debug */,
+7E4CC341282C4D3F00A1D2F6 /* Release */,
+);
+defaultConfigurationIsVisible = 0;
+defaultConfigurationName = Release;
+};
+7E4CC345282C4D3F00A1D2F6 /* Build configuration list for PBXNativeTarget "Skybridge Compass" */ = {
+isa = XCConfigurationList;
+buildConfigurations = (
+7E4CC343282C4D3F00A1D2F6 /* Debug */,
+7E4CC344282C4D3F00A1D2F6 /* Release */,
+);
+defaultConfigurationIsVisible = 0;
+defaultConfigurationName = Release;
+};
+7E4CC348282C4D3F00A1D2F6 /* Build configuration list for PBXNativeTarget "SkybridgeCompassWidgets" */ = {
+isa = XCConfigurationList;
+buildConfigurations = (
+7E4CC346282C4D3F00A1D2F6 /* Debug */,
+7E4CC347282C4D3F00A1D2F6 /* Release */,
+);
+defaultConfigurationIsVisible = 0;
+defaultConfigurationName = Release;
+};
+/* End XCConfigurationList section */
+};
+rootObject = 7E4CC2A5282C4D3D00A1D2F6 /* Project object */;
+}
