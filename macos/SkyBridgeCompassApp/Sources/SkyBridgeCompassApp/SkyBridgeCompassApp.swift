@@ -51,17 +51,17 @@ private struct RootContainerView: View {
             if let session = authModel.currentSession {
                 DashboardView()
                     .onAppear {
-                        dashboardModel.updateAuthentication(session: session)
+                        Task { await dashboardModel.updateAuthentication(session: session) }
                     }
             } else {
                 AuthenticationView()
                     .onAppear {
-                        dashboardModel.updateAuthentication(session: nil)
+                        Task { await dashboardModel.updateAuthentication(session: nil) }
                     }
             }
         }
         .onChange(of: authModel.currentSession) { newSession in
-            dashboardModel.updateAuthentication(session: newSession)
+            Task { await dashboardModel.updateAuthentication(session: newSession) }
         }
         .animation(.easeInOut(duration: 0.25), value: authModel.currentSession != nil)
     }

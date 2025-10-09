@@ -25,11 +25,12 @@ final class DashboardViewModel: ObservableObject {
     }
 
     /// 由根视图调用以更新认证状态。
-    func updateAuthentication(session: AuthSession?) {
+    func updateAuthentication(session: AuthSession?) async {
         if let session {
-            tenantController.bindAuthentication(session: session)
+            await tenantController.bindAuthentication(session: session)
+            await start()
         } else {
-            tenantController.clearAuthentication()
+            await tenantController.clearAuthentication()
             stop()
         }
     }

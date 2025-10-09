@@ -104,17 +104,23 @@ public final class TenantAccessController {
     private init() {}
 
     /// 在成功登录后绑定新的访问令牌。
-    public func bindAuthentication(session: AuthSession) {
-        queue.async(flags: .barrier) {
-            self.currentSession = session
-            self.log.info("Bind authentication session for %{public}@", session.userIdentifier)
+    public func bindAuthentication(session: AuthSession) async {
+        await withCheckedContinuation { continuation in
+            queue.async(flags: .barrier) {
+                self.currentSession = session
+                self.log.info("Bind authentication session for %{public}@", session.userIdentifier)
+                continuation.resume()
+            }
         }
     }
 
     /// 注销时清理访问令牌，避免旧会话被误用。
-    public func clearAuthentication() {
-        queue.async(flags: .barrier) {
-            self.currentSession = nil
+    public func clearAuthentication() async {
+        await withCheckedContinuation { continuation in
+            queue.async(flags: .barrier) {
+                self.currentSession = nil
+                continuation.resume()
+            }
         }
     }
 

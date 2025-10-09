@@ -181,6 +181,9 @@ private final class RemoteDesktopSession {
     private let summaryChanged: () -> Void
     private let stateChanged: () -> Void
 
+    private let continuationLock = NSLock()
+    private var connectionContinuation: CheckedContinuation<Void, Error>?
+
     private(set) var summary: RemoteSessionSummary
     private(set) var clientState: CBFreeRDPClientState = .idle
 
@@ -219,14 +222,22 @@ private final class RemoteDesktopSession {
         clientState = .connecting
         stateChanged()
         try await withCheckedThrowingContinuation { continuation in
-            var error: NSError?
-            if self.client.connectWithError(&error) {
-                continuation.resume(returning: ())
-            } else {
-                self.clientState = .failed
-                self.stateChanged()
-                continuation.resume(throwing: error ?? RemoteDesktopError.connectionFailed("libfreerdp2.dylib 未连接"))
+            continuationLock.lock()
+            if connectionContinuation != nil {
+                continuationLock.unlock()
+                continuation.resume(throwing: RemoteDesktopError.connectionFailed("重复的连接请求"))
+                return
             }
+            connectionContinuation = continuation
+            continuationLock.unlock()
+
+            var error: NSError?
+            if self.client.connectWithError(&error) { return }
+
+            self.clientState = .failed
+            self.stateChanged()
+            let failure = error ?? RemoteDesktopError.connectionFailed("libfreerdp2.dylib 未连接")
+            self.resolveConnectionContinuation(.failure(failure))
         }
     }
 
@@ -263,8 +274,37 @@ private final class RemoteDesktopSession {
         client.stateCallback = { [weak self] description in
             guard let self else { return }
             self.log.info("Session state updated %{public}@", description)
-            self.clientState = self.client.state
+            let newState = self.client.state
+            self.clientState = newState
             self.stateChanged()
+
+            switch newState {
+            case .connected:
+                self.resolveConnectionContinuation(.success(()))
+            case .failed:
+                self.resolveConnectionContinuation(.failure(RemoteDesktopError.connectionFailed(description)))
+            case .disconnected:
+                self.resolveConnectionContinuation(.failure(RemoteDesktopError.connectionFailed("FreeRDP 会话已断开")))
+            default:
+                break
+            }
+        }
+    }
+
+    private func resolveConnectionContinuation(_ result: Result<Void, Error>) {
+        continuationLock.lock()
+        guard let continuation = connectionContinuation else {
+            continuationLock.unlock()
+            return
+        }
+        connectionContinuation = nil
+        continuationLock.unlock()
+
+        switch result {
+        case .success:
+            continuation.resume(returning: ())
+        case .failure(let error):
+            continuation.resume(throwing: error)
         }
     }
 }
