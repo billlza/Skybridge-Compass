@@ -1,0 +1,98 @@
+Building for debugging...
+[0/8] Write sources
+[1/8] Write swift-version-41C403C3136A4E2D.txt
+[3/10] Compiling SkyBridgeCore PerformanceTestSuite.swift
+[4/10] Emitting module SkyBridgeCore
+[5/11] Compiling SkyBridgeCore PerformanceTestView.swift
+[6/31] Emitting module SkyBridgeCompassWidgets
+[7/31] Compiling SkyBridgeCompassWidgets CompassWidget.swift
+[7/31] Write Objects.LinkFileList
+[9/31] Compiling SkyBridgeCompassApp MissingIconHintView.swift
+[10/31] Compiling SkyBridgeCompassApp NSTextFieldRepresentable.swift
+[11/31] Compiling SkyBridgeCompassApp WindowFocusManager.swift
+[12/31] Compiling SkyBridgeCompassApp SkyBridgeCommands.swift
+[13/31] Compiling SkyBridgeCompassApp SkyBridgeCompassApp.swift
+[14/32] Compiling SkyBridgeCompassApp resource_bundle_accessor.swift
+[14/32] Linking SkyBridgeCompassWidgets
+[15/32] Applying SkyBridgeCompassWidgets
+[17/32] Compiling SkyBridgeCompassApp EventMonitor.swift
+[18/32] Compiling SkyBridgeCompassApp GlassSidebar.swift
+[19/32] Compiling SkyBridgeCompassApp RemoteDisplayView.swift
+[20/32] Compiling SkyBridgeCompassApp SiriIntents.swift
+[21/32] Compiling SkyBridgeCompassApp StarryBackground.swift
+[22/32] Compiling SkyBridgeCompassApp ThemeConfiguration.swift
+[23/32] Compiling SkyBridgeCompassApp AuthenticationView.swift
+[24/32] Compiling SkyBridgeCompassApp AuthenticationViewModel.swift
+[25/32] Emitting module SkyBridgeCompassApp
+[26/32] Compiling SkyBridgeCompassApp PreferencesView.swift
+[27/32] Compiling SkyBridgeCompassApp RemoteDesktopView.swift
+[28/32] Compiling SkyBridgeCompassApp DashboardView.swift
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCompassApp/DashboardView.swift:764:27: error: call can throw, but it is not marked with 'try' and the error is not handled
+ 762 |                     )
+ 763 |                     
+ 764 |                     await queue.asyncExecute {
+     |                           `- error: call can throw, but it is not marked with 'try' and the error is not handled
+ 765 |                         // 模拟数据加载，使用优化的块大小
+ 766 |                         let dataSize = 1024 * 1024 // 1MB 模拟数据
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCompassApp/DashboardView.swift:1363:38: warning: capture of 'work' with non-Sendable type '() throws -> T' in a '@Sendable' closure [#SendableClosureCaptures]
+1361 |             self.async {
+1362 |                 do {
+1363 |                     let result = try work()
+     |                                      |- warning: capture of 'work' with non-Sendable type '() throws -> T' in a '@Sendable' closure [#SendableClosureCaptures]
+     |                                      `- note: a function type must be marked '@Sendable' to conform to 'Sendable'
+1364 |                     continuation.resume(returning: result)
+1365 |                 } catch {
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCompassApp/DashboardViewModel.swift:42:19: warning: call to main actor-isolated instance method 'openSettings()' in a synchronous nonisolated context [#ActorIsolatedCall]
+ 40 |             queue: .main
+ 41 |         ) { [weak self] _ in
+ 42 |             self?.openSettings()
+    |                   `- warning: call to main actor-isolated instance method 'openSettings()' in a synchronous nonisolated context [#ActorIsolatedCall]
+ 43 |         }
+ 44 |     }
+    :
+149 |     /// 打开应用设置界面 - 使用符合macOS规范的原生设置窗口样式
+150 |     @MainActor
+151 |     public func openSettings() {
+    |                 `- note: calls to instance method 'openSettings()' from outside of its actor context are implicitly asynchronous
+152 |         // 调用回调函数切换到设置页面
+153 |         onNavigateToSettings?()
+
+[#ActorIsolatedCall]: <https://docs.swift.org/compiler/documentation/diagnostics/actor-isolated-call>
+[#SendableClosureCaptures]: <https://docs.swift.org/compiler/documentation/diagnostics/sendable-closure-captures>
+[29/32] Compiling SkyBridgeCompassApp DashboardViewModel.swift
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCompassApp/DashboardView.swift:764:27: error: call can throw, but it is not marked with 'try' and the error is not handled
+ 762 |                     )
+ 763 |                     
+ 764 |                     await queue.asyncExecute {
+     |                           `- error: call can throw, but it is not marked with 'try' and the error is not handled
+ 765 |                         // 模拟数据加载，使用优化的块大小
+ 766 |                         let dataSize = 1024 * 1024 // 1MB 模拟数据
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCompassApp/DashboardView.swift:1363:38: warning: capture of 'work' with non-Sendable type '() throws -> T' in a '@Sendable' closure [#SendableClosureCaptures]
+1361 |             self.async {
+1362 |                 do {
+1363 |                     let result = try work()
+     |                                      |- warning: capture of 'work' with non-Sendable type '() throws -> T' in a '@Sendable' closure [#SendableClosureCaptures]
+     |                                      `- note: a function type must be marked '@Sendable' to conform to 'Sendable'
+1364 |                     continuation.resume(returning: result)
+1365 |                 } catch {
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCompassApp/DashboardViewModel.swift:42:19: warning: call to main actor-isolated instance method 'openSettings()' in a synchronous nonisolated context [#ActorIsolatedCall]
+ 40 |             queue: .main
+ 41 |         ) { [weak self] _ in
+ 42 |             self?.openSettings()
+    |                   `- warning: call to main actor-isolated instance method 'openSettings()' in a synchronous nonisolated context [#ActorIsolatedCall]
+ 43 |         }
+ 44 |     }
+    :
+149 |     /// 打开应用设置界面 - 使用符合macOS规范的原生设置窗口样式
+150 |     @MainActor
+151 |     public func openSettings() {
+    |                 `- note: calls to instance method 'openSettings()' from outside of its actor context are implicitly asynchronous
+152 |         // 调用回调函数切换到设置页面
+153 |         onNavigateToSettings?()
+
+[#ActorIsolatedCall]: <https://docs.swift.org/compiler/documentation/diagnostics/actor-isolated-call>
+[#SendableClosureCaptures]: <https://docs.swift.org/compiler/documentation/diagnostics/sendable-closure-captures>

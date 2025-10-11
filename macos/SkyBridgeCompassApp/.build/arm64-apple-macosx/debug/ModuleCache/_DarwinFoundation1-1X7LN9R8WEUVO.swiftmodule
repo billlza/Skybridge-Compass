@@ -1,0 +1,16 @@
+---
+path:            '/Users/macbookpro/Desktop/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/macosx/prebuilt-modules/26.1/_DarwinFoundation1.swiftmodule/arm64e-apple-macos.swiftmodule'
+dependencies:
+  - mtime:           1759329814000000000
+    path:            '/Users/macbookpro/Desktop/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/macosx/prebuilt-modules/26.1/_DarwinFoundation1.swiftmodule/arm64e-apple-macos.swiftmodule'
+    size:            90220
+  - mtime:           1758903933000000000
+    path:            'usr/lib/swift/Swift.swiftmodule/arm64e-apple-macos.swiftinterface'
+    size:            2258303
+    sdk_relative:    true
+  - mtime:           1758905806000000000
+    path:            'usr/lib/swift/_DarwinFoundation1.swiftmodule/arm64e-apple-macos.swiftinterface'
+    size:            18855
+    sdk_relative:    true
+version:         1
+...

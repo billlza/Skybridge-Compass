@@ -1,0 +1,3 @@
+module Starscream {
+    header "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/include/Starscream-Swift.h"
+}

@@ -2,19 +2,31 @@ import Foundation
 import Combine
 import CryptoKit
 import Compression
+#if canImport(Starscream)
 import Starscream
+#endif
 import os.log
 import UserNotifications
 
+/// 文件传输管理器 - 遵循 macOS 最佳实践和 Swift 6.2 并发安全
+@MainActor
 public final class FileTransferManager: NSObject {
     private let session: URLSession
     private let queue = OperationQueue()
     private let subject = CurrentValueSubject<[FileTransferTask], Never>([])
+    #if canImport(Starscream)
     private var sockets: [UUID: WebSocket] = [:]
+    #else
+    private var sockets: [UUID: Any] = [:]
+    #endif
     private let log = Logger(subsystem: "com.skybridge.compass", category: "FileTransfer")
-    private let backgroundCoordinator = BackgroundTaskCoordinator.shared
-    private let tenantController = TenantAccessController.shared
-    private let notificationCenter = UNUserNotificationCenter.current()
+    
+    // 在非 .app 打包场景下，直接访问 UNUserNotificationCenter 会触发崩溃。
+    // 这里根据 Bundle 是否具有有效标识来安全地创建通知中心实例。
+    private let notificationCenter: UNUserNotificationCenter? = {
+        guard Bundle.main.bundleIdentifier != nil else { return nil }
+        return UNUserNotificationCenter.current()
+    }()
     private var completedTaskIDs = Set<UUID>()
 
     public var transfers: AnyPublisher<[FileTransferTask], Never> { subject.eraseToAnyPublisher() }
@@ -26,79 +38,99 @@ public final class FileTransferManager: NSObject {
         session = URLSession(configuration: configuration, delegate: nil, delegateQueue: queue)
         super.init()
         queue.maxConcurrentOperationCount = 4
-        backgroundCoordinator.register { [weak self] completion in
-            self?.resumePendingTransfers()
-            completion()
+        
+        // 注册后台处理器，使用 Sendable 闭包
+        BackgroundTaskCoordinator.shared.register { [weak self] completion in
+            Task { @MainActor in
+                await self?.resumePendingTransfers()
+                completion()
+            }
         }
     }
 
-    public func prepare() {
-        backgroundCoordinator.registerSystemTasks()
-        backgroundCoordinator.schedule()
-        log.info("FileTransferManager ready")
+    /// 准备文件传输管理器
+    public func prepare() async {
+        // 使用异步方式注册系统任务
+        await Task { @MainActor in
+            BackgroundTaskCoordinator.shared.registerSystemTasks()
+            BackgroundTaskCoordinator.shared.schedule()
+        }.value
+        log.info("FileTransferManager 已准备就绪")
     }
 
     public func stop() {
         subject.send([])
+        #if canImport(Starscream)
         sockets.values.forEach { $0.disconnect() }
+        #endif
         sockets.removeAll()
         completedTaskIDs.removeAll()
     }
 
-    public func startUpload(url: URL, to destination: URL) {
-        guard let tenant = try? tenantController.requirePermission(.fileTransfer) else {
-            log.error("Active tenant missing file transfer permission")
-            return
+    /// 开始上传文件
+    public func startUpload(url: URL, to destination: URL) async {
+        do {
+            let tenant = try await TenantAccessController.shared.requirePermission(.fileTransfer)
+            var request = URLRequest(url: destination)
+            request.httpMethod = "PUT"
+            request.addValue(tenant.displayName, forHTTPHeaderField: "X-SkyBridge-Tenant")
+            let task = session.uploadTask(with: request, fromFile: url)
+            task.resume()
+        } catch {
+            log.error("上传失败：租户缺少文件传输权限")
         }
-        var request = URLRequest(url: destination)
-        request.httpMethod = "PUT"
-        request.addValue(tenant.displayName, forHTTPHeaderField: "X-SkyBridge-Tenant")
-        let task = session.uploadTask(with: request, fromFile: url)
-        task.resume()
     }
 
-    public func startRealtimeChannel(endpoint: URL) {
-        guard let tenant = try? tenantController.requirePermission(.fileTransfer) else {
-            log.error("Active tenant missing file transfer permission")
-            return
+    /// 开始实时通道连接
+    public func startRealtimeChannel(endpoint: URL) async {
+        do {
+            let tenant = try await TenantAccessController.shared.requirePermission(.fileTransfer)
+            var request = URLRequest(url: endpoint)
+            request.timeoutInterval = 5
+            request.addValue("application/json", forHTTPHeaderField: "Accept")
+            request.addValue(tenant.id.uuidString, forHTTPHeaderField: "X-SkyBridge-Tenant-ID")
+            #if canImport(Starscream)
+            let socket = WebSocket(request: request)
+            let identifier = UUID()
+            sockets[identifier] = socket
+            socket.onEvent = { [weak self] event in
+                Task { @MainActor in
+                    self?.handle(event: event, id: identifier)
+                }
+            }
+            socket.connect()
+            #endif
+        } catch {
+            log.error("实时通道连接失败：租户缺少文件传输权限")
         }
-        var request = URLRequest(url: endpoint)
-        request.timeoutInterval = 5
-        request.addValue("application/json", forHTTPHeaderField: "Accept")
-        request.addValue(tenant.id.uuidString, forHTTPHeaderField: "X-SkyBridge-Tenant-ID")
-        let socket = WebSocket(request: request)
-        let identifier = UUID()
-        sockets[identifier] = socket
-        socket.onEvent = { [weak self] event in
-            self?.handle(event: event, id: identifier)
-        }
-        socket.connect()
     }
 
+    #if canImport(Starscream)
     private func handle(event: WebSocketEvent, id: UUID) {
         switch event {
         case .connected(let headers):
-            log.info("WebSocket connected %{public}@", headers.description)
+            log.info("WebSocket connected \(headers.description)")
         case .disconnected(let reason, let code):
-            log.info("WebSocket disconnected %{public}@ %d", reason, code)
+            log.info("WebSocket disconnected reason=\(reason) code=\(code)")
             sockets[id]?.disconnect()
             sockets.removeValue(forKey: id)
         case .binary(let data):
             processIncoming(data: data)
         case .text(let string):
-            log.debug("Received text %{public}@", string)
+            log.debug("Received text \(string)")
         case .error(let error):
-            log.error("Socket error %{public}@", error?.localizedDescription ?? "unknown")
+            log.error("Socket error \(error?.localizedDescription ?? "unknown")")
         default:
             break
         }
     }
+    #endif
 
     private func processIncoming(data: Data) {
         guard let header = try? JSONDecoder().decode(TransferHeader.self, from: data) else { return }
         let decompressed = decompress(data: header.payload)
         let decrypted = decrypt(data: decompressed, using: header.key)
-        log.info("Received file chunk %{public}@", header.fileName)
+        log.info("Received file chunk \(header.fileName)")
         updateProgress(for: header, bytes: decrypted.count)
     }
 
@@ -140,22 +172,43 @@ public final class FileTransferManager: NSObject {
         }
     }
 
-    private func resumePendingTransfers() {
-        session.getAllTasks { tasks in
-            tasks.forEach { $0.resume() }
-            self.log.debug("Resumed %d background transfers", tasks.count)
+    /// 恢复待处理的传输任务
+    private func resumePendingTransfers() async {
+        await withCheckedContinuation { continuation in
+            session.getAllTasks { tasks in
+                tasks.forEach { $0.resume() }
+                self.log.debug("Resumed \(tasks.count) background transfers")
+                continuation.resume()
+            }
         }
     }
 
+    /// 发送传输完成通知
     private func postCompletionNotification(for task: FileTransferTask) {
-        guard (try? tenantController.requirePermission(.notifications)) != nil else { return }
-        let content = UNMutableNotificationContent()
-        content.title = "文件传输完成"
-        content.body = "\(task.fileName) 已经成功同步"
-        let request = UNNotificationRequest(identifier: task.id.uuidString, content: content, trigger: nil)
-        notificationCenter.add(request) { error in
-            if let error {
-                self.log.error("Failed to schedule notification: %{public}@", error.localizedDescription)
+        // 检查租户权限
+        Task {
+            do {
+                _ = try await TenantAccessController.shared.requirePermission(.notifications)
+            } catch {
+                log.info("跳过通知：租户缺少通知权限")
+                return
+            }
+            
+            guard let notificationCenter else {
+                log.info("跳过通知：UNUserNotificationCenter 不可用（缺少 bundle identifier）")
+                return
+            }
+            
+            let content = UNMutableNotificationContent()
+            content.title = "文件传输完成"
+            content.body = "\(task.fileName) 已经成功同步"
+            let request = UNNotificationRequest(identifier: task.id.uuidString, content: content, trigger: nil)
+            
+            do {
+                try await notificationCenter.add(request)
+                log.info("成功发送传输完成通知")
+            } catch {
+                log.error("发送通知失败：\(error.localizedDescription)")
             }
         }
     }

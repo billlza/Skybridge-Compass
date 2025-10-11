@@ -1,0 +1,1 @@
+warning: Traditional headermap style is no longer supported; please migrate to using separate headermaps and set 'ALWAYS_SEARCH_USER_PATHS' to NO. (in target 'SkyBridgeCompassHost' from project 'SkyBridgeCompassHost')

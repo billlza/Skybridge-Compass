@@ -25,6 +25,8 @@ public final class RemoteFrameRenderer {
     private var currentCodec: RemoteFrameType?
     private var previousFrameTimestamp: DispatchTime?
     private let log = Logger(subsystem: "com.skybridge.compass", category: "MetalRenderer")
+    private let renderQueue = DispatchQueue(label: "com.skybridge.compass.metal.render")
+    public var frameHandler: ((MTLTexture) -> Void)?
 
     public init() {
         device = MTLCreateSystemDefaultDevice()
@@ -101,7 +103,7 @@ public final class RemoteFrameRenderer {
         )
 
         guard status == kCVReturnSuccess, let buffer = pixelBuffer else {
-            log.error("Failed to build CVPixelBuffer for BGRA frame: %{public}d", status)
+            log.error("Failed to build CVPixelBuffer for BGRA frame: \(status)")
             return RenderMetrics(bandwidthMbps: bandwidth, latencyMilliseconds: delta * 1000)
         }
 
@@ -124,10 +126,15 @@ public final class RemoteFrameRenderer {
         )
 
         if textureStatus != kCVReturnSuccess {
-            log.error("Failed to create Metal texture from BGRA frame: %{public}d", textureStatus)
+            log.error("Failed to create Metal texture from BGRA frame: \(textureStatus)")
             return RenderMetrics(bandwidthMbps: bandwidth, latencyMilliseconds: delta * 1000)
         }
 
+        if let textureRef, let texture = CVMetalTextureGetTexture(textureRef) {
+            renderQueue.async { [weak self] in
+                self?.frameHandler?(texture)
+            }
+        }
         commandBuffer.commit()
         return RenderMetrics(bandwidthMbps: bandwidth, latencyMilliseconds: delta * 1000)
     }
@@ -138,7 +145,7 @@ public final class RemoteFrameRenderer {
         }
         configureFormatDescriptionIfNeeded(width: width, height: height, codec: codec)
         guard let formatDescription else {
-            log.error("Missing format description; cannot decode codec %{public}@", String(describing: codec))
+            log.error("Missing format description; cannot decode codec \(String(describing: codec))")
             return RenderMetrics(bandwidthMbps: 0, latencyMilliseconds: 0)
         }
         ensureDecompressionSession(formatDescription: formatDescription, codec: codec)
@@ -146,7 +153,7 @@ public final class RemoteFrameRenderer {
         let bandwidth = calculateBandwidth(bytes: data.count, delta: delta)
 
         guard let decompressionSession else {
-            log.error("No decompression session available for codec %{public}@", String(describing: codec))
+            log.error("No decompression session available for codec \(String(describing: codec))")
             return RenderMetrics(bandwidthMbps: bandwidth, latencyMilliseconds: delta * 1000)
         }
 
@@ -164,7 +171,7 @@ public final class RemoteFrameRenderer {
         )
 
         guard status == kCMBlockBufferNoErr, let block = blockBuffer else {
-            log.error("Failed to create CMBlockBuffer: %{public}d", status)
+            log.error("Failed to create CMBlockBuffer: \(status)")
             return RenderMetrics(bandwidthMbps: bandwidth, latencyMilliseconds: delta * 1000)
         }
 
@@ -197,7 +204,7 @@ public final class RemoteFrameRenderer {
         )
 
         guard status == noErr, let sample = sampleBuffer else {
-            log.error("Unable to create sample buffer for decoding: %{public}d", status)
+            log.error("Unable to create sample buffer for decoding: \(status)")
             return RenderMetrics(bandwidthMbps: bandwidth, latencyMilliseconds: delta * 1000)
         }
 
@@ -205,14 +212,14 @@ public final class RemoteFrameRenderer {
         var outputFlags = VTDecodeInfoFlags()
         status = VTDecompressionSessionDecodeFrame(
             decompressionSession,
-            sample,
-            decodeFlags,
-            nil,
-            &outputFlags
+            sampleBuffer: sample,
+            flags: decodeFlags,
+            frameRefcon: nil,
+            infoFlagsOut: &outputFlags
         )
 
         if status != noErr {
-            log.error("VideoToolbox decode error for codec %{public}@ status %{public}d", String(describing: codec), status)
+            log.error("VideoToolbox decode error for codec \(String(describing: codec)) status \(status)")
         }
 
         return RenderMetrics(bandwidthMbps: bandwidth, latencyMilliseconds: delta * 1000)
@@ -247,14 +254,14 @@ public final class RemoteFrameRenderer {
             formatDescription = description
             currentCodec = codec
         } else {
-            log.error("Failed to create CMVideoFormatDescription for codec %{public}@ status %{public}d", String(describing: codec), status)
+            log.error("Failed to create CMVideoFormatDescription for codec \(String(describing: codec)) status \(status)")
         }
     }
 
     private func ensureDecompressionSession(formatDescription: CMVideoFormatDescription, codec: RemoteFrameType) {
         if let existing = decompressionSession {
-            let currentFormat = VTDecompressionSessionGetFormatDescription(existing)
-            if CMFormatDescriptionEqual(currentFormat, formatDescription) {
+            if let currentDescription = self.formatDescription,
+               CMFormatDescriptionEqual(currentDescription, otherFormatDescription: formatDescription) {
                 return
             }
             VTDecompressionSessionWaitForAsynchronousFrames(existing)
@@ -263,13 +270,25 @@ public final class RemoteFrameRenderer {
 
         var newSession: VTDecompressionSession?
         var callback = VTDecompressionOutputCallbackRecord(
-            decompressionOutputCallback: RemoteFrameRenderer.decompressionCallback,
+            decompressionOutputCallback: { decompressionOutputRefCon, sourceFrameRefCon, status, infoFlags, imageBuffer, presentationTimeStamp, presentationDuration in
+                RemoteFrameRenderer.decompressionCallback(
+                    decompressionOutputRefCon: decompressionOutputRefCon,
+                    sourceFrameRefCon: sourceFrameRefCon,
+                    status: status,
+                    infoFlags: infoFlags,
+                    imageBuffer: imageBuffer,
+                    presentationTimeStamp: presentationTimeStamp,
+                    presentationDuration: presentationDuration
+                )
+            },
             decompressionOutputRefCon: UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
         )
 
         let destinationAttributes: [NSString: Any] = [
             kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA,
-            kCVPixelBufferMetalCompatibilityKey: true
+            kCVPixelBufferMetalCompatibilityKey: true,
+            // 允许通过 IOSurface 零拷贝地将解码后的像素缓冲暴露给 Metal
+            kCVPixelBufferIOSurfacePropertiesKey: [:]
         ]
 
         var decoderSpecification: CFDictionary?
@@ -293,7 +312,7 @@ public final class RemoteFrameRenderer {
             decompressionSession = newSession
         } else {
             decompressionSession = nil
-            log.error("Failed to create VTDecompressionSession for codec %{public}@ status %{public}d", String(describing: codec), status)
+            log.error("Failed to create VTDecompressionSession for codec \(String(describing: codec)) status \(status)")
         }
     }
 
@@ -302,14 +321,45 @@ public final class RemoteFrameRenderer {
         sourceFrameRefCon: UnsafeMutableRawPointer?,
         status: OSStatus,
         infoFlags: VTDecodeInfoFlags,
-        imageBuffer: CVImageBuffer?
+        imageBuffer: CVImageBuffer?,
+        presentationTimeStamp: CMTime,
+        presentationDuration: CMTime
     ) {
         guard let decompressionOutputRefCon else { return }
         let renderer = Unmanaged<RemoteFrameRenderer>.fromOpaque(decompressionOutputRefCon).takeUnretainedValue()
         if status != noErr {
-            renderer.log.error("Decompression callback error: %{public}d, flags %{public}d", status, infoFlags.rawValue)
-        } else if imageBuffer != nil {
-            renderer.log.debug("Decompression callback delivered frame")
+            renderer.log.error("Decompression callback error: \(status), flags \(infoFlags.rawValue)")
+        } else if let imageBuffer {
+            renderer.handleDecompressedFrame(imageBuffer: imageBuffer, presentationTimeStamp: presentationTimeStamp)
+        }
+    }
+
+    private func handleDecompressedFrame(imageBuffer: CVImageBuffer, presentationTimeStamp: CMTime) {
+        renderQueue.async { [weak self] in
+            guard let self else { return }
+            guard let textureCache else {
+                self.log.error("Missing texture cache; cannot convert decoded frame to Metal texture")
+                return
+            }
+            let width = CVPixelBufferGetWidth(imageBuffer)
+            let height = CVPixelBufferGetHeight(imageBuffer)
+            var textureRef: CVMetalTexture?
+            let status = CVMetalTextureCacheCreateTextureFromImage(
+                kCFAllocatorDefault,
+                textureCache,
+                imageBuffer,
+                nil,
+                .bgra8Unorm,
+                width,
+                height,
+                0,
+                &textureRef
+            )
+            if status == kCVReturnSuccess, let textureRef, let texture = CVMetalTextureGetTexture(textureRef) {
+                self.frameHandler?(texture)
+            } else {
+                self.log.error("Failed to create Metal texture from decoded frame: \(status)")
+            }
         }
     }
 

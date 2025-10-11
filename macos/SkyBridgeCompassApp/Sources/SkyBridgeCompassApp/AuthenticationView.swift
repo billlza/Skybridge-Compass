@@ -3,6 +3,8 @@ import AuthenticationServices
 import AppKit
 
 /// 登录界面，提供 Apple ID、星云、手机号、邮箱四种登录方式以及注册入口。
+/// 针对macOS 14.0+进行优化，充分利用最新SwiftUI特性
+@available(macOS 14.0, *)
 struct AuthenticationView: View {
     @EnvironmentObject private var viewModel: AuthenticationViewModel
     @State private var showRegistration = false
@@ -114,6 +116,7 @@ struct AuthenticationView: View {
         switch viewModel.selectedMethod {
         case .apple:
             VStack(spacing: 16) {
+                // 如果本机未启用 Sign in with Apple 能力，给出更清晰提示
                 SignInWithAppleButton(.signIn) { request in
                     request.requestedScopes = [.fullName, .email]
                 } onCompletion: { result in
@@ -121,7 +124,13 @@ struct AuthenticationView: View {
                     case .success(let authorization):
                         Task { await viewModel.handleAppleAuthorization(authorization) }
                     case .failure(let error):
-                        viewModel.errorMessage = error.localizedDescription
+                        let ns = error as NSError
+                        if ns.domain == ASAuthorizationError.errorDomain,
+                           ns.code == ASAuthorizationError.Code.unknown.rawValue {
+                            viewModel.errorMessage = "当前构建未启用 Sign in with Apple 能力或配置不完整，请在 Xcode Capabilities 打开并使用有效开发者签名。"
+                        } else {
+                            viewModel.errorMessage = error.localizedDescription
+                        }
                     }
                 }
                 .signInWithAppleButtonStyle(.whiteOutline)
@@ -133,12 +142,34 @@ struct AuthenticationView: View {
             }
         case .nebula:
             VStack(spacing: 16) {
-                LabeledContent("星云账号") {
-                    TextField("请输入星云账号", text: $viewModel.nebulaAccount)
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("星云账号")
+                        .font(.headline)
+                    TextField("请输入星云账号", text: $viewModel.nebulaAccount, onEditingChanged: { isEditing in
+                        print("星云账号文本框编辑状态变化: \(isEditing)")
+                    }, onCommit: {
+                        print("星云账号文本框提交")
+                    })
                         .textFieldStyle(.roundedBorder)
+                        .disableAutocorrection(true)
+                        .textContentType(.username)
                         .frame(width: 260)
+                        .onTapGesture {
+                            print("星云账号文本框被点击")
+                        }
+                        .onAppear {
+                            print("星云账号文本框出现，当前处理状态: \(viewModel.isProcessing)")
+                        }
+                        .onChange(of: viewModel.nebulaAccount) { oldValue, newValue in
+                            print("星云账号文本框内容变化: '\(oldValue)' -> '\(newValue)'")
+                        }
+                        .onReceive(NotificationCenter.default.publisher(for: NSControl.textDidChangeNotification)) { notification in
+                            print("收到文本变化通知: \(notification)")
+                        }
                 }
-                LabeledContent("密码") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("密码")
+                        .font(.headline)
                     SecureField("请输入密码", text: $viewModel.nebulaPassword)
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 260)
@@ -154,15 +185,35 @@ struct AuthenticationView: View {
             }
         case .phone:
             VStack(spacing: 16) {
-                LabeledContent("手机号") {
-                    TextField("请输入手机号", text: $viewModel.phoneNumber)
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("手机号")
+                        .font(.headline)
+                    TextField("请输入手机号", text: $viewModel.phoneNumber, onEditingChanged: { isEditing in
+                        print("手机号文本框编辑状态变化: \(isEditing)")
+                    }, onCommit: {
+                        print("手机号文本框提交")
+                    })
                         .textFieldStyle(.roundedBorder)
+                        .disableAutocorrection(true)
+                        .textContentType(macOSVersionCheck() ? .telephoneNumber : nil)
                         .frame(width: 260)
+                        .onTapGesture {
+                            print("手机号文本框被点击")
+                        }
+                        .onAppear {
+                            print("手机号文本框出现，当前处理状态: \(viewModel.isProcessing)")
+                        }
+                        .onChange(of: viewModel.phoneNumber) { oldValue, newValue in
+                            print("手机号文本框内容变化: '\(oldValue)' -> '\(newValue)'")
+                        }
                 }
-                LabeledContent("验证码") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("验证码")
+                        .font(.headline)
                     HStack {
                         TextField("短信验证码", text: $viewModel.phoneCode)
                             .textFieldStyle(.roundedBorder)
+                            .disableAutocorrection(true)
                         Button("发送验证码") {
                             NotificationCenter.default.post(name: .init("SkyBridgeRequestOTP"), object: viewModel.phoneNumber)
                         }
@@ -180,12 +231,28 @@ struct AuthenticationView: View {
             }
         case .email:
             VStack(spacing: 16) {
-                LabeledContent("邮箱") {
-                    TextField("name@example.com", text: $viewModel.emailAddress)
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("邮箱")
+                        .font(.headline)
+                    TextField("name@example.com", text: $viewModel.emailAddress, onEditingChanged: { isEditing in
+                        print("邮箱文本框编辑状态变化: \(isEditing)")
+                    }, onCommit: {
+                        print("邮箱文本框提交")
+                    })
                         .textFieldStyle(.roundedBorder)
+                        .disableAutocorrection(true)
+                        .textContentType(macOSVersionCheck() ? .emailAddress : nil)
                         .frame(width: 260)
+                        .onTapGesture {
+                            print("邮箱文本框被点击")
+                        }
+                        .onAppear {
+                            print("邮箱文本框出现，当前处理状态: \(viewModel.isProcessing)")
+                        }
                 }
-                LabeledContent("密码") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("密码")
+                        .font(.headline)
                     SecureField("请输入邮箱密码", text: $viewModel.emailPassword)
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 260)
@@ -210,6 +277,13 @@ struct AuthenticationView: View {
             .buttonStyle(.link)
 
             Spacer()
+
+            // 游客模式按钮
+            Button("游客模式") {
+                viewModel.enterGuestMode()
+            }
+            .buttonStyle(.bordered)
+            .foregroundColor(.secondary)
 
             if viewModel.isProcessing {
                 ProgressView()
@@ -241,40 +315,81 @@ private struct BlurView: NSViewRepresentable {
     func updateNSView(_ nsView: NSVisualEffectView, context: Context) {}
 }
 
-/// 注册表单界面。
+/// macOS版本检查辅助函数，用于确保在支持的系统版本上使用现代化特性
+/// - Returns: 如果系统版本支持macOS 14.0+特性则返回true，否则返回false
+@available(macOS 14.0, *)
+private func macOSVersionCheck() -> Bool {
+    return true // 由于已经有@available标记，这里总是返回true
+}
+
+/// 注册界面视图，提供多种注册方式
+/// 针对macOS 14.0+进行优化
+@available(macOS 14.0, *)
 private struct RegistrationView: View {
     @EnvironmentObject private var viewModel: AuthenticationViewModel
     @Binding var isPresented: Bool
 
     var body: some View {
-        VStack(spacing: 24) {
+        VStack(spacing: 20) {
             Text("创建 SkyBridge 账户")
                 .font(.title2.bold())
-            Form {
-                TextField("展示名称", text: $viewModel.registration.displayName)
-                TextField("企业邮箱", text: $viewModel.registration.email)
-                TextField("手机号", text: $viewModel.registration.phone)
-                SecureField("密码", text: $viewModel.registration.password)
-                SecureField("确认密码", text: $viewModel.registration.confirmPassword)
+
+            Picker("注册方式", selection: $viewModel.selectedRegistration) {
+                Text("手机号注册").tag(AuthenticationViewModel.RegistrationMethod.phone)
+                Text("邮箱注册").tag(AuthenticationViewModel.RegistrationMethod.email)
+                Text("星云账号注册").tag(AuthenticationViewModel.RegistrationMethod.nebula)
+            }
+            .pickerStyle(.segmented)
+
+            Group {
+                switch viewModel.selectedRegistration {
+                case .phone:
+                    Form {
+                        TextField("手机号", text: $viewModel.regPhoneNumber)
+                            .disableAutocorrection(true)
+                        HStack {
+                            TextField("短信验证码", text: $viewModel.regPhoneCode)
+                                .disableAutocorrection(true)
+                            Button("发送验证码") {
+                                NotificationCenter.default.post(name: .init("SkyBridgeRequestOTP"), object: viewModel.regPhoneNumber)
+                            }
+                        }
+                        SecureField("设置密码", text: $viewModel.regPhonePassword)
+                        SecureField("确认密码", text: $viewModel.regPhoneConfirm)
+                    }
+                case .email:
+                    Form {
+                        TextField("邮箱地址", text: $viewModel.regEmailAddress)
+                            .disableAutocorrection(true)
+                        SecureField("设置密码", text: $viewModel.regEmailPassword)
+                        SecureField("确认密码", text: $viewModel.regEmailConfirm)
+                    }
+                case .nebula:
+                    Form {
+                        TextField("星云账号", text: $viewModel.regNebulaAccount)
+                            .disableAutocorrection(true)
+                        SecureField("设置密码", text: $viewModel.regNebulaPassword)
+                        SecureField("确认密码", text: $viewModel.regNebulaConfirm)
+                        TextField("绑定手机号", text: $viewModel.regNebulaPhone)
+                            .disableAutocorrection(true)
+                    }
+                }
             }
             .formStyle(.grouped)
+
             HStack {
-                Button("取消", role: .cancel) {
-                    isPresented = false
-                }
+                Button("取消", role: .cancel) { isPresented = false }
                 Spacer()
                 Button("提交注册") {
                     Task {
                         await viewModel.register()
-                        if viewModel.errorMessage == nil {
-                            isPresented = false
-                        }
+                        if viewModel.errorMessage == nil { isPresented = false }
                     }
                 }
                 .buttonStyle(.borderedProminent)
             }
         }
-        .padding(32)
-        .frame(width: 520, height: 420)
+        .padding(24)
+        .frame(width: 560)
     }
 }

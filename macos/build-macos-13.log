@@ -1,0 +1,172 @@
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.swift:116:10: warning: 'onChange(of:perform:)' was deprecated in macOS 14.0: Use `onChange` with a two or zero parameter action closure instead.
+        .onChange(of: authModel.currentSession) { newSession in
+         ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCompassApp/DashboardView.swift:190:27: warning: value 'first' was defined but never used; consider replacing with boolean test
+                guard let first = sorted.first else { return }
+                      ~~~~^~~~~~~~
+                                               != nil
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:78:18: warning: main actor-isolated property 'activeSessions' can not be referenced from a Sendable closure
+            self.activeSessions.values.forEach { $0.stop() }
+                 ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:59:17: note: property declared here
+    private var activeSessions: [UUID: RemoteDesktopSession] = [:]
+                ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:78:53: warning: call to main actor-isolated instance method 'stop()' in a synchronous nonisolated context
+            self.activeSessions.values.forEach { $0.stop() }
+                                                    ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:285:10: note: calls to instance method 'stop()' from outside of its actor context are implicitly asynchronous
+    func stop() {
+         ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:79:18: warning: main actor-isolated property 'activeSessions' can not be mutated from a Sendable closure
+            self.activeSessions.removeAll()
+                 ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:59:17: note: mutation of this property is only permitted within the actor
+    private var activeSessions: [UUID: RemoteDesktopSession] = [:]
+                ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:110:18: warning: main actor-isolated property 'activeSessions' can not be mutated from a Sendable closure
+            self.activeSessions[session.id] = session
+                 ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:59:17: note: mutation of this property is only permitted within the actor
+    private var activeSessions: [UUID: RemoteDesktopSession] = [:]
+                ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:119:22: warning: main actor-isolated property 'activeSessions' can not be mutated from a Sendable closure
+                self.activeSessions.removeValue(forKey: session.id)
+                     ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:59:17: note: mutation of this property is only permitted within the actor
+    private var activeSessions: [UUID: RemoteDesktopSession] = [:]
+                ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:87:31: warning: no 'async' operations occur within 'await' expression
+        let credentials = try await tenantController.credentials(for: tenant.id)
+                              ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:134:45: warning: call to main actor-isolated instance method 'focus()' in a synchronous nonisolated context
+            self.activeSessions[sessionID]?.focus()
+                                            ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:291:10: note: calls to instance method 'focus()' from outside of its actor context are implicitly asynchronous
+    func focus() {
+         ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:134:18: warning: main actor-isolated property 'activeSessions' can not be referenced from a Sendable closure
+            self.activeSessions[sessionID]?.focus()
+                 ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:59:17: note: property declared here
+    private var activeSessions: [UUID: RemoteDesktopSession] = [:]
+                ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:141:39: warning: main actor-isolated property 'activeSessions' can not be mutated from a Sendable closure
+                if let session = self.activeSessions.removeValue(forKey: sessionID) {
+                                      ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:59:17: note: mutation of this property is only permitted within the actor
+    private var activeSessions: [UUID: RemoteDesktopSession] = [:]
+                ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:142:29: warning: call to main actor-isolated instance method 'stop()' in a synchronous nonisolated context
+                    session.stop()
+                            ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:285:10: note: calls to instance method 'stop()' from outside of its actor context are implicitly asynchronous
+    func stop() {
+         ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:181:32: warning: call to main actor-isolated instance method 'fetchCpuLoad()' in a synchronous nonisolated context
+            let cpuLoad = self.fetchCpuLoad()
+                               ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:186:18: note: calls to instance method 'fetchCpuLoad()' from outside of its actor context are implicitly asynchronous
+    private func fetchCpuLoad() -> Double {
+                 ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:182:18: warning: call to main actor-isolated instance method 'refreshMetrics(cpuLoad:)' in a synchronous nonisolated context
+            self.refreshMetrics(cpuLoad: cpuLoad)
+                 ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:158:18: note: calls to instance method 'refreshMetrics(cpuLoad:)' from outside of its actor context are implicitly asynchronous
+    private func refreshMetrics(cpuLoad: Double? = nil) {
+                 ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteFrameRenderer.swift:79:37: warning: immutable value 'device' was never used; consider replacing with '_' or removing it
+        guard let textureCache, let device else {
+                                ~~~~^~~~~~
+                                _
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteFrameRenderer.swift:135:17: warning: capture of 'self' with non-Sendable type 'RemoteFrameRenderer?' in a '@Sendable' closure
+                self?.frameHandler?(texture)
+                ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteFrameRenderer.swift:19:20: note: class 'RemoteFrameRenderer' does not conform to the 'Sendable' protocol
+public final class RemoteFrameRenderer {
+                   ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteFrameRenderer.swift:135:37: warning: capture of 'texture' with non-Sendable type 'any MTLTexture' in a '@Sendable' closure
+                self?.frameHandler?(texture)
+                                    ^
+/Users/macbookpro/Desktop/Xcode-beta.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.1.sdk/System/Library/Frameworks/Metal.framework/Headers/MTLTexture.h:313:11: note: protocol 'MTLTexture' does not conform to the 'Sendable' protocol
+@protocol MTLTexture <MTLResource>
+          ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteFrameRenderer.swift:2:1: warning: add '@preconcurrency' to treat 'Sendable'-related errors from module 'Metal' as warnings
+import Metal
+^
+@preconcurrency 
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteFrameRenderer.swift:339:23: warning: capture of 'self' with non-Sendable type 'RemoteFrameRenderer?' in a '@Sendable' closure
+            guard let self else { return }
+                      ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteFrameRenderer.swift:19:20: note: class 'RemoteFrameRenderer' does not conform to the 'Sendable' protocol
+public final class RemoteFrameRenderer {
+                   ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteFrameRenderer.swift:344:47: warning: capture of 'imageBuffer' with non-Sendable type 'CVImageBuffer' (aka 'CVBuffer') in a '@Sendable' closure
+            let width = CVPixelBufferGetWidth(imageBuffer)
+                                              ^
+CoreVideo.CVBuffer:1:14: note: class 'CVBuffer' does not conform to the 'Sendable' protocol
+public class CVBuffer : _CFObject {
+             ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/TenantAccessController.swift:111:39: warning: capture of 'session' with non-Sendable type 'AuthSession' in a '@Sendable' closure
+                self.currentSession = session
+                                      ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Models.swift:7:15: note: consider making struct 'AuthSession' conform to the 'Sendable' protocol
+public struct AuthSession: Codable, Hashable {
+              ^
+                                            , Sendable
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/TenantAccessController.swift:111:22: warning: main actor-isolated property 'currentSession' can not be mutated from a Sendable closure
+                self.currentSession = session
+                     ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/TenantAccessController.swift:103:17: note: mutation of this property is only permitted within the actor
+    private var currentSession: AuthSession?
+                ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/TenantAccessController.swift:112:66: warning: implicit capture of 'session' requires that 'AuthSession' conforms to 'Sendable'
+                self.log.info("Bind authentication session for \(session.userIdentifier)")
+                                                                 ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Models.swift:7:15: note: consider making struct 'AuthSession' conform to the 'Sendable' protocol
+public struct AuthSession: Codable, Hashable {
+              ^
+                                            , Sendable
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/TenantAccessController.swift:122:22: warning: main actor-isolated property 'currentSession' can not be mutated from a Sendable closure
+                self.currentSession = nil
+                     ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/TenantAccessController.swift:103:17: note: mutation of this property is only permitted within the actor
+    private var currentSession: AuthSession?
+                ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/TenantAccessController.swift:135:25: warning: main actor-isolated property 'didBootstrap' can not be referenced from a Sendable closure
+            guard !self.didBootstrap else { return }
+                        ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/TenantAccessController.swift:102:17: note: property declared here
+    private var didBootstrap = false
+                ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/TenantAccessController.swift:136:18: warning: call to main actor-isolated instance method 'loadFromDisk()' in a synchronous nonisolated context
+            self.loadFromDisk()
+                 ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/TenantAccessController.swift:212:18: note: calls to instance method 'loadFromDisk()' from outside of its actor context are implicitly asynchronous
+    private func loadFromDisk() {
+                 ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/TenantAccessController.swift:137:18: warning: main actor-isolated property 'didBootstrap' can not be mutated from a Sendable closure
+            self.didBootstrap = true
+                 ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/TenantAccessController.swift:102:17: note: mutation of this property is only permitted within the actor
+    private var didBootstrap = false
+                ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/TenantAccessController.swift:147:13: warning: variable 'tenant' was never mutated; consider changing to 'let' constant
+        var tenant = TenantDescriptor(displayName: displayName,
+        ~~~ ^
+        let
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/AuthenticationService.swift:85:18: warning: main actor-isolated property 'configuration' can not be mutated from a Sendable closure
+            self.configuration = configuration
+                 ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/AuthenticationService.swift:70:17: note: mutation of this property is only permitted within the actor
+    private var configuration: Configuration?
+                ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/AuthenticationService.swift:130:18: warning: main actor-isolated property 'sessionSubject' can not be referenced from a Sendable closure
+            self.sessionSubject.send(nil)
+                 ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/AuthenticationService.swift:64:17: note: property declared here
+    private let sessionSubject = CurrentValueSubject<AuthSession?, Never>(nil)
+                ^
+2025-10-09 17:31:41.849 appintentsmetadataprocessor[43483:2020529] Starting appintentsmetadataprocessor export
+2025-10-09 17:31:41.964 appintentsmetadataprocessor[43483:2020529] error: At least one halting error produced during export. No AppIntents metadata have been exported and this target is not usable with AppIntents until errors are resolved.
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCompassApp/SiriIntents.swift:29: error: Invalid Utterance. Every App Shortcut utterance should have one '${applicationName}' in it.
+warning: Traditional headermap style is no longer supported; please migrate to using separate headermaps and set 'ALWAYS_SEARCH_USER_PATHS' to NO. (in target 'SkyBridgeCompassHost' from project 'SkyBridgeCompassHost')

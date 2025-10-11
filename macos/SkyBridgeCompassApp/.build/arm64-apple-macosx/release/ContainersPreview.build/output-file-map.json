@@ -1,0 +1,55 @@
+{
+  "": {
+    "dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/ContainersPreview.build/ContainersPreview.d",
+    "object": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/ContainersPreview.build/ContainersPreview.o",
+    "swift-dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/ContainersPreview.build/master.swiftdeps"
+  },
+  "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/checkouts/swift-collections/Sources/ContainersPreview/BorrowIteratorProtocol.swift": {
+    "object": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/ContainersPreview.build/BorrowIteratorProtocol.swift.o",
+    "swiftmodule": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/ContainersPreview.build/BorrowIteratorProtocol~partial.swiftmodule",
+    "swift-dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/ContainersPreview.build/BorrowIteratorProtocol.swiftdeps",
+    "diagnostics": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/ContainersPreview.build/BorrowIteratorProtocol.dia"
+  },
+  "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/checkouts/swift-collections/Sources/ContainersPreview/Box.swift": {
+    "object": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/ContainersPreview.build/Box.swift.o",
+    "swiftmodule": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/ContainersPreview.build/Box~partial.swiftmodule",
+    "swift-dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/ContainersPreview.build/Box.swiftdeps",
+    "diagnostics": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/ContainersPreview.build/Box.dia"
+  },
+  "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/checkouts/swift-collections/Sources/ContainersPreview/Container+Utilities.swift": {
+    "object": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/ContainersPreview.build/Container+Utilities.swift.o",
+    "swiftmodule": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/ContainersPreview.build/Container+Utilities~partial.swiftmodule",
+    "swift-dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/ContainersPreview.build/Container+Utilities.swiftdeps",
+    "diagnostics": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/ContainersPreview.build/Container+Utilities.dia"
+  },
+  "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/checkouts/swift-collections/Sources/ContainersPreview/Container.swift": {
+    "object": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/ContainersPreview.build/Container.swift.o",
+    "swiftmodule": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/ContainersPreview.build/Container~partial.swiftmodule",
+    "swift-dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/ContainersPreview.build/Container.swiftdeps",
+    "diagnostics": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/ContainersPreview.build/Container.dia"
+  },
+  "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/checkouts/swift-collections/Sources/ContainersPreview/InputSpan.swift": {
+    "object": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/ContainersPreview.build/InputSpan.swift.o",
+    "swiftmodule": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/ContainersPreview.build/InputSpan~partial.swiftmodule",
+    "swift-dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/ContainersPreview.build/InputSpan.swiftdeps",
+    "diagnostics": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/ContainersPreview.build/InputSpan.dia"
+  },
+  "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/checkouts/swift-collections/Sources/ContainersPreview/Mut.swift": {
+    "object": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/ContainersPreview.build/Mut.swift.o",
+    "swiftmodule": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/ContainersPreview.build/Mut~partial.swiftmodule",
+    "swift-dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/ContainersPreview.build/Mut.swiftdeps",
+    "diagnostics": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/ContainersPreview.build/Mut.dia"
+  },
+  "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/checkouts/swift-collections/Sources/ContainersPreview/Ref.swift": {
+    "object": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/ContainersPreview.build/Ref.swift.o",
+    "swiftmodule": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/ContainersPreview.build/Ref~partial.swiftmodule",
+    "swift-dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/ContainersPreview.build/Ref.swiftdeps",
+    "diagnostics": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/ContainersPreview.build/Ref.dia"
+  },
+  "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/checkouts/swift-collections/Sources/ContainersPreview/Shared.swift": {
+    "object": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/ContainersPreview.build/Shared.swift.o",
+    "swiftmodule": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/ContainersPreview.build/Shared~partial.swiftmodule",
+    "swift-dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/ContainersPreview.build/Shared.swiftdeps",
+    "diagnostics": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/ContainersPreview.build/Shared.dia"
+  }
+}

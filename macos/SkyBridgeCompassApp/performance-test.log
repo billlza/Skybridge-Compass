@@ -1,0 +1,7 @@
+warning: 'starscream': found 1 file(s) which are unhandled; explicitly declare them as resources or exclude from the target
+    /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/checkouts/Starscream/Sources/Info.plist
+[0/1] Planning build
+Building for debugging...
+[0/5] Write swift-version-41C403C3136A4E2D.txt
+Build complete! (0.35s)
+error: no tests found; create a target in the 'Tests' directory

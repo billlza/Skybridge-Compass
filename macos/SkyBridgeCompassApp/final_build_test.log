@@ -1,0 +1,87 @@
+Building for debugging...
+[0/8] Write sources
+[1/8] Write swift-version-41C403C3136A4E2D.txt
+[3/11] Emitting module SkyBridgeCore
+[4/11] Compiling SkyBridgeCore Metal4RenderingEngine.swift
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Rendering/Metal4RenderingEngine.swift:88:14: error: capture of 'self' in a closure that outlives deinit
+ 86 |     
+ 87 |     deinit {
+ 88 |         Task { @MainActor in
+    |              `- error: capture of 'self' in a closure that outlives deinit
+ 89 |             performanceTimer?.invalidate()
+ 90 |         }
+[5/11] Compiling SkyBridgeCore DynamicWallpaperManager.swift
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Rendering/DynamicWallpaperManager.swift:65:50: error: missing argument for parameter 'device' in call
+ 63 |         self.locationService = WeatherLocationService()
+ 64 |         self.mlPredictor = WeatherMLPredictor()
+ 65 |         self.metalFXProcessor = MetalFXProcessor()
+    |                                                  `- error: missing argument for parameter 'device' in call
+ 66 |         self.performanceMonitor = Metal4PerformanceMonitor()
+ 67 |         
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Rendering/MetalFXProcessor.swift:37:12: note: 'init(device:)' declared here
+ 35 |     // MARK: - 初始化
+ 36 |     
+ 37 |     public init(device: MTLDevice) throws {
+    |            `- note: 'init(device:)' declared here
+ 38 |         self.device = device
+ 39 |         
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Rendering/DynamicWallpaperManager.swift:66:60: error: missing argument for parameter 'device' in call
+ 64 |         self.mlPredictor = WeatherMLPredictor()
+ 65 |         self.metalFXProcessor = MetalFXProcessor()
+ 66 |         self.performanceMonitor = Metal4PerformanceMonitor()
+    |                                                            `- error: missing argument for parameter 'device' in call
+ 67 |         
+ 68 |         // 设置渲染通道描述符
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Rendering/Metal4Engine.swift:713:5: note: 'init(device:)' declared here
+711 |     private var frameStartTime: CFTimeInterval = 0
+712 |     
+713 |     init(device: MTLDevice) {
+    |     `- note: 'init(device:)' declared here
+714 |         self.device = device
+715 |     }
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Rendering/DynamicWallpaperManager.swift:64:28: error: call can throw but is not marked with 'try'
+ 62 |         self.weatherDataService = WeatherDataService()
+ 63 |         self.locationService = WeatherLocationService()
+ 64 |         self.mlPredictor = WeatherMLPredictor()
+    |                            |- error: call can throw but is not marked with 'try'
+    |                            |- note: did you mean to use 'try'?
+    |                            |- note: did you mean to handle error as optional value?
+    |                            `- note: did you mean to disable error propagation?
+ 65 |         self.metalFXProcessor = MetalFXProcessor()
+ 66 |         self.performanceMonitor = Metal4PerformanceMonitor()
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Rendering/DynamicWallpaperManager.swift:89:17: warning: no 'async' operations occur within 'await' expression
+ 87 |         do {
+ 88 |             // 请求位置权限并获取当前位置
+ 89 |             try await locationService.requestLocationPermission()
+    |                 `- warning: no 'async' operations occur within 'await' expression
+ 90 |             let location = try await locationService.getCurrentLocation()
+ 91 |             
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Rendering/DynamicWallpaperManager.swift:89:13: warning: no calls to throwing functions occur within 'try' expression
+ 87 |         do {
+ 88 |             // 请求位置权限并获取当前位置
+ 89 |             try await locationService.requestLocationPermission()
+    |             `- warning: no calls to throwing functions occur within 'try' expression
+ 90 |             let location = try await locationService.getCurrentLocation()
+ 91 |             
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Rendering/DynamicWallpaperManager.swift:116:13: warning: no 'async' operations occur within 'await' expression
+114 |         // 停止所有服务
+115 |         Task {
+116 |             await weatherDataService.stopWeatherUpdates()
+    |             `- warning: no 'async' operations occur within 'await' expression
+117 |             await locationService.stopLocationUpdates()
+118 |         }
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Rendering/DynamicWallpaperManager.swift:117:13: warning: no 'async' operations occur within 'await' expression
+115 |         Task {
+116 |             await weatherDataService.stopWeatherUpdates()
+117 |             await locationService.stopLocationUpdates()
+    |             `- warning: no 'async' operations occur within 'await' expression
+118 |         }
+119 |         

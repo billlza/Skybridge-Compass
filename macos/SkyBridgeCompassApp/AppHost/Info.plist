@@ -1,0 +1,122 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleExecutable</key>
+    <string>SkyBridgeCompassHost</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.skybridge.compass.host</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>SkyBridgeCompassHost</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+    <key>NSMainStoryboardFile</key>
+    <string></string>
+    <key>NSRequiresAquaSystemAppearance</key>
+    <true/>
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsArbitraryLoads</key>
+        <true/>
+    </dict>
+    
+    <!-- 输入监控权限使用说明 -->
+    <key>NSInputMonitoringUsageDescription</key>
+    <string>SkyBridge Compass 需要输入监控权限以正确处理文本框的键盘输入事件，确保您能够正常输入用户名、密码等信息。</string>
+    
+    <!-- 辅助功能权限使用说明 -->
+    <key>NSAccessibilityUsageDescription</key>
+    <string>SkyBridge Compass 需要辅助功能权限以提供更好的用户界面交互体验，包括文本框焦点管理和键盘事件处理。</string>
+    
+    <!-- 相机权限使用说明（如果需要） -->
+    <key>NSCameraUsageDescription</key>
+    <string>SkyBridge Compass 可能需要访问相机以支持远程桌面功能中的视频通话或屏幕共享。</string>
+    
+    <!-- 麦克风权限使用说明（如果需要） -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>SkyBridge Compass 可能需要访问麦克风以支持远程桌面功能中的音频通话。</string>
+    
+    <!-- 位置服务权限使用说明（WiFi扫描需要） -->
+    <key>NSLocationUsageDescription</key>
+    <string>SkyBridge Compass 需要位置服务权限以扫描和发现附近的WiFi网络。</string>
+    
+    <key>NSLocationWhenInUseUsageDescription</key>
+    <string>SkyBridge Compass 需要位置服务权限以扫描和发现附近的WiFi网络。</string>
+    
+    <!-- 蓝牙权限使用说明 -->
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>SkyBridge Compass 需要蓝牙权限以发现和连接蓝牙设备。</string>
+    
+    <key>NSBluetoothPeripheralUsageDescription</key>
+    <string>SkyBridge Compass 需要蓝牙权限以发现和连接蓝牙设备。</string>
+    
+    <!-- 网络权限使用说明 -->
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>SkyBridge Compass 需要本地网络权限以发现和连接同一网络中的设备。</string>
+    
+    <!-- 系统扩展权限 -->
+    <key>NSSystemExtensionUsageDescription</key>
+    <string>SkyBridge Compass 需要系统扩展权限以提供网络和设备管理功能。</string>
+    
+    <!-- 应用沙盒配置 -->
+    <key>com.apple.security.app-sandbox</key>
+    <false/>
+    
+    <!-- 网络权限 -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+    
+    <key>com.apple.security.network.server</key>
+    <true/>
+    
+    <!-- 设备访问权限 -->
+    <key>com.apple.security.device.bluetooth</key>
+    <true/>
+    
+    <key>com.apple.security.device.camera</key>
+    <true/>
+    
+    <key>com.apple.security.device.microphone</key>
+    <true/>
+    
+    <!-- 文件访问权限 -->
+    <key>com.apple.security.files.user-selected.read-write</key>
+    <true/>
+    
+    <!-- 硬件加速权限 -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    
+    <!-- 应用传输安全配置 -->
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsArbitraryLoads</key>
+        <true/>
+        <key>NSExceptionDomains</key>
+        <dict>
+            <key>localhost</key>
+            <dict>
+                <key>NSExceptionAllowsInsecureHTTPLoads</key>
+                <true/>
+                <key>NSExceptionMinimumTLSVersion</key>
+                <string>TLSv1.0</string>
+            </dict>
+        </dict>
+    </dict>
+</dict>
+</plist>

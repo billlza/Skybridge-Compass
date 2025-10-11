@@ -1,0 +1,23 @@
+Building for debugging...
+[0/8] Write sources
+[1/8] Write swift-version-41C403C3136A4E2D.txt
+[3/10] Compiling SkyBridgeCore PerformanceTestSuite.swift
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Performance/PerformanceTestSuite.swift:189:50: error: type '() -> Int' does not conform to the 'Sendable' protocol
+187 |             }
+188 |             
+189 |             let results = try await gcdOptimizer.processBatchData(
+    |                                                  |- error: type '() -> Int' does not conform to the 'Sendable' protocol
+    |                                                  `- note: a function type must be marked '@Sendable' to conform to 'Sendable'
+190 |                 data: tasks
+191 |             ) { taskBatch in
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Performance/PerformanceTestSuite.swift:257:29: warning: mutation of captured var 'completedTasks' in concurrently-executing code [#SendableClosureCaptures]
+255 |                             // 模拟任务执行
+256 |                             Thread.sleep(forTimeInterval: 0.1)
+257 |                             completedTasks += 1
+    |                             `- warning: mutation of captured var 'completedTasks' in concurrently-executing code [#SendableClosureCaptures]
+258 |                             continuation.resume()
+259 |                         }
+
+[#SendableClosureCaptures]: <https://docs.swift.org/compiler/documentation/diagnostics/sendable-closure-captures>
+[4/10] Emitting module SkyBridgeCore

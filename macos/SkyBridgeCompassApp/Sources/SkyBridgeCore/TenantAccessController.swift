@@ -4,7 +4,7 @@ import Security
 import os.log
 
 /// 统一管理租户权限标记的结构体，确保所有功能调用都有明确授权。
-public struct TenantPermission: OptionSet, Codable, Hashable {
+public struct TenantPermission: OptionSet, Codable, Hashable, Sendable {
     public let rawValue: Int
 
     public init(rawValue: Int) {
@@ -26,7 +26,7 @@ public struct TenantPermission: OptionSet, Codable, Hashable {
     public static let notifications = TenantPermission(rawValue: 1 << 2)
 }
 
-public struct TenantDescriptor: Identifiable, Codable, Hashable {
+public struct TenantDescriptor: Identifiable, Codable, Hashable, Sendable {
     public let id: UUID
     public var displayName: String
     public var username: String
@@ -49,13 +49,13 @@ public struct TenantDescriptor: Identifiable, Codable, Hashable {
     }
 }
 
-public struct TenantCredential {
+public struct TenantCredential: Sendable {
     public let username: String
     public let password: String
     public let domain: String?
 }
 
-public enum TenantAccessError: Error, LocalizedError {
+public enum TenantAccessError: Error, LocalizedError, Sendable {
     case noActiveTenant
     case permissionDenied(TenantPermission, TenantDescriptor)
     case credentialMissing
@@ -76,7 +76,8 @@ public enum TenantAccessError: Error, LocalizedError {
 }
 
 /// 负责租户列表、凭据存储和访问令牌的集中式控制器。
-public final class TenantAccessController {
+@MainActor
+public final class TenantAccessController: Sendable {
     public static let shared = TenantAccessController()
 
     public var tenantsPublisher: AnyPublisher<[TenantDescriptor], Never> {
@@ -105,10 +106,10 @@ public final class TenantAccessController {
 
     /// 在成功登录后绑定新的访问令牌。
     public func bindAuthentication(session: AuthSession) async {
-        await withCheckedContinuation { continuation in
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             queue.async(flags: .barrier) {
                 self.currentSession = session
-                self.log.info("Bind authentication session for %{public}@", session.userIdentifier)
+                self.log.info("Bind authentication session for \(session.userIdentifier)")
                 continuation.resume()
             }
         }
@@ -130,10 +131,24 @@ public final class TenantAccessController {
     }
 
     public func bootstrap() {
-        queue.async(flags: .barrier) {
-            guard !self.didBootstrap else { return }
-            self.loadFromDisk()
-            self.didBootstrap = true
+        Task { @MainActor in
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                queue.async(flags: .barrier) { [weak self] in
+                    guard let self else {
+                        continuation.resume()
+                        return
+                    }
+                    guard !self.didBootstrap else {
+                        continuation.resume()
+                        return
+                    }
+                    Task { @MainActor in
+                        self.loadFromDisk()
+                        self.didBootstrap = true
+                        continuation.resume()
+                    }
+                }
+            }
         }
     }
 
@@ -159,7 +174,7 @@ public final class TenantAccessController {
                 persistActiveTenant(id: tenant.id)
             }
         }
-        log.info("Registered tenant %{public}@", tenant.displayName)
+        log.info("Registered tenant \(tenant.displayName)")
         return tenant
     }
 
@@ -173,15 +188,20 @@ public final class TenantAccessController {
         }
     }
 
-    public func requirePermission(_ permission: TenantPermission) throws -> TenantDescriptor {
-        try queue.sync {
-            guard let tenant = activeTenantSubject.value else {
-                throw TenantAccessError.noActiveTenant
+    /// 检查当前活跃租户是否具有指定权限
+    public func requirePermission(_ permission: TenantPermission) async throws -> TenantDescriptor {
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<TenantDescriptor, Error>) in
+            queue.async {
+                guard let tenant = self.activeTenantSubject.value else {
+                    continuation.resume(throwing: TenantAccessError.noActiveTenant)
+                    return
+                }
+                guard tenant.permissions.contains(permission) else {
+                    continuation.resume(throwing: TenantAccessError.permissionDenied(permission, tenant))
+                    return
+                }
+                continuation.resume(returning: tenant)
             }
-            guard tenant.permissions.contains(permission) else {
-                throw TenantAccessError.permissionDenied(permission, tenant)
-            }
-            return tenant
         }
     }
 
@@ -215,7 +235,7 @@ public final class TenantAccessController {
                 let tenants = try JSONDecoder().decode([TenantDescriptor].self, from: data)
                 tenantsSubject.send(tenants)
             } catch {
-                log.error("Failed to decode tenants from disk: %{public}@", error.localizedDescription)
+                log.error("Failed to decode tenants from disk: \(error.localizedDescription)")
                 tenantsSubject.send([])
             }
         }
@@ -232,7 +252,7 @@ public final class TenantAccessController {
             let data = try JSONEncoder().encode(tenants)
             UserDefaults.standard.set(data, forKey: storageKey)
         } catch {
-            log.error("Unable to persist tenants: %{public}@", error.localizedDescription)
+            log.error("Unable to persist tenants: \(error.localizedDescription)")
         }
     }
 

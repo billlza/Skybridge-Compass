@@ -1,0 +1,19 @@
+Building for debugging...
+[0/8] Write sources
+[2/8] Write swift-version-41C403C3136A4E2D.txt
+[4/10] Emitting module SkyBridgeCore
+[5/10] Compiling SkyBridgeCore AppleSiliconOptimizer.swift
+[5/11] Write Objects.LinkFileList
+[7/14] Compiling SkyBridgeCompassApp DashboardViewModel.swift
+[8/15] Emitting module SkyBridgeCompassApp
+[8/15] Linking SkyBridgeCompassWidgets
+[9/15] Applying SkyBridgeCompassWidgets
+[11/15] Compiling SkyBridgeCompassApp SkyBridgeCompassApp.swift
+[12/15] Compiling SkyBridgeCompassApp DashboardView.swift
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCompassApp/DashboardView.swift:764:27: error: call can throw, but it is not marked with 'try' and the error is not handled
+ 762 |                     )
+ 763 |                     
+ 764 |                     await queue.asyncExecute { @Sendable in
+     |                           `- error: call can throw, but it is not marked with 'try' and the error is not handled
+ 765 |                         // 模拟数据加载，使用优化的块大小
+ 766 |                         let dataSize = 1024 * 1024 // 1MB 模拟数据

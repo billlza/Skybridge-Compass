@@ -1,0 +1,4 @@
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.swift:116:10: warning: 'onChange(of:perform:)' was deprecated in macOS 14.0: Use `onChange` with a two or zero parameter action closure instead.
+        .onChange(of: authModel.currentSession) { newSession in
+         ^
+warning: Traditional headermap style is no longer supported; please migrate to using separate headermaps and set 'ALWAYS_SEARCH_USER_PATHS' to NO. (in target 'SkyBridgeCompassHost' from project 'SkyBridgeCompassHost')

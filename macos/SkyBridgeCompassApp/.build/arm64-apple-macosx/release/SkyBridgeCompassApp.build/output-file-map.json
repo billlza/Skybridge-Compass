@@ -1,0 +1,127 @@
+{
+  "": {
+    "dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/SkyBridgeCompassApp.d",
+    "object": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/SkyBridgeCompassApp.o",
+    "swift-dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/master.swiftdeps"
+  },
+  "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCompassApp/AuthenticationView.swift": {
+    "object": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/AuthenticationView.swift.o",
+    "swiftmodule": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/AuthenticationView~partial.swiftmodule",
+    "swift-dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/AuthenticationView.swiftdeps",
+    "diagnostics": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/AuthenticationView.dia"
+  },
+  "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCompassApp/AuthenticationViewModel.swift": {
+    "object": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/AuthenticationViewModel.swift.o",
+    "swiftmodule": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/AuthenticationViewModel~partial.swiftmodule",
+    "swift-dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/AuthenticationViewModel.swiftdeps",
+    "diagnostics": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/AuthenticationViewModel.dia"
+  },
+  "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCompassApp/DashboardView.swift": {
+    "object": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/DashboardView.swift.o",
+    "swiftmodule": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/DashboardView~partial.swiftmodule",
+    "swift-dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/DashboardView.swiftdeps",
+    "diagnostics": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/DashboardView.dia"
+  },
+  "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCompassApp/DashboardViewModel.swift": {
+    "object": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/DashboardViewModel.swift.o",
+    "swiftmodule": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/DashboardViewModel~partial.swiftmodule",
+    "swift-dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/DashboardViewModel.swiftdeps",
+    "diagnostics": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/DashboardViewModel.dia"
+  },
+  "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCompassApp/EventMonitor.swift": {
+    "object": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/EventMonitor.swift.o",
+    "swiftmodule": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/EventMonitor~partial.swiftmodule",
+    "swift-dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/EventMonitor.swiftdeps",
+    "diagnostics": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/EventMonitor.dia"
+  },
+  "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCompassApp/GlassSidebar.swift": {
+    "object": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/GlassSidebar.swift.o",
+    "swiftmodule": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/GlassSidebar~partial.swiftmodule",
+    "swift-dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/GlassSidebar.swiftdeps",
+    "diagnostics": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/GlassSidebar.dia"
+  },
+  "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCompassApp/MissingIconHintView.swift": {
+    "object": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/MissingIconHintView.swift.o",
+    "swiftmodule": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/MissingIconHintView~partial.swiftmodule",
+    "swift-dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/MissingIconHintView.swiftdeps",
+    "diagnostics": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/MissingIconHintView.dia"
+  },
+  "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCompassApp/NSTextFieldRepresentable.swift": {
+    "object": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/NSTextFieldRepresentable.swift.o",
+    "swiftmodule": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/NSTextFieldRepresentable~partial.swiftmodule",
+    "swift-dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/NSTextFieldRepresentable.swiftdeps",
+    "diagnostics": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/NSTextFieldRepresentable.dia"
+  },
+  "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCompassApp/OrderedCollectionsFallback.swift": {
+    "object": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/OrderedCollectionsFallback.swift.o",
+    "swiftmodule": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/OrderedCollectionsFallback~partial.swiftmodule",
+    "swift-dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/OrderedCollectionsFallback.swiftdeps",
+    "diagnostics": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/OrderedCollectionsFallback.dia"
+  },
+  "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCompassApp/PerformanceTestDemoView.swift": {
+    "object": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/PerformanceTestDemoView.swift.o",
+    "swiftmodule": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/PerformanceTestDemoView~partial.swiftmodule",
+    "swift-dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/PerformanceTestDemoView.swiftdeps",
+    "diagnostics": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/PerformanceTestDemoView.dia"
+  },
+  "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCompassApp/PreferencesView.swift": {
+    "object": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/PreferencesView.swift.o",
+    "swiftmodule": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/PreferencesView~partial.swiftmodule",
+    "swift-dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/PreferencesView.swiftdeps",
+    "diagnostics": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/PreferencesView.dia"
+  },
+  "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCompassApp/RemoteDesktopView.swift": {
+    "object": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/RemoteDesktopView.swift.o",
+    "swiftmodule": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/RemoteDesktopView~partial.swiftmodule",
+    "swift-dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/RemoteDesktopView.swiftdeps",
+    "diagnostics": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/RemoteDesktopView.dia"
+  },
+  "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCompassApp/RemoteDisplayView.swift": {
+    "object": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/RemoteDisplayView.swift.o",
+    "swiftmodule": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/RemoteDisplayView~partial.swiftmodule",
+    "swift-dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/RemoteDisplayView.swiftdeps",
+    "diagnostics": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/RemoteDisplayView.dia"
+  },
+  "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCompassApp/SiriIntents.swift": {
+    "object": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/SiriIntents.swift.o",
+    "swiftmodule": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/SiriIntents~partial.swiftmodule",
+    "swift-dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/SiriIntents.swiftdeps",
+    "diagnostics": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/SiriIntents.dia"
+  },
+  "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCompassApp/SkyBridgeCommands.swift": {
+    "object": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/SkyBridgeCommands.swift.o",
+    "swiftmodule": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/SkyBridgeCommands~partial.swiftmodule",
+    "swift-dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/SkyBridgeCommands.swiftdeps",
+    "diagnostics": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/SkyBridgeCommands.dia"
+  },
+  "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.swift": {
+    "object": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/SkyBridgeCompassApp.swift.o",
+    "swiftmodule": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/SkyBridgeCompassApp~partial.swiftmodule",
+    "swift-dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/SkyBridgeCompassApp.swiftdeps",
+    "diagnostics": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/SkyBridgeCompassApp.dia"
+  },
+  "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCompassApp/StarryBackground.swift": {
+    "object": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/StarryBackground.swift.o",
+    "swiftmodule": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/StarryBackground~partial.swiftmodule",
+    "swift-dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/StarryBackground.swiftdeps",
+    "diagnostics": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/StarryBackground.dia"
+  },
+  "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCompassApp/ThemeConfiguration.swift": {
+    "object": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/ThemeConfiguration.swift.o",
+    "swiftmodule": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/ThemeConfiguration~partial.swiftmodule",
+    "swift-dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/ThemeConfiguration.swiftdeps",
+    "diagnostics": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/ThemeConfiguration.dia"
+  },
+  "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCompassApp/WindowFocusManager.swift": {
+    "object": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/WindowFocusManager.swift.o",
+    "swiftmodule": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/WindowFocusManager~partial.swiftmodule",
+    "swift-dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/WindowFocusManager.swiftdeps",
+    "diagnostics": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/WindowFocusManager.dia"
+  },
+  "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/DerivedSources/resource_bundle_accessor.swift": {
+    "object": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/resource_bundle_accessor.swift.o",
+    "swiftmodule": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/resource_bundle_accessor~partial.swiftmodule",
+    "swift-dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/resource_bundle_accessor.swiftdeps",
+    "diagnostics": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassApp.build/resource_bundle_accessor.dia"
+  }
+}

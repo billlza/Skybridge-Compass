@@ -1,0 +1,90 @@
+Building for debugging...
+[0/7] Write sources
+[1/7] Write swift-version-41C403C3136A4E2D.txt
+[3/5] Compiling SkyBridgeCoreTests PerformanceTestSuiteTests.swift
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Tests/SkyBridgeCoreTests/PerformanceTestSuiteTests.swift:81:37: warning: capture of 'self' with non-Sendable type 'PerformanceTestSuiteTests' in a '@Sendable' closure [#SendableClosureCaptures]
+  4 | /// Apple Silicon 性能测试套件的单元测试
+  5 | @available(macOS 14.0, *)
+  6 | final class PerformanceTestSuiteTests: XCTestCase {
+    |             `- note: class 'PerformanceTestSuiteTests' does not conform to the 'Sendable' protocol
+  7 |     
+  8 |     private var testSuite: PerformanceTestSuite!
+    :
+ 79 |             
+ 80 |             Task { @Sendable in
+ 81 |                 let results = await testSuite.runFullTestSuite()
+    |                                     `- warning: capture of 'self' with non-Sendable type 'PerformanceTestSuiteTests' in a '@Sendable' closure [#SendableClosureCaptures]
+ 82 |                 if let cpuTest = results.cpuIntensiveTest {
+ 83 |                     XCTAssertTrue(cpuTest.success, "CPU密集型任务应该成功执行")
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Tests/SkyBridgeCoreTests/PerformanceTestSuiteTests.swift:99:37: warning: capture of 'self' with non-Sendable type 'PerformanceTestSuiteTests' in a '@Sendable' closure [#SendableClosureCaptures]
+  4 | /// Apple Silicon 性能测试套件的单元测试
+  5 | @available(macOS 14.0, *)
+  6 | final class PerformanceTestSuiteTests: XCTestCase {
+    |             `- note: class 'PerformanceTestSuiteTests' does not conform to the 'Sendable' protocol
+  7 |     
+  8 |     private var testSuite: PerformanceTestSuite!
+    :
+ 97 |             
+ 98 |             Task { @Sendable in
+ 99 |                 let results = await testSuite.runFullTestSuite()
+    |                                     `- warning: capture of 'self' with non-Sendable type 'PerformanceTestSuiteTests' in a '@Sendable' closure [#SendableClosureCaptures]
+100 |                 if let parallelTest = results.parallelComputeTest {
+101 |                     XCTAssertTrue(parallelTest.success, "并行计算应该成功执行")
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Tests/SkyBridgeCoreTests/PerformanceTestSuiteTests.swift:117:37: warning: capture of 'self' with non-Sendable type 'PerformanceTestSuiteTests' in a '@Sendable' closure [#SendableClosureCaptures]
+  4 | /// Apple Silicon 性能测试套件的单元测试
+  5 | @available(macOS 14.0, *)
+  6 | final class PerformanceTestSuiteTests: XCTestCase {
+    |             `- note: class 'PerformanceTestSuiteTests' does not conform to the 'Sendable' protocol
+  7 |     
+  8 |     private var testSuite: PerformanceTestSuite!
+    :
+115 |             
+116 |             Task { @Sendable in
+117 |                 let results = await testSuite.runFullTestSuite()
+    |                                     `- warning: capture of 'self' with non-Sendable type 'PerformanceTestSuiteTests' in a '@Sendable' closure [#SendableClosureCaptures]
+118 |                 if let memoryTest = results.memoryOptimizationTest {
+119 |                     XCTAssertTrue(memoryTest.success, "内存优化应该成功执行")
+
+[#SendableClosureCaptures]: <https://docs.swift.org/compiler/documentation/diagnostics/sendable-closure-captures>
+[4/5] Emitting module SkyBridgeCoreTests
+[4/6] Write Objects.LinkFileList
+[5/6] Linking SkyBridgeCompassAppPackageTests
+Build complete! (1.52s)
+Test Suite 'Selected tests' started at 2025-10-10 23:34:04.044.
+Test Suite 'SkyBridgeCompassAppPackageTests.xctest' started at 2025-10-10 23:34:04.046.
+Test Suite 'PerformanceTestSuiteTests' started at 2025-10-10 23:34:04.046.
+Test Case '-[SkyBridgeCoreTests.PerformanceTestSuiteTests testBenchmarkResultsCreation]' started.
+Test Case '-[SkyBridgeCoreTests.PerformanceTestSuiteTests testBenchmarkResultsCreation]' passed (0.001 seconds).
+Test Case '-[SkyBridgeCoreTests.PerformanceTestSuiteTests testCompleteTestFlow]' started.
+Test Case '-[SkyBridgeCoreTests.PerformanceTestSuiteTests testCompleteTestFlow]' passed (0.872 seconds).
+Test Case '-[SkyBridgeCoreTests.PerformanceTestSuiteTests testCPUIntensiveTaskPerformance]' started.
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Tests/SkyBridgeCoreTests/PerformanceTestSuiteTests.swift:83: error: -[SkyBridgeCoreTests.PerformanceTestSuiteTests testCPUIntensiveTaskPerformance] : XCTAssertTrue failed - CPU密集型任务应该成功执行
+Test Case '-[SkyBridgeCoreTests.PerformanceTestSuiteTests testCPUIntensiveTaskPerformance]' failed (1.236 seconds).
+Test Case '-[SkyBridgeCoreTests.PerformanceTestSuiteTests testEmptyTestResults]' started.
+Test Case '-[SkyBridgeCoreTests.PerformanceTestSuiteTests testEmptyTestResults]' passed (0.000 seconds).
+Test Case '-[SkyBridgeCoreTests.PerformanceTestSuiteTests testMemoryOptimizationPerformance]' started.
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Tests/SkyBridgeCoreTests/PerformanceTestSuiteTests.swift:113: Test Case '-[SkyBridgeCoreTests.PerformanceTestSuiteTests testMemoryOptimizationPerformance]' measured [Time, seconds] average: 0.849, relative standard deviation: 1.143%, values: [0.833904, 0.841624, 0.846551, 0.845166, 0.863947, 0.858774, 0.860241, 0.853194, 0.845656, 0.836130], performanceMetricID:com.apple.XCTPerformanceMetric_WallClockTime, baselineName: "", baselineAverage: , polarity: prefers smaller, maxPercentRegression: 10.000%, maxPercentRelativeStandardDeviation: 10.000%, maxRegression: 0.100, maxStandardDeviation: 0.100
+Test Case '-[SkyBridgeCoreTests.PerformanceTestSuiteTests testMemoryOptimizationPerformance]' passed (8.805 seconds).
+Test Case '-[SkyBridgeCoreTests.PerformanceTestSuiteTests testParallelComputationPerformance]' started.
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Tests/SkyBridgeCoreTests/PerformanceTestSuiteTests.swift:95: Test Case '-[SkyBridgeCoreTests.PerformanceTestSuiteTests testParallelComputationPerformance]' measured [Time, seconds] average: 0.854, relative standard deviation: 2.663%, values: [0.834716, 0.833084, 0.841428, 0.856724, 0.853268, 0.873164, 0.826838, 0.865440, 0.908411, 0.851232], performanceMetricID:com.apple.XCTPerformanceMetric_WallClockTime, baselineName: "", baselineAverage: , polarity: prefers smaller, maxPercentRegression: 10.000%, maxPercentRelativeStandardDeviation: 10.000%, maxRegression: 0.100, maxStandardDeviation: 0.100
+Test Case '-[SkyBridgeCoreTests.PerformanceTestSuiteTests testParallelComputationPerformance]' passed (8.800 seconds).
+Test Case '-[SkyBridgeCoreTests.PerformanceTestSuiteTests testPerformanceTestSuiteInitialization]' started.
+Test Case '-[SkyBridgeCoreTests.PerformanceTestSuiteTests testPerformanceTestSuiteInitialization]' passed (0.000 seconds).
+Test Case '-[SkyBridgeCoreTests.PerformanceTestSuiteTests testRunBenchmarkComparison]' started.
+Test Case '-[SkyBridgeCoreTests.PerformanceTestSuiteTests testRunBenchmarkComparison]' passed (0.051 seconds).
+Test Case '-[SkyBridgeCoreTests.PerformanceTestSuiteTests testRunFullTestSuite]' started.
+Test Case '-[SkyBridgeCoreTests.PerformanceTestSuiteTests testRunFullTestSuite]' passed (0.854 seconds).
+Test Case '-[SkyBridgeCoreTests.PerformanceTestSuiteTests testSingleTestResult]' started.
+Test Case '-[SkyBridgeCoreTests.PerformanceTestSuiteTests testSingleTestResult]' passed (0.000 seconds).
+Test Suite 'PerformanceTestSuiteTests' failed at 2025-10-10 23:34:24.668.
+	 Executed 10 tests, with 1 failure (0 unexpected) in 20.621 (20.623) seconds
+Test Suite 'SkyBridgeCompassAppPackageTests.xctest' failed at 2025-10-10 23:34:24.668.
+	 Executed 10 tests, with 1 failure (0 unexpected) in 20.621 (20.623) seconds
+Test Suite 'Selected tests' failed at 2025-10-10 23:34:24.668.
+	 Executed 10 tests, with 1 failure (0 unexpected) in 20.621 (20.625) seconds
+◇ Test run started.
+↳ Testing Library Version: 1400
+↳ Target Platform: arm64e-apple-macos14.0
+✔ Test run with 0 tests in 0 suites passed after 0.001 seconds.

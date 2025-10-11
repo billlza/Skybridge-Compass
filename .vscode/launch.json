@@ -1,0 +1,40 @@
+{
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:Skybridge-Compass-2}/macos/SkyBridgeCompassApp",
+            "name": "Debug SkyBridgeCompassApp (macos/SkyBridgeCompassApp)",
+            "program": "${workspaceFolder:Skybridge-Compass-2}/macos/SkyBridgeCompassApp/.build/debug/SkyBridgeCompassApp",
+            "preLaunchTask": "swift: Build Debug SkyBridgeCompassApp (macos/SkyBridgeCompassApp)"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:Skybridge-Compass-2}/macos/SkyBridgeCompassApp",
+            "name": "Release SkyBridgeCompassApp (macos/SkyBridgeCompassApp)",
+            "program": "${workspaceFolder:Skybridge-Compass-2}/macos/SkyBridgeCompassApp/.build/release/SkyBridgeCompassApp",
+            "preLaunchTask": "swift: Build Release SkyBridgeCompassApp (macos/SkyBridgeCompassApp)"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:Skybridge-Compass-2}/macos/SkyBridgeCompassApp",
+            "name": "Debug SkyBridgeCompassWidgets (macos/SkyBridgeCompassApp)",
+            "program": "${workspaceFolder:Skybridge-Compass-2}/macos/SkyBridgeCompassApp/.build/debug/SkyBridgeCompassWidgets",
+            "preLaunchTask": "swift: Build Debug SkyBridgeCompassWidgets (macos/SkyBridgeCompassApp)"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:Skybridge-Compass-2}/macos/SkyBridgeCompassApp",
+            "name": "Release SkyBridgeCompassWidgets (macos/SkyBridgeCompassApp)",
+            "program": "${workspaceFolder:Skybridge-Compass-2}/macos/SkyBridgeCompassApp/.build/release/SkyBridgeCompassWidgets",
+            "preLaunchTask": "swift: Build Release SkyBridgeCompassWidgets (macos/SkyBridgeCompassApp)"
+        }
+    ]
+}

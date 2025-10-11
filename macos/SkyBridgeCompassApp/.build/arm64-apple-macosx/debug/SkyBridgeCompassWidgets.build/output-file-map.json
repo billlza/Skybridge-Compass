@@ -1,0 +1,12 @@
+{
+  "": {
+    "swift-dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/debug/SkyBridgeCompassWidgets.build/master.swiftdeps"
+  },
+  "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCompassWidgets/CompassWidget.swift": {
+    "dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/debug/SkyBridgeCompassWidgets.build/CompassWidget.d",
+    "object": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/debug/SkyBridgeCompassWidgets.build/CompassWidget.swift.o",
+    "swiftmodule": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/debug/SkyBridgeCompassWidgets.build/CompassWidget~partial.swiftmodule",
+    "swift-dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/debug/SkyBridgeCompassWidgets.build/CompassWidget.swiftdeps",
+    "diagnostics": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/debug/SkyBridgeCompassWidgets.build/CompassWidget.dia"
+  }
+}

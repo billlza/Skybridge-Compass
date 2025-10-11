@@ -1,0 +1,133 @@
+{
+  "": {
+    "dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/Starscream.d",
+    "object": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/Starscream.o",
+    "swift-dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/master.swiftdeps"
+  },
+  "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/checkouts/Starscream/Sources/Compression/Compression.swift": {
+    "object": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/Compression.swift.o",
+    "swiftmodule": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/Compression~partial.swiftmodule",
+    "swift-dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/Compression.swiftdeps",
+    "diagnostics": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/Compression.dia"
+  },
+  "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/checkouts/Starscream/Sources/Compression/WSCompression.swift": {
+    "object": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/WSCompression.swift.o",
+    "swiftmodule": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/WSCompression~partial.swiftmodule",
+    "swift-dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/WSCompression.swiftdeps",
+    "diagnostics": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/WSCompression.dia"
+  },
+  "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/checkouts/Starscream/Sources/DataBytes/Data+Extensions.swift": {
+    "object": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/Data+Extensions.swift.o",
+    "swiftmodule": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/Data+Extensions~partial.swiftmodule",
+    "swift-dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/Data+Extensions.swiftdeps",
+    "diagnostics": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/Data+Extensions.dia"
+  },
+  "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/checkouts/Starscream/Sources/Engine/Engine.swift": {
+    "object": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/Engine.swift.o",
+    "swiftmodule": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/Engine~partial.swiftmodule",
+    "swift-dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/Engine.swiftdeps",
+    "diagnostics": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/Engine.dia"
+  },
+  "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/checkouts/Starscream/Sources/Engine/NativeEngine.swift": {
+    "object": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/NativeEngine.swift.o",
+    "swiftmodule": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/NativeEngine~partial.swiftmodule",
+    "swift-dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/NativeEngine.swiftdeps",
+    "diagnostics": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/NativeEngine.dia"
+  },
+  "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/checkouts/Starscream/Sources/Engine/WSEngine.swift": {
+    "object": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/WSEngine.swift.o",
+    "swiftmodule": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/WSEngine~partial.swiftmodule",
+    "swift-dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/WSEngine.swiftdeps",
+    "diagnostics": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/WSEngine.dia"
+  },
+  "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/checkouts/Starscream/Sources/Framer/FoundationHTTPHandler.swift": {
+    "object": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/FoundationHTTPHandler.swift.o",
+    "swiftmodule": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/FoundationHTTPHandler~partial.swiftmodule",
+    "swift-dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/FoundationHTTPHandler.swiftdeps",
+    "diagnostics": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/FoundationHTTPHandler.dia"
+  },
+  "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/checkouts/Starscream/Sources/Framer/FoundationHTTPServerHandler.swift": {
+    "object": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/FoundationHTTPServerHandler.swift.o",
+    "swiftmodule": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/FoundationHTTPServerHandler~partial.swiftmodule",
+    "swift-dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/FoundationHTTPServerHandler.swiftdeps",
+    "diagnostics": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/FoundationHTTPServerHandler.dia"
+  },
+  "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/checkouts/Starscream/Sources/Framer/FrameCollector.swift": {
+    "object": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/FrameCollector.swift.o",
+    "swiftmodule": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/FrameCollector~partial.swiftmodule",
+    "swift-dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/FrameCollector.swiftdeps",
+    "diagnostics": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/FrameCollector.dia"
+  },
+  "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/checkouts/Starscream/Sources/Framer/Framer.swift": {
+    "object": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/Framer.swift.o",
+    "swiftmodule": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/Framer~partial.swiftmodule",
+    "swift-dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/Framer.swiftdeps",
+    "diagnostics": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/Framer.dia"
+  },
+  "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/checkouts/Starscream/Sources/Framer/HTTPHandler.swift": {
+    "object": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/HTTPHandler.swift.o",
+    "swiftmodule": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/HTTPHandler~partial.swiftmodule",
+    "swift-dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/HTTPHandler.swiftdeps",
+    "diagnostics": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/HTTPHandler.dia"
+  },
+  "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/checkouts/Starscream/Sources/Framer/StringHTTPHandler.swift": {
+    "object": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/StringHTTPHandler.swift.o",
+    "swiftmodule": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/StringHTTPHandler~partial.swiftmodule",
+    "swift-dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/StringHTTPHandler.swiftdeps",
+    "diagnostics": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/StringHTTPHandler.dia"
+  },
+  "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/checkouts/Starscream/Sources/Security/FoundationSecurity.swift": {
+    "object": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/FoundationSecurity.swift.o",
+    "swiftmodule": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/FoundationSecurity~partial.swiftmodule",
+    "swift-dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/FoundationSecurity.swiftdeps",
+    "diagnostics": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/FoundationSecurity.dia"
+  },
+  "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/checkouts/Starscream/Sources/Security/Security.swift": {
+    "object": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/Security.swift.o",
+    "swiftmodule": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/Security~partial.swiftmodule",
+    "swift-dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/Security.swiftdeps",
+    "diagnostics": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/Security.dia"
+  },
+  "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/checkouts/Starscream/Sources/Server/Server.swift": {
+    "object": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/Server.swift.o",
+    "swiftmodule": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/Server~partial.swiftmodule",
+    "swift-dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/Server.swiftdeps",
+    "diagnostics": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/Server.dia"
+  },
+  "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/checkouts/Starscream/Sources/Server/WebSocketServer.swift": {
+    "object": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/WebSocketServer.swift.o",
+    "swiftmodule": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/WebSocketServer~partial.swiftmodule",
+    "swift-dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/WebSocketServer.swiftdeps",
+    "diagnostics": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/WebSocketServer.dia"
+  },
+  "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/checkouts/Starscream/Sources/Starscream/WebSocket.swift": {
+    "object": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/WebSocket.swift.o",
+    "swiftmodule": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/WebSocket~partial.swiftmodule",
+    "swift-dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/WebSocket.swiftdeps",
+    "diagnostics": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/WebSocket.dia"
+  },
+  "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/checkouts/Starscream/Sources/Transport/FoundationTransport.swift": {
+    "object": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/FoundationTransport.swift.o",
+    "swiftmodule": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/FoundationTransport~partial.swiftmodule",
+    "swift-dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/FoundationTransport.swiftdeps",
+    "diagnostics": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/FoundationTransport.dia"
+  },
+  "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/checkouts/Starscream/Sources/Transport/TCPTransport.swift": {
+    "object": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/TCPTransport.swift.o",
+    "swiftmodule": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/TCPTransport~partial.swiftmodule",
+    "swift-dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/TCPTransport.swiftdeps",
+    "diagnostics": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/TCPTransport.dia"
+  },
+  "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/checkouts/Starscream/Sources/Transport/Transport.swift": {
+    "object": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/Transport.swift.o",
+    "swiftmodule": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/Transport~partial.swiftmodule",
+    "swift-dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/Transport.swiftdeps",
+    "diagnostics": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/Transport.dia"
+  },
+  "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/DerivedSources/resource_bundle_accessor.swift": {
+    "object": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/resource_bundle_accessor.swift.o",
+    "swiftmodule": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/resource_bundle_accessor~partial.swiftmodule",
+    "swift-dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/resource_bundle_accessor.swiftdeps",
+    "diagnostics": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/Starscream.build/resource_bundle_accessor.dia"
+  }
+}

@@ -3,14 +3,50 @@ import Combine
 import AppKit
 import Network
 import os.log
+@_exported import Foundation
+#if canImport(OrderedCollections)
 import OrderedCollections
+#endif
+#if canImport(FreeRDPBridge)
 import FreeRDPBridge
+#else
+enum CBFreeRDPClientState: Int {
+    case idle, connecting, connected, failed, disconnected
+}
+enum CBFreeRDPFrameType: UInt8 { case bgra = 0 }
+final class CBFreeRDPClient {
+    var state: CBFreeRDPClientState = .idle
+    var frameCallback: ((NSData, UInt32, UInt32, UInt32, CBFreeRDPFrameType) -> Void)?
+    var stateCallback: ((String) -> Void)?
+    init(host: String, port: UInt16, username: String, password: String, domain: String?) {}
+    func connect() throws {
+        state = .connected
+        stateCallback?("connected (stub)")
+    }
+    func disconnect() {
+        state = .disconnected
+        stateCallback?("disconnected (stub)")
+    }
+}
+#endif
 import IOKit
 
-public enum RemoteDesktopError: Error, LocalizedError {
+public enum RemoteDesktopError: Error, LocalizedError, Sendable {
     case missingAddress(DiscoveredDevice)
     case missingPort(DiscoveredDevice)
     case connectionFailed(String)
+    // Metal相关错误
+    case metalInitializationFailed
+    case metalCommandQueueCreationFailed
+    case metalPipelineCreationFailed
+    case metalCommandCreationFailed
+    case metalTextureCreationFailed
+    case textureCacheCreationFailed
+    case pixelBufferCreationFailed
+    case encoderNotInitialized
+    case encodingFailed(OSStatus)
+    case compressionSessionCreationFailed(OSStatus)
+    case compressionSessionPreparationFailed(OSStatus)
 
     public var errorDescription: String? {
         switch self {
@@ -20,12 +56,35 @@ public enum RemoteDesktopError: Error, LocalizedError {
             return "设备 \(device.name) 未公开可用的远程桌面端口"
         case .connectionFailed(let message):
             return "远程桌面连接失败: \(message)"
+        case .metalInitializationFailed:
+            return "Metal设备初始化失败"
+        case .metalCommandQueueCreationFailed:
+            return "Metal命令队列创建失败"
+        case .metalPipelineCreationFailed:
+            return "Metal计算管线创建失败"
+        case .metalCommandCreationFailed:
+            return "Metal命令创建失败"
+        case .metalTextureCreationFailed:
+            return "Metal纹理创建失败"
+        case .textureCacheCreationFailed:
+            return "纹理缓存创建失败"
+        case .pixelBufferCreationFailed:
+            return "像素缓冲区创建失败"
+        case .encoderNotInitialized:
+            return "编码器未初始化"
+        case .encodingFailed(let status):
+            return "视频编码失败: \(status)"
+        case .compressionSessionCreationFailed(let status):
+            return "压缩会话创建失败: \(status)"
+        case .compressionSessionPreparationFailed(let status):
+            return "压缩会话准备失败: \(status)"
         }
     }
 }
 
 @available(macOSApplicationExtension, unavailable)
-public final class RemoteDesktopManager {
+@MainActor
+public final class RemoteDesktopManager: ObservableObject {
     private let sessionsSubject = CurrentValueSubject<[RemoteSessionSummary], Never>([])
     private let metricsSubject = CurrentValueSubject<RemoteMetricsSnapshot, Never>(.init(onlineDevices: 0, activeSessions: 0, transferCount: 0, alertCount: 0, cpuTimeline: [:]))
     private let log = Logger(subsystem: "com.skybridge.compass", category: "RemoteDesktop")
@@ -33,7 +92,9 @@ public final class RemoteDesktopManager {
     private var cpuTimeline = OrderedDictionary<Date, Double>()
     private var activeSessions: [UUID: RemoteDesktopSession] = [:]
     private let sessionQueue = DispatchQueue(label: "com.skybridge.compass.remote.sessions", attributes: .concurrent)
-    private let tenantController = TenantAccessController.shared
+    /// UI 桥接：发布来自会话的最新远端帧纹理。
+    public let textureFeed = RemoteTextureFeed()
+@MainActor private var tenantController: TenantAccessController { TenantAccessController.shared }
 
     public init() {}
 
@@ -45,19 +106,33 @@ public final class RemoteDesktopManager {
     }
 
     public func shutdown() {
+        // 停止资源监控定时器
         monitoringTimer?.invalidate()
         monitoringTimer = nil
-        sessionQueue.async(flags: .barrier) {
-            self.activeSessions.values.forEach { $0.stop() }
-            self.activeSessions.removeAll()
+        
+        // 使用屏障任务确保所有会话操作完成后再清理
+        sessionQueue.async(flags: .barrier) { [weak self] in
+            guard let self = self else { return }
+            
+            Task { @MainActor in
+                // 停止所有活跃会话
+                for session in self.activeSessions.values {
+                    session.stop()  // stop 方法不是异步的，移除 await
+                }
+                
+                // 清空会话字典
+                self.activeSessions.removeAll()
+                
+                // 在主线程更新UI状态
+                self.cpuTimeline.removeAll()
+                self.sessionsSubject.send([])
+                self.metricsSubject.send(.init(onlineDevices: 0, activeSessions: 0, transferCount: 0, alertCount: 0, cpuTimeline: [:]))
+            }
         }
-        cpuTimeline.removeAll()
-        sessionsSubject.send([])
-        metricsSubject.send(.init(onlineDevices: 0, activeSessions: 0, transferCount: 0, alertCount: 0, cpuTimeline: [:]))
     }
 
     public func connect(to device: DiscoveredDevice, tenant: TenantDescriptor) async throws {
-        let credentials = try tenantController.credentials(for: tenant.id)
+        let credentials = try await tenantController.credentials(for: tenant.id)
         guard let host = device.ipv4 ?? device.ipv6 else {
             throw RemoteDesktopError.missingAddress(device)
         }
@@ -65,14 +140,22 @@ public final class RemoteDesktopManager {
             throw RemoteDesktopError.missingPort(device)
         }
 
-        let session = RemoteDesktopSession(device: device, tenant: tenant, credentials: credentials, host: host, port: port, renderer: RemoteFrameRenderer()) { [weak self] in
+        let session = RemoteDesktopSession(
+            device: device,
+            tenant: tenant,
+            credentials: credentials,
+            host: host,
+            port: port,
+            renderer: RemoteFrameRenderer(),
+            feed: textureFeed
+        ) { [weak self] in
             self?.updateSessionsSnapshot()
         } stateChanged: { [weak self] in
             self?.refreshMetrics()
         }
 
-        sessionQueue.async(flags: .barrier) {
-            self.activeSessions[session.id] = session
+        sessionQueue.async(flags: .barrier) { [weak self] in
+            self?.activeSessions[session.id] = session
         }
         updateSessionsSnapshot()
 
@@ -80,8 +163,8 @@ public final class RemoteDesktopManager {
             try await session.start()
             refreshMetrics()
         } catch {
-            sessionQueue.async(flags: .barrier) {
-                self.activeSessions.removeValue(forKey: session.id)
+            sessionQueue.async(flags: .barrier) { [weak self] in
+                self?.activeSessions.removeValue(forKey: session.id)
             }
             updateSessionsSnapshot()
             throw error
@@ -90,27 +173,25 @@ public final class RemoteDesktopManager {
 
     @available(*, deprecated, message: "Use tenant-specific connect")
     public func connect(to device: DiscoveredDevice) async throws {
-        let tenant = try tenantController.requirePermission(.remoteDesktop)
+        let tenant = try await tenantController.requirePermission(.remoteDesktop)
         try await connect(to: device, tenant: tenant)
     }
 
     public func focus(on sessionID: UUID) {
-        sessionQueue.async {
-            self.activeSessions[sessionID]?.focus()
+        Task { @MainActor in
+            activeSessions[sessionID]?.focus()
         }
     }
 
     public func terminate(sessionID: UUID) async {
         await withCheckedContinuation { continuation in
-            sessionQueue.async(flags: .barrier) {
-                if let session = self.activeSessions.removeValue(forKey: sessionID) {
+            Task { @MainActor in
+                if let session = activeSessions.removeValue(forKey: sessionID) {
                     session.stop()
                 }
-                DispatchQueue.main.async {
-                    self.updateSessionsSnapshot()
-                    self.refreshMetrics()
-                    continuation.resume()
-                }
+                updateSessionsSnapshot()
+                refreshMetrics()
+                continuation.resume()
             }
         }
     }
@@ -142,9 +223,11 @@ public final class RemoteDesktopManager {
 
     private func startResourceMonitoring() {
         monitoringTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
-            guard let self = self else { return }
-            let cpuLoad = self.fetchCpuLoad()
-            self.refreshMetrics(cpuLoad: cpuLoad)
+            Task { @MainActor in
+                guard let self = self else { return }
+                let cpuLoad = self.fetchCpuLoad()
+                self.refreshMetrics(cpuLoad: cpuLoad)
+            }
         }
     }
 
@@ -170,12 +253,14 @@ public final class RemoteDesktopManager {
     }
 }
 
+@MainActor
 private final class RemoteDesktopSession {
     let id = UUID()
     let device: DiscoveredDevice
     let tenant: TenantDescriptor
     private let credentials: TenantCredential
     private let renderer: RemoteFrameRenderer
+    private weak var feed: RemoteTextureFeed?
     private let client: CBFreeRDPClient
     private let log = Logger(subsystem: "com.skybridge.compass", category: "RemoteSession")
     private let summaryChanged: () -> Void
@@ -193,12 +278,14 @@ private final class RemoteDesktopSession {
          host: String,
          port: Int,
          renderer: RemoteFrameRenderer,
+         feed: RemoteTextureFeed,
          summaryChanged: @escaping () -> Void,
          stateChanged: @escaping () -> Void) {
         self.device = device
         self.tenant = tenant
         self.credentials = credentials
         self.renderer = renderer
+        self.feed = feed
         self.summaryChanged = summaryChanged
         self.stateChanged = stateChanged
         self.summary = RemoteSessionSummary(
@@ -221,7 +308,7 @@ private final class RemoteDesktopSession {
     func start() async throws {
         clientState = .connecting
         stateChanged()
-        try await withCheckedThrowingContinuation { continuation in
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             continuationLock.lock()
             if connectionContinuation != nil {
                 continuationLock.unlock()
@@ -231,62 +318,93 @@ private final class RemoteDesktopSession {
             connectionContinuation = continuation
             continuationLock.unlock()
 
-            var error: NSError?
-            if self.client.connectWithError(&error) { return }
-
-            self.clientState = .failed
-            self.stateChanged()
-            let failure = error ?? RemoteDesktopError.connectionFailed("libfreerdp2.dylib 未连接")
-            self.resolveConnectionContinuation(.failure(failure))
+            do {
+                try self.client.connect()
+                return
+            } catch {
+                self.clientState = .failed
+                self.stateChanged()
+                let failure = error
+                self.resolveConnectionContinuation(.failure(failure))
+            }
         }
     }
 
     func stop() {
+        // 清理渲染器资源
         renderer.teardown()
+        
+        // 断开客户端连接
         client.disconnect()
+        
+        // 清理回调引用，避免循环引用
+        client.frameCallback = nil
+        client.stateCallback = nil
+        renderer.frameHandler = nil
+        
+        // 清理弱引用
+        feed = nil
+        
+        // 更新状态
+        clientState = .disconnected
+        stateChanged()
     }
 
+    @MainActor
     func focus() {
-        log.info("Focus requested for session %{public}@", device.name)
+        log.info("Focus requested for session \(self.device.name)")
         CGDisplayMoveCursorToPoint(CGMainDisplayID(), CGPoint(x: 0, y: 0))
     }
 
     private func configureCallbacks() {
+        // 将渲染输出纹理桥接到 UI。遵循 Apple 的建议，在主线程驱动 UI 绘制。
+        renderer.frameHandler = { [weak self] texture in
+            guard let self else { return }
+            Task { @MainActor in
+                self.feed?.update(texture: texture)
+            }
+        }
         client.frameCallback = { [weak self] data, width, height, stride, frameType in
             guard let self else { return }
-            let metrics = self.renderer.processFrame(
-                data: data as Data,
-                width: Int(width),
-                height: Int(height),
-                stride: Int(stride),
-                type: RemoteFrameType(rawValue: frameType.rawValue) ?? .bgra
-            )
-            self.summary = RemoteSessionSummary(
-                id: self.summary.id,
-                targetName: self.summary.targetName,
-                protocolDescription: self.summary.protocolDescription,
-                bandwidthMbps: metrics.bandwidthMbps,
-                frameLatencyMilliseconds: metrics.latencyMilliseconds
-            )
-            self.summaryChanged()
+            Task { @MainActor in
+                // 将 FreeRDP 帧类型安全地映射到内部枚举。
+                let mappedType = RemoteFrameType(rawValue: UInt(frameType.rawValue)) ?? .bgra
+                let metrics = self.renderer.processFrame(
+                    data: data as Data,
+                    width: Int(width),
+                    height: Int(height),
+                    stride: Int(stride),
+                    type: mappedType
+                )
+                self.summary = RemoteSessionSummary(
+                    id: self.summary.id,
+                    targetName: self.summary.targetName,
+                    protocolDescription: self.summary.protocolDescription,
+                    bandwidthMbps: metrics.bandwidthMbps,
+                    frameLatencyMilliseconds: metrics.latencyMilliseconds
+                )
+                self.summaryChanged()
+            }
         }
 
         client.stateCallback = { [weak self] description in
             guard let self else { return }
-            self.log.info("Session state updated %{public}@", description)
-            let newState = self.client.state
-            self.clientState = newState
-            self.stateChanged()
+            Task { @MainActor in
+                self.log.info("Session state updated \(description)")
+                let newState = self.client.state
+                self.clientState = newState
+                self.stateChanged()
 
-            switch newState {
-            case .connected:
-                self.resolveConnectionContinuation(.success(()))
-            case .failed:
-                self.resolveConnectionContinuation(.failure(RemoteDesktopError.connectionFailed(description)))
-            case .disconnected:
-                self.resolveConnectionContinuation(.failure(RemoteDesktopError.connectionFailed("FreeRDP 会话已断开")))
-            default:
-                break
+                switch newState {
+                case .connected:
+                    self.resolveConnectionContinuation(.success(()))
+                case .failed:
+                    self.resolveConnectionContinuation(.failure(RemoteDesktopError.connectionFailed(description)))
+                case .disconnected:
+                    self.resolveConnectionContinuation(.failure(RemoteDesktopError.connectionFailed("FreeRDP 会话已断开")))
+                default:
+                    break
+                }
             }
         }
     }

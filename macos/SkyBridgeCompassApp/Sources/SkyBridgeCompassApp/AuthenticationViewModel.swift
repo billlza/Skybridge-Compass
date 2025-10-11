@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import SwiftUI
 import AuthenticationServices
 import SkyBridgeCore
 
@@ -56,6 +57,7 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
     @Published var isProcessing = false
     @Published var errorMessage: String?
     @Published var selectedMethod: LoginMethod = .apple
+    @Published var isGuestMode = false // 游客模式状态
     @Published var nebulaAccount: String = ""
     @Published var nebulaPassword: String = ""
     @Published var phoneNumber: String = ""
@@ -63,6 +65,25 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
     @Published var emailAddress: String = ""
     @Published var emailPassword: String = ""
     @Published var registration = RegistrationForm()
+    
+    // 注册方式：手机号 / 邮箱 / 星云账号（注册后需绑定手机号）
+    enum RegistrationMethod: String, CaseIterable, Identifiable { case phone, email, nebula; var id: String { rawValue } }
+    @Published var selectedRegistration: RegistrationMethod = .phone
+
+    // 分渠道的注册字段（更贴合你的期望）
+    @Published var regPhoneNumber: String = ""
+    @Published var regPhoneCode: String = ""
+    @Published var regPhonePassword: String = ""
+    @Published var regPhoneConfirm: String = ""
+
+    @Published var regEmailAddress: String = ""
+    @Published var regEmailPassword: String = ""
+    @Published var regEmailConfirm: String = ""
+
+    @Published var regNebulaAccount: String = ""
+    @Published var regNebulaPassword: String = ""
+    @Published var regNebulaConfirm: String = ""
+    @Published var regNebulaPhone: String = ""
 
     private let service: AuthenticationService
     private var cancellables = Set<AnyCancellable>()
@@ -73,7 +94,7 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
         super.init()
         service.sessionPublisher
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] in self?.currentSession = $0 }
+            .sink { [weak self] session in self?.currentSession = session }
             .store(in: &cancellables)
     }
 
@@ -83,7 +104,7 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
             errorMessage = "请输入完整的星云账号与密码"
             return
         }
-        await perform { [service, nebulaAccount, nebulaPassword] in
+        await performAuthTask { [service, nebulaAccount, nebulaPassword] in
             try await service.loginNebula(account: nebulaAccount, password: nebulaPassword)
         }
     }
@@ -94,7 +115,7 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
             errorMessage = "请输入正确的手机号和验证码"
             return
         }
-        await perform { [service, phoneNumber, phoneCode] in
+        await performAuthTask { [service, phoneNumber, phoneCode] in
             try await service.loginPhone(number: phoneNumber, code: phoneCode)
         }
     }
@@ -105,33 +126,31 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
             errorMessage = "请输入有效的邮箱地址和密码"
             return
         }
-        await perform { [service, emailAddress, emailPassword] in
+        await performAuthTask { [service, emailAddress, emailPassword] in
             try await service.loginEmail(email: emailAddress, password: emailPassword)
         }
     }
 
-    /// 提交注册表单。
-    func register() async {
-        guard !registration.displayName.isEmpty else {
-            errorMessage = "请填写展示名称"
-            return
-        }
-        guard registration.password == registration.confirmPassword else {
-            errorMessage = "两次输入的密码不一致"
-            return
-        }
-        await perform { [service, registration] in
-            try await service.register(displayName: registration.displayName,
-                                       email: registration.email,
-                                       phone: registration.phone,
-                                       password: registration.password)
-        }
-    }
+    // 旧的统一注册入口已被新的分渠道注册替代
 
     /// 注销当前会话。
     func signOut() {
         service.signOut()
         currentSession = nil
+        isGuestMode = false // 退出游客模式
+    }
+
+    /// 进入游客模式，无需登录直接访问主界面
+    func enterGuestMode() {
+        isGuestMode = true
+        // 创建一个临时的游客会话，用于标识游客状态
+        currentSession = AuthSession(
+            accessToken: "guest_token",
+            refreshToken: nil,
+            userIdentifier: "guest_user",
+            displayName: "游客用户",
+            issuedAt: Date()
+        )
     }
 
     /// 处理 Sign in with Apple 返回的授权结果。
@@ -141,13 +160,70 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
             errorMessage = "未能获取 Apple ID 凭据"
             return
         }
-        await perform { [service] in
+        await performAuthTask { [service] in
             try await service.authenticateWithApple(identityToken: identityToken,
                                                     authorizationCode: credential.authorizationCode)
         }
     }
 
-    private func perform(_ task: @escaping () async throws -> AuthSession) async {
+    /// 根据所选注册方式分派处理
+    func register() async {
+        switch selectedRegistration {
+        case .phone:
+            await registerWithPhone()
+        case .email:
+            await registerWithEmail()
+        case .nebula:
+            await registerNebulaWithPhoneBinding()
+        }
+    }
+
+    /// 手机号注册（短信验证码 + 设置密码）
+    private func registerWithPhone() async {
+        guard regPhoneNumber.count >= 6 else { errorMessage = "请输入正确的手机号"; return }
+        guard !regPhoneCode.isEmpty else { errorMessage = "请输入短信验证码"; return }
+        guard regPhonePassword == regPhoneConfirm, !regPhonePassword.isEmpty else { errorMessage = "两次输入的密码不一致"; return }
+
+        await performAuthTask { [service, regPhoneNumber, regPhonePassword] in
+            // 简化表单：仅携带必要字段，邮箱留空
+            try await service.register(displayName: regPhoneNumber,
+                                       email: "",
+                                       phone: regPhoneNumber,
+                                       password: regPhonePassword)
+        }
+    }
+
+    /// 邮箱注册（邮箱 + 设置密码）
+    private func registerWithEmail() async {
+        guard regEmailAddress.contains("@") else { errorMessage = "请输入有效的邮箱地址"; return }
+        guard regEmailPassword == regEmailConfirm, !regEmailPassword.isEmpty else { errorMessage = "两次输入的密码不一致"; return }
+
+        await performAuthTask { [service, regEmailAddress, regEmailPassword] in
+            // 简化表单：仅携带必要字段，手机号留空
+            try await service.register(displayName: regEmailAddress,
+                                       email: regEmailAddress,
+                                       phone: "",
+                                       password: regEmailPassword)
+        }
+    }
+
+    /// 星云账号注册 -> 绑定手机号（一次性收集后提交）
+    private func registerNebulaWithPhoneBinding() async {
+        guard !regNebulaAccount.isEmpty else { errorMessage = "请输入星云账号"; return }
+        guard regNebulaPassword == regNebulaConfirm, !regNebulaPassword.isEmpty else { errorMessage = "两次输入的密码不一致"; return }
+        guard regNebulaPhone.count >= 6 else { errorMessage = "请输入要绑定的手机号"; return }
+
+        await performAuthTask { [service, regNebulaAccount, regNebulaPhone, regNebulaPassword] in
+            // 后端暂统一注册入口：以星云账号为展示名，绑定手机号
+            try await service.register(displayName: regNebulaAccount,
+                                       email: "",
+                                       phone: regNebulaPhone,
+                                       password: regNebulaPassword)
+        }
+    }
+
+    // 避免与 NSObject 的 perform(_:) 选择器 API 名称冲突
+    private func performAuthTask(_ task: @escaping () async throws -> AuthSession) async {
         isProcessing = true
         do {
             _ = try await task()

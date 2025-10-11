@@ -1,0 +1,238 @@
+// !$*UTF8*$!
+{
+    archiveVersion = 1;
+    classes = {};
+    objectVersion = 56;
+    objects = {
+
+/* Begin PBXBuildFile section */
+        00A1A001 /* SkyBridgeCompassApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00B1B010 /* SkyBridgeCompassApp.swift */; };
+        00A1A002 /* DashboardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00B1B011 /* DashboardView.swift */; };
+        00A1A003 /* DashboardViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00B1B012 /* DashboardViewModel.swift */; };
+        00A1A004 /* AuthenticationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00B1B013 /* AuthenticationView.swift */; };
+        00A1A005 /* AuthenticationViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00B1B014 /* AuthenticationViewModel.swift */; };
+        00A1A006 /* SiriIntents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00B1B015 /* SiriIntents.swift */; };
+        00A1A007 /* MissingIconHintView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00B1B016 /* MissingIconHintView.swift */; };
+        00A1A008 /* AuthenticationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00B1B020 /* AuthenticationService.swift */; };
+        00A1A009 /* BackgroundTaskCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00B1B021 /* BackgroundTaskCoordinator.swift */; };
+        00A1A00A /* DeviceDiscoveryService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00B1B022 /* DeviceDiscoveryService.swift */; };
+        00A1A00B /* FileTransferManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00B1B023 /* FileTransferManager.swift */; };
+        00A1A00C /* IntentBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00B1B024 /* IntentBridge.swift */; };
+        00A1A00D /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00B1B025 /* Models.swift */; };
+        00A1A00E /* RemoteDesktopManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00B1B026 /* RemoteDesktopManager.swift */; };
+        00A1A00F /* RemoteFrameRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00B1B027 /* RemoteFrameRenderer.swift */; };
+        00A1A010 /* TenantAccessController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00B1B028 /* TenantAccessController.swift */; };
+        00A1A013 /* RemoteTextureFeed.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00B1B029 /* RemoteTextureFeed.swift */; };
+        00A1A014 /* RemoteDisplayView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00B1B030 /* RemoteDisplayView.swift */; };
+        00A1A012 /* OrderedCollectionsFallback.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00B1B017 /* OrderedCollectionsFallback.swift */; };
+        00A1A015 /* DeviceManagementView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00B1B031 /* DeviceManagementView.swift */; };
+        00A1A016 /* BluetoothManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00B1B032 /* BluetoothManager.swift */; };
+        00A1A017 /* WiFiManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00B1B033 /* WiFiManager.swift */; };
+        00A1A018 /* AirPlayManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00B1B034 /* AirPlayManager.swift */; };
+        00A1A019 /* DevicePermissionManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00B1B035 /* DevicePermissionManager.swift */; };
+        00A1A020 /* SystemMetricsService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00B1B036 /* SystemMetricsService.swift */; };
+        00A1A021 /* FileTransferView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00B1B037 /* FileTransferView.swift */; };
+        00A1A022 /* RemoteDesktopView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00B1B038 /* RemoteDesktopView.swift */; };
+        00A1A023 /* FileTransferEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00B1B039 /* FileTransferEngine.swift */; };
+        00A1A024 /* FileTransferModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00B1B041 /* FileTransferModels.swift */; };
+        00A1A025 /* P2PNetworkManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00B1B042 /* P2PNetworkManager.swift */; };
+        00A1A026 /* P2PModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00B1B043 /* P2PModels.swift */; };
+        00A1A027 /* P2PNetworkLayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00B1B044 /* P2PNetworkLayer.swift */; };
+        00A1A028 /* P2PSecurityManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00B1B045 /* P2PSecurityManager.swift */; };
+        00A1A029 /* P2PDiscoveryService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00B1B046 /* P2PDiscoveryService.swift */; };
+        00A1A02C /* STUNClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00B1B02B /* STUNClient.swift */; };
+        00A1A030 /* P2PNetworkTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00B1B047 /* P2PNetworkTypes.swift */; };
+        00A1A032 /* NATTraversalManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00B1B049 /* NATTraversalManager.swift */; };
+        00A1A031 /* P2PSecurityTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00B1B048 /* P2PSecurityTypes.swift */; };
+        00A1A011 /* Resources in Resources */ = {isa = PBXBuildFile; fileRef = 00B1B040 /* Resources */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+        00B1B000 /* SkyBridgeCompassHost.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; path = SkyBridgeCompassHost.app; sourceTree = BUILT_PRODUCTS_DIR; };
+        00B1B010 /* SkyBridgeCompassApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.swift; sourceTree = SOURCE_ROOT; };
+        00B1B011 /* DashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Sources/SkyBridgeCompassApp/DashboardView.swift; sourceTree = SOURCE_ROOT; };
+        00B1B012 /* DashboardViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Sources/SkyBridgeCompassApp/DashboardViewModel.swift; sourceTree = SOURCE_ROOT; };
+        00B1B013 /* AuthenticationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Sources/SkyBridgeCompassApp/AuthenticationView.swift; sourceTree = SOURCE_ROOT; };
+        00B1B014 /* AuthenticationViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Sources/SkyBridgeCompassApp/AuthenticationViewModel.swift; sourceTree = SOURCE_ROOT; };
+        00B1B015 /* SiriIntents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Sources/SkyBridgeCompassApp/SiriIntents.swift; sourceTree = SOURCE_ROOT; };
+        00B1B016 /* MissingIconHintView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Sources/SkyBridgeCompassApp/MissingIconHintView.swift; sourceTree = SOURCE_ROOT; };
+        00B1B017 /* OrderedCollectionsFallback.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Sources/SkyBridgeCompassApp/OrderedCollectionsFallback.swift; sourceTree = SOURCE_ROOT; };
+        00B1B020 /* AuthenticationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Sources/SkyBridgeCore/AuthenticationService.swift; sourceTree = SOURCE_ROOT; };
+        00B1B021 /* BackgroundTaskCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Sources/SkyBridgeCore/BackgroundTaskCoordinator.swift; sourceTree = SOURCE_ROOT; };
+        00B1B022 /* DeviceDiscoveryService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Sources/SkyBridgeCore/DeviceDiscoveryService.swift; sourceTree = SOURCE_ROOT; };
+        00B1B023 /* FileTransferManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Sources/SkyBridgeCore/FileTransferManager.swift; sourceTree = SOURCE_ROOT; };
+        00B1B024 /* IntentBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Sources/SkyBridgeCore/IntentBridge.swift; sourceTree = SOURCE_ROOT; };
+        00B1B025 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Sources/SkyBridgeCore/Models.swift; sourceTree = SOURCE_ROOT; };
+        00B1B026 /* RemoteDesktopManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Sources/SkyBridgeCore/RemoteDesktopManager.swift; sourceTree = SOURCE_ROOT; };
+        00B1B027 /* RemoteFrameRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Sources/SkyBridgeCore/RemoteFrameRenderer.swift; sourceTree = SOURCE_ROOT; };
+        00B1B028 /* TenantAccessController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Sources/SkyBridgeCore/TenantAccessController.swift; sourceTree = SOURCE_ROOT; };
+        00B1B029 /* RemoteTextureFeed.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Sources/SkyBridgeCore/RemoteTextureFeed.swift; sourceTree = SOURCE_ROOT; };
+        00B1B030 /* RemoteDisplayView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Sources/SkyBridgeCompassApp/RemoteDisplayView.swift; sourceTree = SOURCE_ROOT; };
+        00B1B031 /* DeviceManagementView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Sources/SkyBridgeCore/Views/DeviceManagementView.swift; sourceTree = SOURCE_ROOT; };
+        00B1B032 /* BluetoothManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Sources/SkyBridgeCore/Device/BluetoothManager.swift; sourceTree = SOURCE_ROOT; };
+        00B1B033 /* WiFiManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Sources/SkyBridgeCore/Device/WiFiManager.swift; sourceTree = SOURCE_ROOT; };
+        00B1B034 /* AirPlayManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Sources/SkyBridgeCore/Device/AirPlayManager.swift; sourceTree = SOURCE_ROOT; };
+        00B1B035 /* DevicePermissionManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Sources/SkyBridgeCore/Device/DevicePermissionManager.swift; sourceTree = SOURCE_ROOT; };
+        00B1B036 /* SystemMetricsService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Sources/SkyBridgeCore/SystemMetricsService.swift; sourceTree = SOURCE_ROOT; };
+        00B1B037 /* FileTransferView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Sources/SkyBridgeCore/FileTransfer/FileTransferView.swift; sourceTree = SOURCE_ROOT; };
+        00B1B038 /* RemoteDesktopView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Sources/SkyBridgeCompassApp/RemoteDesktopView.swift; sourceTree = SOURCE_ROOT; };
+        00B1B039 /* FileTransferEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Sources/SkyBridgeCore/FileTransfer/FileTransferEngine.swift; sourceTree = SOURCE_ROOT; };
+        00B1B040 /* Resources */ = {isa = PBXFileReference; lastKnownFileType = folder; path = ../../Sources/SkyBridgeCompassApp/Resources; sourceTree = SOURCE_ROOT; };
+        00B1B041 /* FileTransferModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Sources/SkyBridgeCore/FileTransfer/FileTransferModels.swift; sourceTree = SOURCE_ROOT; };
+        00B1B042 /* P2PNetworkManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Sources/SkyBridgeCore/P2P/P2PNetworkManager.swift; sourceTree = SOURCE_ROOT; };
+        00B1B043 /* P2PModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Sources/SkyBridgeCore/P2P/P2PModels.swift; sourceTree = SOURCE_ROOT; };
+        00B1B044 /* P2PNetworkLayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Sources/SkyBridgeCore/P2P/P2PNetworkLayer.swift; sourceTree = SOURCE_ROOT; };
+        00B1B02B /* STUNClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Sources/SkyBridgeCore/P2P/STUNClient.swift; sourceTree = SOURCE_ROOT; };
+        00B1B045 /* P2PSecurityManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Sources/SkyBridgeCore/Security/P2PSecurityManager.swift; sourceTree = SOURCE_ROOT; };
+		00B1B046 /* P2PDiscoveryService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Sources/SkyBridgeCore/P2P/P2PDiscoveryService.swift; sourceTree = SOURCE_ROOT; };
+		00B1B047 /* P2PNetworkTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Sources/SkyBridgeCore/P2P/P2PNetworkTypes.swift; sourceTree = SOURCE_ROOT; };
+		00B1B049 /* NATTraversalManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Sources/SkyBridgeCore/P2P/NATTraversalManager.swift; sourceTree = SOURCE_ROOT; };
+        00B1B048 /* P2PSecurityTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Sources/SkyBridgeCore/Security/P2PSecurityTypes.swift; sourceTree = SOURCE_ROOT; };
+        00B1B060 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = SOURCE_ROOT; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+        00C1C000 = {isa = PBXGroup; children = (00C1C010 /* AppHost */, 00C1C020 /* Sources */, 00C1C030 /* Products */); sourceTree = "<group>"; };
+        00C1C010 /* AppHost */ = {isa = PBXGroup; children = (00B1B060 /* Info.plist */); sourceTree = SOURCE_ROOT; };
+        00C1C020 /* Sources */ = {isa = PBXGroup; children = (
+            00B1B010 /* SkyBridgeCompassApp.swift */,
+            00B1B011 /* DashboardView.swift */,
+            00B1B012 /* DashboardViewModel.swift */,
+            00B1B013 /* AuthenticationView.swift */,
+            00B1B014 /* AuthenticationViewModel.swift */,
+            00B1B015 /* SiriIntents.swift */,
+            00B1B016 /* MissingIconHintView.swift */,
+            00B1B017 /* OrderedCollectionsFallback.swift */,
+            00B1B020 /* AuthenticationService.swift */,
+            00B1B021 /* BackgroundTaskCoordinator.swift */,
+            00B1B022 /* DeviceDiscoveryService.swift */,
+            00B1B023 /* FileTransferManager.swift */,
+            00B1B024 /* IntentBridge.swift */,
+            00B1B025 /* Models.swift */,
+            00B1B026 /* RemoteDesktopManager.swift */,
+            00B1B027 /* RemoteFrameRenderer.swift */,
+            00B1B028 /* TenantAccessController.swift */,
+            00B1B029 /* RemoteTextureFeed.swift */,
+            00B1B030 /* RemoteDisplayView.swift */,
+            00B1B031 /* DeviceManagementView.swift */,
+            00B1B032 /* BluetoothManager.swift */,
+            00B1B033 /* WiFiManager.swift */,
+            00B1B034 /* AirPlayManager.swift */,
+            00B1B035 /* DevicePermissionManager.swift */,
+            00B1B036 /* SystemMetricsService.swift */,
+            00B1B037 /* FileTransferView.swift */,
+            00B1B038 /* RemoteDesktopView.swift */,
+            00B1B039 /* FileTransferEngine.swift */,
+            00B1B041 /* FileTransferModels.swift */,
+            00B1B042 /* P2PNetworkManager.swift */,
+            00B1B043 /* P2PModels.swift */,
+            00B1B044 /* P2PNetworkLayer.swift */,
+            00B1B02B /* STUNClient.swift */,
+            00B1B045 /* P2PSecurityManager.swift */,
+            00B1B046 /* P2PDiscoveryService.swift */,
+			00B1B047 /* P2PNetworkTypes.swift */,
+				00B1B049 /* NATTraversalManager.swift */,
+				00B1B048 /* P2PSecurityTypes.swift */,
+            00B1B040 /* Resources */);
+            path = Sources; sourceTree = SOURCE_ROOT; };
+        00C1C030 /* Products */ = {isa = PBXGroup; children = (00B1B000 /* SkyBridgeCompassHost.app */); name = Products; sourceTree = "<group>"; };
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+        00D1D000 /* SkyBridgeCompassHost */ = {isa = PBXNativeTarget; buildConfigurationList = 00E1E030 /* Build configuration list for PBXNativeTarget "SkyBridgeCompassHost" */; buildPhases = (00D1D010 /* Sources */, 00D1D020 /* Resources */); buildRules = (); dependencies = (); name = SkyBridgeCompassHost; productName = SkyBridgeCompassHost; productReference = 00B1B000 /* SkyBridgeCompassHost.app */; productType = "com.apple.product-type.application"; };
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+        00E1E000 /* Project object */ = {isa = PBXProject; attributes = { LastUpgradeCheck = 1600; TargetAttributes = { 00D1D000 = { } ; }; }; buildConfigurationList = 00E1E010 /* Build configuration list for PBXProject "SkyBridgeCompassHost" */; compatibilityVersion = "Xcode 16.0"; developmentRegion = en; hasScannedForEncodings = 0; mainGroup = 00C1C000; productRefGroup = 00C1C030 /* Products */; projectDirPath = ""; projectRoot = ""; targets = (00D1D000 /* SkyBridgeCompassHost */); };
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+        00D1D020 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+        00D1D010 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (
+            00A1A001 /* SkyBridgeCompassApp.swift in Sources */,
+            00A1A002 /* DashboardView.swift in Sources */,
+            00A1A003 /* DashboardViewModel.swift in Sources */,
+            00A1A004 /* AuthenticationView.swift in Sources */,
+            00A1A005 /* AuthenticationViewModel.swift in Sources */,
+            00A1A006 /* SiriIntents.swift in Sources */,
+            00A1A007 /* MissingIconHintView.swift in Sources */,
+            00A1A008 /* AuthenticationService.swift in Sources */,
+            00A1A009 /* BackgroundTaskCoordinator.swift in Sources */,
+            00A1A00A /* DeviceDiscoveryService.swift in Sources */,
+            00A1A00B /* FileTransferManager.swift in Sources */,
+            00A1A00C /* IntentBridge.swift in Sources */,
+            00A1A00D /* Models.swift in Sources */,
+            00A1A00E /* RemoteDesktopManager.swift in Sources */,
+            00A1A00F /* RemoteFrameRenderer.swift in Sources */,
+            00A1A010 /* TenantAccessController.swift in Sources */
+            ,00A1A012 /* OrderedCollectionsFallback.swift in Sources */
+            ,00A1A013 /* RemoteTextureFeed.swift in Sources */
+            ,00A1A014 /* RemoteDisplayView.swift in Sources */
+            ,00A1A015 /* DeviceManagementView.swift in Sources */
+            ,00A1A016 /* BluetoothManager.swift in Sources */
+            ,00A1A017 /* WiFiManager.swift in Sources */
+            ,00A1A018 /* AirPlayManager.swift in Sources */
+            ,00A1A019 /* DevicePermissionManager.swift in Sources */
+            ,00A1A020 /* SystemMetricsService.swift in Sources */
+            ,00A1A021 /* FileTransferView.swift in Sources */
+            ,00A1A022 /* RemoteDesktopView.swift in Sources */
+            ,00A1A023 /* FileTransferEngine.swift in Sources */
+            ,00A1A024 /* FileTransferModels.swift in Sources */
+            ,00A1A025 /* P2PNetworkManager.swift in Sources */
+            ,00A1A026 /* P2PModels.swift in Sources */
+            ,00A1A027 /* P2PNetworkLayer.swift in Sources */
+            ,00A1A02C /* STUNClient.swift in Sources */
+            ,00A1A028 /* P2PSecurityManager.swift in Sources */
+            ,00A1A029 /* P2PDiscoveryService.swift in Sources */
+            ,00A1A030 /* P2PNetworkTypes.swift in Sources */
+            ,00A1A032 /* NATTraversalManager.swift in Sources */
+            ,00A1A031 /* P2PSecurityTypes.swift in Sources */
+        ); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+        00E1E011 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {
+            INFOPLIST_FILE = Info.plist;
+            CODE_SIGN_ENTITLEMENTS = SkyBridgeCompassHost.entitlements;
+            PRODUCT_NAME = "SkyBridgeCompassHost";
+            PRODUCT_BUNDLE_IDENTIFIER = "com.skybridge.compass.host";
+            CODE_SIGN_STYLE = Manual;
+            CODE_SIGN_IDENTITY = "";
+            CODE_SIGNING_ALLOWED = NO;
+            CODE_SIGNING_REQUIRED = NO;
+            ENABLE_HARDENED_RUNTIME = YES;
+            MACOSX_DEPLOYMENT_TARGET = 14.0;
+            SWIFT_VERSION = 6.0;
+            OTHER_SWIFT_FLAGS = ("-parse-as-library");
+            FRAMEWORK_SEARCH_PATHS = ("$(inherited)");
+            OTHER_LDFLAGS = ("-framework", AppKit, "-framework", SwiftUI, "-framework", WidgetKit, "-framework", AuthenticationServices, "-framework", UserNotifications, "-framework", Metal, "-framework", VideoToolbox, "-framework", Security);
+        }; name = Debug; };
+        00E1E012 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {
+            INFOPLIST_FILE = Info.plist;
+            CODE_SIGN_ENTITLEMENTS = SkyBridgeCompassHost.entitlements;
+            PRODUCT_NAME = "SkyBridgeCompassHost";
+            PRODUCT_BUNDLE_IDENTIFIER = "com.skybridge.compass.host";
+            CODE_SIGN_STYLE = Automatic;
+            CODE_SIGN_IDENTITY = "Apple Development";
+            ENABLE_HARDENED_RUNTIME = YES;
+            MACOSX_DEPLOYMENT_TARGET = 14.0;
+            SWIFT_VERSION = 6.0;
+            OTHER_SWIFT_FLAGS = ("-parse-as-library");
+            FRAMEWORK_SEARCH_PATHS = ("$(inherited)");
+            OTHER_LDFLAGS = ("-framework", AppKit, "-framework", SwiftUI, "-framework", WidgetKit, "-framework", AuthenticationServices, "-framework", UserNotifications, "-framework", Metal, "-framework", VideoToolbox, "-framework", Security);
+        }; name = Release; };
+        00E1E031 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = { }; name = Debug; };
+        00E1E032 /* Release */ = {isa = XCBuildConfiguration; buildSettings = { }; name = Release; };
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+        00E1E010 /* Build configuration list for PBXProject "SkyBridgeCompassHost" */ = {isa = XCConfigurationList; buildConfigurations = (00E1E031 /* Debug */, 00E1E032 /* Release */); defaultConfigurationIsVisible = 0; defaultConfigurationName = Debug; };
+        00E1E030 /* Build configuration list for PBXNativeTarget "SkyBridgeCompassHost" */ = {isa = XCConfigurationList; buildConfigurations = (00E1E011 /* Debug */, 00E1E012 /* Release */); defaultConfigurationIsVisible = 0; defaultConfigurationName = Debug; };
+/* End XCConfigurationList section */
+
+    };
+    rootObject = 00E1E000 /* Project object */;
+}

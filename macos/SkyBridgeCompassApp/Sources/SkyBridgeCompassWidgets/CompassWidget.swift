@@ -3,6 +3,13 @@ import SwiftUI
 import Combine
 import SkyBridgeCore
 
+// 在 Swift 6 并发严格发送性检查下，使用 @unchecked Sendable 封装闭包，
+// 以安全地在并发任务中调用来自同步 API 的 completion 闭包。
+private struct SendableClosure<T>: @unchecked Sendable {
+    let call: (T) -> Void
+    init(_ call: @escaping (T) -> Void) { self.call = call }
+}
+
 struct CompassWidgetEntry: TimelineEntry {
     let date: Date
     let deviceCount: Int
@@ -11,23 +18,28 @@ struct CompassWidgetEntry: TimelineEntry {
     let status: String
 }
 
+/// SkyBridge Compass Widget提供器
+/// 为macOS 14.0+系统提供小组件功能，展示设备发现和连接状态
+@available(macOS 14.0, *)
 struct CompassWidgetProvider: TimelineProvider {
     func placeholder(in context: Context) -> CompassWidgetEntry {
         CompassWidgetEntry(date: Date(), deviceCount: 0, sessionCount: 0, transferCount: 0, status: "扫描中")
     }
 
     func getSnapshot(in context: Context, completion: @escaping (CompassWidgetEntry) -> Void) {
-        Task {
+        let complete = SendableClosure<CompassWidgetEntry>(completion)
+        Task { @MainActor in
             let entry = await loadEntry()
-            completion(entry)
+            complete.call(entry)
         }
     }
 
     func getTimeline(in context: Context, completion: @escaping (Timeline<CompassWidgetEntry>) -> Void) {
-        Task {
+        let complete = SendableClosure<Timeline<CompassWidgetEntry>>(completion)
+        Task { @MainActor in
             let entry = await loadEntry()
             let next = Calendar.current.date(byAdding: .minute, value: 15, to: Date()) ?? Date().addingTimeInterval(900)
-            completion(Timeline(entries: [entry], policy: .after(next)))
+            complete.call(Timeline(entries: [entry], policy: .after(next)))
         }
     }
 
@@ -37,18 +49,15 @@ struct CompassWidgetProvider: TimelineProvider {
 
         var latest = DiscoveryState(devices: [], statusDescription: "扫描中")
         var cancellable: AnyCancellable?
-        let semaphore = DispatchSemaphore(value: 0)
 
         cancellable = discovery.discoveryState
             .receive(on: DispatchQueue.global())
             .sink { state in
                 latest = state
-                if !state.devices.isEmpty {
-                    semaphore.signal()
-                }
             }
 
-        _ = semaphore.wait(timeout: .now() + 3)
+        // 等待最多 3 秒以获取一次设备发现结果，避免在异步上下文中使用信号量。
+        try? await Task.sleep(nanoseconds: 3_000_000_000)
         cancellable?.cancel()
         discovery.stop()
 
@@ -70,6 +79,9 @@ struct CompassWidgetProvider: TimelineProvider {
     }
 }
 
+/// SkyBridge Compass Widget视图
+/// 为macOS 14.0+系统优化的小组件界面
+@available(macOS 14.0, *)
 struct CompassWidgetView: View {
     var entry: CompassWidgetProvider.Entry
 
@@ -106,12 +118,14 @@ struct CompassWidgetView: View {
 }
 
 @main
+@available(macOS 14.0, *)
 struct SkyBridgeCompassWidgetBundle: WidgetBundle {
     var body: some Widget {
         SkyBridgeCompassWidget()
     }
 }
 
+@available(macOS 14.0, *)
 struct SkyBridgeCompassWidget: Widget {
     let kind: String = "SkyBridgeCompassWidget"
 

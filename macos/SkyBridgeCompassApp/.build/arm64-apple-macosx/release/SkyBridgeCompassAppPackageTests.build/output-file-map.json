@@ -1,0 +1,13 @@
+{
+  "": {
+    "dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassAppPackageTests.build/SkyBridgeCompassAppPackageTests.d",
+    "object": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassAppPackageTests.build/SkyBridgeCompassAppPackageTests.o",
+    "swift-dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassAppPackageTests.build/master.swiftdeps"
+  },
+  "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassAppPackageTests.derived/runner.swift": {
+    "object": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassAppPackageTests.build/runner.swift.o",
+    "swiftmodule": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassAppPackageTests.build/runner~partial.swiftmodule",
+    "swift-dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassAppPackageTests.build/runner.swiftdeps",
+    "diagnostics": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/release/SkyBridgeCompassAppPackageTests.build/runner.dia"
+  }
+}

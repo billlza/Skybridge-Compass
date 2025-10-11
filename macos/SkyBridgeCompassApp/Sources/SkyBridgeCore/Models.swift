@@ -1,8 +1,10 @@
 import Foundation
+#if canImport(OrderedCollections)
 import OrderedCollections
+#endif
 
 /// 表示当前登录用户的安全会话信息。
-public struct AuthSession: Codable, Hashable {
+public struct AuthSession: Codable, Hashable, Sendable {
     /// 后端颁发的访问令牌。
     public let accessToken: String
     /// 用于续期访问令牌的刷新令牌。
@@ -28,7 +30,7 @@ public struct AuthSession: Codable, Hashable {
 }
 
 /// 概括远程桌面会话的状态与性能指标。
-public struct RemoteSessionSummary: Identifiable, Hashable {
+public struct RemoteSessionSummary: Identifiable, Hashable, Sendable {
     public let id: UUID
     public let targetName: String
     public let protocolDescription: String
@@ -51,12 +53,12 @@ public struct RemoteSessionSummary: Identifiable, Hashable {
 }
 
 /// 表示通过真实网络扫描获得的可连接设备。
-public struct DiscoveredDevice: Identifiable, Hashable {
+public struct DiscoveredDevice: Identifiable, Hashable, Sendable {
     public let id: UUID
     public let name: String
     public let ipv4: String?
     public let ipv6: String?
-    public let services: [String]
+    public var services: [String]
     public let portMap: [String: Int]
 
     public init(
@@ -77,7 +79,7 @@ public struct DiscoveredDevice: Identifiable, Hashable {
 }
 
 /// 表示一个正在进行或最近完成的文件传输任务。
-public struct FileTransferTask: Identifiable, Hashable {
+public struct FileTransferTask: Identifiable, Hashable, Sendable {
     public let id: UUID
     public let fileName: String
     public let progress: Double
@@ -109,7 +111,7 @@ public struct FileTransferTask: Identifiable, Hashable {
 }
 
 /// 仪表盘实时指标快照，直接来源于后台遥测。
-public struct RemoteMetricsSnapshot {
+public struct RemoteMetricsSnapshot: Sendable {
     public let onlineDevices: Int
     public let activeSessions: Int
     public let transferCount: Int

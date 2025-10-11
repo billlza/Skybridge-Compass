@@ -1,0 +1,12 @@
+{
+  "": {
+    "swift-dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/debug/SkyBridgeCompassAppPackageTests.build/master.swiftdeps"
+  },
+  "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/debug/SkyBridgeCompassAppPackageTests.derived/runner.swift": {
+    "dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/debug/SkyBridgeCompassAppPackageTests.build/runner.d",
+    "object": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/debug/SkyBridgeCompassAppPackageTests.build/runner.swift.o",
+    "swiftmodule": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/debug/SkyBridgeCompassAppPackageTests.build/runner~partial.swiftmodule",
+    "swift-dependencies": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/debug/SkyBridgeCompassAppPackageTests.build/runner.swiftdeps",
+    "diagnostics": "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/debug/SkyBridgeCompassAppPackageTests.build/runner.dia"
+  }
+}

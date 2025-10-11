@@ -3,8 +3,8 @@ import SkyBridgeCore
 
 @available(macOS 14.0, *)
 struct StartSkyBridgeSessionIntent: AppIntent {
-    static var title: LocalizedStringResource = "连接云桥司南设备"
-    static var description = IntentDescription("通过Siri直接唤醒云桥司南并连接指定的远程终端。")
+    static let title: LocalizedStringResource = "连接云桥司南设备"
+    static let description = IntentDescription("通过Siri直接唤醒云桥司南并连接指定的远程终端。")
 
     @Parameter(title: "设备名称")
     var deviceName: String
@@ -25,12 +25,16 @@ struct StartSkyBridgeSessionIntent: AppIntent {
 
 @available(macOS 14.0, *)
 struct SkyBridgeCompassShortcuts: AppShortcutsProvider {
-    static var shortcutTileColor: ShortcutTileColor = .blue
+    static let shortcutTileColor: ShortcutTileColor = .blue
 
     static var appShortcuts: [AppShortcut] {
         AppShortcut(
             intent: StartSkyBridgeSessionIntent(),
-            phrases: ["连接云桥司南 \(.applicationName)", "使用云桥司南连接"],
+            // 每个短语必须包含且仅包含一次 `\(.applicationName)`，遵循 AppIntents 规范。
+            phrases: [
+                "使用 \(.applicationName)",
+                "用 \(.applicationName) 快速连接"
+            ],
             shortTitle: "快速连接",
             systemImageName: "rectangle.connected.to.line.below"
         )

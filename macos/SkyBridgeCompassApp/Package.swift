@@ -4,7 +4,7 @@ import PackageDescription
 let package = Package(
     name: "SkyBridgeCompassApp",
     platforms: [
-        .macOS(.v14)
+        .macOS(.v13) // 支持macOS 13+，确保Apple Silicon优化特性可用，同时保持兼容性
     ],
     products: [
         .executable(name: "SkyBridgeCompassApp", targets: ["SkyBridgeCompassApp"]),
@@ -19,7 +19,12 @@ let package = Package(
             name: "FreeRDPBridge",
             dependencies: [],
             path: "Sources/FreeRDPBridge",
-            publicHeadersPath: "include"
+            publicHeadersPath: "include",
+            cSettings: [
+                // ARM64优化编译选项
+                .define("TARGET_CPU_ARM64", to: "1"),
+                .define("APPLE_SILICON_OPTIMIZED", to: "1")
+            ]
         ),
         .target(
             name: "SkyBridgeCore",
@@ -29,11 +34,25 @@ let package = Package(
                 .product(name: "OrderedCollections", package: "swift-collections")
             ],
             path: "Sources/SkyBridgeCore",
+            resources: [
+                .process("RemoteDesktop/RemoteDesktopShaders.metal"),
+                .process("Rendering/Metal4Shaders.metal")
+            ],
+            swiftSettings: [
+                // Apple Silicon特定优化
+                .define("APPLE_SILICON_OPTIMIZED"),
+                .define("ARM64_NATIVE")
+            ],
             linkerSettings: [
                 .linkedFramework("Metal"),
+                .linkedFramework("MetalKit"),
+                .linkedFramework("MetalFX"),
                 .linkedFramework("VideoToolbox"),
                 .linkedFramework("UserNotifications"),
-                .linkedFramework("Security")
+                .linkedFramework("Security"),
+                // Apple Silicon性能框架
+                .linkedFramework("Accelerate"), // 向量化计算优化
+                .linkedFramework("MetalPerformanceShaders") // GPU加速计算
             ]
         ),
         .executableTarget(
@@ -43,6 +62,10 @@ let package = Package(
                 .product(name: "OrderedCollections", package: "swift-collections")
             ],
             path: "Sources/SkyBridgeCompassApp",
+            resources: [
+                // 处理并打包目标内的 Resources 目录（例如 AppIcon.icns / AppIcon.png）
+                .process("Resources")
+            ],
             linkerSettings: [
                 .linkedFramework("AppIntents"),
                 .linkedFramework("WidgetKit"),
@@ -60,9 +83,14 @@ let package = Package(
                 .linkedFramework("WidgetKit"),
                 .linkedFramework("SwiftUI")
             ]
+        ),
+        .testTarget(
+            name: "SkyBridgeCoreTests",
+            dependencies: ["SkyBridgeCore"],
+            path: "Tests/SkyBridgeCoreTests"
         )
     ],
-    swiftLanguageVersions: [
-        .version("6.0")
+    swiftLanguageModes: [
+        .v6
     ]
 )

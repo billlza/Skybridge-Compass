@@ -1,96 +1,78 @@
 import Foundation
 import os.log
-#if canImport(BackgroundTasks)
-import BackgroundTasks
-#endif
 
-public final class BackgroundTaskCoordinator {
+/// 后台任务协调器 - 使用 macOS 原生的 NSBackgroundActivityScheduler
+/// 遵循苹果社区规范，专为 macOS 平台优化
+@MainActor
+public final class BackgroundTaskCoordinator: Sendable {
     public static let shared = BackgroundTaskCoordinator()
 
-    public typealias WorkHandler = (@escaping () -> Void) -> Void
+    public typealias WorkHandler = @Sendable (@escaping @Sendable () -> Void) -> Void
 
     private let log = Logger(subsystem: "com.skybridge.compass", category: "BackgroundTask")
-    private let schedulerIdentifier = "com.skybridge.compass.transfer.processing"
     private let activityScheduler = NSBackgroundActivityScheduler(identifier: "com.skybridge.compass.transfer.activity")
     private var registeredHandlers: [WorkHandler] = []
     private let queue = DispatchQueue(label: "com.skybridge.compass.background", qos: .utility)
 
     private init() {
+        // 配置 NSBackgroundActivityScheduler 以符合 macOS 最佳实践
         activityScheduler.repeats = true
-        activityScheduler.interval = 600
-        activityScheduler.tolerance = 120
+        activityScheduler.interval = 600 // 10分钟间隔
+        activityScheduler.tolerance = 120 // 2分钟容差
+        activityScheduler.qualityOfService = .utility
     }
 
+    /// 注册系统任务 - 使用 macOS 原生后台活动调度器
     public func registerSystemTasks() {
-        queue.async {
-            self.configureBackgroundTasks()
+        Task { @MainActor in
+            await configureBackgroundTasks()
         }
     }
 
+    /// 注册工作处理器
     public func register(handler: @escaping WorkHandler) {
-        queue.async {
-            self.registeredHandlers.append(handler)
-        }
+        registeredHandlers.append(handler)
     }
 
+    /// 调度后台活动
     public func schedule() {
-        queue.async {
-            self.scheduleBackgroundActivity()
+        Task { @MainActor in
+            await scheduleBackgroundActivity()
         }
     }
 
-    private func configureBackgroundTasks() {
-#if canImport(BackgroundTasks)
-        if #available(macOS 13.0, *) {
-            BGTaskScheduler.shared.register(forTaskWithIdentifier: schedulerIdentifier, using: nil) { [weak self] task in
-                guard let processingTask = task as? BGProcessingTask else {
-                    task.setTaskCompleted(success: false)
-                    return
-                }
-                self?.log.info("Executing BGProcessingTask for pending transfers")
-                self?.executeHandlers {
-                    processingTask.setTaskCompleted(success: true)
-                }
-            }
-        }
-#endif
-        scheduleBackgroundActivity()
+    /// 配置后台任务 - 仅使用 macOS 支持的 API
+    private func configureBackgroundTasks() async {
+        log.info("配置 macOS 后台任务调度器")
+        await scheduleBackgroundActivity()
     }
 
-    private func scheduleBackgroundActivity() {
+    /// 调度后台活动 - 使用 NSBackgroundActivityScheduler
+    private func scheduleBackgroundActivity() async {
         activityScheduler.schedule { [weak self] completion in
             guard let self else {
                 completion(.finished)
                 return
             }
-            self.log.debug("Running NSBackgroundActivityScheduler task")
-            self.executeHandlers {
-                completion(.finished)
+            Task { @MainActor in
+                self.log.debug("执行 NSBackgroundActivityScheduler 任务")
+                await self.executeHandlers {
+                    completion(.finished)
+                }
             }
         }
-
-#if canImport(BackgroundTasks)
-        if #available(macOS 13.0, *) {
-            let request = BGProcessingTaskRequest(identifier: schedulerIdentifier)
-            request.requiresNetworkConnectivity = true
-            request.requiresExternalPower = false
-            do {
-                try BGTaskScheduler.shared.submit(request)
-                log.debug("BGProcessingTaskRequest submitted")
-            } catch {
-                log.error("Failed to submit BGProcessingTaskRequest: %{public}@", error.localizedDescription)
-            }
-        }
-#endif
+        log.debug("NSBackgroundActivityScheduler 任务已调度")
     }
 
-    private func executeHandlers(completion: @escaping () -> Void) {
+    /// 执行处理器 - 使用 DispatchGroup 确保线程安全
+    private func executeHandlers(completion: @escaping @Sendable () -> Void) async {
         let handlers = registeredHandlers
         guard !handlers.isEmpty else {
             completion()
             return
         }
 
+        // 使用 DispatchGroup 顺序执行处理器，避免并发问题
         let group = DispatchGroup()
         for handler in handlers {
             group.enter()
@@ -99,7 +81,8 @@ public final class BackgroundTaskCoordinator {
             }
         }
 
-        group.notify(queue: queue) {
+        // 等待所有处理器完成
+        group.notify(queue: .main) {
             completion()
         }
     }

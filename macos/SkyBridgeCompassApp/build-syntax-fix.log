@@ -1,0 +1,1575 @@
+warning: 'starscream': found 1 file(s) which are unhandled; explicitly declare them as resources or exclude from the target
+    /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/checkouts/Starscream/Sources/Info.plist
+[0/1] Planning build
+Building for debugging...
+[0/8] Write sources
+[1/8] Write swift-version-41C403C3136A4E2D.txt
+[3/12] Compiling SkyBridgeCore SettingsManager.swift
+[4/12] Compiling SkyBridgeCore AppleSiliconOptimizer.swift
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Performance/AppleSiliconOptimizer.swift:51:20: warning: 'init(cString:)' is deprecated: Use String(decoding: array, as: UTF8.self) instead, after truncating the null termination. [#DeprecatedDeclaration]
+ 49 |         var brandString = [CChar](repeating: 0, count: size)
+ 50 |         sysctlbyname("machdep.cpu.brand_string", &brandString, &size, nil, 0)
+ 51 |         cpuBrand = String(cString: brandString)
+    |                    `- warning: 'init(cString:)' is deprecated: Use String(decoding: array, as: UTF8.self) instead, after truncating the null termination. [#DeprecatedDeclaration]
+ 52 |         
+ 53 |         // 检测是否为Apple Silicon
+
+[#DeprecatedDeclaration]: <https://docs.swift.org/compiler/documentation/diagnostics/deprecated-declaration>
+[5/12] Compiling SkyBridgeCore PerformanceTestSuite.swift
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Performance/PerformanceTestSuite.swift:86:28: error: call can throw, but it is not marked with 'try' and the error is not handled
+ 84 |         
+ 85 |         // 使用优化的队列执行 CPU 密集型任务
+ 86 |         let result = await gcdOptimizer.executeCPUIntensiveTask {
+    |                            `- error: call can throw, but it is not marked with 'try' and the error is not handled
+ 87 |             // 模拟复杂计算
+ 88 |             var sum: Double = 0
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Performance/PerformanceTestSuite.swift:137:63: error: missing argument label 'data:' in call
+135 |         let largeDataSet = Array(0..<1000000).map { Double($0) }
+136 |         
+137 |         let result = await memoryOptimizer.processLargeDataSet(largeDataSet) { data in
+    |                                                               `- error: missing argument label 'data:' in call
+138 |             return data.map { $0 * 2.0 }
+139 |         }
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Performance/PerformanceTestSuite.swift:166:42: error: value of type 'GCDOptimizer' has no member 'executeBatchTasks'
+164 |         }
+165 |         
+166 |         let results = await gcdOptimizer.executeBatchTasks(tasks)
+    |                                          `- error: value of type 'GCDOptimizer' has no member 'executeBatchTasks'
+167 |         let executionTime = CFAbsoluteTimeGetCurrent() - startTime
+168 |         
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Performance/PerformanceTestSuite.swift:219:29: warning: mutation of captured var 'completedTasks' in concurrently-executing code [#SendableClosureCaptures]
+217 |                             // 模拟任务执行
+218 |                             Thread.sleep(forTimeInterval: 0.1)
+219 |                             completedTasks += 1
+    |                             `- warning: mutation of captured var 'completedTasks' in concurrently-executing code [#SendableClosureCaptures]
+220 |                             continuation.resume()
+221 |                         }
+
+[#SendableClosureCaptures]: <https://docs.swift.org/compiler/documentation/diagnostics/sendable-closure-captures>
+[6/37] Emitting module SkyBridgeCore
+[7/39] Compiling SkyBridgeCore TLSSecurityManager.swift
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Security/TLSSecurityManager.swift:120:13: warning: capture of 'completion' with non-Sendable type '((any Error)?) -> Void' in a '@Sendable' closure [#SendableClosureCaptures]
+118 |                 self.tlsStatistics.messagesSent += 1
+119 |             }
+120 |             completion(error)
+    |             |- warning: capture of 'completion' with non-Sendable type '((any Error)?) -> Void' in a '@Sendable' closure [#SendableClosureCaptures]
+    |             `- note: a function type must be marked '@Sendable' to conform to 'Sendable'
+121 |         })
+122 |     }
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Security/TLSSecurityManager.swift:115:22: warning: main actor-isolated property 'tlsStatistics' can not be mutated from a Sendable closure
+ 17 |     @Published public private(set) var activeConnections: [String: NWConnection] = [:]
+ 18 |     /// TLS统计信息
+ 19 |     @Published public private(set) var tlsStatistics: TLSStatistics = TLSStatistics()
+    |                                        `- note: mutation of this property is only permitted within the actor
+ 20 |     
+ 21 |     // MARK: - 初始化
+    :
+113 |             if let error = error {
+114 |                 print("❌ TLS数据发送失败: \(error)")
+115 |                 self.tlsStatistics.errorCount += 1
+    |                      `- warning: main actor-isolated property 'tlsStatistics' can not be mutated from a Sendable closure
+116 |             } else {
+117 |                 self.tlsStatistics.bytesSent += UInt64(data.count)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Security/TLSSecurityManager.swift:117:22: warning: main actor-isolated property 'tlsStatistics' can not be mutated from a Sendable closure
+ 17 |     @Published public private(set) var activeConnections: [String: NWConnection] = [:]
+ 18 |     /// TLS统计信息
+ 19 |     @Published public private(set) var tlsStatistics: TLSStatistics = TLSStatistics()
+    |                                        `- note: mutation of this property is only permitted within the actor
+ 20 |     
+ 21 |     // MARK: - 初始化
+    :
+115 |                 self.tlsStatistics.errorCount += 1
+116 |             } else {
+117 |                 self.tlsStatistics.bytesSent += UInt64(data.count)
+    |                      `- warning: main actor-isolated property 'tlsStatistics' can not be mutated from a Sendable closure
+118 |                 self.tlsStatistics.messagesSent += 1
+119 |             }
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Security/TLSSecurityManager.swift:118:22: warning: main actor-isolated property 'tlsStatistics' can not be mutated from a Sendable closure
+ 17 |     @Published public private(set) var activeConnections: [String: NWConnection] = [:]
+ 18 |     /// TLS统计信息
+ 19 |     @Published public private(set) var tlsStatistics: TLSStatistics = TLSStatistics()
+    |                                        `- note: mutation of this property is only permitted within the actor
+ 20 |     
+ 21 |     // MARK: - 初始化
+    :
+116 |             } else {
+117 |                 self.tlsStatistics.bytesSent += UInt64(data.count)
+118 |                 self.tlsStatistics.messagesSent += 1
+    |                      `- warning: main actor-isolated property 'tlsStatistics' can not be mutated from a Sendable closure
+119 |             }
+120 |             completion(error)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Security/TLSSecurityManager.swift:134:17: warning: capture of 'completion' with non-Sendable type '(Data?, (any Error)?) -> Void' in a '@Sendable' closure [#SendableClosureCaptures]
+132 |         connection.receive(minimumIncompleteLength: 4, maximumLength: 4) { [weak self] lengthData, _, isComplete, error in
+133 |             if let error = error {
+134 |                 completion(nil, error)
+    |                 |- warning: capture of 'completion' with non-Sendable type '(Data?, (any Error)?) -> Void' in a '@Sendable' closure [#SendableClosureCaptures]
+    |                 `- note: a function type must be marked '@Sendable' to conform to 'Sendable'
+135 |                 return
+136 |             }
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Security/TLSSecurityManager.swift:149:21: warning: capture of 'completion' with non-Sendable type '(Data?, (any Error)?) -> Void' in a '@Sendable' closure [#SendableClosureCaptures]
+147 |             connection.receive(minimumIncompleteLength: Int(length), maximumLength: Int(length)) { data, _, isComplete, error in
+148 |                 if let error = error {
+149 |                     completion(nil, error)
+    |                     |- warning: capture of 'completion' with non-Sendable type '(Data?, (any Error)?) -> Void' in a '@Sendable' closure [#SendableClosureCaptures]
+    |                     `- note: a function type must be marked '@Sendable' to conform to 'Sendable'
+150 |                     return
+151 |                 }
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Security/TLSSecurityManager.swift:154:27: warning: main actor-isolated property 'tlsStatistics' can not be mutated from a Sendable closure
+ 17 |     @Published public private(set) var activeConnections: [String: NWConnection] = [:]
+ 18 |     /// TLS统计信息
+ 19 |     @Published public private(set) var tlsStatistics: TLSStatistics = TLSStatistics()
+    |                                        `- note: mutation of this property is only permitted within the actor
+ 20 |     
+ 21 |     // MARK: - 初始化
+    :
+152 |                 
+153 |                 if let data = data {
+154 |                     self?.tlsStatistics.bytesReceived += UInt64(data.count)
+    |                           `- warning: main actor-isolated property 'tlsStatistics' can not be mutated from a Sendable closure
+155 |                     self?.tlsStatistics.messagesReceived += 1
+156 |                 }
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Security/TLSSecurityManager.swift:154:21: warning: reference to captured var 'self' in concurrently-executing code [#SendableClosureCaptures]
+152 |                 
+153 |                 if let data = data {
+154 |                     self?.tlsStatistics.bytesReceived += UInt64(data.count)
+    |                     `- warning: reference to captured var 'self' in concurrently-executing code [#SendableClosureCaptures]
+155 |                     self?.tlsStatistics.messagesReceived += 1
+156 |                 }
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Security/TLSSecurityManager.swift:155:27: warning: main actor-isolated property 'tlsStatistics' can not be mutated from a Sendable closure
+ 17 |     @Published public private(set) var activeConnections: [String: NWConnection] = [:]
+ 18 |     /// TLS统计信息
+ 19 |     @Published public private(set) var tlsStatistics: TLSStatistics = TLSStatistics()
+    |                                        `- note: mutation of this property is only permitted within the actor
+ 20 |     
+ 21 |     // MARK: - 初始化
+    :
+153 |                 if let data = data {
+154 |                     self?.tlsStatistics.bytesReceived += UInt64(data.count)
+155 |                     self?.tlsStatistics.messagesReceived += 1
+    |                           `- warning: main actor-isolated property 'tlsStatistics' can not be mutated from a Sendable closure
+156 |                 }
+157 |                 
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Security/TLSSecurityManager.swift:155:21: warning: reference to captured var 'self' in concurrently-executing code [#SendableClosureCaptures]
+153 |                 if let data = data {
+154 |                     self?.tlsStatistics.bytesReceived += UInt64(data.count)
+155 |                     self?.tlsStatistics.messagesReceived += 1
+    |                     `- warning: reference to captured var 'self' in concurrently-executing code [#SendableClosureCaptures]
+156 |                 }
+157 |                 
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Security/TLSSecurityManager.swift:251:20: warning: value 'identity' was defined but never used; consider replacing with boolean test [#no-usage]
+249 |         case .server:
+250 |             // 服务器配置
+251 |             if let identity = certificateManager.getIdentity(for: deviceId) {
+    |                    `- warning: value 'identity' was defined but never used; consider replacing with boolean test [#no-usage]
+252 |                 // 注意：身份设置需要通过其他方式实现
+253 |                 // 由于API限制，这里暂时跳过身份配置
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Security/TLSSecurityManager.swift:325:33: warning: 'SecTrustGetCertificateAtIndex' was deprecated in macOS 12.0: renamed to 'SecTrustCopyCertificateChain(_:)' [#DeprecatedDeclaration]
+323 |     private func verifyCertificateChain(_ trust: SecTrust, for deviceId: String) -> Bool {
+324 |         // 获取证书链中的第一个证书（叶子证书）
+325 |         guard let certificate = SecTrustGetCertificateAtIndex(trust, 0) else {
+    |                                 |- warning: 'SecTrustGetCertificateAtIndex' was deprecated in macOS 12.0: renamed to 'SecTrustCopyCertificateChain(_:)' [#DeprecatedDeclaration]
+    |                                 `- note: use 'SecTrustCopyCertificateChain(_:)' instead
+326 |             print("❌ 无法获取证书")
+327 |             return false
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Security/TLSSecurityManager.swift:477:13: warning: initialization of immutable value 'data' was never used; consider replacing with assignment to '_' or removing it [#no-usage]
+475 |         // 获取证书数据
+476 |         let certificateData = SecCertificateCopyData(certificate)
+477 |         let data = CFDataGetBytePtr(certificateData)
+    |             `- warning: initialization of immutable value 'data' was never used; consider replacing with assignment to '_' or removing it [#no-usage]
+478 |         let length = CFDataGetLength(certificateData)
+479 |         
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Security/TLSSecurityManager.swift:511:19: warning: value 'publicKey' was defined but never used; consider replacing with boolean test [#no-usage]
+509 |         }
+510 |         
+511 |         guard let publicKey = SecKeyCopyPublicKey(privateKey) else {
+    |                   `- warning: value 'publicKey' was defined but never used; consider replacing with boolean test [#no-usage]
+512 |             print("❌ 获取公钥失败")
+513 |             return nil
+
+[#DeprecatedDeclaration]: <https://docs.swift.org/compiler/documentation/diagnostics/deprecated-declaration>
+[#SendableClosureCaptures]: <https://docs.swift.org/compiler/documentation/diagnostics/sendable-closure-captures>
+[8/39] Compiling SkyBridgeCore NetworkMonitorCard.swift
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Security/TLSSecurityManager.swift:120:13: warning: capture of 'completion' with non-Sendable type '((any Error)?) -> Void' in a '@Sendable' closure [#SendableClosureCaptures]
+118 |                 self.tlsStatistics.messagesSent += 1
+119 |             }
+120 |             completion(error)
+    |             |- warning: capture of 'completion' with non-Sendable type '((any Error)?) -> Void' in a '@Sendable' closure [#SendableClosureCaptures]
+    |             `- note: a function type must be marked '@Sendable' to conform to 'Sendable'
+121 |         })
+122 |     }
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Security/TLSSecurityManager.swift:115:22: warning: main actor-isolated property 'tlsStatistics' can not be mutated from a Sendable closure
+ 17 |     @Published public private(set) var activeConnections: [String: NWConnection] = [:]
+ 18 |     /// TLS统计信息
+ 19 |     @Published public private(set) var tlsStatistics: TLSStatistics = TLSStatistics()
+    |                                        `- note: mutation of this property is only permitted within the actor
+ 20 |     
+ 21 |     // MARK: - 初始化
+    :
+113 |             if let error = error {
+114 |                 print("❌ TLS数据发送失败: \(error)")
+115 |                 self.tlsStatistics.errorCount += 1
+    |                      `- warning: main actor-isolated property 'tlsStatistics' can not be mutated from a Sendable closure
+116 |             } else {
+117 |                 self.tlsStatistics.bytesSent += UInt64(data.count)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Security/TLSSecurityManager.swift:117:22: warning: main actor-isolated property 'tlsStatistics' can not be mutated from a Sendable closure
+ 17 |     @Published public private(set) var activeConnections: [String: NWConnection] = [:]
+ 18 |     /// TLS统计信息
+ 19 |     @Published public private(set) var tlsStatistics: TLSStatistics = TLSStatistics()
+    |                                        `- note: mutation of this property is only permitted within the actor
+ 20 |     
+ 21 |     // MARK: - 初始化
+    :
+115 |                 self.tlsStatistics.errorCount += 1
+116 |             } else {
+117 |                 self.tlsStatistics.bytesSent += UInt64(data.count)
+    |                      `- warning: main actor-isolated property 'tlsStatistics' can not be mutated from a Sendable closure
+118 |                 self.tlsStatistics.messagesSent += 1
+119 |             }
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Security/TLSSecurityManager.swift:118:22: warning: main actor-isolated property 'tlsStatistics' can not be mutated from a Sendable closure
+ 17 |     @Published public private(set) var activeConnections: [String: NWConnection] = [:]
+ 18 |     /// TLS统计信息
+ 19 |     @Published public private(set) var tlsStatistics: TLSStatistics = TLSStatistics()
+    |                                        `- note: mutation of this property is only permitted within the actor
+ 20 |     
+ 21 |     // MARK: - 初始化
+    :
+116 |             } else {
+117 |                 self.tlsStatistics.bytesSent += UInt64(data.count)
+118 |                 self.tlsStatistics.messagesSent += 1
+    |                      `- warning: main actor-isolated property 'tlsStatistics' can not be mutated from a Sendable closure
+119 |             }
+120 |             completion(error)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Security/TLSSecurityManager.swift:134:17: warning: capture of 'completion' with non-Sendable type '(Data?, (any Error)?) -> Void' in a '@Sendable' closure [#SendableClosureCaptures]
+132 |         connection.receive(minimumIncompleteLength: 4, maximumLength: 4) { [weak self] lengthData, _, isComplete, error in
+133 |             if let error = error {
+134 |                 completion(nil, error)
+    |                 |- warning: capture of 'completion' with non-Sendable type '(Data?, (any Error)?) -> Void' in a '@Sendable' closure [#SendableClosureCaptures]
+    |                 `- note: a function type must be marked '@Sendable' to conform to 'Sendable'
+135 |                 return
+136 |             }
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Security/TLSSecurityManager.swift:149:21: warning: capture of 'completion' with non-Sendable type '(Data?, (any Error)?) -> Void' in a '@Sendable' closure [#SendableClosureCaptures]
+147 |             connection.receive(minimumIncompleteLength: Int(length), maximumLength: Int(length)) { data, _, isComplete, error in
+148 |                 if let error = error {
+149 |                     completion(nil, error)
+    |                     |- warning: capture of 'completion' with non-Sendable type '(Data?, (any Error)?) -> Void' in a '@Sendable' closure [#SendableClosureCaptures]
+    |                     `- note: a function type must be marked '@Sendable' to conform to 'Sendable'
+150 |                     return
+151 |                 }
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Security/TLSSecurityManager.swift:154:27: warning: main actor-isolated property 'tlsStatistics' can not be mutated from a Sendable closure
+ 17 |     @Published public private(set) var activeConnections: [String: NWConnection] = [:]
+ 18 |     /// TLS统计信息
+ 19 |     @Published public private(set) var tlsStatistics: TLSStatistics = TLSStatistics()
+    |                                        `- note: mutation of this property is only permitted within the actor
+ 20 |     
+ 21 |     // MARK: - 初始化
+    :
+152 |                 
+153 |                 if let data = data {
+154 |                     self?.tlsStatistics.bytesReceived += UInt64(data.count)
+    |                           `- warning: main actor-isolated property 'tlsStatistics' can not be mutated from a Sendable closure
+155 |                     self?.tlsStatistics.messagesReceived += 1
+156 |                 }
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Security/TLSSecurityManager.swift:154:21: warning: reference to captured var 'self' in concurrently-executing code [#SendableClosureCaptures]
+152 |                 
+153 |                 if let data = data {
+154 |                     self?.tlsStatistics.bytesReceived += UInt64(data.count)
+    |                     `- warning: reference to captured var 'self' in concurrently-executing code [#SendableClosureCaptures]
+155 |                     self?.tlsStatistics.messagesReceived += 1
+156 |                 }
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Security/TLSSecurityManager.swift:155:27: warning: main actor-isolated property 'tlsStatistics' can not be mutated from a Sendable closure
+ 17 |     @Published public private(set) var activeConnections: [String: NWConnection] = [:]
+ 18 |     /// TLS统计信息
+ 19 |     @Published public private(set) var tlsStatistics: TLSStatistics = TLSStatistics()
+    |                                        `- note: mutation of this property is only permitted within the actor
+ 20 |     
+ 21 |     // MARK: - 初始化
+    :
+153 |                 if let data = data {
+154 |                     self?.tlsStatistics.bytesReceived += UInt64(data.count)
+155 |                     self?.tlsStatistics.messagesReceived += 1
+    |                           `- warning: main actor-isolated property 'tlsStatistics' can not be mutated from a Sendable closure
+156 |                 }
+157 |                 
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Security/TLSSecurityManager.swift:155:21: warning: reference to captured var 'self' in concurrently-executing code [#SendableClosureCaptures]
+153 |                 if let data = data {
+154 |                     self?.tlsStatistics.bytesReceived += UInt64(data.count)
+155 |                     self?.tlsStatistics.messagesReceived += 1
+    |                     `- warning: reference to captured var 'self' in concurrently-executing code [#SendableClosureCaptures]
+156 |                 }
+157 |                 
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Security/TLSSecurityManager.swift:251:20: warning: value 'identity' was defined but never used; consider replacing with boolean test [#no-usage]
+249 |         case .server:
+250 |             // 服务器配置
+251 |             if let identity = certificateManager.getIdentity(for: deviceId) {
+    |                    `- warning: value 'identity' was defined but never used; consider replacing with boolean test [#no-usage]
+252 |                 // 注意：身份设置需要通过其他方式实现
+253 |                 // 由于API限制，这里暂时跳过身份配置
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Security/TLSSecurityManager.swift:325:33: warning: 'SecTrustGetCertificateAtIndex' was deprecated in macOS 12.0: renamed to 'SecTrustCopyCertificateChain(_:)' [#DeprecatedDeclaration]
+323 |     private func verifyCertificateChain(_ trust: SecTrust, for deviceId: String) -> Bool {
+324 |         // 获取证书链中的第一个证书（叶子证书）
+325 |         guard let certificate = SecTrustGetCertificateAtIndex(trust, 0) else {
+    |                                 |- warning: 'SecTrustGetCertificateAtIndex' was deprecated in macOS 12.0: renamed to 'SecTrustCopyCertificateChain(_:)' [#DeprecatedDeclaration]
+    |                                 `- note: use 'SecTrustCopyCertificateChain(_:)' instead
+326 |             print("❌ 无法获取证书")
+327 |             return false
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Security/TLSSecurityManager.swift:477:13: warning: initialization of immutable value 'data' was never used; consider replacing with assignment to '_' or removing it [#no-usage]
+475 |         // 获取证书数据
+476 |         let certificateData = SecCertificateCopyData(certificate)
+477 |         let data = CFDataGetBytePtr(certificateData)
+    |             `- warning: initialization of immutable value 'data' was never used; consider replacing with assignment to '_' or removing it [#no-usage]
+478 |         let length = CFDataGetLength(certificateData)
+479 |         
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Security/TLSSecurityManager.swift:511:19: warning: value 'publicKey' was defined but never used; consider replacing with boolean test [#no-usage]
+509 |         }
+510 |         
+511 |         guard let publicKey = SecKeyCopyPublicKey(privateKey) else {
+    |                   `- warning: value 'publicKey' was defined but never used; consider replacing with boolean test [#no-usage]
+512 |             print("❌ 获取公钥失败")
+513 |             return nil
+
+[#DeprecatedDeclaration]: <https://docs.swift.org/compiler/documentation/diagnostics/deprecated-declaration>
+[#SendableClosureCaptures]: <https://docs.swift.org/compiler/documentation/diagnostics/sendable-closure-captures>
+[9/39] Compiling SkyBridgeCore RemoteDesktopManager.swift
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:118:18: warning: main actor-isolated property 'activeSessions' can not be referenced from a Sendable closure
+ 91 |     private var monitoringTimer: Timer?
+ 92 |     private var cpuTimeline = OrderedDictionary<Date, Double>()
+ 93 |     private var activeSessions: [UUID: RemoteDesktopSession] = [:]
+    |                 `- note: property declared here
+ 94 |     private let sessionQueue = DispatchQueue(label: "com.skybridge.compass.remote.sessions", attributes: .concurrent)
+ 95 |     /// UI 桥接：发布来自会话的最新远端帧纹理。
+    :
+116 |             
+117 |             // 停止所有活跃会话
+118 |             self.activeSessions.values.forEach { session in
+    |                  `- warning: main actor-isolated property 'activeSessions' can not be referenced from a Sendable closure
+119 |                 session.stop()
+120 |             }
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:119:25: warning: call to main actor-isolated instance method 'stop()' in a synchronous nonisolated context [#ActorIsolatedCall]
+117 |             // 停止所有活跃会话
+118 |             self.activeSessions.values.forEach { session in
+119 |                 session.stop()
+    |                         `- warning: call to main actor-isolated instance method 'stop()' in a synchronous nonisolated context [#ActorIsolatedCall]
+120 |             }
+121 |             
+    :
+331 |     }
+332 | 
+333 |     func stop() {
+    |          `- note: calls to instance method 'stop()' from outside of its actor context are implicitly asynchronous
+334 |         // 清理渲染器资源
+335 |         renderer.teardown()
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:123:18: warning: main actor-isolated property 'activeSessions' can not be mutated from a Sendable closure
+ 91 |     private var monitoringTimer: Timer?
+ 92 |     private var cpuTimeline = OrderedDictionary<Date, Double>()
+ 93 |     private var activeSessions: [UUID: RemoteDesktopSession] = [:]
+    |                 `- note: mutation of this property is only permitted within the actor
+ 94 |     private let sessionQueue = DispatchQueue(label: "com.skybridge.compass.remote.sessions", attributes: .concurrent)
+ 95 |     /// UI 桥接：发布来自会话的最新远端帧纹理。
+    :
+121 |             
+122 |             // 清空会话字典
+123 |             self.activeSessions.removeAll()
+    |                  `- warning: main actor-isolated property 'activeSessions' can not be mutated from a Sendable closure
+124 |             
+125 |             // 在主线程更新UI状态
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:158:19: warning: main actor-isolated property 'activeSessions' can not be mutated from a Sendable closure
+ 91 |     private var monitoringTimer: Timer?
+ 92 |     private var cpuTimeline = OrderedDictionary<Date, Double>()
+ 93 |     private var activeSessions: [UUID: RemoteDesktopSession] = [:]
+    |                 `- note: mutation of this property is only permitted within the actor
+ 94 |     private let sessionQueue = DispatchQueue(label: "com.skybridge.compass.remote.sessions", attributes: .concurrent)
+ 95 |     /// UI 桥接：发布来自会话的最新远端帧纹理。
+    :
+156 | 
+157 |         sessionQueue.async(flags: .barrier) { [weak self] in
+158 |             self?.activeSessions[session.id] = session
+    |                   `- warning: main actor-isolated property 'activeSessions' can not be mutated from a Sendable closure
+159 |         }
+160 |         updateSessionsSnapshot()
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:167:23: warning: main actor-isolated property 'activeSessions' can not be mutated from a Sendable closure
+ 91 |     private var monitoringTimer: Timer?
+ 92 |     private var cpuTimeline = OrderedDictionary<Date, Double>()
+ 93 |     private var activeSessions: [UUID: RemoteDesktopSession] = [:]
+    |                 `- note: mutation of this property is only permitted within the actor
+ 94 |     private let sessionQueue = DispatchQueue(label: "com.skybridge.compass.remote.sessions", attributes: .concurrent)
+ 95 |     /// UI 桥接：发布来自会话的最新远端帧纹理。
+    :
+165 |         } catch {
+166 |             sessionQueue.async(flags: .barrier) { [weak self] in
+167 |                 self?.activeSessions.removeValue(forKey: session.id)
+    |                       `- warning: main actor-isolated property 'activeSessions' can not be mutated from a Sendable closure
+168 |             }
+169 |             updateSessionsSnapshot()
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:135:31: warning: no 'async' operations occur within 'await' expression
+133 | 
+134 |     public func connect(to device: DiscoveredDevice, tenant: TenantDescriptor) async throws {
+135 |         let credentials = try await tenantController.credentials(for: tenant.id)
+    |                               `- warning: no 'async' operations occur within 'await' expression
+136 |         guard let host = device.ipv4 ?? device.ipv6 else {
+137 |             throw RemoteDesktopError.missingAddress(device)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteFrameRenderer.swift:79:37: warning: immutable value 'device' was never used; consider replacing with '_' or removing it [#no-usage]
+ 77 |         let delta = interFrameInterval()
+ 78 |         let bandwidth = calculateBandwidth(bytes: byteCount, delta: delta)
+ 79 |         guard let textureCache, let device else {
+    |                                     `- warning: immutable value 'device' was never used; consider replacing with '_' or removing it [#no-usage]
+ 80 |             log.error("Metal device unavailable; BGRA frame fallback active")
+ 81 |             return RenderMetrics(bandwidthMbps: bandwidth, latencyMilliseconds: delta * 1000)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteFrameRenderer.swift:135:17: warning: capture of 'self' with non-Sendable type 'RemoteFrameRenderer?' in a '@Sendable' closure [#SendableClosureCaptures]
+ 17 | }
+ 18 | 
+ 19 | public final class RemoteFrameRenderer {
+    |                    `- note: class 'RemoteFrameRenderer' does not conform to the 'Sendable' protocol
+ 20 |     private let device: MTLDevice?
+ 21 |     private let commandQueue: MTLCommandQueue?
+    :
+133 |         if let textureRef, let texture = CVMetalTextureGetTexture(textureRef) {
+134 |             renderQueue.async { [weak self] in
+135 |                 self?.frameHandler?(texture)
+    |                 `- warning: capture of 'self' with non-Sendable type 'RemoteFrameRenderer?' in a '@Sendable' closure [#SendableClosureCaptures]
+136 |             }
+137 |         }
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteFrameRenderer.swift:135:37: warning: capture of 'texture' with non-Sendable type 'any MTLTexture' in a '@Sendable' closure [#SendableClosureCaptures]
+133 |         if let textureRef, let texture = CVMetalTextureGetTexture(textureRef) {
+134 |             renderQueue.async { [weak self] in
+135 |                 self?.frameHandler?(texture)
+    |                                     `- warning: capture of 'texture' with non-Sendable type 'any MTLTexture' in a '@Sendable' closure [#SendableClosureCaptures]
+136 |             }
+137 |         }
+
+/Users/macbookpro/Desktop/Xcode-beta.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.1.sdk/System/Library/Frameworks/Metal.framework/Headers/MTLTexture.h:313:11: note: protocol 'MTLTexture' does not conform to the 'Sendable' protocol
+311 |  */
+312 | API_AVAILABLE(macos(10.11), ios(8.0))
+313 | @protocol MTLTexture <MTLResource>
+    |           `- note: protocol 'MTLTexture' does not conform to the 'Sendable' protocol
+314 | 
+315 | /*!
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteFrameRenderer.swift:2:1: warning: add '@preconcurrency' to treat 'Sendable'-related errors from module 'Metal' as warnings
+  1 | import Foundation
+  2 | import Metal
+    | `- warning: add '@preconcurrency' to treat 'Sendable'-related errors from module 'Metal' as warnings
+  3 | import VideoToolbox
+  4 | import CoreVideo
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteFrameRenderer.swift:339:23: warning: capture of 'self' with non-Sendable type 'RemoteFrameRenderer?' in a '@Sendable' closure [#SendableClosureCaptures]
+ 17 | }
+ 18 | 
+ 19 | public final class RemoteFrameRenderer {
+    |                    `- note: class 'RemoteFrameRenderer' does not conform to the 'Sendable' protocol
+ 20 |     private let device: MTLDevice?
+ 21 |     private let commandQueue: MTLCommandQueue?
+    :
+337 |     private func handleDecompressedFrame(imageBuffer: CVImageBuffer, presentationTimeStamp: CMTime) {
+338 |         renderQueue.async { [weak self] in
+339 |             guard let self else { return }
+    |                       `- warning: capture of 'self' with non-Sendable type 'RemoteFrameRenderer?' in a '@Sendable' closure [#SendableClosureCaptures]
+340 |             guard let textureCache else {
+341 |                 self.log.error("Missing texture cache; cannot convert decoded frame to Metal texture")
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Security/P2PSecurityManager.swift:135:13: warning: initialization of immutable value 'requestData' was never used; consider replacing with assignment to '_' or removing it [#no-usage]
+133 |     public func verifyConnectionRequest(_ request: P2PConnectionRequest) throws -> Bool {
+134 |         // 重建要验证的数据
+135 |         let requestData = "\(request.targetDevice.id):\(request.targetDevice.address):\(request.timestamp.timeIntervalSince1970)".data(using: .utf8)!
+    |             `- warning: initialization of immutable value 'requestData' was never used; consider replacing with assignment to '_' or removing it [#no-usage]
+136 |         
+137 |         // 重建源设备的公钥 - 注意：P2PConnectionRequest.sourceDevice是P2PDeviceInfo类型，没有publicKey
+
+[#ActorIsolatedCall]: <https://docs.swift.org/compiler/documentation/diagnostics/actor-isolated-call>
+[#SendableClosureCaptures]: <https://docs.swift.org/compiler/documentation/diagnostics/sendable-closure-captures>
+[10/39] Compiling SkyBridgeCore RemoteFrameRenderer.swift
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:118:18: warning: main actor-isolated property 'activeSessions' can not be referenced from a Sendable closure
+ 91 |     private var monitoringTimer: Timer?
+ 92 |     private var cpuTimeline = OrderedDictionary<Date, Double>()
+ 93 |     private var activeSessions: [UUID: RemoteDesktopSession] = [:]
+    |                 `- note: property declared here
+ 94 |     private let sessionQueue = DispatchQueue(label: "com.skybridge.compass.remote.sessions", attributes: .concurrent)
+ 95 |     /// UI 桥接：发布来自会话的最新远端帧纹理。
+    :
+116 |             
+117 |             // 停止所有活跃会话
+118 |             self.activeSessions.values.forEach { session in
+    |                  `- warning: main actor-isolated property 'activeSessions' can not be referenced from a Sendable closure
+119 |                 session.stop()
+120 |             }
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:119:25: warning: call to main actor-isolated instance method 'stop()' in a synchronous nonisolated context [#ActorIsolatedCall]
+117 |             // 停止所有活跃会话
+118 |             self.activeSessions.values.forEach { session in
+119 |                 session.stop()
+    |                         `- warning: call to main actor-isolated instance method 'stop()' in a synchronous nonisolated context [#ActorIsolatedCall]
+120 |             }
+121 |             
+    :
+331 |     }
+332 | 
+333 |     func stop() {
+    |          `- note: calls to instance method 'stop()' from outside of its actor context are implicitly asynchronous
+334 |         // 清理渲染器资源
+335 |         renderer.teardown()
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:123:18: warning: main actor-isolated property 'activeSessions' can not be mutated from a Sendable closure
+ 91 |     private var monitoringTimer: Timer?
+ 92 |     private var cpuTimeline = OrderedDictionary<Date, Double>()
+ 93 |     private var activeSessions: [UUID: RemoteDesktopSession] = [:]
+    |                 `- note: mutation of this property is only permitted within the actor
+ 94 |     private let sessionQueue = DispatchQueue(label: "com.skybridge.compass.remote.sessions", attributes: .concurrent)
+ 95 |     /// UI 桥接：发布来自会话的最新远端帧纹理。
+    :
+121 |             
+122 |             // 清空会话字典
+123 |             self.activeSessions.removeAll()
+    |                  `- warning: main actor-isolated property 'activeSessions' can not be mutated from a Sendable closure
+124 |             
+125 |             // 在主线程更新UI状态
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:158:19: warning: main actor-isolated property 'activeSessions' can not be mutated from a Sendable closure
+ 91 |     private var monitoringTimer: Timer?
+ 92 |     private var cpuTimeline = OrderedDictionary<Date, Double>()
+ 93 |     private var activeSessions: [UUID: RemoteDesktopSession] = [:]
+    |                 `- note: mutation of this property is only permitted within the actor
+ 94 |     private let sessionQueue = DispatchQueue(label: "com.skybridge.compass.remote.sessions", attributes: .concurrent)
+ 95 |     /// UI 桥接：发布来自会话的最新远端帧纹理。
+    :
+156 | 
+157 |         sessionQueue.async(flags: .barrier) { [weak self] in
+158 |             self?.activeSessions[session.id] = session
+    |                   `- warning: main actor-isolated property 'activeSessions' can not be mutated from a Sendable closure
+159 |         }
+160 |         updateSessionsSnapshot()
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:167:23: warning: main actor-isolated property 'activeSessions' can not be mutated from a Sendable closure
+ 91 |     private var monitoringTimer: Timer?
+ 92 |     private var cpuTimeline = OrderedDictionary<Date, Double>()
+ 93 |     private var activeSessions: [UUID: RemoteDesktopSession] = [:]
+    |                 `- note: mutation of this property is only permitted within the actor
+ 94 |     private let sessionQueue = DispatchQueue(label: "com.skybridge.compass.remote.sessions", attributes: .concurrent)
+ 95 |     /// UI 桥接：发布来自会话的最新远端帧纹理。
+    :
+165 |         } catch {
+166 |             sessionQueue.async(flags: .barrier) { [weak self] in
+167 |                 self?.activeSessions.removeValue(forKey: session.id)
+    |                       `- warning: main actor-isolated property 'activeSessions' can not be mutated from a Sendable closure
+168 |             }
+169 |             updateSessionsSnapshot()
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:135:31: warning: no 'async' operations occur within 'await' expression
+133 | 
+134 |     public func connect(to device: DiscoveredDevice, tenant: TenantDescriptor) async throws {
+135 |         let credentials = try await tenantController.credentials(for: tenant.id)
+    |                               `- warning: no 'async' operations occur within 'await' expression
+136 |         guard let host = device.ipv4 ?? device.ipv6 else {
+137 |             throw RemoteDesktopError.missingAddress(device)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteFrameRenderer.swift:79:37: warning: immutable value 'device' was never used; consider replacing with '_' or removing it [#no-usage]
+ 77 |         let delta = interFrameInterval()
+ 78 |         let bandwidth = calculateBandwidth(bytes: byteCount, delta: delta)
+ 79 |         guard let textureCache, let device else {
+    |                                     `- warning: immutable value 'device' was never used; consider replacing with '_' or removing it [#no-usage]
+ 80 |             log.error("Metal device unavailable; BGRA frame fallback active")
+ 81 |             return RenderMetrics(bandwidthMbps: bandwidth, latencyMilliseconds: delta * 1000)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteFrameRenderer.swift:135:17: warning: capture of 'self' with non-Sendable type 'RemoteFrameRenderer?' in a '@Sendable' closure [#SendableClosureCaptures]
+ 17 | }
+ 18 | 
+ 19 | public final class RemoteFrameRenderer {
+    |                    `- note: class 'RemoteFrameRenderer' does not conform to the 'Sendable' protocol
+ 20 |     private let device: MTLDevice?
+ 21 |     private let commandQueue: MTLCommandQueue?
+    :
+133 |         if let textureRef, let texture = CVMetalTextureGetTexture(textureRef) {
+134 |             renderQueue.async { [weak self] in
+135 |                 self?.frameHandler?(texture)
+    |                 `- warning: capture of 'self' with non-Sendable type 'RemoteFrameRenderer?' in a '@Sendable' closure [#SendableClosureCaptures]
+136 |             }
+137 |         }
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteFrameRenderer.swift:135:37: warning: capture of 'texture' with non-Sendable type 'any MTLTexture' in a '@Sendable' closure [#SendableClosureCaptures]
+133 |         if let textureRef, let texture = CVMetalTextureGetTexture(textureRef) {
+134 |             renderQueue.async { [weak self] in
+135 |                 self?.frameHandler?(texture)
+    |                                     `- warning: capture of 'texture' with non-Sendable type 'any MTLTexture' in a '@Sendable' closure [#SendableClosureCaptures]
+136 |             }
+137 |         }
+
+/Users/macbookpro/Desktop/Xcode-beta.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.1.sdk/System/Library/Frameworks/Metal.framework/Headers/MTLTexture.h:313:11: note: protocol 'MTLTexture' does not conform to the 'Sendable' protocol
+311 |  */
+312 | API_AVAILABLE(macos(10.11), ios(8.0))
+313 | @protocol MTLTexture <MTLResource>
+    |           `- note: protocol 'MTLTexture' does not conform to the 'Sendable' protocol
+314 | 
+315 | /*!
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteFrameRenderer.swift:2:1: warning: add '@preconcurrency' to treat 'Sendable'-related errors from module 'Metal' as warnings
+  1 | import Foundation
+  2 | import Metal
+    | `- warning: add '@preconcurrency' to treat 'Sendable'-related errors from module 'Metal' as warnings
+  3 | import VideoToolbox
+  4 | import CoreVideo
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteFrameRenderer.swift:339:23: warning: capture of 'self' with non-Sendable type 'RemoteFrameRenderer?' in a '@Sendable' closure [#SendableClosureCaptures]
+ 17 | }
+ 18 | 
+ 19 | public final class RemoteFrameRenderer {
+    |                    `- note: class 'RemoteFrameRenderer' does not conform to the 'Sendable' protocol
+ 20 |     private let device: MTLDevice?
+ 21 |     private let commandQueue: MTLCommandQueue?
+    :
+337 |     private func handleDecompressedFrame(imageBuffer: CVImageBuffer, presentationTimeStamp: CMTime) {
+338 |         renderQueue.async { [weak self] in
+339 |             guard let self else { return }
+    |                       `- warning: capture of 'self' with non-Sendable type 'RemoteFrameRenderer?' in a '@Sendable' closure [#SendableClosureCaptures]
+340 |             guard let textureCache else {
+341 |                 self.log.error("Missing texture cache; cannot convert decoded frame to Metal texture")
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Security/P2PSecurityManager.swift:135:13: warning: initialization of immutable value 'requestData' was never used; consider replacing with assignment to '_' or removing it [#no-usage]
+133 |     public func verifyConnectionRequest(_ request: P2PConnectionRequest) throws -> Bool {
+134 |         // 重建要验证的数据
+135 |         let requestData = "\(request.targetDevice.id):\(request.targetDevice.address):\(request.timestamp.timeIntervalSince1970)".data(using: .utf8)!
+    |             `- warning: initialization of immutable value 'requestData' was never used; consider replacing with assignment to '_' or removing it [#no-usage]
+136 |         
+137 |         // 重建源设备的公钥 - 注意：P2PConnectionRequest.sourceDevice是P2PDeviceInfo类型，没有publicKey
+
+[#ActorIsolatedCall]: <https://docs.swift.org/compiler/documentation/diagnostics/actor-isolated-call>
+[#SendableClosureCaptures]: <https://docs.swift.org/compiler/documentation/diagnostics/sendable-closure-captures>
+[11/39] Compiling SkyBridgeCore P2PSecurityManager.swift
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:118:18: warning: main actor-isolated property 'activeSessions' can not be referenced from a Sendable closure
+ 91 |     private var monitoringTimer: Timer?
+ 92 |     private var cpuTimeline = OrderedDictionary<Date, Double>()
+ 93 |     private var activeSessions: [UUID: RemoteDesktopSession] = [:]
+    |                 `- note: property declared here
+ 94 |     private let sessionQueue = DispatchQueue(label: "com.skybridge.compass.remote.sessions", attributes: .concurrent)
+ 95 |     /// UI 桥接：发布来自会话的最新远端帧纹理。
+    :
+116 |             
+117 |             // 停止所有活跃会话
+118 |             self.activeSessions.values.forEach { session in
+    |                  `- warning: main actor-isolated property 'activeSessions' can not be referenced from a Sendable closure
+119 |                 session.stop()
+120 |             }
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:119:25: warning: call to main actor-isolated instance method 'stop()' in a synchronous nonisolated context [#ActorIsolatedCall]
+117 |             // 停止所有活跃会话
+118 |             self.activeSessions.values.forEach { session in
+119 |                 session.stop()
+    |                         `- warning: call to main actor-isolated instance method 'stop()' in a synchronous nonisolated context [#ActorIsolatedCall]
+120 |             }
+121 |             
+    :
+331 |     }
+332 | 
+333 |     func stop() {
+    |          `- note: calls to instance method 'stop()' from outside of its actor context are implicitly asynchronous
+334 |         // 清理渲染器资源
+335 |         renderer.teardown()
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:123:18: warning: main actor-isolated property 'activeSessions' can not be mutated from a Sendable closure
+ 91 |     private var monitoringTimer: Timer?
+ 92 |     private var cpuTimeline = OrderedDictionary<Date, Double>()
+ 93 |     private var activeSessions: [UUID: RemoteDesktopSession] = [:]
+    |                 `- note: mutation of this property is only permitted within the actor
+ 94 |     private let sessionQueue = DispatchQueue(label: "com.skybridge.compass.remote.sessions", attributes: .concurrent)
+ 95 |     /// UI 桥接：发布来自会话的最新远端帧纹理。
+    :
+121 |             
+122 |             // 清空会话字典
+123 |             self.activeSessions.removeAll()
+    |                  `- warning: main actor-isolated property 'activeSessions' can not be mutated from a Sendable closure
+124 |             
+125 |             // 在主线程更新UI状态
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:158:19: warning: main actor-isolated property 'activeSessions' can not be mutated from a Sendable closure
+ 91 |     private var monitoringTimer: Timer?
+ 92 |     private var cpuTimeline = OrderedDictionary<Date, Double>()
+ 93 |     private var activeSessions: [UUID: RemoteDesktopSession] = [:]
+    |                 `- note: mutation of this property is only permitted within the actor
+ 94 |     private let sessionQueue = DispatchQueue(label: "com.skybridge.compass.remote.sessions", attributes: .concurrent)
+ 95 |     /// UI 桥接：发布来自会话的最新远端帧纹理。
+    :
+156 | 
+157 |         sessionQueue.async(flags: .barrier) { [weak self] in
+158 |             self?.activeSessions[session.id] = session
+    |                   `- warning: main actor-isolated property 'activeSessions' can not be mutated from a Sendable closure
+159 |         }
+160 |         updateSessionsSnapshot()
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:167:23: warning: main actor-isolated property 'activeSessions' can not be mutated from a Sendable closure
+ 91 |     private var monitoringTimer: Timer?
+ 92 |     private var cpuTimeline = OrderedDictionary<Date, Double>()
+ 93 |     private var activeSessions: [UUID: RemoteDesktopSession] = [:]
+    |                 `- note: mutation of this property is only permitted within the actor
+ 94 |     private let sessionQueue = DispatchQueue(label: "com.skybridge.compass.remote.sessions", attributes: .concurrent)
+ 95 |     /// UI 桥接：发布来自会话的最新远端帧纹理。
+    :
+165 |         } catch {
+166 |             sessionQueue.async(flags: .barrier) { [weak self] in
+167 |                 self?.activeSessions.removeValue(forKey: session.id)
+    |                       `- warning: main actor-isolated property 'activeSessions' can not be mutated from a Sendable closure
+168 |             }
+169 |             updateSessionsSnapshot()
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:135:31: warning: no 'async' operations occur within 'await' expression
+133 | 
+134 |     public func connect(to device: DiscoveredDevice, tenant: TenantDescriptor) async throws {
+135 |         let credentials = try await tenantController.credentials(for: tenant.id)
+    |                               `- warning: no 'async' operations occur within 'await' expression
+136 |         guard let host = device.ipv4 ?? device.ipv6 else {
+137 |             throw RemoteDesktopError.missingAddress(device)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteFrameRenderer.swift:79:37: warning: immutable value 'device' was never used; consider replacing with '_' or removing it [#no-usage]
+ 77 |         let delta = interFrameInterval()
+ 78 |         let bandwidth = calculateBandwidth(bytes: byteCount, delta: delta)
+ 79 |         guard let textureCache, let device else {
+    |                                     `- warning: immutable value 'device' was never used; consider replacing with '_' or removing it [#no-usage]
+ 80 |             log.error("Metal device unavailable; BGRA frame fallback active")
+ 81 |             return RenderMetrics(bandwidthMbps: bandwidth, latencyMilliseconds: delta * 1000)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteFrameRenderer.swift:135:17: warning: capture of 'self' with non-Sendable type 'RemoteFrameRenderer?' in a '@Sendable' closure [#SendableClosureCaptures]
+ 17 | }
+ 18 | 
+ 19 | public final class RemoteFrameRenderer {
+    |                    `- note: class 'RemoteFrameRenderer' does not conform to the 'Sendable' protocol
+ 20 |     private let device: MTLDevice?
+ 21 |     private let commandQueue: MTLCommandQueue?
+    :
+133 |         if let textureRef, let texture = CVMetalTextureGetTexture(textureRef) {
+134 |             renderQueue.async { [weak self] in
+135 |                 self?.frameHandler?(texture)
+    |                 `- warning: capture of 'self' with non-Sendable type 'RemoteFrameRenderer?' in a '@Sendable' closure [#SendableClosureCaptures]
+136 |             }
+137 |         }
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteFrameRenderer.swift:135:37: warning: capture of 'texture' with non-Sendable type 'any MTLTexture' in a '@Sendable' closure [#SendableClosureCaptures]
+133 |         if let textureRef, let texture = CVMetalTextureGetTexture(textureRef) {
+134 |             renderQueue.async { [weak self] in
+135 |                 self?.frameHandler?(texture)
+    |                                     `- warning: capture of 'texture' with non-Sendable type 'any MTLTexture' in a '@Sendable' closure [#SendableClosureCaptures]
+136 |             }
+137 |         }
+
+/Users/macbookpro/Desktop/Xcode-beta.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.1.sdk/System/Library/Frameworks/Metal.framework/Headers/MTLTexture.h:313:11: note: protocol 'MTLTexture' does not conform to the 'Sendable' protocol
+311 |  */
+312 | API_AVAILABLE(macos(10.11), ios(8.0))
+313 | @protocol MTLTexture <MTLResource>
+    |           `- note: protocol 'MTLTexture' does not conform to the 'Sendable' protocol
+314 | 
+315 | /*!
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteFrameRenderer.swift:2:1: warning: add '@preconcurrency' to treat 'Sendable'-related errors from module 'Metal' as warnings
+  1 | import Foundation
+  2 | import Metal
+    | `- warning: add '@preconcurrency' to treat 'Sendable'-related errors from module 'Metal' as warnings
+  3 | import VideoToolbox
+  4 | import CoreVideo
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteFrameRenderer.swift:339:23: warning: capture of 'self' with non-Sendable type 'RemoteFrameRenderer?' in a '@Sendable' closure [#SendableClosureCaptures]
+ 17 | }
+ 18 | 
+ 19 | public final class RemoteFrameRenderer {
+    |                    `- note: class 'RemoteFrameRenderer' does not conform to the 'Sendable' protocol
+ 20 |     private let device: MTLDevice?
+ 21 |     private let commandQueue: MTLCommandQueue?
+    :
+337 |     private func handleDecompressedFrame(imageBuffer: CVImageBuffer, presentationTimeStamp: CMTime) {
+338 |         renderQueue.async { [weak self] in
+339 |             guard let self else { return }
+    |                       `- warning: capture of 'self' with non-Sendable type 'RemoteFrameRenderer?' in a '@Sendable' closure [#SendableClosureCaptures]
+340 |             guard let textureCache else {
+341 |                 self.log.error("Missing texture cache; cannot convert decoded frame to Metal texture")
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Security/P2PSecurityManager.swift:135:13: warning: initialization of immutable value 'requestData' was never used; consider replacing with assignment to '_' or removing it [#no-usage]
+133 |     public func verifyConnectionRequest(_ request: P2PConnectionRequest) throws -> Bool {
+134 |         // 重建要验证的数据
+135 |         let requestData = "\(request.targetDevice.id):\(request.targetDevice.address):\(request.timestamp.timeIntervalSince1970)".data(using: .utf8)!
+    |             `- warning: initialization of immutable value 'requestData' was never used; consider replacing with assignment to '_' or removing it [#no-usage]
+136 |         
+137 |         // 重建源设备的公钥 - 注意：P2PConnectionRequest.sourceDevice是P2PDeviceInfo类型，没有publicKey
+
+[#ActorIsolatedCall]: <https://docs.swift.org/compiler/documentation/diagnostics/actor-isolated-call>
+[#SendableClosureCaptures]: <https://docs.swift.org/compiler/documentation/diagnostics/sendable-closure-captures>
+[12/39] Compiling SkyBridgeCore QoSManager.swift
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktop/ScreenCaptureEngine.swift:216:17: warning: no 'async' operations occur within 'await' expression
+214 |             }
+215 |             
+216 |             try await stream.addStreamOutput(streamOutput, type: .screen, sampleHandlerQueue: .main)
+    |                 `- warning: no 'async' operations occur within 'await' expression
+217 |             try await stream.startCapture()
+218 |             
+[13/39] Compiling SkyBridgeCore HardwareVideoEncoder.swift
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktop/ScreenCaptureEngine.swift:216:17: warning: no 'async' operations occur within 'await' expression
+214 |             }
+215 |             
+216 |             try await stream.addStreamOutput(streamOutput, type: .screen, sampleHandlerQueue: .main)
+    |                 `- warning: no 'async' operations occur within 'await' expression
+217 |             try await stream.startCapture()
+218 |             
+[14/39] Compiling SkyBridgeCore ScreenCaptureEngine.swift
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktop/ScreenCaptureEngine.swift:216:17: warning: no 'async' operations occur within 'await' expression
+214 |             }
+215 |             
+216 |             try await stream.addStreamOutput(streamOutput, type: .screen, sampleHandlerQueue: .main)
+    |                 `- warning: no 'async' operations occur within 'await' expression
+217 |             try await stream.startCapture()
+218 |             
+[15/39] Compiling SkyBridgeCore DeviceManagementExtensionManager.swift
+[16/39] Compiling SkyBridgeCore NATTraversalManager.swift
+[17/39] Compiling SkyBridgeCore P2PDiscoveryService.swift
+[18/39] Compiling SkyBridgeCore TenantAccessController.swift
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/TenantAccessController.swift:111:22: warning: main actor-isolated property 'currentSession' can not be mutated from a Sendable closure
+101 |     private let queue = DispatchQueue(label: "com.skybridge.compass.tenants", attributes: .concurrent)
+102 |     private var didBootstrap = false
+103 |     private var currentSession: AuthSession?
+    |                 `- note: mutation of this property is only permitted within the actor
+104 | 
+105 |     private init() {}
+    :
+109 |         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+110 |             queue.async(flags: .barrier) {
+111 |                 self.currentSession = session
+    |                      `- warning: main actor-isolated property 'currentSession' can not be mutated from a Sendable closure
+112 |                 self.log.info("Bind authentication session for \(session.userIdentifier)")
+113 |                 continuation.resume()
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/TenantAccessController.swift:122:22: warning: main actor-isolated property 'currentSession' can not be mutated from a Sendable closure
+101 |     private let queue = DispatchQueue(label: "com.skybridge.compass.tenants", attributes: .concurrent)
+102 |     private var didBootstrap = false
+103 |     private var currentSession: AuthSession?
+    |                 `- note: mutation of this property is only permitted within the actor
+104 | 
+105 |     private init() {}
+    :
+120 |         await withCheckedContinuation { continuation in
+121 |             queue.async(flags: .barrier) {
+122 |                 self.currentSession = nil
+    |                      `- warning: main actor-isolated property 'currentSession' can not be mutated from a Sendable closure
+123 |                 continuation.resume()
+124 |             }
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/TenantAccessController.swift:141:33: warning: main actor-isolated property 'didBootstrap' can not be referenced from a Sendable closure
+100 |     private let activeTenantSubject = CurrentValueSubject<TenantDescriptor?, Never>(nil)
+101 |     private let queue = DispatchQueue(label: "com.skybridge.compass.tenants", attributes: .concurrent)
+102 |     private var didBootstrap = false
+    |                 `- note: property declared here
+103 |     private var currentSession: AuthSession?
+104 | 
+    :
+139 |                         return
+140 |                     }
+141 |                     guard !self.didBootstrap else {
+    |                                 `- warning: main actor-isolated property 'didBootstrap' can not be referenced from a Sendable closure
+142 |                         continuation.resume()
+143 |                         return
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/TenantAccessController.swift:161:13: warning: variable 'tenant' was never mutated; consider changing to 'let' constant
+159 |                                 domain: String?,
+160 |                                 permissions: TenantPermission) throws -> TenantDescriptor {
+161 |         var tenant = TenantDescriptor(displayName: displayName,
+    |             `- warning: variable 'tenant' was never mutated; consider changing to 'let' constant
+162 |                                       username: username,
+163 |                                       domain: domain,
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/TenantAccessController.swift:195:41: warning: main actor-isolated property 'activeTenantSubject' can not be referenced from a Sendable closure
+ 98 |     private let keychainService = "com.skybridge.compass.tenants"
+ 99 |     private let tenantsSubject = CurrentValueSubject<[TenantDescriptor], Never>([])
+100 |     private let activeTenantSubject = CurrentValueSubject<TenantDescriptor?, Never>(nil)
+    |                 `- note: property declared here
+101 |     private let queue = DispatchQueue(label: "com.skybridge.compass.tenants", attributes: .concurrent)
+102 |     private var didBootstrap = false
+    :
+193 |         return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<TenantDescriptor, Error>) in
+194 |             queue.async {
+195 |                 guard let tenant = self.activeTenantSubject.value else {
+    |                                         `- warning: main actor-isolated property 'activeTenantSubject' can not be referenced from a Sendable closure
+196 |                     continuation.resume(throwing: TenantAccessError.noActiveTenant)
+197 |                     return
+[19/39] Compiling SkyBridgeCore DeviceManagementSettingsView.swift
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/TenantAccessController.swift:111:22: warning: main actor-isolated property 'currentSession' can not be mutated from a Sendable closure
+101 |     private let queue = DispatchQueue(label: "com.skybridge.compass.tenants", attributes: .concurrent)
+102 |     private var didBootstrap = false
+103 |     private var currentSession: AuthSession?
+    |                 `- note: mutation of this property is only permitted within the actor
+104 | 
+105 |     private init() {}
+    :
+109 |         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+110 |             queue.async(flags: .barrier) {
+111 |                 self.currentSession = session
+    |                      `- warning: main actor-isolated property 'currentSession' can not be mutated from a Sendable closure
+112 |                 self.log.info("Bind authentication session for \(session.userIdentifier)")
+113 |                 continuation.resume()
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/TenantAccessController.swift:122:22: warning: main actor-isolated property 'currentSession' can not be mutated from a Sendable closure
+101 |     private let queue = DispatchQueue(label: "com.skybridge.compass.tenants", attributes: .concurrent)
+102 |     private var didBootstrap = false
+103 |     private var currentSession: AuthSession?
+    |                 `- note: mutation of this property is only permitted within the actor
+104 | 
+105 |     private init() {}
+    :
+120 |         await withCheckedContinuation { continuation in
+121 |             queue.async(flags: .barrier) {
+122 |                 self.currentSession = nil
+    |                      `- warning: main actor-isolated property 'currentSession' can not be mutated from a Sendable closure
+123 |                 continuation.resume()
+124 |             }
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/TenantAccessController.swift:141:33: warning: main actor-isolated property 'didBootstrap' can not be referenced from a Sendable closure
+100 |     private let activeTenantSubject = CurrentValueSubject<TenantDescriptor?, Never>(nil)
+101 |     private let queue = DispatchQueue(label: "com.skybridge.compass.tenants", attributes: .concurrent)
+102 |     private var didBootstrap = false
+    |                 `- note: property declared here
+103 |     private var currentSession: AuthSession?
+104 | 
+    :
+139 |                         return
+140 |                     }
+141 |                     guard !self.didBootstrap else {
+    |                                 `- warning: main actor-isolated property 'didBootstrap' can not be referenced from a Sendable closure
+142 |                         continuation.resume()
+143 |                         return
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/TenantAccessController.swift:161:13: warning: variable 'tenant' was never mutated; consider changing to 'let' constant
+159 |                                 domain: String?,
+160 |                                 permissions: TenantPermission) throws -> TenantDescriptor {
+161 |         var tenant = TenantDescriptor(displayName: displayName,
+    |             `- warning: variable 'tenant' was never mutated; consider changing to 'let' constant
+162 |                                       username: username,
+163 |                                       domain: domain,
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/TenantAccessController.swift:195:41: warning: main actor-isolated property 'activeTenantSubject' can not be referenced from a Sendable closure
+ 98 |     private let keychainService = "com.skybridge.compass.tenants"
+ 99 |     private let tenantsSubject = CurrentValueSubject<[TenantDescriptor], Never>([])
+100 |     private let activeTenantSubject = CurrentValueSubject<TenantDescriptor?, Never>(nil)
+    |                 `- note: property declared here
+101 |     private let queue = DispatchQueue(label: "com.skybridge.compass.tenants", attributes: .concurrent)
+102 |     private var didBootstrap = false
+    :
+193 |         return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<TenantDescriptor, Error>) in
+194 |             queue.async {
+195 |                 guard let tenant = self.activeTenantSubject.value else {
+    |                                         `- warning: main actor-isolated property 'activeTenantSubject' can not be referenced from a Sendable closure
+196 |                     continuation.resume(throwing: TenantAccessError.noActiveTenant)
+197 |                     return
+[20/39] Compiling SkyBridgeCore STUNClient.swift
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Performance/AppleSiliconFeatureDetector.swift:211:29: warning: 'init(cString:)' is deprecated: Use String(decoding: array, as: UTF8.self) instead, after truncating the null termination. [#DeprecatedDeclaration]
+209 |             result = sysctlbyname("machdep.cpu.brand_string", &buffer, &size, nil, 0)
+210 |             if result == 0 {
+211 |                 chipModel = String(cString: buffer)
+    |                             `- warning: 'init(cString:)' is deprecated: Use String(decoding: array, as: UTF8.self) instead, after truncating the null termination. [#DeprecatedDeclaration]
+212 |             }
+213 |         }
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Performance/GCDOptimizer.swift:185:13: warning: initialization of immutable value 'systemInfo' was never used; consider replacing with assignment to '_' or removing it [#no-usage]
+183 |     /// 计算最优分片大小
+184 |     private func calculateOptimalChunkSize(for itemCount: Int) async -> Int {
+185 |         let systemInfo = optimizer.getSystemInfo()
+    |             `- warning: initialization of immutable value 'systemInfo' was never used; consider replacing with assignment to '_' or removing it [#no-usage]
+186 |         let recommendedConcurrency = await qosManager.recommendedConcurrency(for: .dataAnalysis)
+187 |         
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Performance/GCDOptimizer.swift:249:17: warning: no 'async' operations occur within 'await' expression
+247 |         monitoringTask = Task {
+248 |             while !Task.isCancelled && isMonitoring {
+249 |                 await updateSystemLoad()
+    |                 `- warning: no 'async' operations occur within 'await' expression
+250 |                 try? await Task.sleep(nanoseconds: 1_000_000_000) // 1秒更新一次
+251 |             }
+
+[#DeprecatedDeclaration]: <https://docs.swift.org/compiler/documentation/diagnostics/deprecated-declaration>
+[21/39] Compiling SkyBridgeCore AppleSiliconFeatureDetector.swift
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Performance/AppleSiliconFeatureDetector.swift:211:29: warning: 'init(cString:)' is deprecated: Use String(decoding: array, as: UTF8.self) instead, after truncating the null termination. [#DeprecatedDeclaration]
+209 |             result = sysctlbyname("machdep.cpu.brand_string", &buffer, &size, nil, 0)
+210 |             if result == 0 {
+211 |                 chipModel = String(cString: buffer)
+    |                             `- warning: 'init(cString:)' is deprecated: Use String(decoding: array, as: UTF8.self) instead, after truncating the null termination. [#DeprecatedDeclaration]
+212 |             }
+213 |         }
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Performance/GCDOptimizer.swift:185:13: warning: initialization of immutable value 'systemInfo' was never used; consider replacing with assignment to '_' or removing it [#no-usage]
+183 |     /// 计算最优分片大小
+184 |     private func calculateOptimalChunkSize(for itemCount: Int) async -> Int {
+185 |         let systemInfo = optimizer.getSystemInfo()
+    |             `- warning: initialization of immutable value 'systemInfo' was never used; consider replacing with assignment to '_' or removing it [#no-usage]
+186 |         let recommendedConcurrency = await qosManager.recommendedConcurrency(for: .dataAnalysis)
+187 |         
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Performance/GCDOptimizer.swift:249:17: warning: no 'async' operations occur within 'await' expression
+247 |         monitoringTask = Task {
+248 |             while !Task.isCancelled && isMonitoring {
+249 |                 await updateSystemLoad()
+    |                 `- warning: no 'async' operations occur within 'await' expression
+250 |                 try? await Task.sleep(nanoseconds: 1_000_000_000) // 1秒更新一次
+251 |             }
+
+[#DeprecatedDeclaration]: <https://docs.swift.org/compiler/documentation/diagnostics/deprecated-declaration>
+[22/39] Compiling SkyBridgeCore GCDOptimizer.swift
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Performance/AppleSiliconFeatureDetector.swift:211:29: warning: 'init(cString:)' is deprecated: Use String(decoding: array, as: UTF8.self) instead, after truncating the null termination. [#DeprecatedDeclaration]
+209 |             result = sysctlbyname("machdep.cpu.brand_string", &buffer, &size, nil, 0)
+210 |             if result == 0 {
+211 |                 chipModel = String(cString: buffer)
+    |                             `- warning: 'init(cString:)' is deprecated: Use String(decoding: array, as: UTF8.self) instead, after truncating the null termination. [#DeprecatedDeclaration]
+212 |             }
+213 |         }
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Performance/GCDOptimizer.swift:185:13: warning: initialization of immutable value 'systemInfo' was never used; consider replacing with assignment to '_' or removing it [#no-usage]
+183 |     /// 计算最优分片大小
+184 |     private func calculateOptimalChunkSize(for itemCount: Int) async -> Int {
+185 |         let systemInfo = optimizer.getSystemInfo()
+    |             `- warning: initialization of immutable value 'systemInfo' was never used; consider replacing with assignment to '_' or removing it [#no-usage]
+186 |         let recommendedConcurrency = await qosManager.recommendedConcurrency(for: .dataAnalysis)
+187 |         
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Performance/GCDOptimizer.swift:249:17: warning: no 'async' operations occur within 'await' expression
+247 |         monitoringTask = Task {
+248 |             while !Task.isCancelled && isMonitoring {
+249 |                 await updateSystemLoad()
+    |                 `- warning: no 'async' operations occur within 'await' expression
+250 |                 try? await Task.sleep(nanoseconds: 1_000_000_000) // 1秒更新一次
+251 |             }
+
+[#DeprecatedDeclaration]: <https://docs.swift.org/compiler/documentation/diagnostics/deprecated-declaration>
+[23/39] Compiling SkyBridgeCore P2PModels.swift
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/P2P/P2PNetworkLayer.swift:350:37: warning: call to main actor-isolated instance method 'getLocalIPAddresses()' in a synchronous nonisolated context [#ActorIsolatedCall]
+348 |             
+349 |             // 获取本地IP地址
+350 |             if let addresses = self.getLocalIPAddresses() {
+    |                                     `- warning: call to main actor-isolated instance method 'getLocalIPAddresses()' in a synchronous nonisolated context [#ActorIsolatedCall]
+351 |                 for address in addresses {
+352 |                     let udpEndpoint = NWEndpoint.hostPort(
+    :
+370 |     
+371 |     /// 获取本地IP地址
+372 |     private func getLocalIPAddresses() -> [String]? {
+    |                  `- note: calls to instance method 'getLocalIPAddresses()' from outside of its actor context are implicitly asynchronous
+373 |         var addresses: [String] = []
+374 |         var ifaddr: UnsafeMutablePointer<ifaddrs>?
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/P2P/P2PNetworkLayer.swift:366:18: warning: main actor-isolated property 'localEndpoints' can not be mutated from a Sendable closure
+ 41 |     private var networkMonitor: NWPathMonitor?
+ 42 |     private var currentNetworkPath: NWPath?
+ 43 |     private var localEndpoints: [NWEndpoint] = []
+    |                 `- note: mutation of this property is only permitted within the actor
+ 44 |     
+ 45 |     // 回调和代理
+    :
+364 |             }
+365 |             
+366 |             self.localEndpoints = endpoints
+    |                  `- warning: main actor-isolated property 'localEndpoints' can not be mutated from a Sendable closure
+367 |             print("🏠 发现本地端点: \(endpoints.count)个")
+368 |         }
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/P2P/P2PNetworkLayer.swift:518:13: warning: initialization of immutable value 'connection' was never used; consider replacing with assignment to '_' or removing it [#no-usage]
+516 |         
+517 |         let nwConnection = NWConnection(to: endpoint, using: parameters)
+518 |         let connection = P2PConnection(device: device, connection: nwConnection, securityManager: securityManager!)
+    |             `- warning: initialization of immutable value 'connection' was never used; consider replacing with assignment to '_' or removing it [#no-usage]
+519 |         
+520 |         pendingConnections[device.id] = PendingP2PConnection(device: device, startTime: Date(), attempts: 1)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/P2P/P2PNetworkLayer.swift:633:22: warning: call to main actor-isolated instance method 'handleDataReceived(_:from:)' in a synchronous nonisolated context [#ActorIsolatedCall]
+631 |                 
+632 |                 // 处理接收到的数据
+633 |                 self.handleDataReceived(data, from: connection)
+    |                      `- warning: call to main actor-isolated instance method 'handleDataReceived(_:from:)' in a synchronous nonisolated context [#ActorIsolatedCall]
+634 |             }
+635 |             
+    :
+646 |     
+647 |     /// 处理接收到的数据
+648 |     private func handleDataReceived(_ data: Data, from connection: P2PConnection) {
+    |                  `- note: calls to instance method 'handleDataReceived(_:from:)' from outside of its actor context are implicitly asynchronous
+649 |         print("📥 接收数据: \(data.count)字节 来自 \(connection.device.name)")
+650 |         
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/P2P/P2PNetworkLayer.swift:642:22: warning: call to main actor-isolated instance method 'setupDataReceiving(for:)' in a synchronous nonisolated context [#ActorIsolatedCall]
+617 |     
+618 |     /// 设置数据接收
+619 |     private func setupDataReceiving(for connection: P2PConnection) {
+    |                  `- note: calls to instance method 'setupDataReceiving(for:)' from outside of its actor context are implicitly asynchronous
+620 |         // 检查连接状态
+621 |         for connection in activeConnections {
+    :
+640 |             if !isComplete {
+641 |                 // 继续接收数据
+642 |                 self.setupDataReceiving(for: connection)
+    |                      `- warning: call to main actor-isolated instance method 'setupDataReceiving(for:)' in a synchronous nonisolated context [#ActorIsolatedCall]
+643 |             }
+644 |         }
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/P2P/P2PNetworkManager.swift:53:21: warning: no 'async' operations occur within 'await' expression
+ 51 |         
+ 52 |         do {
+ 53 |             _ = try await discoveryService.startDiscovery()
+    |                     `- warning: no 'async' operations occur within 'await' expression
+ 54 |             
+ 55 |             // 监听发现的设备
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/P2P/P2PNetworkManager.swift:53:17: warning: no calls to throwing functions occur within 'try' expression
+ 51 |         
+ 52 |         do {
+ 53 |             _ = try await discoveryService.startDiscovery()
+    |                 `- warning: no calls to throwing functions occur within 'try' expression
+ 54 |             
+ 55 |             // 监听发现的设备
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/P2P/P2PNetworkManager.swift:66:11: warning: 'catch' block is unreachable because no errors are thrown in 'do' block
+ 64 |             startDiscoveryTimer()
+ 65 |             
+ 66 |         } catch {
+    |           `- warning: 'catch' block is unreachable because no errors are thrown in 'do' block
+ 67 |             print("启动设备发现失败: \(error)")
+ 68 |             networkState = .disconnected
+
+[#ActorIsolatedCall]: <https://docs.swift.org/compiler/documentation/diagnostics/actor-isolated-call>
+[24/39] Compiling SkyBridgeCore P2PNetworkLayer.swift
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/P2P/P2PNetworkLayer.swift:350:37: warning: call to main actor-isolated instance method 'getLocalIPAddresses()' in a synchronous nonisolated context [#ActorIsolatedCall]
+348 |             
+349 |             // 获取本地IP地址
+350 |             if let addresses = self.getLocalIPAddresses() {
+    |                                     `- warning: call to main actor-isolated instance method 'getLocalIPAddresses()' in a synchronous nonisolated context [#ActorIsolatedCall]
+351 |                 for address in addresses {
+352 |                     let udpEndpoint = NWEndpoint.hostPort(
+    :
+370 |     
+371 |     /// 获取本地IP地址
+372 |     private func getLocalIPAddresses() -> [String]? {
+    |                  `- note: calls to instance method 'getLocalIPAddresses()' from outside of its actor context are implicitly asynchronous
+373 |         var addresses: [String] = []
+374 |         var ifaddr: UnsafeMutablePointer<ifaddrs>?
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/P2P/P2PNetworkLayer.swift:366:18: warning: main actor-isolated property 'localEndpoints' can not be mutated from a Sendable closure
+ 41 |     private var networkMonitor: NWPathMonitor?
+ 42 |     private var currentNetworkPath: NWPath?
+ 43 |     private var localEndpoints: [NWEndpoint] = []
+    |                 `- note: mutation of this property is only permitted within the actor
+ 44 |     
+ 45 |     // 回调和代理
+    :
+364 |             }
+365 |             
+366 |             self.localEndpoints = endpoints
+    |                  `- warning: main actor-isolated property 'localEndpoints' can not be mutated from a Sendable closure
+367 |             print("🏠 发现本地端点: \(endpoints.count)个")
+368 |         }
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/P2P/P2PNetworkLayer.swift:518:13: warning: initialization of immutable value 'connection' was never used; consider replacing with assignment to '_' or removing it [#no-usage]
+516 |         
+517 |         let nwConnection = NWConnection(to: endpoint, using: parameters)
+518 |         let connection = P2PConnection(device: device, connection: nwConnection, securityManager: securityManager!)
+    |             `- warning: initialization of immutable value 'connection' was never used; consider replacing with assignment to '_' or removing it [#no-usage]
+519 |         
+520 |         pendingConnections[device.id] = PendingP2PConnection(device: device, startTime: Date(), attempts: 1)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/P2P/P2PNetworkLayer.swift:633:22: warning: call to main actor-isolated instance method 'handleDataReceived(_:from:)' in a synchronous nonisolated context [#ActorIsolatedCall]
+631 |                 
+632 |                 // 处理接收到的数据
+633 |                 self.handleDataReceived(data, from: connection)
+    |                      `- warning: call to main actor-isolated instance method 'handleDataReceived(_:from:)' in a synchronous nonisolated context [#ActorIsolatedCall]
+634 |             }
+635 |             
+    :
+646 |     
+647 |     /// 处理接收到的数据
+648 |     private func handleDataReceived(_ data: Data, from connection: P2PConnection) {
+    |                  `- note: calls to instance method 'handleDataReceived(_:from:)' from outside of its actor context are implicitly asynchronous
+649 |         print("📥 接收数据: \(data.count)字节 来自 \(connection.device.name)")
+650 |         
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/P2P/P2PNetworkLayer.swift:642:22: warning: call to main actor-isolated instance method 'setupDataReceiving(for:)' in a synchronous nonisolated context [#ActorIsolatedCall]
+617 |     
+618 |     /// 设置数据接收
+619 |     private func setupDataReceiving(for connection: P2PConnection) {
+    |                  `- note: calls to instance method 'setupDataReceiving(for:)' from outside of its actor context are implicitly asynchronous
+620 |         // 检查连接状态
+621 |         for connection in activeConnections {
+    :
+640 |             if !isComplete {
+641 |                 // 继续接收数据
+642 |                 self.setupDataReceiving(for: connection)
+    |                      `- warning: call to main actor-isolated instance method 'setupDataReceiving(for:)' in a synchronous nonisolated context [#ActorIsolatedCall]
+643 |             }
+644 |         }
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/P2P/P2PNetworkManager.swift:53:21: warning: no 'async' operations occur within 'await' expression
+ 51 |         
+ 52 |         do {
+ 53 |             _ = try await discoveryService.startDiscovery()
+    |                     `- warning: no 'async' operations occur within 'await' expression
+ 54 |             
+ 55 |             // 监听发现的设备
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/P2P/P2PNetworkManager.swift:53:17: warning: no calls to throwing functions occur within 'try' expression
+ 51 |         
+ 52 |         do {
+ 53 |             _ = try await discoveryService.startDiscovery()
+    |                 `- warning: no calls to throwing functions occur within 'try' expression
+ 54 |             
+ 55 |             // 监听发现的设备
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/P2P/P2PNetworkManager.swift:66:11: warning: 'catch' block is unreachable because no errors are thrown in 'do' block
+ 64 |             startDiscoveryTimer()
+ 65 |             
+ 66 |         } catch {
+    |           `- warning: 'catch' block is unreachable because no errors are thrown in 'do' block
+ 67 |             print("启动设备发现失败: \(error)")
+ 68 |             networkState = .disconnected
+
+[#ActorIsolatedCall]: <https://docs.swift.org/compiler/documentation/diagnostics/actor-isolated-call>
+[25/39] Compiling SkyBridgeCore P2PNetworkManager.swift
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/P2P/P2PNetworkLayer.swift:350:37: warning: call to main actor-isolated instance method 'getLocalIPAddresses()' in a synchronous nonisolated context [#ActorIsolatedCall]
+348 |             
+349 |             // 获取本地IP地址
+350 |             if let addresses = self.getLocalIPAddresses() {
+    |                                     `- warning: call to main actor-isolated instance method 'getLocalIPAddresses()' in a synchronous nonisolated context [#ActorIsolatedCall]
+351 |                 for address in addresses {
+352 |                     let udpEndpoint = NWEndpoint.hostPort(
+    :
+370 |     
+371 |     /// 获取本地IP地址
+372 |     private func getLocalIPAddresses() -> [String]? {
+    |                  `- note: calls to instance method 'getLocalIPAddresses()' from outside of its actor context are implicitly asynchronous
+373 |         var addresses: [String] = []
+374 |         var ifaddr: UnsafeMutablePointer<ifaddrs>?
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/P2P/P2PNetworkLayer.swift:366:18: warning: main actor-isolated property 'localEndpoints' can not be mutated from a Sendable closure
+ 41 |     private var networkMonitor: NWPathMonitor?
+ 42 |     private var currentNetworkPath: NWPath?
+ 43 |     private var localEndpoints: [NWEndpoint] = []
+    |                 `- note: mutation of this property is only permitted within the actor
+ 44 |     
+ 45 |     // 回调和代理
+    :
+364 |             }
+365 |             
+366 |             self.localEndpoints = endpoints
+    |                  `- warning: main actor-isolated property 'localEndpoints' can not be mutated from a Sendable closure
+367 |             print("🏠 发现本地端点: \(endpoints.count)个")
+368 |         }
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/P2P/P2PNetworkLayer.swift:518:13: warning: initialization of immutable value 'connection' was never used; consider replacing with assignment to '_' or removing it [#no-usage]
+516 |         
+517 |         let nwConnection = NWConnection(to: endpoint, using: parameters)
+518 |         let connection = P2PConnection(device: device, connection: nwConnection, securityManager: securityManager!)
+    |             `- warning: initialization of immutable value 'connection' was never used; consider replacing with assignment to '_' or removing it [#no-usage]
+519 |         
+520 |         pendingConnections[device.id] = PendingP2PConnection(device: device, startTime: Date(), attempts: 1)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/P2P/P2PNetworkLayer.swift:633:22: warning: call to main actor-isolated instance method 'handleDataReceived(_:from:)' in a synchronous nonisolated context [#ActorIsolatedCall]
+631 |                 
+632 |                 // 处理接收到的数据
+633 |                 self.handleDataReceived(data, from: connection)
+    |                      `- warning: call to main actor-isolated instance method 'handleDataReceived(_:from:)' in a synchronous nonisolated context [#ActorIsolatedCall]
+634 |             }
+635 |             
+    :
+646 |     
+647 |     /// 处理接收到的数据
+648 |     private func handleDataReceived(_ data: Data, from connection: P2PConnection) {
+    |                  `- note: calls to instance method 'handleDataReceived(_:from:)' from outside of its actor context are implicitly asynchronous
+649 |         print("📥 接收数据: \(data.count)字节 来自 \(connection.device.name)")
+650 |         
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/P2P/P2PNetworkLayer.swift:642:22: warning: call to main actor-isolated instance method 'setupDataReceiving(for:)' in a synchronous nonisolated context [#ActorIsolatedCall]
+617 |     
+618 |     /// 设置数据接收
+619 |     private func setupDataReceiving(for connection: P2PConnection) {
+    |                  `- note: calls to instance method 'setupDataReceiving(for:)' from outside of its actor context are implicitly asynchronous
+620 |         // 检查连接状态
+621 |         for connection in activeConnections {
+    :
+640 |             if !isComplete {
+641 |                 // 继续接收数据
+642 |                 self.setupDataReceiving(for: connection)
+    |                      `- warning: call to main actor-isolated instance method 'setupDataReceiving(for:)' in a synchronous nonisolated context [#ActorIsolatedCall]
+643 |             }
+644 |         }
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/P2P/P2PNetworkManager.swift:53:21: warning: no 'async' operations occur within 'await' expression
+ 51 |         
+ 52 |         do {
+ 53 |             _ = try await discoveryService.startDiscovery()
+    |                     `- warning: no 'async' operations occur within 'await' expression
+ 54 |             
+ 55 |             // 监听发现的设备
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/P2P/P2PNetworkManager.swift:53:17: warning: no calls to throwing functions occur within 'try' expression
+ 51 |         
+ 52 |         do {
+ 53 |             _ = try await discoveryService.startDiscovery()
+    |                 `- warning: no calls to throwing functions occur within 'try' expression
+ 54 |             
+ 55 |             // 监听发现的设备
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/P2P/P2PNetworkManager.swift:66:11: warning: 'catch' block is unreachable because no errors are thrown in 'do' block
+ 64 |             startDiscoveryTimer()
+ 65 |             
+ 66 |         } catch {
+    |           `- warning: 'catch' block is unreachable because no errors are thrown in 'do' block
+ 67 |             print("启动设备发现失败: \(error)")
+ 68 |             networkState = .disconnected
+
+[#ActorIsolatedCall]: <https://docs.swift.org/compiler/documentation/diagnostics/actor-isolated-call>
+[26/39] Compiling SkyBridgeCore WiFiManager.swift
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/DeviceDiscoveryService.swift:80:51: warning: immutable value 'domain' was never used; consider replacing with '_' or removing it [#no-usage]
+ 78 |         let devices = allResults.compactMap { result -> DiscoveredDevice? in
+ 79 |             switch result.endpoint {
+ 80 |             case .service(let name, let type, let domain, let interface):
+    |                                                   `- warning: immutable value 'domain' was never used; consider replacing with '_' or removing it [#no-usage]
+ 81 |                 return DiscoveredDevice(
+ 82 |                     id: UUID(),
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/DeviceDiscoveryService.swift:80:63: warning: immutable value 'interface' was never used; consider replacing with '_' or removing it [#no-usage]
+ 78 |         let devices = allResults.compactMap { result -> DiscoveredDevice? in
+ 79 |             switch result.endpoint {
+ 80 |             case .service(let name, let type, let domain, let interface):
+    |                                                               `- warning: immutable value 'interface' was never used; consider replacing with '_' or removing it [#no-usage]
+ 81 |                 return DiscoveredDevice(
+ 82 |                     id: UUID(),
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/DeviceDiscoveryService.swift:146:29: warning: initialization of immutable value 'qos' was never used; consider replacing with assignment to '_' or removing it [#no-usage]
+144 |                         guard let self = self else { return }
+145 |                         
+146 |                         let qos = self.optimizer.recommendedQoS(for: capturedTaskType)
+    |                             `- warning: initialization of immutable value 'qos' was never used; consider replacing with assignment to '_' or removing it [#no-usage]
+147 |                         let queue = DispatchQueue.appleSiliconOptimized(
+148 |                             label: "discovery.\(capturedTaskName.lowercased().replacingOccurrences(of: " ", with: ""))",
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/DeviceDiscoveryService.swift:222:58: warning: immutable value 'domain' was never used; consider replacing with '_' or removing it [#no-usage]
+220 |             
+221 |             for result in results {
+222 |                 if case .service(let name, let type, let domain, _) = result.endpoint {
+    |                                                          `- warning: immutable value 'domain' was never used; consider replacing with '_' or removing it [#no-usage]
+223 |                     let device = DiscoveredDevice(
+224 |                         id: UUID(),
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/DeviceDiscoveryService.swift:347:35: warning: 'init(cString:)' is deprecated: Use String(decoding: array, as: UTF8.self) instead, after truncating the null termination. [#DeprecatedDeclaration]
+345 |                                    &hostname, socklen_t(hostname.count),
+346 |                                    nil, socklen_t(0), NI_NUMERICHOST)
+347 |                         address = String(cString: hostname)
+    |                                   `- warning: 'init(cString:)' is deprecated: Use String(decoding: array, as: UTF8.self) instead, after truncating the null termination. [#DeprecatedDeclaration]
+348 |                         break
+349 |                     }
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/FileTransfer/FileTransferView.swift:559:19: warning: 'catch' block is unreachable because no errors are thrown in 'do' block
+ 557 |                     // TODO: 实现文件传输启动逻辑
+ 558 |                     print("开始传输文件: \(url.lastPathComponent) 到设备: \(device.name)")
+ 559 |                 } catch {
+     |                   `- warning: 'catch' block is unreachable because no errors are thrown in 'do' block
+ 560 |                     print("传输启动失败: \(error)")
+ 561 |                 }
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/FileTransfer/FileTransferView.swift:573:26: warning: result of call to 'loadObject(ofClass:completionHandler:)' is unused [#no-usage]
+ 571 |             if provider.canLoadObject(ofClass: URL.self) {
+ 572 |                 group.enter()
+ 573 |                 provider.loadObject(ofClass: URL.self) { url, error in
+     |                          `- warning: result of call to 'loadObject(ofClass:completionHandler:)' is unused [#no-usage]
+ 574 |                     if let url = url {
+ 575 |                         urls.append(url)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/FileTransfer/FileTransferView.swift:575:25: warning: mutation of captured var 'urls' in concurrently-executing code [#SendableClosureCaptures]
+ 573 |                 provider.loadObject(ofClass: URL.self) { url, error in
+ 574 |                     if let url = url {
+ 575 |                         urls.append(url)
+     |                         `- warning: mutation of captured var 'urls' in concurrently-executing code [#SendableClosureCaptures]
+ 576 |                     }
+ 577 |                     group.leave()
+
+[#DeprecatedDeclaration]: <https://docs.swift.org/compiler/documentation/diagnostics/deprecated-declaration>
+[#SendableClosureCaptures]: <https://docs.swift.org/compiler/documentation/diagnostics/sendable-closure-captures>
+[27/39] Compiling SkyBridgeCore DeviceDiscoveryService.swift
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/DeviceDiscoveryService.swift:80:51: warning: immutable value 'domain' was never used; consider replacing with '_' or removing it [#no-usage]
+ 78 |         let devices = allResults.compactMap { result -> DiscoveredDevice? in
+ 79 |             switch result.endpoint {
+ 80 |             case .service(let name, let type, let domain, let interface):
+    |                                                   `- warning: immutable value 'domain' was never used; consider replacing with '_' or removing it [#no-usage]
+ 81 |                 return DiscoveredDevice(
+ 82 |                     id: UUID(),
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/DeviceDiscoveryService.swift:80:63: warning: immutable value 'interface' was never used; consider replacing with '_' or removing it [#no-usage]
+ 78 |         let devices = allResults.compactMap { result -> DiscoveredDevice? in
+ 79 |             switch result.endpoint {
+ 80 |             case .service(let name, let type, let domain, let interface):
+    |                                                               `- warning: immutable value 'interface' was never used; consider replacing with '_' or removing it [#no-usage]
+ 81 |                 return DiscoveredDevice(
+ 82 |                     id: UUID(),
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/DeviceDiscoveryService.swift:146:29: warning: initialization of immutable value 'qos' was never used; consider replacing with assignment to '_' or removing it [#no-usage]
+144 |                         guard let self = self else { return }
+145 |                         
+146 |                         let qos = self.optimizer.recommendedQoS(for: capturedTaskType)
+    |                             `- warning: initialization of immutable value 'qos' was never used; consider replacing with assignment to '_' or removing it [#no-usage]
+147 |                         let queue = DispatchQueue.appleSiliconOptimized(
+148 |                             label: "discovery.\(capturedTaskName.lowercased().replacingOccurrences(of: " ", with: ""))",
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/DeviceDiscoveryService.swift:222:58: warning: immutable value 'domain' was never used; consider replacing with '_' or removing it [#no-usage]
+220 |             
+221 |             for result in results {
+222 |                 if case .service(let name, let type, let domain, _) = result.endpoint {
+    |                                                          `- warning: immutable value 'domain' was never used; consider replacing with '_' or removing it [#no-usage]
+223 |                     let device = DiscoveredDevice(
+224 |                         id: UUID(),
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/DeviceDiscoveryService.swift:347:35: warning: 'init(cString:)' is deprecated: Use String(decoding: array, as: UTF8.self) instead, after truncating the null termination. [#DeprecatedDeclaration]
+345 |                                    &hostname, socklen_t(hostname.count),
+346 |                                    nil, socklen_t(0), NI_NUMERICHOST)
+347 |                         address = String(cString: hostname)
+    |                                   `- warning: 'init(cString:)' is deprecated: Use String(decoding: array, as: UTF8.self) instead, after truncating the null termination. [#DeprecatedDeclaration]
+348 |                         break
+349 |                     }
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/FileTransfer/FileTransferView.swift:559:19: warning: 'catch' block is unreachable because no errors are thrown in 'do' block
+ 557 |                     // TODO: 实现文件传输启动逻辑
+ 558 |                     print("开始传输文件: \(url.lastPathComponent) 到设备: \(device.name)")
+ 559 |                 } catch {
+     |                   `- warning: 'catch' block is unreachable because no errors are thrown in 'do' block
+ 560 |                     print("传输启动失败: \(error)")
+ 561 |                 }
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/FileTransfer/FileTransferView.swift:573:26: warning: result of call to 'loadObject(ofClass:completionHandler:)' is unused [#no-usage]
+ 571 |             if provider.canLoadObject(ofClass: URL.self) {
+ 572 |                 group.enter()
+ 573 |                 provider.loadObject(ofClass: URL.self) { url, error in
+     |                          `- warning: result of call to 'loadObject(ofClass:completionHandler:)' is unused [#no-usage]
+ 574 |                     if let url = url {
+ 575 |                         urls.append(url)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/FileTransfer/FileTransferView.swift:575:25: warning: mutation of captured var 'urls' in concurrently-executing code [#SendableClosureCaptures]
+ 573 |                 provider.loadObject(ofClass: URL.self) { url, error in
+ 574 |                     if let url = url {
+ 575 |                         urls.append(url)
+     |                         `- warning: mutation of captured var 'urls' in concurrently-executing code [#SendableClosureCaptures]
+ 576 |                     }
+ 577 |                     group.leave()
+
+[#DeprecatedDeclaration]: <https://docs.swift.org/compiler/documentation/diagnostics/deprecated-declaration>
+[#SendableClosureCaptures]: <https://docs.swift.org/compiler/documentation/diagnostics/sendable-closure-captures>
+[28/39] Compiling SkyBridgeCore FileTransferView.swift
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/DeviceDiscoveryService.swift:80:51: warning: immutable value 'domain' was never used; consider replacing with '_' or removing it [#no-usage]
+ 78 |         let devices = allResults.compactMap { result -> DiscoveredDevice? in
+ 79 |             switch result.endpoint {
+ 80 |             case .service(let name, let type, let domain, let interface):
+    |                                                   `- warning: immutable value 'domain' was never used; consider replacing with '_' or removing it [#no-usage]
+ 81 |                 return DiscoveredDevice(
+ 82 |                     id: UUID(),
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/DeviceDiscoveryService.swift:80:63: warning: immutable value 'interface' was never used; consider replacing with '_' or removing it [#no-usage]
+ 78 |         let devices = allResults.compactMap { result -> DiscoveredDevice? in
+ 79 |             switch result.endpoint {
+ 80 |             case .service(let name, let type, let domain, let interface):
+    |                                                               `- warning: immutable value 'interface' was never used; consider replacing with '_' or removing it [#no-usage]
+ 81 |                 return DiscoveredDevice(
+ 82 |                     id: UUID(),
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/DeviceDiscoveryService.swift:146:29: warning: initialization of immutable value 'qos' was never used; consider replacing with assignment to '_' or removing it [#no-usage]
+144 |                         guard let self = self else { return }
+145 |                         
+146 |                         let qos = self.optimizer.recommendedQoS(for: capturedTaskType)
+    |                             `- warning: initialization of immutable value 'qos' was never used; consider replacing with assignment to '_' or removing it [#no-usage]
+147 |                         let queue = DispatchQueue.appleSiliconOptimized(
+148 |                             label: "discovery.\(capturedTaskName.lowercased().replacingOccurrences(of: " ", with: ""))",
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/DeviceDiscoveryService.swift:222:58: warning: immutable value 'domain' was never used; consider replacing with '_' or removing it [#no-usage]
+220 |             
+221 |             for result in results {
+222 |                 if case .service(let name, let type, let domain, _) = result.endpoint {
+    |                                                          `- warning: immutable value 'domain' was never used; consider replacing with '_' or removing it [#no-usage]
+223 |                     let device = DiscoveredDevice(
+224 |                         id: UUID(),
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/DeviceDiscoveryService.swift:347:35: warning: 'init(cString:)' is deprecated: Use String(decoding: array, as: UTF8.self) instead, after truncating the null termination. [#DeprecatedDeclaration]
+345 |                                    &hostname, socklen_t(hostname.count),
+346 |                                    nil, socklen_t(0), NI_NUMERICHOST)
+347 |                         address = String(cString: hostname)
+    |                                   `- warning: 'init(cString:)' is deprecated: Use String(decoding: array, as: UTF8.self) instead, after truncating the null termination. [#DeprecatedDeclaration]
+348 |                         break
+349 |                     }
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/FileTransfer/FileTransferView.swift:559:19: warning: 'catch' block is unreachable because no errors are thrown in 'do' block
+ 557 |                     // TODO: 实现文件传输启动逻辑
+ 558 |                     print("开始传输文件: \(url.lastPathComponent) 到设备: \(device.name)")
+ 559 |                 } catch {
+     |                   `- warning: 'catch' block is unreachable because no errors are thrown in 'do' block
+ 560 |                     print("传输启动失败: \(error)")
+ 561 |                 }
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/FileTransfer/FileTransferView.swift:573:26: warning: result of call to 'loadObject(ofClass:completionHandler:)' is unused [#no-usage]
+ 571 |             if provider.canLoadObject(ofClass: URL.self) {
+ 572 |                 group.enter()
+ 573 |                 provider.loadObject(ofClass: URL.self) { url, error in
+     |                          `- warning: result of call to 'loadObject(ofClass:completionHandler:)' is unused [#no-usage]
+ 574 |                     if let url = url {
+ 575 |                         urls.append(url)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/FileTransfer/FileTransferView.swift:575:25: warning: mutation of captured var 'urls' in concurrently-executing code [#SendableClosureCaptures]
+ 573 |                 provider.loadObject(ofClass: URL.self) { url, error in
+ 574 |                     if let url = url {
+ 575 |                         urls.append(url)
+     |                         `- warning: mutation of captured var 'urls' in concurrently-executing code [#SendableClosureCaptures]
+ 576 |                     }
+ 577 |                     group.leave()
+
+[#DeprecatedDeclaration]: <https://docs.swift.org/compiler/documentation/diagnostics/deprecated-declaration>
+[#SendableClosureCaptures]: <https://docs.swift.org/compiler/documentation/diagnostics/sendable-closure-captures>
+[29/39] Compiling SkyBridgeCore BackgroundTaskCoordinator.swift
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Device/BluetoothManager.swift:249:9: warning: no calls to throwing functions occur within 'try' expression
+247 |         
+248 |         // 使用 TaskGroup 进行并发安全的设备连接
+249 |         try await withThrowingTaskGroup(of: Void.self) { group in
+    |         `- warning: no calls to throwing functions occur within 'try' expression
+250 |             group.addTask {
+251 |                 // 在后台队列中查找设备
+[30/39] Compiling SkyBridgeCore BluetoothManager.swift
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Device/BluetoothManager.swift:249:9: warning: no calls to throwing functions occur within 'try' expression
+247 |         
+248 |         // 使用 TaskGroup 进行并发安全的设备连接
+249 |         try await withThrowingTaskGroup(of: Void.self) { group in
+    |         `- warning: no calls to throwing functions occur within 'try' expression
+250 |             group.addTask {
+251 |                 // 在后台队列中查找设备
+[31/39] Compiling SkyBridgeCore DevicePermissionManager.swift
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Device/BluetoothManager.swift:249:9: warning: no calls to throwing functions occur within 'try' expression
+247 |         
+248 |         // 使用 TaskGroup 进行并发安全的设备连接
+249 |         try await withThrowingTaskGroup(of: Void.self) { group in
+    |         `- warning: no calls to throwing functions occur within 'try' expression
+250 |             group.addTask {
+251 |                 // 在后台队列中查找设备
+[32/39] Compiling SkyBridgeCore DeviceManagementView.swift
+[33/39] Compiling SkyBridgeCore SettingsView.swift

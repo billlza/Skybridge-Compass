@@ -1,0 +1,4 @@
+module FreeRDPBridge {
+    umbrella "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/FreeRDPBridge/include"
+    export *
+}

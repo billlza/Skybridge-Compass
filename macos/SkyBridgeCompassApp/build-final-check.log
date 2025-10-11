@@ -1,0 +1,16 @@
+Building for debugging...
+[0/7] Write sources
+[1/7] Write swift-version-41C403C3136A4E2D.txt
+[3/7] Emitting module SkyBridgeCompassApp
+[4/7] Compiling SkyBridgeCompassApp DashboardView.swift
+[5/14] Compiling SkyBridgeCompassApp WindowFocusManager.swift
+[6/14] Compiling SkyBridgeCompassApp SkyBridgeCompassApp.swift
+[7/14] Compiling SkyBridgeCompassApp StarryBackground.swift
+[8/14] Compiling SkyBridgeCompassApp RemoteDisplayView.swift
+[9/14] Compiling SkyBridgeCompassApp DashboardViewModel.swift
+[10/14] Compiling SkyBridgeCompassApp AuthenticationViewModel.swift
+[11/14] Compiling SkyBridgeCompassApp RemoteDesktopView.swift
+[11/14] Write Objects.LinkFileList
+[12/14] Linking SkyBridgeCompassApp
+[13/14] Applying SkyBridgeCompassApp
+Build complete! (4.70s)

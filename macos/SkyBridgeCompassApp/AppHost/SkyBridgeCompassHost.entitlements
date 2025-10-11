@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- 允许应用接收键盘输入事件 -->
+    <key>com.apple.security.device.input-monitoring</key>
+    <true/>
+    
+    <!-- 允许应用使用辅助功能 API -->
+    <key>com.apple.security.device.accessibility</key>
+    <true/>
+    
+    <!-- 允许应用访问用户数据 -->
+    <key>com.apple.security.personal-information.addressbook</key>
+    <false/>
+    
+    <!-- 允许应用使用网络连接 -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+    
+    <!-- 允许应用使用网络服务器功能 -->
+    <key>com.apple.security.network.server</key>
+    <true/>
+    
+    <!-- 允许应用读写用户选择的文件 -->
+    <key>com.apple.security.files.user-selected.read-write</key>
+    <true/>
+    
+    <!-- 允许应用访问钥匙串 -->
+    <key>keychain-access-groups</key>
+    <array>
+        <string>$(AppIdentifierPrefix)com.skybridge.compass.host</string>
+    </array>
+    
+    <!-- 禁用应用沙盒以获得更多权限 -->
+    <key>com.apple.security.app-sandbox</key>
+    <false/>
+    
+    <!-- 蓝牙设备访问权限 -->
+    <key>com.apple.security.device.bluetooth</key>
+    <true/>
+    
+    <!-- 相机访问权限 -->
+    <key>com.apple.security.device.camera</key>
+    <true/>
+    
+    <!-- 麦克风访问权限 -->
+    <key>com.apple.security.device.microphone</key>
+    <true/>
+    
+    <!-- Wi-Fi扫描权限 - 用于CoreWLAN框架 -->
+    <key>com.apple.wifi.anqp</key>
+    <true/>
+    
+    <key>com.apple.wifi.associate</key>
+    <true/>
+    
+    <key>com.apple.wifi.events</key>
+    <true/>
+    
+    <!-- 位置服务权限 - Wi-Fi扫描在macOS 10.15+需要 -->
+    <key>com.apple.security.personal-information.location</key>
+    <true/>
+    
+    <!-- 启用硬化运行时 -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    
+    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+    <false/>
+    
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <false/>
+</dict>
+</plist>

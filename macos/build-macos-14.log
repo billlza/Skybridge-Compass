@@ -1,0 +1,4 @@
+2025-10-09 17:32:09.583 appintentsmetadataprocessor[43842:2021713] Starting appintentsmetadataprocessor export
+2025-10-09 17:32:09.681 appintentsmetadataprocessor[43842:2021713] error: At least one halting error produced during export. No AppIntents metadata have been exported and this target is not usable with AppIntents until errors are resolved.
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCompassApp/SiriIntents.swift:29: error: Invalid parameter type. AppEntity and AppEnum are the only allowed types for deviceName
+warning: Traditional headermap style is no longer supported; please migrate to using separate headermaps and set 'ALWAYS_SEARCH_USER_PATHS' to NO. (in target 'SkyBridgeCompassHost' from project 'SkyBridgeCompassHost')

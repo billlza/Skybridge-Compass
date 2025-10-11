@@ -1,0 +1,2546 @@
+Building for debugging...
+[0/8] Write sources
+[1/8] Write swift-version-41C403C3136A4E2D.txt
+Apple Swift version 6.2.1 (swiftlang-6.2.1.4.2 clang-1700.4.4.1)
+Target: arm64-apple-macosx14.0
+[3/12] Compiling SkyBridgeCore AppleSiliconOptimizer.swift
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:739:5: error: extraneous '}' at top level
+ 737 |             }
+ 738 |         }
+ 739 |     }
+     |     `- error: extraneous '}' at top level
+ 740 |     
+ 741 |     /// 清理网络日志
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:1032:1: error: extraneous '}' at top level
+1030 |         }.store(in: &cancellables)
+1031 |     }
+1032 | }
+     | `- error: extraneous '}' at top level
+1033 | 
+1034 | // MARK: - UserDefaults 扩展
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Performance/AppleSiliconOptimizer.swift:51:20: warning: 'init(cString:)' is deprecated: Use String(decoding: array, as: UTF8.self) instead, after truncating the null termination. [#DeprecatedDeclaration]
+ 49 |         var brandString = [CChar](repeating: 0, count: size)
+ 50 |         sysctlbyname("machdep.cpu.brand_string", &brandString, &size, nil, 0)
+ 51 |         cpuBrand = String(cString: brandString)
+    |                    `- warning: 'init(cString:)' is deprecated: Use String(decoding: array, as: UTF8.self) instead, after truncating the null termination. [#DeprecatedDeclaration]
+ 52 |         
+ 53 |         // 检测是否为Apple Silicon
+
+[#DeprecatedDeclaration]: <https://docs.swift.org/compiler/documentation/diagnostics/deprecated-declaration>
+[4/12] Compiling SkyBridgeCore SettingsManager.swift
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:739:5: error: extraneous '}' at top level
+ 737 |             }
+ 738 |         }
+ 739 |     }
+     |     `- error: extraneous '}' at top level
+ 740 |     
+ 741 |     /// 清理网络日志
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:1032:1: error: extraneous '}' at top level
+1030 |         }.store(in: &cancellables)
+1031 |     }
+1032 | }
+     | `- error: extraneous '}' at top level
+1033 | 
+1034 | // MARK: - UserDefaults 扩展
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:736:17: error: cannot find 'continuation' in scope
+ 734 |         return clearedSize
+ 735 |                 
+ 736 |                 continuation.resume(returning: clearedSize)
+     |                 `- error: cannot find 'continuation' in scope
+ 737 |             }
+ 738 |         }
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:749:13: error: cannot find 'customServiceTypes' in scope
+ 747 |     /// 添加自定义服务类型
+ 748 |     public func addCustomServiceType(_ serviceType: String) {
+ 749 |         if !customServiceTypes.contains(serviceType) {
+     |             `- error: cannot find 'customServiceTypes' in scope
+ 750 |             customServiceTypes.append(serviceType)
+ 751 |         }
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:750:13: error: cannot find 'customServiceTypes' in scope
+ 748 |     public func addCustomServiceType(_ serviceType: String) {
+ 749 |         if !customServiceTypes.contains(serviceType) {
+ 750 |             customServiceTypes.append(serviceType)
+     |             `- error: cannot find 'customServiceTypes' in scope
+ 751 |         }
+ 752 |     }
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:756:9: error: cannot find 'customServiceTypes' in scope
+ 754 |     /// 移除自定义服务类型
+ 755 |     public func removeCustomServiceType(_ serviceType: String) {
+ 756 |         customServiceTypes.removeAll { $0 == serviceType }
+     |         `- error: cannot find 'customServiceTypes' in scope
+ 757 |     }
+ 758 |     
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:764:9: error: cannot find 'autoScanOnStartup' in scope
+ 762 |     private func loadSettings() {
+ 763 |         // 通用设置
+ 764 |         autoScanOnStartup = userDefaults.bool(forKey: "Settings.AutoScanOnStartup", defaultValue: true)
+     |         `- error: cannot find 'autoScanOnStartup' in scope
+ 765 |         showSystemNotifications = userDefaults.bool(forKey: "Settings.ShowSystemNotifications", defaultValue: true)
+ 766 |         useDarkMode = userDefaults.bool(forKey: "Settings.UseDarkMode", defaultValue: false)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:764:29: error: cannot find 'userDefaults' in scope
+ 762 |     private func loadSettings() {
+ 763 |         // 通用设置
+ 764 |         autoScanOnStartup = userDefaults.bool(forKey: "Settings.AutoScanOnStartup", defaultValue: true)
+     |                             `- error: cannot find 'userDefaults' in scope
+ 765 |         showSystemNotifications = userDefaults.bool(forKey: "Settings.ShowSystemNotifications", defaultValue: true)
+ 766 |         useDarkMode = userDefaults.bool(forKey: "Settings.UseDarkMode", defaultValue: false)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:765:9: error: cannot find 'showSystemNotifications' in scope
+ 763 |         // 通用设置
+ 764 |         autoScanOnStartup = userDefaults.bool(forKey: "Settings.AutoScanOnStartup", defaultValue: true)
+ 765 |         showSystemNotifications = userDefaults.bool(forKey: "Settings.ShowSystemNotifications", defaultValue: true)
+     |         `- error: cannot find 'showSystemNotifications' in scope
+ 766 |         useDarkMode = userDefaults.bool(forKey: "Settings.UseDarkMode", defaultValue: false)
+ 767 |         scanInterval = userDefaults.integer(forKey: "Settings.ScanInterval", defaultValue: 30)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:765:35: error: cannot find 'userDefaults' in scope
+ 763 |         // 通用设置
+ 764 |         autoScanOnStartup = userDefaults.bool(forKey: "Settings.AutoScanOnStartup", defaultValue: true)
+ 765 |         showSystemNotifications = userDefaults.bool(forKey: "Settings.ShowSystemNotifications", defaultValue: true)
+     |                                   `- error: cannot find 'userDefaults' in scope
+ 766 |         useDarkMode = userDefaults.bool(forKey: "Settings.UseDarkMode", defaultValue: false)
+ 767 |         scanInterval = userDefaults.integer(forKey: "Settings.ScanInterval", defaultValue: 30)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:766:9: error: cannot find 'useDarkMode' in scope
+ 764 |         autoScanOnStartup = userDefaults.bool(forKey: "Settings.AutoScanOnStartup", defaultValue: true)
+ 765 |         showSystemNotifications = userDefaults.bool(forKey: "Settings.ShowSystemNotifications", defaultValue: true)
+ 766 |         useDarkMode = userDefaults.bool(forKey: "Settings.UseDarkMode", defaultValue: false)
+     |         `- error: cannot find 'useDarkMode' in scope
+ 767 |         scanInterval = userDefaults.integer(forKey: "Settings.ScanInterval", defaultValue: 30)
+ 768 |         showDeviceDetails = userDefaults.bool(forKey: "Settings.ShowDeviceDetails", defaultValue: true)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:766:23: error: cannot find 'userDefaults' in scope
+ 764 |         autoScanOnStartup = userDefaults.bool(forKey: "Settings.AutoScanOnStartup", defaultValue: true)
+ 765 |         showSystemNotifications = userDefaults.bool(forKey: "Settings.ShowSystemNotifications", defaultValue: true)
+ 766 |         useDarkMode = userDefaults.bool(forKey: "Settings.UseDarkMode", defaultValue: false)
+     |                       `- error: cannot find 'userDefaults' in scope
+ 767 |         scanInterval = userDefaults.integer(forKey: "Settings.ScanInterval", defaultValue: 30)
+ 768 |         showDeviceDetails = userDefaults.bool(forKey: "Settings.ShowDeviceDetails", defaultValue: true)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:767:9: error: cannot find 'scanInterval' in scope
+ 765 |         showSystemNotifications = userDefaults.bool(forKey: "Settings.ShowSystemNotifications", defaultValue: true)
+ 766 |         useDarkMode = userDefaults.bool(forKey: "Settings.UseDarkMode", defaultValue: false)
+ 767 |         scanInterval = userDefaults.integer(forKey: "Settings.ScanInterval", defaultValue: 30)
+     |         `- error: cannot find 'scanInterval' in scope
+ 768 |         showDeviceDetails = userDefaults.bool(forKey: "Settings.ShowDeviceDetails", defaultValue: true)
+ 769 |         showConnectionStats = userDefaults.bool(forKey: "Settings.ShowConnectionStats", defaultValue: true)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:767:24: error: cannot find 'userDefaults' in scope
+ 765 |         showSystemNotifications = userDefaults.bool(forKey: "Settings.ShowSystemNotifications", defaultValue: true)
+ 766 |         useDarkMode = userDefaults.bool(forKey: "Settings.UseDarkMode", defaultValue: false)
+ 767 |         scanInterval = userDefaults.integer(forKey: "Settings.ScanInterval", defaultValue: 30)
+     |                        `- error: cannot find 'userDefaults' in scope
+ 768 |         showDeviceDetails = userDefaults.bool(forKey: "Settings.ShowDeviceDetails", defaultValue: true)
+ 769 |         showConnectionStats = userDefaults.bool(forKey: "Settings.ShowConnectionStats", defaultValue: true)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:768:9: error: cannot find 'showDeviceDetails' in scope
+ 766 |         useDarkMode = userDefaults.bool(forKey: "Settings.UseDarkMode", defaultValue: false)
+ 767 |         scanInterval = userDefaults.integer(forKey: "Settings.ScanInterval", defaultValue: 30)
+ 768 |         showDeviceDetails = userDefaults.bool(forKey: "Settings.ShowDeviceDetails", defaultValue: true)
+     |         `- error: cannot find 'showDeviceDetails' in scope
+ 769 |         showConnectionStats = userDefaults.bool(forKey: "Settings.ShowConnectionStats", defaultValue: true)
+ 770 |         compactMode = userDefaults.bool(forKey: "Settings.CompactMode", defaultValue: false)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:768:29: error: cannot find 'userDefaults' in scope
+ 766 |         useDarkMode = userDefaults.bool(forKey: "Settings.UseDarkMode", defaultValue: false)
+ 767 |         scanInterval = userDefaults.integer(forKey: "Settings.ScanInterval", defaultValue: 30)
+ 768 |         showDeviceDetails = userDefaults.bool(forKey: "Settings.ShowDeviceDetails", defaultValue: true)
+     |                             `- error: cannot find 'userDefaults' in scope
+ 769 |         showConnectionStats = userDefaults.bool(forKey: "Settings.ShowConnectionStats", defaultValue: true)
+ 770 |         compactMode = userDefaults.bool(forKey: "Settings.CompactMode", defaultValue: false)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:769:9: error: cannot find 'showConnectionStats' in scope
+ 767 |         scanInterval = userDefaults.integer(forKey: "Settings.ScanInterval", defaultValue: 30)
+ 768 |         showDeviceDetails = userDefaults.bool(forKey: "Settings.ShowDeviceDetails", defaultValue: true)
+ 769 |         showConnectionStats = userDefaults.bool(forKey: "Settings.ShowConnectionStats", defaultValue: true)
+     |         `- error: cannot find 'showConnectionStats' in scope
+ 770 |         compactMode = userDefaults.bool(forKey: "Settings.CompactMode", defaultValue: false)
+ 771 |         
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:769:31: error: cannot find 'userDefaults' in scope
+ 767 |         scanInterval = userDefaults.integer(forKey: "Settings.ScanInterval", defaultValue: 30)
+ 768 |         showDeviceDetails = userDefaults.bool(forKey: "Settings.ShowDeviceDetails", defaultValue: true)
+ 769 |         showConnectionStats = userDefaults.bool(forKey: "Settings.ShowConnectionStats", defaultValue: true)
+     |                               `- error: cannot find 'userDefaults' in scope
+ 770 |         compactMode = userDefaults.bool(forKey: "Settings.CompactMode", defaultValue: false)
+ 771 |         
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:770:9: error: cannot find 'compactMode' in scope
+ 768 |         showDeviceDetails = userDefaults.bool(forKey: "Settings.ShowDeviceDetails", defaultValue: true)
+ 769 |         showConnectionStats = userDefaults.bool(forKey: "Settings.ShowConnectionStats", defaultValue: true)
+ 770 |         compactMode = userDefaults.bool(forKey: "Settings.CompactMode", defaultValue: false)
+     |         `- error: cannot find 'compactMode' in scope
+ 771 |         
+ 772 |         // 网络设置
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:770:23: error: cannot find 'userDefaults' in scope
+ 768 |         showDeviceDetails = userDefaults.bool(forKey: "Settings.ShowDeviceDetails", defaultValue: true)
+ 769 |         showConnectionStats = userDefaults.bool(forKey: "Settings.ShowConnectionStats", defaultValue: true)
+ 770 |         compactMode = userDefaults.bool(forKey: "Settings.CompactMode", defaultValue: false)
+     |                       `- error: cannot find 'userDefaults' in scope
+ 771 |         
+ 772 |         // 网络设置
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:773:9: error: cannot find 'autoConnectKnownNetworks' in scope
+ 771 |         
+ 772 |         // 网络设置
+ 773 |         autoConnectKnownNetworks = userDefaults.bool(forKey: "Settings.AutoConnectKnownNetworks", defaultValue: true)
+     |         `- error: cannot find 'autoConnectKnownNetworks' in scope
+ 774 |         showHiddenNetworks = userDefaults.bool(forKey: "Settings.ShowHiddenNetworks", defaultValue: false)
+ 775 |         prefer5GHz = userDefaults.bool(forKey: "Settings.Prefer5GHz", defaultValue: true)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:773:36: error: cannot find 'userDefaults' in scope
+ 771 |         
+ 772 |         // 网络设置
+ 773 |         autoConnectKnownNetworks = userDefaults.bool(forKey: "Settings.AutoConnectKnownNetworks", defaultValue: true)
+     |                                    `- error: cannot find 'userDefaults' in scope
+ 774 |         showHiddenNetworks = userDefaults.bool(forKey: "Settings.ShowHiddenNetworks", defaultValue: false)
+ 775 |         prefer5GHz = userDefaults.bool(forKey: "Settings.Prefer5GHz", defaultValue: true)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:774:9: error: cannot find 'showHiddenNetworks' in scope
+ 772 |         // 网络设置
+ 773 |         autoConnectKnownNetworks = userDefaults.bool(forKey: "Settings.AutoConnectKnownNetworks", defaultValue: true)
+ 774 |         showHiddenNetworks = userDefaults.bool(forKey: "Settings.ShowHiddenNetworks", defaultValue: false)
+     |         `- error: cannot find 'showHiddenNetworks' in scope
+ 775 |         prefer5GHz = userDefaults.bool(forKey: "Settings.Prefer5GHz", defaultValue: true)
+ 776 |         wifiScanTimeout = userDefaults.integer(forKey: "Settings.WiFiScanTimeout", defaultValue: 10)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:774:30: error: cannot find 'userDefaults' in scope
+ 772 |         // 网络设置
+ 773 |         autoConnectKnownNetworks = userDefaults.bool(forKey: "Settings.AutoConnectKnownNetworks", defaultValue: true)
+ 774 |         showHiddenNetworks = userDefaults.bool(forKey: "Settings.ShowHiddenNetworks", defaultValue: false)
+     |                              `- error: cannot find 'userDefaults' in scope
+ 775 |         prefer5GHz = userDefaults.bool(forKey: "Settings.Prefer5GHz", defaultValue: true)
+ 776 |         wifiScanTimeout = userDefaults.integer(forKey: "Settings.WiFiScanTimeout", defaultValue: 10)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:775:9: error: cannot find 'prefer5GHz' in scope
+ 773 |         autoConnectKnownNetworks = userDefaults.bool(forKey: "Settings.AutoConnectKnownNetworks", defaultValue: true)
+ 774 |         showHiddenNetworks = userDefaults.bool(forKey: "Settings.ShowHiddenNetworks", defaultValue: false)
+ 775 |         prefer5GHz = userDefaults.bool(forKey: "Settings.Prefer5GHz", defaultValue: true)
+     |         `- error: cannot find 'prefer5GHz' in scope
+ 776 |         wifiScanTimeout = userDefaults.integer(forKey: "Settings.WiFiScanTimeout", defaultValue: 10)
+ 777 |         enableBonjourDiscovery = userDefaults.bool(forKey: "Settings.EnableBonjourDiscovery", defaultValue: true)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:775:22: error: cannot find 'userDefaults' in scope
+ 773 |         autoConnectKnownNetworks = userDefaults.bool(forKey: "Settings.AutoConnectKnownNetworks", defaultValue: true)
+ 774 |         showHiddenNetworks = userDefaults.bool(forKey: "Settings.ShowHiddenNetworks", defaultValue: false)
+ 775 |         prefer5GHz = userDefaults.bool(forKey: "Settings.Prefer5GHz", defaultValue: true)
+     |                      `- error: cannot find 'userDefaults' in scope
+ 776 |         wifiScanTimeout = userDefaults.integer(forKey: "Settings.WiFiScanTimeout", defaultValue: 10)
+ 777 |         enableBonjourDiscovery = userDefaults.bool(forKey: "Settings.EnableBonjourDiscovery", defaultValue: true)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:776:9: error: cannot find 'wifiScanTimeout' in scope
+ 774 |         showHiddenNetworks = userDefaults.bool(forKey: "Settings.ShowHiddenNetworks", defaultValue: false)
+ 775 |         prefer5GHz = userDefaults.bool(forKey: "Settings.Prefer5GHz", defaultValue: true)
+ 776 |         wifiScanTimeout = userDefaults.integer(forKey: "Settings.WiFiScanTimeout", defaultValue: 10)
+     |         `- error: cannot find 'wifiScanTimeout' in scope
+ 777 |         enableBonjourDiscovery = userDefaults.bool(forKey: "Settings.EnableBonjourDiscovery", defaultValue: true)
+ 778 |         enableMDNSResolution = userDefaults.bool(forKey: "Settings.EnableMDNSResolution", defaultValue: true)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:776:27: error: cannot find 'userDefaults' in scope
+ 774 |         showHiddenNetworks = userDefaults.bool(forKey: "Settings.ShowHiddenNetworks", defaultValue: false)
+ 775 |         prefer5GHz = userDefaults.bool(forKey: "Settings.Prefer5GHz", defaultValue: true)
+ 776 |         wifiScanTimeout = userDefaults.integer(forKey: "Settings.WiFiScanTimeout", defaultValue: 10)
+     |                           `- error: cannot find 'userDefaults' in scope
+ 777 |         enableBonjourDiscovery = userDefaults.bool(forKey: "Settings.EnableBonjourDiscovery", defaultValue: true)
+ 778 |         enableMDNSResolution = userDefaults.bool(forKey: "Settings.EnableMDNSResolution", defaultValue: true)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:777:9: error: cannot find 'enableBonjourDiscovery' in scope
+ 775 |         prefer5GHz = userDefaults.bool(forKey: "Settings.Prefer5GHz", defaultValue: true)
+ 776 |         wifiScanTimeout = userDefaults.integer(forKey: "Settings.WiFiScanTimeout", defaultValue: 10)
+ 777 |         enableBonjourDiscovery = userDefaults.bool(forKey: "Settings.EnableBonjourDiscovery", defaultValue: true)
+     |         `- error: cannot find 'enableBonjourDiscovery' in scope
+ 778 |         enableMDNSResolution = userDefaults.bool(forKey: "Settings.EnableMDNSResolution", defaultValue: true)
+ 779 |         scanCustomPorts = userDefaults.bool(forKey: "Settings.ScanCustomPorts", defaultValue: false)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:777:34: error: cannot find 'userDefaults' in scope
+ 775 |         prefer5GHz = userDefaults.bool(forKey: "Settings.Prefer5GHz", defaultValue: true)
+ 776 |         wifiScanTimeout = userDefaults.integer(forKey: "Settings.WiFiScanTimeout", defaultValue: 10)
+ 777 |         enableBonjourDiscovery = userDefaults.bool(forKey: "Settings.EnableBonjourDiscovery", defaultValue: true)
+     |                                  `- error: cannot find 'userDefaults' in scope
+ 778 |         enableMDNSResolution = userDefaults.bool(forKey: "Settings.EnableMDNSResolution", defaultValue: true)
+ 779 |         scanCustomPorts = userDefaults.bool(forKey: "Settings.ScanCustomPorts", defaultValue: false)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:778:9: error: cannot find 'enableMDNSResolution' in scope
+ 776 |         wifiScanTimeout = userDefaults.integer(forKey: "Settings.WiFiScanTimeout", defaultValue: 10)
+ 777 |         enableBonjourDiscovery = userDefaults.bool(forKey: "Settings.EnableBonjourDiscovery", defaultValue: true)
+ 778 |         enableMDNSResolution = userDefaults.bool(forKey: "Settings.EnableMDNSResolution", defaultValue: true)
+     |         `- error: cannot find 'enableMDNSResolution' in scope
+ 779 |         scanCustomPorts = userDefaults.bool(forKey: "Settings.ScanCustomPorts", defaultValue: false)
+ 780 |         discoveryTimeout = userDefaults.integer(forKey: "Settings.DiscoveryTimeout", defaultValue: 30)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:778:32: error: cannot find 'userDefaults' in scope
+ 776 |         wifiScanTimeout = userDefaults.integer(forKey: "Settings.WiFiScanTimeout", defaultValue: 10)
+ 777 |         enableBonjourDiscovery = userDefaults.bool(forKey: "Settings.EnableBonjourDiscovery", defaultValue: true)
+ 778 |         enableMDNSResolution = userDefaults.bool(forKey: "Settings.EnableMDNSResolution", defaultValue: true)
+     |                                `- error: cannot find 'userDefaults' in scope
+ 779 |         scanCustomPorts = userDefaults.bool(forKey: "Settings.ScanCustomPorts", defaultValue: false)
+ 780 |         discoveryTimeout = userDefaults.integer(forKey: "Settings.DiscoveryTimeout", defaultValue: 30)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:779:9: error: cannot find 'scanCustomPorts' in scope
+ 777 |         enableBonjourDiscovery = userDefaults.bool(forKey: "Settings.EnableBonjourDiscovery", defaultValue: true)
+ 778 |         enableMDNSResolution = userDefaults.bool(forKey: "Settings.EnableMDNSResolution", defaultValue: true)
+ 779 |         scanCustomPorts = userDefaults.bool(forKey: "Settings.ScanCustomPorts", defaultValue: false)
+     |         `- error: cannot find 'scanCustomPorts' in scope
+ 780 |         discoveryTimeout = userDefaults.integer(forKey: "Settings.DiscoveryTimeout", defaultValue: 30)
+ 781 |         connectionTimeout = userDefaults.integer(forKey: "Settings.ConnectionTimeout", defaultValue: 10)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:779:27: error: cannot find 'userDefaults' in scope
+ 777 |         enableBonjourDiscovery = userDefaults.bool(forKey: "Settings.EnableBonjourDiscovery", defaultValue: true)
+ 778 |         enableMDNSResolution = userDefaults.bool(forKey: "Settings.EnableMDNSResolution", defaultValue: true)
+ 779 |         scanCustomPorts = userDefaults.bool(forKey: "Settings.ScanCustomPorts", defaultValue: false)
+     |                           `- error: cannot find 'userDefaults' in scope
+ 780 |         discoveryTimeout = userDefaults.integer(forKey: "Settings.DiscoveryTimeout", defaultValue: 30)
+ 781 |         connectionTimeout = userDefaults.integer(forKey: "Settings.ConnectionTimeout", defaultValue: 10)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:780:9: error: cannot find 'discoveryTimeout' in scope
+ 778 |         enableMDNSResolution = userDefaults.bool(forKey: "Settings.EnableMDNSResolution", defaultValue: true)
+ 779 |         scanCustomPorts = userDefaults.bool(forKey: "Settings.ScanCustomPorts", defaultValue: false)
+ 780 |         discoveryTimeout = userDefaults.integer(forKey: "Settings.DiscoveryTimeout", defaultValue: 30)
+     |         `- error: cannot find 'discoveryTimeout' in scope
+ 781 |         connectionTimeout = userDefaults.integer(forKey: "Settings.ConnectionTimeout", defaultValue: 10)
+ 782 |         retryCount = userDefaults.integer(forKey: "Settings.RetryCount", defaultValue: 3)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:780:28: error: cannot find 'userDefaults' in scope
+ 778 |         enableMDNSResolution = userDefaults.bool(forKey: "Settings.EnableMDNSResolution", defaultValue: true)
+ 779 |         scanCustomPorts = userDefaults.bool(forKey: "Settings.ScanCustomPorts", defaultValue: false)
+ 780 |         discoveryTimeout = userDefaults.integer(forKey: "Settings.DiscoveryTimeout", defaultValue: 30)
+     |                            `- error: cannot find 'userDefaults' in scope
+ 781 |         connectionTimeout = userDefaults.integer(forKey: "Settings.ConnectionTimeout", defaultValue: 10)
+ 782 |         retryCount = userDefaults.integer(forKey: "Settings.RetryCount", defaultValue: 3)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:781:9: error: cannot find 'connectionTimeout' in scope
+ 779 |         scanCustomPorts = userDefaults.bool(forKey: "Settings.ScanCustomPorts", defaultValue: false)
+ 780 |         discoveryTimeout = userDefaults.integer(forKey: "Settings.DiscoveryTimeout", defaultValue: 30)
+ 781 |         connectionTimeout = userDefaults.integer(forKey: "Settings.ConnectionTimeout", defaultValue: 10)
+     |         `- error: cannot find 'connectionTimeout' in scope
+ 782 |         retryCount = userDefaults.integer(forKey: "Settings.RetryCount", defaultValue: 3)
+ 783 |         enableConnectionEncryption = userDefaults.bool(forKey: "Settings.EnableConnectionEncryption", defaultValue: true)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:781:29: error: cannot find 'userDefaults' in scope
+ 779 |         scanCustomPorts = userDefaults.bool(forKey: "Settings.ScanCustomPorts", defaultValue: false)
+ 780 |         discoveryTimeout = userDefaults.integer(forKey: "Settings.DiscoveryTimeout", defaultValue: 30)
+ 781 |         connectionTimeout = userDefaults.integer(forKey: "Settings.ConnectionTimeout", defaultValue: 10)
+     |                             `- error: cannot find 'userDefaults' in scope
+ 782 |         retryCount = userDefaults.integer(forKey: "Settings.RetryCount", defaultValue: 3)
+ 783 |         enableConnectionEncryption = userDefaults.bool(forKey: "Settings.EnableConnectionEncryption", defaultValue: true)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:782:9: error: cannot find 'retryCount' in scope
+ 780 |         discoveryTimeout = userDefaults.integer(forKey: "Settings.DiscoveryTimeout", defaultValue: 30)
+ 781 |         connectionTimeout = userDefaults.integer(forKey: "Settings.ConnectionTimeout", defaultValue: 10)
+ 782 |         retryCount = userDefaults.integer(forKey: "Settings.RetryCount", defaultValue: 3)
+     |         `- error: cannot find 'retryCount' in scope
+ 783 |         enableConnectionEncryption = userDefaults.bool(forKey: "Settings.EnableConnectionEncryption", defaultValue: true)
+ 784 |         verifyCertificates = userDefaults.bool(forKey: "Settings.VerifyCertificates", defaultValue: true)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:782:22: error: cannot find 'userDefaults' in scope
+ 780 |         discoveryTimeout = userDefaults.integer(forKey: "Settings.DiscoveryTimeout", defaultValue: 30)
+ 781 |         connectionTimeout = userDefaults.integer(forKey: "Settings.ConnectionTimeout", defaultValue: 10)
+ 782 |         retryCount = userDefaults.integer(forKey: "Settings.RetryCount", defaultValue: 3)
+     |                      `- error: cannot find 'userDefaults' in scope
+ 783 |         enableConnectionEncryption = userDefaults.bool(forKey: "Settings.EnableConnectionEncryption", defaultValue: true)
+ 784 |         verifyCertificates = userDefaults.bool(forKey: "Settings.VerifyCertificates", defaultValue: true)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:783:9: error: cannot find 'enableConnectionEncryption' in scope
+ 781 |         connectionTimeout = userDefaults.integer(forKey: "Settings.ConnectionTimeout", defaultValue: 10)
+ 782 |         retryCount = userDefaults.integer(forKey: "Settings.RetryCount", defaultValue: 3)
+ 783 |         enableConnectionEncryption = userDefaults.bool(forKey: "Settings.EnableConnectionEncryption", defaultValue: true)
+     |         `- error: cannot find 'enableConnectionEncryption' in scope
+ 784 |         verifyCertificates = userDefaults.bool(forKey: "Settings.VerifyCertificates", defaultValue: true)
+ 785 |         customServiceTypes = userDefaults.stringArray(forKey: "Settings.CustomServiceTypes") ?? []
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:783:38: error: cannot find 'userDefaults' in scope
+ 781 |         connectionTimeout = userDefaults.integer(forKey: "Settings.ConnectionTimeout", defaultValue: 10)
+ 782 |         retryCount = userDefaults.integer(forKey: "Settings.RetryCount", defaultValue: 3)
+ 783 |         enableConnectionEncryption = userDefaults.bool(forKey: "Settings.EnableConnectionEncryption", defaultValue: true)
+     |                                      `- error: cannot find 'userDefaults' in scope
+ 784 |         verifyCertificates = userDefaults.bool(forKey: "Settings.VerifyCertificates", defaultValue: true)
+ 785 |         customServiceTypes = userDefaults.stringArray(forKey: "Settings.CustomServiceTypes") ?? []
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:784:9: error: cannot find 'verifyCertificates' in scope
+ 782 |         retryCount = userDefaults.integer(forKey: "Settings.RetryCount", defaultValue: 3)
+ 783 |         enableConnectionEncryption = userDefaults.bool(forKey: "Settings.EnableConnectionEncryption", defaultValue: true)
+ 784 |         verifyCertificates = userDefaults.bool(forKey: "Settings.VerifyCertificates", defaultValue: true)
+     |         `- error: cannot find 'verifyCertificates' in scope
+ 785 |         customServiceTypes = userDefaults.stringArray(forKey: "Settings.CustomServiceTypes") ?? []
+ 786 |         
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:784:30: error: cannot find 'userDefaults' in scope
+ 782 |         retryCount = userDefaults.integer(forKey: "Settings.RetryCount", defaultValue: 3)
+ 783 |         enableConnectionEncryption = userDefaults.bool(forKey: "Settings.EnableConnectionEncryption", defaultValue: true)
+ 784 |         verifyCertificates = userDefaults.bool(forKey: "Settings.VerifyCertificates", defaultValue: true)
+     |                              `- error: cannot find 'userDefaults' in scope
+ 785 |         customServiceTypes = userDefaults.stringArray(forKey: "Settings.CustomServiceTypes") ?? []
+ 786 |         
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:785:9: error: cannot find 'customServiceTypes' in scope
+ 783 |         enableConnectionEncryption = userDefaults.bool(forKey: "Settings.EnableConnectionEncryption", defaultValue: true)
+ 784 |         verifyCertificates = userDefaults.bool(forKey: "Settings.VerifyCertificates", defaultValue: true)
+ 785 |         customServiceTypes = userDefaults.stringArray(forKey: "Settings.CustomServiceTypes") ?? []
+     |         `- error: cannot find 'customServiceTypes' in scope
+ 786 |         
+ 787 |         // 设备设置
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:785:30: error: cannot find 'userDefaults' in scope
+ 783 |         enableConnectionEncryption = userDefaults.bool(forKey: "Settings.EnableConnectionEncryption", defaultValue: true)
+ 784 |         verifyCertificates = userDefaults.bool(forKey: "Settings.VerifyCertificates", defaultValue: true)
+ 785 |         customServiceTypes = userDefaults.stringArray(forKey: "Settings.CustomServiceTypes") ?? []
+     |                              `- error: cannot find 'userDefaults' in scope
+ 786 |         
+ 787 |         // 设备设置
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:788:9: error: cannot find 'autoConnectPairedDevices' in scope
+ 786 |         
+ 787 |         // 设备设置
+ 788 |         autoConnectPairedDevices = userDefaults.bool(forKey: "Settings.AutoConnectPairedDevices", defaultValue: true)
+     |         `- error: cannot find 'autoConnectPairedDevices' in scope
+ 789 |         showDeviceRSSI = userDefaults.bool(forKey: "Settings.ShowDeviceRSSI", defaultValue: true)
+ 790 |         showConnectableDevicesOnly = userDefaults.bool(forKey: "Settings.ShowOnlyConnectableDevices", defaultValue: false)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:788:36: error: cannot find 'userDefaults' in scope
+ 786 |         
+ 787 |         // 设备设置
+ 788 |         autoConnectPairedDevices = userDefaults.bool(forKey: "Settings.AutoConnectPairedDevices", defaultValue: true)
+     |                                    `- error: cannot find 'userDefaults' in scope
+ 789 |         showDeviceRSSI = userDefaults.bool(forKey: "Settings.ShowDeviceRSSI", defaultValue: true)
+ 790 |         showConnectableDevicesOnly = userDefaults.bool(forKey: "Settings.ShowOnlyConnectableDevices", defaultValue: false)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:789:9: error: cannot find 'showDeviceRSSI' in scope
+ 787 |         // 设备设置
+ 788 |         autoConnectPairedDevices = userDefaults.bool(forKey: "Settings.AutoConnectPairedDevices", defaultValue: true)
+ 789 |         showDeviceRSSI = userDefaults.bool(forKey: "Settings.ShowDeviceRSSI", defaultValue: true)
+     |         `- error: cannot find 'showDeviceRSSI' in scope
+ 790 |         showConnectableDevicesOnly = userDefaults.bool(forKey: "Settings.ShowOnlyConnectableDevices", defaultValue: false)
+ 791 |         autoDiscoverAppleTV = userDefaults.bool(forKey: "Settings.AutoDiscoverAppleTV", defaultValue: true)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:789:26: error: cannot find 'userDefaults' in scope
+ 787 |         // 设备设置
+ 788 |         autoConnectPairedDevices = userDefaults.bool(forKey: "Settings.AutoConnectPairedDevices", defaultValue: true)
+ 789 |         showDeviceRSSI = userDefaults.bool(forKey: "Settings.ShowDeviceRSSI", defaultValue: true)
+     |                          `- error: cannot find 'userDefaults' in scope
+ 790 |         showConnectableDevicesOnly = userDefaults.bool(forKey: "Settings.ShowOnlyConnectableDevices", defaultValue: false)
+ 791 |         autoDiscoverAppleTV = userDefaults.bool(forKey: "Settings.AutoDiscoverAppleTV", defaultValue: true)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:790:9: error: cannot find 'showConnectableDevicesOnly' in scope
+ 788 |         autoConnectPairedDevices = userDefaults.bool(forKey: "Settings.AutoConnectPairedDevices", defaultValue: true)
+ 789 |         showDeviceRSSI = userDefaults.bool(forKey: "Settings.ShowDeviceRSSI", defaultValue: true)
+ 790 |         showConnectableDevicesOnly = userDefaults.bool(forKey: "Settings.ShowOnlyConnectableDevices", defaultValue: false)
+     |         `- error: cannot find 'showConnectableDevicesOnly' in scope
+ 791 |         autoDiscoverAppleTV = userDefaults.bool(forKey: "Settings.AutoDiscoverAppleTV", defaultValue: true)
+ 792 |         showHomePodDevices = userDefaults.bool(forKey: "Settings.ShowHomePodDevices", defaultValue: true)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:790:38: error: cannot find 'userDefaults' in scope
+ 788 |         autoConnectPairedDevices = userDefaults.bool(forKey: "Settings.AutoConnectPairedDevices", defaultValue: true)
+ 789 |         showDeviceRSSI = userDefaults.bool(forKey: "Settings.ShowDeviceRSSI", defaultValue: true)
+ 790 |         showConnectableDevicesOnly = userDefaults.bool(forKey: "Settings.ShowOnlyConnectableDevices", defaultValue: false)
+     |                                      `- error: cannot find 'userDefaults' in scope
+ 791 |         autoDiscoverAppleTV = userDefaults.bool(forKey: "Settings.AutoDiscoverAppleTV", defaultValue: true)
+ 792 |         showHomePodDevices = userDefaults.bool(forKey: "Settings.ShowHomePodDevices", defaultValue: true)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:791:9: error: cannot find 'autoDiscoverAppleTV' in scope
+ 789 |         showDeviceRSSI = userDefaults.bool(forKey: "Settings.ShowDeviceRSSI", defaultValue: true)
+ 790 |         showConnectableDevicesOnly = userDefaults.bool(forKey: "Settings.ShowOnlyConnectableDevices", defaultValue: false)
+ 791 |         autoDiscoverAppleTV = userDefaults.bool(forKey: "Settings.AutoDiscoverAppleTV", defaultValue: true)
+     |         `- error: cannot find 'autoDiscoverAppleTV' in scope
+ 792 |         showHomePodDevices = userDefaults.bool(forKey: "Settings.ShowHomePodDevices", defaultValue: true)
+ 793 |         showThirdPartyAirPlayDevices = userDefaults.bool(forKey: "Settings.ShowThirdPartyAirPlay", defaultValue: true)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:791:31: error: cannot find 'userDefaults' in scope
+ 789 |         showDeviceRSSI = userDefaults.bool(forKey: "Settings.ShowDeviceRSSI", defaultValue: true)
+ 790 |         showConnectableDevicesOnly = userDefaults.bool(forKey: "Settings.ShowOnlyConnectableDevices", defaultValue: false)
+ 791 |         autoDiscoverAppleTV = userDefaults.bool(forKey: "Settings.AutoDiscoverAppleTV", defaultValue: true)
+     |                               `- error: cannot find 'userDefaults' in scope
+ 792 |         showHomePodDevices = userDefaults.bool(forKey: "Settings.ShowHomePodDevices", defaultValue: true)
+ 793 |         showThirdPartyAirPlayDevices = userDefaults.bool(forKey: "Settings.ShowThirdPartyAirPlay", defaultValue: true)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:792:9: error: cannot find 'showHomePodDevices' in scope
+ 790 |         showConnectableDevicesOnly = userDefaults.bool(forKey: "Settings.ShowOnlyConnectableDevices", defaultValue: false)
+ 791 |         autoDiscoverAppleTV = userDefaults.bool(forKey: "Settings.AutoDiscoverAppleTV", defaultValue: true)
+ 792 |         showHomePodDevices = userDefaults.bool(forKey: "Settings.ShowHomePodDevices", defaultValue: true)
+     |         `- error: cannot find 'showHomePodDevices' in scope
+ 793 |         showThirdPartyAirPlayDevices = userDefaults.bool(forKey: "Settings.ShowThirdPartyAirPlay", defaultValue: true)
+ 794 |         hideOfflineDevices = userDefaults.bool(forKey: "Settings.HideOfflineDevices", defaultValue: false)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:792:30: error: cannot find 'userDefaults' in scope
+ 790 |         showConnectableDevicesOnly = userDefaults.bool(forKey: "Settings.ShowOnlyConnectableDevices", defaultValue: false)
+ 791 |         autoDiscoverAppleTV = userDefaults.bool(forKey: "Settings.AutoDiscoverAppleTV", defaultValue: true)
+ 792 |         showHomePodDevices = userDefaults.bool(forKey: "Settings.ShowHomePodDevices", defaultValue: true)
+     |                              `- error: cannot find 'userDefaults' in scope
+ 793 |         showThirdPartyAirPlayDevices = userDefaults.bool(forKey: "Settings.ShowThirdPartyAirPlay", defaultValue: true)
+ 794 |         hideOfflineDevices = userDefaults.bool(forKey: "Settings.HideOfflineDevices", defaultValue: false)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:793:9: error: cannot find 'showThirdPartyAirPlayDevices' in scope
+ 791 |         autoDiscoverAppleTV = userDefaults.bool(forKey: "Settings.AutoDiscoverAppleTV", defaultValue: true)
+ 792 |         showHomePodDevices = userDefaults.bool(forKey: "Settings.ShowHomePodDevices", defaultValue: true)
+ 793 |         showThirdPartyAirPlayDevices = userDefaults.bool(forKey: "Settings.ShowThirdPartyAirPlay", defaultValue: true)
+     |         `- error: cannot find 'showThirdPartyAirPlayDevices' in scope
+ 794 |         hideOfflineDevices = userDefaults.bool(forKey: "Settings.HideOfflineDevices", defaultValue: false)
+ 795 |         sortBySignalStrength = userDefaults.bool(forKey: "Settings.SortBySignalStrength", defaultValue: true)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:793:40: error: cannot find 'userDefaults' in scope
+ 791 |         autoDiscoverAppleTV = userDefaults.bool(forKey: "Settings.AutoDiscoverAppleTV", defaultValue: true)
+ 792 |         showHomePodDevices = userDefaults.bool(forKey: "Settings.ShowHomePodDevices", defaultValue: true)
+ 793 |         showThirdPartyAirPlayDevices = userDefaults.bool(forKey: "Settings.ShowThirdPartyAirPlay", defaultValue: true)
+     |                                        `- error: cannot find 'userDefaults' in scope
+ 794 |         hideOfflineDevices = userDefaults.bool(forKey: "Settings.HideOfflineDevices", defaultValue: false)
+ 795 |         sortBySignalStrength = userDefaults.bool(forKey: "Settings.SortBySignalStrength", defaultValue: true)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:794:9: error: cannot find 'hideOfflineDevices' in scope
+ 792 |         showHomePodDevices = userDefaults.bool(forKey: "Settings.ShowHomePodDevices", defaultValue: true)
+ 793 |         showThirdPartyAirPlayDevices = userDefaults.bool(forKey: "Settings.ShowThirdPartyAirPlay", defaultValue: true)
+ 794 |         hideOfflineDevices = userDefaults.bool(forKey: "Settings.HideOfflineDevices", defaultValue: false)
+     |         `- error: cannot find 'hideOfflineDevices' in scope
+ 795 |         sortBySignalStrength = userDefaults.bool(forKey: "Settings.SortBySignalStrength", defaultValue: true)
+ 796 |         showDeviceIcons = userDefaults.bool(forKey: "Settings.ShowDeviceIcons", defaultValue: true)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:794:30: error: cannot find 'userDefaults' in scope
+ 792 |         showHomePodDevices = userDefaults.bool(forKey: "Settings.ShowHomePodDevices", defaultValue: true)
+ 793 |         showThirdPartyAirPlayDevices = userDefaults.bool(forKey: "Settings.ShowThirdPartyAirPlay", defaultValue: true)
+ 794 |         hideOfflineDevices = userDefaults.bool(forKey: "Settings.HideOfflineDevices", defaultValue: false)
+     |                              `- error: cannot find 'userDefaults' in scope
+ 795 |         sortBySignalStrength = userDefaults.bool(forKey: "Settings.SortBySignalStrength", defaultValue: true)
+ 796 |         showDeviceIcons = userDefaults.bool(forKey: "Settings.ShowDeviceIcons", defaultValue: true)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:795:9: error: cannot find 'sortBySignalStrength' in scope
+ 793 |         showThirdPartyAirPlayDevices = userDefaults.bool(forKey: "Settings.ShowThirdPartyAirPlay", defaultValue: true)
+ 794 |         hideOfflineDevices = userDefaults.bool(forKey: "Settings.HideOfflineDevices", defaultValue: false)
+ 795 |         sortBySignalStrength = userDefaults.bool(forKey: "Settings.SortBySignalStrength", defaultValue: true)
+     |         `- error: cannot find 'sortBySignalStrength' in scope
+ 796 |         showDeviceIcons = userDefaults.bool(forKey: "Settings.ShowDeviceIcons", defaultValue: true)
+ 797 |         minimumSignalStrength = userDefaults.double(forKey: "Settings.MinimumSignalStrength", defaultValue: -80.0)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:795:32: error: cannot find 'userDefaults' in scope
+ 793 |         showThirdPartyAirPlayDevices = userDefaults.bool(forKey: "Settings.ShowThirdPartyAirPlay", defaultValue: true)
+ 794 |         hideOfflineDevices = userDefaults.bool(forKey: "Settings.HideOfflineDevices", defaultValue: false)
+ 795 |         sortBySignalStrength = userDefaults.bool(forKey: "Settings.SortBySignalStrength", defaultValue: true)
+     |                                `- error: cannot find 'userDefaults' in scope
+ 796 |         showDeviceIcons = userDefaults.bool(forKey: "Settings.ShowDeviceIcons", defaultValue: true)
+ 797 |         minimumSignalStrength = userDefaults.double(forKey: "Settings.MinimumSignalStrength", defaultValue: -80.0)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:796:9: error: cannot find 'showDeviceIcons' in scope
+ 794 |         hideOfflineDevices = userDefaults.bool(forKey: "Settings.HideOfflineDevices", defaultValue: false)
+ 795 |         sortBySignalStrength = userDefaults.bool(forKey: "Settings.SortBySignalStrength", defaultValue: true)
+ 796 |         showDeviceIcons = userDefaults.bool(forKey: "Settings.ShowDeviceIcons", defaultValue: true)
+     |         `- error: cannot find 'showDeviceIcons' in scope
+ 797 |         minimumSignalStrength = userDefaults.double(forKey: "Settings.MinimumSignalStrength", defaultValue: -80.0)
+ 798 |         
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:796:27: error: cannot find 'userDefaults' in scope
+ 794 |         hideOfflineDevices = userDefaults.bool(forKey: "Settings.HideOfflineDevices", defaultValue: false)
+ 795 |         sortBySignalStrength = userDefaults.bool(forKey: "Settings.SortBySignalStrength", defaultValue: true)
+ 796 |         showDeviceIcons = userDefaults.bool(forKey: "Settings.ShowDeviceIcons", defaultValue: true)
+     |                           `- error: cannot find 'userDefaults' in scope
+ 797 |         minimumSignalStrength = userDefaults.double(forKey: "Settings.MinimumSignalStrength", defaultValue: -80.0)
+ 798 |         
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:797:9: error: cannot find 'minimumSignalStrength' in scope
+ 795 |         sortBySignalStrength = userDefaults.bool(forKey: "Settings.SortBySignalStrength", defaultValue: true)
+ 796 |         showDeviceIcons = userDefaults.bool(forKey: "Settings.ShowDeviceIcons", defaultValue: true)
+ 797 |         minimumSignalStrength = userDefaults.double(forKey: "Settings.MinimumSignalStrength", defaultValue: -80.0)
+     |         `- error: cannot find 'minimumSignalStrength' in scope
+ 798 |         
+ 799 |         // 高级设置
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:797:33: error: cannot find 'userDefaults' in scope
+ 795 |         sortBySignalStrength = userDefaults.bool(forKey: "Settings.SortBySignalStrength", defaultValue: true)
+ 796 |         showDeviceIcons = userDefaults.bool(forKey: "Settings.ShowDeviceIcons", defaultValue: true)
+ 797 |         minimumSignalStrength = userDefaults.double(forKey: "Settings.MinimumSignalStrength", defaultValue: -80.0)
+     |                                 `- error: cannot find 'userDefaults' in scope
+ 798 |         
+ 799 |         // 高级设置
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:800:9: error: cannot find 'enableVerboseLogging' in scope
+ 798 |         
+ 799 |         // 高级设置
+ 800 |         enableVerboseLogging = userDefaults.bool(forKey: "Settings.EnableVerboseLogging", defaultValue: false)
+     |         `- error: cannot find 'enableVerboseLogging' in scope
+ 801 |         showDebugInfo = userDefaults.bool(forKey: "Settings.ShowDebugInfo", defaultValue: false)
+ 802 |         saveNetworkLogs = userDefaults.bool(forKey: "Settings.SaveNetworkLogs", defaultValue: false)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:800:32: error: cannot find 'userDefaults' in scope
+ 798 |         
+ 799 |         // 高级设置
+ 800 |         enableVerboseLogging = userDefaults.bool(forKey: "Settings.EnableVerboseLogging", defaultValue: false)
+     |                                `- error: cannot find 'userDefaults' in scope
+ 801 |         showDebugInfo = userDefaults.bool(forKey: "Settings.ShowDebugInfo", defaultValue: false)
+ 802 |         saveNetworkLogs = userDefaults.bool(forKey: "Settings.SaveNetworkLogs", defaultValue: false)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:801:9: error: cannot find 'showDebugInfo' in scope
+ 799 |         // 高级设置
+ 800 |         enableVerboseLogging = userDefaults.bool(forKey: "Settings.EnableVerboseLogging", defaultValue: false)
+ 801 |         showDebugInfo = userDefaults.bool(forKey: "Settings.ShowDebugInfo", defaultValue: false)
+     |         `- error: cannot find 'showDebugInfo' in scope
+ 802 |         saveNetworkLogs = userDefaults.bool(forKey: "Settings.SaveNetworkLogs", defaultValue: false)
+ 803 |         logLevel = userDefaults.string(forKey: "Settings.LogLevel") ?? "Info"
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:801:25: error: cannot find 'userDefaults' in scope
+ 799 |         // 高级设置
+ 800 |         enableVerboseLogging = userDefaults.bool(forKey: "Settings.EnableVerboseLogging", defaultValue: false)
+ 801 |         showDebugInfo = userDefaults.bool(forKey: "Settings.ShowDebugInfo", defaultValue: false)
+     |                         `- error: cannot find 'userDefaults' in scope
+ 802 |         saveNetworkLogs = userDefaults.bool(forKey: "Settings.SaveNetworkLogs", defaultValue: false)
+ 803 |         logLevel = userDefaults.string(forKey: "Settings.LogLevel") ?? "Info"
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:802:9: error: cannot find 'saveNetworkLogs' in scope
+ 800 |         enableVerboseLogging = userDefaults.bool(forKey: "Settings.EnableVerboseLogging", defaultValue: false)
+ 801 |         showDebugInfo = userDefaults.bool(forKey: "Settings.ShowDebugInfo", defaultValue: false)
+ 802 |         saveNetworkLogs = userDefaults.bool(forKey: "Settings.SaveNetworkLogs", defaultValue: false)
+     |         `- error: cannot find 'saveNetworkLogs' in scope
+ 803 |         logLevel = userDefaults.string(forKey: "Settings.LogLevel") ?? "Info"
+ 804 |         enableHardwareAcceleration = userDefaults.bool(forKey: "Settings.EnableHardwareAcceleration", defaultValue: true)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:802:27: error: cannot find 'userDefaults' in scope
+ 800 |         enableVerboseLogging = userDefaults.bool(forKey: "Settings.EnableVerboseLogging", defaultValue: false)
+ 801 |         showDebugInfo = userDefaults.bool(forKey: "Settings.ShowDebugInfo", defaultValue: false)
+ 802 |         saveNetworkLogs = userDefaults.bool(forKey: "Settings.SaveNetworkLogs", defaultValue: false)
+     |                           `- error: cannot find 'userDefaults' in scope
+ 803 |         logLevel = userDefaults.string(forKey: "Settings.LogLevel") ?? "Info"
+ 804 |         enableHardwareAcceleration = userDefaults.bool(forKey: "Settings.EnableHardwareAcceleration", defaultValue: true)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:803:9: error: cannot find 'logLevel' in scope
+ 801 |         showDebugInfo = userDefaults.bool(forKey: "Settings.ShowDebugInfo", defaultValue: false)
+ 802 |         saveNetworkLogs = userDefaults.bool(forKey: "Settings.SaveNetworkLogs", defaultValue: false)
+ 803 |         logLevel = userDefaults.string(forKey: "Settings.LogLevel") ?? "Info"
+     |         `- error: cannot find 'logLevel' in scope
+ 804 |         enableHardwareAcceleration = userDefaults.bool(forKey: "Settings.EnableHardwareAcceleration", defaultValue: true)
+ 805 |         optimizeMemoryUsage = userDefaults.bool(forKey: "Settings.OptimizeMemoryUsage", defaultValue: true)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:803:20: error: cannot find 'userDefaults' in scope
+ 801 |         showDebugInfo = userDefaults.bool(forKey: "Settings.ShowDebugInfo", defaultValue: false)
+ 802 |         saveNetworkLogs = userDefaults.bool(forKey: "Settings.SaveNetworkLogs", defaultValue: false)
+ 803 |         logLevel = userDefaults.string(forKey: "Settings.LogLevel") ?? "Info"
+     |                    `- error: cannot find 'userDefaults' in scope
+ 804 |         enableHardwareAcceleration = userDefaults.bool(forKey: "Settings.EnableHardwareAcceleration", defaultValue: true)
+ 805 |         optimizeMemoryUsage = userDefaults.bool(forKey: "Settings.OptimizeMemoryUsage", defaultValue: true)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:804:9: error: cannot find 'enableHardwareAcceleration' in scope
+ 802 |         saveNetworkLogs = userDefaults.bool(forKey: "Settings.SaveNetworkLogs", defaultValue: false)
+ 803 |         logLevel = userDefaults.string(forKey: "Settings.LogLevel") ?? "Info"
+ 804 |         enableHardwareAcceleration = userDefaults.bool(forKey: "Settings.EnableHardwareAcceleration", defaultValue: true)
+     |         `- error: cannot find 'enableHardwareAcceleration' in scope
+ 805 |         optimizeMemoryUsage = userDefaults.bool(forKey: "Settings.OptimizeMemoryUsage", defaultValue: true)
+ 806 |         enableBackgroundScanning = userDefaults.bool(forKey: "Settings.BackgroundScanning", defaultValue: false)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:804:38: error: cannot find 'userDefaults' in scope
+ 802 |         saveNetworkLogs = userDefaults.bool(forKey: "Settings.SaveNetworkLogs", defaultValue: false)
+ 803 |         logLevel = userDefaults.string(forKey: "Settings.LogLevel") ?? "Info"
+ 804 |         enableHardwareAcceleration = userDefaults.bool(forKey: "Settings.EnableHardwareAcceleration", defaultValue: true)
+     |                                      `- error: cannot find 'userDefaults' in scope
+ 805 |         optimizeMemoryUsage = userDefaults.bool(forKey: "Settings.OptimizeMemoryUsage", defaultValue: true)
+ 806 |         enableBackgroundScanning = userDefaults.bool(forKey: "Settings.BackgroundScanning", defaultValue: false)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:805:9: error: cannot find 'optimizeMemoryUsage' in scope
+ 803 |         logLevel = userDefaults.string(forKey: "Settings.LogLevel") ?? "Info"
+ 804 |         enableHardwareAcceleration = userDefaults.bool(forKey: "Settings.EnableHardwareAcceleration", defaultValue: true)
+ 805 |         optimizeMemoryUsage = userDefaults.bool(forKey: "Settings.OptimizeMemoryUsage", defaultValue: true)
+     |         `- error: cannot find 'optimizeMemoryUsage' in scope
+ 806 |         enableBackgroundScanning = userDefaults.bool(forKey: "Settings.BackgroundScanning", defaultValue: false)
+ 807 |         maxConcurrentConnections = userDefaults.integer(forKey: "Settings.MaxConcurrentConnections", defaultValue: 10)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:805:31: error: cannot find 'userDefaults' in scope
+ 803 |         logLevel = userDefaults.string(forKey: "Settings.LogLevel") ?? "Info"
+ 804 |         enableHardwareAcceleration = userDefaults.bool(forKey: "Settings.EnableHardwareAcceleration", defaultValue: true)
+ 805 |         optimizeMemoryUsage = userDefaults.bool(forKey: "Settings.OptimizeMemoryUsage", defaultValue: true)
+     |                               `- error: cannot find 'userDefaults' in scope
+ 806 |         enableBackgroundScanning = userDefaults.bool(forKey: "Settings.BackgroundScanning", defaultValue: false)
+ 807 |         maxConcurrentConnections = userDefaults.integer(forKey: "Settings.MaxConcurrentConnections", defaultValue: 10)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:806:9: error: cannot find 'enableBackgroundScanning' in scope
+ 804 |         enableHardwareAcceleration = userDefaults.bool(forKey: "Settings.EnableHardwareAcceleration", defaultValue: true)
+ 805 |         optimizeMemoryUsage = userDefaults.bool(forKey: "Settings.OptimizeMemoryUsage", defaultValue: true)
+ 806 |         enableBackgroundScanning = userDefaults.bool(forKey: "Settings.BackgroundScanning", defaultValue: false)
+     |         `- error: cannot find 'enableBackgroundScanning' in scope
+ 807 |         maxConcurrentConnections = userDefaults.integer(forKey: "Settings.MaxConcurrentConnections", defaultValue: 10)
+ 808 |         enableIPv6Support = userDefaults.bool(forKey: "Settings.EnableIPv6Support", defaultValue: false)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:806:36: error: cannot find 'userDefaults' in scope
+ 804 |         enableHardwareAcceleration = userDefaults.bool(forKey: "Settings.EnableHardwareAcceleration", defaultValue: true)
+ 805 |         optimizeMemoryUsage = userDefaults.bool(forKey: "Settings.OptimizeMemoryUsage", defaultValue: true)
+ 806 |         enableBackgroundScanning = userDefaults.bool(forKey: "Settings.BackgroundScanning", defaultValue: false)
+     |                                    `- error: cannot find 'userDefaults' in scope
+ 807 |         maxConcurrentConnections = userDefaults.integer(forKey: "Settings.MaxConcurrentConnections", defaultValue: 10)
+ 808 |         enableIPv6Support = userDefaults.bool(forKey: "Settings.EnableIPv6Support", defaultValue: false)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:807:9: error: cannot find 'maxConcurrentConnections' in scope
+ 805 |         optimizeMemoryUsage = userDefaults.bool(forKey: "Settings.OptimizeMemoryUsage", defaultValue: true)
+ 806 |         enableBackgroundScanning = userDefaults.bool(forKey: "Settings.BackgroundScanning", defaultValue: false)
+ 807 |         maxConcurrentConnections = userDefaults.integer(forKey: "Settings.MaxConcurrentConnections", defaultValue: 10)
+     |         `- error: cannot find 'maxConcurrentConnections' in scope
+ 808 |         enableIPv6Support = userDefaults.bool(forKey: "Settings.EnableIPv6Support", defaultValue: false)
+ 809 |         useNewDiscoveryAlgorithm = userDefaults.bool(forKey: "Settings.UseNewDiscoveryAlgorithm", defaultValue: false)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:807:36: error: cannot find 'userDefaults' in scope
+ 805 |         optimizeMemoryUsage = userDefaults.bool(forKey: "Settings.OptimizeMemoryUsage", defaultValue: true)
+ 806 |         enableBackgroundScanning = userDefaults.bool(forKey: "Settings.BackgroundScanning", defaultValue: false)
+ 807 |         maxConcurrentConnections = userDefaults.integer(forKey: "Settings.MaxConcurrentConnections", defaultValue: 10)
+     |                                    `- error: cannot find 'userDefaults' in scope
+ 808 |         enableIPv6Support = userDefaults.bool(forKey: "Settings.EnableIPv6Support", defaultValue: false)
+ 809 |         useNewDiscoveryAlgorithm = userDefaults.bool(forKey: "Settings.UseNewDiscoveryAlgorithm", defaultValue: false)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:808:9: error: cannot find 'enableIPv6Support' in scope
+ 806 |         enableBackgroundScanning = userDefaults.bool(forKey: "Settings.BackgroundScanning", defaultValue: false)
+ 807 |         maxConcurrentConnections = userDefaults.integer(forKey: "Settings.MaxConcurrentConnections", defaultValue: 10)
+ 808 |         enableIPv6Support = userDefaults.bool(forKey: "Settings.EnableIPv6Support", defaultValue: false)
+     |         `- error: cannot find 'enableIPv6Support' in scope
+ 809 |         useNewDiscoveryAlgorithm = userDefaults.bool(forKey: "Settings.UseNewDiscoveryAlgorithm", defaultValue: false)
+ 810 |         enableP2PDirectConnection = userDefaults.bool(forKey: "Settings.EnableP2PDirectConnect", defaultValue: false)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:808:29: error: cannot find 'userDefaults' in scope
+ 806 |         enableBackgroundScanning = userDefaults.bool(forKey: "Settings.BackgroundScanning", defaultValue: false)
+ 807 |         maxConcurrentConnections = userDefaults.integer(forKey: "Settings.MaxConcurrentConnections", defaultValue: 10)
+ 808 |         enableIPv6Support = userDefaults.bool(forKey: "Settings.EnableIPv6Support", defaultValue: false)
+     |                             `- error: cannot find 'userDefaults' in scope
+ 809 |         useNewDiscoveryAlgorithm = userDefaults.bool(forKey: "Settings.UseNewDiscoveryAlgorithm", defaultValue: false)
+ 810 |         enableP2PDirectConnection = userDefaults.bool(forKey: "Settings.EnableP2PDirectConnect", defaultValue: false)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:809:9: error: cannot find 'useNewDiscoveryAlgorithm' in scope
+ 807 |         maxConcurrentConnections = userDefaults.integer(forKey: "Settings.MaxConcurrentConnections", defaultValue: 10)
+ 808 |         enableIPv6Support = userDefaults.bool(forKey: "Settings.EnableIPv6Support", defaultValue: false)
+ 809 |         useNewDiscoveryAlgorithm = userDefaults.bool(forKey: "Settings.UseNewDiscoveryAlgorithm", defaultValue: false)
+     |         `- error: cannot find 'useNewDiscoveryAlgorithm' in scope
+ 810 |         enableP2PDirectConnection = userDefaults.bool(forKey: "Settings.EnableP2PDirectConnect", defaultValue: false)
+ 811 |         
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:809:36: error: cannot find 'userDefaults' in scope
+ 807 |         maxConcurrentConnections = userDefaults.integer(forKey: "Settings.MaxConcurrentConnections", defaultValue: 10)
+ 808 |         enableIPv6Support = userDefaults.bool(forKey: "Settings.EnableIPv6Support", defaultValue: false)
+ 809 |         useNewDiscoveryAlgorithm = userDefaults.bool(forKey: "Settings.UseNewDiscoveryAlgorithm", defaultValue: false)
+     |                                    `- error: cannot find 'userDefaults' in scope
+ 810 |         enableP2PDirectConnection = userDefaults.bool(forKey: "Settings.EnableP2PDirectConnect", defaultValue: false)
+ 811 |         
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:810:9: error: cannot find 'enableP2PDirectConnection' in scope
+ 808 |         enableIPv6Support = userDefaults.bool(forKey: "Settings.EnableIPv6Support", defaultValue: false)
+ 809 |         useNewDiscoveryAlgorithm = userDefaults.bool(forKey: "Settings.UseNewDiscoveryAlgorithm", defaultValue: false)
+ 810 |         enableP2PDirectConnection = userDefaults.bool(forKey: "Settings.EnableP2PDirectConnect", defaultValue: false)
+     |         `- error: cannot find 'enableP2PDirectConnection' in scope
+ 811 |         
+ 812 |         // 系统监控设置
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:810:37: error: cannot find 'userDefaults' in scope
+ 808 |         enableIPv6Support = userDefaults.bool(forKey: "Settings.EnableIPv6Support", defaultValue: false)
+ 809 |         useNewDiscoveryAlgorithm = userDefaults.bool(forKey: "Settings.UseNewDiscoveryAlgorithm", defaultValue: false)
+ 810 |         enableP2PDirectConnection = userDefaults.bool(forKey: "Settings.EnableP2PDirectConnect", defaultValue: false)
+     |                                     `- error: cannot find 'userDefaults' in scope
+ 811 |         
+ 812 |         // 系统监控设置
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:813:9: error: cannot find 'systemMonitorRefreshInterval' in scope
+ 811 |         
+ 812 |         // 系统监控设置
+ 813 |         systemMonitorRefreshInterval = userDefaults.double(forKey: "Settings.SystemMonitorRefreshInterval", defaultValue: 1.0)
+     |         `- error: cannot find 'systemMonitorRefreshInterval' in scope
+ 814 |         enableSystemNotifications = userDefaults.bool(forKey: "Settings.EnableSystemNotifications", defaultValue: true)
+ 815 |         cpuThreshold = userDefaults.double(forKey: "Settings.CPUThreshold", defaultValue: 80.0)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:813:40: error: cannot find 'userDefaults' in scope
+ 811 |         
+ 812 |         // 系统监控设置
+ 813 |         systemMonitorRefreshInterval = userDefaults.double(forKey: "Settings.SystemMonitorRefreshInterval", defaultValue: 1.0)
+     |                                        `- error: cannot find 'userDefaults' in scope
+ 814 |         enableSystemNotifications = userDefaults.bool(forKey: "Settings.EnableSystemNotifications", defaultValue: true)
+ 815 |         cpuThreshold = userDefaults.double(forKey: "Settings.CPUThreshold", defaultValue: 80.0)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:814:9: error: cannot find 'enableSystemNotifications' in scope
+ 812 |         // 系统监控设置
+ 813 |         systemMonitorRefreshInterval = userDefaults.double(forKey: "Settings.SystemMonitorRefreshInterval", defaultValue: 1.0)
+ 814 |         enableSystemNotifications = userDefaults.bool(forKey: "Settings.EnableSystemNotifications", defaultValue: true)
+     |         `- error: cannot find 'enableSystemNotifications' in scope
+ 815 |         cpuThreshold = userDefaults.double(forKey: "Settings.CPUThreshold", defaultValue: 80.0)
+ 816 |         memoryThreshold = userDefaults.double(forKey: "Settings.MemoryThreshold", defaultValue: 80.0)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:814:37: error: cannot find 'userDefaults' in scope
+ 812 |         // 系统监控设置
+ 813 |         systemMonitorRefreshInterval = userDefaults.double(forKey: "Settings.SystemMonitorRefreshInterval", defaultValue: 1.0)
+ 814 |         enableSystemNotifications = userDefaults.bool(forKey: "Settings.EnableSystemNotifications", defaultValue: true)
+     |                                     `- error: cannot find 'userDefaults' in scope
+ 815 |         cpuThreshold = userDefaults.double(forKey: "Settings.CPUThreshold", defaultValue: 80.0)
+ 816 |         memoryThreshold = userDefaults.double(forKey: "Settings.MemoryThreshold", defaultValue: 80.0)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:815:9: error: cannot find 'cpuThreshold' in scope
+ 813 |         systemMonitorRefreshInterval = userDefaults.double(forKey: "Settings.SystemMonitorRefreshInterval", defaultValue: 1.0)
+ 814 |         enableSystemNotifications = userDefaults.bool(forKey: "Settings.EnableSystemNotifications", defaultValue: true)
+ 815 |         cpuThreshold = userDefaults.double(forKey: "Settings.CPUThreshold", defaultValue: 80.0)
+     |         `- error: cannot find 'cpuThreshold' in scope
+ 816 |         memoryThreshold = userDefaults.double(forKey: "Settings.MemoryThreshold", defaultValue: 80.0)
+ 817 |         diskThreshold = userDefaults.double(forKey: "Settings.DiskThreshold", defaultValue: 90.0)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:815:24: error: cannot find 'userDefaults' in scope
+ 813 |         systemMonitorRefreshInterval = userDefaults.double(forKey: "Settings.SystemMonitorRefreshInterval", defaultValue: 1.0)
+ 814 |         enableSystemNotifications = userDefaults.bool(forKey: "Settings.EnableSystemNotifications", defaultValue: true)
+ 815 |         cpuThreshold = userDefaults.double(forKey: "Settings.CPUThreshold", defaultValue: 80.0)
+     |                        `- error: cannot find 'userDefaults' in scope
+ 816 |         memoryThreshold = userDefaults.double(forKey: "Settings.MemoryThreshold", defaultValue: 80.0)
+ 817 |         diskThreshold = userDefaults.double(forKey: "Settings.DiskThreshold", defaultValue: 90.0)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:816:9: error: cannot find 'memoryThreshold' in scope
+ 814 |         enableSystemNotifications = userDefaults.bool(forKey: "Settings.EnableSystemNotifications", defaultValue: true)
+ 815 |         cpuThreshold = userDefaults.double(forKey: "Settings.CPUThreshold", defaultValue: 80.0)
+ 816 |         memoryThreshold = userDefaults.double(forKey: "Settings.MemoryThreshold", defaultValue: 80.0)
+     |         `- error: cannot find 'memoryThreshold' in scope
+ 817 |         diskThreshold = userDefaults.double(forKey: "Settings.DiskThreshold", defaultValue: 90.0)
+ 818 |         enableAutoRefresh = userDefaults.bool(forKey: "Settings.EnableAutoRefresh", defaultValue: true)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:816:27: error: cannot find 'userDefaults' in scope
+ 814 |         enableSystemNotifications = userDefaults.bool(forKey: "Settings.EnableSystemNotifications", defaultValue: true)
+ 815 |         cpuThreshold = userDefaults.double(forKey: "Settings.CPUThreshold", defaultValue: 80.0)
+ 816 |         memoryThreshold = userDefaults.double(forKey: "Settings.MemoryThreshold", defaultValue: 80.0)
+     |                           `- error: cannot find 'userDefaults' in scope
+ 817 |         diskThreshold = userDefaults.double(forKey: "Settings.DiskThreshold", defaultValue: 90.0)
+ 818 |         enableAutoRefresh = userDefaults.bool(forKey: "Settings.EnableAutoRefresh", defaultValue: true)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:817:9: error: cannot find 'diskThreshold' in scope
+ 815 |         cpuThreshold = userDefaults.double(forKey: "Settings.CPUThreshold", defaultValue: 80.0)
+ 816 |         memoryThreshold = userDefaults.double(forKey: "Settings.MemoryThreshold", defaultValue: 80.0)
+ 817 |         diskThreshold = userDefaults.double(forKey: "Settings.DiskThreshold", defaultValue: 90.0)
+     |         `- error: cannot find 'diskThreshold' in scope
+ 818 |         enableAutoRefresh = userDefaults.bool(forKey: "Settings.EnableAutoRefresh", defaultValue: true)
+ 819 |         showTrendIndicators = userDefaults.bool(forKey: "Settings.ShowTrendIndicators", defaultValue: true)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:817:25: error: cannot find 'userDefaults' in scope
+ 815 |         cpuThreshold = userDefaults.double(forKey: "Settings.CPUThreshold", defaultValue: 80.0)
+ 816 |         memoryThreshold = userDefaults.double(forKey: "Settings.MemoryThreshold", defaultValue: 80.0)
+ 817 |         diskThreshold = userDefaults.double(forKey: "Settings.DiskThreshold", defaultValue: 90.0)
+     |                         `- error: cannot find 'userDefaults' in scope
+ 818 |         enableAutoRefresh = userDefaults.bool(forKey: "Settings.EnableAutoRefresh", defaultValue: true)
+ 819 |         showTrendIndicators = userDefaults.bool(forKey: "Settings.ShowTrendIndicators", defaultValue: true)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:818:9: error: cannot find 'enableAutoRefresh' in scope
+ 816 |         memoryThreshold = userDefaults.double(forKey: "Settings.MemoryThreshold", defaultValue: 80.0)
+ 817 |         diskThreshold = userDefaults.double(forKey: "Settings.DiskThreshold", defaultValue: 90.0)
+ 818 |         enableAutoRefresh = userDefaults.bool(forKey: "Settings.EnableAutoRefresh", defaultValue: true)
+     |         `- error: cannot find 'enableAutoRefresh' in scope
+ 819 |         showTrendIndicators = userDefaults.bool(forKey: "Settings.ShowTrendIndicators", defaultValue: true)
+ 820 |         enableSoundAlerts = userDefaults.bool(forKey: "Settings.EnableSoundAlerts", defaultValue: false)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:818:29: error: cannot find 'userDefaults' in scope
+ 816 |         memoryThreshold = userDefaults.double(forKey: "Settings.MemoryThreshold", defaultValue: 80.0)
+ 817 |         diskThreshold = userDefaults.double(forKey: "Settings.DiskThreshold", defaultValue: 90.0)
+ 818 |         enableAutoRefresh = userDefaults.bool(forKey: "Settings.EnableAutoRefresh", defaultValue: true)
+     |                             `- error: cannot find 'userDefaults' in scope
+ 819 |         showTrendIndicators = userDefaults.bool(forKey: "Settings.ShowTrendIndicators", defaultValue: true)
+ 820 |         enableSoundAlerts = userDefaults.bool(forKey: "Settings.EnableSoundAlerts", defaultValue: false)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:819:9: error: cannot find 'showTrendIndicators' in scope
+ 817 |         diskThreshold = userDefaults.double(forKey: "Settings.DiskThreshold", defaultValue: 90.0)
+ 818 |         enableAutoRefresh = userDefaults.bool(forKey: "Settings.EnableAutoRefresh", defaultValue: true)
+ 819 |         showTrendIndicators = userDefaults.bool(forKey: "Settings.ShowTrendIndicators", defaultValue: true)
+     |         `- error: cannot find 'showTrendIndicators' in scope
+ 820 |         enableSoundAlerts = userDefaults.bool(forKey: "Settings.EnableSoundAlerts", defaultValue: false)
+ 821 |         maxHistoryPoints = userDefaults.double(forKey: "Settings.MaxHistoryPoints", defaultValue: 300.0)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:819:31: error: cannot find 'userDefaults' in scope
+ 817 |         diskThreshold = userDefaults.double(forKey: "Settings.DiskThreshold", defaultValue: 90.0)
+ 818 |         enableAutoRefresh = userDefaults.bool(forKey: "Settings.EnableAutoRefresh", defaultValue: true)
+ 819 |         showTrendIndicators = userDefaults.bool(forKey: "Settings.ShowTrendIndicators", defaultValue: true)
+     |                               `- error: cannot find 'userDefaults' in scope
+ 820 |         enableSoundAlerts = userDefaults.bool(forKey: "Settings.EnableSoundAlerts", defaultValue: false)
+ 821 |         maxHistoryPoints = userDefaults.double(forKey: "Settings.MaxHistoryPoints", defaultValue: 300.0)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:820:9: error: cannot find 'enableSoundAlerts' in scope
+ 818 |         enableAutoRefresh = userDefaults.bool(forKey: "Settings.EnableAutoRefresh", defaultValue: true)
+ 819 |         showTrendIndicators = userDefaults.bool(forKey: "Settings.ShowTrendIndicators", defaultValue: true)
+ 820 |         enableSoundAlerts = userDefaults.bool(forKey: "Settings.EnableSoundAlerts", defaultValue: false)
+     |         `- error: cannot find 'enableSoundAlerts' in scope
+ 821 |         maxHistoryPoints = userDefaults.double(forKey: "Settings.MaxHistoryPoints", defaultValue: 300.0)
+ 822 |     }
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:820:29: error: cannot find 'userDefaults' in scope
+ 818 |         enableAutoRefresh = userDefaults.bool(forKey: "Settings.EnableAutoRefresh", defaultValue: true)
+ 819 |         showTrendIndicators = userDefaults.bool(forKey: "Settings.ShowTrendIndicators", defaultValue: true)
+ 820 |         enableSoundAlerts = userDefaults.bool(forKey: "Settings.EnableSoundAlerts", defaultValue: false)
+     |                             `- error: cannot find 'userDefaults' in scope
+ 821 |         maxHistoryPoints = userDefaults.double(forKey: "Settings.MaxHistoryPoints", defaultValue: 300.0)
+ 822 |     }
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:821:9: error: cannot find 'maxHistoryPoints' in scope
+ 819 |         showTrendIndicators = userDefaults.bool(forKey: "Settings.ShowTrendIndicators", defaultValue: true)
+ 820 |         enableSoundAlerts = userDefaults.bool(forKey: "Settings.EnableSoundAlerts", defaultValue: false)
+ 821 |         maxHistoryPoints = userDefaults.double(forKey: "Settings.MaxHistoryPoints", defaultValue: 300.0)
+     |         `- error: cannot find 'maxHistoryPoints' in scope
+ 822 |     }
+ 823 |     
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:821:28: error: cannot find 'userDefaults' in scope
+ 819 |         showTrendIndicators = userDefaults.bool(forKey: "Settings.ShowTrendIndicators", defaultValue: true)
+ 820 |         enableSoundAlerts = userDefaults.bool(forKey: "Settings.EnableSoundAlerts", defaultValue: false)
+ 821 |         maxHistoryPoints = userDefaults.double(forKey: "Settings.MaxHistoryPoints", defaultValue: 300.0)
+     |                            `- error: cannot find 'userDefaults' in scope
+ 822 |     }
+ 823 |     
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:827:9: error: cannot find '$autoScanOnStartup' in scope
+ 825 |     private func setupObservers() {
+ 826 |         // 通用设置观察者
+ 827 |         $autoScanOnStartup.sink { [weak self] value in
+     |         `- error: cannot find '$autoScanOnStartup' in scope
+ 828 |             self?.userDefaults.set(value, forKey: "Settings.AutoScanOnStartup")
+ 829 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:827:41: error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 825 |     private func setupObservers() {
+ 826 |         // 通用设置观察者
+ 827 |         $autoScanOnStartup.sink { [weak self] value in
+     |                                         `- error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 828 |             self?.userDefaults.set(value, forKey: "Settings.AutoScanOnStartup")
+ 829 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:829:22: error: cannot find 'cancellables' in scope
+ 827 |         $autoScanOnStartup.sink { [weak self] value in
+ 828 |             self?.userDefaults.set(value, forKey: "Settings.AutoScanOnStartup")
+ 829 |         }.store(in: &cancellables)
+     |                      `- error: cannot find 'cancellables' in scope
+ 830 |         
+ 831 |         $showSystemNotifications.sink { [weak self] value in
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:827:47: error: cannot infer type of closure parameter 'value' without a type annotation
+ 825 |     private func setupObservers() {
+ 826 |         // 通用设置观察者
+ 827 |         $autoScanOnStartup.sink { [weak self] value in
+     |                                               `- error: cannot infer type of closure parameter 'value' without a type annotation
+ 828 |             self?.userDefaults.set(value, forKey: "Settings.AutoScanOnStartup")
+ 829 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:831:9: error: cannot find '$showSystemNotifications' in scope
+ 829 |         }.store(in: &cancellables)
+ 830 |         
+ 831 |         $showSystemNotifications.sink { [weak self] value in
+     |         `- error: cannot find '$showSystemNotifications' in scope
+ 832 |             self?.userDefaults.set(value, forKey: "Settings.ShowSystemNotifications")
+ 833 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:831:47: error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 829 |         }.store(in: &cancellables)
+ 830 |         
+ 831 |         $showSystemNotifications.sink { [weak self] value in
+     |                                               `- error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 832 |             self?.userDefaults.set(value, forKey: "Settings.ShowSystemNotifications")
+ 833 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:833:22: error: cannot find 'cancellables' in scope
+ 831 |         $showSystemNotifications.sink { [weak self] value in
+ 832 |             self?.userDefaults.set(value, forKey: "Settings.ShowSystemNotifications")
+ 833 |         }.store(in: &cancellables)
+     |                      `- error: cannot find 'cancellables' in scope
+ 834 |         
+ 835 |         $useDarkMode.sink { [weak self] value in
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:831:53: error: cannot infer type of closure parameter 'value' without a type annotation
+ 829 |         }.store(in: &cancellables)
+ 830 |         
+ 831 |         $showSystemNotifications.sink { [weak self] value in
+     |                                                     `- error: cannot infer type of closure parameter 'value' without a type annotation
+ 832 |             self?.userDefaults.set(value, forKey: "Settings.ShowSystemNotifications")
+ 833 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:835:9: error: cannot find '$useDarkMode' in scope
+ 833 |         }.store(in: &cancellables)
+ 834 |         
+ 835 |         $useDarkMode.sink { [weak self] value in
+     |         `- error: cannot find '$useDarkMode' in scope
+ 836 |             self?.userDefaults.set(value, forKey: "Settings.UseDarkMode")
+ 837 |             self?.applyThemeMode() // 立即应用主题变化
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:835:35: error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 833 |         }.store(in: &cancellables)
+ 834 |         
+ 835 |         $useDarkMode.sink { [weak self] value in
+     |                                   `- error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 836 |             self?.userDefaults.set(value, forKey: "Settings.UseDarkMode")
+ 837 |             self?.applyThemeMode() // 立即应用主题变化
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:838:22: error: cannot find 'cancellables' in scope
+ 836 |             self?.userDefaults.set(value, forKey: "Settings.UseDarkMode")
+ 837 |             self?.applyThemeMode() // 立即应用主题变化
+ 838 |         }.store(in: &cancellables)
+     |                      `- error: cannot find 'cancellables' in scope
+ 839 |         
+ 840 |         $scanInterval.sink { [weak self] value in
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:835:41: error: cannot infer type of closure parameter 'value' without a type annotation
+ 833 |         }.store(in: &cancellables)
+ 834 |         
+ 835 |         $useDarkMode.sink { [weak self] value in
+     |                                         `- error: cannot infer type of closure parameter 'value' without a type annotation
+ 836 |             self?.userDefaults.set(value, forKey: "Settings.UseDarkMode")
+ 837 |             self?.applyThemeMode() // 立即应用主题变化
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:840:9: error: cannot find '$scanInterval' in scope
+ 838 |         }.store(in: &cancellables)
+ 839 |         
+ 840 |         $scanInterval.sink { [weak self] value in
+     |         `- error: cannot find '$scanInterval' in scope
+ 841 |             self?.userDefaults.set(value, forKey: "Settings.ScanInterval")
+ 842 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:840:36: error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 838 |         }.store(in: &cancellables)
+ 839 |         
+ 840 |         $scanInterval.sink { [weak self] value in
+     |                                    `- error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 841 |             self?.userDefaults.set(value, forKey: "Settings.ScanInterval")
+ 842 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:842:22: error: cannot find 'cancellables' in scope
+ 840 |         $scanInterval.sink { [weak self] value in
+ 841 |             self?.userDefaults.set(value, forKey: "Settings.ScanInterval")
+ 842 |         }.store(in: &cancellables)
+     |                      `- error: cannot find 'cancellables' in scope
+ 843 |         
+ 844 |         $showDeviceDetails.sink { [weak self] value in
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:840:42: error: cannot infer type of closure parameter 'value' without a type annotation
+ 838 |         }.store(in: &cancellables)
+ 839 |         
+ 840 |         $scanInterval.sink { [weak self] value in
+     |                                          `- error: cannot infer type of closure parameter 'value' without a type annotation
+ 841 |             self?.userDefaults.set(value, forKey: "Settings.ScanInterval")
+ 842 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:844:9: error: cannot find '$showDeviceDetails' in scope
+ 842 |         }.store(in: &cancellables)
+ 843 |         
+ 844 |         $showDeviceDetails.sink { [weak self] value in
+     |         `- error: cannot find '$showDeviceDetails' in scope
+ 845 |             self?.userDefaults.set(value, forKey: "Settings.ShowDeviceDetails")
+ 846 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:844:41: error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 842 |         }.store(in: &cancellables)
+ 843 |         
+ 844 |         $showDeviceDetails.sink { [weak self] value in
+     |                                         `- error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 845 |             self?.userDefaults.set(value, forKey: "Settings.ShowDeviceDetails")
+ 846 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:846:22: error: cannot find 'cancellables' in scope
+ 844 |         $showDeviceDetails.sink { [weak self] value in
+ 845 |             self?.userDefaults.set(value, forKey: "Settings.ShowDeviceDetails")
+ 846 |         }.store(in: &cancellables)
+     |                      `- error: cannot find 'cancellables' in scope
+ 847 |         
+ 848 |         $showConnectionStats.sink { [weak self] value in
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:844:47: error: cannot infer type of closure parameter 'value' without a type annotation
+ 842 |         }.store(in: &cancellables)
+ 843 |         
+ 844 |         $showDeviceDetails.sink { [weak self] value in
+     |                                               `- error: cannot infer type of closure parameter 'value' without a type annotation
+ 845 |             self?.userDefaults.set(value, forKey: "Settings.ShowDeviceDetails")
+ 846 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:848:9: error: cannot find '$showConnectionStats' in scope
+ 846 |         }.store(in: &cancellables)
+ 847 |         
+ 848 |         $showConnectionStats.sink { [weak self] value in
+     |         `- error: cannot find '$showConnectionStats' in scope
+ 849 |             self?.userDefaults.set(value, forKey: "Settings.ShowConnectionStats")
+ 850 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:848:43: error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 846 |         }.store(in: &cancellables)
+ 847 |         
+ 848 |         $showConnectionStats.sink { [weak self] value in
+     |                                           `- error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 849 |             self?.userDefaults.set(value, forKey: "Settings.ShowConnectionStats")
+ 850 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:850:22: error: cannot find 'cancellables' in scope
+ 848 |         $showConnectionStats.sink { [weak self] value in
+ 849 |             self?.userDefaults.set(value, forKey: "Settings.ShowConnectionStats")
+ 850 |         }.store(in: &cancellables)
+     |                      `- error: cannot find 'cancellables' in scope
+ 851 |         
+ 852 |         $compactMode.sink { [weak self] value in
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:848:49: error: cannot infer type of closure parameter 'value' without a type annotation
+ 846 |         }.store(in: &cancellables)
+ 847 |         
+ 848 |         $showConnectionStats.sink { [weak self] value in
+     |                                                 `- error: cannot infer type of closure parameter 'value' without a type annotation
+ 849 |             self?.userDefaults.set(value, forKey: "Settings.ShowConnectionStats")
+ 850 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:852:9: error: cannot find '$compactMode' in scope
+ 850 |         }.store(in: &cancellables)
+ 851 |         
+ 852 |         $compactMode.sink { [weak self] value in
+     |         `- error: cannot find '$compactMode' in scope
+ 853 |             self?.userDefaults.set(value, forKey: "Settings.CompactMode")
+ 854 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:852:35: error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 850 |         }.store(in: &cancellables)
+ 851 |         
+ 852 |         $compactMode.sink { [weak self] value in
+     |                                   `- error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 853 |             self?.userDefaults.set(value, forKey: "Settings.CompactMode")
+ 854 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:854:22: error: cannot find 'cancellables' in scope
+ 852 |         $compactMode.sink { [weak self] value in
+ 853 |             self?.userDefaults.set(value, forKey: "Settings.CompactMode")
+ 854 |         }.store(in: &cancellables)
+     |                      `- error: cannot find 'cancellables' in scope
+ 855 |         
+ 856 |         // 网络设置观察者
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:852:41: error: cannot infer type of closure parameter 'value' without a type annotation
+ 850 |         }.store(in: &cancellables)
+ 851 |         
+ 852 |         $compactMode.sink { [weak self] value in
+     |                                         `- error: cannot infer type of closure parameter 'value' without a type annotation
+ 853 |             self?.userDefaults.set(value, forKey: "Settings.CompactMode")
+ 854 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:857:9: error: cannot find '$autoConnectKnownNetworks' in scope
+ 855 |         
+ 856 |         // 网络设置观察者
+ 857 |         $autoConnectKnownNetworks.sink { [weak self] value in
+     |         `- error: cannot find '$autoConnectKnownNetworks' in scope
+ 858 |             self?.userDefaults.set(value, forKey: "Settings.AutoConnectKnownNetworks")
+ 859 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:857:48: error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 855 |         
+ 856 |         // 网络设置观察者
+ 857 |         $autoConnectKnownNetworks.sink { [weak self] value in
+     |                                                `- error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 858 |             self?.userDefaults.set(value, forKey: "Settings.AutoConnectKnownNetworks")
+ 859 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:859:22: error: cannot find 'cancellables' in scope
+ 857 |         $autoConnectKnownNetworks.sink { [weak self] value in
+ 858 |             self?.userDefaults.set(value, forKey: "Settings.AutoConnectKnownNetworks")
+ 859 |         }.store(in: &cancellables)
+     |                      `- error: cannot find 'cancellables' in scope
+ 860 |         
+ 861 |         $showHiddenNetworks.sink { [weak self] value in
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:857:54: error: cannot infer type of closure parameter 'value' without a type annotation
+ 855 |         
+ 856 |         // 网络设置观察者
+ 857 |         $autoConnectKnownNetworks.sink { [weak self] value in
+     |                                                      `- error: cannot infer type of closure parameter 'value' without a type annotation
+ 858 |             self?.userDefaults.set(value, forKey: "Settings.AutoConnectKnownNetworks")
+ 859 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:861:9: error: cannot find '$showHiddenNetworks' in scope
+ 859 |         }.store(in: &cancellables)
+ 860 |         
+ 861 |         $showHiddenNetworks.sink { [weak self] value in
+     |         `- error: cannot find '$showHiddenNetworks' in scope
+ 862 |             self?.userDefaults.set(value, forKey: "Settings.ShowHiddenNetworks")
+ 863 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:861:42: error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 859 |         }.store(in: &cancellables)
+ 860 |         
+ 861 |         $showHiddenNetworks.sink { [weak self] value in
+     |                                          `- error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 862 |             self?.userDefaults.set(value, forKey: "Settings.ShowHiddenNetworks")
+ 863 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:863:22: error: cannot find 'cancellables' in scope
+ 861 |         $showHiddenNetworks.sink { [weak self] value in
+ 862 |             self?.userDefaults.set(value, forKey: "Settings.ShowHiddenNetworks")
+ 863 |         }.store(in: &cancellables)
+     |                      `- error: cannot find 'cancellables' in scope
+ 864 |         
+ 865 |         $prefer5GHz.sink { [weak self] value in
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:861:48: error: cannot infer type of closure parameter 'value' without a type annotation
+ 859 |         }.store(in: &cancellables)
+ 860 |         
+ 861 |         $showHiddenNetworks.sink { [weak self] value in
+     |                                                `- error: cannot infer type of closure parameter 'value' without a type annotation
+ 862 |             self?.userDefaults.set(value, forKey: "Settings.ShowHiddenNetworks")
+ 863 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:865:9: error: cannot find '$prefer5GHz' in scope
+ 863 |         }.store(in: &cancellables)
+ 864 |         
+ 865 |         $prefer5GHz.sink { [weak self] value in
+     |         `- error: cannot find '$prefer5GHz' in scope
+ 866 |             self?.userDefaults.set(value, forKey: "Settings.Prefer5GHz")
+ 867 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:865:34: error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 863 |         }.store(in: &cancellables)
+ 864 |         
+ 865 |         $prefer5GHz.sink { [weak self] value in
+     |                                  `- error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 866 |             self?.userDefaults.set(value, forKey: "Settings.Prefer5GHz")
+ 867 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:867:22: error: cannot find 'cancellables' in scope
+ 865 |         $prefer5GHz.sink { [weak self] value in
+ 866 |             self?.userDefaults.set(value, forKey: "Settings.Prefer5GHz")
+ 867 |         }.store(in: &cancellables)
+     |                      `- error: cannot find 'cancellables' in scope
+ 868 |         
+ 869 |         $wifiScanTimeout.sink { [weak self] value in
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:865:40: error: cannot infer type of closure parameter 'value' without a type annotation
+ 863 |         }.store(in: &cancellables)
+ 864 |         
+ 865 |         $prefer5GHz.sink { [weak self] value in
+     |                                        `- error: cannot infer type of closure parameter 'value' without a type annotation
+ 866 |             self?.userDefaults.set(value, forKey: "Settings.Prefer5GHz")
+ 867 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:869:9: error: cannot find '$wifiScanTimeout' in scope
+ 867 |         }.store(in: &cancellables)
+ 868 |         
+ 869 |         $wifiScanTimeout.sink { [weak self] value in
+     |         `- error: cannot find '$wifiScanTimeout' in scope
+ 870 |             self?.userDefaults.set(value, forKey: "Settings.WiFiScanTimeout")
+ 871 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:869:39: error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 867 |         }.store(in: &cancellables)
+ 868 |         
+ 869 |         $wifiScanTimeout.sink { [weak self] value in
+     |                                       `- error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 870 |             self?.userDefaults.set(value, forKey: "Settings.WiFiScanTimeout")
+ 871 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:871:22: error: cannot find 'cancellables' in scope
+ 869 |         $wifiScanTimeout.sink { [weak self] value in
+ 870 |             self?.userDefaults.set(value, forKey: "Settings.WiFiScanTimeout")
+ 871 |         }.store(in: &cancellables)
+     |                      `- error: cannot find 'cancellables' in scope
+ 872 |         
+ 873 |         $enableBonjourDiscovery.sink { [weak self] value in
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:869:45: error: cannot infer type of closure parameter 'value' without a type annotation
+ 867 |         }.store(in: &cancellables)
+ 868 |         
+ 869 |         $wifiScanTimeout.sink { [weak self] value in
+     |                                             `- error: cannot infer type of closure parameter 'value' without a type annotation
+ 870 |             self?.userDefaults.set(value, forKey: "Settings.WiFiScanTimeout")
+ 871 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:873:9: error: cannot find '$enableBonjourDiscovery' in scope
+ 871 |         }.store(in: &cancellables)
+ 872 |         
+ 873 |         $enableBonjourDiscovery.sink { [weak self] value in
+     |         `- error: cannot find '$enableBonjourDiscovery' in scope
+ 874 |             self?.userDefaults.set(value, forKey: "Settings.EnableBonjourDiscovery")
+ 875 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:873:46: error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 871 |         }.store(in: &cancellables)
+ 872 |         
+ 873 |         $enableBonjourDiscovery.sink { [weak self] value in
+     |                                              `- error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 874 |             self?.userDefaults.set(value, forKey: "Settings.EnableBonjourDiscovery")
+ 875 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:875:22: error: cannot find 'cancellables' in scope
+ 873 |         $enableBonjourDiscovery.sink { [weak self] value in
+ 874 |             self?.userDefaults.set(value, forKey: "Settings.EnableBonjourDiscovery")
+ 875 |         }.store(in: &cancellables)
+     |                      `- error: cannot find 'cancellables' in scope
+ 876 |         
+ 877 |         $enableMDNSResolution.sink { [weak self] value in
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:873:52: error: cannot infer type of closure parameter 'value' without a type annotation
+ 871 |         }.store(in: &cancellables)
+ 872 |         
+ 873 |         $enableBonjourDiscovery.sink { [weak self] value in
+     |                                                    `- error: cannot infer type of closure parameter 'value' without a type annotation
+ 874 |             self?.userDefaults.set(value, forKey: "Settings.EnableBonjourDiscovery")
+ 875 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:877:9: error: cannot find '$enableMDNSResolution' in scope
+ 875 |         }.store(in: &cancellables)
+ 876 |         
+ 877 |         $enableMDNSResolution.sink { [weak self] value in
+     |         `- error: cannot find '$enableMDNSResolution' in scope
+ 878 |             self?.userDefaults.set(value, forKey: "Settings.EnableMDNSResolution")
+ 879 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:877:44: error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 875 |         }.store(in: &cancellables)
+ 876 |         
+ 877 |         $enableMDNSResolution.sink { [weak self] value in
+     |                                            `- error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 878 |             self?.userDefaults.set(value, forKey: "Settings.EnableMDNSResolution")
+ 879 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:879:22: error: cannot find 'cancellables' in scope
+ 877 |         $enableMDNSResolution.sink { [weak self] value in
+ 878 |             self?.userDefaults.set(value, forKey: "Settings.EnableMDNSResolution")
+ 879 |         }.store(in: &cancellables)
+     |                      `- error: cannot find 'cancellables' in scope
+ 880 |         
+ 881 |         $scanCustomPorts.sink { [weak self] value in
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:877:50: error: cannot infer type of closure parameter 'value' without a type annotation
+ 875 |         }.store(in: &cancellables)
+ 876 |         
+ 877 |         $enableMDNSResolution.sink { [weak self] value in
+     |                                                  `- error: cannot infer type of closure parameter 'value' without a type annotation
+ 878 |             self?.userDefaults.set(value, forKey: "Settings.EnableMDNSResolution")
+ 879 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:881:9: error: cannot find '$scanCustomPorts' in scope
+ 879 |         }.store(in: &cancellables)
+ 880 |         
+ 881 |         $scanCustomPorts.sink { [weak self] value in
+     |         `- error: cannot find '$scanCustomPorts' in scope
+ 882 |             self?.userDefaults.set(value, forKey: "Settings.ScanCustomPorts")
+ 883 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:881:39: error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 879 |         }.store(in: &cancellables)
+ 880 |         
+ 881 |         $scanCustomPorts.sink { [weak self] value in
+     |                                       `- error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 882 |             self?.userDefaults.set(value, forKey: "Settings.ScanCustomPorts")
+ 883 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:883:22: error: cannot find 'cancellables' in scope
+ 881 |         $scanCustomPorts.sink { [weak self] value in
+ 882 |             self?.userDefaults.set(value, forKey: "Settings.ScanCustomPorts")
+ 883 |         }.store(in: &cancellables)
+     |                      `- error: cannot find 'cancellables' in scope
+ 884 |         
+ 885 |         $discoveryTimeout.sink { [weak self] value in
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:881:45: error: cannot infer type of closure parameter 'value' without a type annotation
+ 879 |         }.store(in: &cancellables)
+ 880 |         
+ 881 |         $scanCustomPorts.sink { [weak self] value in
+     |                                             `- error: cannot infer type of closure parameter 'value' without a type annotation
+ 882 |             self?.userDefaults.set(value, forKey: "Settings.ScanCustomPorts")
+ 883 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:885:9: error: cannot find '$discoveryTimeout' in scope
+ 883 |         }.store(in: &cancellables)
+ 884 |         
+ 885 |         $discoveryTimeout.sink { [weak self] value in
+     |         `- error: cannot find '$discoveryTimeout' in scope
+ 886 |             self?.userDefaults.set(value, forKey: "Settings.DiscoveryTimeout")
+ 887 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:885:40: error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 883 |         }.store(in: &cancellables)
+ 884 |         
+ 885 |         $discoveryTimeout.sink { [weak self] value in
+     |                                        `- error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 886 |             self?.userDefaults.set(value, forKey: "Settings.DiscoveryTimeout")
+ 887 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:887:22: error: cannot find 'cancellables' in scope
+ 885 |         $discoveryTimeout.sink { [weak self] value in
+ 886 |             self?.userDefaults.set(value, forKey: "Settings.DiscoveryTimeout")
+ 887 |         }.store(in: &cancellables)
+     |                      `- error: cannot find 'cancellables' in scope
+ 888 |         
+ 889 |         $connectionTimeout.sink { [weak self] value in
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:885:46: error: cannot infer type of closure parameter 'value' without a type annotation
+ 883 |         }.store(in: &cancellables)
+ 884 |         
+ 885 |         $discoveryTimeout.sink { [weak self] value in
+     |                                              `- error: cannot infer type of closure parameter 'value' without a type annotation
+ 886 |             self?.userDefaults.set(value, forKey: "Settings.DiscoveryTimeout")
+ 887 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:889:9: error: cannot find '$connectionTimeout' in scope
+ 887 |         }.store(in: &cancellables)
+ 888 |         
+ 889 |         $connectionTimeout.sink { [weak self] value in
+     |         `- error: cannot find '$connectionTimeout' in scope
+ 890 |             self?.userDefaults.set(value, forKey: "Settings.ConnectionTimeout")
+ 891 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:889:41: error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 887 |         }.store(in: &cancellables)
+ 888 |         
+ 889 |         $connectionTimeout.sink { [weak self] value in
+     |                                         `- error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 890 |             self?.userDefaults.set(value, forKey: "Settings.ConnectionTimeout")
+ 891 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:891:22: error: cannot find 'cancellables' in scope
+ 889 |         $connectionTimeout.sink { [weak self] value in
+ 890 |             self?.userDefaults.set(value, forKey: "Settings.ConnectionTimeout")
+ 891 |         }.store(in: &cancellables)
+     |                      `- error: cannot find 'cancellables' in scope
+ 892 |         
+ 893 |         $retryCount.sink { [weak self] value in
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:889:47: error: cannot infer type of closure parameter 'value' without a type annotation
+ 887 |         }.store(in: &cancellables)
+ 888 |         
+ 889 |         $connectionTimeout.sink { [weak self] value in
+     |                                               `- error: cannot infer type of closure parameter 'value' without a type annotation
+ 890 |             self?.userDefaults.set(value, forKey: "Settings.ConnectionTimeout")
+ 891 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:893:9: error: cannot find '$retryCount' in scope
+ 891 |         }.store(in: &cancellables)
+ 892 |         
+ 893 |         $retryCount.sink { [weak self] value in
+     |         `- error: cannot find '$retryCount' in scope
+ 894 |             self?.userDefaults.set(value, forKey: "Settings.RetryCount")
+ 895 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:893:34: error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 891 |         }.store(in: &cancellables)
+ 892 |         
+ 893 |         $retryCount.sink { [weak self] value in
+     |                                  `- error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 894 |             self?.userDefaults.set(value, forKey: "Settings.RetryCount")
+ 895 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:895:22: error: cannot find 'cancellables' in scope
+ 893 |         $retryCount.sink { [weak self] value in
+ 894 |             self?.userDefaults.set(value, forKey: "Settings.RetryCount")
+ 895 |         }.store(in: &cancellables)
+     |                      `- error: cannot find 'cancellables' in scope
+ 896 |         
+ 897 |         $enableConnectionEncryption.sink { [weak self] value in
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:893:40: error: cannot infer type of closure parameter 'value' without a type annotation
+ 891 |         }.store(in: &cancellables)
+ 892 |         
+ 893 |         $retryCount.sink { [weak self] value in
+     |                                        `- error: cannot infer type of closure parameter 'value' without a type annotation
+ 894 |             self?.userDefaults.set(value, forKey: "Settings.RetryCount")
+ 895 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:897:9: error: cannot find '$enableConnectionEncryption' in scope
+ 895 |         }.store(in: &cancellables)
+ 896 |         
+ 897 |         $enableConnectionEncryption.sink { [weak self] value in
+     |         `- error: cannot find '$enableConnectionEncryption' in scope
+ 898 |             self?.userDefaults.set(value, forKey: "Settings.EnableConnectionEncryption")
+ 899 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:897:50: error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 895 |         }.store(in: &cancellables)
+ 896 |         
+ 897 |         $enableConnectionEncryption.sink { [weak self] value in
+     |                                                  `- error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 898 |             self?.userDefaults.set(value, forKey: "Settings.EnableConnectionEncryption")
+ 899 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:899:22: error: cannot find 'cancellables' in scope
+ 897 |         $enableConnectionEncryption.sink { [weak self] value in
+ 898 |             self?.userDefaults.set(value, forKey: "Settings.EnableConnectionEncryption")
+ 899 |         }.store(in: &cancellables)
+     |                      `- error: cannot find 'cancellables' in scope
+ 900 |         
+ 901 |         $verifyCertificates.sink { [weak self] value in
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:897:56: error: cannot infer type of closure parameter 'value' without a type annotation
+ 895 |         }.store(in: &cancellables)
+ 896 |         
+ 897 |         $enableConnectionEncryption.sink { [weak self] value in
+     |                                                        `- error: cannot infer type of closure parameter 'value' without a type annotation
+ 898 |             self?.userDefaults.set(value, forKey: "Settings.EnableConnectionEncryption")
+ 899 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:901:9: error: cannot find '$verifyCertificates' in scope
+ 899 |         }.store(in: &cancellables)
+ 900 |         
+ 901 |         $verifyCertificates.sink { [weak self] value in
+     |         `- error: cannot find '$verifyCertificates' in scope
+ 902 |             self?.userDefaults.set(value, forKey: "Settings.VerifyCertificates")
+ 903 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:901:42: error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 899 |         }.store(in: &cancellables)
+ 900 |         
+ 901 |         $verifyCertificates.sink { [weak self] value in
+     |                                          `- error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 902 |             self?.userDefaults.set(value, forKey: "Settings.VerifyCertificates")
+ 903 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:903:22: error: cannot find 'cancellables' in scope
+ 901 |         $verifyCertificates.sink { [weak self] value in
+ 902 |             self?.userDefaults.set(value, forKey: "Settings.VerifyCertificates")
+ 903 |         }.store(in: &cancellables)
+     |                      `- error: cannot find 'cancellables' in scope
+ 904 |         
+ 905 |         $customServiceTypes.sink { [weak self] value in
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:901:48: error: cannot infer type of closure parameter 'value' without a type annotation
+ 899 |         }.store(in: &cancellables)
+ 900 |         
+ 901 |         $verifyCertificates.sink { [weak self] value in
+     |                                                `- error: cannot infer type of closure parameter 'value' without a type annotation
+ 902 |             self?.userDefaults.set(value, forKey: "Settings.VerifyCertificates")
+ 903 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:905:9: error: cannot find '$customServiceTypes' in scope
+ 903 |         }.store(in: &cancellables)
+ 904 |         
+ 905 |         $customServiceTypes.sink { [weak self] value in
+     |         `- error: cannot find '$customServiceTypes' in scope
+ 906 |             self?.userDefaults.set(value, forKey: "Settings.CustomServiceTypes")
+ 907 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:905:42: error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 903 |         }.store(in: &cancellables)
+ 904 |         
+ 905 |         $customServiceTypes.sink { [weak self] value in
+     |                                          `- error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 906 |             self?.userDefaults.set(value, forKey: "Settings.CustomServiceTypes")
+ 907 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:907:22: error: cannot find 'cancellables' in scope
+ 905 |         $customServiceTypes.sink { [weak self] value in
+ 906 |             self?.userDefaults.set(value, forKey: "Settings.CustomServiceTypes")
+ 907 |         }.store(in: &cancellables)
+     |                      `- error: cannot find 'cancellables' in scope
+ 908 |         
+ 909 |         // 设备设置观察者
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:905:48: error: cannot infer type of closure parameter 'value' without a type annotation
+ 903 |         }.store(in: &cancellables)
+ 904 |         
+ 905 |         $customServiceTypes.sink { [weak self] value in
+     |                                                `- error: cannot infer type of closure parameter 'value' without a type annotation
+ 906 |             self?.userDefaults.set(value, forKey: "Settings.CustomServiceTypes")
+ 907 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:910:9: error: cannot find '$autoConnectPairedDevices' in scope
+ 908 |         
+ 909 |         // 设备设置观察者
+ 910 |         $autoConnectPairedDevices.sink { [weak self] value in
+     |         `- error: cannot find '$autoConnectPairedDevices' in scope
+ 911 |             self?.userDefaults.set(value, forKey: "Settings.AutoConnectPairedDevices")
+ 912 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:910:48: error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 908 |         
+ 909 |         // 设备设置观察者
+ 910 |         $autoConnectPairedDevices.sink { [weak self] value in
+     |                                                `- error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 911 |             self?.userDefaults.set(value, forKey: "Settings.AutoConnectPairedDevices")
+ 912 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:912:22: error: cannot find 'cancellables' in scope
+ 910 |         $autoConnectPairedDevices.sink { [weak self] value in
+ 911 |             self?.userDefaults.set(value, forKey: "Settings.AutoConnectPairedDevices")
+ 912 |         }.store(in: &cancellables)
+     |                      `- error: cannot find 'cancellables' in scope
+ 913 |         
+ 914 |         $showDeviceRSSI.sink { [weak self] value in
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:910:54: error: cannot infer type of closure parameter 'value' without a type annotation
+ 908 |         
+ 909 |         // 设备设置观察者
+ 910 |         $autoConnectPairedDevices.sink { [weak self] value in
+     |                                                      `- error: cannot infer type of closure parameter 'value' without a type annotation
+ 911 |             self?.userDefaults.set(value, forKey: "Settings.AutoConnectPairedDevices")
+ 912 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:914:9: error: cannot find '$showDeviceRSSI' in scope
+ 912 |         }.store(in: &cancellables)
+ 913 |         
+ 914 |         $showDeviceRSSI.sink { [weak self] value in
+     |         `- error: cannot find '$showDeviceRSSI' in scope
+ 915 |             self?.userDefaults.set(value, forKey: "Settings.ShowDeviceRSSI")
+ 916 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:914:38: error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 912 |         }.store(in: &cancellables)
+ 913 |         
+ 914 |         $showDeviceRSSI.sink { [weak self] value in
+     |                                      `- error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 915 |             self?.userDefaults.set(value, forKey: "Settings.ShowDeviceRSSI")
+ 916 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:916:22: error: cannot find 'cancellables' in scope
+ 914 |         $showDeviceRSSI.sink { [weak self] value in
+ 915 |             self?.userDefaults.set(value, forKey: "Settings.ShowDeviceRSSI")
+ 916 |         }.store(in: &cancellables)
+     |                      `- error: cannot find 'cancellables' in scope
+ 917 |         
+ 918 |         $showConnectableDevicesOnly.sink { [weak self] value in
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:914:44: error: cannot infer type of closure parameter 'value' without a type annotation
+ 912 |         }.store(in: &cancellables)
+ 913 |         
+ 914 |         $showDeviceRSSI.sink { [weak self] value in
+     |                                            `- error: cannot infer type of closure parameter 'value' without a type annotation
+ 915 |             self?.userDefaults.set(value, forKey: "Settings.ShowDeviceRSSI")
+ 916 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:918:9: error: cannot find '$showConnectableDevicesOnly' in scope
+ 916 |         }.store(in: &cancellables)
+ 917 |         
+ 918 |         $showConnectableDevicesOnly.sink { [weak self] value in
+     |         `- error: cannot find '$showConnectableDevicesOnly' in scope
+ 919 |             self?.userDefaults.set(value, forKey: "Settings.ShowOnlyConnectableDevices")
+ 920 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:918:50: error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 916 |         }.store(in: &cancellables)
+ 917 |         
+ 918 |         $showConnectableDevicesOnly.sink { [weak self] value in
+     |                                                  `- error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 919 |             self?.userDefaults.set(value, forKey: "Settings.ShowOnlyConnectableDevices")
+ 920 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:920:22: error: cannot find 'cancellables' in scope
+ 918 |         $showConnectableDevicesOnly.sink { [weak self] value in
+ 919 |             self?.userDefaults.set(value, forKey: "Settings.ShowOnlyConnectableDevices")
+ 920 |         }.store(in: &cancellables)
+     |                      `- error: cannot find 'cancellables' in scope
+ 921 |         
+ 922 |         $autoDiscoverAppleTV.sink { [weak self] value in
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:918:56: error: cannot infer type of closure parameter 'value' without a type annotation
+ 916 |         }.store(in: &cancellables)
+ 917 |         
+ 918 |         $showConnectableDevicesOnly.sink { [weak self] value in
+     |                                                        `- error: cannot infer type of closure parameter 'value' without a type annotation
+ 919 |             self?.userDefaults.set(value, forKey: "Settings.ShowOnlyConnectableDevices")
+ 920 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:922:9: error: cannot find '$autoDiscoverAppleTV' in scope
+ 920 |         }.store(in: &cancellables)
+ 921 |         
+ 922 |         $autoDiscoverAppleTV.sink { [weak self] value in
+     |         `- error: cannot find '$autoDiscoverAppleTV' in scope
+ 923 |             self?.userDefaults.set(value, forKey: "Settings.AutoDiscoverAppleTV")
+ 924 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:922:43: error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 920 |         }.store(in: &cancellables)
+ 921 |         
+ 922 |         $autoDiscoverAppleTV.sink { [weak self] value in
+     |                                           `- error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 923 |             self?.userDefaults.set(value, forKey: "Settings.AutoDiscoverAppleTV")
+ 924 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:924:22: error: cannot find 'cancellables' in scope
+ 922 |         $autoDiscoverAppleTV.sink { [weak self] value in
+ 923 |             self?.userDefaults.set(value, forKey: "Settings.AutoDiscoverAppleTV")
+ 924 |         }.store(in: &cancellables)
+     |                      `- error: cannot find 'cancellables' in scope
+ 925 |         
+ 926 |         $showHomePodDevices.sink { [weak self] value in
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:922:49: error: cannot infer type of closure parameter 'value' without a type annotation
+ 920 |         }.store(in: &cancellables)
+ 921 |         
+ 922 |         $autoDiscoverAppleTV.sink { [weak self] value in
+     |                                                 `- error: cannot infer type of closure parameter 'value' without a type annotation
+ 923 |             self?.userDefaults.set(value, forKey: "Settings.AutoDiscoverAppleTV")
+ 924 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:926:9: error: cannot find '$showHomePodDevices' in scope
+ 924 |         }.store(in: &cancellables)
+ 925 |         
+ 926 |         $showHomePodDevices.sink { [weak self] value in
+     |         `- error: cannot find '$showHomePodDevices' in scope
+ 927 |             self?.userDefaults.set(value, forKey: "Settings.ShowHomePodDevices")
+ 928 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:926:42: error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 924 |         }.store(in: &cancellables)
+ 925 |         
+ 926 |         $showHomePodDevices.sink { [weak self] value in
+     |                                          `- error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 927 |             self?.userDefaults.set(value, forKey: "Settings.ShowHomePodDevices")
+ 928 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:928:22: error: cannot find 'cancellables' in scope
+ 926 |         $showHomePodDevices.sink { [weak self] value in
+ 927 |             self?.userDefaults.set(value, forKey: "Settings.ShowHomePodDevices")
+ 928 |         }.store(in: &cancellables)
+     |                      `- error: cannot find 'cancellables' in scope
+ 929 |         
+ 930 |         $showThirdPartyAirPlayDevices.sink { [weak self] value in
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:926:48: error: cannot infer type of closure parameter 'value' without a type annotation
+ 924 |         }.store(in: &cancellables)
+ 925 |         
+ 926 |         $showHomePodDevices.sink { [weak self] value in
+     |                                                `- error: cannot infer type of closure parameter 'value' without a type annotation
+ 927 |             self?.userDefaults.set(value, forKey: "Settings.ShowHomePodDevices")
+ 928 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:930:9: error: cannot find '$showThirdPartyAirPlayDevices' in scope
+ 928 |         }.store(in: &cancellables)
+ 929 |         
+ 930 |         $showThirdPartyAirPlayDevices.sink { [weak self] value in
+     |         `- error: cannot find '$showThirdPartyAirPlayDevices' in scope
+ 931 |             self?.userDefaults.set(value, forKey: "Settings.ShowThirdPartyAirPlay")
+ 932 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:930:52: error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 928 |         }.store(in: &cancellables)
+ 929 |         
+ 930 |         $showThirdPartyAirPlayDevices.sink { [weak self] value in
+     |                                                    `- error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 931 |             self?.userDefaults.set(value, forKey: "Settings.ShowThirdPartyAirPlay")
+ 932 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:932:22: error: cannot find 'cancellables' in scope
+ 930 |         $showThirdPartyAirPlayDevices.sink { [weak self] value in
+ 931 |             self?.userDefaults.set(value, forKey: "Settings.ShowThirdPartyAirPlay")
+ 932 |         }.store(in: &cancellables)
+     |                      `- error: cannot find 'cancellables' in scope
+ 933 |         
+ 934 |         $hideOfflineDevices.sink { [weak self] value in
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:930:58: error: cannot infer type of closure parameter 'value' without a type annotation
+ 928 |         }.store(in: &cancellables)
+ 929 |         
+ 930 |         $showThirdPartyAirPlayDevices.sink { [weak self] value in
+     |                                                          `- error: cannot infer type of closure parameter 'value' without a type annotation
+ 931 |             self?.userDefaults.set(value, forKey: "Settings.ShowThirdPartyAirPlay")
+ 932 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:934:9: error: cannot find '$hideOfflineDevices' in scope
+ 932 |         }.store(in: &cancellables)
+ 933 |         
+ 934 |         $hideOfflineDevices.sink { [weak self] value in
+     |         `- error: cannot find '$hideOfflineDevices' in scope
+ 935 |             self?.userDefaults.set(value, forKey: "Settings.HideOfflineDevices")
+ 936 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:934:42: error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 932 |         }.store(in: &cancellables)
+ 933 |         
+ 934 |         $hideOfflineDevices.sink { [weak self] value in
+     |                                          `- error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 935 |             self?.userDefaults.set(value, forKey: "Settings.HideOfflineDevices")
+ 936 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:936:22: error: cannot find 'cancellables' in scope
+ 934 |         $hideOfflineDevices.sink { [weak self] value in
+ 935 |             self?.userDefaults.set(value, forKey: "Settings.HideOfflineDevices")
+ 936 |         }.store(in: &cancellables)
+     |                      `- error: cannot find 'cancellables' in scope
+ 937 |         
+ 938 |         $sortBySignalStrength.sink { [weak self] value in
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:934:48: error: cannot infer type of closure parameter 'value' without a type annotation
+ 932 |         }.store(in: &cancellables)
+ 933 |         
+ 934 |         $hideOfflineDevices.sink { [weak self] value in
+     |                                                `- error: cannot infer type of closure parameter 'value' without a type annotation
+ 935 |             self?.userDefaults.set(value, forKey: "Settings.HideOfflineDevices")
+ 936 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:938:9: error: cannot find '$sortBySignalStrength' in scope
+ 936 |         }.store(in: &cancellables)
+ 937 |         
+ 938 |         $sortBySignalStrength.sink { [weak self] value in
+     |         `- error: cannot find '$sortBySignalStrength' in scope
+ 939 |             self?.userDefaults.set(value, forKey: "Settings.SortBySignalStrength")
+ 940 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:938:44: error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 936 |         }.store(in: &cancellables)
+ 937 |         
+ 938 |         $sortBySignalStrength.sink { [weak self] value in
+     |                                            `- error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 939 |             self?.userDefaults.set(value, forKey: "Settings.SortBySignalStrength")
+ 940 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:940:22: error: cannot find 'cancellables' in scope
+ 938 |         $sortBySignalStrength.sink { [weak self] value in
+ 939 |             self?.userDefaults.set(value, forKey: "Settings.SortBySignalStrength")
+ 940 |         }.store(in: &cancellables)
+     |                      `- error: cannot find 'cancellables' in scope
+ 941 |         
+ 942 |         $showDeviceIcons.sink { [weak self] value in
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:938:50: error: cannot infer type of closure parameter 'value' without a type annotation
+ 936 |         }.store(in: &cancellables)
+ 937 |         
+ 938 |         $sortBySignalStrength.sink { [weak self] value in
+     |                                                  `- error: cannot infer type of closure parameter 'value' without a type annotation
+ 939 |             self?.userDefaults.set(value, forKey: "Settings.SortBySignalStrength")
+ 940 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:942:9: error: cannot find '$showDeviceIcons' in scope
+ 940 |         }.store(in: &cancellables)
+ 941 |         
+ 942 |         $showDeviceIcons.sink { [weak self] value in
+     |         `- error: cannot find '$showDeviceIcons' in scope
+ 943 |             self?.userDefaults.set(value, forKey: "Settings.ShowDeviceIcons")
+ 944 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:942:39: error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 940 |         }.store(in: &cancellables)
+ 941 |         
+ 942 |         $showDeviceIcons.sink { [weak self] value in
+     |                                       `- error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 943 |             self?.userDefaults.set(value, forKey: "Settings.ShowDeviceIcons")
+ 944 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:944:22: error: cannot find 'cancellables' in scope
+ 942 |         $showDeviceIcons.sink { [weak self] value in
+ 943 |             self?.userDefaults.set(value, forKey: "Settings.ShowDeviceIcons")
+ 944 |         }.store(in: &cancellables)
+     |                      `- error: cannot find 'cancellables' in scope
+ 945 |         
+ 946 |         $minimumSignalStrength.sink { [weak self] value in
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:942:45: error: cannot infer type of closure parameter 'value' without a type annotation
+ 940 |         }.store(in: &cancellables)
+ 941 |         
+ 942 |         $showDeviceIcons.sink { [weak self] value in
+     |                                             `- error: cannot infer type of closure parameter 'value' without a type annotation
+ 943 |             self?.userDefaults.set(value, forKey: "Settings.ShowDeviceIcons")
+ 944 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:946:9: error: cannot find '$minimumSignalStrength' in scope
+ 944 |         }.store(in: &cancellables)
+ 945 |         
+ 946 |         $minimumSignalStrength.sink { [weak self] value in
+     |         `- error: cannot find '$minimumSignalStrength' in scope
+ 947 |             self?.userDefaults.set(value, forKey: "Settings.MinimumSignalStrength")
+ 948 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:946:45: error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 944 |         }.store(in: &cancellables)
+ 945 |         
+ 946 |         $minimumSignalStrength.sink { [weak self] value in
+     |                                             `- error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 947 |             self?.userDefaults.set(value, forKey: "Settings.MinimumSignalStrength")
+ 948 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:948:22: error: cannot find 'cancellables' in scope
+ 946 |         $minimumSignalStrength.sink { [weak self] value in
+ 947 |             self?.userDefaults.set(value, forKey: "Settings.MinimumSignalStrength")
+ 948 |         }.store(in: &cancellables)
+     |                      `- error: cannot find 'cancellables' in scope
+ 949 |         
+ 950 |         // 高级设置观察者
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:946:51: error: cannot infer type of closure parameter 'value' without a type annotation
+ 944 |         }.store(in: &cancellables)
+ 945 |         
+ 946 |         $minimumSignalStrength.sink { [weak self] value in
+     |                                                   `- error: cannot infer type of closure parameter 'value' without a type annotation
+ 947 |             self?.userDefaults.set(value, forKey: "Settings.MinimumSignalStrength")
+ 948 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:951:9: error: cannot find '$enableVerboseLogging' in scope
+ 949 |         
+ 950 |         // 高级设置观察者
+ 951 |         $enableVerboseLogging.sink { [weak self] value in
+     |         `- error: cannot find '$enableVerboseLogging' in scope
+ 952 |             self?.userDefaults.set(value, forKey: "Settings.EnableVerboseLogging")
+ 953 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:951:44: error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 949 |         
+ 950 |         // 高级设置观察者
+ 951 |         $enableVerboseLogging.sink { [weak self] value in
+     |                                            `- error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 952 |             self?.userDefaults.set(value, forKey: "Settings.EnableVerboseLogging")
+ 953 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:953:22: error: cannot find 'cancellables' in scope
+ 951 |         $enableVerboseLogging.sink { [weak self] value in
+ 952 |             self?.userDefaults.set(value, forKey: "Settings.EnableVerboseLogging")
+ 953 |         }.store(in: &cancellables)
+     |                      `- error: cannot find 'cancellables' in scope
+ 954 |         
+ 955 |         $showDebugInfo.sink { [weak self] value in
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:951:50: error: cannot infer type of closure parameter 'value' without a type annotation
+ 949 |         
+ 950 |         // 高级设置观察者
+ 951 |         $enableVerboseLogging.sink { [weak self] value in
+     |                                                  `- error: cannot infer type of closure parameter 'value' without a type annotation
+ 952 |             self?.userDefaults.set(value, forKey: "Settings.EnableVerboseLogging")
+ 953 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:955:9: error: cannot find '$showDebugInfo' in scope
+ 953 |         }.store(in: &cancellables)
+ 954 |         
+ 955 |         $showDebugInfo.sink { [weak self] value in
+     |         `- error: cannot find '$showDebugInfo' in scope
+ 956 |             self?.userDefaults.set(value, forKey: "Settings.ShowDebugInfo")
+ 957 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:955:37: error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 953 |         }.store(in: &cancellables)
+ 954 |         
+ 955 |         $showDebugInfo.sink { [weak self] value in
+     |                                     `- error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 956 |             self?.userDefaults.set(value, forKey: "Settings.ShowDebugInfo")
+ 957 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:957:22: error: cannot find 'cancellables' in scope
+ 955 |         $showDebugInfo.sink { [weak self] value in
+ 956 |             self?.userDefaults.set(value, forKey: "Settings.ShowDebugInfo")
+ 957 |         }.store(in: &cancellables)
+     |                      `- error: cannot find 'cancellables' in scope
+ 958 |         
+ 959 |         $saveNetworkLogs.sink { [weak self] value in
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:955:43: error: cannot infer type of closure parameter 'value' without a type annotation
+ 953 |         }.store(in: &cancellables)
+ 954 |         
+ 955 |         $showDebugInfo.sink { [weak self] value in
+     |                                           `- error: cannot infer type of closure parameter 'value' without a type annotation
+ 956 |             self?.userDefaults.set(value, forKey: "Settings.ShowDebugInfo")
+ 957 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:959:9: error: cannot find '$saveNetworkLogs' in scope
+ 957 |         }.store(in: &cancellables)
+ 958 |         
+ 959 |         $saveNetworkLogs.sink { [weak self] value in
+     |         `- error: cannot find '$saveNetworkLogs' in scope
+ 960 |             self?.userDefaults.set(value, forKey: "Settings.SaveNetworkLogs")
+ 961 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:959:39: error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 957 |         }.store(in: &cancellables)
+ 958 |         
+ 959 |         $saveNetworkLogs.sink { [weak self] value in
+     |                                       `- error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 960 |             self?.userDefaults.set(value, forKey: "Settings.SaveNetworkLogs")
+ 961 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:961:22: error: cannot find 'cancellables' in scope
+ 959 |         $saveNetworkLogs.sink { [weak self] value in
+ 960 |             self?.userDefaults.set(value, forKey: "Settings.SaveNetworkLogs")
+ 961 |         }.store(in: &cancellables)
+     |                      `- error: cannot find 'cancellables' in scope
+ 962 |         
+ 963 |         $logLevel.sink { [weak self] value in
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:959:45: error: cannot infer type of closure parameter 'value' without a type annotation
+ 957 |         }.store(in: &cancellables)
+ 958 |         
+ 959 |         $saveNetworkLogs.sink { [weak self] value in
+     |                                             `- error: cannot infer type of closure parameter 'value' without a type annotation
+ 960 |             self?.userDefaults.set(value, forKey: "Settings.SaveNetworkLogs")
+ 961 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:963:9: error: cannot find '$logLevel' in scope
+ 961 |         }.store(in: &cancellables)
+ 962 |         
+ 963 |         $logLevel.sink { [weak self] value in
+     |         `- error: cannot find '$logLevel' in scope
+ 964 |             self?.userDefaults.set(value, forKey: "Settings.LogLevel")
+ 965 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:963:32: error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 961 |         }.store(in: &cancellables)
+ 962 |         
+ 963 |         $logLevel.sink { [weak self] value in
+     |                                `- error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 964 |             self?.userDefaults.set(value, forKey: "Settings.LogLevel")
+ 965 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:965:22: error: cannot find 'cancellables' in scope
+ 963 |         $logLevel.sink { [weak self] value in
+ 964 |             self?.userDefaults.set(value, forKey: "Settings.LogLevel")
+ 965 |         }.store(in: &cancellables)
+     |                      `- error: cannot find 'cancellables' in scope
+ 966 |         
+ 967 |         $enableHardwareAcceleration.sink { [weak self] value in
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:963:38: error: cannot infer type of closure parameter 'value' without a type annotation
+ 961 |         }.store(in: &cancellables)
+ 962 |         
+ 963 |         $logLevel.sink { [weak self] value in
+     |                                      `- error: cannot infer type of closure parameter 'value' without a type annotation
+ 964 |             self?.userDefaults.set(value, forKey: "Settings.LogLevel")
+ 965 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:967:9: error: cannot find '$enableHardwareAcceleration' in scope
+ 965 |         }.store(in: &cancellables)
+ 966 |         
+ 967 |         $enableHardwareAcceleration.sink { [weak self] value in
+     |         `- error: cannot find '$enableHardwareAcceleration' in scope
+ 968 |             self?.userDefaults.set(value, forKey: "Settings.EnableHardwareAcceleration")
+ 969 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:967:50: error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 965 |         }.store(in: &cancellables)
+ 966 |         
+ 967 |         $enableHardwareAcceleration.sink { [weak self] value in
+     |                                                  `- error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 968 |             self?.userDefaults.set(value, forKey: "Settings.EnableHardwareAcceleration")
+ 969 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:969:22: error: cannot find 'cancellables' in scope
+ 967 |         $enableHardwareAcceleration.sink { [weak self] value in
+ 968 |             self?.userDefaults.set(value, forKey: "Settings.EnableHardwareAcceleration")
+ 969 |         }.store(in: &cancellables)
+     |                      `- error: cannot find 'cancellables' in scope
+ 970 |         
+ 971 |         $optimizeMemoryUsage.sink { [weak self] value in
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:967:56: error: cannot infer type of closure parameter 'value' without a type annotation
+ 965 |         }.store(in: &cancellables)
+ 966 |         
+ 967 |         $enableHardwareAcceleration.sink { [weak self] value in
+     |                                                        `- error: cannot infer type of closure parameter 'value' without a type annotation
+ 968 |             self?.userDefaults.set(value, forKey: "Settings.EnableHardwareAcceleration")
+ 969 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:971:9: error: cannot find '$optimizeMemoryUsage' in scope
+ 969 |         }.store(in: &cancellables)
+ 970 |         
+ 971 |         $optimizeMemoryUsage.sink { [weak self] value in
+     |         `- error: cannot find '$optimizeMemoryUsage' in scope
+ 972 |             self?.userDefaults.set(value, forKey: "Settings.OptimizeMemoryUsage")
+ 973 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:971:43: error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 969 |         }.store(in: &cancellables)
+ 970 |         
+ 971 |         $optimizeMemoryUsage.sink { [weak self] value in
+     |                                           `- error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 972 |             self?.userDefaults.set(value, forKey: "Settings.OptimizeMemoryUsage")
+ 973 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:973:22: error: cannot find 'cancellables' in scope
+ 971 |         $optimizeMemoryUsage.sink { [weak self] value in
+ 972 |             self?.userDefaults.set(value, forKey: "Settings.OptimizeMemoryUsage")
+ 973 |         }.store(in: &cancellables)
+     |                      `- error: cannot find 'cancellables' in scope
+ 974 |         
+ 975 |         $enableBackgroundScanning.sink { [weak self] value in
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:971:49: error: cannot infer type of closure parameter 'value' without a type annotation
+ 969 |         }.store(in: &cancellables)
+ 970 |         
+ 971 |         $optimizeMemoryUsage.sink { [weak self] value in
+     |                                                 `- error: cannot infer type of closure parameter 'value' without a type annotation
+ 972 |             self?.userDefaults.set(value, forKey: "Settings.OptimizeMemoryUsage")
+ 973 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:975:9: error: cannot find '$enableBackgroundScanning' in scope
+ 973 |         }.store(in: &cancellables)
+ 974 |         
+ 975 |         $enableBackgroundScanning.sink { [weak self] value in
+     |         `- error: cannot find '$enableBackgroundScanning' in scope
+ 976 |             self?.userDefaults.set(value, forKey: "Settings.BackgroundScanning")
+ 977 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:975:48: error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 973 |         }.store(in: &cancellables)
+ 974 |         
+ 975 |         $enableBackgroundScanning.sink { [weak self] value in
+     |                                                `- error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 976 |             self?.userDefaults.set(value, forKey: "Settings.BackgroundScanning")
+ 977 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:977:22: error: cannot find 'cancellables' in scope
+ 975 |         $enableBackgroundScanning.sink { [weak self] value in
+ 976 |             self?.userDefaults.set(value, forKey: "Settings.BackgroundScanning")
+ 977 |         }.store(in: &cancellables)
+     |                      `- error: cannot find 'cancellables' in scope
+ 978 |         
+ 979 |         $maxConcurrentConnections.sink { [weak self] value in
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:975:54: error: cannot infer type of closure parameter 'value' without a type annotation
+ 973 |         }.store(in: &cancellables)
+ 974 |         
+ 975 |         $enableBackgroundScanning.sink { [weak self] value in
+     |                                                      `- error: cannot infer type of closure parameter 'value' without a type annotation
+ 976 |             self?.userDefaults.set(value, forKey: "Settings.BackgroundScanning")
+ 977 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:979:9: error: cannot find '$maxConcurrentConnections' in scope
+ 977 |         }.store(in: &cancellables)
+ 978 |         
+ 979 |         $maxConcurrentConnections.sink { [weak self] value in
+     |         `- error: cannot find '$maxConcurrentConnections' in scope
+ 980 |             self?.userDefaults.set(value, forKey: "Settings.MaxConcurrentConnections")
+ 981 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:979:48: error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 977 |         }.store(in: &cancellables)
+ 978 |         
+ 979 |         $maxConcurrentConnections.sink { [weak self] value in
+     |                                                `- error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 980 |             self?.userDefaults.set(value, forKey: "Settings.MaxConcurrentConnections")
+ 981 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:981:22: error: cannot find 'cancellables' in scope
+ 979 |         $maxConcurrentConnections.sink { [weak self] value in
+ 980 |             self?.userDefaults.set(value, forKey: "Settings.MaxConcurrentConnections")
+ 981 |         }.store(in: &cancellables)
+     |                      `- error: cannot find 'cancellables' in scope
+ 982 |         
+ 983 |         $enableIPv6Support.sink { [weak self] value in
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:979:54: error: cannot infer type of closure parameter 'value' without a type annotation
+ 977 |         }.store(in: &cancellables)
+ 978 |         
+ 979 |         $maxConcurrentConnections.sink { [weak self] value in
+     |                                                      `- error: cannot infer type of closure parameter 'value' without a type annotation
+ 980 |             self?.userDefaults.set(value, forKey: "Settings.MaxConcurrentConnections")
+ 981 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:983:9: error: cannot find '$enableIPv6Support' in scope
+ 981 |         }.store(in: &cancellables)
+ 982 |         
+ 983 |         $enableIPv6Support.sink { [weak self] value in
+     |         `- error: cannot find '$enableIPv6Support' in scope
+ 984 |             self?.userDefaults.set(value, forKey: "Settings.EnableIPv6Support")
+ 985 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:983:41: error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 981 |         }.store(in: &cancellables)
+ 982 |         
+ 983 |         $enableIPv6Support.sink { [weak self] value in
+     |                                         `- error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 984 |             self?.userDefaults.set(value, forKey: "Settings.EnableIPv6Support")
+ 985 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:985:22: error: cannot find 'cancellables' in scope
+ 983 |         $enableIPv6Support.sink { [weak self] value in
+ 984 |             self?.userDefaults.set(value, forKey: "Settings.EnableIPv6Support")
+ 985 |         }.store(in: &cancellables)
+     |                      `- error: cannot find 'cancellables' in scope
+ 986 |         
+ 987 |         $useNewDiscoveryAlgorithm.sink { [weak self] value in
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:983:47: error: cannot infer type of closure parameter 'value' without a type annotation
+ 981 |         }.store(in: &cancellables)
+ 982 |         
+ 983 |         $enableIPv6Support.sink { [weak self] value in
+     |                                               `- error: cannot infer type of closure parameter 'value' without a type annotation
+ 984 |             self?.userDefaults.set(value, forKey: "Settings.EnableIPv6Support")
+ 985 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:987:9: error: cannot find '$useNewDiscoveryAlgorithm' in scope
+ 985 |         }.store(in: &cancellables)
+ 986 |         
+ 987 |         $useNewDiscoveryAlgorithm.sink { [weak self] value in
+     |         `- error: cannot find '$useNewDiscoveryAlgorithm' in scope
+ 988 |             self?.userDefaults.set(value, forKey: "Settings.UseNewDiscoveryAlgorithm")
+ 989 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:987:48: error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 985 |         }.store(in: &cancellables)
+ 986 |         
+ 987 |         $useNewDiscoveryAlgorithm.sink { [weak self] value in
+     |                                                `- error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 988 |             self?.userDefaults.set(value, forKey: "Settings.UseNewDiscoveryAlgorithm")
+ 989 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:989:22: error: cannot find 'cancellables' in scope
+ 987 |         $useNewDiscoveryAlgorithm.sink { [weak self] value in
+ 988 |             self?.userDefaults.set(value, forKey: "Settings.UseNewDiscoveryAlgorithm")
+ 989 |         }.store(in: &cancellables)
+     |                      `- error: cannot find 'cancellables' in scope
+ 990 |         
+ 991 |         $enableP2PDirectConnection.sink { [weak self] value in
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:987:54: error: cannot infer type of closure parameter 'value' without a type annotation
+ 985 |         }.store(in: &cancellables)
+ 986 |         
+ 987 |         $useNewDiscoveryAlgorithm.sink { [weak self] value in
+     |                                                      `- error: cannot infer type of closure parameter 'value' without a type annotation
+ 988 |             self?.userDefaults.set(value, forKey: "Settings.UseNewDiscoveryAlgorithm")
+ 989 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:991:9: error: cannot find '$enableP2PDirectConnection' in scope
+ 989 |         }.store(in: &cancellables)
+ 990 |         
+ 991 |         $enableP2PDirectConnection.sink { [weak self] value in
+     |         `- error: cannot find '$enableP2PDirectConnection' in scope
+ 992 |             self?.userDefaults.set(value, forKey: "Settings.EnableP2PDirectConnect")
+ 993 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:991:49: error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 989 |         }.store(in: &cancellables)
+ 990 |         
+ 991 |         $enableP2PDirectConnection.sink { [weak self] value in
+     |                                                 `- error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 992 |             self?.userDefaults.set(value, forKey: "Settings.EnableP2PDirectConnect")
+ 993 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:993:22: error: cannot find 'cancellables' in scope
+ 991 |         $enableP2PDirectConnection.sink { [weak self] value in
+ 992 |             self?.userDefaults.set(value, forKey: "Settings.EnableP2PDirectConnect")
+ 993 |         }.store(in: &cancellables)
+     |                      `- error: cannot find 'cancellables' in scope
+ 994 |         
+ 995 |         // 系统监控设置观察者
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:991:55: error: cannot infer type of closure parameter 'value' without a type annotation
+ 989 |         }.store(in: &cancellables)
+ 990 |         
+ 991 |         $enableP2PDirectConnection.sink { [weak self] value in
+     |                                                       `- error: cannot infer type of closure parameter 'value' without a type annotation
+ 992 |             self?.userDefaults.set(value, forKey: "Settings.EnableP2PDirectConnect")
+ 993 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:996:9: error: cannot find '$systemMonitorRefreshInterval' in scope
+ 994 |         
+ 995 |         // 系统监控设置观察者
+ 996 |         $systemMonitorRefreshInterval.sink { [weak self] value in
+     |         `- error: cannot find '$systemMonitorRefreshInterval' in scope
+ 997 |             self?.userDefaults.set(value, forKey: "Settings.SystemMonitorRefreshInterval")
+ 998 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:996:52: error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 994 |         
+ 995 |         // 系统监控设置观察者
+ 996 |         $systemMonitorRefreshInterval.sink { [weak self] value in
+     |                                                    `- error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 997 |             self?.userDefaults.set(value, forKey: "Settings.SystemMonitorRefreshInterval")
+ 998 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:998:22: error: cannot find 'cancellables' in scope
+ 996 |         $systemMonitorRefreshInterval.sink { [weak self] value in
+ 997 |             self?.userDefaults.set(value, forKey: "Settings.SystemMonitorRefreshInterval")
+ 998 |         }.store(in: &cancellables)
+     |                      `- error: cannot find 'cancellables' in scope
+ 999 |         
+1000 |         $enableSystemNotifications.sink { [weak self] value in
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:996:58: error: cannot infer type of closure parameter 'value' without a type annotation
+ 994 |         
+ 995 |         // 系统监控设置观察者
+ 996 |         $systemMonitorRefreshInterval.sink { [weak self] value in
+     |                                                          `- error: cannot infer type of closure parameter 'value' without a type annotation
+ 997 |             self?.userDefaults.set(value, forKey: "Settings.SystemMonitorRefreshInterval")
+ 998 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:1000:9: error: cannot find '$enableSystemNotifications' in scope
+ 998 |         }.store(in: &cancellables)
+ 999 |         
+1000 |         $enableSystemNotifications.sink { [weak self] value in
+     |         `- error: cannot find '$enableSystemNotifications' in scope
+1001 |             self?.userDefaults.set(value, forKey: "Settings.EnableSystemNotifications")
+1002 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:1000:49: error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+ 998 |         }.store(in: &cancellables)
+ 999 |         
+1000 |         $enableSystemNotifications.sink { [weak self] value in
+     |                                                 `- error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+1001 |             self?.userDefaults.set(value, forKey: "Settings.EnableSystemNotifications")
+1002 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:1002:22: error: cannot find 'cancellables' in scope
+1000 |         $enableSystemNotifications.sink { [weak self] value in
+1001 |             self?.userDefaults.set(value, forKey: "Settings.EnableSystemNotifications")
+1002 |         }.store(in: &cancellables)
+     |                      `- error: cannot find 'cancellables' in scope
+1003 |         
+1004 |         $cpuThreshold.sink { [weak self] value in
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:1000:55: error: cannot infer type of closure parameter 'value' without a type annotation
+ 998 |         }.store(in: &cancellables)
+ 999 |         
+1000 |         $enableSystemNotifications.sink { [weak self] value in
+     |                                                       `- error: cannot infer type of closure parameter 'value' without a type annotation
+1001 |             self?.userDefaults.set(value, forKey: "Settings.EnableSystemNotifications")
+1002 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:1004:9: error: cannot find '$cpuThreshold' in scope
+1002 |         }.store(in: &cancellables)
+1003 |         
+1004 |         $cpuThreshold.sink { [weak self] value in
+     |         `- error: cannot find '$cpuThreshold' in scope
+1005 |             self?.userDefaults.set(value, forKey: "Settings.CPUThreshold")
+1006 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:1004:36: error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+1002 |         }.store(in: &cancellables)
+1003 |         
+1004 |         $cpuThreshold.sink { [weak self] value in
+     |                                    `- error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+1005 |             self?.userDefaults.set(value, forKey: "Settings.CPUThreshold")
+1006 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:1006:22: error: cannot find 'cancellables' in scope
+1004 |         $cpuThreshold.sink { [weak self] value in
+1005 |             self?.userDefaults.set(value, forKey: "Settings.CPUThreshold")
+1006 |         }.store(in: &cancellables)
+     |                      `- error: cannot find 'cancellables' in scope
+1007 |         
+1008 |         $memoryThreshold.sink { [weak self] value in
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:1004:42: error: cannot infer type of closure parameter 'value' without a type annotation
+1002 |         }.store(in: &cancellables)
+1003 |         
+1004 |         $cpuThreshold.sink { [weak self] value in
+     |                                          `- error: cannot infer type of closure parameter 'value' without a type annotation
+1005 |             self?.userDefaults.set(value, forKey: "Settings.CPUThreshold")
+1006 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:1008:9: error: cannot find '$memoryThreshold' in scope
+1006 |         }.store(in: &cancellables)
+1007 |         
+1008 |         $memoryThreshold.sink { [weak self] value in
+     |         `- error: cannot find '$memoryThreshold' in scope
+1009 |             self?.userDefaults.set(value, forKey: "Settings.MemoryThreshold")
+1010 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:1008:39: error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+1006 |         }.store(in: &cancellables)
+1007 |         
+1008 |         $memoryThreshold.sink { [weak self] value in
+     |                                       `- error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+1009 |             self?.userDefaults.set(value, forKey: "Settings.MemoryThreshold")
+1010 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:1010:22: error: cannot find 'cancellables' in scope
+1008 |         $memoryThreshold.sink { [weak self] value in
+1009 |             self?.userDefaults.set(value, forKey: "Settings.MemoryThreshold")
+1010 |         }.store(in: &cancellables)
+     |                      `- error: cannot find 'cancellables' in scope
+1011 |         
+1012 |         $diskThreshold.sink { [weak self] value in
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:1008:45: error: cannot infer type of closure parameter 'value' without a type annotation
+1006 |         }.store(in: &cancellables)
+1007 |         
+1008 |         $memoryThreshold.sink { [weak self] value in
+     |                                             `- error: cannot infer type of closure parameter 'value' without a type annotation
+1009 |             self?.userDefaults.set(value, forKey: "Settings.MemoryThreshold")
+1010 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:1012:9: error: cannot find '$diskThreshold' in scope
+1010 |         }.store(in: &cancellables)
+1011 |         
+1012 |         $diskThreshold.sink { [weak self] value in
+     |         `- error: cannot find '$diskThreshold' in scope
+1013 |             self?.userDefaults.set(value, forKey: "Settings.DiskThreshold")
+1014 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:1012:37: error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+1010 |         }.store(in: &cancellables)
+1011 |         
+1012 |         $diskThreshold.sink { [weak self] value in
+     |                                     `- error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+1013 |             self?.userDefaults.set(value, forKey: "Settings.DiskThreshold")
+1014 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:1014:22: error: cannot find 'cancellables' in scope
+1012 |         $diskThreshold.sink { [weak self] value in
+1013 |             self?.userDefaults.set(value, forKey: "Settings.DiskThreshold")
+1014 |         }.store(in: &cancellables)
+     |                      `- error: cannot find 'cancellables' in scope
+1015 |         
+1016 |         $enableAutoRefresh.sink { [weak self] value in
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:1012:43: error: cannot infer type of closure parameter 'value' without a type annotation
+1010 |         }.store(in: &cancellables)
+1011 |         
+1012 |         $diskThreshold.sink { [weak self] value in
+     |                                           `- error: cannot infer type of closure parameter 'value' without a type annotation
+1013 |             self?.userDefaults.set(value, forKey: "Settings.DiskThreshold")
+1014 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:1016:9: error: cannot find '$enableAutoRefresh' in scope
+1014 |         }.store(in: &cancellables)
+1015 |         
+1016 |         $enableAutoRefresh.sink { [weak self] value in
+     |         `- error: cannot find '$enableAutoRefresh' in scope
+1017 |             self?.userDefaults.set(value, forKey: "Settings.EnableAutoRefresh")
+1018 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:1016:41: error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+1014 |         }.store(in: &cancellables)
+1015 |         
+1016 |         $enableAutoRefresh.sink { [weak self] value in
+     |                                         `- error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+1017 |             self?.userDefaults.set(value, forKey: "Settings.EnableAutoRefresh")
+1018 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:1018:22: error: cannot find 'cancellables' in scope
+1016 |         $enableAutoRefresh.sink { [weak self] value in
+1017 |             self?.userDefaults.set(value, forKey: "Settings.EnableAutoRefresh")
+1018 |         }.store(in: &cancellables)
+     |                      `- error: cannot find 'cancellables' in scope
+1019 |         
+1020 |         $showTrendIndicators.sink { [weak self] value in
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:1016:47: error: cannot infer type of closure parameter 'value' without a type annotation
+1014 |         }.store(in: &cancellables)
+1015 |         
+1016 |         $enableAutoRefresh.sink { [weak self] value in
+     |                                               `- error: cannot infer type of closure parameter 'value' without a type annotation
+1017 |             self?.userDefaults.set(value, forKey: "Settings.EnableAutoRefresh")
+1018 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:1020:9: error: cannot find '$showTrendIndicators' in scope
+1018 |         }.store(in: &cancellables)
+1019 |         
+1020 |         $showTrendIndicators.sink { [weak self] value in
+     |         `- error: cannot find '$showTrendIndicators' in scope
+1021 |             self?.userDefaults.set(value, forKey: "Settings.ShowTrendIndicators")
+1022 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:1020:43: error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+1018 |         }.store(in: &cancellables)
+1019 |         
+1020 |         $showTrendIndicators.sink { [weak self] value in
+     |                                           `- error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+1021 |             self?.userDefaults.set(value, forKey: "Settings.ShowTrendIndicators")
+1022 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:1022:22: error: cannot find 'cancellables' in scope
+1020 |         $showTrendIndicators.sink { [weak self] value in
+1021 |             self?.userDefaults.set(value, forKey: "Settings.ShowTrendIndicators")
+1022 |         }.store(in: &cancellables)
+     |                      `- error: cannot find 'cancellables' in scope
+1023 |         
+1024 |         $enableSoundAlerts.sink { [weak self] value in
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:1020:49: error: cannot infer type of closure parameter 'value' without a type annotation
+1018 |         }.store(in: &cancellables)
+1019 |         
+1020 |         $showTrendIndicators.sink { [weak self] value in
+     |                                                 `- error: cannot infer type of closure parameter 'value' without a type annotation
+1021 |             self?.userDefaults.set(value, forKey: "Settings.ShowTrendIndicators")
+1022 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:1024:9: error: cannot find '$enableSoundAlerts' in scope
+1022 |         }.store(in: &cancellables)
+1023 |         
+1024 |         $enableSoundAlerts.sink { [weak self] value in
+     |         `- error: cannot find '$enableSoundAlerts' in scope
+1025 |             self?.userDefaults.set(value, forKey: "Settings.EnableSoundAlerts")
+1026 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:1024:41: error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+1022 |         }.store(in: &cancellables)
+1023 |         
+1024 |         $enableSoundAlerts.sink { [weak self] value in
+     |                                         `- error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+1025 |             self?.userDefaults.set(value, forKey: "Settings.EnableSoundAlerts")
+1026 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:1026:22: error: cannot find 'cancellables' in scope
+1024 |         $enableSoundAlerts.sink { [weak self] value in
+1025 |             self?.userDefaults.set(value, forKey: "Settings.EnableSoundAlerts")
+1026 |         }.store(in: &cancellables)
+     |                      `- error: cannot find 'cancellables' in scope
+1027 |         
+1028 |         $maxHistoryPoints.sink { [weak self] value in
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:1024:47: error: cannot infer type of closure parameter 'value' without a type annotation
+1022 |         }.store(in: &cancellables)
+1023 |         
+1024 |         $enableSoundAlerts.sink { [weak self] value in
+     |                                               `- error: cannot infer type of closure parameter 'value' without a type annotation
+1025 |             self?.userDefaults.set(value, forKey: "Settings.EnableSoundAlerts")
+1026 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:1028:9: error: cannot find '$maxHistoryPoints' in scope
+1026 |         }.store(in: &cancellables)
+1027 |         
+1028 |         $maxHistoryPoints.sink { [weak self] value in
+     |         `- error: cannot find '$maxHistoryPoints' in scope
+1029 |             self?.userDefaults.set(value, forKey: "Settings.MaxHistoryPoints")
+1030 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:1028:40: error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+1026 |         }.store(in: &cancellables)
+1027 |         
+1028 |         $maxHistoryPoints.sink { [weak self] value in
+     |                                        `- error: cannot find 'self' in scope; did you mean to use it in a type or extension context?
+1029 |             self?.userDefaults.set(value, forKey: "Settings.MaxHistoryPoints")
+1030 |         }.store(in: &cancellables)
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:1030:22: error: cannot find 'cancellables' in scope
+1028 |         $maxHistoryPoints.sink { [weak self] value in
+1029 |             self?.userDefaults.set(value, forKey: "Settings.MaxHistoryPoints")
+1030 |         }.store(in: &cancellables)
+     |                      `- error: cannot find 'cancellables' in scope
+1031 |     }
+1032 | }
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:1028:46: error: cannot infer type of closure parameter 'value' without a type annotation
+1026 |         }.store(in: &cancellables)
+1027 |         
+1028 |         $maxHistoryPoints.sink { [weak self] value in
+     |                                              `- error: cannot infer type of closure parameter 'value' without a type annotation
+1029 |             self?.userDefaults.set(value, forKey: "Settings.MaxHistoryPoints")
+1030 |         }.store(in: &cancellables)
+[5/12] Compiling SkyBridgeCore PerformanceTestSuite.swift
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:739:5: error: extraneous '}' at top level
+ 737 |             }
+ 738 |         }
+ 739 |     }
+     |     `- error: extraneous '}' at top level
+ 740 |     
+ 741 |     /// 清理网络日志
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:1032:1: error: extraneous '}' at top level
+1030 |         }.store(in: &cancellables)
+1031 |     }
+1032 | }
+     | `- error: extraneous '}' at top level
+1033 | 
+1034 | // MARK: - UserDefaults 扩展
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Performance/PerformanceTestSuite.swift:86:28: error: call can throw, but it is not marked with 'try' and the error is not handled
+ 84 |         
+ 85 |         // 使用优化的队列执行 CPU 密集型任务
+ 86 |         let result = await gcdOptimizer.executeCPUIntensiveTask {
+    |                            `- error: call can throw, but it is not marked with 'try' and the error is not handled
+ 87 |             // 模拟复杂计算
+ 88 |             var sum: Double = 0
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Performance/PerformanceTestSuite.swift:137:63: error: missing argument label 'data:' in call
+135 |         let largeDataSet = Array(0..<1000000).map { Double($0) }
+136 |         
+137 |         let result = await memoryOptimizer.processLargeDataSet(largeDataSet) { data in
+    |                                                               `- error: missing argument label 'data:' in call
+138 |             return data.map { $0 * 2.0 }
+139 |         }
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Performance/PerformanceTestSuite.swift:166:42: error: value of type 'GCDOptimizer' has no member 'executeBatchTasks'
+164 |         }
+165 |         
+166 |         let results = await gcdOptimizer.executeBatchTasks(tasks)
+    |                                          `- error: value of type 'GCDOptimizer' has no member 'executeBatchTasks'
+167 |         let executionTime = CFAbsoluteTimeGetCurrent() - startTime
+168 |         
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Performance/PerformanceTestSuite.swift:219:29: warning: mutation of captured var 'completedTasks' in concurrently-executing code [#SendableClosureCaptures]
+217 |                             // 模拟任务执行
+218 |                             Thread.sleep(forTimeInterval: 0.1)
+219 |                             completedTasks += 1
+    |                             `- warning: mutation of captured var 'completedTasks' in concurrently-executing code [#SendableClosureCaptures]
+220 |                             continuation.resume()
+221 |                         }
+
+[#SendableClosureCaptures]: <https://docs.swift.org/compiler/documentation/diagnostics/sendable-closure-captures>
+error: emit-module command failed with exit code 1 (use -v to see invocation)
+[6/12] Emitting module SkyBridgeCore
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:739:5: error: extraneous '}' at top level
+ 737 |             }
+ 738 |         }
+ 739 |     }
+     |     `- error: extraneous '}' at top level
+ 740 |     
+ 741 |     /// 清理网络日志
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Settings/SettingsManager.swift:1032:1: error: extraneous '}' at top level
+1030 |         }.store(in: &cancellables)
+1031 |     }
+1032 | }
+     | `- error: extraneous '}' at top level
+1033 | 
+1034 | // MARK: - UserDefaults 扩展

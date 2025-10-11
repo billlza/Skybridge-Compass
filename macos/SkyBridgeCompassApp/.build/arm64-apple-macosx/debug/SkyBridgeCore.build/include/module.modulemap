@@ -1,0 +1,3 @@
+module SkyBridgeCore {
+    header "/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/debug/SkyBridgeCore.build/include/SkyBridgeCore-Swift.h"
+}

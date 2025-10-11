@@ -1,0 +1,47 @@
+{
+  "object" : {
+    "artifacts" : [
+
+    ],
+    "dependencies" : [
+      {
+        "basedOn" : null,
+        "packageRef" : {
+          "identity" : "starscream",
+          "kind" : "remoteSourceControl",
+          "location" : "https://github.com/daltoniam/Starscream",
+          "name" : "Starscream"
+        },
+        "state" : {
+          "checkoutState" : {
+            "revision" : "c6bfd1af48efcc9a9ad203665db12375ba6b145a",
+            "version" : "4.0.8"
+          },
+          "name" : "sourceControlCheckout"
+        },
+        "subpath" : "Starscream"
+      },
+      {
+        "basedOn" : null,
+        "packageRef" : {
+          "identity" : "swift-collections",
+          "kind" : "remoteSourceControl",
+          "location" : "https://github.com/apple/swift-collections",
+          "name" : "swift-collections"
+        },
+        "state" : {
+          "checkoutState" : {
+            "revision" : "7b847a3b7008b2dc2f47ca3110d8c782fb2e5c7e",
+            "version" : "1.3.0"
+          },
+          "name" : "sourceControlCheckout"
+        },
+        "subpath" : "swift-collections"
+      }
+    ],
+    "prebuilts" : [
+
+    ]
+  },
+  "version" : 7
+}

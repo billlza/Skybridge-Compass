@@ -1,0 +1,47 @@
+#!/usr/bin/osascript -l JavaScript
+/*
+ Save clipboard image as PNG to project Resources.
+ Usage: osascript scripts/save-clipboard-app-icon.jxa [output_path]
+ If output_path is not provided, defaults to the macOS app Resources/AppIcon.png.
+*/
+
+ObjC.import('Cocoa');
+ObjC.import('Foundation');
+
+function run(argv) {
+  const env = $.NSProcessInfo.processInfo.environment;
+  const pwd = env.objectForKey('PWD');
+  const defaultOut = `${ObjC.unwrap(pwd)}/macos/SkyBridgeCompassApp/Sources/SkyBridgeCompassApp/Resources/AppIcon.png`;
+  const outPath = argv.length > 0 ? argv[0] : defaultOut;
+
+  const pb = $.NSPasteboard.generalPasteboard;
+  // Try PNG first, then TIFF fallback
+  let pngData = pb.dataForType('public.png');
+  if (!pngData) {
+    const tiffData = pb.dataForType('public.tiff');
+    if (!tiffData) {
+      throw new Error('剪贴板中未检测到图片（PNG/TIFF）。请复制图片到剪贴板后重试。');
+    }
+    const bitmap = $.NSBitmapImageRep.imageRepWithData(tiffData);
+    if (!bitmap) {
+      throw new Error('无法创建位图表示。');
+    }
+    // JXA selector bridging uses underscores for colons; pass an empty NSDictionary
+    // Pass nil (null) properties to use defaults
+    pngData = bitmap.representationUsingType_properties($.NSBitmapImageFileTypePNG, null);
+    if (!pngData) {
+      throw new Error('PNG 转换失败。');
+    }
+  }
+
+  // Ensure directory exists
+  const fm = $.NSFileManager.defaultManager;
+  const outDir = ObjC.unwrap(outPath).substring(0, ObjC.unwrap(outPath).lastIndexOf('/'));
+  fm.createDirectoryAtPathWithIntermediateDirectoriesAttributesError($(outDir), true, null, null);
+
+  const ok = pngData.writeToFile_atomically($(outPath), true);
+  if (!ok) {
+    throw new Error('写入文件失败：' + outPath);
+  }
+  return 'Saved AppIcon PNG -> ' + outPath;
+}

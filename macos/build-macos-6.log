@@ -1,0 +1,216 @@
+Command line invocation:
+    /Users/macbookpro/Desktop/Xcode-beta.app/Contents/Developer/usr/bin/xcodebuild -project macos/SkyBridgeCompassApp/AppHost/SkyBridgeCompassHost.xcodeproj -scheme SkyBridgeCompassHost -configuration Debug -derivedDataPath ./DerivedData build
+
+2025-10-09 17:17:11.397 xcodebuild[37357:1992222] [MT] IDERunDestination: Supported platforms for the buildables in the current scheme is empty.
+--- xcodebuild: WARNING: Using the first of multiple matching destinations:
+{ platform:macOS, arch:arm64, id:00006001-0018198436FA401E, name:My Mac }
+{ platform:macOS, arch:x86_64, id:00006001-0018198436FA401E, name:My Mac }
+{ platform:macOS, name:Any Mac }
+ComputePackagePrebuildTargetDependencyGraph
+
+Prepare packages
+
+CreateBuildRequest
+
+SendProjectDescription
+
+CreateBuildOperation
+
+ComputeTargetDependencyGraph
+note: Building targets in dependency order
+note: Target dependency graph (1 target)
+    Target 'SkyBridgeCompassHost' in project 'SkyBridgeCompassHost' (no dependencies)
+
+GatherProvisioningInputs
+
+CreateBuildDescription
+
+ExecuteExternalTool /Users/macbookpro/Desktop/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang -v -E -dM -isysroot /Users/macbookpro/Desktop/Xcode-beta.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.1.sdk -x c -c /dev/null
+
+ExecuteExternalTool /Users/macbookpro/Desktop/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc --version
+
+ExecuteExternalTool /Users/macbookpro/Desktop/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/ld -version_details
+
+Build description signature: 559edd3c2e34c0b4e2a2bd771ad0aee0
+Build description path: /Users/macbookpro/Skybridge-Compass-2/DerivedData/Build/Intermediates.noindex/XCBuildData/559edd3c2e34c0b4e2a2bd771ad0aee0.xcbuilddata
+ClangStatCache /Users/macbookpro/Desktop/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang-stat-cache /Users/macbookpro/Desktop/Xcode-beta.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.1.sdk /Users/macbookpro/Skybridge-Compass-2/DerivedData/SDKStatCaches.noindex/macosx26.1-25B5057c-1ea2d9abd1b1969a29b756263880570f.sdkstatcache
+    cd /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/AppHost/SkyBridgeCompassHost.xcodeproj
+    /Users/macbookpro/Desktop/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang-stat-cache /Users/macbookpro/Desktop/Xcode-beta.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.1.sdk -o /Users/macbookpro/Skybridge-Compass-2/DerivedData/SDKStatCaches.noindex/macosx26.1-25B5057c-1ea2d9abd1b1969a29b756263880570f.sdkstatcache
+
+ProcessInfoPlistFile /Users/macbookpro/Skybridge-Compass-2/DerivedData/Build/Products/Debug/SkyBridgeCompassHost.app/Contents/Info.plist /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/AppHost/Info.plist (in target 'SkyBridgeCompassHost' from project 'SkyBridgeCompassHost')
+    cd /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/AppHost
+    builtin-infoPlistUtility /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/AppHost/Info.plist -producttype com.apple.product-type.application -genpkginfo /Users/macbookpro/Skybridge-Compass-2/DerivedData/Build/Products/Debug/SkyBridgeCompassHost.app/Contents/PkgInfo -expandbuildsettings -platform macosx -o /Users/macbookpro/Skybridge-Compass-2/DerivedData/Build/Products/Debug/SkyBridgeCompassHost.app/Contents/Info.plist
+
+SwiftDriver SkyBridgeCompassHost normal arm64 com.apple.xcode.tools.swift.compiler (in target 'SkyBridgeCompassHost' from project 'SkyBridgeCompassHost')
+    cd /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/AppHost
+    builtin-SwiftDriver -- /Users/macbookpro/Desktop/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc -module-name SkyBridgeCompassHost -O -enforce-exclusivity\=checked @/Users/macbookpro/Skybridge-Compass-2/DerivedData/Build/Intermediates.noindex/SkyBridgeCompassHost.build/Debug/SkyBridgeCompassHost.build/Objects-normal/arm64/SkyBridgeCompassHost.SwiftFileList -parse-as-library -enable-experimental-feature DebugDescriptionMacro -sdk /Users/macbookpro/Desktop/Xcode-beta.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.1.sdk -target arm64-apple-macos14.0 -g -module-cache-path /Users/macbookpro/Skybridge-Compass-2/DerivedData/ModuleCache.noindex -Xfrontend -serialize-debugging-options -swift-version 6 -I /Users/macbookpro/Skybridge-Compass-2/DerivedData/Build/Products/Debug -F /Users/macbookpro/Skybridge-Compass-2/DerivedData/Build/Products/Debug -c -j10 -enable-batch-mode -incremental -Xcc -ivfsstatcache -Xcc /Users/macbookpro/Skybridge-Compass-2/DerivedData/SDKStatCaches.noindex/macosx26.1-25B5057c-1ea2d9abd1b1969a29b756263880570f.sdkstatcache -output-file-map /Users/macbookpro/Skybridge-Compass-2/DerivedData/Build/Intermediates.noindex/SkyBridgeCompassHost.build/Debug/SkyBridgeCompassHost.build/Objects-normal/arm64/SkyBridgeCompassHost-OutputFileMap.json -use-frontend-parseable-output -save-temps -no-color-diagnostics -explicit-module-build -module-cache-path /Users/macbookpro/Skybridge-Compass-2/DerivedData/Build/Intermediates.noindex/SwiftExplicitPrecompiledModules -clang-scanner-module-cache-path /Users/macbookpro/Skybridge-Compass-2/DerivedData/ModuleCache.noindex -sdk-module-cache-path /Users/macbookpro/Skybridge-Compass-2/DerivedData/ModuleCache.noindex -serialize-diagnostics -emit-dependencies -emit-module -emit-module-path /Users/macbookpro/Skybridge-Compass-2/DerivedData/Build/Intermediates.noindex/SkyBridgeCompassHost.build/Debug/SkyBridgeCompassHost.build/Objects-normal/arm64/SkyBridgeCompassHost.swiftmodule -validate-clang-modules-once -clang-build-session-file /Users/macbookpro/Skybridge-Compass-2/DerivedData/ModuleCache.noindex/Session.modulevalidation -Xcc -I/Users/macbookpro/Skybridge-Compass-2/DerivedData/Build/Intermediates.noindex/SkyBridgeCompassHost.build/Debug/SkyBridgeCompassHost.build/swift-overrides.hmap -emit-const-values -Xfrontend -const-gather-protocols-file -Xfrontend /Users/macbookpro/Skybridge-Compass-2/DerivedData/Build/Intermediates.noindex/SkyBridgeCompassHost.build/Debug/SkyBridgeCompassHost.build/Objects-normal/arm64/SkyBridgeCompassHost_const_extract_protocols.json -Xcc -iquote -Xcc /Users/macbookpro/Skybridge-Compass-2/DerivedData/Build/Intermediates.noindex/SkyBridgeCompassHost.build/Debug/SkyBridgeCompassHost.build/SkyBridgeCompassHost-generated-files.hmap -Xcc -I/Users/macbookpro/Skybridge-Compass-2/DerivedData/Build/Intermediates.noindex/SkyBridgeCompassHost.build/Debug/SkyBridgeCompassHost.build/SkyBridgeCompassHost-own-target-headers.hmap -Xcc -I/Users/macbookpro/Skybridge-Compass-2/DerivedData/Build/Intermediates.noindex/SkyBridgeCompassHost.build/Debug/SkyBridgeCompassHost.build/SkyBridgeCompassHost-all-target-headers.hmap -Xcc -iquote -Xcc /Users/macbookpro/Skybridge-Compass-2/DerivedData/Build/Intermediates.noindex/SkyBridgeCompassHost.build/Debug/SkyBridgeCompassHost.build/SkyBridgeCompassHost-project-headers.hmap -Xcc -I/Users/macbookpro/Skybridge-Compass-2/DerivedData/Build/Products/Debug/include -Xcc -I/Users/macbookpro/Skybridge-Compass-2/DerivedData/Build/Intermediates.noindex/SkyBridgeCompassHost.build/Debug/SkyBridgeCompassHost.build/DerivedSources-normal/arm64 -Xcc -I/Users/macbookpro/Skybridge-Compass-2/DerivedData/Build/Intermediates.noindex/SkyBridgeCompassHost.build/Debug/SkyBridgeCompassHost.build/DerivedSources/arm64 -Xcc -I/Users/macbookpro/Skybridge-Compass-2/DerivedData/Build/Intermediates.noindex/SkyBridgeCompassHost.build/Debug/SkyBridgeCompassHost.build/DerivedSources -emit-objc-header -emit-objc-header-path /Users/macbookpro/Skybridge-Compass-2/DerivedData/Build/Intermediates.noindex/SkyBridgeCompassHost.build/Debug/SkyBridgeCompassHost.build/Objects-normal/arm64/SkyBridgeCompassHost-Swift.h -working-directory /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/AppHost -experimental-emit-module-separately -disable-cmo
+
+SwiftCompile normal arm64 Compiling\ BackgroundTaskCoordinator.swift,\ DeviceDiscoveryService.swift /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/BackgroundTaskCoordinator.swift /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/DeviceDiscoveryService.swift (in target 'SkyBridgeCompassHost' from project 'SkyBridgeCompassHost')
+
+SwiftCompile normal arm64 /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/BackgroundTaskCoordinator.swift (in target 'SkyBridgeCompassHost' from project 'SkyBridgeCompassHost')
+    cd /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/AppHost
+    
+
+SwiftCompile normal arm64 /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/DeviceDiscoveryService.swift (in target 'SkyBridgeCompassHost' from project 'SkyBridgeCompassHost')
+    cd /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/AppHost
+    
+
+SwiftCompile normal arm64 Compiling\ RemoteFrameRenderer.swift /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteFrameRenderer.swift (in target 'SkyBridgeCompassHost' from project 'SkyBridgeCompassHost')
+
+SwiftCompile normal arm64 /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteFrameRenderer.swift (in target 'SkyBridgeCompassHost' from project 'SkyBridgeCompassHost')
+    cd /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/AppHost
+    
+
+SwiftCompile normal arm64 Compiling\ DashboardViewModel.swift,\ AuthenticationView.swift /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCompassApp/DashboardViewModel.swift /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCompassApp/AuthenticationView.swift (in target 'SkyBridgeCompassHost' from project 'SkyBridgeCompassHost')
+
+SwiftCompile normal arm64 /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCompassApp/DashboardViewModel.swift (in target 'SkyBridgeCompassHost' from project 'SkyBridgeCompassHost')
+    cd /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/AppHost
+    
+
+SwiftCompile normal arm64 /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCompassApp/AuthenticationView.swift (in target 'SkyBridgeCompassHost' from project 'SkyBridgeCompassHost')
+    cd /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/AppHost
+    
+
+SwiftEmitModule normal arm64 Emitting\ module\ for\ SkyBridgeCompassHost (in target 'SkyBridgeCompassHost' from project 'SkyBridgeCompassHost')
+
+EmitSwiftModule normal arm64 (in target 'SkyBridgeCompassHost' from project 'SkyBridgeCompassHost')
+    cd /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/AppHost
+    
+
+SwiftCompile normal arm64 Compiling\ SkyBridgeCompassApp.swift,\ DashboardView.swift /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.swift /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCompassApp/DashboardView.swift (in target 'SkyBridgeCompassHost' from project 'SkyBridgeCompassHost')
+
+SwiftCompile normal arm64 /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.swift (in target 'SkyBridgeCompassHost' from project 'SkyBridgeCompassHost')
+    cd /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/AppHost
+    
+
+SwiftCompile normal arm64 /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCompassApp/DashboardView.swift (in target 'SkyBridgeCompassHost' from project 'SkyBridgeCompassHost')
+    cd /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/AppHost
+    
+
+SwiftCompile normal arm64 Compiling\ Models.swift,\ RemoteDesktopManager.swift /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Models.swift /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift (in target 'SkyBridgeCompassHost' from project 'SkyBridgeCompassHost')
+Failed frontend command:
+/Users/macbookpro/Desktop/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swift-frontend -frontend -c /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.swift /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCompassApp/DashboardView.swift /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCompassApp/DashboardViewModel.swift /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCompassApp/AuthenticationView.swift /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCompassApp/AuthenticationViewModel.swift /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCompassApp/SiriIntents.swift /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCompassApp/MissingIconHintView.swift /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/AuthenticationService.swift /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/BackgroundTaskCoordinator.swift /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/DeviceDiscoveryService.swift /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/FileTransferManager.swift /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/IntentBridge.swift -primary-file /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Models.swift -primary-file /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteFrameRenderer.swift /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/TenantAccessController.swift /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCompassApp/OrderedCollectionsFallback.swift -emit-dependencies-path /Users/macbookpro/Skybridge-Compass-2/DerivedData/Build/Intermediates.noindex/SkyBridgeCompassHost.build/Debug/SkyBridgeCompassHost.build/Objects-normal/arm64/Models.d -emit-const-values-path /Users/macbookpro/Skybridge-Compass-2/DerivedData/Build/Intermediates.noindex/SkyBridgeCompassHost.build/Debug/SkyBridgeCompassHost.build/Objects-normal/arm64/Models.swiftconstvalues -emit-reference-dependencies-path /Users/macbookpro/Skybridge-Compass-2/DerivedData/Build/Intermediates.noindex/SkyBridgeCompassHost.build/Debug/SkyBridgeCompassHost.build/Objects-normal/arm64/Models.swiftdeps -serialize-diagnostics-path /Users/macbookpro/Skybridge-Compass-2/DerivedData/Build/Intermediates.noindex/SkyBridgeCompassHost.build/Debug/SkyBridgeCompassHost.build/Objects-normal/arm64/Models.dia -emit-dependencies-path /Users/macbookpro/Skybridge-Compass-2/DerivedData/Build/Intermediates.noindex/SkyBridgeCompassHost.build/Debug/SkyBridgeCompassHost.build/Objects-normal/arm64/RemoteDesktopManager.d -emit-const-values-path /Users/macbookpro/Skybridge-Compass-2/DerivedData/Build/Intermediates.noindex/SkyBridgeCompassHost.build/Debug/SkyBridgeCompassHost.build/Objects-normal/arm64/RemoteDesktopManager.swiftconstvalues -emit-reference-dependencies-path /Users/macbookpro/Skybridge-Compass-2/DerivedData/Build/Intermediates.noindex/SkyBridgeCompassHost.build/Debug/SkyBridgeCompassHost.build/Objects-normal/arm64/RemoteDesktopManager.swiftdeps -serialize-diagnostics-path /Users/macbookpro/Skybridge-Compass-2/DerivedData/Build/Intermediates.noindex/SkyBridgeCompassHost.build/Debug/SkyBridgeCompassHost.build/Objects-normal/arm64/RemoteDesktopManager.dia -target arm64-apple-macos14.0 -module-can-import-version BackgroundTasks 1.0.0 1.0.0 -disable-cross-import-overlay-search -swift-module-cross-import AppIntents /Users/macbookpro/Desktop/Xcode-beta.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/AppIntents.framework/Modules/AppIntents.swiftcrossimport/AppKit.swiftoverlay -swift-module-cross-import AppIntents /Users/macbookpro/Desktop/Xcode-beta.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/AppIntents.framework/Modules/AppIntents.swiftcrossimport/SwiftUI.swiftoverlay -swift-module-cross-import AppIntents /Users/macbookpro/Desktop/Xcode-beta.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/AppIntents.framework/Modules/AppIntents.swiftcrossimport/UIKit.swiftoverlay -swift-module-cross-import AppIntents /Users/macbookpro/Desktop/Xcode-beta.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.1.sdk/System/Library/Frameworks/AppIntents.framework/Modules/AppIntents.swiftcrossimport/AppKit.swiftoverlay -swift-module-cross-import AppIntents /Users/macbookpro/Desktop/Xcode-beta.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.1.sdk/System/Library/Frameworks/AppIntents.framework/Modules/AppIntents.swiftcrossimport/SwiftUI.swiftoverlay -swift-module-cross-import AppIntents /Users/macbookpro/Desktop/Xcode-beta.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.1.sdk/System/Library/Frameworks/AppIntents.framework/Modules/AppIntents.swiftcrossimport/UIKit.swiftoverlay -swift-module-cross-import AuthenticationServices /Users/macbookpro/Desktop/Xcode-beta.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Cryptexes/OS/System/Library/Frameworks/AuthenticationServices.framework/Modules/AuthenticationServices.swiftcrossimport/SwiftUI.swiftoverlay -swift-module-cross-import AuthenticationServices /Users/macbookpro/Desktop/Xcode-beta.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.1.sdk/System/Library/Frameworks/AuthenticationServices.framework/Modules/AuthenticationServices.swiftcrossimport/SwiftUI.swiftoverlay -load-resolved-plugin /Users/macbookpro/Desktop/Xcode-beta.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib/swift/host/plugins/libAppIntentsMacros.dylib\#/Users/macbookpro/Desktop/Xcode-beta.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/bin/swift-plugin-server\#AppIntentsMacros -load-resolved-plugin /Users/macbookpro/Desktop/Xcode-beta.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib/swift/host/plugins/libFoundationMacros.dylib\#/Users/macbookpro/Desktop/Xcode-beta.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/bin/swift-plugin-server\#FoundationMacros -load-resolved-plugin /Users/macbookpro/Desktop/Xcode-beta.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib/swift/host/plugins/libObservationMacros.dylib\#/Users/macbookpro/Desktop/Xcode-beta.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/bin/swift-plugin-server\#ObservationMacros -load-resolved-plugin /Users/macbookpro/Desktop/Xcode-beta.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib/swift/host/plugins/libPreviewsMacros.dylib\#/Users/macbookpro/Desktop/Xcode-beta.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/bin/swift-plugin-server\#PreviewsMacros -load-resolved-plugin /Users/macbookpro/Desktop/Xcode-beta.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib/swift/host/plugins/libSwiftMacros.dylib\#/Users/macbookpro/Desktop/Xcode-beta.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/bin/swift-plugin-server\#SwiftMacros -load-resolved-plugin /Users/macbookpro/Desktop/Xcode-beta.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib/swift/host/plugins/libSwiftUIMacros.dylib\#/Users/macbookpro/Desktop/Xcode-beta.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/bin/swift-plugin-server\#SwiftUIMacros -disable-implicit-swift-modules -Xcc -fno-implicit-modules -Xcc -fno-implicit-module-maps -explicit-swift-module-map-file /Users/macbookpro/Skybridge-Compass-2/DerivedData/Build/Intermediates.noindex/SkyBridgeCompassHost.build/Debug/SkyBridgeCompassHost.build/Objects-normal/arm64/SkyBridgeCompassHost-dependencies-1.json -Xllvm -aarch64-use-tbi -enable-objc-interop -stack-check -sdk /Users/macbookpro/Desktop/Xcode-beta.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.1.sdk -I /Users/macbookpro/Skybridge-Compass-2/DerivedData/Build/Products/Debug -F /Users/macbookpro/Skybridge-Compass-2/DerivedData/Build/Products/Debug -no-color-diagnostics -Xcc -fno-color-diagnostics -g -debug-info-format\=dwarf -dwarf-version\=4 -module-cache-path /Users/macbookpro/Skybridge-Compass-2/DerivedData/Build/Intermediates.noindex/SwiftExplicitPrecompiledModules -swift-version 6 -enforce-exclusivity\=checked -O -serialize-debugging-options -const-gather-protocols-file /Users/macbookpro/Skybridge-Compass-2/DerivedData/Build/Intermediates.noindex/SkyBridgeCompassHost.build/Debug/SkyBridgeCompassHost.build/Objects-normal/arm64/SkyBridgeCompassHost_const_extract_protocols.json -enable-experimental-feature DebugDescriptionMacro -empty-abi-descriptor -validate-clang-modules-once -clang-build-session-file /Users/macbookpro/Skybridge-Compass-2/DerivedData/ModuleCache.noindex/Session.modulevalidation -Xcc -working-directory -Xcc /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/AppHost -file-compilation-dir /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/AppHost -Xcc -ivfsstatcache -Xcc /Users/macbookpro/Skybridge-Compass-2/DerivedData/SDKStatCaches.noindex/macosx26.1-25B5057c-1ea2d9abd1b1969a29b756263880570f.sdkstatcache -Xcc -I/Users/macbookpro/Skybridge-Compass-2/DerivedData/Build/Intermediates.noindex/SkyBridgeCompassHost.build/Debug/SkyBridgeCompassHost.build/swift-overrides.hmap -Xcc -iquote -Xcc /Users/macbookpro/Skybridge-Compass-2/DerivedData/Build/Intermediates.noindex/SkyBridgeCompassHost.build/Debug/SkyBridgeCompassHost.build/SkyBridgeCompassHost-generated-files.hmap -Xcc -I/Users/macbookpro/Skybridge-Compass-2/DerivedData/Build/Intermediates.noindex/SkyBridgeCompassHost.build/Debug/SkyBridgeCompassHost.build/SkyBridgeCompassHost-own-target-headers.hmap -Xcc -I/Users/macbookpro/Skybridge-Compass-2/DerivedData/Build/Intermediates.noindex/SkyBridgeCompassHost.build/Debug/SkyBridgeCompassHost.build/SkyBridgeCompassHost-all-target-headers.hmap -Xcc -iquote -Xcc /Users/macbookpro/Skybridge-Compass-2/DerivedData/Build/Intermediates.noindex/SkyBridgeCompassHost.build/Debug/SkyBridgeCompassHost.build/SkyBridgeCompassHost-project-headers.hmap -Xcc -I/Users/macbookpro/Skybridge-Compass-2/DerivedData/Build/Products/Debug/include -Xcc -I/Users/macbookpro/Skybridge-Compass-2/DerivedData/Build/Intermediates.noindex/SkyBridgeCompassHost.build/Debug/SkyBridgeCompassHost.build/DerivedSources-normal/arm64 -Xcc -I/Users/macbookpro/Skybridge-Compass-2/DerivedData/Build/Intermediates.noindex/SkyBridgeCompassHost.build/Debug/SkyBridgeCompassHost.build/DerivedSources/arm64 -Xcc -I/Users/macbookpro/Skybridge-Compass-2/DerivedData/Build/Intermediates.noindex/SkyBridgeCompassHost.build/Debug/SkyBridgeCompassHost.build/DerivedSources -no-auto-bridging-header-chaining -module-name SkyBridgeCompassHost -frontend-parseable-output -disable-clang-spi -target-sdk-version 26.1 -target-sdk-name macosx26.1 -clang-target arm64-apple-macos26.1 -in-process-plugin-server-path /Users/macbookpro/Desktop/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/libSwiftInProcPluginServer.dylib -parse-as-library -o /Users/macbookpro/Skybridge-Compass-2/DerivedData/Build/Intermediates.noindex/SkyBridgeCompassHost.build/Debug/SkyBridgeCompassHost.build/Objects-normal/arm64/Models.o -o /Users/macbookpro/Skybridge-Compass-2/DerivedData/Build/Intermediates.noindex/SkyBridgeCompassHost.build/Debug/SkyBridgeCompassHost.build/Objects-normal/arm64/RemoteDesktopManager.o -index-unit-output-path /SkyBridgeCompassHost.build/Debug/SkyBridgeCompassHost.build/Objects-normal/arm64/Models.o -index-unit-output-path /SkyBridgeCompassHost.build/Debug/SkyBridgeCompassHost.build/Objects-normal/arm64/RemoteDesktopManager.o
+
+SwiftCompile normal arm64 /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Models.swift (in target 'SkyBridgeCompassHost' from project 'SkyBridgeCompassHost')
+    cd /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/AppHost
+    
+
+SwiftCompile normal arm64 /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift (in target 'SkyBridgeCompassHost' from project 'SkyBridgeCompassHost')
+    cd /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/AppHost
+    
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:76:18: warning: main actor-isolated property 'activeSessions' can not be referenced from a Sendable closure
+            self.activeSessions.values.forEach { $0.stop() }
+                 ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:59:17: note: property declared here
+    private var activeSessions: [UUID: RemoteDesktopSession] = [:]
+                ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:76:53: warning: call to main actor-isolated instance method 'stop()' in a synchronous nonisolated context
+            self.activeSessions.values.forEach { $0.stop() }
+                                                    ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:272:10: note: calls to instance method 'stop()' from outside of its actor context are implicitly asynchronous
+    func stop() {
+         ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:77:18: warning: main actor-isolated property 'activeSessions' can not be mutated from a Sendable closure
+            self.activeSessions.removeAll()
+                 ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:59:17: note: mutation of this property is only permitted within the actor
+    private var activeSessions: [UUID: RemoteDesktopSession] = [:]
+                ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:100:18: warning: main actor-isolated property 'activeSessions' can not be mutated from a Sendable closure
+            self.activeSessions[session.id] = session
+                 ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:59:17: note: mutation of this property is only permitted within the actor
+    private var activeSessions: [UUID: RemoteDesktopSession] = [:]
+                ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:109:22: warning: main actor-isolated property 'activeSessions' can not be mutated from a Sendable closure
+                self.activeSessions.removeValue(forKey: session.id)
+                     ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:59:17: note: mutation of this property is only permitted within the actor
+    private var activeSessions: [UUID: RemoteDesktopSession] = [:]
+                ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:85:31: warning: no 'async' operations occur within 'await' expression
+        let credentials = try await tenantController.credentials(for: tenant.id)
+                              ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:124:45: warning: call to main actor-isolated instance method 'focus()' in a synchronous nonisolated context
+            self.activeSessions[sessionID]?.focus()
+                                            ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:278:10: note: calls to instance method 'focus()' from outside of its actor context are implicitly asynchronous
+    func focus() {
+         ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:124:18: warning: main actor-isolated property 'activeSessions' can not be referenced from a Sendable closure
+            self.activeSessions[sessionID]?.focus()
+                 ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:59:17: note: property declared here
+    private var activeSessions: [UUID: RemoteDesktopSession] = [:]
+                ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:131:39: warning: main actor-isolated property 'activeSessions' can not be mutated from a Sendable closure
+                if let session = self.activeSessions.removeValue(forKey: sessionID) {
+                                      ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:59:17: note: mutation of this property is only permitted within the actor
+    private var activeSessions: [UUID: RemoteDesktopSession] = [:]
+                ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:132:29: warning: call to main actor-isolated instance method 'stop()' in a synchronous nonisolated context
+                    session.stop()
+                            ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:272:10: note: calls to instance method 'stop()' from outside of its actor context are implicitly asynchronous
+    func stop() {
+         ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:171:32: warning: call to main actor-isolated instance method 'fetchCpuLoad()' in a synchronous nonisolated context
+            let cpuLoad = self.fetchCpuLoad()
+                               ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:176:18: note: calls to instance method 'fetchCpuLoad()' from outside of its actor context are implicitly asynchronous
+    private func fetchCpuLoad() -> Double {
+                 ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:172:18: warning: call to main actor-isolated instance method 'refreshMetrics(cpuLoad:)' in a synchronous nonisolated context
+            self.refreshMetrics(cpuLoad: cpuLoad)
+                 ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:148:18: note: calls to instance method 'refreshMetrics(cpuLoad:)' from outside of its actor context are implicitly asynchronous
+    private func refreshMetrics(cpuLoad: Double? = nil) {
+                 ^
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift:292:63: error: cannot convert value of type 'UInt8' to expected argument type 'UInt'
+                    type: RemoteFrameType(rawValue: frameType.rawValue) ?? .bgra
+                                                              ^
+                                                    UInt(             )
+
+SwiftCompile normal arm64 Compiling\ AuthenticationViewModel.swift,\ SiriIntents.swift /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCompassApp/AuthenticationViewModel.swift /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCompassApp/SiriIntents.swift (in target 'SkyBridgeCompassHost' from project 'SkyBridgeCompassHost')
+SwiftCompile normal arm64 /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCompassApp/AuthenticationViewModel.swift (in target 'SkyBridgeCompassHost' from project 'SkyBridgeCompassHost')
+    cd /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/AppHost
+    
+
+SwiftCompile normal arm64 /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCompassApp/SiriIntents.swift (in target 'SkyBridgeCompassHost' from project 'SkyBridgeCompassHost')
+    cd /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/AppHost
+    
+
+SwiftCompile normal arm64 Compiling\ FileTransferManager.swift,\ IntentBridge.swift /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/FileTransferManager.swift /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/IntentBridge.swift (in target 'SkyBridgeCompassHost' from project 'SkyBridgeCompassHost')
+
+SwiftCompile normal arm64 /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/FileTransferManager.swift (in target 'SkyBridgeCompassHost' from project 'SkyBridgeCompassHost')
+    cd /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/AppHost
+    
+
+SwiftCompile normal arm64 /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/IntentBridge.swift (in target 'SkyBridgeCompassHost' from project 'SkyBridgeCompassHost')
+    cd /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/AppHost
+    
+
+SwiftCompile normal arm64 Compiling\ OrderedCollectionsFallback.swift /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCompassApp/OrderedCollectionsFallback.swift (in target 'SkyBridgeCompassHost' from project 'SkyBridgeCompassHost')
+
+SwiftCompile normal arm64 /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCompassApp/OrderedCollectionsFallback.swift (in target 'SkyBridgeCompassHost' from project 'SkyBridgeCompassHost')
+    cd /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/AppHost
+    
+
+SwiftCompile normal arm64 Compiling\ TenantAccessController.swift /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/TenantAccessController.swift (in target 'SkyBridgeCompassHost' from project 'SkyBridgeCompassHost')
+
+SwiftCompile normal arm64 /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/TenantAccessController.swift (in target 'SkyBridgeCompassHost' from project 'SkyBridgeCompassHost')
+    cd /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/AppHost
+    
+
+SwiftCompile normal arm64 Compiling\ MissingIconHintView.swift,\ AuthenticationService.swift /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCompassApp/MissingIconHintView.swift /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/AuthenticationService.swift (in target 'SkyBridgeCompassHost' from project 'SkyBridgeCompassHost')
+
+warning: Traditional headermap style is no longer supported; please migrate to using separate headermaps and set 'ALWAYS_SEARCH_USER_PATHS' to NO. (in target 'SkyBridgeCompassHost' from project 'SkyBridgeCompassHost')
+** BUILD FAILED **
+
+
+The following build commands failed:
+	SwiftCompile normal arm64 Compiling\ Models.swift,\ RemoteDesktopManager.swift /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/Models.swift /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift (in target 'SkyBridgeCompassHost' from project 'SkyBridgeCompassHost')
+	SwiftCompile normal arm64 /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Sources/SkyBridgeCore/RemoteDesktopManager.swift (in target 'SkyBridgeCompassHost' from project 'SkyBridgeCompassHost')
+	Building project SkyBridgeCompassHost with scheme SkyBridgeCompassHost and configuration Debug
+(3 failures)

@@ -1,0 +1,39 @@
+warning: 'starscream': found 1 file(s) which are unhandled; explicitly declare them as resources or exclude from the target
+    /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/checkouts/Starscream/Sources/Info.plist
+[0/1] Planning build
+Building for debugging...
+[0/5] /Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/.build/arm64-apple-macosx/debug/SkyBridgeCompassAppPackageTests.derived/runner.swift
+[1/10] Write sources
+[3/10] Write swift-version-41C403C3136A4E2D.txt
+[5/8] Emitting module SkyBridgeCoreTests
+[6/8] Compiling SkyBridgeCoreTests PerformanceTestSuiteTests.swift
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Tests/SkyBridgeCoreTests/PerformanceTestSuiteTests.swift:80:13: error: passing closure as a 'sending' parameter risks causing data races between code in the current task and concurrent execution of the closure
+ 78 |             let expectation = XCTestExpectation(description: "CPU密集型任务完成")
+ 79 |             
+ 80 |             Task {
+    |             `- error: passing closure as a 'sending' parameter risks causing data races between code in the current task and concurrent execution of the closure
+ 81 |                 let results = await testSuite.runFullTestSuite()
+    |                                     `- note: closure captures 'self' which is accessible to code in the current task
+ 82 |                 if let cpuTest = results.cpuIntensiveTest {
+ 83 |                     XCTAssertTrue(cpuTest.success, "CPU密集型任务应该成功执行")
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Tests/SkyBridgeCoreTests/PerformanceTestSuiteTests.swift:98:13: error: passing closure as a 'sending' parameter risks causing data races between code in the current task and concurrent execution of the closure
+ 96 |             let expectation = XCTestExpectation(description: "并行计算完成")
+ 97 |             
+ 98 |             Task {
+    |             `- error: passing closure as a 'sending' parameter risks causing data races between code in the current task and concurrent execution of the closure
+ 99 |                 let results = await testSuite.runFullTestSuite()
+    |                                     `- note: closure captures 'self' which is accessible to code in the current task
+100 |                 if let parallelTest = results.parallelComputeTest {
+101 |                     XCTAssertTrue(parallelTest.success, "并行计算应该成功执行")
+
+/Users/macbookpro/Skybridge-Compass-2/macos/SkyBridgeCompassApp/Tests/SkyBridgeCoreTests/PerformanceTestSuiteTests.swift:116:13: error: passing closure as a 'sending' parameter risks causing data races between code in the current task and concurrent execution of the closure
+114 |             let expectation = XCTestExpectation(description: "内存优化测试完成")
+115 |             
+116 |             Task {
+    |             `- error: passing closure as a 'sending' parameter risks causing data races between code in the current task and concurrent execution of the closure
+117 |                 let results = await testSuite.runFullTestSuite()
+    |                                     `- note: closure captures 'self' which is accessible to code in the current task
+118 |                 if let memoryTest = results.memoryOptimizationTest {
+119 |                     XCTAssertTrue(memoryTest.success, "内存优化应该成功执行")
+error: fatalError

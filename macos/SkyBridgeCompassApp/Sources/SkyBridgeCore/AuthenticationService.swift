@@ -3,7 +3,7 @@ import Combine
 import Security
 
 /// 负责处理所有 SkyBridge 账户登录、注册与会话持久化逻辑的核心服务。
-public final class AuthenticationService {
+@MainActor public final class AuthenticationService {
     /// 登录配置，必须使用真实环境的接口地址。
     public struct Configuration: Sendable {
         public let appleEndpoint: URL
@@ -65,7 +65,6 @@ public final class AuthenticationService {
     private let urlSession: URLSession
     private let keychainService = "com.skybridge.compass.authsession"
     private let keychainAccount = "primary"
-    private let queue = DispatchQueue(label: "com.skybridge.compass.auth", attributes: .concurrent)
 
     private var configuration: Configuration?
 
@@ -81,9 +80,8 @@ public final class AuthenticationService {
 
     /// 使用真实的配置覆盖默认设置，通常在应用启动阶段调用。
     public func updateConfiguration(_ configuration: Configuration) {
-        queue.async(flags: .barrier) {
-            self.configuration = configuration
-        }
+        // @MainActor 类中直接赋值，避免跨 actor 的并发闭包警告
+        self.configuration = configuration
     }
 
     /// 将 Sign in with Apple 返回的身份凭据交给后端换取 SkyBridge 会话。
@@ -126,15 +124,14 @@ public final class AuthenticationService {
 
     /// 主动注销并清除钥匙串中的会话信息。
     public func signOut() {
-        queue.async(flags: .barrier) {
-            self.sessionSubject.send(nil)
-            let query: [String: Any] = [
-                kSecClass as String: kSecClassGenericPassword,
-                kSecAttrService as String: self.keychainService,
-                kSecAttrAccount as String: self.keychainAccount
-            ]
-            SecItemDelete(query as CFDictionary)
-        }
+        // 在主 actor 上清理状态并删除钥匙串项
+        self.sessionSubject.send(nil)
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: self.keychainService,
+            kSecAttrAccount as String: self.keychainAccount
+        ]
+        SecItemDelete(query as CFDictionary)
     }
 
     private func performRequest<P: Encodable>(endpoint: URL?, payload: P) async throws -> AuthSession {
