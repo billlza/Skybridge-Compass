@@ -1,0 +1,410 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 222.2 84% 4.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 222.2 84% 4.9%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 222.2 84% 4.9%;
+    --primary: 221.2 83.2% 53.3%;
+    --primary-foreground: 210 40% 98%;
+    --secondary: 210 40% 96%;
+    --secondary-foreground: 222.2 84% 4.9%;
+    --muted: 210 40% 96%;
+    --muted-foreground: 215.4 16.3% 46.9%;
+    --accent: 210 40% 96%;
+    --accent-foreground: 222.2 84% 4.9%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 214.3 31.8% 91.4%;
+    --input: 214.3 31.8% 91.4%;
+    --ring: 221.2 83.2% 53.3%;
+    --radius: 0.5rem;
+  }
+
+  .dark {
+    --background: 2 6 23;
+    --foreground: 210 40% 98%;
+    --card: 15 23 42;
+    --card-foreground: 210 40% 98%;
+    --popover: 15 23 42;
+    --popover-foreground: 210 40% 98%;
+    --primary: 217.2 91.2% 59.8%;
+    --primary-foreground: 222.2 84% 4.9%;
+    --secondary: 30 41 59;
+    --secondary-foreground: 210 40% 98%;
+    --muted: 30 41 59;
+    --muted-foreground: 215 20.2% 65.1%;
+    --accent: 30 41 59;
+    --accent-foreground: 210 40% 98%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 30 41 59;
+    --input: 30 41 59;
+    --ring: 224.3 76.3% 94.1%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  
+  body {
+    @apply bg-background text-foreground;
+    font-feature-settings: "rlig" 1, "calt" 1;
+    font-family: 
+      /* 现代系统字体 */
+      -apple-system, BlinkMacSystemFont,
+      /* Windows */
+      "Segoe UI",
+      /* Android */
+      Roboto,
+      /* Ubuntu */
+      "Ubuntu", "Cantarell",
+      /* 通用无衬线字体 */
+      "Helvetica Neue", Arial, sans-serif,
+      /* Emoji 支持 */
+      "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
+    
+    /* 字体渲染优化 */
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+  
+  /* 确保主内容区域可见 */
+  main {
+    min-height: 100vh;
+    background-color: rgb(2 6 23) !important;
+  }
+  
+  /* 修复可能的透明度问题 */
+  .bg-slate-950 {
+    background-color: rgb(2 6 23) !important;
+  }
+  
+  .bg-slate-900 {
+    background-color: rgb(15 23 42) !important;
+  }
+  
+  .bg-slate-800 {
+    background-color: rgb(30 41 59) !important;
+  }
+  
+  /* 自定义滚动条样式 */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  
+  ::-webkit-scrollbar-track {
+    @apply bg-muted;
+  }
+  
+  ::-webkit-scrollbar-thumb {
+    @apply bg-muted-foreground/30 rounded-full;
+  }
+  
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-muted-foreground/50;
+  }
+}
+
+/* Apple 2025 液态玻璃效果动画 */
+@keyframes liquid-float {
+  0%, 100% {
+    transform: translateY(0px) rotate(0deg);
+    opacity: 0.6;
+  }
+  50% {
+    transform: translateY(-10px) rotate(180deg);
+    opacity: 0.8;
+  }
+}
+
+@keyframes liquid-pulse {
+  0%, 100% {
+    transform: scale(1);
+    opacity: 0.4;
+  }
+  50% {
+    transform: scale(1.05);
+    opacity: 0.6;
+  }
+}
+
+@keyframes liquid-shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+@keyframes liquid-glow {
+  0%, 100% {
+    box-shadow: 0 0 20px rgba(59, 130, 246, 0.3);
+  }
+  50% {
+    box-shadow: 0 0 30px rgba(59, 130, 246, 0.5), 0 0 40px rgba(34, 211, 238, 0.3);
+  }
+}
+
+@keyframes liquid-ripple {
+  0% {
+    transform: scale(0);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(4);
+    opacity: 0;
+  }
+}
+
+@layer components {
+  /* 液态玻璃效果组件 */
+  .liquid-glass {
+    background: rgba(255, 255, 255, 0.08);
+    backdrop-filter: blur(20px) saturate(180%);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    position: relative;
+    overflow: hidden;
+  }
+  
+  .liquid-glass::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(135deg, 
+      rgba(59, 130, 246, 0.08) 0%, 
+      rgba(147, 51, 234, 0.06) 35%, 
+      rgba(34, 211, 238, 0.08) 100%);
+    opacity: 0.8;
+    animation: liquid-pulse 4s ease-in-out infinite;
+  }
+  
+  .liquid-glass::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(180deg, 
+      rgba(255, 255, 255, 0.05) 0%, 
+      transparent 50%, 
+      rgba(0, 0, 0, 0.05) 100%);
+  }
+  
+  /* 动态光影效果 */
+  .liquid-shimmer {
+    position: relative;
+    overflow: hidden;
+  }
+  
+  .liquid-shimmer::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: -100%;
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(90deg, 
+      transparent, 
+      rgba(255, 255, 255, 0.1), 
+      transparent);
+    animation: liquid-shimmer 3s ease-in-out infinite;
+  }
+  
+  /* 浮动粒子效果 */
+  .liquid-particles {
+    position: relative;
+  }
+  
+  .liquid-particles::before,
+  .liquid-particles::after {
+    content: '';
+    position: absolute;
+    width: 4px;
+    height: 4px;
+    background: radial-gradient(circle, rgba(59, 130, 246, 0.6) 0%, transparent 70%);
+    border-radius: 50%;
+    animation: liquid-float 6s ease-in-out infinite;
+  }
+  
+  .liquid-particles::before {
+    top: 20%;
+    left: 15%;
+    animation-delay: -2s;
+  }
+  
+  .liquid-particles::after {
+    top: 60%;
+    right: 20%;
+    animation-delay: -4s;
+    background: radial-gradient(circle, rgba(34, 211, 238, 0.6) 0%, transparent 70%);
+  }
+  
+  /* 激活状态的液态效果 */
+  .liquid-active {
+    animation: liquid-glow 2s ease-in-out infinite;
+    position: relative;
+  }
+  
+  .liquid-active::before {
+    content: '';
+    position: absolute;
+    inset: -2px;
+    background: linear-gradient(45deg, 
+      rgba(59, 130, 246, 0.3), 
+      rgba(34, 211, 238, 0.3), 
+      rgba(59, 130, 246, 0.3));
+    border-radius: inherit;
+    z-index: -1;
+    filter: blur(8px);
+    animation: liquid-pulse 2s ease-in-out infinite;
+  }
+  
+  /* 涟漪效果 */
+  .liquid-ripple {
+    position: relative;
+    overflow: hidden;
+  }
+  
+  .liquid-ripple::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 0;
+    height: 0;
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(255, 255, 255, 0.3) 0%, transparent 70%);
+    transform: translate(-50%, -50%);
+    animation: liquid-ripple 1.5s ease-out;
+    pointer-events: none;
+  }
+  
+  /* 加载动画组件 */
+  .loading-spinner {
+    @apply inline-block w-6 h-6 border-2 border-current border-t-transparent rounded-full animate-spin;
+  }
+  
+  .loading-dots {
+    @apply flex space-x-1;
+  }
+  
+  .loading-dots > div {
+    @apply w-2 h-2 bg-current rounded-full animate-pulse;
+    animation-delay: calc(var(--i) * 0.1s);
+  }
+  
+  /* 卡片组件 */
+  .card {
+    @apply rounded-lg border bg-card text-card-foreground shadow-sm;
+  }
+  
+  .card-header {
+    @apply flex flex-col space-y-1.5 p-6;
+  }
+  
+  .card-title {
+    @apply text-2xl font-semibold leading-none tracking-tight;
+  }
+  
+  .card-description {
+    @apply text-sm text-muted-foreground;
+  }
+  
+  .card-content {
+    @apply p-6 pt-0;
+  }
+  
+  .card-footer {
+    @apply flex items-center p-6 pt-0;
+  }
+  
+  /* 按钮组件 */
+  .btn {
+    @apply inline-flex items-center justify-center rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50 disabled:pointer-events-none ring-offset-background;
+  }
+  
+  .btn-primary {
+    @apply bg-primary text-primary-foreground hover:bg-primary/90;
+  }
+  
+  .btn-secondary {
+    @apply bg-secondary text-secondary-foreground hover:bg-secondary/80;
+  }
+  
+  .btn-ghost {
+    @apply hover:bg-accent hover:text-accent-foreground;
+  }
+  
+  .btn-link {
+    @apply underline-offset-4 hover:underline text-primary;
+  }
+  
+  .btn-sm {
+    @apply h-9 px-3 rounded-md;
+  }
+  
+  .btn-lg {
+    @apply h-11 px-8 rounded-md;
+  }
+  
+  /* 输入框组件 */
+  .input {
+    @apply flex h-10 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50;
+  }
+  
+  /* 标签组件 */
+  .label {
+    @apply text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70;
+  }
+}
+
+@layer utilities {
+  /* 玻璃态效果 */
+  .glass {
+    @apply backdrop-blur-md bg-white/10 border border-white/20;
+  }
+  
+  .glass-dark {
+    @apply backdrop-blur-md bg-black/10 border border-white/10;
+  }
+  
+  /* 渐变背景 */
+  .gradient-bg {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  }
+  
+  .gradient-text {
+    @apply bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent;
+  }
+  
+  /* 动画工具类 */
+  .animate-fade-in {
+    animation: fade-in 0.5s ease-out;
+  }
+  
+  .animate-slide-up {
+    animation: slide-in-from-bottom 0.3s ease-out;
+  }
+  
+  .animate-slide-down {
+    animation: slide-in-from-top 0.3s ease-out;
+  }
+  
+  .animate-slide-left {
+    animation: slide-in-from-right 0.3s ease-out;
+  }
+  
+  .animate-slide-right {
+    animation: slide-in-from-left 0.3s ease-out;
+  }
+}
