@@ -1,18 +1,14 @@
-# SkyBridge Compass Pro
+# SkyBridge Compass Pro（iOS 客户端）
 
-SkyBridge Compass Pro 是一个跨平台设备管理和远程控制解决方案，支持 macOS、iOS、Android、Windows 和 Linux 设备之间的无缝连接和协作。
+本仓库聚焦 iPhone 端的 SkyBridge Compass Pro 客户端，实现与 mac 版本一致的星空视觉、量子安全协议和跨设备控制体验。若需完整的交互与技术路线，请查阅 [IOS_CLIENT_DESIGN.md](IOS_CLIENT_DESIGN.md)。
 
-## 项目结构
+## 仓库结构
 
 ```
 SkyBridge Compass Pro/
-├── SkyBridge Compass Pro/          # macOS 主应用
-│   ├── SkyBridge_Compass_Pro.swift # 应用入口
-│   ├── ContentView.swift           # 主界面
-│   ├── P2PDiscoveryService.swift   # P2P 设备发现服务
-│   ├── P2PModels.swift            # 数据模型
-│   └── ...
-├── web-dashboard/                  # Web 仪表板
+├── IOS_CLIENT_DESIGN.md            # iOS 客户端完整设计稿
+├── README.md
+└── web-dashboard/                  # Web 仪表板（共享的远程监控界面）
 │   ├── src/
 │   │   ├── components/            # React 组件
 │   │   ├── services/              # 服务层
@@ -23,19 +19,41 @@ SkyBridge Compass Pro/
 └── README.md
 ```
 
-## 功能特性
+## iOS 客户端蓝图
 
-### macOS 应用
-- 🔍 **设备发现**: 基于 Bonjour/mDNS 的本地网络设备自动发现
-- 🔐 **安全连接**: TLS 1.3 加密，证书固定，设备认证
-- 🌐 **NAT 穿透**: STUN 服务器支持，智能 NAT 类型检测
-- 📱 **多平台支持**: 支持 macOS、iOS、iPadOS、Android、Windows、Linux
+### 设计与交互
+- 🌌 **星空背景 + Liquid Glass**：SwiftUI 4 + Swift 6.2.1，17–18 上使用 `.ultraThinMaterial`，iOS 26 自动切换官方 Liquid Glass。
+- 🧭 **底部导向导航**：浮动 TabBar、顶部状态行与底部玻璃操作台，保证单手操作和安全区适配。
+- 🪟 **模块化玻璃组件**：`SkyBridgeDesignSystem` 中提供 `GlassCard`、`GlassPanel`、`GlassBottomSheet` 等复用组件。
 
-### Web 仪表板
-- 🎛️ **设备管理**: 统一的设备监控和管理界面
-- 🔍 **设备发现**: 集成的设备发现功能，支持多种发现方式
-- 📊 **实时监控**: 设备状态、系统资源、连接统计
-- 🎨 **现代 UI**: 基于 React + Next.js + Tailwind CSS
+### 技术模块
+- 🧩 **共享 Swift Packages**：`SkyBridgeCore`（会话/传输）、`DeviceDiscoveryKit`（发现）、`RemoteDesktopKit`（视频流）、`QuantumSecurityKit`（PQC）、`SettingsKit`（配置）、`SkyBridgeWidgets`（Widget/Live Activity）。
+- ⚙️ **并发与网络**：async/await、AsyncSequence、Bonjour + 自研发现算法、P2P/中继自动切换。
+- 🔒 **量子安全**：iOS 26 优先 CryptoKit PQC + Secure Enclave；iOS 17–18 使用 `QuantumSecurityKit` 并清晰标注“软件实现/实验性”。
+
+### 迭代阶段
+1. **阶段 0**：项目初始化、Target/Package 划分、Design System 搭建。
+2. **阶段 1**：导航骨架、星空背景、底部 Liquid Glass 骨架。
+3. **阶段 2**：主控台与天气卡片（wttr.in + AQI 数据源）。
+4. **阶段 3**：设备发现列表、底部连接 Sheet。
+5. **阶段 4**：文件传输与远程桌面入口卡片。
+6. **阶段 5**：高级设置面板（性能、网络实验、量子安全、重置）。
+
+### Widget / Live Activity
+- 🏠 **主屏/锁屏 Widget**：快速连接、系统状态、性能模式切换。
+- 🎛️ **交互式 Widget（iOS 17/18）**：AppIntent + Toggle/Buttons 控制 PQC、性能模式。
+- 🕳️ **Dynamic Island & Live Activities**：远程会话、文件传输、量子安全状态三大场景，提供紧凑/展开布局与操作按钮。
+
+### 兼容策略
+- `@available(iOS 26, *)` 包裹 Liquid Glass 与系统 PQC 代码，低版本 fallback。
+- 17/18 降级模糊层级，保障性能；26 充分使用 GPU 优化过的材质。
+- Widget 能力按系统分层：17（互动主屏）、18（控制组件）、26（色彩/tint 自定义）。
+
+## Web 仪表板
+- 🎛️ **设备管理**: 统一监控与控制入口
+- 🔍 **设备发现**: 浏览器侧的 WebRTC/Bonjour 混合策略
+- 📊 **实时监控**: 设备状态、会话指标、量子安全状态
+- 🎨 **现代 UI**: React + Next.js + Tailwind CSS
 
 ## 技术架构
 
@@ -53,11 +71,6 @@ SkyBridge Compass Pro/
 
 ## 快速开始
 
-### macOS 应用
-1. 使用 Xcode 打开项目
-2. 选择目标设备或模拟器
-3. 点击运行按钮
-
 ### Web 仪表板
 ```bash
 cd web-dashboard
@@ -69,9 +82,9 @@ npm run dev
 
 ## 开发环境
 
-- **macOS**: Xcode 15+, Swift 5.9+
-- **Web**: Node.js 18+, React 18+, Next.js 14+
-- **工具**: Git, npm/yarn
+- **iOS**: Xcode 26（目标），Swift 6.2.1，SwiftUI 4，ActivityKit/WidgetKit。
+- **Web**: Node.js 18+, React 18+, Next.js 14+, Tailwind CSS。
+- **工具**: Git、npm/yarn、AppIntents/ActivityKit CLI。
 
 ## 贡献指南
 
