@@ -8,15 +8,26 @@
 SkyBridge Compass Pro/
 ├── IOS_CLIENT_DESIGN.md            # iOS 客户端完整设计稿
 ├── README.md
+├── ios-app/                        # SwiftUI iOS App 包结构
+│   ├── Package.swift               # SwiftPM + .iOSApplication
+│   ├── Info.plist                  # 权限与场景描述
+│   └── Sources/
+│       ├── SkybridgeCompassApp/    # App 入口、RootView、Tabs、资源
+│       ├── SkyBridgeDesignSystem/  # Liquid Glass、GlassCard、背景
+│       ├── SkyBridgeCore/          # App 状态、天气/网络/会话模型
+│       ├── DeviceDiscoveryKit/     # 设备模型
+│       ├── RemoteDesktopKit/       # 会话 / 传输任务模型
+│       ├── QuantumSecurityKit/     # PQC 状态模型
+│       ├── SettingsKit/            # 性能 & 网络配置
+│       └── SkyBridgeWidgets/       # Widget 数据占位
 └── web-dashboard/                  # Web 仪表板（共享的远程监控界面）
-│   ├── src/
-│   │   ├── components/            # React 组件
-│   │   ├── services/              # 服务层
-│   │   ├── hooks/                 # React Hooks
-│   │   └── ...
-│   ├── package.json
-│   └── ...
-└── README.md
+    ├── src/
+    │   ├── components/            # React 组件
+    │   ├── services/              # 服务层
+    │   ├── hooks/                 # React Hooks
+    │   └── ...
+    ├── package.json
+    └── ...
 ```
 
 ## iOS 客户端蓝图
@@ -70,6 +81,14 @@ SkyBridge Compass Pro/
 - **连接安全**: 安全的 P2P 连接建立
 
 ## 快速开始
+
+### iOS 客户端
+```bash
+cd ios-app
+open Package.swift   # 或者 xed .，由 Xcode 26 生成项目
+```
+
+选择 `SkybridgeCompassApp` 运行即可查看 Stage 1 的 RootView + 浮动 TabBar + 底部 Liquid Glass 体验。
 
 ### Web 仪表板
 ```bash
