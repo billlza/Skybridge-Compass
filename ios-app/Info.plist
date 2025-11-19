@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>Skybridge needs local network access to discover nearby devices securely.</string>
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>Bluetooth is used to discover accessories that expose Skybridge control endpoints.</string>
+    <key>NSCameraUsageDescription</key>
+    <string>Camera access is required for QR onboarding of new devices.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Skybridge streams microphone input while you are inside a remote desktop session.</string>
+    <key>UIApplicationSceneManifest</key>
+    <dict>
+        <key>UIApplicationSupportsMultipleScenes</key>
+        <true/>
+    </dict>
+</dict>
+</plist>
