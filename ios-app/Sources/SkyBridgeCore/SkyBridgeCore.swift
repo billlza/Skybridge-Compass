@@ -34,6 +34,8 @@ public enum MainTab: String, CaseIterable, Identifiable {
 }
 
 public struct WeatherSnapshot: Sendable {
+    public static let defaultAirQualityIndex = 60
+
     public let city: String
     public let condition: String
     public let temperature: String
@@ -41,6 +43,7 @@ public struct WeatherSnapshot: Sendable {
     public let visibility: String
     public let wind: String
     public let airQualityIndex: Int
+
     public init(city: String, condition: String, temperature: String, humidity: String, visibility: String, wind: String, airQualityIndex: Int) {
         self.city = city
         self.condition = condition
@@ -49,6 +52,21 @@ public struct WeatherSnapshot: Sendable {
         self.visibility = visibility
         self.wind = wind
         self.airQualityIndex = airQualityIndex
+    }
+
+    public var conditionSymbolName: String {
+        let lowercased = condition.lowercased()
+        if lowercased.contains("晴") || lowercased.contains("sun") {
+            return "sun.max.fill"
+        } else if lowercased.contains("云") || lowercased.contains("cloud") {
+            return "cloud.sun.fill"
+        } else if lowercased.contains("雨") || lowercased.contains("rain") {
+            return "cloud.rain.fill"
+        } else if lowercased.contains("雪") || lowercased.contains("snow") {
+            return "snow"
+        } else {
+            return "cloud.fill"
+        }
     }
 }
 
@@ -90,6 +108,7 @@ public enum LinkType: String, Sendable {
     case relay = "中继"
 }
 
+@MainActor
 @Observable
 public final class SkybridgeAppState {
     public var selectedTab: MainTab = .dashboard
@@ -100,13 +119,23 @@ public final class SkybridgeAppState {
     public var performanceSettings: PerformanceSettings
     public var securityStatus: QuantumSecurityStatus
 
+    public private(set) var availableCities: [WeatherLocation]
+    public private(set) var selectedCity: WeatherLocation
+    public private(set) var isWeatherRefreshing: Bool = false
+    public private(set) var weatherError: String?
+
+    private let weatherService: WeatherProviding
+
     public init(
         dashboardSummary: DashboardSummary = .mock,
         devices: [DiscoveredDevice] = DiscoveredDevice.mockDevices,
         transfers: [TransferTask] = TransferTask.mock,
         sessions: [RemoteSessionSummary] = RemoteSessionSummary.mockSessions,
         performanceSettings: PerformanceSettings = .default,
-        securityStatus: QuantumSecurityStatus = .default
+        securityStatus: QuantumSecurityStatus = .default,
+        availableCities: [WeatherLocation] = WeatherLocation.presets,
+        selectedCity: WeatherLocation? = nil,
+        weatherService: WeatherProviding = WeatherService()
     ) {
         self.dashboardSummary = dashboardSummary
         self.devices = devices
@@ -114,38 +143,52 @@ public final class SkybridgeAppState {
         self.sessions = sessions
         self.performanceSettings = performanceSettings
         self.securityStatus = securityStatus
+        self.availableCities = availableCities
+        self.selectedCity = selectedCity ?? availableCities.first ?? WeatherLocation(displayName: "上海", query: "Shanghai", region: "中国 · CN")
+        self.weatherService = weatherService
     }
 
     public func refreshWeather() async {
-        try? await Task.sleep(for: .seconds(1.2))
-        dashboardSummary = DashboardSummary(
-            weather: WeatherSnapshot(
-                city: "上海",
-                condition: "多云",
-                temperature: "25°",
-                humidity: "58%",
-                visibility: "9 km",
-                wind: "东北 12 km/h",
-                airQualityIndex: 42
-            ),
-            activeSession: dashboardSummary.activeSession,
-            securityStatus: dashboardSummary.securityStatus,
-            linkSummary: dashboardSummary.linkSummary
-        )
+        if isWeatherRefreshing { return }
+        isWeatherRefreshing = true
+        weatherError = nil
+        defer { isWeatherRefreshing = false }
+
+        do {
+            let snapshot = try await weatherService.fetchSnapshot(for: selectedCity)
+            dashboardSummary = DashboardSummary(
+                weather: snapshot,
+                activeSession: dashboardSummary.activeSession,
+                securityStatus: dashboardSummary.securityStatus,
+                linkSummary: dashboardSummary.linkSummary
+            )
+        } catch {
+            weatherError = error.localizedDescription
+        }
     }
+
+    public func changeCity(to city: WeatherLocation) async {
+        guard city != selectedCity else { return }
+        selectedCity = city
+        await refreshWeather()
+    }
+}
+
+public extension WeatherSnapshot {
+    static let mock = WeatherSnapshot(
+        city: "杭州",
+        condition: "晴朗",
+        temperature: "27°",
+        humidity: "52%",
+        visibility: "10 km",
+        wind: "东南 8 km/h",
+        airQualityIndex: 36
+    )
 }
 
 public extension DashboardSummary {
     static let mock = DashboardSummary(
-        weather: WeatherSnapshot(
-            city: "杭州",
-            condition: "晴朗",
-            temperature: "27°",
-            humidity: "52%",
-            visibility: "10 km",
-            wind: "东南 8 km/h",
-            airQualityIndex: 36
-        ),
+        weather: .mock,
         activeSession: RemoteSessionSummary.mockSessions.first,
         securityStatus: QuantumSecurityStatus.default,
         linkSummary: NetworkLinkSummary(

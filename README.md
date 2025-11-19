@@ -88,7 +88,18 @@ cd ios-app
 open Package.swift   # 或者 xed .，由 Xcode 26 生成项目
 ```
 
-选择 `SkybridgeCompassApp` 运行即可查看 Stage 1 的 RootView + 浮动 TabBar + 底部 Liquid Glass 体验。
+选择 `SkybridgeCompassApp` 运行即可查看 Stage 2 的主控台：实时天气/AQI（wttr.in + AQICN）、浮动 TabBar、底部 Liquid Glass 操作台。
+
+#### 天气 / AQI 服务配置
+- `wttr.in` JSON 接口默认启用，无需额外 Key。
+- AQI 默认使用 [WAQI demo token](https://aqicn.org/api/)，可通过环境变量覆盖：
+
+```bash
+export WAQI_TOKEN=your_token
+open Package.swift
+```
+
+未提供自定义 token 时会自动回退到 demo 限额，必要时请申请正式 Key。
 
 ### Web 仪表板
 ```bash

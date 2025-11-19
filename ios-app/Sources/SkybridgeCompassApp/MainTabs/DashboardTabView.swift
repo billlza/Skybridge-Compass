@@ -5,11 +5,17 @@ import SkyBridgeDesignSystem
 
 struct DashboardTabView: View {
     @Bindable var appState: SkybridgeAppState
+    @State private var isCityPickerPresented = false
 
     var body: some View {
         ScrollView(showsIndicators: false) {
             VStack(spacing: 20) {
-                WeatherCard(snapshot: appState.dashboardSummary.weather)
+                WeatherCard(snapshot: appState.dashboardSummary.weather, isLoading: appState.isWeatherRefreshing)
+                if let error = appState.weatherError {
+                    WeatherErrorBanner(message: error) {
+                        Task { await appState.refreshWeather() }
+                    }
+                }
                 if let session = appState.dashboardSummary.activeSession {
                     ActiveSessionCard(session: session)
                 }
@@ -24,28 +30,46 @@ struct DashboardTabView: View {
                     Text("快捷操作")
                         .font(.headline)
                     HStack(spacing: 12) {
-                        PrimaryActionButton(title: "刷新天气", icon: "arrow.clockwise") {
+                        PrimaryActionButton(title: "刷新天气", icon: "arrow.clockwise", isLoading: appState.isWeatherRefreshing) {
                             Task { await appState.refreshWeather() }
                         }
-                        PrimaryActionButton(title: "切换城市", icon: "location") {}
+                        PrimaryActionButton(title: "切换城市", icon: "location") {
+                            isCityPickerPresented = true
+                        }
                         PrimaryActionButton(title: "性能面板", icon: "slider.horizontal.3") {}
                     }
                 }
             }
+        }
+        .sheet(isPresented: $isCityPickerPresented) {
+            CityPickerSheet(appState: appState)
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
         }
     }
 }
 
 private struct WeatherCard: View {
     let snapshot: WeatherSnapshot
+    let isLoading: Bool
+
     var body: some View {
         GlassCard {
             VStack(alignment: .leading, spacing: 12) {
-                Text(snapshot.city)
-                    .font(.title)
-                Text(snapshot.condition)
-                    .font(.headline)
-                    .foregroundStyle(.secondary)
+                HStack(alignment: .center) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(snapshot.city)
+                            .font(.title)
+                        Text(snapshot.condition)
+                            .font(.headline)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Image(systemName: snapshot.conditionSymbolName)
+                        .font(.system(size: 48))
+                        .symbolRenderingMode(.hierarchical)
+                        .foregroundStyle(SkyBridgeColors.accentPrimary)
+                }
                 Text(snapshot.temperature)
                     .font(.system(size: 60, weight: .semibold, design: .rounded))
                 HStack {
@@ -62,6 +86,13 @@ private struct WeatherCard: View {
                     Label("星云安全 · 正常", systemImage: "shield.checkerboard")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
+                }
+            }
+            .overlay(alignment: .topTrailing) {
+                if isLoading {
+                    ProgressView()
+                        .progressViewStyle(.circular)
+                        .tint(.white)
                 }
             }
         }
@@ -156,15 +187,82 @@ private struct SecurityRow: View {
     }
 }
 
+private struct WeatherErrorBanner: View {
+    let message: String
+    let retry: () -> Void
+
+    var body: some View {
+        GlassCard {
+            HStack(spacing: 12) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(Color.yellow)
+                Text(message)
+                    .font(.subheadline)
+                Spacer()
+                Button("重试", action: retry)
+                    .buttonStyle(.borderedProminent)
+            }
+        }
+    }
+}
+
+private struct CityPickerSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @Bindable var appState: SkybridgeAppState
+
+    var body: some View {
+        NavigationStack {
+            List(appState.availableCities) { city in
+                Button {
+                    Task {
+                        await appState.changeCity(to: city)
+                        dismiss()
+                    }
+                } label: {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(city.displayName)
+                            Text(city.region)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        if city == appState.selectedCity {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundStyle(SkyBridgeColors.accentPrimary)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+                .buttonStyle(.plain)
+            }
+            .listStyle(.insetGrouped)
+            .navigationTitle("切换城市")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("完成") { dismiss() }
+                }
+            }
+        }
+    }
+}
+
 struct PrimaryActionButton: View {
     let title: String
     let icon: String
     let action: () -> Void
+    var isLoading: Bool = false
 
     var body: some View {
         Button(action: action) {
             HStack {
-                Image(systemName: icon)
+                if isLoading {
+                    ProgressView()
+                        .progressViewStyle(.circular)
+                        .tint(.white)
+                } else {
+                    Image(systemName: icon)
+                }
                 Text(title)
             }
             .padding()
@@ -173,5 +271,6 @@ struct PrimaryActionButton: View {
             .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         }
         .buttonStyle(.plain)
+        .disabled(isLoading)
     }
 }

@@ -40,6 +40,9 @@ struct RootView: View {
         }
         .preferredColorScheme(.dark)
         .ignoresSafeArea(edges: .bottom)
+        .task {
+            await appState.refreshWeather()
+        }
     }
 }
 
