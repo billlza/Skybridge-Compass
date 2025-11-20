@@ -1,0 +1,37 @@
+<Window
+    x:Class="Skybridge.WinClient.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+    <Grid Background="{ThemeResource SolidBackgroundFillColorBase}">
+        <StackPanel Spacing="12" HorizontalAlignment="Center" VerticalAlignment="Center" Width="360">
+            <TextBlock Text="Skybridge" FontSize="32" HorizontalAlignment="Center" />
+            <TextBlock Text="Session engine pending native binding" HorizontalAlignment="Center" />
+
+            <StackPanel Orientation="Horizontal" Spacing="12" HorizontalAlignment="Center">
+                <TextBlock Text="Connection:" />
+                <TextBlock Text="{Binding ConnectionStatus}" FontWeight="SemiBold" />
+            </StackPanel>
+
+            <StackPanel Orientation="Horizontal" Spacing="12" HorizontalAlignment="Center">
+                <TextBlock Text="Bitrate" VerticalAlignment="Center" />
+                <ComboBox ItemsSource="{Binding BitrateProfiles}" SelectedItem="{Binding SelectedBitrate, Mode=TwoWay}" Width="140" />
+            </StackPanel>
+
+            <StackPanel Orientation="Horizontal" Spacing="12" HorizontalAlignment="Center">
+                <TextBlock Text="Framerate" VerticalAlignment="Center" />
+                <ComboBox ItemsSource="{Binding FramerateProfiles}" SelectedItem="{Binding SelectedFramerate, Mode=TwoWay}" Width="140" />
+            </StackPanel>
+
+            <StackPanel Orientation="Horizontal" Spacing="12" HorizontalAlignment="Center">
+                <Button Content="Connect" Command="{Binding ConnectCommand}" Width="96" />
+                <Button Content="Heartbeat" Command="{Binding HeartbeatCommand}" Width="96" />
+                <Button Content="Disconnect" Command="{Binding DisconnectCommand}" Width="96" />
+            </StackPanel>
+
+            <TextBlock Text="{Binding StatusMessage}" TextWrapping="Wrap" HorizontalAlignment="Center" />
+        </StackPanel>
+    </Grid>
+</Window>

@@ -1,0 +1,18 @@
+[package]
+name = "skybridge-core"
+version = "0.1.0"
+edition = "2021"
+authors = ["Skybridge"]
+description = "Skybridge core engine for session management and remote streaming"
+license = "MIT"
+
+[lib]
+name = "skybridge_core"
+path = "src/lib.rs"
+
+[dependencies]
+thiserror = "1.0"
+async-trait = "0.1"
+tokio = { version = "1.40", features = ["macros", "rt", "time"] }
+p256 = { version = "0.13", features = ["ecdh"] }
+rand_core = "0.6"
