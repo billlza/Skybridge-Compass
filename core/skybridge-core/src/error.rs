@@ -22,7 +22,7 @@ pub enum CoreError {
     RateLimited { retry_in_ms: u64 },
     #[error("invalid session state: expected {expected}, got {actual:?}")]
     InvalidState {
-        expected: &'static str,
+        expected: String,
         actual: SessionState,
     },
 }

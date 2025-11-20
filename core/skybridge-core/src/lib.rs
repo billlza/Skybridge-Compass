@@ -9,7 +9,9 @@ pub mod session;
 pub mod stream;
 
 use crypto::SessionCryptoProvider;
-use session::{AsyncSessionManager, HeartbeatEmitter, SessionConfig, SessionState};
+use session::{
+    AsyncSessionManager, HeartbeatEmitter, SessionConfig, SessionState, SessionStateMachine,
+};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use stream::{FlowRate, StreamController, StreamMetrics};
@@ -17,7 +19,7 @@ use stream::{FlowRate, StreamController, StreamMetrics};
 /// CoreEngine ties together session, streaming, and crypto primitives.
 #[derive(Debug)]
 pub struct EngineState {
-    state: Mutex<SessionState>,
+    state_machine: SessionStateMachine,
     last_config: Mutex<Option<SessionConfig>>,
     last_heartbeat: Mutex<Option<Instant>>,
 }
@@ -25,48 +27,18 @@ pub struct EngineState {
 impl EngineState {
     pub fn new() -> Self {
         Self {
-            state: Mutex::new(SessionState::Disconnected),
+            state_machine: SessionStateMachine::new(),
             last_config: Mutex::new(None),
             last_heartbeat: Mutex::new(None),
         }
     }
 
     pub fn state(&self) -> SessionState {
-        *self.state.lock().unwrap()
+        self.state_machine.current()
     }
 
-    fn set_state(
-        &self,
-        next: SessionState,
-        allowed_from: &[SessionState],
-    ) -> Result<(), error::CoreError> {
-        let mut guard = self.state.lock().unwrap();
-        let current = *guard;
-        if !allowed_from.contains(&current) {
-            return Err(error::CoreError::InvalidState {
-                expected: self.describe_expected(allowed_from),
-                actual: current,
-            });
-        }
-
-        *guard = next;
-        Ok(())
-    }
-
-    fn describe_expected(&self, allowed: &[SessionState]) -> &'static str {
-        match allowed {
-            [single] => match single {
-                SessionState::Disconnected => "Disconnected",
-                SessionState::Connecting => "Connecting",
-                SessionState::Connected => "Connected",
-                SessionState::Reconnecting => "Reconnecting",
-                SessionState::ShuttingDown => "ShuttingDown",
-            },
-            [SessionState::Connected, SessionState::Disconnected, SessionState::Reconnecting] => {
-                "Connected|Disconnected|Reconnecting"
-            }
-            _ => "ValidState",
-        }
+    fn set_state(&self, next: SessionState) -> Result<(), error::CoreError> {
+        self.state_machine.transition(next)
     }
 
     fn mark_config(&self, config: SessionConfig) {
@@ -133,13 +105,15 @@ where
     }
 
     /// Bootstraps the engine with the given configuration.
+    ///
+    /// This async operation performs crypto handshakes and session establishment;
+    /// callers must await it to avoid blocking executors.
     pub async fn initialize(&self, config: SessionConfig) -> Result<(), error::CoreError> {
         if self.state.state() != SessionState::Disconnected {
             return Err(error::CoreError::AlreadyInitialized);
         }
 
-        self.state
-            .set_state(SessionState::Connecting, &[SessionState::Disconnected])?;
+        self.state.set_state(SessionState::Connecting)?;
 
         let config_snapshot = config.clone();
         let init_result = async {
@@ -157,35 +131,35 @@ where
         match init_result {
             Ok(()) => {
                 self.state.mark_config(config_snapshot);
-                self.state
-                    .set_state(SessionState::Connected, &[SessionState::Connecting])?;
+                self.state.set_state(SessionState::Connected)?;
                 Ok(())
             }
             Err(err) => {
-                let _ = self
-                    .state
-                    .set_state(SessionState::Disconnected, &[SessionState::Connecting]);
+                let _ = self.state.set_state(SessionState::Disconnected);
                 Err(err)
             }
         }
     }
 
-    /// Retrieves stream metrics for diagnostics.
+    /// Retrieves stream metrics for diagnostics asynchronously.
     pub async fn metrics(&self) -> StreamMetrics {
         self.stream_controller.metrics().await
     }
 
-    /// Issues a stream flow control adjustment.
+    /// Issues a stream flow control adjustment asynchronously.
     pub async fn throttle_stream(&self, rate: FlowRate) {
         self.stream_controller.adjust_flow(rate).await;
     }
 
     /// Attempts to reconnect an interrupted session.
+    ///
+    /// The operation awaits the underlying session reconnect and enforces state
+    /// preconditions via the explicit state machine.
     pub async fn reconnect(&self) -> Result<(), error::CoreError> {
         let current = self.state.state();
         if current != SessionState::Connected {
             return Err(error::CoreError::InvalidState {
-                expected: "Connected",
+                expected: "Connected".to_string(),
                 actual: current,
             });
         }
@@ -195,49 +169,43 @@ where
             .last_config()
             .ok_or(error::CoreError::MissingConfig)?;
 
-        self.state
-            .set_state(SessionState::Reconnecting, &[SessionState::Connected])?;
+        self.state.set_state(SessionState::Reconnecting)?;
 
         let reconnect_result = self.session_manager.reconnect_async().await;
         match reconnect_result {
             Ok(()) => {
                 // ensure configuration persists for future heartbeats
                 self.state.mark_config(config);
-                self.state
-                    .set_state(SessionState::Connected, &[SessionState::Reconnecting])?;
+                self.state.set_state(SessionState::Connected)?;
                 Ok(())
             }
             Err(err) => {
-                let _ = self
-                    .state
-                    .set_state(SessionState::Disconnected, &[SessionState::Reconnecting]);
+                let _ = self.state.set_state(SessionState::Disconnected);
                 Err(err)
             }
         }
     }
 
     /// Terminates the active session.
+    ///
+    /// Awaiting this call guarantees the session manager has fully released
+    /// resources before the engine returns to `Disconnected`.
     pub async fn shutdown(&self) -> Result<(), error::CoreError> {
-        self.state.set_state(
-            SessionState::ShuttingDown,
-            &[
-                SessionState::Connected,
-                SessionState::Disconnected,
-                SessionState::Reconnecting,
-            ],
-        )?;
+        self.state.set_state(SessionState::ShuttingDown)?;
         self.session_manager.terminate_async().await;
-        self.state
-            .set_state(SessionState::Disconnected, &[SessionState::ShuttingDown])?;
+        self.state.set_state(SessionState::Disconnected)?;
         Ok(())
     }
 
     /// Emits a heartbeat if the session is connected.
+    ///
+    /// Returns [`CoreError::RateLimited`] when called faster than the configured
+    /// heartbeat interval.
     pub async fn send_heartbeat(&self) -> Result<(), error::CoreError> {
         let current = self.state.state();
         if current != SessionState::Connected {
             return Err(error::CoreError::InvalidState {
-                expected: "Connected",
+                expected: "Connected".to_string(),
                 actual: current,
             });
         }
@@ -429,6 +397,22 @@ mod tests {
                 "session_establish",
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn initialize_without_peer_key_is_rejected_and_recovers_state() {
+        let recorder = Recorder::new();
+        let engine = build_engine(recorder);
+
+        let config = SessionConfig {
+            client_id: "demo".into(),
+            heartbeat_interval_ms: 1_000,
+            peer_public_key: None,
+        };
+
+        let err = engine.initialize(config).await.unwrap_err();
+        assert!(matches!(err, error::CoreError::MissingCryptoMaterial));
+        assert_eq!(engine.state.state(), SessionState::Disconnected);
     }
 
     #[tokio::test]
