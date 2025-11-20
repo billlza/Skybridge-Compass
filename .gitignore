@@ -126,3 +126,10 @@ public
 # Temporary folders
 tmp/
 temp/
+
+# Rust / Windows native
+/target
+core/skybridge-core/target
+**/bin/
+**/obj/
+
