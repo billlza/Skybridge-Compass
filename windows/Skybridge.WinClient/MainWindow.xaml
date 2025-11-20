@@ -4,7 +4,9 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
-    mc:Ignorable="d">
+    xmlns:vm="using:Skybridge.WinClient.ViewModels"
+    mc:Ignorable="d"
+    d:DataContext="{d:DesignInstance Type=vm:SessionViewModel, IsDesignTimeCreatable=False}">
     <Grid Background="{ThemeResource SolidBackgroundFillColorBase}">
         <StackPanel Spacing="12" HorizontalAlignment="Center" VerticalAlignment="Center" Width="360">
             <TextBlock Text="Skybridge" FontSize="32" HorizontalAlignment="Center" />

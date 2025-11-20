@@ -27,10 +27,14 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private string _statusMessage = "Idle";
     private BitrateProfile _selectedBitrate = BitrateProfile.Medium;
     private FramerateProfile _selectedFramerate = FramerateProfile.Fps60;
+    private EngineConnectionState _connectionState;
+    private bool _isBusy;
 
     public SessionViewModel(IEngineClient engineClient)
     {
         _engineClient = engineClient;
+        _connectionState = _engineClient.State;
+        _engineClient.ConnectionStateChanged += OnEngineStateChanged;
         ConnectCommand = new AsyncRelayCommand(ConnectAsync, CanConnect);
         DisconnectCommand = new AsyncRelayCommand(DisconnectAsync, CanDisconnect);
         HeartbeatCommand = new AsyncRelayCommand(SendHeartbeatAsync, CanSendHeartbeat);
@@ -44,9 +48,32 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     public ObservableCollection<FramerateProfile> FramerateProfiles { get; }
 
-    public EngineConnectionState ConnectionState => _engineClient.State;
+    public EngineConnectionState ConnectionState
+    {
+        get => _connectionState;
+        private set
+        {
+            if (SetField(ref _connectionState, value))
+            {
+                OnPropertyChanged(nameof(ConnectionStatus));
+                RefreshCommandStates();
+            }
+        }
+    }
 
     public string ConnectionStatus => ConnectionState.ToString();
+
+    public bool IsBusy
+    {
+        get => _isBusy;
+        private set
+        {
+            if (SetField(ref _isBusy, value))
+            {
+                RefreshCommandStates();
+            }
+        }
+    }
 
     public string StatusMessage
     {
@@ -86,38 +113,89 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     private async Task ConnectAsync()
     {
-        StatusMessage = "Connecting...";
-        await _engineClient.ConnectAsync();
-        OnStateChanged("Connected");
+        if (IsBusy)
+        {
+            return;
+        }
+
+        await RunWithBusyState(async () =>
+        {
+            StatusMessage = "Connecting...";
+            await _engineClient.ConnectAsync();
+            StatusMessage = "Connected";
+        });
     }
 
     private async Task DisconnectAsync()
     {
-        StatusMessage = "Disconnecting...";
-        await _engineClient.DisconnectAsync();
-        OnStateChanged("Disconnected");
+        if (IsBusy)
+        {
+            return;
+        }
+
+        await RunWithBusyState(async () =>
+        {
+            StatusMessage = "Disconnecting...";
+            await _engineClient.DisconnectAsync();
+            StatusMessage = "Disconnected";
+        });
     }
 
     private async Task SendHeartbeatAsync()
     {
-        await _engineClient.SendHeartbeatAsync();
-        StatusMessage = "Heartbeat acknowledged";
+        if (IsBusy)
+        {
+            return;
+        }
+
+        await RunWithBusyState(async () =>
+        {
+            await _engineClient.SendHeartbeatAsync();
+            StatusMessage = "Heartbeat acknowledged";
+        });
     }
 
-    private bool CanConnect() => ConnectionState == EngineConnectionState.Disconnected;
+    private bool CanConnect() => !IsBusy && ConnectionState == EngineConnectionState.Disconnected;
 
-    private bool CanDisconnect() => ConnectionState == EngineConnectionState.Connected || ConnectionState == EngineConnectionState.Reconnecting;
+    private bool CanDisconnect() => !IsBusy && (ConnectionState == EngineConnectionState.Connected || ConnectionState == EngineConnectionState.Reconnecting);
 
-    private bool CanSendHeartbeat() => ConnectionState == EngineConnectionState.Connected;
+    private bool CanSendHeartbeat() => !IsBusy && ConnectionState == EngineConnectionState.Connected;
 
-    private void OnStateChanged(string message)
+    private async Task RunWithBusyState(Func<Task> action)
     {
-        OnPropertyChanged(nameof(ConnectionState));
-        OnPropertyChanged(nameof(ConnectionStatus));
+        try
+        {
+            IsBusy = true;
+            await action();
+        }
+        catch (Exception ex)
+        {
+            StatusMessage = ex.Message;
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private void RefreshCommandStates()
+    {
         (ConnectCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
         (DisconnectCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
         (HeartbeatCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
-        StatusMessage = message;
+    }
+
+    private void OnEngineStateChanged(object? sender, EngineConnectionState newState)
+    {
+        ConnectionState = newState;
+        StatusMessage = newState switch
+        {
+            EngineConnectionState.Connecting => "Connecting...",
+            EngineConnectionState.Connected => "Connected",
+            EngineConnectionState.Reconnecting => "Reconnecting...",
+            EngineConnectionState.ShuttingDown => "Disconnecting...",
+            _ => "Disconnected"
+        };
     }
 
     private bool SetField<T>(ref T field, T value, [CallerMemberName] string? propertyName = null)

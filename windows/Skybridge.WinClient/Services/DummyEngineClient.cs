@@ -11,6 +11,8 @@ public sealed class DummyEngineClient : IEngineClient
 
     public EngineConnectionState State => _state;
 
+    public event EventHandler<EngineConnectionState>? ConnectionStateChanged;
+
     public async Task ConnectAsync()
     {
         await _mutex.WaitAsync();
@@ -21,7 +23,7 @@ public sealed class DummyEngineClient : IEngineClient
                 return;
             }
 
-            _state = EngineConnectionState.Connecting;
+            SetState(EngineConnectionState.Connecting);
         }
         finally
         {
@@ -33,7 +35,7 @@ public sealed class DummyEngineClient : IEngineClient
         await _mutex.WaitAsync();
         try
         {
-            _state = EngineConnectionState.Connected;
+            SetState(EngineConnectionState.Connected);
         }
         finally
         {
@@ -51,7 +53,7 @@ public sealed class DummyEngineClient : IEngineClient
                 return;
             }
 
-            _state = EngineConnectionState.ShuttingDown;
+            SetState(EngineConnectionState.ShuttingDown);
         }
         finally
         {
@@ -63,7 +65,7 @@ public sealed class DummyEngineClient : IEngineClient
         await _mutex.WaitAsync();
         try
         {
-            _state = EngineConnectionState.Disconnected;
+            SetState(EngineConnectionState.Disconnected);
         }
         finally
         {
@@ -87,5 +89,11 @@ public sealed class DummyEngineClient : IEngineClient
         }
 
         await Task.Delay(TimeSpan.FromMilliseconds(50));
+    }
+
+    private void SetState(EngineConnectionState newState)
+    {
+        _state = newState;
+        ConnectionStateChanged?.Invoke(this, newState);
     }
 }

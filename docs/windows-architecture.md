@@ -3,8 +3,8 @@
 The WinUI client is organized to keep UI binding, engine integration, and platform FFI clearly separated so the Rust core can be slotted in without disrupting the shell.
 
 ## Layers
-- **ViewModels** (`windows/Skybridge.WinClient/ViewModels`): presentation logic and bindable state. `SessionViewModel` owns connection status, bitrate/framerate selections, and commands that orchestrate engine calls.
-- **Services** (`windows/Skybridge.WinClient/Services`): engine abstractions behind `IEngineClient`. The stub `DummyEngineClient` simulates connect/disconnect/heartbeat flows; it will be replaced by a real FFI-backed implementation that calls into the Rust `ffi` module.
+- **ViewModels** (`windows/Skybridge.WinClient/ViewModels`): presentation logic and bindable state. `SessionViewModel` owns connection status, bitrate/framerate selections, async commands for connect/disconnect/heartbeat, and busy-state handling to keep the UI responsive.
+- **Services** (`windows/Skybridge.WinClient/Services`): engine abstractions behind `IEngineClient`. The stub `DummyEngineClient` simulates connect/disconnect/heartbeat flows and raises state-change events; it will be replaced by a real FFI-backed implementation that calls into the Rust `ffi` module.
 - **Views** (`windows/Skybridge.WinClient/MainWindow.xaml`): XAML-only bindings with no business logic in code-behind. The window creates the view model and relies on commands/properties for interactions.
 
 ## Planned Rust FFI integration
