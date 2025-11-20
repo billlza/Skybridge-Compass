@@ -3,6 +3,7 @@ use crate::error::{CoreError, CoreResult};
 use crate::session::{AsyncSessionManager, HeartbeatEmitter, SessionConfig, SessionState};
 use crate::stream::{FlowRate, StreamController, StreamMetrics};
 use crate::CoreEngine;
+use std::collections::VecDeque;
 use std::os::raw::c_char;
 use std::str::from_utf8;
 use std::sync::{Arc, Mutex};
@@ -41,6 +42,24 @@ pub struct SkybridgeSessionConfig {
     pub heartbeat_interval_ms: u64,
     pub peer_public_key_ptr: *const u8,
     pub peer_public_key_len: usize,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkybridgeEventKind {
+    None = 0,
+    Connected = 1,
+    Disconnected = 2,
+    HeartbeatAck = 3,
+    InputReceived = 4,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct SkybridgeEvent {
+    pub kind: SkybridgeEventKind,
+    pub data_ptr: *const u8,
+    pub data_len: usize,
 }
 
 fn map_core_error(err: CoreError) -> SkybridgeErrorCode {
@@ -175,11 +194,15 @@ pub struct SkybridgeEngineHandle {
     runtime: Runtime,
     engine: CoreEngine<FfiSessionManager, FfiStreamController, FfiCrypto, FfiHeartbeat>,
     input_buffer: Arc<Mutex<Vec<u8>>>,
+    events: Arc<Mutex<VecDeque<FfiEvent>>>,
+    last_event_payload: Arc<Mutex<Vec<u8>>>,
 }
 
 impl SkybridgeEngineHandle {
     fn new() -> Self {
         let input_buffer = Arc::new(Mutex::new(Vec::new()));
+        let events = Arc::new(Mutex::new(VecDeque::new()));
+        let last_event_payload = Arc::new(Mutex::new(Vec::new()));
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_time()
             .build()
@@ -196,6 +219,36 @@ impl SkybridgeEngineHandle {
             runtime,
             engine,
             input_buffer,
+            events,
+            last_event_payload,
+        }
+    }
+
+    fn push_event(&self, event: FfiEvent) {
+        self.events.lock().unwrap().push_back(event);
+    }
+
+    fn pop_event(&self) -> SkybridgeEvent {
+        let mut queue = self.events.lock().unwrap();
+        if let Some(event) = queue.pop_front() {
+            let mut payload = self.last_event_payload.lock().unwrap();
+            *payload = event.payload;
+            let ptr = if payload.is_empty() {
+                std::ptr::null()
+            } else {
+                payload.as_ptr()
+            };
+            SkybridgeEvent {
+                kind: event.kind,
+                data_ptr: ptr,
+                data_len: payload.len(),
+            }
+        } else {
+            SkybridgeEvent {
+                kind: SkybridgeEventKind::None,
+                data_ptr: std::ptr::null(),
+                data_len: 0,
+            }
         }
     }
 
@@ -209,6 +262,12 @@ impl SkybridgeEngineHandle {
         let handle = unsafe { &mut *handle };
         Some(f(handle))
     }
+}
+
+#[derive(Debug, Clone)]
+struct FfiEvent {
+    kind: SkybridgeEventKind,
+    payload: Vec<u8>,
 }
 
 #[no_mangle]
@@ -270,7 +329,13 @@ pub extern "C" fn skybridge_engine_connect(
         Ok(config) => handle
             .runtime
             .block_on(handle.engine.initialize(config))
-            .map(|_| SkybridgeErrorCode::Ok)
+            .map(|_| {
+                handle.push_event(FfiEvent {
+                    kind: SkybridgeEventKind::Connected,
+                    payload: Vec::new(),
+                });
+                SkybridgeErrorCode::Ok
+            })
             .unwrap_or_else(map_core_error),
         Err(code) => code,
     })
@@ -285,7 +350,13 @@ pub extern "C" fn skybridge_engine_send_heartbeat(
         handle
             .runtime
             .block_on(handle.engine.send_heartbeat())
-            .map(|_| SkybridgeErrorCode::Ok)
+            .map(|_| {
+                handle.push_event(FfiEvent {
+                    kind: SkybridgeEventKind::HeartbeatAck,
+                    payload: Vec::new(),
+                });
+                SkybridgeErrorCode::Ok
+            })
             .unwrap_or_else(map_core_error)
     })
     .unwrap_or(SkybridgeErrorCode::NullHandle)
@@ -310,6 +381,10 @@ pub unsafe extern "C" fn skybridge_engine_send_input(
             std::slice::from_raw_parts(input_ptr, input_len)
         };
         handle.engine.stream_controller.record_input(data);
+        handle.push_event(FfiEvent {
+            kind: SkybridgeEventKind::InputReceived,
+            payload: data.to_vec(),
+        });
         SkybridgeErrorCode::Ok
     })
     .unwrap_or(SkybridgeErrorCode::NullHandle)
@@ -323,10 +398,23 @@ pub extern "C" fn skybridge_engine_shutdown(
         handle
             .runtime
             .block_on(handle.engine.shutdown())
-            .map(|_| SkybridgeErrorCode::Ok)
+            .map(|_| {
+                handle.push_event(FfiEvent {
+                    kind: SkybridgeEventKind::Disconnected,
+                    payload: Vec::new(),
+                });
+                SkybridgeErrorCode::Ok
+            })
             .unwrap_or_else(map_core_error)
     })
     .unwrap_or(SkybridgeErrorCode::NullHandle)
+}
+
+#[no_mangle]
+pub extern "C" fn skybridge_engine_disconnect(
+    handle: *mut SkybridgeEngineHandle,
+) -> SkybridgeErrorCode {
+    skybridge_engine_shutdown(handle)
 }
 
 #[no_mangle]
@@ -347,4 +435,26 @@ pub extern "C" fn skybridge_engine_state(
 pub extern "C" fn skybridge_engine_last_input_len(handle: *mut SkybridgeEngineHandle) -> usize {
     SkybridgeEngineHandle::with_handle(handle, |handle| handle.input_buffer.lock().unwrap().len())
         .unwrap_or(0)
+}
+
+#[no_mangle]
+/// # Safety
+/// `out_event` must be a valid, writable pointer to `SkybridgeEvent` and is populated
+/// with the next queued event. The returned payload pointer remains valid until the
+/// next call to `skybridge_engine_poll_events` or until the engine handle is freed.
+pub unsafe extern "C" fn skybridge_engine_poll_events(
+    handle: *mut SkybridgeEngineHandle,
+    out_event: *mut SkybridgeEvent,
+) -> SkybridgeErrorCode {
+    SkybridgeEngineHandle::with_handle(handle, |handle| {
+        if out_event.is_null() {
+            return SkybridgeErrorCode::InvalidInput;
+        }
+        let event = handle.pop_event();
+        unsafe {
+            *out_event = event;
+        }
+        SkybridgeErrorCode::Ok
+    })
+    .unwrap_or(SkybridgeErrorCode::NullHandle)
 }
