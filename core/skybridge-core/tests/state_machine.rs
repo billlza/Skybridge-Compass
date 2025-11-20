@@ -114,6 +114,14 @@ impl SessionCryptoProvider for TrackingCrypto {
     fn algorithm(&self) -> &'static str {
         self.inner.algorithm()
     }
+
+    fn encrypt(&self, secrets: &SessionSecrets, plaintext: &[u8]) -> Result<Vec<u8>, CoreError> {
+        self.inner.encrypt(secrets, plaintext)
+    }
+
+    fn decrypt(&self, secrets: &SessionSecrets, ciphertext: &[u8]) -> Result<Vec<u8>, CoreError> {
+        self.inner.decrypt(secrets, ciphertext)
+    }
 }
 
 struct TrackingHeartbeat {

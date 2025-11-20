@@ -10,6 +10,12 @@ pub enum CoreError {
     Stream(String),
     #[error("crypto error: {0}")]
     Crypto(String),
+    #[error("crypto handshake failed: {0}")]
+    CryptoHandshake(String),
+    #[error("encryption failed: {0}")]
+    Encrypt(String),
+    #[error("decryption failed: {0}")]
+    Decrypt(String),
     #[error("missing crypto material for handshake")]
     MissingCryptoMaterial,
     #[error("invalid crypto key material")]
