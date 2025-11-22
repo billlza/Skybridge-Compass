@@ -247,6 +247,7 @@ pub struct SkybridgeEngineHandle {
     events: Arc<Mutex<VecDeque<FfiEvent>>>,
     last_event_payload: Arc<Mutex<Vec<u8>>>,
     last_public_key: Arc<Mutex<Vec<u8>>>,
+    last_crypto_output: Arc<Mutex<Vec<u8>>>,
 }
 
 impl SkybridgeEngineHandle {
@@ -255,6 +256,7 @@ impl SkybridgeEngineHandle {
         let events = Arc::new(Mutex::new(VecDeque::new()));
         let last_event_payload = Arc::new(Mutex::new(Vec::new()));
         let last_public_key = Arc::new(Mutex::new(Vec::new()));
+        let last_crypto_output = Arc::new(Mutex::new(Vec::new()));
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_time()
             .build()
@@ -274,6 +276,7 @@ impl SkybridgeEngineHandle {
             events,
             last_event_payload,
             last_public_key,
+            last_crypto_output,
         }
     }
 
@@ -312,6 +315,33 @@ impl SkybridgeEngineHandle {
     fn clear_events(&self) {
         self.events.lock().unwrap().clear();
         self.last_event_payload.lock().unwrap().clear();
+    }
+
+    fn write_crypto_output(
+        &self,
+        data: Vec<u8>,
+        out_buffer: *mut SkybridgeBuffer,
+    ) -> SkybridgeErrorCode {
+        if out_buffer.is_null() {
+            return SkybridgeErrorCode::InvalidInput;
+        }
+
+        let mut buffer = self.last_crypto_output.lock().unwrap();
+        *buffer = data;
+
+        let view = SkybridgeBuffer {
+            data_ptr: if buffer.is_empty() {
+                std::ptr::null()
+            } else {
+                buffer.as_ptr()
+            },
+            data_len: buffer.len(),
+        };
+
+        unsafe {
+            *out_buffer = view;
+        }
+        SkybridgeErrorCode::Ok
     }
 
     fn with_handle<T>(
@@ -583,6 +613,62 @@ pub extern "C" fn skybridge_engine_disconnect(
     handle: *mut SkybridgeEngineHandle,
 ) -> SkybridgeErrorCode {
     skybridge_engine_shutdown(handle)
+}
+
+#[no_mangle]
+/// # Safety
+/// `out_buffer` must be a valid, writable pointer to `SkybridgeBuffer`. The returned pointer
+/// remains valid until the next call to encrypt/decrypt or the engine handle is freed.
+pub unsafe extern "C" fn skybridge_engine_encrypt_payload(
+    handle: *mut SkybridgeEngineHandle,
+    plaintext_ptr: *const u8,
+    plaintext_len: usize,
+    out_buffer: *mut SkybridgeBuffer,
+) -> SkybridgeErrorCode {
+    SkybridgeEngineHandle::with_handle(handle, |handle| {
+        if plaintext_len > 0 && plaintext_ptr.is_null() {
+            return SkybridgeErrorCode::InvalidInput;
+        }
+        let plaintext = if plaintext_len == 0 {
+            &[]
+        } else {
+            unsafe { std::slice::from_raw_parts(plaintext_ptr, plaintext_len) }
+        };
+        handle
+            .engine
+            .encrypt_payload(plaintext)
+            .map(|ciphertext| handle.write_crypto_output(ciphertext, out_buffer))
+            .unwrap_or_else(map_core_error)
+    })
+    .unwrap_or(SkybridgeErrorCode::NullHandle)
+}
+
+#[no_mangle]
+/// # Safety
+/// `out_buffer` must be a valid, writable pointer to `SkybridgeBuffer`. The returned pointer
+/// remains valid until the next encrypt/decrypt call or engine destruction.
+pub unsafe extern "C" fn skybridge_engine_decrypt_payload(
+    handle: *mut SkybridgeEngineHandle,
+    ciphertext_ptr: *const u8,
+    ciphertext_len: usize,
+    out_buffer: *mut SkybridgeBuffer,
+) -> SkybridgeErrorCode {
+    SkybridgeEngineHandle::with_handle(handle, |handle| {
+        if ciphertext_len > 0 && ciphertext_ptr.is_null() {
+            return SkybridgeErrorCode::InvalidInput;
+        }
+        let ciphertext = if ciphertext_len == 0 {
+            &[]
+        } else {
+            unsafe { std::slice::from_raw_parts(ciphertext_ptr, ciphertext_len) }
+        };
+        handle
+            .engine
+            .decrypt_payload(ciphertext)
+            .map(|plaintext| handle.write_crypto_output(plaintext, out_buffer))
+            .unwrap_or_else(map_core_error)
+    })
+    .unwrap_or(SkybridgeErrorCode::NullHandle)
 }
 
 #[no_mangle]

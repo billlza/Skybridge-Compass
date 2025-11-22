@@ -1,11 +1,12 @@
 use skybridge_core::ffi::{
-    skybridge_engine_clear_events, skybridge_engine_connect, skybridge_engine_disconnect,
-    skybridge_engine_free, skybridge_engine_last_input_len, skybridge_engine_local_public_key,
-    skybridge_engine_metrics, skybridge_engine_new, skybridge_engine_poll_events,
-    skybridge_engine_reconnect, skybridge_engine_send_heartbeat, skybridge_engine_send_input,
-    skybridge_engine_state, skybridge_engine_throttle_stream, SkybridgeBuffer, SkybridgeErrorCode,
-    SkybridgeEvent, SkybridgeEventKind, SkybridgeFlowRate, SkybridgeSessionConfig,
-    SkybridgeSessionState, SkybridgeStreamMetrics, SKYBRIDGE_EVENT_CAPACITY,
+    skybridge_engine_clear_events, skybridge_engine_connect, skybridge_engine_decrypt_payload,
+    skybridge_engine_disconnect, skybridge_engine_encrypt_payload, skybridge_engine_free,
+    skybridge_engine_last_input_len, skybridge_engine_local_public_key, skybridge_engine_metrics,
+    skybridge_engine_new, skybridge_engine_poll_events, skybridge_engine_reconnect,
+    skybridge_engine_send_heartbeat, skybridge_engine_send_input, skybridge_engine_state,
+    skybridge_engine_throttle_stream, SkybridgeBuffer, SkybridgeErrorCode, SkybridgeEvent,
+    SkybridgeEventKind, SkybridgeFlowRate, SkybridgeSessionConfig, SkybridgeSessionState,
+    SkybridgeStreamMetrics, SKYBRIDGE_EVENT_CAPACITY,
 };
 use std::os::raw::c_char;
 use std::ptr;
@@ -61,6 +62,40 @@ fn ffi_engine_lifecycle_runs() {
     };
     let throttle_result = skybridge_engine_throttle_stream(handle, flow);
     assert_eq!(throttle_result, SkybridgeErrorCode::Ok);
+
+    // Encrypt/decrypt roundtrip through the C ABI.
+    let mut crypto_buffer = SkybridgeBuffer {
+        data_ptr: ptr::null(),
+        data_len: 0,
+    };
+    let plaintext = b"ffi-encrypt-payload";
+    let encrypt_res = unsafe {
+        skybridge_engine_encrypt_payload(
+            handle,
+            plaintext.as_ptr(),
+            plaintext.len(),
+            &mut crypto_buffer,
+        )
+    };
+    assert_eq!(encrypt_res, SkybridgeErrorCode::Ok);
+    assert!(!crypto_buffer.data_ptr.is_null());
+    assert!(crypto_buffer.data_len > 0);
+    let ciphertext =
+        unsafe { std::slice::from_raw_parts(crypto_buffer.data_ptr, crypto_buffer.data_len) };
+    assert_ne!(ciphertext, plaintext);
+
+    let decrypt_res = unsafe {
+        skybridge_engine_decrypt_payload(
+            handle,
+            crypto_buffer.data_ptr,
+            crypto_buffer.data_len,
+            &mut crypto_buffer,
+        )
+    };
+    assert_eq!(decrypt_res, SkybridgeErrorCode::Ok);
+    let decrypted =
+        unsafe { std::slice::from_raw_parts(crypto_buffer.data_ptr, crypto_buffer.data_len) };
+    assert_eq!(decrypted, plaintext);
 
     let payload = [1u8, 2, 3, 4];
     let input_result =

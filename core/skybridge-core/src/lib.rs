@@ -22,6 +22,7 @@ pub struct EngineState {
     state_machine: SessionStateMachine,
     last_config: Mutex<Option<SessionConfig>>,
     last_heartbeat: Mutex<Option<Instant>>,
+    session_secrets: Mutex<Option<crypto::SessionSecrets>>,
 }
 
 impl EngineState {
@@ -30,6 +31,7 @@ impl EngineState {
             state_machine: SessionStateMachine::new(),
             last_config: Mutex::new(None),
             last_heartbeat: Mutex::new(None),
+            session_secrets: Mutex::new(None),
         }
     }
 
@@ -62,6 +64,18 @@ impl EngineState {
 
         *last = Some(Instant::now());
         Ok(())
+    }
+
+    fn store_secrets(&self, secrets: crypto::SessionSecrets) {
+        *self.session_secrets.lock().unwrap() = Some(secrets);
+    }
+
+    fn secrets(&self) -> Option<crypto::SessionSecrets> {
+        self.session_secrets.lock().unwrap().clone()
+    }
+
+    fn clear_secrets(&self) {
+        self.session_secrets.lock().unwrap().take();
     }
 }
 
@@ -123,7 +137,8 @@ where
                 .as_deref()
                 .ok_or(error::CoreError::MissingCryptoMaterial)?;
             self.crypto.begin_handshake().await?;
-            self.crypto.finalize_handshake(peer_key).await?;
+            let secrets = self.crypto.finalize_handshake(peer_key).await?;
+            self.state.store_secrets(secrets);
             self.session_manager.establish_async(config).await
         }
         .await;
@@ -136,6 +151,7 @@ where
             }
             Err(err) => {
                 let _ = self.state.set_state(SessionState::Disconnected);
+                self.state.clear_secrets();
                 Err(err)
             }
         }
@@ -194,6 +210,7 @@ where
         self.state.set_state(SessionState::ShuttingDown)?;
         self.session_manager.terminate_async().await;
         self.state.set_state(SessionState::Disconnected)?;
+        self.state.clear_secrets();
         Ok(())
     }
 
@@ -216,6 +233,36 @@ where
             .ok_or(error::CoreError::MissingConfig)?;
         self.state.record_heartbeat(config.heartbeat_interval_ms)?;
         self.heartbeat_emitter.emit().await
+    }
+
+    /// Encrypts payloads using the negotiated session secrets.
+    pub fn encrypt_payload(&self, plaintext: &[u8]) -> Result<Vec<u8>, error::CoreError> {
+        if self.state.state() != SessionState::Connected {
+            return Err(error::CoreError::InvalidState {
+                expected: "Connected".to_string(),
+                actual: self.state.state(),
+            });
+        }
+        let secrets = self
+            .state
+            .secrets()
+            .ok_or(error::CoreError::MissingCryptoMaterial)?;
+        self.crypto.encrypt(&secrets, plaintext)
+    }
+
+    /// Decrypts payloads using the negotiated session secrets.
+    pub fn decrypt_payload(&self, ciphertext: &[u8]) -> Result<Vec<u8>, error::CoreError> {
+        if self.state.state() != SessionState::Connected {
+            return Err(error::CoreError::InvalidState {
+                expected: "Connected".to_string(),
+                actual: self.state.state(),
+            });
+        }
+        let secrets = self
+            .state
+            .secrets()
+            .ok_or(error::CoreError::MissingCryptoMaterial)?;
+        self.crypto.decrypt(&secrets, ciphertext)
     }
 }
 
@@ -554,5 +601,35 @@ mod tests {
             }
             other => panic!("unexpected error: {:?}", other),
         }
+    }
+
+    #[tokio::test]
+    async fn encrypt_and_decrypt_require_active_session() {
+        let recorder = Recorder::new();
+        let engine = build_engine(recorder);
+
+        let err = engine
+            .encrypt_payload(b"data")
+            .expect_err("cannot encrypt while disconnected");
+        match err {
+            error::CoreError::InvalidState { expected, actual } => {
+                assert_eq!(expected, "Connected");
+                assert_eq!(actual, SessionState::Disconnected);
+            }
+            other => panic!("unexpected error: {:?}", other),
+        }
+
+        let config = SessionConfig {
+            client_id: "demo".into(),
+            heartbeat_interval_ms: 1_000,
+            peer_public_key: Some(sample_peer_key().await),
+        };
+
+        engine.initialize(config).await.unwrap();
+        let ciphertext = engine.encrypt_payload(b"payload").unwrap();
+        assert_ne!(ciphertext, b"payload");
+
+        let roundtrip = engine.decrypt_payload(&ciphertext).unwrap();
+        assert_eq!(roundtrip, b"payload");
     }
 }
