@@ -1,9 +1,11 @@
 use skybridge_core::ffi::{
     skybridge_engine_connect, skybridge_engine_disconnect, skybridge_engine_free,
-    skybridge_engine_last_input_len, skybridge_engine_local_public_key, skybridge_engine_new,
-    skybridge_engine_poll_events, skybridge_engine_send_heartbeat, skybridge_engine_send_input,
-    skybridge_engine_state, SkybridgeBuffer, SkybridgeErrorCode, SkybridgeEvent,
-    SkybridgeEventKind, SkybridgeSessionConfig, SkybridgeSessionState,
+    skybridge_engine_last_input_len, skybridge_engine_local_public_key, skybridge_engine_metrics,
+    skybridge_engine_new, skybridge_engine_poll_events, skybridge_engine_reconnect,
+    skybridge_engine_send_heartbeat, skybridge_engine_send_input, skybridge_engine_state,
+    skybridge_engine_throttle_stream, SkybridgeBuffer, SkybridgeErrorCode, SkybridgeEvent,
+    SkybridgeEventKind, SkybridgeFlowRate, SkybridgeSessionConfig, SkybridgeSessionState,
+    SkybridgeStreamMetrics,
 };
 use std::os::raw::c_char;
 use std::ptr;
@@ -53,6 +55,13 @@ fn ffi_engine_lifecycle_runs() {
     assert_eq!(hb_event, SkybridgeErrorCode::Ok);
     assert_eq!(event.kind, SkybridgeEventKind::HeartbeatAck);
 
+    let flow = SkybridgeFlowRate {
+        target_bitrate_bps: 1_000_000,
+        max_latency_ms: 40,
+    };
+    let throttle_result = skybridge_engine_throttle_stream(handle, flow);
+    assert_eq!(throttle_result, SkybridgeErrorCode::Ok);
+
     let payload = [1u8, 2, 3, 4];
     let input_result =
         unsafe { skybridge_engine_send_input(handle, payload.as_ptr(), payload.len()) };
@@ -65,6 +74,20 @@ fn ffi_engine_lifecycle_runs() {
     assert_eq!(data, payload);
     let recorded_len = skybridge_engine_last_input_len(handle);
     assert_eq!(recorded_len, payload.len());
+
+    let mut metrics = SkybridgeStreamMetrics {
+        bitrate_bps: 0,
+        packet_loss_ppm: 0,
+    };
+    let metrics_result = unsafe { skybridge_engine_metrics(handle, &mut metrics) };
+    assert_eq!(metrics_result, SkybridgeErrorCode::Ok);
+    assert_eq!(metrics.bitrate_bps, flow.target_bitrate_bps);
+
+    let reconnect_result = skybridge_engine_reconnect(handle);
+    assert_eq!(reconnect_result, SkybridgeErrorCode::Ok);
+    let reconnect_event = unsafe { skybridge_engine_poll_events(handle, &mut event) };
+    assert_eq!(reconnect_event, SkybridgeErrorCode::Ok);
+    assert_eq!(event.kind, SkybridgeEventKind::Reconnected);
 
     let shutdown_result = skybridge_engine_disconnect(handle);
     assert_eq!(shutdown_result, SkybridgeErrorCode::Ok);

@@ -52,6 +52,7 @@ pub enum SkybridgeEventKind {
     Disconnected = 2,
     HeartbeatAck = 3,
     InputReceived = 4,
+    Reconnected = 5,
 }
 
 #[repr(C)]
@@ -67,6 +68,20 @@ pub struct SkybridgeEvent {
 pub struct SkybridgeBuffer {
     pub data_ptr: *const u8,
     pub data_len: usize,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct SkybridgeFlowRate {
+    pub target_bitrate_bps: u64,
+    pub max_latency_ms: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct SkybridgeStreamMetrics {
+    pub bitrate_bps: u64,
+    pub packet_loss_ppm: u32,
 }
 
 fn map_core_error(err: CoreError) -> SkybridgeErrorCode {
@@ -127,11 +142,15 @@ impl AsyncSessionManager for FfiSessionManager {
 #[derive(Clone)]
 struct FfiStreamController {
     last_input: Arc<Mutex<Vec<u8>>>,
+    last_rate: Arc<Mutex<Option<FlowRate>>>,
 }
 
 impl FfiStreamController {
     fn new(buffer: Arc<Mutex<Vec<u8>>>) -> Self {
-        Self { last_input: buffer }
+        Self {
+            last_input: buffer,
+            last_rate: Arc::new(Mutex::new(None)),
+        }
     }
 
     fn record_input(&self, data: &[u8]) {
@@ -141,11 +160,19 @@ impl FfiStreamController {
 
 #[async_trait::async_trait(?Send)]
 impl StreamController for FfiStreamController {
-    async fn adjust_flow(&self, _rate: FlowRate) {}
+    async fn adjust_flow(&self, rate: FlowRate) {
+        *self.last_rate.lock().unwrap() = Some(rate);
+    }
 
     async fn metrics(&self) -> StreamMetrics {
+        let bitrate = self
+            .last_rate
+            .lock()
+            .unwrap()
+            .map(|r| r.target_bitrate_bps)
+            .unwrap_or(0);
         StreamMetrics {
-            bitrate_bps: 0,
+            bitrate_bps: bitrate,
             packet_loss: 0.0,
         }
     }
@@ -364,6 +391,26 @@ pub extern "C" fn skybridge_engine_connect(
 }
 
 #[no_mangle]
+pub extern "C" fn skybridge_engine_reconnect(
+    handle: *mut SkybridgeEngineHandle,
+) -> SkybridgeErrorCode {
+    SkybridgeEngineHandle::with_handle(handle, |handle| {
+        handle
+            .runtime
+            .block_on(handle.engine.reconnect())
+            .map(|_| {
+                handle.push_event(FfiEvent {
+                    kind: SkybridgeEventKind::Reconnected,
+                    payload: Vec::new(),
+                });
+                SkybridgeErrorCode::Ok
+            })
+            .unwrap_or_else(map_core_error)
+    })
+    .unwrap_or(SkybridgeErrorCode::NullHandle)
+}
+
+#[no_mangle]
 /// Returns the engine's local public key, generating one if necessary.
 ///
 /// # Safety
@@ -424,6 +471,47 @@ pub extern "C" fn skybridge_engine_send_heartbeat(
                 SkybridgeErrorCode::Ok
             })
             .unwrap_or_else(map_core_error)
+    })
+    .unwrap_or(SkybridgeErrorCode::NullHandle)
+}
+
+#[no_mangle]
+pub extern "C" fn skybridge_engine_throttle_stream(
+    handle: *mut SkybridgeEngineHandle,
+    flow: SkybridgeFlowRate,
+) -> SkybridgeErrorCode {
+    SkybridgeEngineHandle::with_handle(handle, |handle| {
+        handle
+            .runtime
+            .block_on(handle.engine.throttle_stream(FlowRate {
+                target_bitrate_bps: flow.target_bitrate_bps,
+                max_latency_ms: flow.max_latency_ms,
+            }));
+        SkybridgeErrorCode::Ok
+    })
+    .unwrap_or(SkybridgeErrorCode::NullHandle)
+}
+
+#[no_mangle]
+/// # Safety
+/// The caller must provide a valid handle and a non-null pointer to writable metrics output.
+pub unsafe extern "C" fn skybridge_engine_metrics(
+    handle: *mut SkybridgeEngineHandle,
+    out_metrics: *mut SkybridgeStreamMetrics,
+) -> SkybridgeErrorCode {
+    SkybridgeEngineHandle::with_handle(handle, |handle| {
+        if out_metrics.is_null() {
+            return SkybridgeErrorCode::InvalidInput;
+        }
+        let metrics = handle.runtime.block_on(handle.engine.metrics());
+        let ppm = (metrics.packet_loss * 1_000_000.0) as u32;
+        unsafe {
+            *out_metrics = SkybridgeStreamMetrics {
+                bitrate_bps: metrics.bitrate_bps,
+                packet_loss_ppm: ppm,
+            };
+        }
+        SkybridgeErrorCode::Ok
     })
     .unwrap_or(SkybridgeErrorCode::NullHandle)
 }
