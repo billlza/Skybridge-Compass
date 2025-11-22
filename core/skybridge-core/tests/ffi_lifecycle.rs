@@ -161,6 +161,7 @@ fn ffi_engine_lifecycle_runs() {
     assert_eq!(snapshot_res, SkybridgeErrorCode::Ok);
     assert_eq!(snapshot.state, SkybridgeSessionState::Disconnected);
     assert!(!snapshot.has_secrets);
+    assert!(!snapshot.has_last_heartbeat);
 
     unsafe { skybridge_engine_free(handle) };
 }

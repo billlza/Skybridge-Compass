@@ -75,6 +75,14 @@ impl EngineState {
         Ok(())
     }
 
+    fn clear_heartbeat(&self) {
+        self.last_heartbeat.lock().unwrap().take();
+    }
+
+    fn clear_config(&self) {
+        self.last_config.lock().unwrap().take();
+    }
+
     fn check_liveness(
         &self,
         interval_ms: u64,
@@ -264,6 +272,8 @@ where
         self.state.set_state(SessionState::ShuttingDown)?;
         self.session_manager.terminate_async().await;
         self.state.set_state(SessionState::Disconnected)?;
+        self.state.clear_config();
+        self.state.clear_heartbeat();
         self.state.clear_secrets();
         Ok(())
     }
@@ -589,6 +599,31 @@ mod tests {
 
         assert!(engine.state.secrets().is_none());
         assert_eq!(engine.state.state(), SessionState::Disconnected);
+    }
+
+    #[tokio::test]
+    async fn shutdown_resets_tracking_state() {
+        let recorder = Recorder::new();
+        let engine = build_engine(recorder.clone());
+
+        let config = SessionConfig {
+            client_id: "demo".into(),
+            heartbeat_interval_ms: 50,
+            peer_public_key: Some(sample_peer_key().await),
+        };
+
+        engine.initialize(config).await.unwrap();
+        engine.send_heartbeat().await.unwrap();
+        let snapshot = engine.snapshot();
+        assert_eq!(snapshot.state, SessionState::Connected);
+        assert!(snapshot.has_secrets);
+        assert!(snapshot.last_heartbeat_ms.is_some());
+
+        engine.shutdown().await.unwrap();
+        let snapshot = engine.snapshot();
+        assert_eq!(snapshot.state, SessionState::Disconnected);
+        assert!(!snapshot.has_secrets);
+        assert!(snapshot.last_heartbeat_ms.is_none());
     }
 
     #[tokio::test]
