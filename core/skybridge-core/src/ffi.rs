@@ -84,6 +84,11 @@ pub struct SkybridgeStreamMetrics {
     pub packet_loss_ppm: u32,
 }
 
+/// Maximum number of queued events retained by the engine handle.
+/// Older events are dropped once this capacity is reached so callers must poll
+/// regularly to avoid missing notifications.
+pub const SKYBRIDGE_EVENT_CAPACITY: usize = 1024;
+
 fn map_core_error(err: CoreError) -> SkybridgeErrorCode {
     match err {
         CoreError::Session(_) => SkybridgeErrorCode::SessionError,
@@ -273,7 +278,11 @@ impl SkybridgeEngineHandle {
     }
 
     fn push_event(&self, event: FfiEvent) {
-        self.events.lock().unwrap().push_back(event);
+        let mut queue = self.events.lock().unwrap();
+        if queue.len() >= SKYBRIDGE_EVENT_CAPACITY {
+            queue.pop_front();
+        }
+        queue.push_back(event);
     }
 
     fn pop_event(&self) -> SkybridgeEvent {
@@ -298,6 +307,11 @@ impl SkybridgeEngineHandle {
                 data_len: 0,
             }
         }
+    }
+
+    fn clear_events(&self) {
+        self.events.lock().unwrap().clear();
+        self.last_event_payload.lock().unwrap().clear();
     }
 
     fn with_handle<T>(
@@ -569,6 +583,17 @@ pub extern "C" fn skybridge_engine_disconnect(
     handle: *mut SkybridgeEngineHandle,
 ) -> SkybridgeErrorCode {
     skybridge_engine_shutdown(handle)
+}
+
+#[no_mangle]
+pub extern "C" fn skybridge_engine_clear_events(
+    handle: *mut SkybridgeEngineHandle,
+) -> SkybridgeErrorCode {
+    SkybridgeEngineHandle::with_handle(handle, |handle| {
+        handle.clear_events();
+        SkybridgeErrorCode::Ok
+    })
+    .unwrap_or(SkybridgeErrorCode::NullHandle)
 }
 
 #[no_mangle]
