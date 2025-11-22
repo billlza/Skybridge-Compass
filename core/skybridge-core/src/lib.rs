@@ -67,6 +67,23 @@ impl EngineState {
         Ok(())
     }
 
+    fn check_liveness(
+        &self,
+        interval_ms: u64,
+        grace_multiplier: u32,
+    ) -> Result<(), error::CoreError> {
+        let last = self.last_heartbeat.lock().unwrap();
+        let last_heartbeat = (*last).ok_or(error::CoreError::NoHeartbeat)?;
+        let elapsed = last_heartbeat.elapsed();
+        let allowed = Duration::from_millis(interval_ms.saturating_mul(grace_multiplier as u64));
+        if elapsed > allowed {
+            return Err(error::CoreError::HeartbeatTimeout {
+                elapsed_ms: elapsed.as_millis() as u64,
+            });
+        }
+        Ok(())
+    }
+
     fn store_secrets(&self, secrets: crypto::SessionSecrets) {
         let mut guard = self.session_secrets.lock().unwrap();
         if let Some(mut existing) = guard.take() {
@@ -240,6 +257,26 @@ where
             .ok_or(error::CoreError::MissingConfig)?;
         self.state.record_heartbeat(config.heartbeat_interval_ms)?;
         self.heartbeat_emitter.emit().await
+    }
+
+    /// Verifies that a heartbeat has been observed within the configured interval.
+    ///
+    /// The grace multiplier allows callers to tolerate some jitter before
+    /// treating the session as unhealthy.
+    pub async fn check_liveness(&self, grace_multiplier: u32) -> Result<(), error::CoreError> {
+        if self.state.state() != SessionState::Connected {
+            return Err(error::CoreError::InvalidState {
+                expected: "Connected".to_string(),
+                actual: self.state.state(),
+            });
+        }
+
+        let config = self
+            .state
+            .last_config()
+            .ok_or(error::CoreError::MissingConfig)?;
+        self.state
+            .check_liveness(config.heartbeat_interval_ms, grace_multiplier)
     }
 
     /// Encrypts payloads using the negotiated session secrets.
@@ -628,6 +665,37 @@ mod tests {
             error::CoreError::InvalidState { expected, actual } => {
                 assert_eq!(expected, "Connected");
                 assert_eq!(actual, SessionState::Disconnected);
+            }
+            other => panic!("unexpected error: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn liveness_check_requires_recent_heartbeat() {
+        let recorder = Recorder::new();
+        let engine = build_engine(recorder);
+
+        let err = engine.check_liveness(2).await.unwrap_err();
+        assert!(matches!(err, error::CoreError::InvalidState { .. }));
+
+        let config = SessionConfig {
+            client_id: "demo".into(),
+            heartbeat_interval_ms: 20,
+            peer_public_key: Some(sample_peer_key().await),
+        };
+        engine.initialize(config).await.unwrap();
+
+        let missing = engine.check_liveness(2).await.unwrap_err();
+        assert!(matches!(missing, error::CoreError::NoHeartbeat));
+
+        engine.send_heartbeat().await.unwrap();
+        engine.check_liveness(2).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let timeout = engine.check_liveness(2).await.unwrap_err();
+        match timeout {
+            error::CoreError::HeartbeatTimeout { elapsed_ms } => {
+                assert!(elapsed_ms >= 40);
             }
             other => panic!("unexpected error: {:?}", other),
         }

@@ -53,6 +53,7 @@ pub enum SkybridgeEventKind {
     HeartbeatAck = 3,
     InputReceived = 4,
     Reconnected = 5,
+    HeartbeatTimeout = 6,
 }
 
 #[repr(C)]
@@ -101,6 +102,8 @@ fn map_core_error(err: CoreError) -> SkybridgeErrorCode {
         CoreError::MissingConfig => SkybridgeErrorCode::MissingConfig,
         CoreError::MissingCryptoMaterial => SkybridgeErrorCode::CryptoError,
         CoreError::InvalidCryptoKey => SkybridgeErrorCode::CryptoError,
+        CoreError::NoHeartbeat => SkybridgeErrorCode::InvalidState,
+        CoreError::HeartbeatTimeout { .. } => SkybridgeErrorCode::InvalidState,
         CoreError::RateLimited { .. } => SkybridgeErrorCode::RateLimited,
         CoreError::InvalidState { .. } => SkybridgeErrorCode::InvalidState,
     }
@@ -515,6 +518,29 @@ pub extern "C" fn skybridge_engine_send_heartbeat(
                 SkybridgeErrorCode::Ok
             })
             .unwrap_or_else(map_core_error)
+    })
+    .unwrap_or(SkybridgeErrorCode::NullHandle)
+}
+
+#[no_mangle]
+pub extern "C" fn skybridge_engine_check_liveness(
+    handle: *mut SkybridgeEngineHandle,
+    grace_multiplier: u32,
+) -> SkybridgeErrorCode {
+    SkybridgeEngineHandle::with_handle(handle, |handle| {
+        handle
+            .runtime
+            .block_on(handle.engine.check_liveness(grace_multiplier))
+            .map(|_| SkybridgeErrorCode::Ok)
+            .unwrap_or_else(|err| {
+                if let CoreError::HeartbeatTimeout { .. } = err {
+                    handle.push_event(FfiEvent {
+                        kind: SkybridgeEventKind::HeartbeatTimeout,
+                        payload: Vec::new(),
+                    });
+                }
+                map_core_error(err)
+            })
     })
     .unwrap_or(SkybridgeErrorCode::NullHandle)
 }

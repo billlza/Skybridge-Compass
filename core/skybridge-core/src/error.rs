@@ -24,6 +24,10 @@ pub enum CoreError {
     AlreadyInitialized,
     #[error("no active session configuration available")]
     MissingConfig,
+    #[error("no heartbeat has been recorded yet")]
+    NoHeartbeat,
+    #[error("heartbeat timeout after {elapsed_ms} ms")]
+    HeartbeatTimeout { elapsed_ms: u64 },
     #[error("heartbeat rate limited, retry in {retry_in_ms} ms")]
     RateLimited { retry_in_ms: u64 },
     #[error("invalid session state: expected {expected}, got {actual:?}")]

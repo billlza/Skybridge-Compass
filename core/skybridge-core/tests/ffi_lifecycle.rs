@@ -1,12 +1,13 @@
 use skybridge_core::ffi::{
-    skybridge_engine_clear_events, skybridge_engine_connect, skybridge_engine_decrypt_payload,
-    skybridge_engine_disconnect, skybridge_engine_encrypt_payload, skybridge_engine_free,
-    skybridge_engine_last_input_len, skybridge_engine_local_public_key, skybridge_engine_metrics,
-    skybridge_engine_new, skybridge_engine_poll_events, skybridge_engine_reconnect,
-    skybridge_engine_send_heartbeat, skybridge_engine_send_input, skybridge_engine_state,
-    skybridge_engine_throttle_stream, SkybridgeBuffer, SkybridgeErrorCode, SkybridgeEvent,
-    SkybridgeEventKind, SkybridgeFlowRate, SkybridgeSessionConfig, SkybridgeSessionState,
-    SkybridgeStreamMetrics, SKYBRIDGE_EVENT_CAPACITY,
+    skybridge_engine_check_liveness, skybridge_engine_clear_events, skybridge_engine_connect,
+    skybridge_engine_decrypt_payload, skybridge_engine_disconnect,
+    skybridge_engine_encrypt_payload, skybridge_engine_free, skybridge_engine_last_input_len,
+    skybridge_engine_local_public_key, skybridge_engine_metrics, skybridge_engine_new,
+    skybridge_engine_poll_events, skybridge_engine_reconnect, skybridge_engine_send_heartbeat,
+    skybridge_engine_send_input, skybridge_engine_state, skybridge_engine_throttle_stream,
+    SkybridgeBuffer, SkybridgeErrorCode, SkybridgeEvent, SkybridgeEventKind, SkybridgeFlowRate,
+    SkybridgeSessionConfig, SkybridgeSessionState, SkybridgeStreamMetrics,
+    SKYBRIDGE_EVENT_CAPACITY,
 };
 use std::os::raw::c_char;
 use std::ptr;
@@ -55,6 +56,16 @@ fn ffi_engine_lifecycle_runs() {
     let hb_event = unsafe { skybridge_engine_poll_events(handle, &mut event) };
     assert_eq!(hb_event, SkybridgeErrorCode::Ok);
     assert_eq!(event.kind, SkybridgeEventKind::HeartbeatAck);
+
+    let liveness_ok = skybridge_engine_check_liveness(handle, 2);
+    assert_eq!(liveness_ok, SkybridgeErrorCode::Ok);
+
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    let timeout_res = skybridge_engine_check_liveness(handle, 2);
+    assert_eq!(timeout_res, SkybridgeErrorCode::InvalidState);
+    let timeout_event = unsafe { skybridge_engine_poll_events(handle, &mut event) };
+    assert_eq!(timeout_event, SkybridgeErrorCode::Ok);
+    assert_eq!(event.kind, SkybridgeEventKind::HeartbeatTimeout);
 
     let flow = SkybridgeFlowRate {
         target_bitrate_bps: 1_000_000,
