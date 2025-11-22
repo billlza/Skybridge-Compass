@@ -5,9 +5,10 @@ use p256::{ecdh::EphemeralSecret, elliptic_curve::sec1::ToEncodedPoint, PublicKe
 use rand_core::{OsRng, RngCore};
 use sha2::Sha256;
 use std::sync::Mutex;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Encapsulates symmetric material derived during a session handshake.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
 pub struct SessionSecrets {
     pub shared_secret: Vec<u8>,
     aead_key: [u8; 32],
@@ -213,12 +214,14 @@ mod tests {
             .finalize_handshake(&remote_pub)
             .await
             .unwrap()
-            .shared_secret;
+            .shared_secret
+            .clone();
         let remote_shared = remote_crypto
             .finalize_handshake(&local_pub)
             .await
             .unwrap()
-            .shared_secret;
+            .shared_secret
+            .clone();
 
         assert_eq!(local_shared, remote_shared);
         assert!(!local_shared.is_empty());
@@ -269,6 +272,16 @@ mod tests {
             .expect("decrypt");
 
         assert_eq!(payload.to_vec(), decrypted);
+    }
+
+    #[tokio::test]
+    async fn secrets_zeroize_wipes_material() {
+        let mut secrets = SessionSecrets::new(vec![1u8; 32]).expect("construct secrets");
+        // Call zeroize directly to validate the derive impl clears buffers.
+        secrets.zeroize();
+
+        assert!(secrets.shared_secret.iter().all(|b| *b == 0));
+        assert!(secrets.aead_key.iter().all(|b| *b == 0));
     }
 
     #[tokio::test]

@@ -15,6 +15,7 @@ use session::{
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use stream::{FlowRate, StreamController, StreamMetrics};
+use zeroize::Zeroize;
 
 /// CoreEngine ties together session, streaming, and crypto primitives.
 #[derive(Debug)]
@@ -67,7 +68,11 @@ impl EngineState {
     }
 
     fn store_secrets(&self, secrets: crypto::SessionSecrets) {
-        *self.session_secrets.lock().unwrap() = Some(secrets);
+        let mut guard = self.session_secrets.lock().unwrap();
+        if let Some(mut existing) = guard.take() {
+            existing.zeroize();
+        }
+        *guard = Some(secrets);
     }
 
     fn secrets(&self) -> Option<crypto::SessionSecrets> {
@@ -75,7 +80,9 @@ impl EngineState {
     }
 
     fn clear_secrets(&self) {
-        self.session_secrets.lock().unwrap().take();
+        if let Some(mut secrets) = self.session_secrets.lock().unwrap().take() {
+            secrets.zeroize();
+        }
     }
 }
 
@@ -475,6 +482,29 @@ mod tests {
 
         let err = engine.initialize(config).await.unwrap_err();
         assert!(matches!(err, error::CoreError::MissingCryptoMaterial));
+        assert_eq!(engine.state.state(), SessionState::Disconnected);
+    }
+
+    #[tokio::test]
+    async fn shutdown_clears_session_secrets() {
+        let recorder = Recorder::new();
+        let engine = build_engine(recorder);
+
+        let config = SessionConfig {
+            client_id: "demo".into(),
+            heartbeat_interval_ms: 500,
+            peer_public_key: Some(sample_peer_key().await),
+        };
+
+        engine
+            .initialize(config)
+            .await
+            .expect("init should succeed");
+        assert!(engine.state.secrets().is_some());
+
+        engine.shutdown().await.expect("shutdown");
+
+        assert!(engine.state.secrets().is_none());
         assert_eq!(engine.state.state(), SessionState::Disconnected);
     }
 
