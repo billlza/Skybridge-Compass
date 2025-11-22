@@ -151,6 +151,8 @@ where
             return Err(error::CoreError::AlreadyInitialized);
         }
 
+        config.validate()?;
+
         self.state.set_state(SessionState::Connecting)?;
 
         let config_snapshot = config.clone();
@@ -519,6 +521,22 @@ mod tests {
 
         let err = engine.initialize(config).await.unwrap_err();
         assert!(matches!(err, error::CoreError::MissingCryptoMaterial));
+        assert_eq!(engine.state.state(), SessionState::Disconnected);
+    }
+
+    #[tokio::test]
+    async fn initialize_rejects_invalid_config() {
+        let recorder = Recorder::new();
+        let engine = build_engine(recorder);
+
+        let config = SessionConfig {
+            client_id: " ".into(),
+            heartbeat_interval_ms: 0,
+            peer_public_key: Some(sample_peer_key().await),
+        };
+
+        let err = engine.initialize(config).await.unwrap_err();
+        assert!(matches!(err, error::CoreError::InvalidConfig { .. }));
         assert_eq!(engine.state.state(), SessionState::Disconnected);
     }
 

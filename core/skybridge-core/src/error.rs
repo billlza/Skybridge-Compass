@@ -30,6 +30,8 @@ pub enum CoreError {
     HeartbeatTimeout { elapsed_ms: u64 },
     #[error("heartbeat rate limited, retry in {retry_in_ms} ms")]
     RateLimited { retry_in_ms: u64 },
+    #[error("invalid configuration: {reason}")]
+    InvalidConfig { reason: String },
     #[error("invalid session state: expected {expected}, got {actual:?}")]
     InvalidState {
         expected: String,

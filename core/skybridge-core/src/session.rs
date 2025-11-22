@@ -96,6 +96,32 @@ pub struct SessionConfig {
     pub peer_public_key: Option<Vec<u8>>,
 }
 
+impl SessionConfig {
+    pub fn validate(&self) -> CoreResult<()> {
+        if self.client_id.trim().is_empty() {
+            return Err(CoreError::InvalidConfig {
+                reason: "client_id is required".into(),
+            });
+        }
+
+        if self.heartbeat_interval_ms == 0 {
+            return Err(CoreError::InvalidConfig {
+                reason: "heartbeat interval must be greater than zero".into(),
+            });
+        }
+
+        if let Some(key) = &self.peer_public_key {
+            if key.is_empty() {
+                return Err(CoreError::InvalidConfig {
+                    reason: "peer public key must not be empty".into(),
+                });
+            }
+        }
+
+        Ok(())
+    }
+}
+
 /// Trait to be implemented by session managers.
 #[async_trait::async_trait(?Send)]
 pub trait AsyncSessionManager {
@@ -143,5 +169,32 @@ mod tests {
             }
             other => panic!("unexpected error: {:?}", other),
         }
+    }
+
+    #[test]
+    fn config_validation_rejects_bad_inputs() {
+        let empty_id = SessionConfig {
+            client_id: "   ".into(),
+            heartbeat_interval_ms: 1,
+            peer_public_key: None,
+        };
+        let err = empty_id.validate().unwrap_err();
+        assert!(matches!(err, CoreError::InvalidConfig { .. }));
+
+        let zero_heartbeat = SessionConfig {
+            client_id: "id".into(),
+            heartbeat_interval_ms: 0,
+            peer_public_key: None,
+        };
+        let err = zero_heartbeat.validate().unwrap_err();
+        assert!(matches!(err, CoreError::InvalidConfig { .. }));
+
+        let empty_key = SessionConfig {
+            client_id: "id".into(),
+            heartbeat_interval_ms: 10,
+            peer_public_key: Some(Vec::new()),
+        };
+        let err = empty_key.validate().unwrap_err();
+        assert!(matches!(err, CoreError::InvalidConfig { .. }));
     }
 }

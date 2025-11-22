@@ -147,6 +147,38 @@ fn ffi_engine_lifecycle_runs() {
 }
 
 #[test]
+fn ffi_connect_rejects_invalid_config() {
+    let handle = skybridge_engine_new();
+    assert!(!handle.is_null());
+
+    let mut local_public = SkybridgeBuffer {
+        data_ptr: ptr::null(),
+        data_len: 0,
+    };
+    unsafe { skybridge_engine_local_public_key(handle, &mut local_public) };
+    let local_key =
+        unsafe { std::slice::from_raw_parts(local_public.data_ptr, local_public.data_len) };
+
+    let client_id = b" ";
+    let config = SkybridgeSessionConfig {
+        client_id_ptr: client_id.as_ptr() as *const c_char,
+        client_id_len: client_id.len(),
+        heartbeat_interval_ms: 0,
+        peer_public_key_ptr: local_key.as_ptr(),
+        peer_public_key_len: local_key.len(),
+    };
+
+    let connect_result = skybridge_engine_connect(handle, config);
+    assert_eq!(connect_result, SkybridgeErrorCode::InvalidInput);
+    assert_eq!(
+        skybridge_engine_state(handle),
+        SkybridgeSessionState::Disconnected
+    );
+
+    unsafe { skybridge_engine_free(handle) };
+}
+
+#[test]
 fn ffi_event_queue_is_bounded_and_clearable() {
     let handle = skybridge_engine_new();
     assert!(!handle.is_null());

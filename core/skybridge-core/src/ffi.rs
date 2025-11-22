@@ -102,6 +102,7 @@ fn map_core_error(err: CoreError) -> SkybridgeErrorCode {
         CoreError::MissingConfig => SkybridgeErrorCode::MissingConfig,
         CoreError::MissingCryptoMaterial => SkybridgeErrorCode::CryptoError,
         CoreError::InvalidCryptoKey => SkybridgeErrorCode::CryptoError,
+        CoreError::InvalidConfig { .. } => SkybridgeErrorCode::InvalidInput,
         CoreError::NoHeartbeat => SkybridgeErrorCode::InvalidState,
         CoreError::HeartbeatTimeout { .. } => SkybridgeErrorCode::InvalidState,
         CoreError::RateLimited { .. } => SkybridgeErrorCode::RateLimited,
@@ -408,11 +409,16 @@ fn parse_config(config: SkybridgeSessionConfig) -> Result<SessionConfig, Skybrid
             .to_vec(),
         )
     };
-    Ok(SessionConfig {
+    let config = SessionConfig {
         client_id,
         heartbeat_interval_ms: config.heartbeat_interval_ms,
         peer_public_key,
-    })
+    };
+
+    config
+        .validate()
+        .map_err(|_| SkybridgeErrorCode::InvalidInput)?;
+    Ok(config)
 }
 
 #[no_mangle]
