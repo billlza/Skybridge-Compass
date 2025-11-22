@@ -85,6 +85,15 @@ pub struct SkybridgeStreamMetrics {
     pub packet_loss_ppm: u32,
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct SkybridgeEngineSnapshot {
+    pub state: SkybridgeSessionState,
+    pub last_heartbeat_ms: u64,
+    pub has_last_heartbeat: bool,
+    pub has_secrets: bool,
+}
+
 /// Maximum number of queued events retained by the engine handle.
 /// Older events are dropped once this capacity is reached so callers must poll
 /// regularly to avoid missing notifications.
@@ -107,6 +116,16 @@ fn map_core_error(err: CoreError) -> SkybridgeErrorCode {
         CoreError::HeartbeatTimeout { .. } => SkybridgeErrorCode::InvalidState,
         CoreError::RateLimited { .. } => SkybridgeErrorCode::RateLimited,
         CoreError::InvalidState { .. } => SkybridgeErrorCode::InvalidState,
+    }
+}
+
+fn map_session_state(state: SessionState) -> SkybridgeSessionState {
+    match state {
+        SessionState::Disconnected => SkybridgeSessionState::Disconnected,
+        SessionState::Connecting => SkybridgeSessionState::Connecting,
+        SessionState::Connected => SkybridgeSessionState::Connected,
+        SessionState::Reconnecting => SkybridgeSessionState::Reconnecting,
+        SessionState::ShuttingDown => SkybridgeSessionState::ShuttingDown,
     }
 }
 
@@ -718,14 +737,41 @@ pub extern "C" fn skybridge_engine_clear_events(
 pub extern "C" fn skybridge_engine_state(
     handle: *mut SkybridgeEngineHandle,
 ) -> SkybridgeSessionState {
-    SkybridgeEngineHandle::with_handle(handle, |handle| match handle.engine.state.state() {
-        SessionState::Disconnected => SkybridgeSessionState::Disconnected,
-        SessionState::Connecting => SkybridgeSessionState::Connecting,
-        SessionState::Connected => SkybridgeSessionState::Connected,
-        SessionState::Reconnecting => SkybridgeSessionState::Reconnecting,
-        SessionState::ShuttingDown => SkybridgeSessionState::ShuttingDown,
+    SkybridgeEngineHandle::with_handle(handle, |handle| {
+        map_session_state(handle.engine.state.state())
     })
     .unwrap_or(SkybridgeSessionState::Disconnected)
+}
+
+#[no_mangle]
+/// # Safety
+/// `out_snapshot` must be a valid writable pointer. The caller owns the memory
+/// and must ensure the handle is not freed while the snapshot is being
+/// written.
+pub unsafe extern "C" fn skybridge_engine_snapshot(
+    handle: *mut SkybridgeEngineHandle,
+    out_snapshot: *mut SkybridgeEngineSnapshot,
+) -> SkybridgeErrorCode {
+    SkybridgeEngineHandle::with_handle(handle, |handle| {
+        if out_snapshot.is_null() {
+            return SkybridgeErrorCode::InvalidInput;
+        }
+
+        let snapshot = handle.engine.snapshot();
+        let ffi_snapshot = SkybridgeEngineSnapshot {
+            state: map_session_state(snapshot.state),
+            last_heartbeat_ms: snapshot.last_heartbeat_ms.unwrap_or(0),
+            has_last_heartbeat: snapshot.last_heartbeat_ms.is_some(),
+            has_secrets: snapshot.has_secrets,
+        };
+
+        unsafe {
+            *out_snapshot = ffi_snapshot;
+        }
+
+        SkybridgeErrorCode::Ok
+    })
+    .unwrap_or(SkybridgeErrorCode::NullHandle)
 }
 
 #[no_mangle]

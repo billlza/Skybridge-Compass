@@ -235,3 +235,41 @@ async fn integration_heartbeat_throttle_is_enforced() {
     sleep(Duration::from_millis(110)).await;
     engine.send_heartbeat().await.unwrap();
 }
+
+#[tokio::test]
+async fn engine_snapshot_tracks_state_and_heartbeat_age() {
+    let recorder = Recorder::new();
+    let engine = CoreEngine::new(
+        TrackingSession::new(recorder.clone()),
+        TrackingStream {
+            recorder: recorder.clone(),
+        },
+        TrackingCrypto {
+            recorder: recorder.clone(),
+            inner: P256SessionCrypto::new(P256KeyExchange),
+        },
+        TrackingHeartbeat { recorder },
+    );
+
+    let config = SessionConfig {
+        client_id: "snapshot".into(),
+        heartbeat_interval_ms: 20,
+        peer_public_key: Some(sample_peer_key().await),
+    };
+
+    engine.initialize(config).await.unwrap();
+    let snapshot = engine.snapshot();
+    assert_eq!(snapshot.state, SessionState::Connected);
+    assert!(snapshot.has_secrets);
+    assert_eq!(snapshot.last_heartbeat_ms, None);
+
+    engine.send_heartbeat().await.unwrap();
+    let snapshot = engine.snapshot();
+    assert!(snapshot.last_heartbeat_ms.is_some());
+    assert!(snapshot.last_heartbeat_ms.unwrap() <= 50);
+
+    engine.shutdown().await.unwrap();
+    let snapshot = engine.snapshot();
+    assert_eq!(snapshot.state, SessionState::Disconnected);
+    assert!(!snapshot.has_secrets);
+}

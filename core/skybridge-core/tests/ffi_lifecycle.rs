@@ -4,10 +4,10 @@ use skybridge_core::ffi::{
     skybridge_engine_encrypt_payload, skybridge_engine_free, skybridge_engine_last_input_len,
     skybridge_engine_local_public_key, skybridge_engine_metrics, skybridge_engine_new,
     skybridge_engine_poll_events, skybridge_engine_reconnect, skybridge_engine_send_heartbeat,
-    skybridge_engine_send_input, skybridge_engine_state, skybridge_engine_throttle_stream,
-    SkybridgeBuffer, SkybridgeErrorCode, SkybridgeEvent, SkybridgeEventKind, SkybridgeFlowRate,
-    SkybridgeSessionConfig, SkybridgeSessionState, SkybridgeStreamMetrics,
-    SKYBRIDGE_EVENT_CAPACITY,
+    skybridge_engine_send_input, skybridge_engine_snapshot, skybridge_engine_state,
+    skybridge_engine_throttle_stream, SkybridgeBuffer, SkybridgeEngineSnapshot, SkybridgeErrorCode,
+    SkybridgeEvent, SkybridgeEventKind, SkybridgeFlowRate, SkybridgeSessionConfig,
+    SkybridgeSessionState, SkybridgeStreamMetrics, SKYBRIDGE_EVENT_CAPACITY,
 };
 use std::os::raw::c_char;
 use std::ptr;
@@ -42,6 +42,18 @@ fn ffi_engine_lifecycle_runs() {
     let state = skybridge_engine_state(handle);
     assert_eq!(state, SkybridgeSessionState::Connected);
 
+    let mut snapshot = SkybridgeEngineSnapshot {
+        state: SkybridgeSessionState::Disconnected,
+        last_heartbeat_ms: 0,
+        has_last_heartbeat: false,
+        has_secrets: false,
+    };
+    let snapshot_res = unsafe { skybridge_engine_snapshot(handle, &mut snapshot) };
+    assert_eq!(snapshot_res, SkybridgeErrorCode::Ok);
+    assert_eq!(snapshot.state, SkybridgeSessionState::Connected);
+    assert!(snapshot.has_secrets);
+    assert!(!snapshot.has_last_heartbeat);
+
     let mut event = SkybridgeEvent {
         kind: SkybridgeEventKind::None,
         data_ptr: ptr::null(),
@@ -56,6 +68,9 @@ fn ffi_engine_lifecycle_runs() {
     let hb_event = unsafe { skybridge_engine_poll_events(handle, &mut event) };
     assert_eq!(hb_event, SkybridgeErrorCode::Ok);
     assert_eq!(event.kind, SkybridgeEventKind::HeartbeatAck);
+    let snapshot_res = unsafe { skybridge_engine_snapshot(handle, &mut snapshot) };
+    assert_eq!(snapshot_res, SkybridgeErrorCode::Ok);
+    assert!(snapshot.has_last_heartbeat);
 
     let liveness_ok = skybridge_engine_check_liveness(handle, 2);
     assert_eq!(liveness_ok, SkybridgeErrorCode::Ok);
@@ -142,6 +157,10 @@ fn ffi_engine_lifecycle_runs() {
     assert_eq!(event.kind, SkybridgeEventKind::Disconnected);
     let final_state = skybridge_engine_state(handle);
     assert_eq!(final_state, SkybridgeSessionState::Disconnected);
+    let snapshot_res = unsafe { skybridge_engine_snapshot(handle, &mut snapshot) };
+    assert_eq!(snapshot_res, SkybridgeErrorCode::Ok);
+    assert_eq!(snapshot.state, SkybridgeSessionState::Disconnected);
+    assert!(!snapshot.has_secrets);
 
     unsafe { skybridge_engine_free(handle) };
 }

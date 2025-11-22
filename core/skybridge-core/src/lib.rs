@@ -17,6 +17,14 @@ use std::time::{Duration, Instant};
 use stream::{FlowRate, StreamController, StreamMetrics};
 use zeroize::Zeroize;
 
+/// Snapshot of runtime engine health used by host diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EngineSnapshot {
+    pub state: SessionState,
+    pub last_heartbeat_ms: Option<u64>,
+    pub has_secrets: bool,
+}
+
 /// CoreEngine ties together session, streaming, and crypto primitives.
 #[derive(Debug)]
 pub struct EngineState {
@@ -99,6 +107,21 @@ impl EngineState {
     fn clear_secrets(&self) {
         if let Some(mut secrets) = self.session_secrets.lock().unwrap().take() {
             secrets.zeroize();
+        }
+    }
+
+    pub fn snapshot(&self) -> EngineSnapshot {
+        let last_heartbeat_ms = self
+            .last_heartbeat
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|instant| instant.elapsed().as_millis() as u64);
+        let has_secrets = self.session_secrets.lock().unwrap().is_some();
+        EngineSnapshot {
+            state: self.state(),
+            last_heartbeat_ms,
+            has_secrets,
         }
     }
 }
@@ -186,6 +209,11 @@ where
     /// Retrieves stream metrics for diagnostics asynchronously.
     pub async fn metrics(&self) -> StreamMetrics {
         self.stream_controller.metrics().await
+    }
+
+    /// Returns a snapshot of the engine's runtime state without blocking.
+    pub fn snapshot(&self) -> EngineSnapshot {
+        self.state.snapshot()
     }
 
     /// Issues a stream flow control adjustment asynchronously.
