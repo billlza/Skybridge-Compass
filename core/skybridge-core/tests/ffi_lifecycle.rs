@@ -1,10 +1,9 @@
-use skybridge_core::crypto::{KeyExchangeProvider, P256KeyExchange};
 use skybridge_core::ffi::{
     skybridge_engine_connect, skybridge_engine_disconnect, skybridge_engine_free,
-    skybridge_engine_last_input_len, skybridge_engine_new, skybridge_engine_poll_events,
-    skybridge_engine_send_heartbeat, skybridge_engine_send_input, skybridge_engine_state,
-    SkybridgeErrorCode, SkybridgeEvent, SkybridgeEventKind, SkybridgeSessionConfig,
-    SkybridgeSessionState,
+    skybridge_engine_last_input_len, skybridge_engine_local_public_key, skybridge_engine_new,
+    skybridge_engine_poll_events, skybridge_engine_send_heartbeat, skybridge_engine_send_input,
+    skybridge_engine_state, SkybridgeBuffer, SkybridgeErrorCode, SkybridgeEvent,
+    SkybridgeEventKind, SkybridgeSessionConfig, SkybridgeSessionState,
 };
 use std::os::raw::c_char;
 use std::ptr;
@@ -14,25 +13,24 @@ fn ffi_engine_lifecycle_runs() {
     let handle = skybridge_engine_new();
     assert!(!handle.is_null());
 
-    let peer_key = tokio::runtime::Builder::new_current_thread()
-        .enable_time()
-        .build()
-        .unwrap()
-        .block_on(async {
-            P256KeyExchange
-                .generate()
-                .await
-                .expect("peer key")
-                .public_key
-        });
+    let mut local_public = SkybridgeBuffer {
+        data_ptr: ptr::null(),
+        data_len: 0,
+    };
+    let local_key_result = unsafe { skybridge_engine_local_public_key(handle, &mut local_public) };
+    assert_eq!(local_key_result, SkybridgeErrorCode::Ok);
+    assert!(!local_public.data_ptr.is_null());
+    assert!(local_public.data_len > 0);
+    let local_key =
+        unsafe { std::slice::from_raw_parts(local_public.data_ptr, local_public.data_len) };
 
     let client_id = b"ffi-client";
     let config = SkybridgeSessionConfig {
         client_id_ptr: client_id.as_ptr() as *const c_char,
         client_id_len: client_id.len(),
         heartbeat_interval_ms: 10,
-        peer_public_key_ptr: peer_key.as_ptr(),
-        peer_public_key_len: peer_key.len(),
+        peer_public_key_ptr: local_key.as_ptr(),
+        peer_public_key_len: local_key.len(),
     };
 
     let connect_result = skybridge_engine_connect(handle, config);

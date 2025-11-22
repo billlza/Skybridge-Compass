@@ -62,6 +62,13 @@ pub struct SkybridgeEvent {
     pub data_len: usize,
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SkybridgeBuffer {
+    pub data_ptr: *const u8,
+    pub data_len: usize,
+}
+
 fn map_core_error(err: CoreError) -> SkybridgeErrorCode {
     match err {
         CoreError::Session(_) => SkybridgeErrorCode::SessionError,
@@ -207,6 +214,7 @@ pub struct SkybridgeEngineHandle {
     input_buffer: Arc<Mutex<Vec<u8>>>,
     events: Arc<Mutex<VecDeque<FfiEvent>>>,
     last_event_payload: Arc<Mutex<Vec<u8>>>,
+    last_public_key: Arc<Mutex<Vec<u8>>>,
 }
 
 impl SkybridgeEngineHandle {
@@ -214,6 +222,7 @@ impl SkybridgeEngineHandle {
         let input_buffer = Arc::new(Mutex::new(Vec::new()));
         let events = Arc::new(Mutex::new(VecDeque::new()));
         let last_event_payload = Arc::new(Mutex::new(Vec::new()));
+        let last_public_key = Arc::new(Mutex::new(Vec::new()));
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_time()
             .build()
@@ -232,6 +241,7 @@ impl SkybridgeEngineHandle {
             input_buffer,
             events,
             last_event_payload,
+            last_public_key,
         }
     }
 
@@ -349,6 +359,51 @@ pub extern "C" fn skybridge_engine_connect(
             })
             .unwrap_or_else(map_core_error),
         Err(code) => code,
+    })
+    .unwrap_or(SkybridgeErrorCode::NullHandle)
+}
+
+#[no_mangle]
+/// Returns the engine's local public key, generating one if necessary.
+///
+/// # Safety
+/// `out_buffer` must be a valid pointer to writable `SkybridgeBuffer`. The returned
+/// `data_ptr` remains valid until the next call to this function or until the handle is freed.
+pub unsafe extern "C" fn skybridge_engine_local_public_key(
+    handle: *mut SkybridgeEngineHandle,
+    out_buffer: *mut SkybridgeBuffer,
+) -> SkybridgeErrorCode {
+    SkybridgeEngineHandle::with_handle(handle, |handle| {
+        if out_buffer.is_null() {
+            return SkybridgeErrorCode::InvalidInput;
+        }
+        let result = handle.runtime.block_on(async {
+            if let Some(existing) = handle.engine.crypto.local_public_key() {
+                Ok(existing)
+            } else {
+                handle.engine.crypto.begin_handshake().await
+            }
+        });
+
+        match result {
+            Ok(key) => {
+                let mut buffer = handle.last_public_key.lock().unwrap();
+                *buffer = key;
+                let view = SkybridgeBuffer {
+                    data_ptr: if buffer.is_empty() {
+                        std::ptr::null()
+                    } else {
+                        buffer.as_ptr()
+                    },
+                    data_len: buffer.len(),
+                };
+                unsafe {
+                    *out_buffer = view;
+                }
+                SkybridgeErrorCode::Ok
+            }
+            Err(err) => map_core_error(err),
+        }
     })
     .unwrap_or(SkybridgeErrorCode::NullHandle)
 }
