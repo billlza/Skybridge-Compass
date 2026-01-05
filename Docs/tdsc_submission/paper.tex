@@ -147,29 +147,35 @@ Contributions (reviewer-facing, evidence-backed):
   We turn PQC migration from a narrative into an enforceable contract by
   making downgrade and legacy-compatibility decisions explicit,
   testable, and auditable rather than implicit ``best-effort'' fallback.
-  (Fig. 7; Table XIII; PolicyDowngradeBenchTests,
+  (Fig.~\ref{fig:downgrade-matrix}; Table~\ref{tab:security-contract};
+  PolicyDowngradeBenchTests,
   LegacyFallbackPreconditionTests)
 \item
   We design a crypto-agile P2P handshake that cleanly separates suite
   negotiation, transcript binding, and protocol-signature keys,
   preventing ``suite says PQC but keys stay classical'' class of
-  integration bugs. (Fig. 2; Table XIII;
+  integration bugs. (Fig.~\ref{fig:handshake-sequence};
+  Table~\ref{tab:security-contract};
   ProtocolSignatureRegressionTests, TranscriptIntegrityPropertyTests)
 \item
   We provide migration safety with measurable coverage by enumerating
   legacy/PQC strata and validating acceptance/rejection boundaries under
   fault injection instead of relying on informal compatibility claims.
-  (Table VIII; Table V; HandshakeFaultInjectionBenchTests)
+  (Table~\ref{tab:legacy-precondition};
+  Table~\ref{tab:failure-mode}; HandshakeFaultInjectionBenchTests)
 \item
   We harden correctness under concurrency by an actor-isolated state
   machine with idempotent transitions and bounded retries, eliminating
-  double-resume and state desynchronization failure modes. (Fig. 3;
-  Table XIII; HandshakeDriverTests)
+  double-resume and state desynchronization failure modes.
+  (Fig.~\ref{fig:handshake-state-machine};
+  Table~\ref{tab:security-contract}; HandshakeDriverTests)
 \item
   We make evaluation reproducible by shipping a benchmark harness that
   reports distributional statistics (p50/p95/p99) over large-N runs and
-  links each metric back to a concrete failure taxonomy. (Fig. 6; Table
-  I--II; HandshakeBenchmarkTests, MessageSizeSnapshotTests)
+  links each metric back to a concrete failure taxonomy.
+  (Fig.~\ref{fig:policy-fallback};
+  Tables~\ref{tab:handshake-latency}--\ref{tab:handshake-sizes};
+  HandshakeBenchmarkTests, MessageSizeSnapshotTests)
 \end{enumerate}
 
 \subsection{Paper Organization}\label{b.-paper-organization}
@@ -269,8 +275,9 @@ unique requirements of cryptographic handshakes.
 
 SkyBridge Compass implements a layered architecture separating concerns
 across four primary domains: discovery, cryptographic operations,
-handshake management, and session transport. Fig. 1 illustrates the
-high-level component relationships and trust boundaries.
+handshake management, and session transport. Fig.~\ref{fig:architecture}
+illustrates the high-level component relationships and trust
+boundaries.
 
 \subsection{1 Threat Model}\label{a.1-threat-model}
 
@@ -316,14 +323,14 @@ on users
 \subsection{2 Protocol Message
 Flow}\label{a.2-protocol-message-flow}
 
-Fig. 2 illustrates the handshake message sequence and transcript
-coverage.
+Fig.~\ref{fig:handshake-sequence} illustrates the handshake message
+sequence and transcript coverage.
 
 \begin{figure}
 \centering
 \pandocbounded{\includegraphics[keepaspectratio,width=\columnwidth]{figures/fig_handshake_sequence.png}}
-\caption{Fig. 2. Handshake sequence with transcript coverage and policy
-visibility.}
+\caption{Handshake sequence with transcript coverage and policy
+visibility.}\label{fig:handshake-sequence}
 \end{figure}
 
 \textbf{Key Share Semantics:} The \texttt{keyShares{[}{]}.shareBytes}
@@ -377,7 +384,7 @@ payloads. The Finished MAC is computed as
 \texttt{HMAC-SHA256(finishedKey,\ transcriptHash)} where
 \texttt{finishedKey\ =\ HKDF(sessionKey,\ info="SkyBridge-FINISHED\textbar{}\textless{}role\textgreater{}\textbar{}")}.
 Wire overhead for the full handshake including Finished frames is
-reported in Table II.
+reported in Table~\ref{tab:handshake-sizes}.
 
 \textbf{Anti-Downgrade Invariant:} The Initiator MUST verify that
 \texttt{selectedSuite} is a member of the \texttt{supportedSuites{[}{]}}
@@ -391,6 +398,7 @@ attacker will cause \texttt{sigB} verification to fail.
 
 \begin{table*}[!t]
 \centering
+\caption{Suite negotiation scenarios.}\label{tab:suite-negotiation}
 \begin{tabular}{@{}
   >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.4219}}
   >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.3281}}
@@ -424,6 +432,7 @@ policy respected \\
 
 \begin{table*}[!t]
 \centering
+\caption{Message field validation rules.}\label{tab:message-validation}
 \begin{tabular}{@{}
   >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.2000}}
   >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3429}}
@@ -518,8 +527,8 @@ after failure
 \draw[arrow] (pi) -- (core);
 \end{tikzpicture}
 }
-\caption{Fig. 1. SkyBridge Compass system architecture with trust
-boundaries and policy guard.}
+\caption{SkyBridge Compass system architecture with trust boundaries and
+policy guard.}\label{fig:architecture}
 \end{figure}
 
 \subsection{CryptoProvider
@@ -577,6 +586,7 @@ structured 16-bit wire format enabling forward compatibility:
 
 \begin{table*}[!t]
 \centering
+\caption{Suite identifier ranges and components.}\label{tab:suite-identifiers}
 \begin{tabular}{@{}
   >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.1556}}
   >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.2222}}
@@ -884,15 +894,16 @@ checking is planned for future work.
 
 \subsection{State Transitions}\label{c.-state-transitions}
 
-Fig. 3 illustrates the handshake state machine for both roles.
+Fig.~\ref{fig:handshake-state-machine} illustrates the handshake state
+machine for both roles.
 
 \begin{figure}
 \centering
 \pandocbounded{\includegraphics[keepaspectratio,width=\columnwidth]{figures/fig_state_machine_initiator.png}}
 \vspace{2mm}
 \pandocbounded{\includegraphics[keepaspectratio,width=\columnwidth]{figures/fig_state_machine_responder.png}}
-\caption{Fig. 3. Handshake state machines for Initiator (top) and Responder
-(bottom).}
+\caption{Handshake state machines for Initiator (top) and Responder
+(bottom).}\label{fig:handshake-state-machine}
 \end{figure}
 
 \subsection{Double-Resume
@@ -1147,7 +1158,7 @@ to classic is allowed under strict policy.\\
 \emph{Proof sketch:} \texttt{TwoAttemptHandshakeManager} enforces a
 policy gate before any fallback attempt; strictPQC forbids all fallback
 edges regardless of error type. This is validated by policy downgrade
-benchmarks (Fig. 6).
+benchmarks (Fig.~\ref{fig:policy-fallback}).
 
 \textbf{Property G6 (Safe Fallback under default policy):} Fallback can
 only occur for a whitelisted set of benign errors, and never due to
@@ -1161,7 +1172,8 @@ signatures are accepted only under authenticated pairing or an existing
 trust record.\\
 \emph{Proof sketch:} Legacy acceptance is gated by
 \texttt{LegacyTrustPrecondition}; pure network stranger connections
-fail. This is validated by the precondition test matrix (Table VIII).
+fail. This is validated by the precondition test matrix
+(Table~\ref{tab:legacy-precondition}).
 
 \textbf{Property G8 (Auditability):} Cryptographic downgrades and
 exceptional states are observable.\\
@@ -1170,11 +1182,9 @@ exceptional states are observable.\\
 deviceId, and cooldown context, enabling post-hoc verification of policy
 adherence.
 
-\textbf{TABLE XIII: Security Contract (Properties, Enforcement,
-Evidence)}
-
 \begin{table*}[!t]
 \centering
+\caption{Security contract (properties, enforcement, evidence).}\label{tab:security-contract}
 \begin{tabular}{@{}
   >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3030}}
   >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3939}}
@@ -1192,20 +1202,23 @@ Evidence
 \bottomrule\noalign{}
 
 G1 Negotiation integrity & Suite/keyshare validation + transcript-bound
-\texttt{sigB} & Fig. 2, Table IX, HandshakeDriverTests \\
+\texttt{sigB} & Fig.~\ref{fig:handshake-sequence},
+Table~\ref{tab:transcript-integrity}, HandshakeDriverTests \\
 G2 Mutual authentication & Identity pinning + signature verification &
-Table V (wrong signature), Table VIII \\
+Table~\ref{tab:failure-mode} (wrong signature),
+Table~\ref{tab:legacy-precondition} \\
 G3 Session key secrecy & KEM/DH + HKDF with transcript-bound salt &
-Property 1, Table VI \\
+Property 1, Table~\ref{tab:mldsa-sizes} \\
 G4 Replay resistance & \texttt{handshakeId} cache + nonce binding &
 Property-Oriented Testing (Section VII.B.3) \\
 G5 strictPQC no-downgrade & Policy gate in TwoAttemptHandshakeManager &
-Fig. 6, PolicyDowngradeBenchTests \\
-G6 Default safe fallback & Whitelist/blacklist + cooldown & Fig. 7,
-Table V \\
-G7 Legacy acceptance precondition & LegacyTrustPrecondition & Table
-VIII \\
-G8 Auditability & Security event emission & Fig. 8, Table XIV \\
+Fig.~\ref{fig:policy-fallback}, PolicyDowngradeBenchTests \\
+G6 Default safe fallback & Whitelist/blacklist + cooldown &
+Fig.~\ref{fig:downgrade-matrix}, Table~\ref{tab:failure-mode} \\
+G7 Legacy acceptance precondition & LegacyTrustPrecondition &
+Table~\ref{tab:legacy-precondition} \\
+G8 Auditability & Security event emission &
+Fig.~\ref{fig:failure-histogram}, Table~\ref{tab:audit-fidelity} \\
 \end{tabular}
 \end{table*}
 
@@ -1218,6 +1231,7 @@ Matrix}\label{a.-platform-support-matrix}
 
 \begin{table*}[!t]
 \centering
+\caption{Platform support matrix.}\label{tab:platform-support}
 \begin{tabular}{@{}
   >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.2326}}
   >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.3256}}
@@ -1597,44 +1611,44 @@ the paper's tables:
 \begin{itemize}
 \tightlist
 \item
-  \textbf{Table I (Handshake Latency):}
+  \textbf{Table~\ref{tab:handshake-latency} (Handshake Latency):}
   \texttt{SKYBRIDGE\_RUN\_BENCH=1\ swift\ test\ -\/-filter\ HandshakeBenchmark\allowbreak\hspace{0pt}Tests}
 \item
-  \textbf{Table I-B (Handshake RTT):}
+  \textbf{Table~\ref{tab:handshake-rtt} (Handshake RTT):}
   \texttt{SKYBRIDGE\_RUN\_BENCH=1\ swift\ test\ -\/-filter\ HandshakeBenchmark\allowbreak\hspace{0pt}Tests}
 \item
-  \textbf{Table II (Handshake Message Sizes):}
+  \textbf{Table~\ref{tab:handshake-sizes} (Handshake Message Sizes):}
   \texttt{SKYBRIDGE\_RUN\_BENCH=1\ swift\ test\ -\/-filter\ HandshakeBenchmark\allowbreak\hspace{0pt}Tests}
 \item
-  \textbf{Table III (Data-Plane Throughput):}
+  \textbf{Table~\ref{tab:data-plane-throughput} (Data-Plane Throughput):}
 \texttt{SKYBRIDGE\_RUN\_BENCH=1\ swift\ test\ -\/-filter\ testBench\_DataPlaneThroughput\allowbreak AndCPUProxy}
 \item
-  \textbf{Table IV (Provider Selection):}
+  \textbf{Table~\ref{tab:provider-selection} (Provider Selection):}
   \texttt{SKYBRIDGE\_RUN\_BENCH=1\ swift\ test\ -\/-filter\ testBench\_ProviderSelection\allowbreak\hspace{0pt}Overhead}
 \item
-  \textbf{Table V (Fault Injection):}
+  \textbf{Table~\ref{tab:failure-mode} (Fault Injection):}
   \texttt{SKYBRIDGE\_RUN\_FI=1\ swift\ test\ -\/-filter\ HandshakeFaultInjection\allowbreak\hspace{0pt}BenchTests}
 \item
-  \textbf{Message Size Breakdown (Fig. 5):}
+  \textbf{Message Size Breakdown (Fig.~\ref{fig:wire-size-breakdown}):}
   \texttt{swift\ test\ -\/-filter\ MessageSize\allowbreak\hspace{0pt}SnapshotTests}
 \item
-  \textbf{Policy Downgrade Bench (Fig. 6):}
+  \textbf{Policy Downgrade Bench (Fig.~\ref{fig:policy-fallback}):}
   \texttt{SKYBRIDGE\_RUN\_POLICY\_BENCH=1\ swift\ test\ -\/-filter\ PolicyDowngrade\allowbreak\hspace{0pt}BenchTests}
 \item
-  \textbf{Migration Coverage Bench (Table VIII coverage):}
+  \textbf{Migration Coverage Bench (Table~\ref{tab:legacy-precondition} coverage):}
   \texttt{SKYBRIDGE\_RUN\_MIGRATION\_BENCH=1\ swift\ test\ -\/-filter\ MigrationCoverage\allowbreak\hspace{0pt}BenchTests}
 \item
-  \textbf{Downgrade Matrix (Fig. 7):} derived from
+  \textbf{Downgrade Matrix (Fig.~\ref{fig:downgrade-matrix}):} derived from
   \texttt{TwoAttemptHandshakeManager.\allowbreak shouldAllowFallback}
   whitelist/blacklist
 \item
-  \textbf{Failure Histogram (Fig. 8):}
+  \textbf{Failure Histogram (Fig.~\ref{fig:failure-histogram}):}
   \texttt{SKYBRIDGE\_RUN\_FI=1\ swift\ test\ -\/-filter\ HandshakeFaultInjection\allowbreak\hspace{0pt}BenchTests}
   +
   \texttt{SKYBRIDGE\_RUN\_POLICY\_BENCH=1\ swift\ test\ -\/-filter\ PolicyDowngrade\allowbreak\hspace{0pt}BenchTests},
   then \texttt{Scripts/plot\_\allowbreak\hspace{0pt}failure\_histogram.py}
 \item
-  \textbf{Audit-Signal Fidelity (Fig. 9 / Table XIV):}
+  \textbf{Audit-Signal Fidelity (Fig.~\ref{fig:audit-trace} / Table~\ref{tab:audit-fidelity}):}
   \texttt{Scripts/derive\_\allowbreak\hspace{0pt}audit\_signal\_fidelity.py} (inputs
   \texttt{fault\_\allowbreak\hspace{0pt}injection\_\textless{}date\textgreater{}.csv},
   \texttt{policy\_\allowbreak\hspace{0pt}downgrade\_\textless{}date\textgreater{}.csv}; outputs
@@ -1664,7 +1678,7 @@ reproducible from the shipped test suite.
 \subsection{Security-Centric
 Evaluation}\label{b.-security-centric-evaluation}
 
-\paragraph{B.1 Failure-Mode
+\subsubsection{Failure-Mode
 Robustness}\label{b.1-failure-mode-robustness}
 
 This experiment validates that the actor-isolated handshake driver
@@ -1687,8 +1701,6 @@ count of emitted \texttt{SecurityEventType.handshakeFailed} -
 \texttt{E\_cryptoDowngrade}: count of emitted
 \texttt{SecurityEventType.cryptoDowngrade}
 
-\textbf{TABLE V: Failure-Mode Robustness and Observability}
-
 \emph{Runs = number of iterations per scenario and policy (n=1000).
 Table reports default policy; strictPQC counts are recorded separately
 in \texttt{fault\_injection\_\textless{}date\textgreater{}.csv}. All
@@ -1699,6 +1711,7 @@ HandshakeDriverTests.}
 
 \begin{table*}[!t]
 \centering
+\caption{Failure-mode robustness and observability.}\label{tab:failure-mode}
 \begin{tabular}{@{}
   >{\raggedright\arraybackslash}p{(\linewidth - 12\tabcolsep) * \real{0.1186}}
   >{\raggedright\arraybackslash}p{(\linewidth - 12\tabcolsep) * \real{0.0508}}
@@ -1740,18 +1753,19 @@ Concurrent timeout & 1000 & 1 & 1 & 1 & 1000 & 0 \\
 \end{tabular}
 \end{table*}
 
-Downgrade events are quantified separately in the policy bench (Fig. 6)
+Downgrade events are quantified separately in the policy bench
+(Fig.~\ref{fig:policy-fallback})
 to avoid conflating fallback behavior with transport corruption
 scenarios.
 
 \begin{figure}
 \centering
 \pandocbounded{\includegraphics[keepaspectratio,width=\columnwidth]{figures/fig_policy_downgrade.pdf}}
-\caption{Fig. 6. Policy guard enforces strictPQC: fallback events per
-1000 runs (95\% CI), macOS 26.x, N=1000 per policy.}
+\caption{Policy guard enforces strictPQC: fallback events per 1000 runs
+(95\% CI), macOS 26.x, N=1000 per policy.}\label{fig:policy-fallback}
 \end{figure}
 
-Fig. 6 is generated from
+Fig.~\ref{fig:policy-fallback} is generated from
 \texttt{policy\_downgrade\_\textless{}date\textgreater{}.csv} and
 demonstrates that strictPQC never emits fallback events even under
 forced PQC-unavailable errors; default policy shows non-zero downgrade
@@ -1760,26 +1774,28 @@ events.
 \begin{figure}
 \centering
 \pandocbounded{\includegraphics[keepaspectratio,width=\columnwidth]{figures/fig_downgrade_matrix.pdf}}
-\caption{Fig. 7. Downgrade decision matrix (policy x error) with
-explicit allow/deny semantics, macOS 26.x.}
+\caption{Downgrade decision matrix (policy x error) with explicit
+allow/deny semantics, macOS 26.x.}\label{fig:downgrade-matrix}
 \end{figure}
 
-Fig. 7 encodes the explicit downgrade whitelist/blacklist: only
+Fig.~\ref{fig:downgrade-matrix} encodes the explicit downgrade
+whitelist/blacklist: only
 PQC-unavailability and suite-selection errors may fallback under default
 policy; strictPQC denies all fallback edges.
 
 \begin{figure}
 \centering
 \pandocbounded{\includegraphics[keepaspectratio,width=\columnwidth]{figures/fig_failure_histogram.pdf}}
-\caption{Fig. 8. Failure-mode histogram of security events, macOS 26.x,
-N=1000 per scenario.}
+\caption{Failure-mode histogram of security events, macOS 26.x, N=1000
+per scenario.}\label{fig:failure-histogram}
 \end{figure}
 
-Fig. 8 combines fault-injection counts with the downgrade-acceptance
+Fig.~\ref{fig:failure-histogram} combines fault-injection counts with
+the downgrade-acceptance
 event from the policy bench to visualize observability of failures and
 downgrades.
 
-\paragraph{B.2 Comparison with
+\subsubsection{Comparison with
 Baseline}\label{b.2-comparison-with-baseline}
 
 The baseline implementation lacks: 1. Provider abstraction (hard-coded
@@ -1796,7 +1812,7 @@ primary evaluation tables.
 The actor-based design eliminates these race conditions with negligible
 additional latency per handshake.
 
-\paragraph{B.3 Property-Oriented
+\subsubsection{Property-Oriented
 Testing}\label{b.3-property-oriented-testing}
 
 Correctness properties are validated using property-oriented tests that
@@ -1824,17 +1840,16 @@ asserts counter equals allocation count.
 double-resume of a continuation. Validated via concurrent
 cancellation/timeout/message-arrival stress tests (500 iterations).
 
-\paragraph{B.4 ML-DSA Key Lifecycle
+\subsubsection{ML-DSA Key Lifecycle
 Validation}\label{b.4-ml-dsa-key-lifecycle-validation}
 
 This experiment validates the ML-DSA-65 key generation, storage, and
 sign-verify round-trip correctness as implemented in
 \texttt{DeviceIdentity\allowbreak\hspace{0pt}KeyManager}.
 
-\textbf{TABLE VI: ML-DSA-65 Key Sizes (FIPS 204 Compliance)}
-
 \begin{table*}[!t]
 \centering
+\caption{ML-DSA-65 key sizes (FIPS 204 compliance).}\label{tab:mldsa-sizes}
 \begin{tabular}{@{}llll@{}}
 \toprule\noalign{}
 Component & Expected (FIPS 204) & Measured & Status \\
@@ -1862,13 +1877,12 @@ independent from Ed25519 keys; using the wrong public key for
 verification always fails. Validated with 50 cross-key verification
 attempts.
 
-\textbf{TABLE VII: ML-DSA-65 Property Test Results}
-
 \emph{All tests executed via DeviceIdentityKeyManager\allowbreak\hspace{0pt}MLDSATests. N =
 number of iterations per property.}
 
 \begin{table*}[!t]
 \centering
+\caption{ML-DSA-65 property test results.}\label{tab:mldsa-tests}
 \begin{tabular}{@{}
   >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.3226}}
   >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.0968}}
@@ -1926,7 +1940,7 @@ Keychain
 This ensures ML-DSA keys remain device-local and are protected by the
 device passcode.
 
-\paragraph{B.5 Legacy Fallback Security Precondition
+\subsubsection{Legacy Fallback Security Precondition
 Validation}\label{b.5-legacy-fallback-security-precondition-validation}
 
 This experiment validates the security preconditions for legacy P-256
@@ -1944,13 +1958,12 @@ previously-established TrustRecord contains a
 Pure network stranger connections (no authenticated channel, no existing
 trust) are rejected to prevent downgrade attacks.
 
-\textbf{TABLE VIII: Legacy Fallback Precondition Test Results}
-
 \emph{All tests executed via LegacyFallbackPreconditionTests. Tests
 validate Property 7: Legacy Fallback Security Precondition.}
 
 \begin{table*}[!t]
 \centering
+\caption{Legacy fallback precondition test results.}\label{tab:legacy-precondition}
 \begin{tabular}{@{}
   >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.1786}}
   >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.2500}}
@@ -1989,7 +2002,8 @@ Validated with 12 test cases covering all precondition combinations.
 \textbf{Coverage Statement:} We define the migration state space as the
 Cartesian product of
 \texttt{\{authenticatedChannel\ in\ \{verified,\ unverified,\ none\}\}\ x\ \{trustRecord\ in\ \{none,\ withLegacyKey,\ withoutLegacyKey\}\}\ x\ \{discovery\ in\ \{network-only,\ OOB\}\}}.
-The 12 scenarios in Table VIII cover all boundary combinations and
+The 12 scenarios in Table~\ref{tab:legacy-precondition} cover all
+boundary combinations and
 security-relevant buckets, yielding 100\% coverage of the defined
 precondition space. The \texttt{MigrationCoverageBenchTests} harness
 records per-scenario outcomes in
@@ -2024,7 +2038,7 @@ The authenticated channel type (if applicable)
 This enables audit logging and anomaly detection for legacy fallback
 patterns.
 
-\paragraph{B.6 Audit-Signal Fidelity (Event Traces +
+\subsubsection{Audit-Signal Fidelity (Event Traces +
 TP/FP)}\label{b.6-audit-signal-fidelity-event-traces-tpfp}
 
 This experiment evaluates whether the emitted security events provide a
@@ -2033,28 +2047,27 @@ deterministic, audit-grade explanation of \textbf{what happened},
 treat the fault-injection workloads as labeled scenarios and check for
 correct event semantics rather than classifier performance.
 
-\textbf{Event Trace Case (Fig. 9):} - \textbf{Timeout after drop
+\textbf{Event Trace Case (Fig.~\ref{fig:audit-trace}):} - \textbf{Timeout after drop
 (representative):} \texttt{handshakeFailed} is emitted, and
 \texttt{handshakeFallback} is blocked due to timeout blacklist.
 
 \begin{figure}
 \centering
 \pandocbounded{\includegraphics[keepaspectratio,width=\columnwidth]{figures/fig_event_traces.pdf}}
-\caption{Fig. 9. Audit-signal event trace (representative timeout case)
-showing attacker action, policy gate, and emitted event.}
+\caption{Audit-signal event trace (representative timeout case) showing
+attacker action, policy gate, and emitted event.}\label{fig:audit-trace}
 \end{figure}
 
 \textbf{Audit-Signal Fidelity (TP/FP):}
 
-We compute a TP/FP summary from the labeled fault-injection runs (Table
-V) and the policy downgrade bench (Fig. 6), stratified by policy. The
-remaining trace cases are captured in the corresponding TP/FP classes
-below.
-
-\textbf{TABLE XIV: Audit-Signal Fidelity Summary}
+We compute a TP/FP summary from the labeled fault-injection runs
+(Table~\ref{tab:failure-mode}) and the policy downgrade bench
+(Fig.~\ref{fig:policy-fallback}), stratified by policy. The remaining
+trace cases are captured in the corresponding TP/FP classes below.
 
 \begin{table*}[!t]
 \centering
+\caption{Audit-signal fidelity summary.}\label{tab:audit-fidelity}
 \begin{tabular}{@{}
   >{\raggedright\arraybackslash}p{(\linewidth - 8\tabcolsep) * \real{0.3488}}
   >{\raggedright\arraybackslash}p{(\linewidth - 8\tabcolsep) * \real{0.3953}}
@@ -2099,7 +2112,7 @@ PQC unavailable (strictPQC) & \texttt{handshakeFallback=0} & 1000 & 1.00
 This provides a compact, quantifiable view of audit signal correctness
 without positioning the system as a detector.
 
-\paragraph{B.7 Transcript TLV Canonical Encoding
+\subsubsection{Transcript TLV Canonical Encoding
 Validation}\label{b.7-transcript-tlv-canonical-encoding-validation}
 
 This experiment validates the transcript integrity properties for both
@@ -2111,6 +2124,7 @@ maintaining cryptographic binding guarantees.
 
 \begin{table*}[!t]
 \centering
+\caption{Transcript version design.}\label{tab:transcript-versions}
 \begin{tabular}{@{}llll@{}}
 \toprule\noalign{}
 Version & Encoding & Use Case & Compatibility \\
@@ -2143,13 +2157,12 @@ Message tags (messageA, messageB, finished) - 0x30-0x3F: Identity tags
 (initiatorPublicKey, responderPublicKey, nonces) - 0xF0-0xFF: Extension
 tags (reserved)
 
-\textbf{TABLE IX: Transcript Integrity Property Test Results}
-
 \emph{All tests executed via TranscriptIntegrityPropertyTests. Tests
 validate Property 4: Transcript Integrity (TLV Canonical).}
 
 \begin{table*}[!t]
 \centering
+\caption{Transcript integrity property test results.}\label{tab:transcript-integrity}
 \begin{tabular}{@{}
   >{\raggedright\arraybackslash}p{(\linewidth - 8\tabcolsep) * \real{0.2115}}
   >{\raggedright\arraybackslash}p{(\linewidth - 8\tabcolsep) * \real{0.1731}}
@@ -2185,10 +2198,9 @@ Random byte modification & V1/V2 & XOR 0xFF & Hash differs & OK Pass \\
 \end{tabular}
 \end{table*}
 
-\textbf{TABLE X: TLV Encoder/Decoder Validation}
-
 \begin{table*}[!t]
 \centering
+\caption{TLV encoder/decoder validation.}\label{tab:tlv-validation}
 \begin{tabular}{@{}lll@{}}
 \toprule\noalign{}
 Test Case & Expected & Actual \\
@@ -2248,7 +2260,7 @@ modifications, determinism, and version negotiation.
   compatibility checking
 \end{itemize}
 
-\paragraph{B.8 Regression Test Matrix
+\subsubsection{Regression Test Matrix
 Validation}\label{b.8-regression-test-matrix-validation}
 
 This experiment validates the complete regression test matrix covering
@@ -2256,13 +2268,12 @@ all protocol signature invariants. The matrix ensures that type system
 guarantees, fallback behavior, and event emission are correctly
 implemented.
 
-\textbf{TABLE XI: Regression Test Matrix Results}
-
 \emph{All tests executed via ProtocolSignatureRegressionTests. Tests
 validate Requirements 12.1-12.6.}
 
 \begin{table*}[!t]
 \centering
+\caption{Regression test matrix results.}\label{tab:regression-matrix}
 \begin{tabular}{@{}
   >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.2564}}
   >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.2821}}
@@ -2314,10 +2325,9 @@ preconditionType in context & OK Pass \\
 \end{tabular}
 \end{table*}
 
-\textbf{TABLE XII: Final Gate Validation}
-
 \begin{table*}[!t]
 \centering
+\caption{Final gate validation.}\label{tab:final-gate}
 \begin{tabular}{@{}
   >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.2500}}
   >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.4167}}
@@ -2400,7 +2410,7 @@ Regression Matrix & All 15 regression tests pass & OK 15/15 Pass \\
 \subsection{Cost-Centric
 Evaluation}\label{c.-cost-centric-evaluation}
 
-\paragraph{C.1 Handshake Latency}\label{c.1-handshake-latency}
+\subsubsection{Handshake Latency}\label{c.1-handshake-latency}
 
 This experiment measures the end-to-end time to complete a full
 handshake including explicit key confirmation
@@ -2421,14 +2431,13 @@ byte totals from serialized on-wire encoding
 Each configuration reports (p50/p95/p99) over (N=1000) iterations after
 10 warmup runs.
 
-\textbf{TABLE I: Handshake Latency}
-
 \emph{Latency measured from handshake initiation to verified
 Finished\_I2R. Includes event emission overhead. N=1000 iterations after
 10 warmup runs.}
 
 \begin{table*}[!t]
 \centering
+\caption{Handshake latency.}\label{tab:handshake-latency}
 \begin{tabular}{@{}
   >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.1750}}
   >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.1500}}
@@ -2469,13 +2478,12 @@ CryptoKit PQC (ML-KEM-768 + ML-DSA-65) & macOS 26.x & 1000 & 10.104 &
 \end{tabular}
 \end{table*}
 
-\textbf{TABLE I-B: Handshake RTT}
-
 \emph{RTT measured as \texttt{tB\ -\ tA} (MessageB receive time minus
 MessageA send time). N=1000 iterations after 10 warmup runs.}
 
 \begin{table*}[!t]
 \centering
+\caption{Handshake RTT.}\label{tab:handshake-rtt}
 \begin{tabular}{@{}
   >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.1750}}
   >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.1500}}
@@ -2519,17 +2527,16 @@ CryptoKit PQC (ML-KEM-768 + ML-DSA-65) & macOS 26.x & 1000 & 5.155 &
 \begin{figure}
 \centering
 \pandocbounded{\includegraphics[keepaspectratio,width=\columnwidth]{figures/fig_handshake_latency.png}}
-\caption{Fig. 4. Handshake latency percentiles for Classic vs liboqs PQC
-vs CryptoKit PQC (N=1000).}
+\caption{Handshake latency percentiles for Classic vs liboqs PQC vs
+CryptoKit PQC (N=1000).}\label{fig:handshake-latency}
 \end{figure}
-
-\textbf{TABLE II: Handshake Message Sizes}
 
 \emph{All sizes in bytes. B\_finished = 2 x 38 = 76 bytes (Finished\_R2I
 + Finished\_I2R). B\_total = B\_msgA + B\_msgB + B\_finished.}
 
 \begin{table*}[!t]
 \centering
+\caption{Handshake message sizes.}\label{tab:handshake-sizes}
 \begin{tabular}{@{}
   >{\raggedright\arraybackslash}p{(\linewidth - 8\tabcolsep) * \real{0.1321}}
   >{\raggedright\arraybackslash}p{(\linewidth - 8\tabcolsep) * \real{0.2075}}
@@ -2561,29 +2568,30 @@ CryptoKit PQC & 6577 & 5510 & 76 & 12163 \\
 Note: X-Wing is a hybrid suite. The current benchmark harness covers
 only pqcOnly/classicOnly paths. The hybrid path will be measured after
 integration into HandshakeBenchmarkTests, so the main table omits the
-projected row. In Table II, CryptoKit PQC and liboqs PQC sizes are very
+projected row. In Table~\ref{tab:handshake-sizes}, CryptoKit PQC and
+liboqs PQC sizes are very
 close; differences come from provider metadata and encoding details. The
 X-Wing projection appears in Appendix C.
 
 \begin{figure}
 \centering
 \pandocbounded{\includegraphics[keepaspectratio,width=\columnwidth]{figures/fig_message_size_breakdown.png}}
-\caption{Fig. 5. Wire-format size breakdown (signature, keyshare,
-identity fields, framing overhead) for MessageA/MessageB.}
+\caption{Wire-format size breakdown (signature, keyshare, identity
+fields, framing overhead) for MessageA/MessageB.}\label{fig:wire-size-breakdown}
 \end{figure}
 
 The size breakdown is generated from
 \texttt{message\_sizes\_\textless{}date\textgreater{}.csv}, emitted by
 \texttt{MessageSizeSnapshotTests} using deterministic snapshot messages
 (minimal capability set), so totals can be slightly smaller than the
-end-to-end wire sizes in Table II.
+end-to-end wire sizes in Table~\ref{tab:handshake-sizes}.
 
 We additionally report a breakdown by dominant contributors (KEM
 encapsulation/decapsulation, signature sign/verify, and serialization)
 using instrumented timing around provider calls in the benchmark
 harness.
 
-\paragraph{C.2 Data-Plane Throughput and CPU
+\subsubsection{Data-Plane Throughput and CPU
 Proxy}\label{c.2-data-plane-throughput-and-cpu-proxy}
 
 Handshake cost is not the only performance concern for remote desktop
@@ -2599,14 +2607,13 @@ keys derived by the handshake (\texttt{SessionKeys.sendKey} /
 time for encrypt+decrypt - \texttt{CPU\_proxy\_ns\_per\_byte}: elapsed
 ns / bytes processed in a fixed performance mode
 
-\textbf{TABLE III: Data-Plane Throughput}
-
 \emph{Throughput measured for symmetric AEAD (AES-256-GCM)
 encrypt+decrypt cycle using session keys derived from handshake. Does
 not include handshake overhead. N=200 iterations after warmup.}
 
 \begin{table*}[!t]
 \centering
+\caption{Data-plane throughput.}\label{tab:data-plane-throughput}
 \begin{tabular}{@{}
   >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.2029}}
   >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.2029}}
@@ -2633,7 +2640,7 @@ Classic & 1 MiB & 3755.3 & 0.25 \\
 \end{tabular}
 \end{table*}
 
-\paragraph{C.3 Provider Selection
+\subsubsection{Provider Selection
 Overhead}\label{c.3-provider-selection-overhead}
 
 This experiment isolates the overhead of capability detection and
@@ -2646,13 +2653,12 @@ result).
 call after \texttt{clearCache()} - \texttt{T\_select\_hot\_us}: elapsed
 time for subsequent calls with warm caches
 
-\textbf{TABLE IV: Provider Selection Overhead}
-
 \emph{Time measured using ContinuousClock. Cold = after clearCache();
 Hot = cached path. N=200 iterations.}
 
 \begin{table*}[!t]
 \centering
+\caption{Provider selection overhead.}\label{tab:provider-selection}
 \begin{tabular}{@{}
   >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.2703}}
   >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.2703}}
@@ -2832,6 +2838,7 @@ The author declares no competing interests.
 
 \begin{table*}[!t]
 \centering
+\caption{Key size reference.}\label{tab:key-size-reference}
 \begin{tabular}{@{}
   >{\raggedright\arraybackslash}p{(\linewidth - 8\tabcolsep) * \real{0.1294}}
   >{\raggedright\arraybackslash}p{(\linewidth - 8\tabcolsep) * \real{0.1412}}
@@ -2878,6 +2885,7 @@ vary.
 
 \begin{table*}[!t]
 \centering
+\caption{Security event types.}\label{tab:security-event-types}
 \begin{tabular}{@{}
   >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3871}}
   >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3226}}
@@ -2916,7 +2924,8 @@ key \\
 
 We exclude X-Wing from the main tables because the benchmark harness
 currently exercises only \texttt{pqcOnly}/\texttt{classicOnly} paths.
-For a conservative wire-size estimate, we start from Table II (pure
+For a conservative wire-size estimate, we start from
+Table~\ref{tab:handshake-sizes} (pure
 ML-KEM-768 + ML-DSA-65) and adjust only the KEM keyshare lengths:
 
 \begin{align*}
