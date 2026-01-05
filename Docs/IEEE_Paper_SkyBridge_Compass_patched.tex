@@ -69,12 +69,8 @@
 \setlength{\leftmargini}{1.3em}
 \setlength{\leftmarginii}{1.1em}
 \setlength{\labelsep}{0.4em}
-\setcounter{secnumdepth}{3}
 \setlength{\parindent}{1em}
 \raggedbottom
-\renewcommand{\thesection}{\Roman{section}}
-\renewcommand{\thesubsection}{\Alph{subsection}}
-\renewcommand{\thesubsubsection}{\arabic{subsubsection}}
 
 
 \title{SkyBridge Compass: A Crypto-Agile Peer-to-Peer Remote Desktop and File Transfer System with Post-Quantum Readiness on Apple Platforms}
@@ -185,8 +181,9 @@ Contributions (reviewer-facing, evidence-backed):
 \item
   We make evaluation reproducible by shipping a benchmark harness that
   reports distributional statistics (p50/p95/p99) over large-N runs and
-  links each metric back to a concrete failure taxonomy. (Fig.~\ref{fig:policy-downgrade};
-  Table~\ref{tab:handshake-latency}, Table~\ref{tab:handshake-rtt}, Table~\ref{tab:handshake-message-sizes}; HandshakeBenchmarkTests, MessageSizeSnapshotTests)
+  links each metric back to a concrete failure taxonomy.
+  (Fig.~\ref{fig:policy-downgrade}; Tables~\ref{tab:handshake-latency}--\ref{tab:handshake-message-sizes};
+  HandshakeBenchmarkTests, MessageSizeSnapshotTests)
 \end{enumerate}
 
 \subsection{Paper Organization}\label{b.-paper-organization}
@@ -714,6 +711,7 @@ structured 16-bit wire format enabling forward compatibility:
 
 \begin{table*}[!t]
 \centering
+\caption{Suite identifier ranges and components.}\label{tab:suite-identifiers}
 \begin{tabular}{@{}
   >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.1556}}
   >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.2222}}
@@ -1456,6 +1454,7 @@ Matrix}\label{a.-platform-support-matrix}
 
 \begin{table*}[!t]
 \centering
+\caption{Platform support matrix.}\label{tab:platform-support}
 \begin{tabular}{@{}
   >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.2326}}
   >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.3256}}
@@ -1870,28 +1869,28 @@ the paper's tables:
 \begin{itemize}
 \tightlist
 \item
-  \textbf{Table~\ref{tab:handshake-latency} (Handshake Latency):}\par
+  \textbf{Handshake Latency (Table~\ref{tab:handshake-latency}):}\par
   \begin{tabular}[t]{@{}l@{}}
   \texttt{SKYBRIDGE\_RUN\_BENCH=1}\\
   \texttt{swift test --filter}\\
   \texttt{HandshakeBenchmarkTests}
   \end{tabular}
 \item
-  \textbf{Table~\ref{tab:handshake-rtt} (Handshake RTT):}\par
+  \textbf{Handshake RTT (Table~\ref{tab:handshake-rtt}):}\par
   \begin{tabular}[t]{@{}l@{}}
   \texttt{SKYBRIDGE\_RUN\_BENCH=1}\\
   \texttt{swift test --filter}\\
   \texttt{HandshakeBenchmarkTests}
   \end{tabular}
 \item
-  \textbf{Table~\ref{tab:handshake-message-sizes} (Handshake Message Sizes):}\par
+  \textbf{Handshake Message Sizes (Table~\ref{tab:handshake-message-sizes}):}\par
   \begin{tabular}[t]{@{}l@{}}
   \texttt{SKYBRIDGE\_RUN\_BENCH=1}\\
   \texttt{swift test --filter}\\
   \texttt{HandshakeBenchmarkTests}
   \end{tabular}
 \item
-  \textbf{Table~\ref{tab:data-plane-throughput} (Data-Plane Throughput):}\par
+  \textbf{Data-Plane Throughput (Table~\ref{tab:data-plane-throughput}):}\par
   \begin{tabular}[t]{@{}l@{}}
   \texttt{SKYBRIDGE\_RUN\_BENCH=1}\\
   \texttt{swift test --filter}\\
@@ -1899,7 +1898,7 @@ the paper's tables:
   \texttt{DataPlaneThroughputAndCPUProxy}
   \end{tabular}
 \item
-  \textbf{Table~\ref{tab:provider-selection-overhead} (Provider Selection):}\par
+  \textbf{Provider Selection (Table~\ref{tab:provider-selection-overhead}):}\par
   \begin{tabular}[t]{@{}l@{}}
   \texttt{SKYBRIDGE\_RUN\_BENCH=1}\\
   \texttt{swift test --filter}\\
@@ -1907,7 +1906,7 @@ the paper's tables:
   \texttt{ProviderSelectionOverhead}
   \end{tabular}
 \item
-  \textbf{Table~\ref{tab:failure-mode-robustness} (Fault Injection):}\par
+  \textbf{Fault Injection (Table~\ref{tab:failure-mode-robustness}):}\par
   \begin{tabular}[t]{@{}l@{}}
   \texttt{SKYBRIDGE\_RUN\_FI=1}\\
   \texttt{swift test --filter}\\
@@ -2460,6 +2459,7 @@ maintaining cryptographic binding guarantees.
 
 \begin{table*}[!t]
 \centering
+\caption{Transcript version design.}\label{tab:transcript-versions}
 \begin{tabular}{@{}llll@{}}
 \toprule\noalign{}
 Version & Encoding & Use Case & Compatibility \\
@@ -3137,6 +3137,7 @@ handshake semantics that are reproducible from released artifacts.
 
 \begin{table*}[!t]
 \centering
+\caption{Key size reference.}\label{tab:key-size-reference}
 \begin{tabular}{@{}
   >{\raggedright\arraybackslash}p{(\linewidth - 8\tabcolsep) * \real{0.1294}}
   >{\raggedright\arraybackslash}p{(\linewidth - 8\tabcolsep) * \real{0.1412}}
@@ -3183,6 +3184,7 @@ vary.
 
 \begin{table*}[!t]
 \centering
+\caption{Security event types.}\label{tab:security-event-types}
 \begin{tabular}{@{}
   >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3871}}
   >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3226}}
