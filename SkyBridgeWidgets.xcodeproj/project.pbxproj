@@ -1,0 +1,370 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		306A4A889A8ECD7F0D631141 /* WidgetKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = AA4009F3AB9EC57282EBCD07 /* WidgetKit.framework */; };
+		46232BE959AC8B34E517C798 /* AppIntents.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 2B68DC27EAEE5485CBDDAE6B /* AppIntents.framework */; };
+		5B92DEAF73D4A58CD8B62A69 /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 011B25C12BF2C1EB67D2D843 /* SwiftUI.framework */; };
+		8D178C6A9D84763F3C1B383F /* CompassWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = D77D1FEE9D791CA02A737B6C /* CompassWidget.swift */; };
+		A4FB6EB862F04D9BB309A69A /* WidgetIntents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CEA4D01349D879638CC4917 /* WidgetIntents.swift */; };
+		D18FEAF482D5F10FC9FF76D1 /* SkyBridgeWidgetShared in Frameworks */ = {isa = PBXBuildFile; productRef = 0EEB3E27748D53378DDED79E /* SkyBridgeWidgetShared */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		011B25C12BF2C1EB67D2D843 /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = SwiftUI.framework; sourceTree = "<group>"; };
+		1B2691D9D9A0E7E40DAC0794 /* SkyBridgeCompassWidgetsExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = SkyBridgeCompassWidgetsExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		2B68DC27EAEE5485CBDDAE6B /* AppIntents.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = AppIntents.framework; sourceTree = "<group>"; };
+		5CEA4D01349D879638CC4917 /* WidgetIntents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WidgetIntents.swift; sourceTree = "<group>"; };
+		6F343001F48A7DD45E78B48B /* SkyBridge Compass Pro release */ = {isa = PBXFileReference; lastKnownFileType = folder; name = "SkyBridge Compass Pro release"; path = .; sourceTree = SOURCE_ROOT; };
+		AA4009F3AB9EC57282EBCD07 /* WidgetKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = WidgetKit.framework; sourceTree = "<group>"; };
+		D77D1FEE9D791CA02A737B6C /* CompassWidget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompassWidget.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		4EA46C07DE6CCC6F4FE98192 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				D18FEAF482D5F10FC9FF76D1 /* SkyBridgeWidgetShared in Frameworks */,
+				306A4A889A8ECD7F0D631141 /* WidgetKit.framework in Frameworks */,
+				5B92DEAF73D4A58CD8B62A69 /* SwiftUI.framework in Frameworks */,
+				46232BE959AC8B34E517C798 /* AppIntents.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		007FBC1553557CC3FB082A58 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				2B68DC27EAEE5485CBDDAE6B /* AppIntents.framework */,
+				011B25C12BF2C1EB67D2D843 /* SwiftUI.framework */,
+				AA4009F3AB9EC57282EBCD07 /* WidgetKit.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		418E4BEA2662B71E9BBADC6C /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				1B2691D9D9A0E7E40DAC0794 /* SkyBridgeCompassWidgetsExtension.appex */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		59D635831C028CE2A3D68EF0 = {
+			isa = PBXGroup;
+			children = (
+				A6A3A17372289871EB86E959 /* Packages */,
+				BD1AD8B65B38F1A9EE92C573 /* SkyBridgeCompassWidgets */,
+				007FBC1553557CC3FB082A58 /* Frameworks */,
+				418E4BEA2662B71E9BBADC6C /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		A6A3A17372289871EB86E959 /* Packages */ = {
+			isa = PBXGroup;
+			children = (
+				6F343001F48A7DD45E78B48B /* SkyBridge Compass Pro release */,
+			);
+			path = Packages;
+			sourceTree = "<group>";
+		};
+		BD1AD8B65B38F1A9EE92C573 /* SkyBridgeCompassWidgets */ = {
+			isa = PBXGroup;
+			children = (
+				D77D1FEE9D791CA02A737B6C /* CompassWidget.swift */,
+				5CEA4D01349D879638CC4917 /* WidgetIntents.swift */,
+			);
+			name = SkyBridgeCompassWidgets;
+			path = Sources/SkyBridgeCompassWidgets;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		33EDECE841DEB307763D7C42 /* SkyBridgeCompassWidgetsExtension */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 22633CD85FFC89F71524E553 /* Build configuration list for PBXNativeTarget "SkyBridgeCompassWidgetsExtension" */;
+			buildPhases = (
+				715CD2463F3D7D991DEF66FE /* Sources */,
+				4EA46C07DE6CCC6F4FE98192 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = SkyBridgeCompassWidgetsExtension;
+			packageProductDependencies = (
+				0EEB3E27748D53378DDED79E /* SkyBridgeWidgetShared */,
+			);
+			productName = SkyBridgeCompassWidgetsExtension;
+			productReference = 1B2691D9D9A0E7E40DAC0794 /* SkyBridgeCompassWidgetsExtension.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		620DCBF70F533292B94D88C3 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1500;
+				TargetAttributes = {
+					33EDECE841DEB307763D7C42 = {
+						ProvisioningStyle = Manual;
+					};
+				};
+			};
+			buildConfigurationList = EA88EDD8C5EBD746F3201E55 /* Build configuration list for PBXProject "SkyBridgeWidgets" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = "zh-Hans";
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				"zh-Hans",
+			);
+			mainGroup = 59D635831C028CE2A3D68EF0;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				693E3FFB165133393C01CBB9 /* XCLocalSwiftPackageReference "." */,
+			);
+			preferredProjectObjectVersion = 77;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				33EDECE841DEB307763D7C42 /* SkyBridgeCompassWidgetsExtension */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		715CD2463F3D7D991DEF66FE /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				8D178C6A9D84763F3C1B383F /* CompassWidget.swift in Sources */,
+				A4FB6EB862F04D9BB309A69A /* WidgetIntents.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		10E6B88141B51784070BACAC /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGNING_REQUIRED = NO;
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		32E32D1AB187AD7EA9084F0C /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				COMBINE_HIDPI_IMAGES = YES;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\".\"",
+				);
+				INFOPLIST_FILE = Sources/SkyBridgeCompassWidgets/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@executable_path/../../../../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.skybridge.compass.widgets;
+				PRODUCT_NAME = SkyBridgeCompassWidgetsExtension;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+			};
+			name = Release;
+		};
+		5C890C9AFD814A0BB87B5E78 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGNING_REQUIRED = NO;
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+		94B98FA533874626A135F031 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				COMBINE_HIDPI_IMAGES = YES;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\".\"",
+				);
+				INFOPLIST_FILE = Sources/SkyBridgeCompassWidgets/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@executable_path/../../../../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.skybridge.compass.widgets;
+				PRODUCT_NAME = SkyBridgeCompassWidgetsExtension;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		22633CD85FFC89F71524E553 /* Build configuration list for PBXNativeTarget "SkyBridgeCompassWidgetsExtension" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				94B98FA533874626A135F031 /* Debug */,
+				32E32D1AB187AD7EA9084F0C /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		EA88EDD8C5EBD746F3201E55 /* Build configuration list for PBXProject "SkyBridgeWidgets" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				10E6B88141B51784070BACAC /* Debug */,
+				5C890C9AFD814A0BB87B5E78 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		693E3FFB165133393C01CBB9 /* XCLocalSwiftPackageReference "." */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = .;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		0EEB3E27748D53378DDED79E /* SkyBridgeWidgetShared */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = SkyBridgeWidgetShared;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = 620DCBF70F533292B94D88C3 /* Project object */;
+}
