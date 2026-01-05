@@ -1,0 +1,61 @@
+name: SkyBridgeWidgets
+options:
+  bundleIdPrefix: com.skybridge.compass
+  deploymentTarget:
+    macOS: "14.0"
+  xcodeVersion: "15.0"
+  developmentLanguage: zh-Hans
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    CODE_SIGN_STYLE: Manual
+    CODE_SIGN_IDENTITY: "-"
+    CODE_SIGNING_REQUIRED: NO
+    CODE_SIGNING_ALLOWED: NO
+    ONLY_ACTIVE_ARCH: YES
+
+packages:
+  SkyBridgeCompassApp:
+    path: .
+
+targets:
+  SkyBridgeCompassWidgetsExtension:
+    type: app-extension
+    platform: macOS
+    sources:
+      - path: Sources/SkyBridgeCompassWidgets
+        excludes:
+          - "**/*.plist"
+          - "**/*.entitlements"
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.skybridge.compass.widgets
+        INFOPLIST_FILE: Sources/SkyBridgeCompassWidgets/Info.plist
+        SKIP_INSTALL: YES
+        LD_RUNPATH_SEARCH_PATHS:
+          - $(inherited)
+          - "@executable_path/../Frameworks"
+          - "@executable_path/../../../../Frameworks"
+        PRODUCT_NAME: SkyBridgeCompassWidgetsExtension
+    dependencies:
+      - package: SkyBridgeCompassApp
+        product: SkyBridgeWidgetShared
+      - framework: WidgetKit.framework
+        embed: false
+      - framework: SwiftUI.framework
+        embed: false
+      - framework: AppIntents.framework
+        embed: false
+
+schemes:
+  SkyBridgeCompassWidgetsExtension:
+    build:
+      targets:
+        SkyBridgeCompassWidgetsExtension: all
+    run:
+      config: Release
+    archive:
+      config: Release

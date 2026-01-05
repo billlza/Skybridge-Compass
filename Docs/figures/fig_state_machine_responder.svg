@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="720" viewBox="0 0 1200 720">
+  <defs>
+    <style>
+      .state { fill: #f7f9fb; stroke: #1d2a33; stroke-width: 2; rx: 12; ry: 12; }
+      .label { font-family: Helvetica, Arial, sans-serif; font-size: 16px; fill: #1d2a33; }
+      .note { font-family: Helvetica, Arial, sans-serif; font-size: 13px; fill: #3b4a55; }
+      .title { font-family: Helvetica, Arial, sans-serif; font-size: 20px; font-weight: 700; fill: #1d2a33; }
+      .arrow { stroke: #1d2a33; stroke-width: 2; fill: none; marker-end: url(#arrow); }
+      .fail { fill: #fdecea; stroke: #b71c1c; stroke-width: 2; rx: 12; ry: 12; }
+      .ok { fill: #e8f5e9; stroke: #1b5e20; stroke-width: 2; rx: 12; ry: 12; }
+    </style>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#1d2a33"/>
+    </marker>
+  </defs>
+
+  <text x="40" y="40" class="title">Responder State Machine (Policy-Aware)</text>
+
+  <rect x="100" y="120" width="220" height="70" class="state"/>
+  <text x="150" y="160" class="label">idle</text>
+
+  <rect x="380" y="120" width="260" height="90" class="state"/>
+  <text x="410" y="160" class="label">processingMessageA</text>
+  <text x="410" y="182" class="note">verify sigA, pinning</text>
+
+  <rect x="700" y="120" width="260" height="90" class="state"/>
+  <text x="740" y="160" class="label">waitingFinished</text>
+  <text x="740" y="182" class="note">after MessageB</text>
+
+  <rect x="360" y="300" width="240" height="80" class="ok"/>
+  <text x="400" y="345" class="label">established</text>
+
+  <rect x="740" y="300" width="240" height="80" class="fail"/>
+  <text x="800" y="345" class="label">failed</text>
+
+  <path d="M 320 155 L 380 155" class="arrow"/>
+  <text x="330" y="140" class="note">MessageA</text>
+
+  <path d="M 640 170 L 700 170" class="arrow"/>
+  <text x="645" y="150" class="note">sigA ok</text>
+
+  <path d="M 800 210 L 470 300" class="arrow"/>
+  <text x="620" y="255" class="note">Finished valid</text>
+
+  <path d="M 810 210 L 860 300" class="arrow"/>
+  <text x="830" y="255" class="note">timeout / invalid</text>
+
+  <path d="M 500 200 L 780 300" class="arrow"/>
+  <text x="580" y="235" class="note">invalidSig / suite</text>
+
+  <rect x="80" y="450" width="1040" height="160" class="state"/>
+  <text x="110" y="480" class="label">Policy Gates on Failure Edges</text>
+  <text x="110" y="510" class="note">strictPQC: suiteNotSupported / pqcUnavailable ⇒ fail (no classic fallback)</text>
+  <text x="110" y="532" class="note">default: allowed fallback only for explicit whitelist errors</text>
+  <text x="110" y="554" class="note">All failure edges emit SecurityEvent.handshakeFailed</text>
+</svg>

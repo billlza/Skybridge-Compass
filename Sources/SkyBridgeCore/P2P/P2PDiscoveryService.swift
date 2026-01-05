@@ -1,0 +1,1374 @@
+//
+// DeviceDiscoveryManager.swift
+// Skybridge-Compass
+//
+// macOS 26.x / Swift 6.2.1
+// 基于 Network.framework + Bonjour 的本地设备发现与 TCP 连接管理
+//
+
+import Foundation
+import Network
+import OSLog
+import Combine
+
+/// 设备发现管理器 - 基于 2025 年 Apple 推荐栈
+/// 使用 Network.framework 的 Bonjour 能力 + TCP 连接
+///
+/// 继承 BaseManager，统一管理器模式和生命周期管理
+@MainActor
+public class P2PDiscoveryService: BaseManager {
+    
+ // MARK: - 发布的属性（给 SwiftUI / 视图层用）
+    
+ /// 发现的设备列表（Bonjour + 自定义逻辑融合）
+    @Published public var discoveredDevices: [DiscoveredDevice] = []
+ /// P2P设备列表（供上层统一使用）
+    @Published public var p2pDevices: [P2PDevice] = []
+    
+ /// 当前连接状态（只是对 connections 字典的一个抽象）
+    @Published public var connectionStatus: P2PDiscoveryConnectionStatus = .disconnected
+    
+ /// 是否正在扫描（有无浏览器在跑）
+    @Published public var isScanning: Bool = false
+ /// P2P发现是否运行中
+    @Published public var isDiscovering: Bool = false
+ /// 是否正在广播服务
+    @Published public var isAdvertising: Bool = false
+    
+ // MARK: - 私有属性
+    
+ /// Bonjour 浏览器（一个 serviceType 对应一个 NWBrowser）
+    private var browsers: [NWBrowser] = []
+    
+ /// Bonjour 监听器（本机作为服务端被发现）
+    private var listener: NWListener?
+    
+ /// 当前活跃连接（按 DiscoveredDevice.id.uuidString 存）
+    private var connections: [String: NWConnection] = [:]
+    private var txtResolveCooldown: [String: Date] = [:]
+    
+ /// 服务类型瘦身策略 - 默认仅SkyBridge；兼容/调试模式可扩展
+    private let allServiceTypes = [
+        "_skybridge._tcp",
+        "_companion-link._tcp",
+        "_airplay._tcp",
+        "_rdlink._tcp",
+        "_sftp-ssh._tcp"
+    ]
+ /// 兼容模式与 companion-link 开关（默认关闭，正常用户场景仅SkyBridge）
+    public var enableCompatibilityMode: Bool = false
+    public var enableCompanionLink: Bool = false
+    private func effectiveServiceTypes() -> [String] {
+        var base = ["_skybridge._tcp"]
+        if enableCompanionLink { base.append("_companion-link._tcp") }
+        if enableCompatibilityMode {
+            base.append(contentsOf: allServiceTypes.filter { !$0.hasPrefix("_skybridge") && !$0.hasPrefix("_companion-link") })
+        }
+        return base
+    }
+    
+    private let serviceDomain = "local."
+    
+ // MARK: - 初始化
+    
+    public init() {
+        super.init(category: "DeviceDiscoveryManager")
+        $discoveredDevices
+            .map { $0.map { Self.mapToP2PDevice($0) } }
+            .assign(to: &self.$p2pDevices)
+    }
+    
+ // MARK: - BaseManager 重写
+    
+ /// 执行设备发现管理器的初始化逻辑
+    public override func performInitialization() async {
+        await super.performInitialization()
+        logger.info("✅ 设备发现管理器初始化完成")
+    }
+    
+ /// 启动设备发现管理器
+    public override func performStart() async throws {
+        logger.info("🚀 启动设备发现服务")
+        startScanning()
+    }
+    
+ /// 停止设备发现管理器
+    public override func performStop() async {
+        logger.info("🛑 停止设备发现服务")
+        stopScanning()
+    }
+    
+ /// 清理资源
+    public override func cleanup() {
+        super.cleanup()
+        
+ // 清理发现的设备
+        discoveredDevices.removeAll()
+        connectionStatus = .disconnected
+        isScanning = false
+        
+ // 清理网络连接
+        connections.values.forEach { $0.cancel() }
+        connections.removeAll()
+        
+ // 停止 Bonjour 浏览 / 广播
+        browsers.forEach { $0.cancel() }
+        browsers.removeAll()
+        listener?.cancel()
+        listener = nil
+    }
+    
+ // MARK: - 公共方法（扫描 / 连接）
+    
+ /// 开始扫描设备 - 2025 增强版：多服务类型扫描（全基于 Network.framework）
+    public func startScanning() {
+        guard isInitialized else {
+            Task { await self.handleError(.notInitialized) }
+            return
+        }
+        guard !isScanning else {
+            logger.debug("startScanning() 忽略：已经在扫描中")
+            return
+        }
+        
+        let selected = effectiveServiceTypes()
+        logger.info("🔍 开始扫描设备（Bonjour，服务类型：\(selected)）")
+        isScanning = true
+        isDiscovering = true
+        
+ // 为每种服务类型创建独立的浏览器
+        for serviceType in selected {
+            let descriptor = NWBrowser.Descriptor.bonjour(type: serviceType, domain: serviceDomain)
+            let parameters = NWParameters()
+            parameters.includePeerToPeer = true  // 支持点对点（AWDL / 直连）
+            
+            let browser = NWBrowser(for: descriptor, using: parameters)
+            
+ // 设置状态更新处理器
+            browser.stateUpdateHandler = { [weak self, serviceType] state in
+                Task { @MainActor in
+                    self?.handleBrowserStateUpdate(state, for: serviceType)
+                }
+            }
+            
+ // 设置结果变化处理器
+            browser.browseResultsChangedHandler = { [weak self, serviceType] results, changes in
+                Task { @MainActor in
+                    self?.handleBrowseResultsChanged(results: results,
+                                                     changes: changes,
+                                                     serviceType: serviceType)
+                }
+            }
+            
+ // 启动浏览器
+            browser.start(queue: .global(qos: .utility))
+            browsers.append(browser)
+            
+            logger.debug("  ✅ 启动浏览器: \(serviceType)")
+        }
+        
+ // 同时启动监听器以便其他设备发现我们
+        startAdvertising()
+    }
+
+ /// 启动发现（与 startScanning 同义，供上层统一调用）
+    public func startDiscovery() {
+        startScanning()
+    }
+
+ /// 停止发现（与 stopScanning 同义，供上层统一调用）
+    public func stopDiscovery() {
+        stopScanning()
+    }
+
+ /// 刷新设备列表（重启扫描）
+    public func refreshDevices() async {
+        stopScanning()
+        startScanning()
+    }
+    
+ /// 停止扫描设备
+    public func stopScanning() {
+        guard isScanning else { return }
+        
+        logger.info("⏹️ 停止扫描设备")
+        isScanning = false
+        isDiscovering = false
+        
+ // 取消所有浏览器
+        for browser in browsers {
+            browser.cancel()
+        }
+        browsers.removeAll()
+        
+        stopAdvertising()
+    }
+    
+ /// 连接到指定设备（基于 IPv4 + 主服务端口）
+    public func connectToDevice(_ device: DiscoveredDevice) async throws {
+        logger.info("尝试连接到设备: \(device.name)")
+        
+ // 从设备信息中获取连接地址
+        guard let ipv4 = device.ipv4 else {
+            throw P2PDiscoveryError.deviceNotConnected
+        }
+        if isLocalIPAddress(ipv4) {
+            logger.debug("忽略本机地址，跳过连接尝试: \(ipv4)")
+            throw P2PDiscoveryError.connectionCancelled
+        }
+        
+ // 选取发现的端口（不得回落默认值）
+        let preferredKey = device.services.first ?? "_skybridge._tcp"
+        let portValue = device.portMap[preferredKey] ?? device.portMap.values.first ?? 0
+        guard portValue > 0, let port = NWEndpoint.Port(rawValue: UInt16(portValue)) else {
+            throw P2PDiscoveryError.scanningFailed
+        }
+        
+        let host = NWEndpoint.Host(ipv4)
+        let endpoint = NWEndpoint.hostPort(host: host, port: port)
+        
+ // 应用统一 TLS 策略（近距连接）
+        let net = RemoteDesktopSettingsManager.shared.settings.networkSettings
+        let connection: NWConnection
+        if net.enableEncryption,
+           let tls = TLSConfigurator.options(for: net.encryptionAlgorithm) {
+            let tcp = NWProtocolTCP.Options()
+            let params = NWParameters(tls: tls, tcp: tcp)
+            connection = NWConnection(to: endpoint, using: params)
+        } else {
+            connection = NWConnection(to: endpoint, using: .tcp)
+        }
+        
+        connections[device.id.uuidString] = connection
+        connectionStatus = .connecting
+        
+ // 启动连接
+        connection.stateUpdateHandler = { [weak self] state in
+            Task { @MainActor in
+                self?.handleConnectionStateUpdate(state, for: device.id.uuidString)
+            }
+        }
+        
+        connection.start(queue: DispatchQueue.global(qos: .userInitiated))
+        
+ // 等待连接建立
+        try await waitForConnection(connection)
+        
+        logger.info("✅ 成功连接到设备: \(device.name)")
+    }
+    
+ /// 断开与指定设备的连接
+    public func disconnectFromDevice(_ deviceId: String) {
+        logger.info("🔌 断开设备连接: \(deviceId)")
+        
+        connections[deviceId]?.cancel()
+        connections.removeValue(forKey: deviceId)
+        
+        if connections.isEmpty {
+            connectionStatus = .disconnected
+        }
+    }
+    
+ /// 发送数据到指定设备
+    public func sendData(_ data: Data, to deviceId: String) async throws {
+        guard let connection = connections[deviceId] else {
+            throw P2PDiscoveryError.deviceNotConnected
+        }
+        
+        return try await withCheckedThrowingContinuation { continuation in
+            connection.send(content: data, completion: .contentProcessed { error in
+                if let error = error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume()
+                }
+            })
+        }
+    }
+    
+ // MARK: - Bonjour 广播（本机作为服务端）
+    
+ /// 启动广播服务（Bonjour）
+    @MainActor public func startAdvertising() {
+        logger.info("📡 开始广播服务")
+        if isAdvertising {
+            logger.debug("📡 广播已在运行，忽略重复启动")
+            return
+        }
+        if let existing = listener {
+            existing.cancel()
+            listener = nil
+        }
+        
+        Task { @MainActor in
+            if await ServiceAdvertiserCenter.shared.isAdvertising("_skybridge._tcp") {
+                logger.debug("📡 广播中心已在运行，忽略重复启动")
+                isAdvertising = true
+                return
+            }
+            do {
+                let port = try await ServiceAdvertiserCenter.shared.startAdvertising(
+                    serviceName: getDeviceName(),
+                    serviceType: "_skybridge._tcp",
+                    connectionHandler: { [weak self] connection in
+                        Task { @MainActor in self?.handleNewConnection(connection) }
+                    },
+                    stateHandler: { [weak self] state in
+                        Task { @MainActor in self?.handleListenerStateUpdate(state) }
+                    }
+                )
+                isAdvertising = true
+                if port > 0 {
+                    logger.info("📡 广播服务已启动，端口: \(port)")
+                } else {
+                    logger.info("📡 广播服务已启动（系统分配端口）")
+                }
+            } catch {
+                logger.error("❌ 启动广播服务失败: \(error.localizedDescription)")
+            }
+        }
+    }
+    
+ /// 停止广播服务
+    private func stopAdvertising() {
+        logger.info("📡 停止广播服务")
+        listener?.cancel()
+        listener = nil
+        isAdvertising = false
+    }
+    
+ // MARK: - Bonjour 浏览结果处理
+    
+ /// 处理浏览器状态更新
+    private func handleBrowserStateUpdate(_ state: NWBrowser.State, for serviceType: String) {
+        switch state {
+        case .ready:
+            logger.info("🔍 浏览器就绪: \(serviceType)")
+        case .failed(let error):
+            logger.error("❌ 浏览器失败 [\(serviceType)]: \(error.localizedDescription)")
+        case .cancelled:
+            logger.info("⏹️ 浏览器已取消: \(serviceType)")
+        default:
+            break
+        }
+    }
+    
+ /// 处理浏览结果变化 - 增强版：支持多服务类型
+    private func handleBrowseResultsChanged(
+        results: Set<NWBrowser.Result>,
+        changes: Set<NWBrowser.Result.Change>,
+        serviceType: String
+    ) {
+        for change in changes {
+            switch change {
+            case .added(let result):
+                addDiscoveredDeviceAsync(from: result, serviceType: serviceType)
+            case .removed(let result):
+                removeDiscoveredDevice(from: result)
+            case .changed(old: _, new: let new, flags: _):
+                updateDiscoveredDeviceAsync(from: new, serviceType: serviceType)
+            case .identical:
+                break
+            @unknown default:
+                break
+            }
+        }
+    }
+    
+ /// 添加发现的设备 - 增强版：识别设备类型
+    private func addDiscoveredDevice(from result: NWBrowser.Result, serviceType: String) {
+        let deviceName = extractDeviceName(from: result)
+        let (ipv4, ipv6, port) = extractNetworkInfo(from: result)
+        
+ // 根据服务类型推断设备类型（纯 UI 用，不影响连接逻辑）
+        var detectedDeviceType = ""
+        if serviceType.contains("airplay") {
+ // AirPlay 服务通常是 iPhone/iPad/Apple TV
+            if !deviceName.lowercased().contains("iphone"),
+               !deviceName.lowercased().contains("ipad"),
+               !deviceName.lowercased().contains("apple tv") {
+                detectedDeviceType = " 📱"
+            }
+        } else if serviceType.contains("companion-link") {
+ // Apple Continuity 设备
+            if !deviceName.lowercased().contains("apple") {
+                detectedDeviceType = " 🍎"
+            }
+        }
+        
+ // 创建 DiscoveredDevice 实例，使用从 result 中提取的真实网络信息
+        let device = DiscoveredDevice(
+            id: UUID(),
+            name: deviceName + detectedDeviceType,
+            ipv4: ipv4,
+            ipv6: ipv6,
+            services: [serviceType],
+            portMap: [serviceType: port],
+            connectionTypes: [.wifi], // 网络发现的设备默认为 Wi-Fi
+            uniqueIdentifier: ipv4 ?? ipv6,
+            signalStrength: nil,
+            isLocalDevice: isProbablyLocalDevice(name: deviceName, ipv4: ipv4, ipv6: ipv6)
+        )
+        
+ // 检查是否已存在相同的设备（基于 IP 地址，更准确）
+        if let existingIndex = discoveredDevices.firstIndex(where: { existingDevice in
+ // 优先使用 IP 地址匹配
+            if let existingIPv4 = existingDevice.ipv4,
+               let newIPv4 = device.ipv4,
+               existingIPv4 == newIPv4 {
+                return true
+            }
+            if let existingIPv6 = existingDevice.ipv6,
+               let newIPv6 = device.ipv6,
+               existingIPv6 == newIPv6 {
+                return true
+            }
+ // 如果没有 IP，使用名称匹配（去除 emoji 和特殊字符后）
+            let cleanExistingName = existingDevice.name.filter { $0.isLetter || $0.isNumber }
+            let cleanNewName = deviceName.filter { $0.isLetter || $0.isNumber }
+            return cleanExistingName == cleanNewName && !cleanNewName.isEmpty
+        }) {
+ // 设备已存在，更新服务列表
+            var existingDevice = discoveredDevices[existingIndex]
+            if !existingDevice.services.contains(serviceType) {
+                existingDevice.services.append(serviceType)
+                existingDevice.portMap[serviceType] = port
+                discoveredDevices[existingIndex] = existingDevice
+                logger.debug("🔄 更新设备服务: \(device.name) - 新增服务: \(serviceType)")
+            }
+        } else {
+ // 新设备，添加到列表
+            discoveredDevices.append(device)
+            logger.info("✅ 发现[\(serviceType)]: \(device.name) - IPv4: \(ipv4 ?? "无"), IPv6: \(ipv6 ?? "无"), 端口: \(port)")
+        }
+    }
+
+    private func addDiscoveredDeviceAsync(from result: NWBrowser.Result, serviceType: String) {
+        Task.detached { [serviceType] in
+            let deviceName = P2P_ExtractDeviceName(result)
+            let (ipv4, ipv6) = P2P_ExtractNetworkAddrs(result)
+            let port = 0
+            var detectedDeviceType = ""
+            if serviceType.contains("airplay") {
+                if !deviceName.lowercased().contains("iphone"),
+                   !deviceName.lowercased().contains("ipad"),
+                   !deviceName.lowercased().contains("apple tv") {
+                    detectedDeviceType = " 📱"
+                }
+            } else if serviceType.contains("companion-link") {
+                if !deviceName.lowercased().contains("apple") {
+                    detectedDeviceType = " 🍎"
+                }
+            }
+            let device = DiscoveredDevice(
+                id: UUID(),
+                name: deviceName + detectedDeviceType,
+                ipv4: ipv4,
+                ipv6: ipv6,
+                services: [serviceType],
+                portMap: [serviceType: port],
+                connectionTypes: [.wifi],
+                uniqueIdentifier: ipv4 ?? ipv6
+            )
+            await MainActor.run { [self] in
+                if let existingIndex = self.discoveredDevices.firstIndex(where: { existing in
+                    if let e4 = existing.ipv4, let n4 = device.ipv4, e4 == n4 { return true }
+                    if let e6 = existing.ipv6, let n6 = device.ipv6, e6 == n6 { return true }
+                    let cleanExisting = existing.name.filter { $0.isLetter || $0.isNumber }
+                    let cleanNew = deviceName.filter { $0.isLetter || $0.isNumber }
+                    return !cleanNew.isEmpty && cleanExisting == cleanNew
+                }) {
+                    var existing = self.discoveredDevices[existingIndex]
+                    if !existing.services.contains(serviceType) {
+                        existing.services.append(serviceType)
+                        existing.portMap[serviceType] = port
+                        self.discoveredDevices[existingIndex] = existing
+                        self.logger.debug("🔄 更新设备服务: \(device.name) - 新增服务: \(serviceType)")
+                    }
+                    self.resolveViaNetServiceIfNeeded(result: result, deviceIndex: existingIndex, serviceType: serviceType)
+                } else {
+                    self.discoveredDevices.append(device)
+                    let ipv4Str = ipv4 ?? "无"
+                    let ipv6Str = ipv6 ?? "无"
+                    self.logger.info("✅ 发现[\(serviceType)]: \(device.name) - IPv4: \(ipv4Str), IPv6: \(ipv6Str), 端口: \(port)")
+                    self.resolveViaNetServiceIfNeeded(result: result, deviceIndex: self.discoveredDevices.count - 1, serviceType: serviceType)
+                }
+            }
+        }
+    }
+    
+ /// 移除设备
+    private func removeDiscoveredDevice(from result: NWBrowser.Result) {
+        let deviceId = extractDeviceName(from: result)
+        discoveredDevices.removeAll { $0.name == deviceId }
+        logger.info("设备已离线: \(deviceId)")
+    }
+    
+ /// 更新设备信息
+    private func updateDiscoveredDevice(from result: NWBrowser.Result, serviceType: String) {
+        let deviceId = extractDeviceName(from: result)
+        if discoveredDevices.firstIndex(where: { $0.name.contains(deviceId) }) != nil {
+            let (ipv4, _, _) = extractNetworkInfo(from: result)
+            logger.info("🔄 更新[\(serviceType)]: \(deviceId) - IPv4: \(ipv4 ?? "无")")
+        }
+    }
+    
+ // MARK: - 监听器 / 连接状态
+    
+ /// 处理监听器状态更新
+    private func handleListenerStateUpdate(_ state: NWListener.State) {
+        switch state {
+        case .ready:
+            logger.info("📡 监听器就绪")
+        case .failed(let error):
+            logger.error("❌ 监听器失败: \(error.localizedDescription)")
+        case .cancelled:
+            logger.info("⏹️ 监听器已取消")
+        default:
+            break
+        }
+    }
+    
+ /// 处理新连接（传入 TCP）
+    private func handleNewConnection(_ connection: NWConnection) {
+        logger.info("🔗 收到新连接")
+        
+ // 设置连接状态处理器
+        connection.stateUpdateHandler = { [weak self] state in
+            Task { @MainActor in
+                self?.handleIncomingConnectionStateUpdate(state, connection: connection)
+            }
+        }
+        
+ // 启动连接
+        connection.start(queue: .global())
+    }
+    
+ /// 处理主动发起的连接状态更新
+    private func handleConnectionStateUpdate(_ state: NWConnection.State, for deviceId: String) {
+        switch state {
+        case .ready:
+            logger.info("✅ 连接就绪: \(deviceId)")
+            connectionStatus = .connected
+        case .failed(let error):
+            logger.error("❌ 连接失败: \(deviceId), 错误: \(error.localizedDescription)")
+            connections.removeValue(forKey: deviceId)
+            connectionStatus = .failed
+        case .cancelled:
+            logger.info("⏹️ 连接已取消: \(deviceId)")
+            connections.removeValue(forKey: deviceId)
+            connectionStatus = connections.isEmpty ? .disconnected : connectionStatus
+        default:
+            break
+        }
+    }
+    
+ /// 处理传入连接状态更新
+    private func handleIncomingConnectionStateUpdate(_ state: NWConnection.State, connection: NWConnection) {
+        switch state {
+        case .ready:
+            logger.info("✅ 传入连接就绪")
+ // 处理传入控制通道（握手/验签/能力协商），避免阻塞主线程
+            Task {
+                await self.handleInboundControlChannel(connection)
+            }
+        case .failed(let error):
+            if case NWError.posix(let posixErr) = error, posixErr == .ECONNREFUSED || posixErr == .EADDRNOTAVAIL {
+                logger.debug("传入连接失败(预期探测失败): \(posixErr.rawValue)")
+            } else {
+                logger.error("❌ 传入连接失败: \(error.localizedDescription)")
+            }
+        case .cancelled:
+            logger.info("⏹️ 传入连接已取消")
+        default:
+            break
+        }
+    }
+
+ /// 统一的入站控制包模型，JSON使用Base64承载二进制字段
+    private struct SecurePacket: Codable {
+        enum PacketType: String, Codable { case message, keyExchange, heartbeat }
+        let type: PacketType
+        let data: Data
+        let signature: Data
+        let timestamp: TimeInterval
+    }
+
+ /// 入站控制通道处理（统一格式 SecurePacket）
+    private func handleInboundControlChannel(_ connection: NWConnection) async {
+        do {
+            while connection.state == .ready {
+ // 读取控制包长度（4字节，大端）
+                let lenData = try await receiveData(length: 4, from: connection)
+                let totalLen = lenData.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+                guard totalLen > 0 && totalLen < 1_048_576 else { break }
+ // 读取控制负载
+                let payload = try await receiveData(length: Int(totalLen), from: connection)
+ // 解析 SecurePacket
+                let packet = try JSONDecoder().decode(SecurePacket.self, from: payload)
+ // 验签
+                let ok = try await EnhancedPostQuantumCrypto().verify(packet.data, signature: packet.signature, for: packetSenderId(packet))
+                guard ok else {
+                    logger.error("❌ 入站控制包验签失败")
+                    continue
+                }
+ // 类型处理
+                switch packet.type {
+                case .message:
+                    NotificationCenter.default.post(name: Notification.Name("P2PInboundMessage"), object: self, userInfo: ["payload": packet.data])
+                case .keyExchange:
+ // 入站密钥交换：按 QuantumSecureP2PNetwork 的流程触发换钥
+                    NotificationCenter.default.post(name: Notification.Name("P2PInboundKeyExchange"), object: self, userInfo: ["payload": packet.data])
+                case .heartbeat:
+ // 发送 ACK（1字节 0x09）
+                    try await sendAck(code: 0x09, to: connection)
+                }
+            }
+        } catch {
+            logger.error("❌ 入站控制通道处理异常: \(error.localizedDescription)")
+        }
+    }
+
+ /// 提取控制包发送方标识（若上层无显式字段，则以当前连接的 peerId 映射）
+    private func packetSenderId(_ packet: SecurePacket) -> String { String(packet.timestamp) }
+
+ /// 发送简易 ACK（单字节）
+    private func sendAck(code: UInt8, to connection: NWConnection) async throws {
+        try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
+            connection.send(content: Data([code]), completion: .contentProcessed { err in
+                if let err = err { c.resume(throwing: err) } else { c.resume() }
+            })
+        }
+    }
+
+ /// 入站读取固定长度数据
+    private func receiveData(length: Int, from connection: NWConnection) async throws -> Data {
+        return try await withCheckedThrowingContinuation { (c: CheckedContinuation<Data, Error>) in
+            connection.receive(minimumIncompleteLength: length, maximumLength: length) { data, _, _, err in
+                if let err = err { c.resume(throwing: err) }
+                else if let data = data, data.count == length { c.resume(returning: data) }
+                else { c.resume(throwing: NSError(domain: "P2PInbound", code: -1)) }
+            }
+        }
+    }
+
+ /// 判断给定 IPv4 地址是否属于本机，避免自连接导致路径冲突
+    private func isLocalIPAddress(_ address: String) -> Bool {
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddr) == 0 else { return false }
+        defer { freeifaddrs(ifaddr) }
+        var ptr = ifaddr
+        while ptr != nil {
+            defer { ptr = ptr?.pointee.ifa_next }
+            guard let interface = ptr?.pointee, let sa = interface.ifa_addr else { continue }
+            let family = sa.pointee.sa_family
+            if family == UInt8(AF_INET) || family == UInt8(AF_INET6) {
+                var buf = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+                if getnameinfo(sa, socklen_t(sa.pointee.sa_len), &buf, socklen_t(buf.count), nil, socklen_t(0), NI_NUMERICHOST) == 0 {
+                    let data = Data(bytes: buf, count: buf.count)
+                    let trimmed = data.prefix { $0 != 0 }
+                    let ip = String(decoding: trimmed, as: UTF8.self)
+                    if ip == address { return true }
+                }
+            }
+        }
+        return false
+    }
+
+ /// 判断是否为本机设备（严格匹配）
+    private func isProbablyLocalDevice(name: String, ipv4: String?, ipv6: String?) -> Bool {
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        var locals: Set<String> = []
+        if getifaddrs(&ifaddr) == 0 {
+            var ptr = ifaddr
+            while ptr != nil {
+                defer { ptr = ptr?.pointee.ifa_next }
+                guard let interface = ptr?.pointee, let sa = interface.ifa_addr else { continue }
+                let fam = sa.pointee.sa_family
+                if fam == UInt8(AF_INET) || fam == UInt8(AF_INET6) {
+                    var buf = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+                    if getnameinfo(sa, socklen_t(sa.pointee.sa_len), &buf, socklen_t(buf.count), nil, socklen_t(0), NI_NUMERICHOST) == 0 {
+                        let data = Data(bytes: buf, count: buf.count)
+                        let trimmed = data.prefix { $0 != 0 }
+                        let ip = String(decoding: trimmed, as: UTF8.self)
+                        if !ip.isEmpty { locals.insert(ip) }
+                    }
+                }
+            }
+            freeifaddrs(ifaddr)
+        }
+        if let v4 = ipv4, locals.contains(v4) { return true }
+        if let v6 = ipv6, locals.contains(v6) { return true }
+        func norm(_ s: String) -> String { s.lowercased().replacingOccurrences(of: " ", with: "").replacingOccurrences(of: "(", with: "").replacingOccurrences(of: ")", with: "") }
+        let localName = Host.current().localizedName ?? ""
+        if !localName.isEmpty, norm(name) == norm(localName) { return true }
+        return false
+    }
+    
+ /// 等待连接建立
+    private func waitForConnection(_ connection: NWConnection) async throws {
+        return try await withCheckedThrowingContinuation { continuation in
+            let resumed = OSAllocatedUnfairLock(initialState: false)
+            
+            connection.stateUpdateHandler = { state in
+                resumed.withLock { isResumed in
+                    guard !isResumed else { return }
+                    
+                    switch state {
+                    case .ready:
+                        isResumed = true
+                        continuation.resume()
+                    case .failed(let error):
+                        isResumed = true
+                        continuation.resume(throwing: error)
+                    case .cancelled:
+                        isResumed = true
+                        continuation.resume(throwing: P2PDiscoveryError.connectionCancelled)
+                    default:
+                        break
+                    }
+                }
+            }
+
+            DispatchQueue.global().asyncAfter(deadline: .now() + 5.0) {
+                let shouldResume = resumed.withLock { isResumed -> Bool in
+                    guard !isResumed else { return false }
+                    isResumed = true
+                    return true
+                }
+                guard shouldResume else { return }
+                connection.stateUpdateHandler = nil
+                connection.cancel()
+                continuation.resume(throwing: P2PDiscoveryError.connectionCancelled)
+            }
+        }
+    }
+    
+ // MARK: - 辅助方法：名称 / 网络信息解析
+    
+ /// 获取本机设备名称
+    private func getDeviceName() -> String {
+        return Host.current().localizedName ?? "SkyBridge设备"
+    }
+    
+ /// 从结果中提取设备名称 - 2025 增强版
+    private func extractDeviceName(from result: NWBrowser.Result) -> String {
+        var deviceName = "未知设备"
+        
+        if case .service(let name, _, _, _) = result.endpoint {
+ // 使用服务名作为基础
+            deviceName = name
+            
+ // 尝试从 result.metadata 获取 TXT 记录（使用统一解析器）
+            let metadata = result.metadata
+            if case .bonjour(let txtRecord) = metadata {
+                let deviceInfo = BonjourTXTParser.extractDeviceInfo(txtRecord)
+ // 优先使用设备名称
+                if let friendlyName = deviceInfo.name ?? deviceInfo.hostname {
+                    deviceName = friendlyName
+                }
+                
+ // 添加设备类型信息
+                if let deviceType = deviceInfo.type ?? deviceInfo.model {
+                    deviceName += " (\(deviceType))"
+                }
+            }
+            
+ // 清理设备名称
+            deviceName = cleanDeviceName(deviceName)
+            
+            if isProbablyLocalDevice(name: deviceName, ipv4: nil, ipv6: nil) {
+                deviceName += " (本机)"
+            }
+        }
+        
+        logger.info("提取设备名称: \(deviceName)")
+        return deviceName
+    }
+    
+ /// 解析 TXT 记录（已废弃，请使用 BonjourTXTParser）
+    @available(*, deprecated, message: "Use BonjourTXTParser.parse instead")
+    private func parseTXTRecord(_ txtRecord: NWTXTRecord) -> [String: String]? {
+        let dict = BonjourTXTParser.parse(txtRecord)
+        return dict.isEmpty ? nil : dict
+    }
+    
+ /// 清理设备名称
+    private func cleanDeviceName(_ name: String) -> String {
+        var cleaned = name
+        
+        cleaned = cleaned.replacingOccurrences(of: "._tcp", with: "")
+        cleaned = cleaned.replacingOccurrences(of: "._udp", with: "")
+        cleaned = cleaned.replacingOccurrences(of: ".local", with: "")
+        
+        cleaned = cleaned.trimmingCharacters(in: .whitespaces)
+        
+        if cleaned.count > 50 {
+            cleaned = String(cleaned.prefix(47)) + "..."
+        }
+        
+        return cleaned
+    }
+    
+ /// 从 IP 地址反向解析主机名
+    private func resolveHostnameFromIP(_ ipAddress: String) -> String? {
+        var hints = addrinfo()
+        hints.ai_family = AF_UNSPEC
+        hints.ai_socktype = SOCK_STREAM
+        
+        var result: UnsafeMutablePointer<addrinfo>?
+        guard getaddrinfo(ipAddress, nil, &hints, &result) == 0 else {
+            return nil
+        }
+        defer { freeaddrinfo(result) }
+        
+        var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+        if getnameinfo(result?.pointee.ai_addr,
+                       socklen_t(result?.pointee.ai_addrlen ?? 0),
+                       &hostname,
+                       socklen_t(hostname.count),
+                       nil, 0,
+                       NI_NAMEREQD) == 0 {
+            let bytes = Data(bytes: hostname, count: hostname.count)
+            let trimmed = bytes.prefix { $0 != 0 }
+            return String(decoding: trimmed, as: UTF8.self)
+        }
+        
+        return nil
+    }
+    
+ /// 从结果中提取网络信息 - 2025 增强版
+    private func extractNetworkInfo(from result: NWBrowser.Result) -> (ipv4: String?, ipv6: String?, port: Int) {
+        var ipv4: String?
+        var ipv6: String?
+        var port: Int = 0 // 未知端口，必须依靠服务端点提供
+        
+        if case .service(_, _, let servicePort, _) = result.endpoint {
+            port = Int(servicePort) ?? 0
+        }
+        
+ // 方法 1: 从 NWBrowser.Result.interfaces 提取（macOS 14+）
+        if !result.interfaces.isEmpty {
+ // 优先使用 Wi-Fi 接口
+            for interface in result.interfaces {
+                let interfaceName = interface.name
+                logger.debug("检查网络接口: \(interfaceName)")
+                
+                if let addresses = getIPAddressesForInterface(interfaceName) {
+                    if ipv4 == nil {
+                        ipv4 = addresses.ipv4
+                    }
+                    if ipv6 == nil {
+                        ipv6 = addresses.ipv6
+                    }
+                }
+            }
+        }
+        
+ // 方法 2: 使用 NWEndpoint 直接解析（通过 DNS）
+        if case .service(let name, let type, _, _) = result.endpoint {
+            let host = NWEndpoint.Host(name + "." + type.replacingOccurrences(of: "_", with: "") + ".local")
+            
+            if let resolvedAddresses = resolveHost(host) {
+                if ipv4 == nil {
+                    ipv4 = resolvedAddresses.ipv4
+                }
+                if ipv6 == nil {
+                    ipv6 = resolvedAddresses.ipv6
+                }
+            }
+        }
+        
+ // 方法 3: 使用 NetService (兼容性后备)
+        if ipv4 == nil && ipv6 == nil {
+            if case .service(let name, let type, _, _) = result.endpoint {
+                let netService = NetService(domain: "local.", type: type, name: name)
+                netService.resolve(withTimeout: 1.0)
+                
+                if let addresses = netService.addresses {
+                    for addressData in addresses {
+                        let address = extractIPAddress(from: addressData)
+                        if address.contains("."),
+                           !address.starts(with: "169.254"),
+                           ipv4 == nil {
+                            ipv4 = address
+                        } else if address.contains(":"),
+                                  ipv6 == nil {
+                            ipv6 = address
+                        }
+                    }
+                }
+            }
+        }
+        
+        logger.info("解析设备网络信息 - IPv4: \(ipv4 ?? "无"), IPv6: \(ipv6 ?? "无"), 端口: \(port)")
+        return (ipv4, ipv6, port)
+    }
+    
+ /// 通过接口名称获取 IP 地址
+    private func getIPAddressesForInterface(_ interfaceName: String) -> (ipv4: String?, ipv6: String?)? {
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddr) == 0 else { return nil }
+        defer { freeifaddrs(ifaddr) }
+        
+        var ipv4: String?
+        var ipv6: String?
+        var ptr = ifaddr
+        
+        while ptr != nil {
+            defer { ptr = ptr?.pointee.ifa_next }
+            
+            guard let interface = ptr?.pointee else { continue }
+            let name = String(decoding: Data(bytes: interface.ifa_name,
+                                             count: Int(strlen(interface.ifa_name))),
+                              as: UTF8.self)
+            
+ // 匹配接口名（Wi-Fi / AWDL 等）
+            if name == interfaceName || name.hasPrefix("en") || name.hasPrefix("awdl") {
+                let addr = interface.ifa_addr.pointee
+                
+                if addr.sa_family == UInt8(AF_INET) {
+ // IPv4
+                    var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+                    if getnameinfo(
+                        interface.ifa_addr,
+                        socklen_t(addr.sa_len),
+                        &hostname,
+                        socklen_t(hostname.count),
+                        nil,
+                        socklen_t(0),
+                        NI_NUMERICHOST
+                    ) == 0 {
+                        let data = Data(bytes: hostname, count: hostname.count)
+                        let trimmed = data.prefix { $0 != 0 }
+                        let address = String(decoding: trimmed, as: UTF8.self)
+ // 排除本地链路地址
+                        if !address.starts(with: "169.254") && !address.starts(with: "127.") {
+                            ipv4 = address
+                        }
+                    }
+                } else if addr.sa_family == UInt8(AF_INET6) {
+ // IPv6
+                    var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+                    if getnameinfo(
+                        interface.ifa_addr,
+                        socklen_t(addr.sa_len),
+                        &hostname,
+                        socklen_t(hostname.count),
+                        nil,
+                        socklen_t(0),
+                        NI_NUMERICHOST
+                    ) == 0 {
+                        let data = Data(bytes: hostname, count: hostname.count)
+                        let trimmed = data.prefix { $0 != 0 }
+                        let address = String(decoding: trimmed, as: UTF8.self)
+ // 排除链路本地地址
+                        if !address.starts(with: "fe80:") {
+                            ipv6 = address
+                        }
+                    }
+                }
+            }
+        }
+        
+        if ipv4 != nil || ipv6 != nil {
+            return (ipv4, ipv6)
+        }
+        return nil
+    }
+    
+ /// 解析主机名为 IP 地址
+    private func resolveHost(_ host: NWEndpoint.Host) -> (ipv4: String?, ipv6: String?)? {
+        var ipv4: String?
+        var ipv6: String?
+        
+        var hints = addrinfo()
+        hints.ai_family = AF_UNSPEC  // IPv4 或 IPv6
+        hints.ai_socktype = SOCK_STREAM
+        
+        var result: UnsafeMutablePointer<addrinfo>?
+        let hostString = "\(host)"
+        
+        guard getaddrinfo(hostString, nil, &hints, &result) == 0 else {
+            return nil
+        }
+        defer { freeaddrinfo(result) }
+        
+        var ptr = result
+        while ptr != nil {
+            defer { ptr = ptr?.pointee.ai_next }
+            
+            guard let addr = ptr?.pointee else { continue }
+            
+            if addr.ai_family == AF_INET {
+ // IPv4
+                var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+                if getnameinfo(
+                    addr.ai_addr,
+                    socklen_t(addr.ai_addrlen),
+                    &hostname,
+                    socklen_t(hostname.count),
+                    nil,
+                    0,
+                    NI_NUMERICHOST
+                ) == 0 {
+                    let bytes4 = Data(bytes: hostname, count: hostname.count)
+                    let trimmed4 = bytes4.prefix { $0 != 0 }
+                    ipv4 = String(decoding: trimmed4, as: UTF8.self)
+                }
+            } else if addr.ai_family == AF_INET6 {
+ // IPv6
+                var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+                if getnameinfo(
+                    addr.ai_addr,
+                    socklen_t(addr.ai_addrlen),
+                    &hostname,
+                    socklen_t(hostname.count),
+                    nil,
+                    0,
+                    NI_NUMERICHOST
+                ) == 0 {
+                    let bytes6 = Data(bytes: hostname, count: hostname.count)
+                    let trimmed6 = bytes6.prefix { $0 != 0 }
+                    ipv6 = String(decoding: trimmed6, as: UTF8.self)
+                }
+            }
+        }
+        
+        if ipv4 != nil || ipv6 != nil {
+            return (ipv4, ipv6)
+        }
+        return nil
+    }
+    
+ /// 从地址数据中提取 IP 地址字符串
+    private func extractIPAddress(from data: Data) -> String {
+        return data.withUnsafeBytes { bytes in
+            guard bytes.count >= MemoryLayout<sockaddr>.size,
+                  let sockaddr = bytes.bindMemory(to: sockaddr.self).baseAddress else {
+                return "未知地址"
+            }
+            
+            switch Int32(sockaddr.pointee.sa_family) {
+            case AF_INET:
+                guard bytes.count >= MemoryLayout<sockaddr_in>.size,
+                      let addr = bytes.bindMemory(to: sockaddr_in.self).baseAddress,
+                      let cstr = inet_ntoa(addr.pointee.sin_addr) else {
+                    return "未知地址"
+                }
+                return String(cString: cstr)
+                
+            case AF_INET6:
+                guard bytes.count >= MemoryLayout<sockaddr_in6>.size,
+                      let addr = bytes.bindMemory(to: sockaddr_in6.self).baseAddress else {
+                    return "未知地址"
+                }
+                var buffer = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
+                var sin6_addr = addr.pointee.sin6_addr
+                guard inet_ntop(AF_INET6, &sin6_addr, &buffer, socklen_t(INET6_ADDRSTRLEN)) != nil else {
+                    return "未知地址"
+                }
+                let data = Data(bytes: buffer, count: Int(INET6_ADDRSTRLEN))
+                let trimmed = data.prefix { $0 != 0 }
+                return String(decoding: trimmed, as: UTF8.self)
+                
+            default:
+                return "未知地址"
+            }
+        }
+    }
+
+    private func resolveViaNetServiceIfNeeded(result: NWBrowser.Result, deviceIndex: Int, serviceType: String) {
+        guard deviceIndex >= 0 && deviceIndex < discoveredDevices.count else { return }
+        let d = discoveredDevices[deviceIndex]
+        let hasPort = (d.portMap[serviceType] ?? 0) > 0
+        let hasAddr = (d.ipv4 != nil) || (d.ipv6 != nil)
+        guard !hasPort || !hasAddr else { return }
+        guard case .service(let name, let type, let domain, _) = result.endpoint else { return }
+        let key = name + "|" + type
+        let now = Date()
+        if let last = txtResolveCooldown[key], now.timeIntervalSince(last) < 2.0 { return }
+        txtResolveCooldown[key] = now
+        Task.detached { [domain, type, name, serviceType] in
+            let svc = NetService(domain: domain.isEmpty ? "local." : domain, type: type, name: name)
+            svc.resolve(withTimeout: 1.0)
+            var port = 0
+            if svc.port > 0 { port = svc.port }
+            var found4: String?
+            var found6: String?
+            if let addrs = svc.addresses {
+                for data in addrs {
+                    let addr = P2P_ExtractIPAddress(from: data)
+                    if addr.contains("."), !addr.starts(with: "169.254"), !addr.starts(with: "127."), found4 == nil { found4 = addr }
+                    else if addr.contains(":"), !addr.starts(with: "fe80:"), found6 == nil { found6 = addr }
+                }
+            }
+            await MainActor.run { [self] in
+                guard deviceIndex >= 0 && deviceIndex < self.discoveredDevices.count else { return }
+                let dd = self.discoveredDevices[deviceIndex]
+                var newPortMap = dd.portMap
+                if (newPortMap[serviceType] ?? 0) == 0 && port > 0 { newPortMap[serviceType] = port }
+                let newIPv4 = dd.ipv4 ?? found4
+                let newIPv6 = dd.ipv6 ?? found6
+                let updated = DiscoveredDevice(
+                    id: dd.id,
+                    name: dd.name,
+                    ipv4: newIPv4,
+                    ipv6: newIPv6,
+                    services: dd.services,
+                    portMap: newPortMap,
+                    connectionTypes: dd.connectionTypes,
+                    uniqueIdentifier: dd.uniqueIdentifier
+                )
+                self.discoveredDevices[deviceIndex] = updated
+            }
+        }
+    }
+    private func updateDiscoveredDeviceAsync(from result: NWBrowser.Result, serviceType: String) {
+        Task.detached { [serviceType] in
+            let deviceId = P2P_ExtractDeviceName(result)
+            let (ipv4, _) = P2P_ExtractNetworkAddrs(result)
+            await MainActor.run { [self] in
+                if let idx = self.discoveredDevices.firstIndex(where: { $0.name.contains(deviceId) }) {
+                    let ipv4Str = ipv4 ?? "无"
+                    self.logger.info("🔄 更新[\(serviceType)]: \(deviceId) - IPv4: \(ipv4Str)")
+                    self.resolveViaNetServiceIfNeeded(result: result, deviceIndex: idx, serviceType: serviceType)
+                }
+            }
+        }
+    }
+ /// 将网络发现的设备映射为 P2P 设备（供上层统一使用）
+ /// Swift 6.2.1：公钥数据在发现阶段暂不可用，将在安全握手时获取
+    private static func mapToP2PDevice(_ d: DiscoveredDevice) -> P2PDevice {
+        let address = d.ipv4 ?? d.ipv6 ?? ""
+        let portInt = d.portMap["_skybridge._tcp"] ?? d.portMap.values.first ?? 0
+        let endpoints: [String] = portInt > 0 ? ["\(address):\(portInt)"] : (address.isEmpty ? [] : [address])
+        return P2PDevice(
+            id: d.id.uuidString,
+            name: d.name,
+            type: .macOS,
+            address: address,
+            port: UInt16(portInt),
+            osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
+            capabilities: [],
+            publicKey: Data(), // 公钥在 P2PSecurityManager.establishSessionKey 握手时获取
+            lastSeen: Date(),
+            endpoints: endpoints,
+            lastMessageTimestamp: nil,
+            isVerified: false,
+            verificationFailedReason: d.pubKeyFP == nil ? "等待公钥交换" : nil,
+            persistentDeviceId: d.deviceId,
+            pubKeyFingerprint: d.pubKeyFP,
+            macAddresses: d.macSet.isEmpty ? nil : d.macSet
+        )
+    }
+}
+
+// MARK: - 数据模型 & 错误类型
+
+/// 网络发现的设备（内部使用）
+internal struct P2PNetworkDiscoveredDevice: Identifiable, Sendable {
+    public let id: String
+    public let name: String
+    public let endpoint: NWEndpoint
+    public var metadata: NWTXTRecord?
+    public let discoveredAt: Date
+    public var lastSeen: Date = Date()
+    
+    public init(id: String, name: String, endpoint: NWEndpoint, metadata: NWTXTRecord?, discoveredAt: Date) {
+        self.id = id
+        self.name = name
+        self.endpoint = endpoint
+        self.metadata = metadata
+        self.discoveredAt = discoveredAt
+    }
+}
+
+/// 设备发现连接状态
+public enum P2PDiscoveryConnectionStatus: String, CaseIterable {
+    case disconnected = "未连接"
+    case connecting = "连接中"
+    case connected = "已连接"
+    case reconnecting = "重连中"
+    case failed = "连接失败"
+    case timeout = "连接超时"
+    
+    public var displayName: String {
+        return rawValue
+    }
+}
+
+/// 设备发现错误
+public enum P2PDiscoveryError: Error, LocalizedError {
+    case deviceNotConnected
+    case connectionCancelled
+    case scanningFailed
+    
+    public var errorDescription: String? {
+        switch self {
+        case .deviceNotConnected:
+            return "设备未连接"
+        case .connectionCancelled:
+            return "连接已取消"
+        case .scanningFailed:
+            return "扫描失败"
+        }
+    }
+}
+
+/// 解析 TXT 记录（已废弃，使用统一解析器）
+@available(*, deprecated, message: "Use BonjourTXTParser.parse instead")
+fileprivate func P2P_ParseTXTRecord(_ txtRecord: NWTXTRecord) -> [String: String]? {
+    let dict = BonjourTXTParser.parse(txtRecord)
+    return dict.isEmpty ? nil : dict
+}
+
+fileprivate func P2P_CleanDeviceName(_ name: String) -> String {
+    var cleaned = name
+    cleaned = cleaned.replacingOccurrences(of: "._tcp", with: "")
+    cleaned = cleaned.replacingOccurrences(of: "._udp", with: "")
+    cleaned = cleaned.replacingOccurrences(of: ".local", with: "")
+    cleaned = cleaned.trimmingCharacters(in: .whitespaces)
+    if cleaned.count > 50 { cleaned = String(cleaned.prefix(47)) + "..." }
+    return cleaned
+}
+
+fileprivate func P2P_ExtractDeviceName(_ result: NWBrowser.Result) -> String {
+    var deviceName = "未知设备"
+    if case .service(let name, _, _, _) = result.endpoint {
+        deviceName = name
+        let metadata = result.metadata
+        if case .bonjour(let txtRecord) = metadata {
+            let info = BonjourTXTParser.extractDeviceInfo(txtRecord)
+            if let friendly = info.name ?? info.hostname { deviceName = friendly }
+            if let model = info.type ?? info.model { deviceName += " (\(model))" }
+        }
+        deviceName = P2P_CleanDeviceName(deviceName)
+        let localName = Host.current().localizedName ?? ""
+        if !localName.isEmpty, deviceName == localName { deviceName += " (本机)" }
+    }
+    return deviceName
+}
+
+fileprivate func P2P_GetIPAddressesForInterface(_ interfaceName: String) -> (ipv4: String?, ipv6: String?)? {
+    var ifaddr: UnsafeMutablePointer<ifaddrs>?
+    guard getifaddrs(&ifaddr) == 0 else { return nil }
+    defer { freeifaddrs(ifaddr) }
+    var ipv4: String?
+    var ipv6: String?
+    var ptr = ifaddr
+    while ptr != nil {
+        defer { ptr = ptr?.pointee.ifa_next }
+        guard let interface = ptr?.pointee else { continue }
+        let name = String(decoding: Data(bytes: interface.ifa_name, count: Int(strlen(interface.ifa_name))), as: UTF8.self)
+        if name == interfaceName || name.hasPrefix("en") || name.hasPrefix("awdl") {
+            let addr = interface.ifa_addr.pointee
+            if addr.sa_family == UInt8(AF_INET) {
+                var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+                if getnameinfo(interface.ifa_addr, socklen_t(addr.sa_len), &hostname, socklen_t(hostname.count), nil, socklen_t(0), NI_NUMERICHOST) == 0 {
+                    let data = Data(bytes: hostname, count: hostname.count)
+                    let trimmed = data.prefix { $0 != 0 }
+                    let address = String(decoding: trimmed, as: UTF8.self)
+                    if !address.starts(with: "169.254") && !address.starts(with: "127.") { ipv4 = address }
+                }
+            } else if addr.sa_family == UInt8(AF_INET6) {
+                var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+                if getnameinfo(interface.ifa_addr, socklen_t(addr.sa_len), &hostname, socklen_t(hostname.count), nil, socklen_t(0), NI_NUMERICHOST) == 0 {
+                    let data = Data(bytes: hostname, count: hostname.count)
+                    let trimmed = data.prefix { $0 != 0 }
+                    let address = String(decoding: trimmed, as: UTF8.self)
+                    if !address.starts(with: "fe80:") { ipv6 = address }
+                }
+            }
+        }
+    }
+    return (ipv4, ipv6)
+}
+
+fileprivate func P2P_ExtractIPAddress(from data: Data) -> String {
+    return data.withUnsafeBytes { bytes in
+        guard bytes.count >= MemoryLayout<sockaddr>.size,
+              let sockaddr = bytes.bindMemory(to: sockaddr.self).baseAddress else {
+            return "未知地址"
+        }
+        switch Int32(sockaddr.pointee.sa_family) {
+        case AF_INET:
+            guard bytes.count >= MemoryLayout<sockaddr_in>.size,
+                  let addr = bytes.bindMemory(to: sockaddr_in.self).baseAddress,
+                  let cstr = inet_ntoa(addr.pointee.sin_addr) else {
+                return "未知地址"
+            }
+            return String(cString: cstr)
+        case AF_INET6:
+            guard bytes.count >= MemoryLayout<sockaddr_in6>.size,
+                  let addr = bytes.bindMemory(to: sockaddr_in6.self).baseAddress else {
+                return "未知地址"
+            }
+            var buffer = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
+            var sin6_addr = addr.pointee.sin6_addr
+            guard inet_ntop(AF_INET6, &sin6_addr, &buffer, socklen_t(INET6_ADDRSTRLEN)) != nil else {
+                return "未知地址"
+            }
+            let data = Data(bytes: buffer, count: Int(INET6_ADDRSTRLEN))
+            let trimmed = data.prefix { $0 != 0 }
+            return String(decoding: trimmed, as: UTF8.self)
+        default:
+            return "未知地址"
+        }
+    }
+}
+
+fileprivate func P2P_ResolveHost(_ host: NWEndpoint.Host) -> (ipv4: String?, ipv6: String?)? {
+    var ipv4: String?
+    var ipv6: String?
+    var hints = addrinfo()
+    hints.ai_family = AF_UNSPEC
+    hints.ai_socktype = SOCK_STREAM
+    var result: UnsafeMutablePointer<addrinfo>?
+    let hostString = "\(host)"
+    guard getaddrinfo(hostString, nil, &hints, &result) == 0 else { return nil }
+    defer { freeaddrinfo(result) }
+    var ptr = result
+    while ptr != nil {
+        defer { ptr = ptr?.pointee.ai_next }
+        guard let addr = ptr?.pointee else { continue }
+        if addr.ai_family == AF_INET {
+            var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            if getnameinfo(addr.ai_addr, socklen_t(addr.ai_addrlen), &hostname, socklen_t(hostname.count), nil, 0, NI_NUMERICHOST) == 0 {
+                let bytes4 = Data(bytes: hostname, count: hostname.count)
+                let trimmed4 = bytes4.prefix { $0 != 0 }
+                ipv4 = String(decoding: trimmed4, as: UTF8.self)
+            }
+        } else if addr.ai_family == AF_INET6 {
+            var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            if getnameinfo(addr.ai_addr, socklen_t(addr.ai_addrlen), &hostname, socklen_t(hostname.count), nil, 0, NI_NUMERICHOST) == 0 {
+                let bytes6 = Data(bytes: hostname, count: hostname.count)
+                let trimmed6 = bytes6.prefix { $0 != 0 }
+                ipv6 = String(decoding: trimmed6, as: UTF8.self)
+            }
+        }
+    }
+    return (ipv4, ipv6)
+}
+
+fileprivate func P2P_ExtractNetworkAddrs(_ result: NWBrowser.Result) -> (ipv4: String?, ipv6: String?) {
+    var ipv4: String?
+    var ipv6: String?
+    if !result.interfaces.isEmpty {
+        for interface in result.interfaces {
+            let name = interface.name
+            if let addrs = P2P_GetIPAddressesForInterface(name) {
+                if ipv4 == nil { ipv4 = addrs.ipv4 }
+                if ipv6 == nil { ipv6 = addrs.ipv6 }
+            }
+        }
+    }
+    if case .service(let name, let type, _, _) = result.endpoint {
+        let host = NWEndpoint.Host(name + "." + type.replacingOccurrences(of: "_", with: "") + ".local")
+        if let resolved = P2P_ResolveHost(host) {
+            if ipv4 == nil { ipv4 = resolved.ipv4 }
+            if ipv6 == nil { ipv6 = resolved.ipv6 }
+        }
+    }
+    return (ipv4, ipv6)
+}

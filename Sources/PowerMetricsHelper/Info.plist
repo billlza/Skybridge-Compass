@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.skybridge.PowerMetricsHelper</string>
+    <key>CFBundleName</key>
+    <string>PowerMetricsHelper</string>
+    <key>CFBundleExecutable</key>
+    <string>com.skybridge.PowerMetricsHelper</string>
+    <key>CFBundleVersion</key>
+    <string>1.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>CFBundlePackageType</key>
+    <string>BNDL</string>
+
+    <!-- 注册 Mach 服务，供 NSXPCConnection 使用 -->
+    <key>MachServices</key>
+    <dict>
+        <key>com.skybridge.PowerMetricsHelper</key>
+        <true/>
+    </dict>
+
+    <!-- 允许在 launchd 下以 root 运行（由 SMJobBless 安装） -->
+    <key>SMAuthorizedClients</key>
+    <array>
+        <!-- 将由宿主应用签名哈希填充；开发阶段可先留空或稍后由打包脚本注入 -->
+    </array>
+</dict>
+</plist>
+

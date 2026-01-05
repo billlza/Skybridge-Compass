@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- 
+    RegexMatchingHelper - Minimal Privilege XPC Helper
+    
+    Security Constraints (Critical):
+    - Stateless: No persistent state
+    - No file system access: Does not read/write files  
+    - No network access: Does not connect to network
+    - Input limited: Only accepts pattern + input bytes
+    - Output limited: Only returns match results or errors
+    
+    This helper intentionally has NO entitlements to minimize attack surface.
+    It runs in a sandboxed environment with the most restrictive permissions.
+    -->
+    
+    <!-- App Sandbox enabled with no additional permissions -->
+    <key>com.apple.security.app-sandbox</key>
+    <true/>
+    
+    <!-- No file system access -->
+    <!-- No network access -->
+    <!-- No hardware access -->
+    <!-- No user data access -->
+    
+    <!-- Hardened runtime for additional security -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <false/>
+    
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <false/>
+    
+    <key>com.apple.security.cs.allow-jit</key>
+    <false/>
+    
+    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+    <false/>
+</dict>
+</plist>

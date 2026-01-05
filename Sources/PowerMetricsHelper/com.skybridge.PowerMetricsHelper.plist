@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- launchd 服务标识符（必须与文件名一致） -->
+    <key>Label</key>
+    <string>com.skybridge.PowerMetricsHelper</string>
+    
+    <!-- 注册 XPC Mach Service -->
+    <key>MachServices</key>
+    <dict>
+        <key>com.skybridge.PowerMetricsHelper</key>
+        <true/>
+    </dict>
+</dict>
+</plist>

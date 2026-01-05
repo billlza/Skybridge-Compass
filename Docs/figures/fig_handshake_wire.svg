@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="420" viewBox="0 0 720 420">
+<rect width="100%" height="100%" fill="#ffffff"/>
+<line x1="60" y1="360" x2="660" y2="360" stroke="#111"/>
+<line x1="60" y1="60" x2="60" y2="360" stroke="#111"/>
+<line x1="55" y1="60.0" x2="60" y2="60.0" stroke="#111"/>
+<text x="50" y="64.0" text-anchor="end" font-size="10" fill="#333">13333</text>
+<line x1="55" y1="135.0" x2="60" y2="135.0" stroke="#111"/>
+<text x="50" y="139.0" text-anchor="end" font-size="10" fill="#333">9999</text>
+<line x1="55" y1="210.0" x2="60" y2="210.0" stroke="#111"/>
+<text x="50" y="214.0" text-anchor="end" font-size="10" fill="#333">6666</text>
+<line x1="55" y1="285.0" x2="60" y2="285.0" stroke="#111"/>
+<text x="50" y="289.0" text-anchor="end" font-size="10" fill="#333">3333</text>
+<line x1="55" y1="360.0" x2="60" y2="360.0" stroke="#111"/>
+<text x="50" y="364.0" text-anchor="end" font-size="10" fill="#333">0</text>
+<rect x="135.0" y="352.5073688789554" width="150.0" height="7.492631121044618" fill="#2E86AB"/>
+<rect x="135.0" y="344.0472208263645" width="150.0" height="8.46014805259092" fill="#9FD356"/>
+<rect x="135.0" y="342.33719090084077" width="150.0" height="1.7100299255236966" fill="#F6C85F"/>
+<text x="210.0" y="378" text-anchor="middle" font-size="11" fill="#333">Classic</text>
+<rect x="435.0" y="212.48741852982428" width="150.0" height="147.51258147017572" fill="#2E86AB"/>
+<rect x="435.0" y="88.982757198251" width="150.0" height="123.5046613315733" fill="#9FD356"/>
+<rect x="435.0" y="87.27272727272725" width="150.0" height="1.7100299255236966" fill="#F6C85F"/>
+<text x="510.0" y="378" text-anchor="middle" font-size="11" fill="#333">liboqs</text>
+<rect x="490" y="65" width="12" height="12" fill="#2E86AB"/>
+<text x="508" y="75" font-size="11" fill="#333">msgA</text>
+<rect x="490" y="81" width="12" height="12" fill="#9FD356"/>
+<text x="508" y="91" font-size="11" fill="#333">msgB</text>
+<rect x="490" y="97" width="12" height="12" fill="#F6C85F"/>
+<text x="508" y="107" font-size="11" fill="#333">finished</text>
+<text x="360.0" y="40" text-anchor="middle" font-size="14" fill="#111">Handshake Wire Size Breakdown (bytes)</text>
+</svg>

@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- iCloud权限 -->
+	<key>com.apple.developer.icloud-container-identifiers</key>
+	<array>
+		<string>iCloud.com.skybridge.compass</string>
+	</array>
+	
+	<key>com.apple.developer.icloud-services</key>
+	<array>
+		<string>CloudKit</string>
+		<string>CloudDocuments</string>
+	</array>
+	
+	<key>com.apple.developer.ubiquity-container-identifiers</key>
+	<array>
+		<string>iCloud.com.skybridge.compass</string>
+	</array>
+	
+	<key>com.apple.developer.ubiquity-kvstore-identifier</key>
+	<string>$(TeamIdentifierPrefix)com.skybridge.compass</string>
+	
+	<!-- 网络权限 -->
+	<key>com.apple.security.network.client</key>
+	<true/>
+	<key>com.apple.security.network.server</key>
+	<true/>
+	
+	<!-- 文件访问权限 -->
+	<key>com.apple.security.files.user-selected.read-write</key>
+	<true/>
+	
+	<!-- USB访问权限 -->
+	<key>com.apple.security.device.usb</key>
+	<true/>
+	
+	<!-- 蓝牙权限 -->
+	<key>com.apple.security.device.bluetooth</key>
+	<true/>
+	
+	<!-- App Sandbox（开发模式可以禁用） -->
+	<key>com.apple.security.app-sandbox</key>
+	<false/>
+	
+	<!-- 用于调试 -->
+	<key>com.apple.security.get-task-allow</key>
+	<true/>
+</dict>
+</plist>
+

@@ -1,0 +1,13 @@
+"usb.management.title" = "USB 管理";
+"usb.lastScan" = "上次扫描：%@";
+"usb.mfi.title" = "MFi 认证";
+"usb.android.title" = "Android 设备";
+"usb.storage.title" = "存储设备";
+"usb.total.title" = "设备总数";
+"usb.empty.title" = "未检测到 USB 设备";
+"usb.empty.subtitle" = "请连接设备后刷新，或检查数据线与端口";
+"action.refresh" = "刷新";
+"auth.hero.tagline" = "跨网无感，安全即达。";
+"auth.hero.benefit.reach" = "跨网直达";
+"auth.hero.benefit.trust" = "端到端可信";
+"auth.hero.benefit.setup" = "零配置协作";

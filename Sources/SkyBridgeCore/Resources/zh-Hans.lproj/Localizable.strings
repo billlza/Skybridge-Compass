@@ -1,0 +1,880 @@
+/* Connection Methods */
+"connection.crossNetwork.title" = "跨网络连接";
+"connection.qrcode.title" = "动态二维码";
+"connection.qrcode.longDescription" = "生成临时加密二维码，使用手机扫描即可连接。安全、快速、零配置。";
+"connection.qrcode.highlight" = "✨ 创新点：动态密钥 + 5分钟自动过期";
+"connection.qrcode.scanInstruction" = "使用 SkyBridge 移动端扫描";
+"connection.waiting" = "等待连接...";
+"connection.generateQR" = "生成二维码";
+"connection.device.other" = "在其他设备上";
+"connection.scanQR" = "扫描二维码";
+"connection.scanQR.description" = "点击开启摄像头";
+"connection.security.encrypted" = "端对端加密";
+"connection.validity.5min" = "5分钟有效";
+"connection.p2p" = "P2P 直连";
+"connection.natTraversal" = "NAT 穿透";
+
+/* iCloud */
+"connection.icloud.title" = "iCloud 设备链";
+"connection.icloud.description" = "连接同一 Apple ID 下的设备。无需手动配对。";
+"connection.icloud.highlight" = "✨ 创新点：Apple 生态专属，零配置体验";
+"connection.icloud.noDevices" = "未发现 iCloud 设备";
+"connection.icloud.instruction" = "请确保其他设备已登录 iCloud 并打开 SkyBridge。";
+"action.refresh" = "刷新";
+"connection.availableDevices" = "%d 个可用设备";
+"connection.icloud.sync" = "iCloud 同步";
+"connection.apple.ecosystem" = "Apple 生态";
+"connection.auto.discovery" = "自动发现";
+"connection.apple.auth" = "安全认证";
+
+/* Smart Code */
+"connection.smartCode.title" = "智能连接码";
+"connection.smartCode.fullDescription" = "生成6位字母数字连接码，适用于所有场景。支持 P2P 直连和智能中继。";
+"connection.smartCode.highlight" = "✨ 创新点：短码 + 智能路由 + 10分钟有效期";
+"connection.device.this" = "在此设备上";
+"connection.smartCode.shareInstruction" = "分享此码以连接";
+"connection.copy" = "复制";
+"connection.regenerate" = "重新生成";
+"connection.smartCode.generate" = "生成连接码";
+"connection.smartCode.placeholder" = "输入连接码";
+"connection.smartCode.connect" = "连接";
+"connection.fast" = "高速连接";
+"connection.p2p.priority" = "P2P 优先";
+"connection.smart.relay" = "智能中继";
+"connection.validity.10min" = "10分钟有效";
+
+/* Dashboard */
+"dashboard.unknownIP" = "未知 IP";
+"dashboard.action.connect" = "连接";
+"dashboard.status.connecting" = "连接中...";
+"dashboard.deviceDiscovery" = "发现设备";
+"discovery.manualConnect" = "手动连接";
+
+/* App */
+"app.name" = "云桥司南";
+"app.slogan" = "下一代跨平台连接体验";
+
+/* Manual Connect */
+"manualConnect.title" = "手动连接";
+"manualConnect.ipAddress" = "IP 地址";
+"manualConnect.port" = "端口";
+"manualConnect.pairingCode" = "配对码";
+"action.cancel" = "取消";
+
+/* Status */
+"status.disconnected" = "未连接";
+"status.scanning" = "扫描中...";
+"device.status.connected" = "已连接";
+"status.excellent" = "极佳";
+"status.good" = "良好";
+"status.attention" = "注意";
+
+/* Theme */
+"theme.selectBackground" = "选择背景";
+"theme.animations" = "界面动画";
+"theme.glassEffects" = "毛玻璃特效";
+
+/* Navigation */
+"sidebar.dashboard" = "主控制台";
+"sidebar.deviceDiscovery" = "设备发现";
+"sidebar.usbManagement" = "USB 管理";
+"sidebar.fileTransfer" = "文件传输";
+"sidebar.remoteDesktop" = "远程桌面";
+"sidebar.systemMonitor" = "系统监控";
+"sidebar.settings" = "设置";
+
+/* Quantum */
+"quantum.title" = "量子通信";
+"quantum.subtitle" = "已集成至文件传输与远程桌面";
+
+/* Dashboard Stats */
+"dashboard.onlineDevices" = "在线设备";
+"dashboard.activeSessions" = "活跃会话";
+"dashboard.performanceStatus" = "系统状态";
+
+/* Performance Monitor */
+"dashboard.performanceMonitor" = "性能监控";
+"monitor.cpu" = "CPU";
+"monitor.gpu" = "GPU";
+"monitor.memoryUsage" = "内存";
+"monitor.fanSpeed" = "风扇转速";
+"monitor.systemLoad" = "系统负载";
+"monitor.thermalState" = "散热状态";
+"monitor.powerState" = "电源状态";
+"monitor.recommendations" = "优化建议";
+
+/* System Metrics */
+"dashboard.systemMetrics" = "系统指标";
+"metrics.cpuUsage" = "CPU 使用率";
+"metrics.memoryUsage" = "内存使用率";
+"metrics.downloadRate" = "下载速率";
+"metrics.uploadRate" = "上传速率";
+
+/* Discovery */
+"discovery.compatibilityMode" = "兼容/更多设备";
+"discovery.extendedSearch.active" = "扩展搜索 (%d秒)";
+"discovery.extendedSearch.default" = "扩展搜索";
+"discovery.extendedSearch.static" = "扩展搜索 15s";
+"discovery.searchPlaceholder" = "搜索设备...";
+"discovery.noMatch" = "未找到匹配设备";
+"discovery.adjustSearch" = "尝试调整搜索关键词";
+"dashboard.noDevicesFound" = "未发现设备";
+"dashboard.checkNetwork" = "请检查网络连接";
+
+/* Remote Sessions */
+"dashboard.remoteSessions" = "远程会话";
+"session.noActive" = "无活跃会话";
+"session.placeholder" = "从设备发现开始新的会话";
+
+/* Quick Actions */
+"dashboard.quickActions" = "快捷操作";
+"action.scanDevices" = "扫描设备";
+"action.systemMonitor" = "系统监控";
+"action.settings" = "系统设置";
+
+/* System Info */
+"dashboard.systemPerformance" = "系统性能";
+"info.processorArch" = "处理器架构";
+
+/* Device Row */
+"device.local" = "本机";
+"device.noIP" = "无 IP";
+"device.services" = "服务";
+"device.servicesCount" = "个服务";
+"device.unknownIP" = "未知 IP";
+"dashboard.fileTransfer" = "文件传输";
+"dashboard.transferTasks" = "传输任务";
+"dashboard.noTransferTasks" = "暂无传输任务";
+"dashboard.transferTasksPlaceholder" = "拖拽文件开始传输";
+"dashboard.deviceManagement" = "设备管理";
+"dashboard.discoveredDevices" = "已发现设备";
+
+/* Settings */
+"settings.header.title" = "设置";
+"settings.tab.general" = "通用";
+"settings.tab.network" = "网络";
+"settings.tab.devices" = "设备";
+"settings.tab.fileTransfer" = "文件传输";
+"settings.tab.remoteDesktop" = "远程桌面";
+"settings.tab.systemMonitor" = "系统监控";
+"settings.tab.permissions" = "权限";
+"settings.tab.advanced" = "高级";
+
+"settings.general.language.sectionTitle" = "语言";
+"settings.general.language.label" = "界面语言";
+"settings.general.language.description" = "选择应用的显示语言";
+"settings.language.system" = "跟随系统";
+
+"settings.general.preferences" = "通用偏好";
+"settings.general.autoScan" = "启动时自动扫描设备";
+"settings.general.systemNotifications" = "显示系统通知";
+"settings.general.darkMode" = "启用深色模式";
+"settings.general.scanInterval" = "扫描间隔";
+
+"settings.general.interface" = "界面与显示";
+"settings.general.showDeviceDetails" = "显示设备详细信息";
+"settings.general.showConnectionStats" = "显示连接统计";
+"settings.general.compactMode" = "紧凑模式";
+"settings.general.themeColor" = "主题颜色";
+
+"settings.general.dataManagement" = "数据管理";
+"settings.general.clearCache" = "清理缓存";
+"settings.general.cacheSize" = "当前缓存：%@";
+"settings.general.exportSettings" = "导出设置";
+"settings.general.importSettings" = "导入设置";
+"settings.general.resetSettings" = "恢复默认设置";
+"settings.general.deduplicateKeychain" = "清理重复的钥匙串项";
+
+/* Units */
+"unit.seconds.15" = "15 秒";
+"unit.seconds.30" = "30 秒";
+"unit.seconds.60" = "60 秒";
+"unit.seconds.120" = "120 秒";
+
+/* Device Discovery (Enhanced) */
+"discovery.title" = "设备发现";
+"discovery.manualConnect.title" = "手动连接";
+"discovery.manualConnect.button" = "连接";
+"discovery.manualConnect.ip" = "IP地址";
+"discovery.manualConnect.port" = "端口";
+"discovery.manualConnect.code" = "配对码（可选）";
+"discovery.manualConnect.cancel" = "取消";
+"discovery.localScan.title" = "近距设备扫描";
+"discovery.localScan.description" = "自动发现同一网络下的设备";
+"discovery.scanning" = "扫描中...";
+"discovery.stopScan" = "停止扫描";
+"discovery.startScan" = "开始扫描";
+"discovery.refresh" = "刷新";
+"discovery.onlineDevices" = "在线设备 (%d)";
+"discovery.noDevices.title" = "未发现设备";
+"discovery.noDevices.scanning" = "正在扫描...";
+"discovery.noDevices.startPrompt" = "点击\"开始扫描\"发现附近设备";
+"discovery.qrCode.title" = "动态加密二维码";
+"discovery.qrCode.description" = "扫一扫即连，5分钟有效期，端到端加密";
+"discovery.qrCode.thisDevice" = "在此设备上";
+"discovery.qrCode.scanPrompt" = "请用其他设备扫描此二维码";
+"discovery.qrCode.waiting" = "等待连接...";
+"discovery.qrCode.regenerate" = "重新生成";
+"discovery.qrCode.generate" = "生成二维码";
+"discovery.qrCode.otherDevice" = "在其他设备上";
+"discovery.qrCode.scanButton" = "扫描二维码";
+"discovery.qrCode.cameraPrompt" = "使用摄像头扫描对方的二维码";
+"discovery.qrCode.error.title" = "扫描错误";
+"discovery.qrCode.error.ok" = "知道了";
+"discovery.qrCode.error.connectFailed" = "二维码连接失败：%@";
+"discovery.qrCode.error.unrecognized" = "未识别的二维码内容";
+"discovery.icloud.title" = "Apple ID 设备链";
+"discovery.icloud.description" = "自动发现同一 Apple ID 下的所有设备，零配置";
+"discovery.icloud.refresh" = "刷新";
+"discovery.icloud.connectError" = "iCloud 设备连接失败：%@";
+"discovery.device.thisDevice" = "本机";
+"discovery.device.notConnectable" = "不可连接";
+
+/* Smart Code */
+"discovery.smartCode.title" = "智能连接码";
+"discovery.smartCode.description" = "6位短码，10分钟有效期，适用于远程协助";
+"discovery.smartCode.onThisDevice" = "在此设备上";
+"discovery.smartCode.shareInstruction" = "将此连接码告知对方";
+"discovery.smartCode.copy" = "复制";
+"discovery.smartCode.regenerate" = "重新生成";
+"discovery.smartCode.waiting" = "等待连接...";
+"discovery.smartCode.generate" = "生成连接码";
+"discovery.smartCode.onOtherDevice" = "在其他设备上";
+
+/* Discovery Modes */
+"discovery.mode.localScan" = "近距扫描";
+"discovery.mode.qrCode" = "扫码连接";
+"discovery.mode.cloudLink" = "iCloud";
+"discovery.mode.connectionCode" = "智能连接码";
+"discovery.mode.subtitle.localScan" = "同网络";
+"discovery.mode.subtitle.qrCode" = "扫一扫";
+"discovery.mode.subtitle.cloudLink" = "零配置";
+"discovery.mode.subtitle.connectionCode" = "6位短码";
+
+/* Cloud Link Section */
+"discovery.icloud.status.syncing" = "同步中...";
+"discovery.icloud.status.synced" = "已同步";
+"discovery.icloud.noDevices.title" = "未发现设备";
+"discovery.icloud.noDevices.message" = "请确保设备已登录相同的 iCloud 账号并开启了 iCloud Drive";
+"discovery.icloud.authorizedDevices" = "iCloud 授权设备";
+"discovery.device.status.online" = "在线";
+"discovery.device.status.offline" = "离线";
+"discovery.time.justNow" = "刚刚";
+"discovery.time.minutesAgo" = "%d分钟前";
+"discovery.time.hoursAgo" = "%d小时前";
+"discovery.time.daysAgo" = "%d天前";
+"discovery.time.justNowOnline" = "刚刚在线";
+"discovery.action.connect" = "连接";
+"discovery.action.notConnectable" = "不可连接";
+"discovery.device.lastActive" = "最后活跃: %@";
+
+/* Capabilities */
+"discovery.capability.remoteDesktop" = "远程桌面";
+"discovery.capability.fileTransfer" = "文件传输";
+"discovery.capability.clipboard" = "剪贴板";
+"discovery.capability.notifications" = "通知";
+"discovery.capability.calls" = "通话";
+"discovery.capability.messages" = "消息";
+
+/* Smart Code Section (Additional) */
+"discovery.code.enterPrompt" = "输入6位连接码";
+"discovery.code.connect" = "连接";
+
+/* User Profile */
+"dashboard.userProfile.title" = "用户资料";
+"dashboard.userProfile.unknownID" = "未知ID";
+
+/* Remote Session Status */
+"dashboard.session.bandwidth" = "带宽";
+"dashboard.action.view" = "查看";
+"dashboard.action.disconnect" = "断开";
+
+/* File Transfer Status */
+"dashboard.transfer.speed" = "速度";
+"dashboard.transfer.remaining" = "剩余";
+
+/* Weather Dashboard */
+"weather.metric.humidity" = "湿度";
+"weather.metric.windSpeed" = "风速";
+"weather.metric.visibility" = "能见度";
+"weather.metric.aqi" = "AQI";
+"weather.status.loading" = "正在获取天气信息...";
+"weather.status.loadingHint" = "首次加载需要几秒钟";
+"weather.status.error" = "天气数据获取失败";
+"weather.action.retry" = "重试";
+"weather.time.justNow" = "刚刚";
+"weather.time.minutesAgo" = "%d分钟前";
+"weather.time.hoursAgo" = "%d小时前";
+
+/* Settings - Network */
+"settings.network.wifi.title" = "WiFi配置";
+"settings.network.wifi.currentNetwork" = "当前网络:";
+"settings.network.wifi.notConnected" = "未连接";
+"settings.network.wifi.autoConnectKnown" = "自动连接已知网络";
+"settings.network.wifi.showHidden" = "显示隐藏网络";
+"settings.network.wifi.prefer5GHz" = "优先使用5GHz/6GHz频段";
+"settings.network.wifi.scanTimeout" = "扫描超时:";
+"settings.network.discovery.title" = "网络发现";
+"settings.network.discovery.enableBonjour" = "启用Bonjour发现";
+"settings.network.discovery.enableMDNS" = "启用mDNS解析";
+"settings.network.discovery.scanCustomPorts" = "扫描自定义端口";
+"settings.network.discovery.timeout" = "发现超时:";
+"settings.network.discovery.customServiceType" = "自定义服务类型:";
+"settings.network.discovery.customServiceTypeExample" = "例如: _custom._tcp.";
+"settings.network.connection.title" = "连接设置";
+"settings.network.connection.timeout" = "连接超时:";
+"settings.network.connection.retryCount" = "重试次数:";
+"settings.network.connection.enableEncryption" = "启用连接加密";
+"settings.network.connection.verifyCertificates" = "验证证书";
+
+/* Units (additional) */
+"unit.seconds.5" = "5 秒";
+"unit.seconds.10" = "10 秒";
+"unit.second.short" = "秒";
+"unit.times.short" = "次";
+
+/* Common Actions */
+"action.add" = "添加";
+"alert.permissions.title" = "权限提醒";
+"alert.permissions.message" = "某些功能需要系统权限才能正常工作。请在系统偏好设置中授权相关权限。";
+"action.openSystemPreferences" = "打开系统偏好设置";
+"action.cancel" = "取消";
+"alert.reset.title" = "重置确认";
+"action.reset" = "重置";
+"alert.reset.message" = "这将重置所有设置到默认值。此操作无法撤销。";
+"settings.general.export.defaultFilename" = "SkyBridge设置备份";
+
+"discovery.startScan" = "开始扫描";
+"discovery.stopScan" = "停止扫描";
+"status.idle" = "空闲";
+"status.enabled" = "已启用";
+"status.disabled" = "已禁用";
+"status.optimized" = "已优化";
+"status.needsAdjust" = "需调整";
+"status.load.high" = "高负载";
+"status.load.medium" = "中等负载";
+"status.load.low" = "轻负载";
+
+"action.request" = "请求";
+"action.requestPermissions" = "请求权限";
+"action.refreshStatus" = "刷新状态";
+"action.applySettings" = "应用设置";
+"action.select" = "选择";
+"action.resetAllSettings" = "重置所有设置";
+"action.resetNetworkSettings" = "重置网络设置";
+"action.resetToDefaults" = "重置为默认";
+"action.resetMonitorData" = "重置监控数据";
+
+"unit.dbm" = "dBm";
+"unit.count.short" = "数量";
+"unit.times.short" = "次";
+"unit.path" = "路径";
+"unit.millisecond.short" = "毫秒";
+"unit.bandwidth" = "Mbps";
+"unit.mbPerSecond" = "MB/s";
+"unit.seconds.1" = "1秒";
+"unit.seconds.5" = "5秒";
+"unit.seconds.10" = "10秒";
+"unit.seconds.30" = "30秒";
+"unit.days.short" = "天";
+
+"position.topLeft" = "左上角";
+"position.topRight" = "右上角";
+"position.bottomLeft" = "左下角";
+"position.bottomRight" = "右下角";
+
+"metric.frameRate" = "帧率";
+"metric.gpuTime" = "GPU时间";
+"metric.memory" = "内存";
+
+"quality.low" = "低";
+"quality.medium" = "中";
+"quality.high" = "高";
+"quality.ultra" = "超高";
+
+"precision.low" = "低";
+"precision.normal" = "正常";
+"precision.high" = "高";
+
+"chart.line" = "线图";
+"chart.bar" = "柱状图";
+"chart.area" = "面积图";
+
+"settings.common.status" = "状态:";
+"settings.common.retryCount" = "重试次数:";
+"settings.common.maxConcurrentConnections" = "最大并发连接:";
+
+"settings.devices.bluetooth.title" = "蓝牙设置";
+"settings.devices.bluetooth.status" = "蓝牙状态:";
+"settings.devices.bluetooth.discoveredCount" = "已发现: %d 设备";
+"settings.devices.bluetooth.autoConnectPaired" = "自动连接已配对设备";
+"settings.devices.bluetooth.showRSSI" = "显示设备RSSI";
+"settings.devices.bluetooth.showConnectableOnly" = "仅显示可连接设备";
+
+"settings.devices.airplay.title" = "AirPlay设置";
+"settings.devices.airplay.status" = "AirPlay状态:";
+"settings.devices.airplay.discoveredCount" = "已发现: %d 设备";
+"settings.devices.airplay.autoDiscoverAppleTV" = "自动发现Apple TV";
+"settings.devices.airplay.showHomePodDevices" = "显示HomePod设备";
+"settings.devices.airplay.showThirdPartyAirPlayDevices" = "显示第三方AirPlay设备";
+
+"settings.devices.filters.title" = "设备过滤";
+"settings.devices.filters.hideOffline" = "隐藏离线设备";
+"settings.devices.filters.sortBySignal" = "按信号强度排序";
+"settings.devices.filters.showIcons" = "显示设备图标";
+"settings.devices.filters.minSignalStrength" = "最小信号强度:";
+
+"settings.permissions.status.title" = "权限状态";
+"settings.permissions.summary" = "权限摘要:";
+"settings.permissions.warning.notAuthorized" = "某些必需权限未授权，可能影响功能正常使用";
+"settings.permissions.details.title" = "详细权限";
+"settings.permissions.help.title" = "权限帮助";
+"settings.permissions.help.description.title" = "权限说明:";
+"settings.permissions.help.wifiAccess" = "• WiFi网络访问: 扫描和连接WiFi网络";
+"settings.permissions.help.bluetoothAccess" = "• 蓝牙设备访问: 发现和连接蓝牙设备";
+"settings.permissions.help.locationAccess" = "• 位置服务: WiFi扫描可能需要位置权限";
+"settings.permissions.help.systemConfigAccess" = "• 系统配置: 访问网络配置信息";
+
+"settings.advanced.debug.title" = "调试选项";
+"settings.advanced.debug.enableVerboseLogging" = "启用详细日志";
+"settings.advanced.debug.showDebugInfo" = "显示调试信息";
+"settings.advanced.debug.saveNetworkLogs" = "保存网络日志";
+"settings.advanced.debug.logLevel" = "日志级别:";
+
+"settings.advanced.performance.title" = "性能优化";
+"settings.advanced.performance.mode" = "性能模式:";
+"settings.advanced.currentMode" = "当前: %@";
+"settings.advanced.performance.details.title" = "配置详情:";
+"settings.advanced.performance.renderScale.range" = "渲染缩放: 50%-100%";
+"settings.advanced.performance.maxParticles.range" = "最大粒子: 2,000-8,000";
+"settings.advanced.performance.targetFPS.range" = "目标帧率: 30-120 FPS";
+"settings.advanced.performance.metalFXQuality.range" = "MetalFX: 30%-100%";
+"settings.advanced.performance.shadowQuality.dynamic" = "阴影质量: 动态调节";
+"settings.advanced.performance.postProcessing.smart" = "后处理: 智能启用";
+"settings.advanced.performance.currentStatus" = "当前状态:";
+"settings.advanced.performance.renderScale.formatPercent" = "渲染缩放: %d%%";
+"settings.advanced.performance.maxParticles.format" = "最大粒子: %d";
+"settings.advanced.performance.targetFPS.format" = "目标帧率: %d FPS";
+"settings.advanced.performance.metalFXQuality.formatPercent" = "MetalFX: %d%%";
+"settings.advanced.performance.shadowQuality.format" = "阴影质量: %@";
+"settings.advanced.performance.postProcessing.format" = "后处理: %@";
+"settings.advanced.performance.showRealtimeFPS" = "显示实时FPS";
+"settings.advanced.performance.showRealtimeFPS.help" = "在顶部导航显示Metal渲染FPS；无数据时显示占位字符 — FPS";
+"settings.advanced.hardware.enableAcceleration" = "启用硬件加速";
+"settings.advanced.memory.optimize" = "优化内存使用";
+"settings.advanced.backgroundScanning" = "后台扫描";
+
+"settings.advanced.weather.api.title" = "天气 API";
+"settings.advanced.weather.enable" = "启用实时天气";
+"settings.advanced.weather.status" = "状态:";
+"settings.advanced.weather.status.enabled" = "已启用";
+"settings.advanced.weather.status.disabled" = "已禁用";
+
+"settings.hud.enableRealtimeMonitoring" = "启用实时性能监控";
+"settings.hud.enableRealtimeMonitoring.help" = "显示实时的Metal渲染性能指标";
+"settings.hud.showHUD" = "显示HUD界面";
+"settings.hud.showHUD.help" = "在应用界面上显示性能监控覆盖层";
+"settings.hud.position" = "HUD位置:";
+"settings.hud.metrics.title" = "显示指标:";
+
+"settings.advanced.experimental.title" = "实验性功能";
+"settings.advanced.experimental.enableIPv6" = "启用IPv6支持";
+"settings.advanced.experimental.useNewDiscovery" = "使用新的发现算法";
+"settings.advanced.experimental.enableP2P" = "启用P2P直连";
+"settings.advanced.experimental.warning" = "⚠️ 实验性功能可能不稳定";
+
+"settings.advanced.pqc.title" = "量子安全";
+"settings.advanced.pqc.enableAppLayer" = "启用后量子密码（应用层）";
+"settings.advanced.pqc.enableHybridTLS" = "启用TLS混合协商（系统支持时）";
+"settings.advanced.pqc.signatureAlgorithm" = "签名算法:";
+"settings.advanced.pqc.useSecureEnclaveMLDSA" = "ML-DSA 使用 Secure Enclave";
+"settings.advanced.pqc.useSecureEnclaveMLKEM" = "ML-KEM 使用 Secure Enclave";
+"settings.advanced.pqc.note" = "Secure Enclave PQC 仅在 macOS 26+（CryptoKit）可用；macOS 14–15 回退到 liboqs（ML‑KEM‑768/ML‑DSA‑65），OQS 不可用则回退 Classic（X25519/Ed25519）。";
+
+"settings.advanced.smoothing.title" = "设备强度平滑";
+"settings.advanced.smoothing.alpha" = "强度平滑系数 (EMA)";
+"settings.advanced.smoothing.alpha.help" = "数值越小越平滑，越大响应越快。建议 0.4~0.7";
+"settings.advanced.smoothing.alpha.desc" = "用于设备信号强度融合的指数移动平均参数。";
+
+"settings.advanced.reset.title" = "重置选项";
+"settings.advanced.reset.warning" = "重置操作无法撤销，请谨慎操作";
+
+"settings.fileTransfer.config.title" = "传输配置";
+"settings.fileTransfer.defaultPath" = "默认传输路径:";
+"settings.fileTransfer.maxConcurrentTransfers" = "最大并发传输:";
+"settings.fileTransfer.bufferSize" = "传输缓冲区大小:";
+"settings.fileTransfer.options.title" = "传输选项";
+"settings.fileTransfer.options.showNotification" = "传输完成后显示通知";
+"settings.fileTransfer.options.autoRetryFailed" = "自动重试失败的传输";
+"settings.fileTransfer.options.keepHistory" = "保持传输历史记录";
+"settings.fileTransfer.options.keepAwake" = "传输时保持系统唤醒";
+"settings.fileTransfer.security.title" = "安全设置";
+"settings.fileTransfer.security.enableEncrypt" = "启用传输加密";
+"settings.fileTransfer.security.verifyIntegrity" = "验证文件完整性";
+"settings.fileTransfer.security.scanVirus" = "扫描传输文件病毒";
+"settings.fileTransfer.security.algorithm" = "加密算法:";
+"settings.fileTransfer.security.scanLevel" = "扫描级别:";
+"settings.fileTransfer.security.scanLevel.quick" = "快速";
+"settings.fileTransfer.security.scanLevel.quick.desc" = "仅隔离区检查";
+"settings.fileTransfer.security.scanLevel.standard" = "标准";
+"settings.fileTransfer.security.scanLevel.standard.desc" = "隔离区 + 代码签名";
+"settings.fileTransfer.security.scanLevel.deep" = "深度";
+"settings.fileTransfer.security.scanLevel.deep.desc" = "完整扫描含模式匹配";
+
+"settings.videoTransfer.title" = "视频传输配置";
+"settings.videoTransfer.currentConfig" = "当前配置";
+"settings.videoTransfer.estimatedRate" = "预估传输率";
+"settings.videoTransfer.resolution.title" = "视频分辨率";
+"settings.videoTransfer.resolution.desc" = "选择传输视频的分辨率规格";
+"settings.videoTransfer.frameRate.title" = "视频帧率";
+"settings.videoTransfer.frameRate.desc" = "选择传输视频的帧率";
+"settings.videoTransfer.presets.title" = "快速预设";
+"settings.videoTransfer.presets.desc" = "一键应用预设配置";
+"settings.videoTransfer.advancedOptions.title" = "高级选项";
+"settings.videoTransfer.enableHardwareAcceleration" = "启用硬件加速";
+"settings.videoTransfer.enableHardwareAcceleration.help" = "使用硬件编码器提升性能";
+"settings.videoTransfer.enableAppleSiliconOptimization" = "启用Apple Silicon优化";
+"settings.videoTransfer.enableAppleSiliconOptimization.help" = "针对Apple Silicon芯片进行优化";
+"settings.videoTransfer.enableAdaptiveBitrate" = "自适应比特率";
+"settings.videoTransfer.enableAdaptiveBitrate.help" = "根据网络状况自动调整比特率";
+"settings.videoTransfer.compressionQuality" = "压缩质量:";
+
+"settings.remote.display.title" = "显示设置";
+"settings.remote.display.videoQuality" = "视频质量:";
+"settings.remote.display.compressionLevel" = "压缩级别:";
+"settings.remote.display.refreshRate" = "帧率限制:";
+"settings.remote.display.fullScreenMode" = "全屏模式";
+"settings.remote.interaction.title" = "交互设置";
+"settings.remote.interaction.clipboardSync" = "启用剪贴板同步";
+"settings.remote.interaction.audioRedirection" = "启用音频重定向";
+"settings.remote.interaction.fileTransfer" = "启用文件传输";
+"settings.remote.interaction.trackpadGestures" = "启用触控板手势";
+"settings.remote.interaction.mouseSensitivity" = "鼠标灵敏度:";
+"settings.remote.interaction.doubleClickInterval" = "双击间隔 (ms):";
+"settings.remote.network.title" = "网络优化";
+"settings.remote.network.enableBandwidthAdaptive" = "启用带宽自适应";
+"settings.remote.network.enableUDP" = "启用UDP传输";
+"settings.remote.network.enableCompression" = "启用数据压缩";
+"settings.remote.network.bandwidthLimit" = "带宽限制 (Mbps):";
+"settings.remote.network.bufferSize" = "缓冲区大小:";
+
+"settings.systemMonitor.config.title" = "监控配置";
+"settings.systemMonitor.config.refreshInterval" = "刷新间隔:";
+"settings.systemMonitor.config.enableRealtime" = "启用实时监控";
+"settings.systemMonitor.config.enableHistory" = "启用历史记录";
+"settings.systemMonitor.config.enablePerformanceAlerts" = "启用性能警报";
+"settings.systemMonitor.config.retentionDays" = "数据保留天数:";
+"settings.systemMonitor.display.title" = "显示选项";
+"settings.systemMonitor.display.cpu" = "显示CPU使用率";
+"settings.systemMonitor.display.memory" = "显示内存使用率";
+"settings.systemMonitor.display.disk" = "显示磁盘使用率";
+"settings.systemMonitor.display.network" = "显示网络活动";
+"settings.systemMonitor.display.temperature" = "显示温度信息";
+"settings.systemMonitor.display.fanSpeed" = "显示风扇转速";
+"settings.systemMonitor.display.chartType" = "图表类型:";
+"settings.systemMonitor.alerts.title" = "警报设置";
+"settings.systemMonitor.alerts.cpuThreshold" = "CPU警报阈值:";
+"settings.systemMonitor.alerts.memoryThreshold" = "内存警报阈值:";
+"settings.systemMonitor.alerts.diskThreshold" = "磁盘警报阈值:";
+"settings.systemMonitor.alerts.enableSound" = "启用声音警报";
+"settings.systemMonitor.alerts.enableNotificationCenter" = "启用通知中心";
+"settings.systemMonitor.advanced.title" = "高级选项";
+"settings.systemMonitor.advanced.enableVerboseLogging" = "启用详细日志";
+"settings.systemMonitor.advanced.exportData" = "导出监控数据";
+"settings.systemMonitor.advanced.enableRemoteMonitoring" = "启用远程监控";
+"settings.systemMonitor.advanced.samplingPrecision" = "采样精度:";
+
+"fileTransfer.connectionStatus" = "连接状态";
+"status.transferring" = "传输中";
+"fileTransfer.totalProgress" = "总进度";
+"fileTransfer.quickActions" = "快速操作";
+"action.selectFiles" = "选择文件";
+"action.selectFolder" = "选择文件夹";
+"fileTransfer.recentTransfers" = "最近传输";
+"fileTransfer.recent.empty" = "暂无传输记录";
+"fileTransfer.tab.transfer" = "传输";
+"fileTransfer.tab.history" = "历史";
+"fileTransfer.drop.title" = "拖拽文件到此处";
+"fileTransfer.drop.subtitle" = "支持音频、视频、文档等多种格式";
+"fileTransfer.selectedFiles" = "选中的文件";
+"action.sendAll" = "发送全部";
+"action.clear" = "清空";
+"fileTransfer.activeTransfers" = "活跃传输";
+"fileTransfer.active.emptyTitle" = "没有活跃传输";
+"fileTransfer.active.emptySubtitle" = "选择文件开始传输";
+"fileTransfer.history.title" = "传输历史";
+"fileTransfer.history.clear" = "清空历史";
+"fileTransfer.history.emptyTitle" = "没有传输历史";
+"fileTransfer.history.emptySubtitle" = "完成的传输将显示在这里";
+"fileTransfer.debug.title" = "调试面板";
+"fileTransfer.debug.hmacTagHex" = "HMAC 标记（十六进制）";
+"fileTransfer.debug.signatureResult" = "整文件签名校验结果";
+"common.none" = "无";
+"action.preview" = "预览";
+"transferStatus.preparing" = "准备中";
+"transferStatus.transferring" = "传输中";
+"transferStatus.paused" = "已暂停";
+"transferStatus.completed" = "已完成";
+"transferStatus.failed" = "失败";
+"transferStatus.cancelled" = "已取消";
+"action.close" = "关闭";
+"action.share" = "分享";
+"status.idle" = "空闲";
+"status.adaptiveTuning" = "自适应调谐";
+"qrcode.title" = "文件传输二维码";
+"qrcode.subtitle" = "扫描二维码即可在移动设备上接收文件";
+"qrcode.status.running" = "服务已启动";
+"qrcode.status.ready" = "准备就绪";
+"qrcode.generating" = "正在生成二维码...";
+"qrcode.instruction.title" = "使用移动设备扫描上方二维码";
+"qrcode.instruction.subtitle" = "文件将通过安全连接传输到您的设备";
+"qrcode.connectionInfo" = "连接信息";
+"qrcode.serverAddress" = "服务器地址";
+"qrcode.connectionCode" = "连接码";
+"qrcode.serviceStatus" = "服务状态";
+"status.running" = "运行中";
+"status.stopped" = "已停止";
+"qrcode.pendingFiles" = "待传输文件";
+"common.files.count" = "%d 个文件";
+"qrcode.networkHint" = "确保设备连接到同一网络";
+"action.startServer" = "启动服务";
+"action.stopServer" = "停止服务";
+"action.copyToClipboard" = "复制到剪贴板";
+"action.closeWindow" = "关闭窗口";
+"remote.search.placeholder" = "搜索会话...";
+"remote.activeSessions" = "活跃会话";
+"remote.recentConnections" = "最近连接";
+"remote.newConnection" = "新建连接";
+"remote.overlay.connectingTo" = "正在连接到 %@...";
+"remote.empty.title" = "选择一个会话开始远程桌面";
+"remote.empty.subtitle" = "从左侧列表选择活跃会话，或创建新的远程连接";
+"remote.toolbar.newConnection.help" = "新建远程连接";
+"remote.toolbar.refresh.help" = "刷新会话列表";
+"remote.performance.monitor" = "Metal 4 性能监控";
+"remote.recent.reconnect.help" = "重新连接到此会话";
+"remote.recent.lastConnected" = "上次连接: %@";
+"remote.connectionMode.auto" = "自动";
+"remote.connectionMode.near" = "近距";
+"remote.connectionMode.far" = "远距";
+"remote.connectionMode.auto.description" = "自动选择最佳连接模式（同网优先近距镜像）";
+"remote.connectionMode.near.description" = "近距硬件镜像 - 同网低延迟（ScreenCaptureKit + HEVC + QUIC）";
+"remote.connectionMode.far.description" = "远距 RDP - 跨网稳定（FreeRDP 3.x + GFX-AVC444）";
+"common.unknown" = "未知";
+"profile.title" = "用户资料";
+"action.close" = "关闭";
+"profile.edit" = "编辑信息";
+"action.cancel" = "取消";
+"action.saving" = "保存中...";
+"action.save" = "保存";
+"profile.save.success" = "保存成功";
+"profile.save.failure" = "保存失败";
+"profile.save.success.detail" = "您的资料已成功保存到云端";
+"action.ok" = "确定";
+"profile.help" = "点击查看和编辑用户资料";
+"profile.quickActions" = "快速操作";
+"about.title" = "关于 SkyBridge Compass Pro";
+"about.checkingUpdates" = "正在检查更新...";
+"about.checkUpdates" = "检查更新";
+"about.systemInfo" = "系统信息";
+"about.diagnostics" = "诊断工具";
+"about.feedback" = "反馈问题";
+"about.website" = "访问官网";
+"profile.email.unbound" = "未绑定";
+"profile.phone.unbound" = "未绑定";
+"transferSpeed.slow" = "慢速";
+"transferSpeed.normal" = "正常";
+"transferSpeed.fast" = "快速";
+"brand.title" = "SkyBridge Compass";
+"brand.tagline" = "连接无界，探索无限";
+"auth.selectMethod" = "选择登录方式";
+"auth.apple.tip" = "使用Apple ID快速登录";
+"auth.nebula.toggle.hasAccount" = "已有账号？点击登录";
+"auth.nebula.toggle.noAccount" = "没有账号？点击注册";
+"auth.nebula.account" = "星云账号";
+"auth.nebula.account.placeholder" = "请输入星云账号";
+"auth.password" = "密码";
+"auth.password.placeholder" = "请输入密码";
+"auth.confirmPassword" = "确认密码";
+"auth.confirmPassword.placeholder" = "请再次输入密码";
+"auth.displayName" = "显示名称";
+"auth.displayName.placeholder" = "请输入显示名称";
+"auth.emailAddress" = "邮箱地址";
+"auth.emailAddress.placeholder" = "请输入邮箱地址";
+"auth.nebula.register" = "注册星云账号";
+"auth.nebula.login" = "登录星云";
+"auth.mfa.code" = "多因素认证码";
+"auth.mfa.verify" = "验证MFA";
+"auth.phone.toggle.hasAccount" = "已有账号？点击登录";
+"auth.phone.toggle.noAccount" = "没有账号？点击注册";
+"auth.phone.number" = "手机号码";
+"auth.phone.number.placeholder" = "请输入手机号码";
+"auth.phone.code" = "验证码";
+"auth.phone.code.placeholder" = "请输入验证码";
+"auth.phone.codeSentCountdown" = "验证码已发送，%d秒后可重新发送";
+"auth.phone.register.complete" = "完成注册";
+"auth.phone.login.verify" = "验证登录";
+"auth.phone.register.sendCode" = "发送注册验证码";
+"auth.phone.login.sendCode" = "发送登录验证码";
+"auth.phone.resendCode" = "重新发送验证码";
+"auth.email.toggle.hasAccount" = "已有账号？点击登录";
+"auth.email.toggle.noAccount" = "没有账号？点击注册";
+"auth.rememberCredentials" = "记住账号密码";
+"auth.email.verification.sent" = "验证邮件已发送";
+"auth.email.verification.tip" = "请检查您的邮箱并点击验证链接完成注册";
+"auth.email.register" = "注册账号";
+"auth.email.login" = "邮箱登录";
+"auth.password.forgot" = "忘记密码？";
+"guest.mode" = "游客模式体验";
+"monitor.noData" = "暂无数据";
+"monitor.axis.time" = "时间";
+"monitor.axis.value" = "数值";
+"monitor.stats.avg" = "平均";
+"monitor.stats.max" = "峰值";
+"monitor.stats.min" = "最低";
+"remote.settings.help" = "远程桌面设置";
+"remote.context.focusWindow" = "聚焦窗口";
+"remote.context.disconnect" = "断开连接";
+"remote.context.copyInfo" = "复制连接信息";
+"remote.context.reconnect" = "重新连接";
+"remote.context.removeFromHistory" = "从历史中移除";
+"remote.form.title" = "新建远程连接";
+"remote.form.section.connection" = "连接信息";
+"remote.form.hostname" = "主机名或IP地址";
+"remote.form.port" = "端口";
+"remote.form.protocol" = "协议";
+"remote.form.section.auth" = "认证";
+"auth.username" = "用户名";
+"remote.form.connect" = "连接";
+"remote.form.connectFailed" = "连接失败";
+"monitor.title" = "系统监控";
+"monitor.status.monitoring" = "监控中";
+"monitor.status.initializing" = "初始化中...";
+"monitor.action.stop" = "停止监控";
+"monitor.waiting.cpuStable" = "正在等待CPU负载平稳...";
+"monitor.waiting.tip" = "系统将在CPU负载稳定后自动开始监控\n（预计10-15秒）";
+"monitor.helper.suggest" = "建议启用『高级监控』（需管理员权限），以准确获取GPU功耗/温度/风扇等系统级数据。";
+"monitor.helper.enable" = "启用高级监控…";
+"monitor.helper.uninstall.tip" = "可卸载提权 Helper 以恢复系统默认状态。";
+"monitor.helper.uninstall" = "卸载 Helper…";
+"monitor.overview" = "系统概览";
+"monitor.cpu.details" = "CPU详情";
+"monitor.memory.details" = "内存详情";
+"monitor.gpu.details" = "GPU详情";
+"monitor.thermal.details" = "散热详情";
+"monitor.indicator.health" = "整体健康";
+"monitor.indicator.thermal" = "热状态";
+"monitor.indicator.load" = "系统负载";
+"thermal.nominal" = "正常";
+"thermal.fair" = "偏热";
+"thermal.serious" = "过热";
+"thermal.critical" = "危险";
+"thermal.low" = "低温";
+"health.excellent" = "优秀";
+"health.good" = "良好";
+"health.fair" = "一般";
+"health.caution" = "注意";
+"health.warning" = "警告";
+"monitor.network.title" = "网络监控";
+"status.connected" = "已连接";
+"status.disconnected" = "未连接";
+"monitor.network.upload" = "上传";
+"monitor.network.download" = "下载";
+"monitor.network.totalUpload" = "总上传";
+"monitor.network.totalDownload" = "总下载";
+"monitor.network.activeConnections" = "活跃连接";
+"monitor.network.quality" = "网络质量";
+"qrcode.generateFailed" = "生成二维码失败";
+"qrcode.regenerate" = "重新生成";
+
+/* 扫描进度指示器 */
+"scan.filesProgress" = "已扫描文件";
+"scan.phase.preparing" = "准备扫描...";
+"scan.phase.quarantine" = "检查隔离属性...";
+"scan.phase.xprotect" = "XProtect 扫描...";
+"scan.phase.signature" = "验证签名...";
+"scan.phase.notarization" = "检查公证...";
+"scan.phase.pattern" = "模式匹配...";
+"scan.phase.heuristic" = "启发式分析...";
+"scan.phase.completing" = "完成中...";
+
+/* 扫描裁决 */
+"scan.verdict.safe" = "安全";
+"scan.verdict.warning" = "警告";
+"scan.verdict.unsafe" = "检测到威胁";
+"scan.verdict.unknown" = "未知";
+
+/* 扫描警告 */
+"scan.warnings" = "警告";
+
+/* 威胁警报 */
+"scan.threat.detected" = "检测到安全威胁";
+"scan.threat.recommendedActions" = "推荐操作";
+"scan.action.delete" = "删除文件";
+"scan.action.quarantine" = "移至隔离区";
+"scan.action.ignore" = "忽略风险";
+
+/* 扫描详情 */
+"scan.details.title" = "扫描详情";
+"scan.details.fileInfo" = "文件信息";
+"scan.details.fileName" = "文件名";
+"scan.details.path" = "路径";
+"scan.details.targetType" = "目标类型";
+"scan.details.scanLevel" = "扫描级别";
+"scan.details.summary" = "扫描摘要";
+"scan.details.duration" = "耗时";
+"scan.details.patternsChecked" = "已检查模式数";
+"scan.details.checksPerformed" = "已执行检查";
+"scan.details.codeSignature" = "代码签名";
+"scan.details.signed" = "已签名";
+"scan.details.valid" = "有效";
+"scan.details.signer" = "签名者";
+"scan.details.teamId" = "团队 ID";
+"scan.details.trustLevel" = "信任级别";
+"scan.details.notarization" = "公证状态";
+"scan.details.threats" = "检测到的威胁";
+"scan.details.warnings" = "警告";
+
+/* 目标类型 */
+"scan.targetType.file" = "文件";
+"scan.targetType.bundle" = "应用程序包";
+"scan.targetType.archive" = "归档文件";
+"scan.targetType.directory" = "目录";
+"scan.targetType.machO" = "Mach-O 二进制";
+"scan.targetType.script" = "脚本";
+
+/* 扫描级别 */
+"scan.level.quick" = "快速";
+"scan.level.standard" = "标准";
+"scan.level.deep" = "深度";
+
+/* 扫描方法 */
+"scan.method.quarantine" = "隔离检查";
+"scan.method.gatekeeper" = "Gatekeeper";
+"scan.method.codeSignature" = "代码签名";
+"scan.method.notarization" = "公证验证";
+"scan.method.patternMatch" = "模式匹配";
+"scan.method.heuristic" = "启发式分析";
+"scan.method.archiveScan" = "归档扫描";
+"scan.method.xprotect" = "XProtect";
+"scan.method.signatureCheck" = "签名检查";
+"scan.method.skipped" = "已跳过";
+
+/* 信任级别 */
+"scan.trustLevel.trusted" = "受信任";
+"scan.trustLevel.identified" = "已识别";
+"scan.trustLevel.adHoc" = "临时签名";
+"scan.trustLevel.unsigned" = "未签名";
+"scan.trustLevel.invalid" = "无效";
+
+/* 公证状态 */
+"scan.notarization.notarized" = "已公证";
+"scan.notarization.notarized.desc" = "此文件已通过 Apple 验证";
+"scan.notarization.notNotarized" = "未公证";
+"scan.notarization.notNotarized.desc" = "此文件未通过 Apple 验证";
+"scan.notarization.unknown" = "未知";
+"scan.notarization.unknown.desc" = "无法确定公证状态";
+
+/* 通用 */
+"common.yes" = "是";
+"common.no" = "否";
+"common.done" = "完成";

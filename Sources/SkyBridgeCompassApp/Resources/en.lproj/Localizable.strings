@@ -1,0 +1,13 @@
+"usb.management.title" = "USB Management";
+"usb.lastScan" = "Last scan: %@";
+"usb.mfi.title" = "MFi Certified";
+"usb.android.title" = "Android Devices";
+"usb.storage.title" = "Storage Devices";
+"usb.total.title" = "Total Devices";
+"usb.empty.title" = "No USB Devices Found";
+"usb.empty.subtitle" = "Connect a device and refresh, or check cables and ports";
+"action.refresh" = "Refresh";
+"auth.hero.tagline" = "Seamless across networks, secure by default.";
+"auth.hero.benefit.reach" = "Cross-network reach";
+"auth.hero.benefit.trust" = "End-to-end trust";
+"auth.hero.benefit.setup" = "Zero-setup collaboration";

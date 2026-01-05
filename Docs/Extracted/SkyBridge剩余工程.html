@@ -1,0 +1,409 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+<html>
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+  <meta http-equiv="Content-Style-Type" content="text/css">
+  <title></title>
+  <meta name="Author" content="李子昂">
+  <meta name="LastAuthor" content="李子昂">
+  <meta name="CreationTime" content="2025-11-29T20:24:00Z">
+  <meta name="ModificationTime" content="2025-11-29T20:24:00Z">
+  <meta name="Generator" content="Cocoa HTML Writer">
+  <meta name="CocoaVersion" content="2685.2">
+  <style type="text/css">
+    p.p1 {margin: 0.0px 0.0px 0.0px 0.0px; font: 12.0px Times}
+    p.p2 {margin: 0.0px 0.0px 0.0px 0.0px; font: 12.0px Times; min-height: 14.0px}
+  </style>
+</head>
+<body>
+<p class="p1">一、我认为优先级最高的几个雷（建议 P0 / P1）</p>
+<p class="p1">1）awaitResult + @MainActor = 经典死锁雷</p>
+<p class="p2"><br></p>
+<p class="p1">位置：</p>
+<p class="p2"><br></p>
+<p class="p1">Sources/SkyBridgeCore/Security/P2PSecurityManager.swift</p>
+<p class="p2"><br></p>
+<p class="p1">P2PSecurityManager 整个类是 @MainActor</p>
+<p class="p2"><br></p>
+<p class="p1">establishSessionKey 里调用：</p>
+<p class="p2"><br></p>
+<p class="p1">let enc = try awaitResult { try await provider.kemEncapsulate(...) }</p>
+<p class="p1">let ss2 = try awaitResult { try await provider.kemDecapsulate(...) }</p>
+<p class="p2"><br></p>
+<p class="p2"><br></p>
+<p class="p1">awaitResult 定义：</p>
+<p class="p2"><br></p>
+<p class="p1">private func awaitResult&lt;T&gt;(_ body: @escaping () async throws -&gt; T) throws -&gt; T {</p>
+<p class="p1"><span class="Apple-converted-space">    </span>let g = DispatchGroup()</p>
+<p class="p1"><span class="Apple-converted-space">    </span>g.enter()</p>
+<p class="p1"><span class="Apple-converted-space">    </span>var result: Result&lt;T, Error&gt;!</p>
+<p class="p1"><span class="Apple-converted-space">    </span>Task { @MainActor in</p>
+<p class="p1"><span class="Apple-converted-space">        </span>do { let v = try await body(); result = .success(v) } catch { result = .failure(error) }</p>
+<p class="p1"><span class="Apple-converted-space">        </span>g.leave()</p>
+<p class="p1"><span class="Apple-converted-space">    </span>}</p>
+<p class="p1"><span class="Apple-converted-space">    </span>g.wait()</p>
+<p class="p1"><span class="Apple-converted-space">    </span>switch result! {</p>
+<p class="p1"><span class="Apple-converted-space">    </span>case .success(let v): return v</p>
+<p class="p1"><span class="Apple-converted-space">    </span>case .failure(let e): throw e</p>
+<p class="p1"><span class="Apple-converted-space">    </span>}</p>
+<p class="p1">}</p>
+<p class="p2"><br></p>
+<p class="p2"><br></p>
+<p class="p1">问题：</p>
+<p class="p2"><br></p>
+<p class="p1">P2PSecurityManager 是 @MainActor，establishSessionKey 也是在 MainActor 上执行。</p>
+<p class="p2"><br></p>
+<p class="p1">里面开了一个 Task { @MainActor in ... }，然后当前线程（同一个 MainActor）立刻 g.wait() 阻塞。</p>
+<p class="p2"><br></p>
+<p class="p1">MainActor 被 g.wait() 卡住了，新建的 Task { @MainActor ... } 永远没有机会在 MainActor 上跑，g.leave() 永远不会调用，100% 死锁。</p>
+<p class="p2"><br></p>
+<p class="p1">只要在真实路径上调用 establishSessionKey，UI 就直接卡死，不是“理论风险”，而是典型死锁模式。</p>
+<p class="p2"><br></p>
+<p class="p1">建议修法（方向）：</p>
+<p class="p2"><br></p>
+<p class="p1">要么：把 QuantumCryptoManager / PQCProvider 的调用改成彻底 async，establishSessionKey 本身标记为 async throws，上层用 await，别再搞同步封装。</p>
+<p class="p2"><br></p>
+<p class="p1">要么：这个同步封装必须在非 MainActor 上做，比如：</p>
+<p class="p2"><br></p>
+<p class="p1">把 awaitResult 搬到 nonisolated / 非 @MainActor 的 helper 里；</p>
+<p class="p2"><br></p>
+<p class="p1">Task { ... } 不要再标记 @MainActor，让它在后台 executor 跑，然后当前线程阻塞。但这也不优雅。</p>
+<p class="p2"><br></p>
+<p class="p1">总体建议：干脆删掉 awaitResult 这一套，PQC 协商全链路改 async，比现在这个“MainActor + DispatchGroup”组合健康太多。</p>
+<p class="p2"><br></p>
+<p class="p1">2）SSH 仍然是「接受所有 HostKey」——安全性完全靠天</p>
+<p class="p2"><br></p>
+<p class="p1">位置：</p>
+<p class="p2"><br></p>
+<p class="p1">Sources/SkyBridgeCore/RemoteConnection/SSHSession.swift</p>
+<p class="p2"><br></p>
+<p class="p1">有个委托：</p>
+<p class="p2"><br></p>
+<p class="p1">final class AcceptAllHostKeysDelegate: NIOSSHClientServerAuthenticationDelegate {</p>
+<p class="p1"><span class="Apple-converted-space">    </span>func validateHostKey(hostKey: NIOSSHPublicKey, validationCompletePromise: EventLoopPromise&lt;Void&gt;) {</p>
+<p class="p1"><span class="Apple-converted-space">        </span>validationCompletePromise.succeed(())</p>
+<p class="p1"><span class="Apple-converted-space">    </span>}</p>
+<p class="p1">}</p>
+<p class="p2"><br></p>
+<p class="p2"><br></p>
+<p class="p1">并且在建立连接时多处：</p>
+<p class="p2"><br></p>
+<p class="p1">let hostKeyDelegate = AcceptAllHostKeysDelegate()</p>
+<p class="p2"><br></p>
+<p class="p2"><br></p>
+<p class="p1">问题：</p>
+<p class="p2"><br></p>
+<p class="p1">这就是字面意义的“任何服务器公钥都信任”。</p>
+<p class="p2"><br></p>
+<p class="p1">生产环境相当于完全没有主机身份校验，MITM / DNS 劫持 = 透明成功。</p>
+<p class="p2"><br></p>
+<p class="p1">建议：</p>
+<p class="p2"><br></p>
+<p class="p1">至少要有一个「开发模式 / Debug 开关」，默认关闭 AcceptAllHostKeysDelegate。</p>
+<p class="p2"><br></p>
+<p class="p1">正常模式下走：</p>
+<p class="p2"><br></p>
+<p class="p1">本地 known_hosts 风格存储；</p>
+<p class="p2"><br></p>
+<p class="p1">或者你自己的「信任设备公钥表」（你已经有 P2P / Supabase 信任体系了，完全可以统一）。</p>
+<p class="p2"><br></p>
+<p class="p1">3）AQI 接口里用的是硬编码 demo key</p>
+<p class="p2"><br></p>
+<p class="p1">位置：</p>
+<p class="p2"><br></p>
+<p class="p1">Sources/SkyBridgeCore/Weather/WeatherService.swift</p>
+<p class="p2"><br></p>
+<p class="p1">代码片段：</p>
+<p class="p2"><br></p>
+<p class="p1">// OpenWeatherMap</p>
+<p class="p1">let urlString = "https://api.openweathermap.org/data/2.5/air_pollution?lat=\(latitude)&amp;lon=\(longitude)&amp;appid=demo_key"</p>
+<p class="p2"><br></p>
+<p class="p1">// WAQI</p>
+<p class="p1">let urlString = "https://api.waqi.info/feed/geo:\(latitude);\(longitude)/?token=demo"</p>
+<p class="p2"><br></p>
+<p class="p2"><br></p>
+<p class="p1">问题：</p>
+<p class="p2"><br></p>
+<p class="p1">这两个 demo_key / token=demo 在真实环境下基本等于不可用，或者马上 hit rate limit。</p>
+<p class="p2"><br></p>
+<p class="p1">而当前 AQI 逻辑是：</p>
+<p class="p2"><br></p>
+<p class="p1">OWM；</p>
+<p class="p2"><br></p>
+<p class="p1">WAQI；</p>
+<p class="p2"><br></p>
+<p class="p1">再 fallback 能见度估算。</p>
+<p class="p2"><br></p>
+<p class="p1">只要联网环境正常，这两个请求会稳定失败 + 白白占用网络与日志。</p>
+<p class="p1">上线前必须：</p>
+<p class="p2"><br></p>
+<p class="p1">换成从 APIKeyManagementView / 配置中心读的真实 key；</p>
+<p class="p2"><br></p>
+<p class="p1">或在没有 key 的情况下直接跳过外部 API，避免对外乱打 demo endpoint。</p>
+<p class="p2"><br></p>
+<p class="p1">4）PQC / HPKE：OQSProvider 的 HPKE 完全未集成</p>
+<p class="p2"><br></p>
+<p class="p1">位置：</p>
+<p class="p2"><br></p>
+<p class="p1">Sources/SkyBridgeCore/QuantumSecure/PQCProvider.swift</p>
+<p class="p2"><br></p>
+<p class="p1">摘关键几行：</p>
+<p class="p2"><br></p>
+<p class="p1">func hpkeSeal(...) async throws -&gt; (ciphertext: Data, encapsulatedKey: Data) {</p>
+<p class="p1"><span class="Apple-converted-space">    </span>throw NSError(domain: "PQC", code: -104, userInfo: [NSLocalizedDescriptionKey: "oqs-provider 尚未集成"])</p>
+<p class="p1">}</p>
+<p class="p1">func hpkeOpen(...) async throws -&gt; Data {</p>
+<p class="p1"><span class="Apple-converted-space">    </span>throw NSError(domain: "PQC", code: -105, userInfo: [NSLocalizedDescriptionKey: "oqs-provider 尚未集成"])</p>
+<p class="p1">}</p>
+<p class="p2"><br></p>
+<p class="p2"><br></p>
+<p class="p1">以及：</p>
+<p class="p2"><br></p>
+<p class="p1">@available(macOS 14.0, *)</p>
+<p class="p1">extension OQSProvider: PQCHPKEProvider {</p>
+<p class="p1"><span class="Apple-converted-space">    </span>func senderContext(...) throws -&gt; HPKESenderContext {</p>
+<p class="p1"><span class="Apple-converted-space">        </span>throw NSError(domain: "PQC", code: -903, userInfo: [NSLocalizedDescriptionKey: "HPKE unsupported in OQSProvider"])</p>
+<p class="p1"><span class="Apple-converted-space">    </span>}</p>
+<p class="p1"><span class="Apple-converted-space">    </span>func recipientContext(...) throws -&gt; HPKERecipientContext {</p>
+<p class="p1"><span class="Apple-converted-space">        </span>throw NSError(domain: "PQC", code: -904, userInfo: [NSLocalizedDescriptionKey: "HPKE unsupported in OQSProvider"])</p>
+<p class="p1"><span class="Apple-converted-space">    </span>}</p>
+<p class="p1">}</p>
+<p class="p2"><br></p>
+<p class="p2"><br></p>
+<p class="p1">问题：</p>
+<p class="p2"><br></p>
+<p class="p1">只要哪条路径在 OQS 后端上错误地调用了 HPKE，就是直接抛异常。</p>
+<p class="p2"><br></p>
+<p class="p1">好消息是：目前看调用方大多还停留在“示例 / 预留”，真正会话协商更多是 AES-GCM + KEM。</p>
+<p class="p2"><br></p>
+<p class="p1">要求：</p>
+<p class="p2"><br></p>
+<p class="p1">必须保证所有生产路径在选择 HPKE 时明确区分 backend：</p>
+<p class="p2"><br></p>
+<p class="p1">backend == .applePQC 才允许走 HPKE；</p>
+<p class="p2"><br></p>
+<p class="p1">liboqs 必须明确“不支持 HPKE”，不要走这条代码。</p>
+<p class="p2"><br></p>
+<p class="p1">你已经有 PQCBackend / PQCAlgorithmSuite 之类的枚举，把这层判断做到所有入口之前就行。</p>
+<p class="p2"><br></p>
+<p class="p1">二、加密 / 协议层的“半成品”与潜在逻辑坑</p>
+<p class="p1">5）P2P 会话密钥协商：KEM 使用方式还是“本机演示级”的</p>
+<p class="p2"><br></p>
+<p class="p1">位置：</p>
+<p class="p2"><br></p>
+<p class="p1">P2PSecurityManager.establishSessionKey(with:publicKey:)</p>
+<p class="p2"><br></p>
+<p class="p1">逻辑大概是：</p>
+<p class="p2"><br></p>
+<p class="p1">if let provider = PQCProviderFactory.makeProvider() {</p>
+<p class="p1"><span class="Apple-converted-space">    </span>let enc = try awaitResult { try await provider.kemEncapsulate(peerId: deviceId, kemVariant: "ML-KEM-768") }</p>
+<p class="p1"><span class="Apple-converted-space">    </span>let ss2 = try awaitResult { try await provider.kemDecapsulate(peerId: deviceId, encapsulated: enc.encapsulated, kemVariant: "ML-KEM-768") }</p>
+<p class="p1"><span class="Apple-converted-space">    </span>// 然后基于 ss2 / P256 HKDF 派生 sessionKey</p>
+<p class="p1">}</p>
+<p class="p2"><br></p>
+<p class="p2"><br></p>
+<p class="p1">配套注释：</p>
+<p class="p2"><br></p>
+<p class="p1">注意：此处为简化演示，真实场景需通过上层信令交换对端公钥标签</p>
+<p class="p2"><br></p>
+<p class="p1">问题：</p>
+<p class="p2"><br></p>
+<p class="p1">现在这一套，其实是在同一进程里既封装又解封，更像“自测”，而不是跨设备协商。</p>
+<p class="p2"><br></p>
+<p class="p1">真正的流程应该是：</p>
+<p class="p2"><br></p>
+<p class="p1">A：拿 B 的公钥 / 标记 → 调 kemEncapsulate → 发送 encapsulated 给 B；</p>
+<p class="p2"><br></p>
+<p class="p1">B：基于自己私钥 + 收到的 encapsulated → kemDecapsulate → 得到共享密钥；</p>
+<p class="p2"><br></p>
+<p class="p1">双方再各自派生对称密钥。</p>
+<p class="p2"><br></p>
+<p class="p1">目前这段代码没有看见消息传递层的参与，看起来是“把 liboqs 当作一个伪随机源”，而不是实际和对端对齐。</p>
+<p class="p2"><br></p>
+<p class="p1">建议：</p>
+<p class="p2"><br></p>
+<p class="p1">把这段逻辑挪到“真正的 P2P handshake 层”，让 P2PSecurityManager 只提供：</p>
+<p class="p2"><br></p>
+<p class="p1">func kemEncapsulate(peerId: String, suite: ...) async throws -&gt; (ss: Data, enc: Data)</p>
+<p class="p2"><br></p>
+<p class="p1">func kemDecapsulate(peerId: String, enc: Data, suite: ...) async throws -&gt; Data</p>
+<p class="p2"><br></p>
+<p class="p1">上层握手负责把 enc 在两端传过去，不要在一个函数里把封装 + 解封都做掉。</p>
+<p class="p2"><br></p>
+<p class="p1">6）Apple PQC 类型仍然是“猜 API 名字”的占位写法</p>
+<p class="p2"><br></p>
+<p class="p1">例子：</p>
+<p class="p2"><br></p>
+<p class="p1">QuantumCryptoManager.generateHPKEKeyPair()：</p>
+<p class="p2"><br></p>
+<p class="p1">@available(macOS 26.0, *)</p>
+<p class="p1">public static func generateHPKEKeyPair() throws -&gt; (privateKey: XWingMLKEM768X25519.PrivateKey, publicKey: XWingMLKEM768X25519.PublicKey) {</p>
+<p class="p1"><span class="Apple-converted-space">    </span>// 注意：API 可能是 generate() 或 init()，根据实际文档调整</p>
+<p class="p1"><span class="Apple-converted-space">    </span>let privateKey = try XWingMLKEM768X25519.PrivateKey.generate()</p>
+<p class="p1"><span class="Apple-converted-space">    </span>let publicKey = privateKey.publicKey</p>
+<p class="p1"><span class="Apple-converted-space">    </span>return (privateKey, publicKey)</p>
+<p class="p1">}</p>
+<p class="p2"><br></p>
+<p class="p2"><br></p>
+<p class="p1">以及 UltraStream / ApplePQCProvider 里类似的 HPKE.Sender(... ciphersuite: .XWingMLKEM768X25519_SHA256_AES_GCM_256, ...)。</p>
+<p class="p2"><br></p>
+<p class="p1">事实：</p>
+<p class="p2"><br></p>
+<p class="p1">这里明确写着“API 可能是 generate() 或 init()”，说明这部分代码本身就是基于未来文档的猜测。</p>
+<p class="p2"><br></p>
+<p class="p1">编译能不能过，完全取决于 Apple 最终 API 是否刚好这么设计；现在这就是典型“未来占位”。</p>
+<p class="p2"><br></p>
+<p class="p1">建议：</p>
+<p class="p2"><br></p>
+<p class="p1">保留结构没问题，但要在代码里明确标记为占位（目前有注释，但你自己未来会忘）。</p>
+<p class="p2"><br></p>
+<p class="p1">真正上 Xcode 新 SDK 之后，要做一次通篇对照 Apple 文档：</p>
+<p class="p2"><br></p>
+<p class="p1">类型名是否一致；</p>
+<p class="p2"><br></p>
+<p class="p1">ciphersuite enum 名是否一致；</p>
+<p class="p2"><br></p>
+<p class="p1">integrityCheckedRepresentation 等序列化接口是否存在 / 是否改名。</p>
+<p class="p2"><br></p>
+<p class="p1">在那之前，把这些代码当成“只在 macOS 26 + 最新 SDK 下启用的 feature branch”，不要期望它在当前环境跑。</p>
+<p class="p2"><br></p>
+<p class="p1">三、功能级 / UX 级的“残缺”和占位</p>
+<p class="p2"><br></p>
+<p class="p1">这些不是立刻爆炸，但会导致体验不完整，或者安全性减分。</p>
+<p class="p2"><br></p>
+<p class="p1">7）P2P 手动连接：publicKey 为空的占位</p>
+<p class="p2"><br></p>
+<p class="p1">位置：</p>
+<p class="p2"><br></p>
+<p class="p1">P2PConnectionView.swift：</p>
+<p class="p2"><br></p>
+<p class="p1">ManualConnectSheet { host, port, name, type in</p>
+<p class="p1"><span class="Apple-converted-space">    </span>// 构造最小设备信息并发起连接（公钥为空为占位）</p>
+<p class="p1"><span class="Apple-converted-space">    </span>let device = P2PDevice(</p>
+<p class="p1"><span class="Apple-converted-space">        </span>id: UUID().uuidString,</p>
+<p class="p1"><span class="Apple-converted-space">        </span>name: name,</p>
+<p class="p1"><span class="Apple-converted-space">        </span>type: type,</p>
+<p class="p1"><span class="Apple-converted-space">        </span>address: host,</p>
+<p class="p1"><span class="Apple-converted-space">        </span>port: port,</p>
+<p class="p1"><span class="Apple-converted-space">        </span>...</p>
+<p class="p1"><span class="Apple-converted-space">        </span>pubKeyFingerprint: nil,</p>
+<p class="p1"><span class="Apple-converted-space">        </span>macAddresses: nil</p>
+<p class="p1"><span class="Apple-converted-space">    </span>)</p>
+<p class="p1"><span class="Apple-converted-space">    </span>onConnect(device)</p>
+<p class="p1">}</p>
+<p class="p2"><br></p>
+<p class="p2"><br></p>
+<p class="p1">问题：</p>
+<p class="p2"><br></p>
+<p class="p1">手动添加设备时，完全没有 P-256 公钥 / 指纹，和你前面那套“强身份 / 量子加密信任体系”完全脱节。</p>
+<p class="p2"><br></p>
+<p class="p1">如果上层默认把这类设备也当作“信任设备”，那就相当于开了一个无身份验证的后门。</p>
+<p class="p2"><br></p>
+<p class="p1">建议：</p>
+<p class="p2"><br></p>
+<p class="p1">至少 UI 上要标清楚：“未验证设备 / 手动设备”；安全策略上不允许它享受 full-trust。</p>
+<p class="p2"><br></p>
+<p class="p1">更理想的是：手动添加也要求用户贴入一个 fingerprint / 设备 token，让 P2PSecurityManager 可以在第一次连接时校验。</p>
+<p class="p2"><br></p>
+<p class="p1">8）Weather / DynamicWallpaper：功能逻辑基本 ok，但模型 / 效果部分仍然简化</p>
+<p class="p2"><br></p>
+<p class="p1">好的一面：</p>
+<p class="p2"><br></p>
+<p class="p1">WeatherMLPredictor.loadMLModel() 现在是：</p>
+<p class="p2"><br></p>
+<p class="p1">if let modelURL = Bundle.main.url(forResource: "WeatherPredictionModel", withExtension: "mlmodelc") {</p>
+<p class="p1"><span class="Apple-converted-space">    </span>self.mlModel = try MLModel(contentsOf: modelURL)</p>
+<p class="p1"><span class="Apple-converted-space">    </span>backend = CoreMLBackend(model: self.mlModel)</p>
+<p class="p1">} else {</p>
+<p class="p1"><span class="Apple-converted-space">    </span>self.mlModel = nil</p>
+<p class="p1"><span class="Apple-converted-space">    </span>backend = RuleEngineBackend()</p>
+<p class="p1">}</p>
+<p class="p2"><br></p>
+<p class="p2"><br></p>
+<p class="p1">这已经是我之前建议的“有模型用模型，无模型走规则引擎”，不会再因为假模型崩溃。</p>
+<p class="p2"><br></p>
+<p class="p1">DynamicWallpaperManager 初始化里对 MetalFX 也做了 family 检测，旧设备上优雅降级。</p>
+<p class="p2"><br></p>
+<p class="p1">残留的小问题：</p>
+<p class="p2"><br></p>
+<p class="p1">WeatherMLPredictor 里 createMockMLModel() 还在，是彻底没用到的占位函数，可以考虑删掉，减噪。</p>
+<p class="p2"><br></p>
+<p class="p1">WeatherEffectView 里各种 “简化占位符（由 DashboardView 处理完整效果）” 的注释还在，说明视觉效果还没完全对齐最终设计——不算 bug，只是还没完工。</p>
+<p class="p2"><br></p>
+<p class="p1">9）UltraStream 的 HPKE 协议是“示例层”</p>
+<p class="p2"><br></p>
+<p class="p1">位置：</p>
+<p class="p2"><br></p>
+<p class="p1">UltraStream/UltraStream.swift 底部的：</p>
+<p class="p2"><br></p>
+<p class="p1">// MARK: - PQC HPKE X-Wing 会话密钥协商（示例层）</p>
+<p class="p1">// ...</p>
+<p class="p1">public enum UltraStreamKeyAgreement { ... }</p>
+<p class="p2"><br></p>
+<p class="p2"><br></p>
+<p class="p1">里面说明也写得很清楚，是“演示如何用 CryptoKit HPKE + XWingMLKEM768X25519 生成会话对称密钥”。</p>
+<p class="p2"><br></p>
+<p class="p1">现状：</p>
+<p class="p2"><br></p>
+<p class="p1">这块现在没真正接到 UltraStream 的生产握手里，只是一个工具 / 示例。</p>
+<p class="p2"><br></p>
+<p class="p1">不会直接炸，但也不能当成“已经有了完整会话协商”。</p>
+<p class="p2"><br></p>
+<p class="p1">10）杂项占位 / 示例</p>
+<p class="p2"><br></p>
+<p class="p1">这些更多是“代码还没完工”的信号，不是炸弹：</p>
+<p class="p2"><br></p>
+<p class="p1">QuantumBeam struct 明确写着“占位符实现”；</p>
+<p class="p2"><br></p>
+<p class="p1">EnhancedDeviceDiscovery 只是个空壳（startScanning 里没真正扫描逻辑）；</p>
+<p class="p2"><br></p>
+<p class="p1">PreferencesView 用的 skybridge.example.com / support@skybridge.example.com 还没换成真实域名；</p>
+<p class="p2"><br></p>
+<p class="p1">OQSRAIISample / PQCKeyMigrationTool 就是纯 sample / tool，不会被主流程调用。</p>
+<p class="p2"><br></p>
+<p class="p1">四、已经明显改善 / 修掉的点（顺便给你一个 sanity check）</p>
+<p class="p2"><br></p>
+<p class="p1">为了避免你怀疑我没看之前那堆：</p>
+<p class="p2"><br></p>
+<p class="p1">BGRA 内存生命周期问题</p>
+<p class="p2"><br></p>
+<p class="p1">Metal4EnhancedRenderer.renderBGRAFrame 已经统一走 BGRAFrameBuilder.buildPixelBuffer(...)；</p>
+<p class="p2"><br></p>
+<p class="p1">BGRAFrameBuilder 的 .safeCopy 是标准 CVPixelBufferCreate + memcpy，.zeroCopy 目前明确抛 zeroCopyNotImplemented；</p>
+<p class="p2"><br></p>
+<p class="p1">之前那个 CVPixelBufferCreateWithBytes + Data 绑定异步纹理的悬挂指针问题，已经消失，这是实打实的提升。</p>
+<p class="p2"><br></p>
+<p class="p1">TLS Identity 类型检查</p>
+<p class="p2"><br></p>
+<p class="p1">TLSSecurityManager.createServerListener 里新增：</p>
+<p class="p2"><br></p>
+<p class="p1">if let identity = certificateManager.getIdentity(for: deviceId) {</p>
+<p class="p1"><span class="Apple-converted-space">    </span>if CFGetTypeID(identity) == SecIdentityGetTypeID() {</p>
+<p class="p1"><span class="Apple-converted-space">        </span>let secIdentity = sec_identity_create(identity)</p>
+<p class="p1"><span class="Apple-converted-space">        </span>if let secIdentity = secIdentity {</p>
+<p class="p1"><span class="Apple-converted-space">            </span>sec_protocol_options_set_local_identity(secOptions, secIdentity)</p>
+<p class="p1"><span class="Apple-converted-space">        </span>}</p>
+<p class="p1"><span class="Apple-converted-space">    </span>}</p>
+<p class="p1">}</p>
+<p class="p2"><br></p>
+<p class="p2"><br></p>
+<p class="p1">这就是我们前面讨论的 S1 增强，已经落地。</p>
+<p class="p2"><br></p>
+<p class="p1">WeatherMLPredictor 真实模型 + 规则回退</p>
+<p class="p2"><br></p>
+<p class="p1">不再企图构造一个假的 MLModel(contentsOf: Bundle.main.bundleURL)，而是显式 nil + RuleEngine，干净多了。</p>
+<p class="p2"><br></p>
+<p class="p1">这些地方我确认过，确实比你之前那版“更安全、更稳”。</p>
+<p class="p2"><br></p>
+<p class="p1">总结一句人话</p>
+<p class="p2"><br></p>
+<p class="p1">真雷：</p>
+<p class="p1">P2PSecurityManager.awaitResult 死锁风险、SSH 全信任 HostKey、AQI demo key、OQS HPKE 未集成但接口已暴露 —— 这几个要优先收拾。</p>
+<p class="p2"><br></p>
+<p class="p1">半成品：</p>
+<p class="p1">P2P 会话 KEM 流程（本机自嗨）、Apple PQC/HPKE 的类型 &amp; API 依然是“预测未来文档”的写法 —— 这些等你手里有最新 Xcode / 文档时，一次性对表修正。</p>
+<p class="p2"><br></p>
+<p class="p1">无伤占位：</p>
+<p class="p1">WeatherEffect、QuantumBeam、UltraStreamKeyAgreement 示例层、若干 example 域名——更多是 Roadmap 的提醒，不是炸弹。</p>
+</body>
+</html>

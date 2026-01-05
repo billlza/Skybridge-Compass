@@ -1,0 +1,67 @@
+# Fastlane 自动化脚本
+# SkyBridge Compass
+
+default_platform(:mac)
+
+platform :mac do
+  
+  desc "获取或创建 Developer ID 证书"
+  lane :setup_certificates do
+    # 创建 Developer ID Application 证书
+    cert(
+      development: false,
+      type: "developer_id_application",
+      generate_apple_certs: true,
+      keychain_path: "~/Library/Keychains/login.keychain-db"
+    )
+    
+    UI.success("✅ Developer ID 证书已配置完成！")
+  end
+  
+  desc "构建并签名应用（包含 Widget）"
+  lane :build_signed do
+    # 确保证书存在
+    setup_certificates
+    
+    # 获取签名身份
+    signing_identity = sh("security find-identity -v -p codesigning | grep 'Developer ID Application' | head -1 | awk -F'\"' '{print $2}'").strip
+    
+    if signing_identity.empty?
+      UI.user_error!("未找到 Developer ID Application 证书")
+    end
+    
+    UI.message("使用签名身份: #{signing_identity}")
+    
+    # 运行构建脚本
+    sh("cd .. && ./Scripts/build_with_widgets.sh")
+    
+    # 重新签名应用
+    sh("cd .. && codesign --force --deep --sign '#{signing_identity}' --options runtime --entitlements Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.entitlements 'dist/SkyBridge Compass.app'")
+    
+    UI.success("✅ 应用构建并签名完成！")
+  end
+  
+  desc "公证应用（用于分发）"
+  lane :notarize_app do
+    notarize(
+      package: "dist/SkyBridge Compass.app",
+      bundle_id: "com.skybridge.compass",
+      print_log: true,
+      verbose: true
+    )
+    
+    UI.success("✅ 应用公证完成！")
+  end
+  
+  desc "完整构建流程：构建 + 签名 + 公证"
+  lane :release do
+    build_signed
+    notarize_app
+    
+    # 复制到桌面
+    sh("cp '../dist/SkyBridgeCompass-'$(date +%Y.%m.%d)'.dmg' ~/Desktop/")
+    
+    UI.success("✅ 发布版本已准备好，DMG 已复制到桌面！")
+  end
+  
+end

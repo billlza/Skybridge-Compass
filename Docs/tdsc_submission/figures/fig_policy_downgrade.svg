@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="360" viewBox="0 0 720 360">
+<rect width="100%" height="100%" fill="#ffffff"/>
+<line x1="70" y1="290" x2="650" y2="290" stroke="#222" stroke-width="1.5"/>
+<line x1="70" y1="70" x2="70" y2="290" stroke="#222" stroke-width="1.5"/>
+<line x1="64" y1="290.0" x2="70" y2="290.0" stroke="#222" stroke-width="1"/>
+<text x="60" y="294.0" text-anchor="end" font-size="12" fill="#333">0</text>
+<line x1="64" y1="246.0" x2="70" y2="246.0" stroke="#222" stroke-width="1"/>
+<text x="60" y="250.0" text-anchor="end" font-size="12" fill="#333">177</text>
+<line x1="64" y1="202.0" x2="70" y2="202.0" stroke="#222" stroke-width="1"/>
+<text x="60" y="206.0" text-anchor="end" font-size="12" fill="#333">354</text>
+<line x1="64" y1="158.0" x2="70" y2="158.0" stroke="#222" stroke-width="1"/>
+<text x="60" y="162.0" text-anchor="end" font-size="12" fill="#333">530</text>
+<line x1="64" y1="114.0" x2="70" y2="114.0" stroke="#222" stroke-width="1"/>
+<text x="60" y="118.0" text-anchor="end" font-size="12" fill="#333">707</text>
+<line x1="64" y1="70.0" x2="70" y2="70.0" stroke="#222" stroke-width="1"/>
+<text x="60" y="74.0" text-anchor="end" font-size="12" fill="#333">884</text>
+<rect x="90" y="290.0" width="160" height="0.0" fill="#2A9D8F" />
+<text x="170.0" y="312" text-anchor="middle" font-size="12" fill="#222">strictPQC</text>
+<text x="170.0" y="282.0" text-anchor="middle" font-size="11" fill="#222">0</text>
+<rect x="340" y="70.0" width="160" height="220.0" fill="#E76F51" />
+<line x1="420.0" y1="65.06051564418334" x2="420.0" y2="74.93948435581666" stroke="#111" stroke-width="1.5"/>
+<line x1="414.0" y1="65.06051564418334" x2="426.0" y2="65.06051564418334" stroke="#111" stroke-width="1.5"/>
+<line x1="414.0" y1="74.93948435581666" x2="426.0" y2="74.93948435581666" stroke="#111" stroke-width="1.5"/>
+<text x="420.0" y="312" text-anchor="middle" font-size="12" fill="#222">default</text>
+<text x="420.0" y="62.0" text-anchor="middle" font-size="11" fill="#222">884</text>
+<text x="360.0" y="36" text-anchor="middle" font-size="16" fill="#111">Fallback Rate per 1000 Runs (95% CI)</text>
+<text x="360.0" y="342" text-anchor="middle" font-size="12" fill="#333">Policy</text>
+<text x="18" y="180.0" text-anchor="middle" font-size="12" fill="#333" transform="rotate(-90 18 180.0)">Fallback events per 1000 runs</text>
+</svg>

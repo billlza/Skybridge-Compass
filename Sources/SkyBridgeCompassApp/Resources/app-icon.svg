@@ -1,0 +1,144 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <!-- 渐变定义 -->
+    <linearGradient id="frameGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#4A90E2;stop-opacity:1" />
+      <stop offset="50%" style="stop-color:#5BA3F5;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#357ABD;stop-opacity:1" />
+    </linearGradient>
+    
+    <linearGradient id="cloudGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#87CEEB;stop-opacity:1" />
+      <stop offset="50%" style="stop-color:#5DADE2;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#3498DB;stop-opacity:1" />
+    </linearGradient>
+    
+    <linearGradient id="compassGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#D4AF37;stop-opacity:1" />
+      <stop offset="50%" style="stop-color:#B8860B;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#8B6914;stop-opacity:1" />
+    </linearGradient>
+    
+    <radialGradient id="compassFaceGradient" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" style="stop-color:#8B4513;stop-opacity:1" />
+      <stop offset="70%" style="stop-color:#654321;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#3E2723;stop-opacity:1" />
+    </radialGradient>
+    
+    <!-- 阴影滤镜 -->
+    <filter id="dropShadow" x="-50%" y="-50%" width="200%" height="200%">
+      <feDropShadow dx="4" dy="4" stdDeviation="8" flood-color="#000000" flood-opacity="0.3"/>
+    </filter>
+  </defs>
+  
+  <!-- 外框 -->
+  <rect x="64" y="64" width="896" height="896" rx="128" ry="128" 
+        fill="url(#frameGradient)" stroke="#2C5282" stroke-width="8" 
+        filter="url(#dropShadow)"/>
+  
+  <!-- 云朵装饰 -->
+  <g fill="url(#cloudGradient)" opacity="0.8">
+    <!-- 左上云朵 -->
+    <path d="M 200 200 
+             C 180 180, 160 190, 150 210
+             C 140 200, 120 205, 115 220
+             C 100 215, 90 225, 95 240
+             C 85 245, 85 260, 100 265
+             C 95 275, 105 285, 120 280
+             C 125 290, 145 285, 150 270
+             C 160 275, 180 270, 185 250
+             C 200 255, 220 245, 215 225
+             C 225 220, 220 200, 200 200 Z"/>
+    
+    <!-- 右上云朵 -->
+    <path d="M 750 180 
+             C 730 160, 710 170, 700 190
+             C 690 180, 670 185, 665 200
+             C 650 195, 640 205, 645 220
+             C 635 225, 635 240, 650 245
+             C 645 255, 655 265, 670 260
+             C 675 270, 695 265, 700 250
+             C 710 255, 730 250, 735 230
+             C 750 235, 770 225, 765 205
+             C 775 200, 770 180, 750 180 Z"/>
+    
+    <!-- 左下云朵 -->
+    <path d="M 180 780 
+             C 160 760, 140 770, 130 790
+             C 120 780, 100 785, 95 800
+             C 80 795, 70 805, 75 820
+             C 65 825, 65 840, 80 845
+             C 75 855, 85 865, 100 860
+             C 105 870, 125 865, 130 850
+             C 140 855, 160 850, 165 830
+             C 180 835, 200 825, 195 805
+             C 205 800, 200 780, 180 780 Z"/>
+    
+    <!-- 右下云朵 -->
+    <path d="M 820 800 
+             C 800 780, 780 790, 770 810
+             C 760 800, 740 805, 735 820
+             C 720 815, 710 825, 715 840
+             C 705 845, 705 860, 720 865
+             C 715 875, 725 885, 740 880
+             C 745 890, 765 885, 770 870
+             C 780 875, 800 870, 805 850
+             C 820 855, 840 845, 835 825
+             C 845 820, 840 800, 820 800 Z"/>
+  </g>
+  
+  <!-- 指南针主体 -->
+  <g transform="translate(512, 512)">
+    <!-- 外圈 -->
+    <circle cx="0" cy="0" r="280" fill="url(#compassGradient)" 
+            stroke="#8B6914" stroke-width="6" filter="url(#dropShadow)"/>
+    
+    <!-- 内圈表盘 -->
+    <circle cx="0" cy="0" r="240" fill="url(#compassFaceGradient)" 
+            stroke="#D4AF37" stroke-width="4"/>
+    
+    <!-- 刻度线 -->
+    <g stroke="#D4AF37" stroke-width="3" fill="none">
+      <!-- 主要方向刻度 -->
+      <g stroke-width="5">
+        <line x1="0" y1="-240" x2="0" y2="-220"/> <!-- 北 -->
+        <line x1="240" y1="0" x2="220" y2="0"/>   <!-- 东 -->
+        <line x1="0" y1="240" x2="0" y2="220"/>   <!-- 南 -->
+        <line x1="-240" y1="0" x2="-220" y2="0"/> <!-- 西 -->
+      </g>
+      
+      <!-- 次要刻度 -->
+      <g stroke-width="3">
+        <line x1="169.7" y1="-169.7" x2="155.6" y2="-155.6"/> <!-- 东北 -->
+        <line x1="169.7" y1="169.7" x2="155.6" y2="155.6"/>   <!-- 东南 -->
+        <line x1="-169.7" y1="169.7" x2="-155.6" y2="155.6"/> <!-- 西南 -->
+        <line x1="-169.7" y1="-169.7" x2="-155.6" y2="-155.6"/> <!-- 西北 -->
+      </g>
+    </g>
+    
+    <!-- 数字标记 -->
+    <g fill="#D4AF37" font-family="Arial, sans-serif" font-size="36" font-weight="bold" text-anchor="middle">
+      <text x="0" y="-190" dominant-baseline="middle">23</text>
+      <text x="190" y="12" dominant-baseline="middle">220</text>
+      <text x="0" y="205" dominant-baseline="middle">96</text>
+    </g>
+    
+    <!-- 指针 -->
+    <g>
+      <!-- 指针阴影 -->
+      <polygon points="0,-180 15,0 0,20 -15,0" 
+               fill="#000000" opacity="0.3" 
+               transform="translate(3, 3)"/>
+      
+      <!-- 主指针 -->
+      <polygon points="0,-180 15,0 0,20 -15,0" 
+               fill="#FFD700" stroke="#B8860B" stroke-width="2"/>
+      
+      <!-- 中心圆 -->
+      <circle cx="0" cy="0" r="15" fill="#D4AF37" 
+              stroke="#8B6914" stroke-width="2"/>
+      <circle cx="0" cy="0" r="8" fill="#FFD700"/>
+    </g>
+  </g>
+</svg>

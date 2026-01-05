@@ -1,0 +1,854 @@
+/* Connection Methods */
+"connection.crossNetwork.title" = "Cross-Network Connection";
+"connection.qrcode.title" = "Dynamic QR Code";
+"connection.qrcode.longDescription" = "Generate a temporary encrypted QR code. Scan with mobile app to connect. Secure, fast, zero config.";
+"connection.qrcode.highlight" = "✨ Highlight: Dynamic Key + 5-min Expiration";
+"connection.qrcode.scanInstruction" = "Scan with SkyBridge Mobile App";
+"connection.waiting" = "Waiting for connection...";
+"connection.generateQR" = "Generate QR Code";
+"connection.device.other" = "On Other Device";
+"connection.scanQR" = "Scan QR Code";
+"connection.scanQR.description" = "Click to open camera";
+"connection.security.encrypted" = "End-to-End Encrypted";
+"connection.validity.5min" = "Valid for 5 mins";
+"connection.p2p" = "P2P Direct";
+"connection.natTraversal" = "NAT Traversal";
+
+/* iCloud */
+"connection.icloud.title" = "iCloud Device Chain";
+"connection.icloud.description" = "Connect devices under the same Apple ID. No manual pairing required.";
+"connection.icloud.highlight" = "✨ Highlight: Apple Ecosystem Exclusive, Zero Config";
+"connection.icloud.noDevices" = "No iCloud Devices Found";
+"connection.icloud.instruction" = "Ensure other devices are signed into iCloud and have SkyBridge open.";
+"action.refresh" = "Refresh";
+"connection.availableDevices" = "%d Available Devices";
+"connection.icloud.sync" = "iCloud Sync";
+"connection.apple.ecosystem" = "Apple Ecosystem";
+"connection.auto.discovery" = "Auto Discovery";
+"connection.apple.auth" = "Secure Auth";
+
+/* Smart Code */
+"connection.smartCode.title" = "Smart Connection Code";
+"connection.smartCode.fullDescription" = "Generate a 6-digit alphanumeric code for all scenarios. Supports P2P direct and smart relay.";
+"connection.smartCode.highlight" = "✨ Highlight: Short Code + Smart Routing + 10-min Validity";
+"connection.device.this" = "On This Device";
+"connection.smartCode.shareInstruction" = "Share this code to connect";
+"connection.copy" = "Copy";
+"connection.regenerate" = "Regenerate";
+"connection.smartCode.generate" = "Generate Code";
+"connection.smartCode.placeholder" = "Enter Connection Code";
+"connection.smartCode.connect" = "Connect";
+"connection.fast" = "High Speed";
+"connection.p2p.priority" = "P2P Priority";
+"connection.smart.relay" = "Smart Relay";
+"connection.validity.10min" = "Valid for 10 mins";
+
+/* Dashboard */
+"dashboard.unknownIP" = "Unknown IP";
+"dashboard.action.connect" = "Connect";
+"dashboard.status.connecting" = "Connecting...";
+"dashboard.deviceDiscovery" = "Discover Devices";
+"discovery.manualConnect" = "Manual Connect";
+
+/* App */
+"app.name" = "SkyBridge Compass";
+"app.slogan" = "Next-Gen Cross-Platform Connection Experience";
+
+/* Manual Connect */
+"manualConnect.title" = "Manual Connect";
+"manualConnect.ipAddress" = "IP Address";
+"manualConnect.port" = "Port";
+"manualConnect.pairingCode" = "Pairing Code";
+"action.cancel" = "Cancel";
+
+/* Status */
+"status.disconnected" = "Disconnected";
+"status.scanning" = "Scanning...";
+"device.status.connected" = "Connected";
+"status.excellent" = "Excellent";
+"status.good" = "Good";
+"status.attention" = "Attention";
+
+/* Theme */
+"theme.selectBackground" = "Select Background";
+"theme.animations" = "Animations";
+"theme.glassEffects" = "Glass Effects";
+
+/* Navigation */
+"sidebar.dashboard" = "Main Console";
+"sidebar.deviceDiscovery" = "Device Discovery";
+"sidebar.usbManagement" = "USB Management";
+"sidebar.fileTransfer" = "File Transfer";
+"sidebar.remoteDesktop" = "Remote Desktop";
+"sidebar.systemMonitor" = "System Monitor";
+"sidebar.settings" = "Settings";
+
+/* Quantum */
+"quantum.title" = "Quantum Communication";
+"quantum.subtitle" = "Integrated into File Transfer & Remote Desktop";
+
+/* Dashboard Stats */
+"dashboard.onlineDevices" = "Online Devices";
+"dashboard.activeSessions" = "Active Sessions";
+"dashboard.performanceStatus" = "System Status";
+
+/* Performance Monitor */
+"dashboard.performanceMonitor" = "Performance Monitor";
+"monitor.cpu" = "CPU";
+"monitor.gpu" = "GPU";
+"monitor.memoryUsage" = "Memory";
+"monitor.fanSpeed" = "Fan Speed";
+"monitor.systemLoad" = "System Load";
+"monitor.thermalState" = "Thermal State";
+"monitor.powerState" = "Power State";
+"monitor.recommendations" = "Recommendations";
+
+/* System Metrics */
+"dashboard.systemMetrics" = "System Metrics";
+"metrics.cpuUsage" = "CPU Usage";
+"metrics.memoryUsage" = "Memory Usage";
+"metrics.downloadRate" = "Download Rate";
+"metrics.uploadRate" = "Upload Rate";
+
+/* Discovery */
+"discovery.compatibilityMode" = "Compatibility/More Devices";
+"discovery.extendedSearch.active" = "Extended Search (%ds)";
+"discovery.extendedSearch.default" = "Extended Search";
+"discovery.extendedSearch.static" = "Extended Search 15s";
+"discovery.searchPlaceholder" = "Search devices...";
+"discovery.noMatch" = "No matching devices";
+"discovery.adjustSearch" = "Try adjusting your search terms";
+"dashboard.noDevicesFound" = "No Devices Found";
+"dashboard.checkNetwork" = "Check your network connection";
+
+/* Remote Sessions */
+"dashboard.remoteSessions" = "Remote Sessions";
+"session.noActive" = "No Active Sessions";
+"session.placeholder" = "Start a session from Device Discovery";
+
+/* Quick Actions */
+"dashboard.quickActions" = "Quick Actions";
+"action.scanDevices" = "Scan Devices";
+"action.systemMonitor" = "System Monitor";
+"action.settings" = "Settings";
+
+/* System Info */
+"dashboard.systemPerformance" = "System Performance";
+"info.processorArch" = "Processor Architecture";
+
+/* Device Row */
+"device.local" = "Local";
+"device.noIP" = "No IP";
+"device.services" = "Services";
+"device.servicesCount" = "Services";
+"device.unknownIP" = "Unknown IP";
+"dashboard.fileTransfer" = "File Transfer";
+"dashboard.transferTasks" = "Transfer Tasks";
+"dashboard.noTransferTasks" = "No Transfer Tasks";
+"dashboard.transferTasksPlaceholder" = "Drag and drop files to start transfer";
+"dashboard.deviceManagement" = "Device Management";
+"dashboard.discoveredDevices" = "Discovered Devices";
+
+/* Settings */
+"settings.header.title" = "Settings";
+"settings.tab.general" = "General";
+"settings.tab.network" = "Network";
+"settings.tab.devices" = "Devices";
+"settings.tab.fileTransfer" = "File Transfer";
+"settings.tab.remoteDesktop" = "Remote Desktop";
+"settings.tab.systemMonitor" = "System Monitor";
+"settings.tab.permissions" = "Permissions";
+"settings.tab.advanced" = "Advanced";
+
+"settings.general.language.sectionTitle" = "Language";
+"settings.general.language.label" = "Interface Language";
+"settings.general.language.description" = "Choose the display language";
+"settings.language.system" = "Follow System";
+
+"settings.general.preferences" = "General Preferences";
+"settings.general.autoScan" = "Auto-scan devices on launch";
+"settings.general.systemNotifications" = "Show system notifications";
+"settings.general.darkMode" = "Enable dark mode";
+"settings.general.scanInterval" = "Scan Interval";
+
+"settings.general.interface" = "Interface & Display";
+"settings.general.showDeviceDetails" = "Show device details";
+"settings.general.showConnectionStats" = "Show connection stats";
+"settings.general.compactMode" = "Compact mode";
+"settings.general.themeColor" = "Theme color";
+
+"settings.general.dataManagement" = "Data Management";
+"settings.general.clearCache" = "Clear cache";
+"settings.general.cacheSize" = "Current cache: %@";
+"settings.general.exportSettings" = "Export settings";
+"settings.general.importSettings" = "Import settings";
+"settings.general.resetSettings" = "Reset to defaults";
+"settings.general.deduplicateKeychain" = "Deduplicate Keychain items";
+
+/* Units */
+"unit.seconds.15" = "15 seconds";
+"unit.seconds.30" = "30 seconds";
+"unit.seconds.60" = "60 seconds";
+"unit.seconds.120" = "120 seconds";
+/* Device Discovery (Enhanced) */
+"discovery.title" = "Device Discovery";
+"discovery.manualConnect.title" = "Manual Connect";
+"discovery.manualConnect.button" = "Connect";
+"discovery.manualConnect.ip" = "IP Address";
+"discovery.manualConnect.port" = "Port";
+"discovery.manualConnect.code" = "Pairing Code (Optional)";
+"discovery.manualConnect.cancel" = "Cancel";
+"discovery.localScan.title" = "Local Scan";
+"discovery.localScan.description" = "Automatically discover devices on the same network";
+"discovery.scanning" = "Scanning...";
+"discovery.stopScan" = "Stop Scan";
+"discovery.startScan" = "Start Scan";
+"discovery.refresh" = "Refresh";
+"discovery.onlineDevices" = "Online Devices (%d)";
+"discovery.noDevices.title" = "No Devices Found";
+"discovery.noDevices.scanning" = "Scanning...";
+"discovery.noDevices.startPrompt" = "Click 'Start Scan' to find nearby devices";
+"discovery.qrCode.title" = "Dynamic Encrypted QR Code";
+"discovery.qrCode.description" = "Scan to connect, valid for 5 mins, E2E encrypted";
+"discovery.qrCode.thisDevice" = "On This Device";
+"discovery.qrCode.scanPrompt" = "Scan this QR code with another device";
+"discovery.qrCode.waiting" = "Waiting for connection...";
+"discovery.qrCode.regenerate" = "Regenerate";
+"discovery.qrCode.generate" = "Generate QR Code";
+"discovery.qrCode.otherDevice" = "On Other Device";
+"discovery.qrCode.scanButton" = "Scan QR Code";
+"discovery.qrCode.cameraPrompt" = "Use camera to scan the other device's QR code";
+"discovery.qrCode.error.title" = "Scan Error";
+"discovery.qrCode.error.ok" = "OK";
+"discovery.qrCode.error.connectFailed" = "QR Code Connection Failed: %@";
+"discovery.qrCode.error.unrecognized" = "Unrecognized QR Code Content";
+"discovery.icloud.title" = "Apple ID Device Chain";
+"discovery.icloud.description" = "Automatically discover devices on the same Apple ID, zero config";
+"discovery.icloud.refresh" = "Refresh";
+"discovery.icloud.connectError" = "iCloud Connection Failed: %@";
+"discovery.device.thisDevice" = "This Device";
+"discovery.device.notConnectable" = "Not Connectable";
+
+/* Smart Code */
+"discovery.smartCode.title" = "Smart Connection Code";
+"discovery.smartCode.description" = "6-digit code, valid for 10 mins, for remote assistance";
+"discovery.smartCode.onThisDevice" = "On This Device";
+"discovery.smartCode.shareInstruction" = "Share this code to connect";
+"discovery.smartCode.copy" = "Copy";
+"discovery.smartCode.regenerate" = "Regenerate";
+"discovery.smartCode.waiting" = "Waiting for connection...";
+"discovery.smartCode.generate" = "Generate Code";
+"discovery.smartCode.onOtherDevice" = "On Other Device";
+
+/* Discovery Modes */
+"discovery.mode.localScan" = "Local Scan";
+"discovery.mode.qrCode" = "QR Code";
+"discovery.mode.cloudLink" = "iCloud";
+"discovery.mode.connectionCode" = "Connection Code";
+"discovery.mode.subtitle.localScan" = "Same Network";
+"discovery.mode.subtitle.qrCode" = "Scan";
+"discovery.mode.subtitle.cloudLink" = "Zero Config";
+"discovery.mode.subtitle.connectionCode" = "6-Digit Code";
+
+/* Cloud Link Section */
+"discovery.icloud.status.syncing" = "Syncing...";
+"discovery.icloud.status.synced" = "Synced";
+"discovery.icloud.noDevices.title" = "No Devices Found";
+"discovery.icloud.noDevices.message" = "Please ensure devices are signed into the same iCloud account and have iCloud Drive enabled";
+"discovery.icloud.authorizedDevices" = "iCloud Authorized Devices";
+"discovery.device.status.online" = "Online";
+"discovery.device.status.offline" = "Offline";
+"discovery.time.justNow" = "Just now";
+"discovery.time.minutesAgo" = "%d minutes ago";
+"discovery.time.hoursAgo" = "%d hours ago";
+"discovery.time.daysAgo" = "%d days ago";
+"discovery.time.justNowOnline" = "Online just now";
+"discovery.action.connect" = "Connect";
+"discovery.action.notConnectable" = "Not Connectable";
+"discovery.device.lastActive" = "Last Active: %@";
+
+/* Capabilities */
+"discovery.capability.remoteDesktop" = "Remote Desktop";
+"discovery.capability.fileTransfer" = "File Transfer";
+"discovery.capability.clipboard" = "Clipboard";
+"discovery.capability.notifications" = "Notifications";
+"discovery.capability.calls" = "Calls";
+"discovery.capability.messages" = "Messages";
+
+/* Smart Code Section (Additional) */
+"discovery.code.enterPrompt" = "Enter 6-digit code";
+"discovery.code.connect" = "Connect";
+
+/* Settings - Network */
+"settings.network.wifi.title" = "Wi‑Fi Settings";
+"settings.network.wifi.currentNetwork" = "Current network:";
+"settings.network.wifi.notConnected" = "Not connected";
+"settings.network.wifi.autoConnectKnown" = "Auto-connect known networks";
+"settings.network.wifi.showHidden" = "Show hidden networks";
+"settings.network.wifi.prefer5GHz" = "Prefer 5/6 GHz band";
+"settings.network.wifi.scanTimeout" = "Scan timeout:";
+"settings.network.discovery.title" = "Network Discovery";
+"settings.network.discovery.enableBonjour" = "Enable Bonjour discovery";
+"settings.network.discovery.enableMDNS" = "Enable mDNS resolution";
+"settings.network.discovery.scanCustomPorts" = "Scan custom ports";
+"settings.network.discovery.timeout" = "Discovery timeout:";
+"settings.network.discovery.customServiceType" = "Custom service type:";
+"settings.network.discovery.customServiceTypeExample" = "e.g., _custom._tcp.";
+"settings.network.connection.title" = "Connection Settings";
+"settings.network.connection.timeout" = "Connection timeout:";
+"settings.network.connection.retryCount" = "Retry count:";
+"settings.network.connection.enableEncryption" = "Enable encryption";
+"settings.network.connection.verifyCertificates" = "Verify certificates";
+
+/* Units (additional) */
+"unit.seconds.5" = "5 seconds";
+"unit.seconds.10" = "10 seconds";
+"unit.second.short" = "sec";
+"unit.times.short" = "times";
+
+/* Common Actions */
+"action.add" = "Add";
+"alert.permissions.title" = "Permissions Required";
+"alert.permissions.message" = "Some features require system permissions. Please grant them in System Settings.";
+"action.openSystemPreferences" = "Open System Settings";
+"action.cancel" = "Cancel";
+"alert.reset.title" = "Reset Confirmation";
+"action.reset" = "Reset";
+"alert.reset.message" = "This will reset all settings to defaults. This action cannot be undone.";
+"settings.general.export.defaultFilename" = "SkyBridge Settings Backup";
+
+"discovery.startScan" = "Start Scan";
+"discovery.stopScan" = "Stop Scan";
+"status.idle" = "Idle";
+"status.enabled" = "Enabled";
+"status.disabled" = "Disabled";
+"status.optimized" = "Optimized";
+"status.needsAdjust" = "Needs Adjustment";
+"status.load.high" = "High Load";
+"status.load.medium" = "Medium Load";
+"status.load.low" = "Low Load";
+
+"action.request" = "Request";
+"action.requestPermissions" = "Request Permissions";
+"action.refreshStatus" = "Refresh Status";
+"action.applySettings" = "Apply Settings";
+"action.select" = "Select";
+"action.resetAllSettings" = "Reset All Settings";
+"action.resetNetworkSettings" = "Reset Network Settings";
+"action.resetToDefaults" = "Reset to Defaults";
+"action.resetMonitorData" = "Reset Monitor Data";
+
+"unit.dbm" = "dBm";
+"unit.count.short" = "count";
+"unit.times.short" = "times";
+"unit.path" = "Path";
+"unit.millisecond.short" = "ms";
+"unit.bandwidth" = "Mbps";
+"unit.mbPerSecond" = "MB/s";
+"unit.seconds.1" = "1 s";
+"unit.seconds.5" = "5 s";
+"unit.seconds.10" = "10 s";
+"unit.seconds.30" = "30 s";
+"unit.days.short" = "days";
+
+"position.topLeft" = "Top Left";
+"position.topRight" = "Top Right";
+"position.bottomLeft" = "Bottom Left";
+"position.bottomRight" = "Bottom Right";
+
+"metric.frameRate" = "FPS";
+"metric.gpuTime" = "GPU Time";
+"metric.memory" = "Memory";
+
+"quality.low" = "Low";
+"quality.medium" = "Medium";
+"quality.high" = "High";
+"quality.ultra" = "Ultra";
+
+"precision.low" = "Low";
+"precision.normal" = "Normal";
+"precision.high" = "High";
+
+"chart.line" = "Line";
+"chart.bar" = "Bar";
+"chart.area" = "Area";
+
+"settings.common.status" = "Status:";
+"settings.common.retryCount" = "Retry Count:";
+"settings.common.maxConcurrentConnections" = "Max Concurrent Connections:";
+
+"settings.devices.bluetooth.title" = "Bluetooth Settings";
+"settings.devices.bluetooth.status" = "Bluetooth Status:";
+"settings.devices.bluetooth.discoveredCount" = "Discovered: %d devices";
+"settings.devices.bluetooth.autoConnectPaired" = "Auto-connect paired devices";
+"settings.devices.bluetooth.showRSSI" = "Show device RSSI";
+"settings.devices.bluetooth.showConnectableOnly" = "Show connectable devices only";
+
+"settings.devices.airplay.title" = "AirPlay Settings";
+"settings.devices.airplay.status" = "AirPlay Status:";
+"settings.devices.airplay.discoveredCount" = "Discovered: %d devices";
+"settings.devices.airplay.autoDiscoverAppleTV" = "Auto-discover Apple TV";
+"settings.devices.airplay.showHomePodDevices" = "Show HomePod devices";
+"settings.devices.airplay.showThirdPartyAirPlayDevices" = "Show third-party AirPlay devices";
+
+"settings.devices.filters.title" = "Device Filters";
+"settings.devices.filters.hideOffline" = "Hide offline devices";
+"settings.devices.filters.sortBySignal" = "Sort by signal strength";
+"settings.devices.filters.showIcons" = "Show device icons";
+"settings.devices.filters.minSignalStrength" = "Minimum signal strength:";
+
+"settings.permissions.status.title" = "Permission Status";
+"settings.permissions.summary" = "Summary:";
+"settings.permissions.warning.notAuthorized" = "Some required permissions are not granted; functionality may be affected";
+"settings.permissions.details.title" = "Detailed Permissions";
+"settings.permissions.help.title" = "Permission Help";
+"settings.permissions.help.description.title" = "Permission Description:";
+"settings.permissions.help.wifiAccess" = "• Wi‑Fi Access: Scan and connect to Wi‑Fi networks";
+"settings.permissions.help.bluetoothAccess" = "• Bluetooth Access: Discover and connect to Bluetooth devices";
+"settings.permissions.help.locationAccess" = "• Location Services: Wi‑Fi scanning may require location permission";
+"settings.permissions.help.systemConfigAccess" = "• System Configuration: Access network configuration information";
+
+"settings.advanced.debug.title" = "Debug Options";
+"settings.advanced.debug.enableVerboseLogging" = "Enable verbose logging";
+"settings.advanced.debug.showDebugInfo" = "Show debug information";
+"settings.advanced.debug.saveNetworkLogs" = "Save network logs";
+"settings.advanced.debug.logLevel" = "Log Level:";
+
+"settings.advanced.performance.title" = "Performance Optimization";
+"settings.advanced.performance.mode" = "Performance Mode:";
+"settings.advanced.currentMode" = "Current: %@";
+"settings.advanced.performance.details.title" = "Configuration Details:";
+"settings.advanced.performance.renderScale.range" = "Render Scale: 50%–100%";
+"settings.advanced.performance.maxParticles.range" = "Max Particles: 2,000–8,000";
+"settings.advanced.performance.targetFPS.range" = "Target FPS: 30–120 FPS";
+"settings.advanced.performance.metalFXQuality.range" = "MetalFX: 30%–100%";
+"settings.advanced.performance.shadowQuality.dynamic" = "Shadow Quality: Dynamic Adjustment";
+"settings.advanced.performance.postProcessing.smart" = "Post Processing: Smart Enable";
+"settings.advanced.performance.currentStatus" = "Current Status:";
+"settings.advanced.performance.renderScale.formatPercent" = "Render Scale: %d%%";
+"settings.advanced.performance.maxParticles.format" = "Max Particles: %d";
+"settings.advanced.performance.targetFPS.format" = "Target FPS: %d FPS";
+"settings.advanced.performance.metalFXQuality.formatPercent" = "MetalFX: %d%%";
+"settings.advanced.performance.shadowQuality.format" = "Shadow Quality: %@";
+"settings.advanced.performance.postProcessing.format" = "Post Processing: %@";
+"settings.advanced.performance.showRealtimeFPS" = "Show real-time FPS";
+"settings.advanced.performance.showRealtimeFPS.help" = "Show Metal rendering FPS in top navigation; shows placeholder — FPS when unavailable";
+"settings.advanced.hardware.enableAcceleration" = "Enable hardware acceleration";
+"settings.advanced.memory.optimize" = "Optimize memory usage";
+"settings.advanced.backgroundScanning" = "Background scanning";
+
+"settings.advanced.weather.api.title" = "Weather API";
+"settings.advanced.weather.enable" = "Enable real-time weather";
+"settings.advanced.weather.status" = "Status:";
+"settings.advanced.weather.status.enabled" = "Enabled";
+"settings.advanced.weather.status.disabled" = "Disabled";
+
+"settings.hud.enableRealtimeMonitoring" = "Enable real-time performance monitoring";
+"settings.hud.enableRealtimeMonitoring.help" = "Display Metal rendering performance metrics in real time";
+"settings.hud.showHUD" = "Show HUD overlay";
+"settings.hud.showHUD.help" = "Show performance monitoring overlay in app UI";
+"settings.hud.position" = "HUD Position:";
+"settings.hud.metrics.title" = "Displayed Metrics:";
+
+"settings.advanced.experimental.title" = "Experimental Features";
+"settings.advanced.experimental.enableIPv6" = "Enable IPv6 support";
+"settings.advanced.experimental.useNewDiscovery" = "Use new discovery algorithm";
+"settings.advanced.experimental.enableP2P" = "Enable P2P direct connection";
+"settings.advanced.experimental.warning" = "⚠️ Experimental features may be unstable";
+
+"settings.advanced.pqc.title" = "Post-Quantum Security";
+"settings.advanced.pqc.enableAppLayer" = "Enable post-quantum cryptography (app layer)";
+"settings.advanced.pqc.enableHybridTLS" = "Enable TLS hybrid negotiation (when supported by system)";
+"settings.advanced.pqc.signatureAlgorithm" = "Signature Algorithm:";
+"settings.advanced.pqc.useSecureEnclaveMLDSA" = "Use Secure Enclave for ML-DSA";
+"settings.advanced.pqc.useSecureEnclaveMLKEM" = "Use Secure Enclave for ML-KEM";
+"settings.advanced.pqc.note" = "Secure Enclave PQC is available only on macOS 26+ (CryptoKit). macOS 14–15 falls back to liboqs (ML-KEM-768/ML-DSA-65) or Classic (X25519/Ed25519) when OQS is unavailable.";
+
+"settings.advanced.smoothing.title" = "Device Signal Smoothing";
+"settings.advanced.smoothing.alpha" = "Smoothing Factor (EMA)";
+"settings.advanced.smoothing.alpha.help" = "Smaller value is smoother; larger reacts faster. Recommend 0.4–0.7";
+"settings.advanced.smoothing.alpha.desc" = "Exponential moving average parameter for device signal strength fusion.";
+
+"settings.advanced.reset.title" = "Reset Options";
+"settings.advanced.reset.warning" = "Reset operations cannot be undone; proceed with caution";
+
+"settings.fileTransfer.config.title" = "Transfer Configuration";
+"settings.fileTransfer.defaultPath" = "Default transfer path:";
+"settings.fileTransfer.maxConcurrentTransfers" = "Max concurrent transfers:";
+"settings.fileTransfer.bufferSize" = "Transfer buffer size:";
+"settings.fileTransfer.options.title" = "Transfer Options";
+"settings.fileTransfer.options.showNotification" = "Show notification when transfer completes";
+"settings.fileTransfer.options.autoRetryFailed" = "Auto retry failed transfers";
+"settings.fileTransfer.options.keepHistory" = "Keep transfer history";
+"settings.fileTransfer.options.keepAwake" = "Keep system awake during transfer";
+"settings.fileTransfer.security.title" = "Security Settings";
+"settings.fileTransfer.security.enableEncrypt" = "Enable transfer encryption";
+"settings.fileTransfer.security.verifyIntegrity" = "Verify file integrity";
+"settings.fileTransfer.security.scanVirus" = "Scan transferred files for viruses";
+"settings.fileTransfer.security.algorithm" = "Encryption Algorithm:";
+"settings.fileTransfer.security.scanLevel" = "Scan Level:";
+"settings.fileTransfer.security.scanLevel.quick" = "Quick";
+"settings.fileTransfer.security.scanLevel.quick.desc" = "Quarantine check only";
+"settings.fileTransfer.security.scanLevel.standard" = "Standard";
+"settings.fileTransfer.security.scanLevel.standard.desc" = "Quarantine + Code Signature";
+"settings.fileTransfer.security.scanLevel.deep" = "Deep";
+"settings.fileTransfer.security.scanLevel.deep.desc" = "Full scan with pattern matching";
+
+"settings.videoTransfer.title" = "Video Transfer Configuration";
+"settings.videoTransfer.currentConfig" = "Current Configuration";
+"settings.videoTransfer.estimatedRate" = "Estimated data rate";
+"settings.videoTransfer.resolution.title" = "Video Resolution";
+"settings.videoTransfer.resolution.desc" = "Choose the resolution for video transfer";
+"settings.videoTransfer.frameRate.title" = "Video Frame Rate";
+"settings.videoTransfer.frameRate.desc" = "Choose the frame rate for video transfer";
+"settings.videoTransfer.presets.title" = "Quick Presets";
+"settings.videoTransfer.presets.desc" = "Apply preset configuration in one click";
+"settings.videoTransfer.advancedOptions.title" = "Advanced Options";
+"settings.videoTransfer.enableHardwareAcceleration" = "Enable hardware acceleration";
+"settings.videoTransfer.enableHardwareAcceleration.help" = "Use hardware encoder to improve performance";
+"settings.videoTransfer.enableAppleSiliconOptimization" = "Enable Apple Silicon optimization";
+"settings.videoTransfer.enableAppleSiliconOptimization.help" = "Optimize for Apple Silicon";
+"settings.videoTransfer.enableAdaptiveBitrate" = "Adaptive bitrate";
+"settings.videoTransfer.enableAdaptiveBitrate.help" = "Adjust bitrate automatically based on network conditions";
+"settings.videoTransfer.compressionQuality" = "Compression Quality:";
+
+"settings.remote.display.title" = "Display Settings";
+"settings.remote.display.videoQuality" = "Video Quality:";
+"settings.remote.display.compressionLevel" = "Compression Level:";
+"settings.remote.display.refreshRate" = "Frame Rate Limit:";
+"settings.remote.display.fullScreenMode" = "Full-screen mode";
+"settings.remote.interaction.title" = "Interaction Settings";
+"settings.remote.interaction.clipboardSync" = "Enable clipboard sync";
+"settings.remote.interaction.audioRedirection" = "Enable audio redirection";
+"settings.remote.interaction.fileTransfer" = "Enable file transfer";
+"settings.remote.interaction.trackpadGestures" = "Enable trackpad gestures";
+"settings.remote.interaction.mouseSensitivity" = "Mouse sensitivity:";
+"settings.remote.interaction.doubleClickInterval" = "Double-click interval (ms):";
+"settings.remote.network.title" = "Network Optimization";
+"settings.remote.network.enableBandwidthAdaptive" = "Enable bandwidth adaptive";
+"settings.remote.network.enableUDP" = "Enable UDP transport";
+"settings.remote.network.enableCompression" = "Enable data compression";
+"settings.remote.network.bandwidthLimit" = "Bandwidth limit (Mbps):";
+"settings.remote.network.bufferSize" = "Buffer size:";
+
+"settings.systemMonitor.config.title" = "Monitoring Configuration";
+"settings.systemMonitor.config.refreshInterval" = "Refresh Interval:";
+"settings.systemMonitor.config.enableRealtime" = "Enable real-time monitoring";
+"settings.systemMonitor.config.enableHistory" = "Enable history";
+"settings.systemMonitor.config.enablePerformanceAlerts" = "Enable performance alerts";
+"settings.systemMonitor.config.retentionDays" = "Data retention (days):";
+"settings.systemMonitor.display.title" = "Display Options";
+"settings.systemMonitor.display.cpu" = "Show CPU usage";
+"settings.systemMonitor.display.memory" = "Show memory usage";
+"settings.systemMonitor.display.disk" = "Show disk usage";
+"settings.systemMonitor.display.network" = "Show network activity";
+"settings.systemMonitor.display.temperature" = "Show temperature";
+"settings.systemMonitor.display.fanSpeed" = "Show fan speed";
+"settings.systemMonitor.display.chartType" = "Chart Type:";
+"settings.systemMonitor.alerts.title" = "Alert Settings";
+"settings.systemMonitor.alerts.cpuThreshold" = "CPU alert threshold:";
+"settings.systemMonitor.alerts.memoryThreshold" = "Memory alert threshold:";
+"settings.systemMonitor.alerts.diskThreshold" = "Disk alert threshold:";
+"settings.systemMonitor.alerts.enableSound" = "Enable sound alerts";
+"settings.systemMonitor.alerts.enableNotificationCenter" = "Enable Notification Center";
+"settings.systemMonitor.advanced.title" = "Advanced Options";
+"settings.systemMonitor.advanced.enableVerboseLogging" = "Enable verbose logging";
+"settings.systemMonitor.advanced.exportData" = "Export monitoring data";
+"settings.systemMonitor.advanced.enableRemoteMonitoring" = "Enable remote monitoring";
+"settings.systemMonitor.advanced.samplingPrecision" = "Sampling precision:";
+
+"fileTransfer.connectionStatus" = "Connection Status";
+"status.transferring" = "Transferring";
+"fileTransfer.totalProgress" = "Total Progress";
+"fileTransfer.quickActions" = "Quick Actions";
+"action.selectFiles" = "Select Files";
+"action.selectFolder" = "Select Folder";
+"fileTransfer.recentTransfers" = "Recent Transfers";
+"fileTransfer.recent.empty" = "No transfer records";
+"fileTransfer.tab.transfer" = "Transfer";
+"fileTransfer.tab.history" = "History";
+"fileTransfer.drop.title" = "Drag files here";
+"fileTransfer.drop.subtitle" = "Supports audio, video, documents, and more";
+"fileTransfer.selectedFiles" = "Selected Files";
+"action.sendAll" = "Send All";
+"action.clear" = "Clear";
+"fileTransfer.activeTransfers" = "Active Transfers";
+"fileTransfer.active.emptyTitle" = "No active transfers";
+"fileTransfer.active.emptySubtitle" = "Select files to start transfer";
+"fileTransfer.history.title" = "Transfer History";
+"fileTransfer.history.clear" = "Clear History";
+"fileTransfer.history.emptyTitle" = "No transfer history";
+"fileTransfer.history.emptySubtitle" = "Completed transfers will appear here";
+"fileTransfer.debug.title" = "Debug Panel";
+"fileTransfer.debug.hmacTagHex" = "HMAC Tag (Hex)";
+"fileTransfer.debug.signatureResult" = "File Signature Verification Result";
+"common.none" = "None";
+"action.preview" = "Preview";
+"transferStatus.preparing" = "Preparing";
+"transferStatus.transferring" = "Transferring";
+"transferStatus.paused" = "Paused";
+"transferStatus.completed" = "Completed";
+"transferStatus.failed" = "Failed";
+"transferStatus.cancelled" = "Cancelled";
+"action.close" = "Close";
+"action.share" = "Share";
+"status.idle" = "Idle";
+"status.adaptiveTuning" = "Adaptive Tuning";
+"qrcode.title" = "File Transfer QR Code";
+"qrcode.subtitle" = "Scan the QR to receive files on mobile";
+"qrcode.status.running" = "Service Running";
+"qrcode.status.ready" = "Ready";
+"qrcode.generating" = "Generating QR code...";
+"qrcode.instruction.title" = "Scan the above QR code with your mobile device";
+"qrcode.instruction.subtitle" = "Files will be transferred securely to your device";
+"qrcode.connectionInfo" = "Connection Info";
+"qrcode.serverAddress" = "Server Address";
+"qrcode.connectionCode" = "Connection Code";
+"qrcode.serviceStatus" = "Service Status";
+"status.running" = "Running";
+"status.stopped" = "Stopped";
+"qrcode.pendingFiles" = "Pending Files";
+"common.files.count" = "%d files";
+"qrcode.networkHint" = "Ensure devices are on the same network";
+"action.startServer" = "Start Service";
+"action.stopServer" = "Stop Service";
+"action.copyToClipboard" = "Copy to Clipboard";
+"action.closeWindow" = "Close Window";
+"remote.search.placeholder" = "Search sessions...";
+"remote.activeSessions" = "Active Sessions";
+"remote.recentConnections" = "Recent Connections";
+"remote.newConnection" = "New Connection";
+"remote.overlay.connectingTo" = "Connecting to %@...";
+"remote.empty.title" = "Select a session to start Remote Desktop";
+"remote.empty.subtitle" = "Choose an active session on the left, or create a new connection";
+"remote.toolbar.newConnection.help" = "Create a remote connection";
+"remote.toolbar.refresh.help" = "Refresh sessions";
+"remote.performance.monitor" = "Metal 4 Performance Monitor";
+"remote.recent.reconnect.help" = "Reconnect to this session";
+"remote.recent.lastConnected" = "Last connected: %@";
+"remote.connectionMode.auto" = "Auto";
+"remote.connectionMode.near" = "Near";
+"remote.connectionMode.far" = "Far";
+"remote.connectionMode.auto.description" = "Automatically selects the best mode (prefers near-field on same network)";
+"remote.connectionMode.near.description" = "Near-field hardware mirroring — low latency on same network (ScreenCaptureKit + HEVC + QUIC)";
+"remote.connectionMode.far.description" = "Far-field RDP — stable across networks (FreeRDP 3.x + GFX-AVC444)";
+"common.unknown" = "Unknown";
+"profile.title" = "Profile";
+"action.close" = "Close";
+"profile.edit" = "Edit Info";
+"action.cancel" = "Cancel";
+"action.saving" = "Saving...";
+"action.save" = "Save";
+"profile.save.success" = "Saved";
+"profile.save.failure" = "Save Failed";
+"profile.save.success.detail" = "Your profile has been saved to cloud";
+"action.ok" = "OK";
+"profile.help" = "View and edit your profile";
+"profile.quickActions" = "Quick Actions";
+"about.title" = "About SkyBridge Compass Pro";
+"about.checkingUpdates" = "Checking for updates...";
+"about.checkUpdates" = "Check for Updates";
+"about.systemInfo" = "System Info";
+"about.diagnostics" = "Diagnostics";
+"about.feedback" = "Send Feedback";
+"about.website" = "Visit Website";
+"profile.email.unbound" = "Unbound";
+"profile.phone.unbound" = "Unbound";
+"transferSpeed.slow" = "Slow";
+"transferSpeed.normal" = "Normal";
+"transferSpeed.fast" = "Fast";
+"brand.title" = "SkyBridge Compass";
+"brand.tagline" = "Connect without borders";
+"auth.selectMethod" = "Choose a sign-in method";
+"auth.apple.tip" = "Sign in with Apple ID";
+"auth.nebula.toggle.hasAccount" = "Have an account? Sign in";
+"auth.nebula.toggle.noAccount" = "No account? Sign up";
+"auth.nebula.account" = "Nebula Account";
+"auth.nebula.account.placeholder" = "Enter Nebula account";
+"auth.password" = "Password";
+"auth.password.placeholder" = "Enter password";
+"auth.confirmPassword" = "Confirm Password";
+"auth.confirmPassword.placeholder" = "Re-enter password";
+"auth.displayName" = "Display Name";
+"auth.displayName.placeholder" = "Enter display name";
+"auth.emailAddress" = "Email Address";
+"auth.emailAddress.placeholder" = "Enter email address";
+"auth.nebula.register" = "Register Nebula";
+"auth.nebula.login" = "Sign in to Nebula";
+"auth.mfa.code" = "MFA Code";
+"auth.mfa.verify" = "Verify MFA";
+"auth.phone.toggle.hasAccount" = "Have an account? Sign in";
+"auth.phone.toggle.noAccount" = "No account? Sign up";
+"auth.phone.number" = "Phone Number";
+"auth.phone.number.placeholder" = "Enter phone number";
+"auth.phone.code" = "Verification Code";
+"auth.phone.code.placeholder" = "Enter verification code";
+"auth.phone.codeSentCountdown" = "Code sent, resend in %d seconds";
+"auth.phone.register.complete" = "Complete Sign Up";
+"auth.phone.login.verify" = "Verify Sign In";
+"auth.phone.register.sendCode" = "Send sign-up code";
+"auth.phone.login.sendCode" = "Send sign-in code";
+"auth.phone.resendCode" = "Resend code";
+"auth.email.toggle.hasAccount" = "Have an account? Sign in";
+"auth.email.toggle.noAccount" = "No account? Sign up";
+"auth.rememberCredentials" = "Remember credentials";
+"auth.email.verification.sent" = "Verification email sent";
+"auth.email.verification.tip" = "Check your email and click the verification link";
+"auth.email.register" = "Register";
+"auth.email.login" = "Sign in with Email";
+"auth.password.forgot" = "Forgot password?";
+"guest.mode" = "Guest mode";
+"monitor.noData" = "No data";
+"monitor.axis.time" = "Time";
+"monitor.axis.value" = "Value";
+"monitor.stats.avg" = "Average";
+"monitor.stats.max" = "Peak";
+"monitor.stats.min" = "Minimum";
+"remote.settings.help" = "Remote Desktop Settings";
+"remote.context.focusWindow" = "Focus Window";
+"remote.context.disconnect" = "Disconnect";
+"remote.context.copyInfo" = "Copy Connection Info";
+"remote.context.reconnect" = "Reconnect";
+"remote.context.removeFromHistory" = "Remove from History";
+"remote.form.title" = "New Remote Connection";
+"remote.form.section.connection" = "Connection";
+"remote.form.hostname" = "Hostname or IP";
+"remote.form.port" = "Port";
+"remote.form.protocol" = "Protocol";
+"remote.form.section.auth" = "Authentication";
+"auth.username" = "Username";
+"remote.form.connect" = "Connect";
+"remote.form.connectFailed" = "Connection Failed";
+"monitor.title" = "System Monitor";
+"monitor.status.monitoring" = "Monitoring";
+"monitor.status.initializing" = "Initializing...";
+"monitor.action.stop" = "Stop Monitoring";
+"monitor.waiting.cpuStable" = "Waiting for CPU load to stabilize...";
+"monitor.waiting.tip" = "Monitoring will start automatically once load stabilizes\n(about 10–15 seconds)";
+"monitor.helper.suggest" = "Enable Advanced Monitoring (admin required) to access GPU power/temperature/fan data.";
+"monitor.helper.enable" = "Enable Advanced Monitoring…";
+"monitor.helper.uninstall.tip" = "You can uninstall the elevated Helper to restore defaults.";
+"monitor.helper.uninstall" = "Uninstall Helper…";
+"monitor.overview" = "Overview";
+"monitor.cpu.details" = "CPU Details";
+"monitor.memory.details" = "Memory Details";
+"monitor.gpu.details" = "GPU Details";
+"monitor.thermal.details" = "Thermal Details";
+"monitor.indicator.health" = "Overall Health";
+"monitor.indicator.thermal" = "Thermal State";
+"monitor.indicator.load" = "System Load";
+"thermal.nominal" = "Nominal";
+"thermal.fair" = "Warm";
+"thermal.serious" = "Hot";
+"thermal.critical" = "Critical";
+"thermal.low" = "Cool";
+"health.excellent" = "Excellent";
+"health.good" = "Good";
+"health.fair" = "Fair";
+"health.caution" = "Caution";
+"health.warning" = "Warning";
+"monitor.network.title" = "Network Monitor";
+"status.connected" = "Connected";
+"status.disconnected" = "Disconnected";
+"monitor.network.upload" = "Upload";
+"monitor.network.download" = "Download";
+"monitor.network.totalUpload" = "Total Upload";
+"monitor.network.totalDownload" = "Total Download";
+"monitor.network.activeConnections" = "Active Connections";
+"monitor.network.quality" = "Network Quality";
+"qrcode.generateFailed" = "Failed to generate QR code";
+"qrcode.regenerate" = "Regenerate";
+
+
+/* Scan Progress Indicator */
+"scan.filesProgress" = "Files scanned";
+"scan.phase.preparing" = "Preparing scan...";
+"scan.phase.quarantine" = "Checking quarantine...";
+"scan.phase.xprotect" = "XProtect scan...";
+"scan.phase.signature" = "Verifying signature...";
+"scan.phase.notarization" = "Checking notarization...";
+"scan.phase.pattern" = "Pattern matching...";
+"scan.phase.heuristic" = "Heuristic analysis...";
+"scan.phase.completing" = "Completing...";
+
+/* Scan Verdict */
+"scan.verdict.safe" = "Safe";
+"scan.verdict.warning" = "Warning";
+"scan.verdict.unsafe" = "Threat Detected";
+"scan.verdict.unknown" = "Unknown";
+
+/* Scan Warnings */
+"scan.warnings" = "Warnings";
+
+/* Threat Alert */
+"scan.threat.detected" = "Security Threat Detected";
+"scan.threat.recommendedActions" = "Recommended Actions";
+"scan.action.delete" = "Delete File";
+"scan.action.quarantine" = "Move to Quarantine";
+"scan.action.ignore" = "Ignore Risk";
+
+/* Scan Details */
+"scan.details.title" = "Scan Details";
+"scan.details.fileInfo" = "File Information";
+"scan.details.fileName" = "File Name";
+"scan.details.path" = "Path";
+"scan.details.targetType" = "Target Type";
+"scan.details.scanLevel" = "Scan Level";
+"scan.details.summary" = "Scan Summary";
+"scan.details.duration" = "Duration";
+"scan.details.patternsChecked" = "Patterns Checked";
+"scan.details.checksPerformed" = "Checks Performed";
+"scan.details.codeSignature" = "Code Signature";
+"scan.details.signed" = "Signed";
+"scan.details.valid" = "Valid";
+"scan.details.signer" = "Signer";
+"scan.details.teamId" = "Team ID";
+"scan.details.trustLevel" = "Trust Level";
+"scan.details.notarization" = "Notarization";
+"scan.details.threats" = "Detected Threats";
+"scan.details.warnings" = "Warnings";
+
+/* Target Types */
+"scan.targetType.file" = "File";
+"scan.targetType.bundle" = "Application Bundle";
+"scan.targetType.archive" = "Archive";
+"scan.targetType.directory" = "Directory";
+"scan.targetType.machO" = "Mach-O Binary";
+"scan.targetType.script" = "Script";
+
+/* Scan Levels */
+"scan.level.quick" = "Quick";
+"scan.level.standard" = "Standard";
+"scan.level.deep" = "Deep";
+
+/* Scan Methods */
+"scan.method.quarantine" = "Quarantine";
+"scan.method.gatekeeper" = "Gatekeeper";
+"scan.method.codeSignature" = "Code Signature";
+"scan.method.notarization" = "Notarization";
+"scan.method.patternMatch" = "Pattern Match";
+"scan.method.heuristic" = "Heuristic";
+"scan.method.archiveScan" = "Archive Scan";
+"scan.method.xprotect" = "XProtect";
+"scan.method.signatureCheck" = "Signature Check";
+"scan.method.skipped" = "Skipped";
+
+/* Trust Levels */
+"scan.trustLevel.trusted" = "Trusted";
+"scan.trustLevel.identified" = "Identified";
+"scan.trustLevel.adHoc" = "Ad-Hoc";
+"scan.trustLevel.unsigned" = "Unsigned";
+"scan.trustLevel.invalid" = "Invalid";
+
+/* Notarization Status */
+"scan.notarization.notarized" = "Notarized";
+"scan.notarization.notarized.desc" = "This file has been verified by Apple";
+"scan.notarization.notNotarized" = "Not Notarized";
+"scan.notarization.notNotarized.desc" = "This file has not been verified by Apple";
+"scan.notarization.unknown" = "Unknown";
+"scan.notarization.unknown.desc" = "Notarization status could not be determined";
+
+/* Common */
+"common.yes" = "Yes";
+"common.no" = "No";
+"common.done" = "Done";

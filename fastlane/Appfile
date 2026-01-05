@@ -1,0 +1,8 @@
+# Fastlane 配置文件
+# SkyBridge Compass
+
+app_identifier("com.skybridge.compass")
+apple_id("2403871950@qq.com")
+
+# 如果你有 Team ID，取消下面的注释并填入
+# team_id("YOUR_TEAM_ID")

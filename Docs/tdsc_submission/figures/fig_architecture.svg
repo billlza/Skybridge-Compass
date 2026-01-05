@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="720" viewBox="0 0 1200 720">
+  <defs>
+    <style>
+      .box { fill: #f7f9fb; stroke: #1d2a33; stroke-width: 2; rx: 10; ry: 10; }
+      .box-strong { fill: #eef4f8; stroke: #1d2a33; stroke-width: 2.5; rx: 10; ry: 10; }
+      .trust { fill: none; stroke: #6b7b88; stroke-width: 2; stroke-dasharray: 8 6; rx: 14; ry: 14; }
+      .label { font-family: Helvetica, Arial, sans-serif; font-size: 16px; fill: #1d2a33; }
+      .title { font-family: Helvetica, Arial, sans-serif; font-size: 20px; font-weight: 700; fill: #1d2a33; }
+      .note { font-family: Helvetica, Arial, sans-serif; font-size: 13px; fill: #3b4a55; }
+      .arrow { stroke: #1d2a33; stroke-width: 2; fill: none; marker-end: url(#arrow); }
+      .arrow-dashed { stroke: #1d2a33; stroke-width: 2; fill: none; stroke-dasharray: 6 4; marker-end: url(#arrow); }
+      .policy { fill: #fff2cc; stroke: #b07c00; stroke-width: 2; rx: 8; ry: 8; }
+    </style>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#1d2a33"/>
+    </marker>
+  </defs>
+
+  <rect x="40" y="40" width="1120" height="640" class="trust"/>
+  <text x="60" y="70" class="title">Local Device (Trusted Boundary)</text>
+
+  <rect x="80" y="110" width="1040" height="500" class="box-strong"/>
+  <text x="100" y="140" class="title">SkyBridge Core</text>
+
+  <rect x="120" y="180" width="240" height="80" class="box"/>
+  <text x="150" y="210" class="label">UI / Views</text>
+  <text x="150" y="232" class="note">User actions</text>
+
+  <rect x="390" y="180" width="260" height="80" class="box"/>
+  <text x="415" y="210" class="label">SessionManager</text>
+  <text x="415" y="232" class="note">Policy decision point</text>
+
+  <rect x="700" y="180" width="260" height="80" class="box"/>
+  <text x="725" y="210" class="label">TwoAttempt</text>
+  <text x="725" y="232" class="note">Downgrade executor</text>
+
+  <rect x="700" y="300" width="260" height="90" class="box"/>
+  <text x="730" y="330" class="label">HandshakeDriver</text>
+  <text x="730" y="352" class="note">MessageA/B, Finished</text>
+
+  <rect x="390" y="300" width="260" height="90" class="box"/>
+  <text x="415" y="330" class="label">CryptoProviderFactory</text>
+  <text x="415" y="352" class="note">Capability selection</text>
+
+  <rect x="120" y="300" width="240" height="90" class="box"/>
+  <text x="150" y="330" class="label">KeyManager</text>
+  <text x="150" y="352" class="note">Identity + SE PoP</text>
+
+  <rect x="120" y="430" width="840" height="140" class="box"/>
+  <text x="150" y="460" class="label">Crypto Providers</text>
+  <text x="150" y="482" class="note">ApplePQCCrypto / OQSPQC / Classic</text>
+  <rect x="170" y="500" width="220" height="50" class="box"/>
+  <text x="190" y="532" class="note">Apple PQC (CryptoKit)</text>
+  <rect x="410" y="500" width="170" height="50" class="box"/>
+  <text x="430" y="532" class="note">liboqs PQC</text>
+  <rect x="600" y="500" width="170" height="50" class="box"/>
+  <text x="630" y="532" class="note">Classic</text>
+
+  <rect x="980" y="430" width="120" height="140" class="box"/>
+  <text x="995" y="460" class="label">Transport</text>
+  <text x="995" y="482" class="note">Discovery I/O</text>
+
+  <rect x="420" y="120" width="210" height="40" class="policy"/>
+  <text x="435" y="146" class="note">Policy Guard: strictPQC</text>
+
+  <path d="M 360 220 L 390 220" class="arrow"/>
+  <path d="M 650 220 L 700 220" class="arrow"/>
+  <path d="M 820 260 L 820 300" class="arrow"/>
+  <path d="M 520 260 L 520 300" class="arrow"/>
+  <path d="M 240 260 L 240 300" class="arrow"/>
+  <path d="M 520 390 L 520 430" class="arrow"/>
+  <path d="M 830 390 L 830 430" class="arrow"/>
+  <path d="M 240 390 L 240 430" class="arrow"/>
+
+  <path d="M 630 140 L 700 180" class="arrow-dashed"/>
+  <text x="660" y="170" class="note">prevents</text>
+  <text x="660" y="186" class="note">fallback</text>
+</svg>

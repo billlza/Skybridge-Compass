@@ -1,0 +1,752 @@
+/* Connection Methods */
+"connection.crossNetwork.title" = "クロスネットワーク接続";
+"connection.qrcode.title" = "動的QRコード";
+"connection.qrcode.longDescription" = "一時的な暗号化QRコードを生成し、モバイルでスキャンして接続します。安全、高速、設定不要。";
+"connection.qrcode.highlight" = "✨ 革新：動的キー + 5分間有効";
+"connection.qrcode.scanInstruction" = "SkyBridgeモバイルアプリでスキャン";
+"connection.waiting" = "接続待機中...";
+"connection.generateQR" = "QRコード生成";
+"connection.device.other" = "他のデバイスで";
+"connection.scanQR" = "QRコードをスキャン";
+"connection.scanQR.description" = "カメラを起動";
+"connection.security.encrypted" = "エンドツーエンド暗号化";
+"connection.validity.5min" = "5分間有効";
+"connection.p2p" = "P2P直接接続";
+"connection.natTraversal" = "NATトラバーサル";
+
+/* iCloud */
+"connection.icloud.title" = "iCloudデバイスチェーン";
+"connection.icloud.description" = "同じApple IDでサインインしているデバイスに接続します。手動ペアリングは不要です。";
+"connection.icloud.highlight" = "✨ 革新：Appleエコシステム専用、設定不要";
+"connection.icloud.noDevices" = "iCloudデバイスが見つかりません";
+"connection.icloud.instruction" = "他のデバイスがiCloudにサインインし、SkyBridgeが開いていることを確認してください。";
+"action.refresh" = "更新";
+"connection.availableDevices" = "%d 台の利用可能なデバイス";
+"connection.icloud.sync" = "iCloud同期";
+"connection.apple.ecosystem" = "Appleエコシステム";
+"connection.auto.discovery" = "自動検出";
+"connection.apple.auth" = "安全な認証";
+
+/* Smart Code */
+"connection.smartCode.title" = "スマート接続コード";
+"connection.smartCode.fullDescription" = "すべてのシナリオに対応する6桁の英数字コードを生成します。P2P直接接続とスマートリレーをサポート。";
+"connection.smartCode.highlight" = "✨ 革新：ショートコード + スマートルーティング + 10分間有効";
+"connection.device.this" = "このデバイスで";
+"connection.smartCode.shareInstruction" = "このコードを共有して接続";
+"connection.copy" = "コピー";
+"connection.regenerate" = "再生成";
+"connection.smartCode.generate" = "コード生成";
+"connection.smartCode.placeholder" = "コードを入力";
+"connection.smartCode.connect" = "接続";
+"connection.fast" = "高速接続";
+"connection.p2p.priority" = "P2P優先";
+"connection.smart.relay" = "スマートリレー";
+"connection.validity.10min" = "10分間有効";
+
+/* Dashboard */
+"dashboard.unknownIP" = "不明なIP";
+"dashboard.action.connect" = "接続";
+"dashboard.status.connecting" = "接続中...";
+"dashboard.deviceDiscovery" = "デバイス検出";
+"discovery.manualConnect" = "手動接続";
+
+/* App */
+"app.name" = "SkyBridge コンパス Pro";
+"app.slogan" = "次世代のクロスプラットフォーム接続";
+
+/* Manual Connect */
+"manualConnect.title" = "手動接続";
+"manualConnect.ipAddress" = "IPアドレス";
+"manualConnect.port" = "ポート";
+"manualConnect.pairingCode" = "ペアリングコード";
+"action.cancel" = "キャンセル";
+
+/* Status */
+"status.disconnected" = "未接続";
+"status.scanning" = "スキャン中...";
+"device.status.connected" = "接続済み";
+"status.excellent" = "極めて良好";
+"status.good" = "良好";
+"status.attention" = "注意";
+
+/* Theme */
+"theme.selectBackground" = "背景を選択";
+"theme.animations" = "アニメーション";
+"theme.glassEffects" = "すりガラス効果";
+
+/* Navigation */
+"sidebar.dashboard" = "ダッシュボード";
+"sidebar.deviceDiscovery" = "デバイス検出";
+"sidebar.usbManagement" = "USB管理";
+"sidebar.fileTransfer" = "ファイル転送";
+"sidebar.remoteDesktop" = "リモートデスクトップ";
+"sidebar.systemMonitor" = "システム監視";
+"sidebar.settings" = "設定";
+
+/* Quantum */
+"quantum.title" = "量子通信";
+"quantum.subtitle" = "ファイル転送とリモートデスクトップに統合";
+
+/* Dashboard Stats */
+"dashboard.onlineDevices" = "オンラインデバイス";
+"dashboard.activeSessions" = "アクティブセッション";
+"dashboard.performanceStatus" = "システム状態";
+
+/* Performance Monitor */
+"dashboard.performanceMonitor" = "パフォーマンス監視";
+"monitor.cpu" = "CPU";
+"monitor.gpu" = "GPU";
+"monitor.memoryUsage" = "メモリ";
+"monitor.fanSpeed" = "ファン速度";
+"monitor.systemLoad" = "システム負荷";
+"monitor.thermalState" = "熱状態";
+"monitor.powerState" = "電源状態";
+"monitor.recommendations" = "推奨事項";
+
+/* System Metrics */
+"dashboard.systemMetrics" = "システムメトリクス";
+"metrics.cpuUsage" = "CPU使用率";
+"metrics.memoryUsage" = "メモリ使用率";
+"metrics.downloadRate" = "ダウンロード速度";
+"metrics.uploadRate" = "アップロード速度";
+
+/* Discovery */
+"discovery.compatibilityMode" = "互換性/その他のデバイス";
+"discovery.extendedSearch.active" = "拡張検索 (%d秒)";
+"discovery.extendedSearch.default" = "拡張検索";
+"discovery.extendedSearch.static" = "拡張検索 15s";
+"discovery.searchPlaceholder" = "デバイスを検索...";
+"discovery.noMatch" = "一致するデバイスなし";
+"discovery.adjustSearch" = "検索キーワードを調整してください";
+"dashboard.noDevicesFound" = "デバイスが見つかりません";
+"dashboard.checkNetwork" = "ネットワーク接続を確認してください";
+
+/* Remote Sessions */
+"dashboard.remoteSessions" = "リモートセッション";
+"session.noActive" = "アクティブなセッションなし";
+"session.placeholder" = "デバイス検出からセッションを開始";
+
+/* Quick Actions */
+"dashboard.quickActions" = "クイックアクション";
+"action.scanDevices" = "デバイススキャン";
+"action.systemMonitor" = "システム監視";
+"action.settings" = "設定";
+
+/* System Info */
+"dashboard.systemPerformance" = "システムパフォーマンス";
+"info.processorArch" = "プロセッサアーキテクチャ";
+
+/* Device Row */
+"device.local" = "ローカル";
+"device.noIP" = "IPなし";
+"device.services" = "サービス";
+"device.servicesCount" = "サービス";
+"device.unknownIP" = "不明なIP";
+"dashboard.fileTransfer" = "ファイル転送";
+"dashboard.transferTasks" = "転送タスク";
+"dashboard.noTransferTasks" = "転送タスクなし";
+"dashboard.transferTasksPlaceholder" = "ファイルをドラッグ＆ドロップして転送開始";
+"dashboard.deviceManagement" = "デバイス管理";
+"dashboard.discoveredDevices" = "検出されたデバイス";
+
+/* Settings */
+"settings.header.title" = "設定";
+"settings.tab.general" = "一般";
+"settings.tab.network" = "ネットワーク";
+"settings.tab.devices" = "デバイス";
+"settings.tab.fileTransfer" = "ファイル転送";
+"settings.tab.remoteDesktop" = "リモートデスクトップ";
+"settings.tab.systemMonitor" = "システム監視";
+"settings.tab.permissions" = "権限";
+"settings.tab.advanced" = "詳細";
+
+"settings.general.language.sectionTitle" = "言語";
+"settings.general.language.label" = "インターフェース言語";
+"settings.general.language.description" = "表示言語を選択";
+"settings.language.system" = "システムに従う";
+
+"settings.general.preferences" = "一般設定";
+"settings.general.autoScan" = "起動時にデバイスを自動スキャン";
+"settings.general.systemNotifications" = "システム通知を表示";
+"settings.general.darkMode" = "ダークモードを有効化";
+"settings.general.scanInterval" = "スキャン間隔";
+
+"settings.general.interface" = "インターフェースと表示";
+"settings.general.showDeviceDetails" = "デバイス詳細を表示";
+"settings.general.showConnectionStats" = "接続統計を表示";
+"settings.general.compactMode" = "コンパクトモード";
+"settings.general.themeColor" = "テーマカラー";
+
+"settings.general.dataManagement" = "データ管理";
+"settings.general.clearCache" = "キャッシュを削除";
+"settings.general.cacheSize" = "現在のキャッシュ：%@";
+"settings.general.exportSettings" = "設定をエクスポート";
+"settings.general.importSettings" = "設定をインポート";
+"settings.general.resetSettings" = "デフォルトにリセット";
+"settings.general.deduplicateKeychain" = "キーチェーンの重複を整理";
+
+/* Units */
+"unit.seconds.15" = "15秒";
+"unit.seconds.30" = "30秒";
+"unit.seconds.60" = "60秒";
+"unit.seconds.120" = "120秒";
+/* Device Discovery (Enhanced) */
+"discovery.title" = "デバイス検出";
+"discovery.manualConnect.title" = "手動接続";
+"discovery.manualConnect.button" = "接続";
+"discovery.manualConnect.ip" = "IPアドレス";
+"discovery.manualConnect.port" = "ポート";
+"discovery.manualConnect.code" = "ペアリングコード（任意）";
+"discovery.manualConnect.cancel" = "キャンセル";
+"discovery.localScan.title" = "近距離スキャン";
+"discovery.localScan.description" = "同じネットワーク内のデバイスを自動検出";
+"discovery.scanning" = "スキャン中...";
+"discovery.stopScan" = "スキャン停止";
+"discovery.startScan" = "スキャン開始";
+"discovery.refresh" = "更新";
+"discovery.onlineDevices" = "オンラインデバイス (%d)";
+"discovery.noDevices.title" = "デバイスが見つかりません";
+"discovery.noDevices.scanning" = "スキャン中...";
+"discovery.noDevices.startPrompt" = "「スキャン開始」をクリックして近くのデバイスを検出";
+"discovery.qrCode.title" = "動的暗号化QRコード";
+"discovery.qrCode.description" = "スキャンして接続、5分間有効、E2E暗号化";
+"discovery.qrCode.thisDevice" = "このデバイス";
+"discovery.qrCode.scanPrompt" = "他のデバイスでこのQRコードをスキャン";
+"discovery.qrCode.waiting" = "接続待機中...";
+"discovery.qrCode.regenerate" = "再生成";
+"discovery.qrCode.generate" = "QRコード生成";
+"discovery.qrCode.otherDevice" = "他のデバイス";
+"discovery.qrCode.scanButton" = "QRコードをスキャン";
+"discovery.qrCode.cameraPrompt" = "カメラを使って相手のQRコードをスキャン";
+"discovery.qrCode.error.title" = "スキャンエラー";
+"discovery.qrCode.error.ok" = "OK";
+"discovery.qrCode.error.connectFailed" = "QRコード接続失敗: %@";
+"discovery.qrCode.error.unrecognized" = "認識できないQRコードの内容";
+"discovery.icloud.title" = "Apple ID デバイスチェーン";
+"discovery.icloud.description" = "同じApple IDのすべてのデバイスを自動検出、設定不要";
+"discovery.icloud.refresh" = "更新";
+"discovery.icloud.connectError" = "iCloud接続失敗: %@";
+"discovery.device.thisDevice" = "このデバイス";
+"discovery.device.notConnectable" = "接続不可";
+
+/* Smart Code */
+"discovery.smartCode.title" = "スマート接続コード";
+"discovery.smartCode.description" = "6桁のショートコード、10分間有効、リモートアシスタンス用";
+"discovery.smartCode.onThisDevice" = "このデバイスで";
+"discovery.smartCode.shareInstruction" = "このコードを相手に共有してください";
+"discovery.smartCode.copy" = "コピー";
+"discovery.smartCode.regenerate" = "再生成";
+"discovery.smartCode.waiting" = "接続待ち...";
+"discovery.smartCode.generate" = "コードを生成";
+"discovery.smartCode.onOtherDevice" = "他のデバイスで";
+
+/* Discovery Modes */
+"discovery.mode.localScan" = "近距離スキャン";
+"discovery.mode.qrCode" = "QR接続";
+"discovery.mode.cloudLink" = "iCloud";
+"discovery.mode.connectionCode" = "スマートコード";
+"discovery.mode.subtitle.localScan" = "同ネットワーク";
+"discovery.mode.subtitle.qrCode" = "スキャン";
+"discovery.mode.subtitle.cloudLink" = "設定不要";
+"discovery.mode.subtitle.connectionCode" = "6桁コード";
+
+/* Cloud Link Section */
+"discovery.icloud.status.syncing" = "同期中...";
+"discovery.icloud.status.synced" = "同期済み";
+"discovery.icloud.noDevices.title" = "デバイスが見つかりません";
+"discovery.icloud.noDevices.message" = "デバイスが同じiCloudアカウントにサインインし、iCloud Driveが有効になっていることを確認してください";
+"discovery.icloud.authorizedDevices" = "iCloud認証済みデバイス";
+"discovery.device.status.online" = "オンライン";
+"discovery.device.status.offline" = "オフライン";
+"discovery.time.justNow" = "たった今";
+"discovery.time.minutesAgo" = "%d分前";
+"discovery.time.hoursAgo" = "%d時間前";
+"discovery.time.daysAgo" = "%d日前";
+"discovery.time.justNowOnline" = "たった今オンライン";
+"discovery.action.connect" = "接続";
+"discovery.action.notConnectable" = "接続不可";
+"discovery.device.lastActive" = "最終アクティブ: %@";
+
+/* Capabilities */
+"discovery.capability.remoteDesktop" = "リモートデスクトップ";
+"discovery.capability.fileTransfer" = "ファイル転送";
+"discovery.capability.clipboard" = "クリップボード";
+"discovery.capability.notifications" = "通知";
+"discovery.capability.calls" = "通話";
+"discovery.capability.messages" = "メッセージ";
+
+/* Smart Code Section (Additional) */
+"discovery.code.enterPrompt" = "6桁のコードを入力";
+"discovery.code.connect" = "接続";
+
+/* Settings - Network */
+"settings.network.wifi.title" = "Wi‑Fi設定";
+"settings.network.wifi.currentNetwork" = "現在のネットワーク:";
+"settings.network.wifi.notConnected" = "未接続";
+"settings.network.wifi.autoConnectKnown" = "既知ネットワークに自動接続";
+"settings.network.wifi.showHidden" = "隠しネットワークを表示";
+"settings.network.wifi.prefer5GHz" = "5/6GHz帯を優先";
+"settings.network.wifi.scanTimeout" = "スキャンタイムアウト:";
+"settings.network.discovery.title" = "ネットワーク検出";
+"settings.network.discovery.enableBonjour" = "Bonjour検出を有効化";
+"settings.network.discovery.enableMDNS" = "mDNS解析を有効化";
+"settings.network.discovery.scanCustomPorts" = "カスタムポートをスキャン";
+"settings.network.discovery.timeout" = "検出タイムアウト:";
+"settings.network.discovery.customServiceType" = "カスタムサービス種別:";
+"settings.network.discovery.customServiceTypeExample" = "例: _custom._tcp.";
+"settings.network.connection.title" = "接続設定";
+"settings.network.connection.timeout" = "接続タイムアウト:";
+"settings.network.connection.retryCount" = "再試行回数:";
+"settings.network.connection.enableEncryption" = "接続の暗号化を有効化";
+"settings.network.connection.verifyCertificates" = "証明書を検証";
+
+/* Units (additional) */
+"unit.seconds.5" = "5秒";
+"unit.seconds.10" = "10秒";
+"unit.second.short" = "秒";
+"unit.times.short" = "回";
+
+/* Common Actions */
+"action.add" = "追加";
+"alert.permissions.title" = "権限が必要です";
+"alert.permissions.message" = "一部の機能にはシステム権限が必要です。システム設定で付与してください。";
+"action.openSystemPreferences" = "システム設定を開く";
+"action.cancel" = "キャンセル";
+"alert.reset.title" = "リセットの確認";
+"action.reset" = "リセット";
+"alert.reset.message" = "すべての設定が初期化されます。この操作は元に戻せません。";
+"settings.general.export.defaultFilename" = "SkyBridge設定バックアップ";
+
+"discovery.startScan" = "スキャン開始";
+"discovery.stopScan" = "スキャン停止";
+"status.idle" = "待機中";
+"status.enabled" = "有効";
+"status.disabled" = "無効";
+"status.optimized" = "最適化";
+"status.needsAdjust" = "調整が必要";
+"status.load.high" = "高負荷";
+"status.load.medium" = "中負荷";
+"status.load.low" = "低負荷";
+
+"action.request" = "リクエスト";
+"action.requestPermissions" = "権限をリクエスト";
+"action.refreshStatus" = "状態を更新";
+"action.applySettings" = "設定を適用";
+"action.select" = "選択";
+"action.resetAllSettings" = "すべての設定をリセット";
+"action.resetNetworkSettings" = "ネットワーク設定をリセット";
+"action.resetToDefaults" = "デフォルトにリセット";
+"action.resetMonitorData" = "モニターデータをリセット";
+
+"unit.dbm" = "dBm";
+"unit.count.short" = "件";
+"unit.times.short" = "回";
+"unit.path" = "パス";
+"unit.millisecond.short" = "ms";
+"unit.bandwidth" = "Mbps";
+"unit.mbPerSecond" = "MB/s";
+"unit.seconds.1" = "1秒";
+"unit.seconds.5" = "5秒";
+"unit.seconds.10" = "10秒";
+"unit.seconds.30" = "30秒";
+"unit.days.short" = "日";
+
+"position.topLeft" = "左上";
+"position.topRight" = "右上";
+"position.bottomLeft" = "左下";
+"position.bottomRight" = "右下";
+
+"metric.frameRate" = "FPS";
+"metric.gpuTime" = "GPU時間";
+"metric.memory" = "メモリ";
+
+"quality.low" = "低";
+"quality.medium" = "中";
+"quality.high" = "高";
+"quality.ultra" = "超高";
+
+"precision.low" = "低";
+"precision.normal" = "標準";
+"precision.high" = "高";
+
+"chart.line" = "折れ線";
+"chart.bar" = "棒";
+"chart.area" = "面";
+
+"settings.common.status" = "状態:";
+"settings.common.retryCount" = "再試行回数:";
+"settings.common.maxConcurrentConnections" = "最大同時接続:";
+
+"settings.devices.bluetooth.title" = "Bluetooth設定";
+"settings.devices.bluetooth.status" = "Bluetooth状態:";
+"settings.devices.bluetooth.discoveredCount" = "検出: %d台";
+"settings.devices.bluetooth.autoConnectPaired" = "ペア済みデバイスに自動接続";
+"settings.devices.bluetooth.showRSSI" = "デバイスRSSIを表示";
+"settings.devices.bluetooth.showConnectableOnly" = "接続可能なデバイスのみ表示";
+
+"settings.devices.airplay.title" = "AirPlay設定";
+"settings.devices.airplay.status" = "AirPlay状態:";
+"settings.devices.airplay.discoveredCount" = "検出: %d台";
+"settings.devices.airplay.autoDiscoverAppleTV" = "Apple TVを自動検出";
+"settings.devices.airplay.showHomePodDevices" = "HomePodを表示";
+"settings.devices.airplay.showThirdPartyAirPlayDevices" = "サードパーティAirPlayデバイスを表示";
+
+"settings.devices.filters.title" = "デバイスフィルタ";
+"settings.devices.filters.hideOffline" = "オフラインを非表示";
+"settings.devices.filters.sortBySignal" = "信号強度で並べ替え";
+"settings.devices.filters.showIcons" = "デバイスアイコンを表示";
+"settings.devices.filters.minSignalStrength" = "最小信号強度:";
+
+"settings.permissions.status.title" = "権限の状態";
+"settings.permissions.summary" = "概要:";
+"settings.permissions.warning.notAuthorized" = "必須権限が未付与です。機能に影響する可能性があります";
+"settings.permissions.details.title" = "詳細権限";
+"settings.permissions.help.title" = "権限ヘルプ";
+"settings.permissions.help.description.title" = "権限の説明:";
+"settings.permissions.help.wifiAccess" = "• Wi‑Fiアクセス: Wi‑Fiネットワークの走査と接続";
+"settings.permissions.help.bluetoothAccess" = "• Bluetoothアクセス: Bluetoothデバイスの検出と接続";
+"settings.permissions.help.locationAccess" = "• 位置情報サービス: Wi‑Fi走査に位置権限が必要な場合があります";
+"settings.permissions.help.systemConfigAccess" = "• システム設定: ネットワーク設定情報へのアクセス";
+
+"settings.advanced.debug.title" = "デバッグオプション";
+"settings.advanced.debug.enableVerboseLogging" = "詳細ログを有効化";
+"settings.advanced.debug.showDebugInfo" = "デバッグ情報を表示";
+"settings.advanced.debug.saveNetworkLogs" = "ネットワークログを保存";
+"settings.advanced.debug.logLevel" = "ログレベル:";
+
+"settings.advanced.performance.title" = "性能最適化";
+"settings.advanced.performance.mode" = "性能モード:";
+"settings.advanced.currentMode" = "現在: %@";
+"settings.advanced.performance.details.title" = "構成詳細:";
+"settings.advanced.performance.renderScale.range" = "レンダースケール: 50%–100%";
+"settings.advanced.performance.maxParticles.range" = "最大パーティクル: 2,000–8,000";
+"settings.advanced.performance.targetFPS.range" = "目標FPS: 30–120 FPS";
+"settings.advanced.performance.metalFXQuality.range" = "MetalFX: 30%–100%";
+"settings.advanced.performance.shadowQuality.dynamic" = "シャドウ品質: 動的調整";
+"settings.advanced.performance.postProcessing.smart" = "後処理: スマート有効化";
+"settings.advanced.performance.currentStatus" = "現在の状態:";
+"settings.advanced.performance.renderScale.formatPercent" = "レンダースケール: %d%%";
+"settings.advanced.performance.maxParticles.format" = "最大パーティクル: %d";
+"settings.advanced.performance.targetFPS.format" = "目標FPS: %d FPS";
+"settings.advanced.performance.metalFXQuality.formatPercent" = "MetalFX: %d%%";
+"settings.advanced.performance.shadowQuality.format" = "シャドウ品質: %@";
+"settings.advanced.performance.postProcessing.format" = "後処理: %@";
+"settings.advanced.performance.showRealtimeFPS" = "リアルタイムFPSを表示";
+"settings.advanced.performance.showRealtimeFPS.help" = "トップナビにMetalレンダリングFPSを表示。未取得時は占位 — FPS";
+"settings.advanced.hardware.enableAcceleration" = "ハードウェアアクセラレーションを有効化";
+"settings.advanced.memory.optimize" = "メモリ使用を最適化";
+"settings.advanced.backgroundScanning" = "バックグラウンドスキャン";
+
+"settings.hud.enableRealtimeMonitoring" = "リアルタイム性能監視を有効化";
+"settings.hud.enableRealtimeMonitoring.help" = "Metalレンダリングの性能指標をリアルタイム表示";
+"settings.hud.showHUD" = "HUDオーバーレイを表示";
+"settings.hud.showHUD.help" = "アプリUIに性能監視オーバーレイを表示";
+"settings.hud.position" = "HUD位置:";
+"settings.hud.metrics.title" = "表示メトリクス:";
+
+"settings.advanced.experimental.title" = "実験的機能";
+"settings.advanced.experimental.enableIPv6" = "IPv6サポートを有効化";
+"settings.advanced.experimental.useNewDiscovery" = "新しい検出アルゴリズムを使用";
+"settings.advanced.experimental.enableP2P" = "P2P直接接続を有効化";
+"settings.advanced.experimental.warning" = "⚠️ 実験的機能は不安定な場合があります";
+
+"settings.advanced.pqc.title" = "量子耐性セキュリティ";
+"settings.advanced.pqc.enableAppLayer" = "ポスト量子暗号（アプリ層）を有効化";
+"settings.advanced.pqc.enableHybridTLS" = "TLSハイブリッドネゴシエーションを有効化（システム対応時）";
+"settings.advanced.pqc.signatureAlgorithm" = "署名アルゴリズム:";
+"settings.advanced.pqc.useSecureEnclaveMLDSA" = "ML-DSAにSecure Enclaveを使用";
+"settings.advanced.pqc.useSecureEnclaveMLKEM" = "ML-KEMにSecure Enclaveを使用";
+"settings.advanced.pqc.note" = "Secure Enclave PQCは macOS 26+（CryptoKit）のみ。macOS 14–15 は liboqs（ML‑KEM‑768/ML‑DSA‑65）へ、OQS 不可の場合は Classic（X25519/Ed25519）へフォールバック。";
+
+"settings.advanced.smoothing.title" = "デバイス信号スムージング";
+"settings.advanced.smoothing.alpha" = "スムージング係数（EMA）";
+"settings.advanced.smoothing.alpha.help" = "値が小さいほど滑らか、大きいほど応答が速い。推奨 0.4〜0.7";
+"settings.advanced.smoothing.alpha.desc" = "デバイス信号強度の融合に用いる指数移動平均パラメータ。";
+
+"settings.advanced.reset.title" = "リセットオプション";
+"settings.advanced.reset.warning" = "リセット操作は元に戻せません。慎重に行ってください";
+
+"settings.fileTransfer.config.title" = "転送設定";
+"settings.fileTransfer.defaultPath" = "デフォルト転送パス:";
+"settings.fileTransfer.maxConcurrentTransfers" = "最大同時転送:";
+"settings.fileTransfer.bufferSize" = "転送バッファサイズ:";
+"settings.fileTransfer.options.title" = "転送オプション";
+"settings.fileTransfer.options.showNotification" = "転送完了時に通知を表示";
+"settings.fileTransfer.options.autoRetryFailed" = "失敗した転送を自動再試行";
+"settings.fileTransfer.options.keepHistory" = "転送履歴を保持";
+"settings.fileTransfer.options.keepAwake" = "転送中にシステムをスリープさせない";
+"settings.fileTransfer.security.title" = "セキュリティ設定";
+"settings.fileTransfer.security.enableEncrypt" = "転送暗号化を有効化";
+"settings.fileTransfer.security.verifyIntegrity" = "ファイル整合性を検証";
+"settings.fileTransfer.security.scanVirus" = "転送ファイルをウイルススキャン";
+"settings.fileTransfer.security.algorithm" = "暗号アルゴリズム:";
+"settings.fileTransfer.security.scanLevel" = "スキャンレベル:";
+"settings.fileTransfer.security.scanLevel.quick" = "クイック";
+"settings.fileTransfer.security.scanLevel.quick.desc" = "隔離チェックのみ";
+"settings.fileTransfer.security.scanLevel.standard" = "標準";
+"settings.fileTransfer.security.scanLevel.standard.desc" = "隔離 + コード署名";
+"settings.fileTransfer.security.scanLevel.deep" = "ディープ";
+"settings.fileTransfer.security.scanLevel.deep.desc" = "パターンマッチング含む完全スキャン";
+
+"settings.videoTransfer.title" = "動画転送設定";
+"settings.videoTransfer.currentConfig" = "現在の構成";
+"settings.videoTransfer.estimatedRate" = "推定データレート";
+"settings.videoTransfer.resolution.title" = "動画解像度";
+"settings.videoTransfer.resolution.desc" = "転送する動画の解像度を選択";
+"settings.videoTransfer.frameRate.title" = "動画フレームレート";
+"settings.videoTransfer.frameRate.desc" = "転送する動画のフレームレートを選択";
+"settings.videoTransfer.presets.title" = "クイックプリセット";
+"settings.videoTransfer.presets.desc" = "ワンクリックでプリセット構成を適用";
+"settings.videoTransfer.advancedOptions.title" = "詳細オプション";
+"settings.videoTransfer.enableHardwareAcceleration" = "ハードウェアアクセラレーションを有効化";
+"settings.videoTransfer.enableHardwareAcceleration.help" = "ハードウェアエンコーダを使用して性能を向上";
+"settings.videoTransfer.enableAppleSiliconOptimization" = "Apple Silicon最適化を有効化";
+"settings.videoTransfer.enableAppleSiliconOptimization.help" = "Apple Silicon向けに最適化";
+"settings.videoTransfer.enableAdaptiveBitrate" = "アダプティブビットレート";
+"settings.videoTransfer.enableAdaptiveBitrate.help" = "ネットワーク状況に応じてビットレートを自動調整";
+"settings.videoTransfer.compressionQuality" = "圧縮品質:";
+
+"settings.remote.display.title" = "表示設定";
+"settings.remote.display.videoQuality" = "動画品質:";
+"settings.remote.display.compressionLevel" = "圧縮レベル:";
+"settings.remote.display.refreshRate" = "フレームレート制限:";
+"settings.remote.display.fullScreenMode" = "全画面モード";
+"settings.remote.interaction.title" = "インタラクション設定";
+"settings.remote.interaction.clipboardSync" = "クリップボード同期を有効化";
+"settings.remote.interaction.audioRedirection" = "オーディオリダイレクトを有効化";
+"settings.remote.interaction.fileTransfer" = "ファイル転送を有効化";
+"settings.remote.interaction.trackpadGestures" = "トラックパッドジェスチャを有効化";
+"settings.remote.interaction.mouseSensitivity" = "マウス感度:";
+"settings.remote.interaction.doubleClickInterval" = "ダブルクリック間隔（ms）:";
+"settings.remote.network.title" = "ネットワーク最適化";
+"settings.remote.network.enableBandwidthAdaptive" = "帯域幅の自動適応を有効化";
+"settings.remote.network.enableUDP" = "UDP転送を有効化";
+"settings.remote.network.enableCompression" = "データ圧縮を有効化";
+"settings.remote.network.bandwidthLimit" = "帯域幅制限（Mbps）:";
+"settings.remote.network.bufferSize" = "バッファサイズ:";
+
+"settings.systemMonitor.config.title" = "モニタ設定";
+"settings.systemMonitor.config.refreshInterval" = "更新間隔:";
+"settings.systemMonitor.config.enableRealtime" = "リアルタイム監視を有効化";
+"settings.systemMonitor.config.enableHistory" = "履歴を有効化";
+"settings.systemMonitor.config.enablePerformanceAlerts" = "性能アラートを有効化";
+"settings.systemMonitor.config.retentionDays" = "データ保持（日数):";
+"settings.systemMonitor.display.title" = "表示オプション";
+"settings.systemMonitor.display.cpu" = "CPU使用率を表示";
+"settings.systemMonitor.display.memory" = "メモリ使用率を表示";
+"settings.systemMonitor.display.disk" = "ディスク使用率を表示";
+"settings.systemMonitor.display.network" = "ネットワーク活動を表示";
+"settings.systemMonitor.display.temperature" = "温度情報を表示";
+"settings.systemMonitor.display.fanSpeed" = "ファン回転数を表示";
+"settings.systemMonitor.display.chartType" = "グラフ種類:";
+"settings.systemMonitor.alerts.title" = "アラート設定";
+"settings.systemMonitor.alerts.cpuThreshold" = "CPUアラート閾値:";
+"settings.systemMonitor.alerts.memoryThreshold" = "メモリアラート閾値:";
+"settings.systemMonitor.alerts.diskThreshold" = "ディスクアラート閾値:";
+"settings.systemMonitor.alerts.enableSound" = "サウンドアラートを有効化";
+"settings.systemMonitor.alerts.enableNotificationCenter" = "通知センターを有効化";
+"settings.systemMonitor.advanced.title" = "詳細オプション";
+"settings.systemMonitor.advanced.enableVerboseLogging" = "詳細ログを有効化";
+"settings.systemMonitor.advanced.exportData" = "モニタデータをエクスポート";
+"settings.systemMonitor.advanced.enableRemoteMonitoring" = "リモート監視を有効化";
+"settings.systemMonitor.advanced.samplingPrecision" = "サンプリング精度:";
+
+"fileTransfer.connectionStatus" = "接続状態";
+"status.transferring" = "転送中";
+"fileTransfer.totalProgress" = "総進捗";
+"fileTransfer.quickActions" = "クイックアクション";
+"action.selectFiles" = "ファイルを選択";
+"action.selectFolder" = "フォルダを選択";
+"fileTransfer.recentTransfers" = "最近の転送";
+"fileTransfer.recent.empty" = "転送履歴はありません";
+"fileTransfer.tab.transfer" = "転送";
+"fileTransfer.tab.history" = "履歴";
+"fileTransfer.drop.title" = "ここにファイルをドラッグ";
+"fileTransfer.drop.subtitle" = "音声・動画・文書などに対応";
+"fileTransfer.selectedFiles" = "選択したファイル";
+"action.sendAll" = "すべて送信";
+"action.clear" = "クリア";
+"fileTransfer.activeTransfers" = "アクティブ転送";
+"fileTransfer.active.emptyTitle" = "アクティブな転送はありません";
+"fileTransfer.active.emptySubtitle" = "ファイルを選択して転送を開始";
+"fileTransfer.history.title" = "転送履歴";
+"fileTransfer.history.clear" = "履歴をクリア";
+"fileTransfer.history.emptyTitle" = "転送履歴はありません";
+"fileTransfer.history.emptySubtitle" = "完了した転送がここに表示されます";
+"fileTransfer.debug.title" = "デバッグパネル";
+"fileTransfer.debug.hmacTagHex" = "HMACタグ（16進）";
+"fileTransfer.debug.signatureResult" = "ファイル署名検証結果";
+"common.none" = "なし";
+"action.preview" = "プレビュー";
+"transferStatus.preparing" = "準備中";
+"transferStatus.transferring" = "転送中";
+"transferStatus.paused" = "一時停止";
+"transferStatus.completed" = "完了";
+"transferStatus.failed" = "失敗";
+"transferStatus.cancelled" = "キャンセル済み";
+"action.close" = "閉じる";
+"action.share" = "共有";
+"status.idle" = "待機中";
+"status.adaptiveTuning" = "アダプティブ調整";
+"qrcode.title" = "ファイル転送QRコード";
+"qrcode.subtitle" = "QRをスキャンしてモバイルで受信";
+"qrcode.status.running" = "サービス稼働中";
+"qrcode.status.ready" = "準備完了";
+"qrcode.generating" = "QRコードを生成中...";
+"qrcode.instruction.title" = "上のQRコードをモバイルでスキャン";
+"qrcode.instruction.subtitle" = "ファイルは安全な接続で転送されます";
+"qrcode.connectionInfo" = "接続情報";
+"qrcode.serverAddress" = "サーバーアドレス";
+"qrcode.connectionCode" = "接続コード";
+"qrcode.serviceStatus" = "サービス状態";
+"status.running" = "稼働中";
+"status.stopped" = "停止";
+"qrcode.pendingFiles" = "転送予定のファイル";
+"common.files.count" = "%d 件のファイル";
+"qrcode.networkHint" = "同じネットワークに接続してください";
+"action.startServer" = "サービス開始";
+"action.stopServer" = "サービス停止";
+"action.copyToClipboard" = "クリップボードにコピー";
+"action.closeWindow" = "ウィンドウを閉じる";
+"remote.search.placeholder" = "セッションを検索...";
+"remote.activeSessions" = "アクティブセッション";
+"remote.recentConnections" = "最近の接続";
+"remote.newConnection" = "新しい接続";
+"remote.overlay.connectingTo" = "%@ に接続中...";
+"remote.empty.title" = "セッションを選択してリモートデスクトップを開始";
+"remote.empty.subtitle" = "左のリストからアクティブなセッションを選ぶか、新しい接続を作成";
+"remote.toolbar.newConnection.help" = "リモート接続を作成";
+"remote.toolbar.refresh.help" = "セッションを更新";
+"remote.performance.monitor" = "Metal 4 パフォーマンスモニタ";
+"remote.recent.reconnect.help" = "このセッションに再接続";
+"remote.recent.lastConnected" = "前回接続: %@";
+"remote.connectionMode.auto" = "自動";
+"remote.connectionMode.near" = "近距離";
+"remote.connectionMode.far" = "遠距離";
+"remote.connectionMode.auto.description" = "最適なモードを自動選択（同一ネットワークでは近距離を優先）";
+"remote.connectionMode.near.description" = "近距離ハードウェアミラーリング — 同一ネットワークで低遅延（ScreenCaptureKit + HEVC + QUIC）";
+"remote.connectionMode.far.description" = "遠距離 RDP — ネットワークを跨いでも安定（FreeRDP 3.x + GFX-AVC444）";
+"common.unknown" = "不明";
+"profile.title" = "プロフィール";
+"action.close" = "閉じる";
+"profile.edit" = "情報を編集";
+"action.cancel" = "キャンセル";
+"action.saving" = "保存中...";
+"action.save" = "保存";
+"profile.save.success" = "保存しました";
+"profile.save.failure" = "保存に失敗";
+"profile.save.success.detail" = "プロフィールはクラウドに保存されました";
+"action.ok" = "OK";
+"profile.help" = "プロフィールを表示・編集";
+"profile.quickActions" = "クイックアクション";
+"about.title" = "SkyBridge Compass Pro について";
+"about.checkingUpdates" = "更新を確認中...";
+"about.checkUpdates" = "更新を確認";
+"about.systemInfo" = "システム情報";
+"about.diagnostics" = "診断ツール";
+"about.feedback" = "フィードバックを送信";
+"about.website" = "公式サイト";
+"transferSpeed.slow" = "低速";
+"transferSpeed.normal" = "通常";
+"transferSpeed.fast" = "高速";
+"brand.title" = "SkyBridge Compass";
+"brand.tagline" = "境界なくつながる";
+"auth.selectMethod" = "サインイン方法を選択";
+"auth.apple.tip" = "Apple IDでサインイン";
+"auth.nebula.toggle.hasAccount" = "アカウントをお持ちですか？ ログイン";
+"auth.nebula.toggle.noAccount" = "アカウントがありませんか？ 登録";
+"auth.nebula.account" = "Nebula アカウント";
+"auth.nebula.account.placeholder" = "Nebulaアカウントを入力";
+"auth.password" = "パスワード";
+"auth.password.placeholder" = "パスワードを入力";
+"auth.confirmPassword" = "パスワード確認";
+"auth.confirmPassword.placeholder" = "もう一度入力";
+"auth.displayName" = "表示名";
+"auth.displayName.placeholder" = "表示名を入力";
+"auth.emailAddress" = "メールアドレス";
+"auth.emailAddress.placeholder" = "メールアドレスを入力";
+"auth.nebula.register" = "Nebula登録";
+"auth.nebula.login" = "Nebulaにログイン";
+"auth.mfa.code" = "MFAコード";
+"auth.mfa.verify" = "MFAを確認";
+"auth.phone.toggle.hasAccount" = "アカウントあり？ ログイン";
+"auth.phone.toggle.noAccount" = "アカウントなし？ 登録";
+"auth.phone.number" = "電話番号";
+"auth.phone.number.placeholder" = "電話番号を入力";
+"auth.phone.code" = "確認コード";
+"auth.phone.code.placeholder" = "確認コードを入力";
+"auth.phone.codeSentCountdown" = "コード送信済み、%d秒後に再送可能";
+"auth.phone.register.complete" = "登録を完了";
+"auth.phone.login.verify" = "ログインを確認";
+"auth.phone.register.sendCode" = "登録コードを送信";
+"auth.phone.login.sendCode" = "ログインコードを送信";
+"auth.phone.resendCode" = "コードを再送";
+"auth.email.toggle.hasAccount" = "アカウントあり？ ログイン";
+"auth.email.toggle.noAccount" = "アカウントなし？ 登録";
+"auth.rememberCredentials" = "資格情報を保存";
+"auth.email.verification.sent" = "確認メールを送信しました";
+"auth.email.verification.tip" = "メールを確認してリンクをクリックしてください";
+"auth.email.register" = "アカウント登録";
+"auth.email.login" = "メールでログイン";
+"auth.password.forgot" = "パスワードをお忘れですか？";
+"guest.mode" = "ゲストモード";
+"monitor.noData" = "データなし";
+"monitor.axis.time" = "時間";
+"monitor.axis.value" = "値";
+"monitor.stats.avg" = "平均";
+"monitor.stats.max" = "ピーク";
+"monitor.stats.min" = "最小";
+"remote.settings.help" = "リモートデスクトップ設定";
+"remote.context.focusWindow" = "ウィンドウをフォーカス";
+"remote.context.disconnect" = "切断";
+"remote.context.copyInfo" = "接続情報をコピー";
+"remote.context.reconnect" = "再接続";
+"remote.context.removeFromHistory" = "履歴から削除";
+"remote.form.title" = "新しいリモート接続";
+"remote.form.section.connection" = "接続情報";
+"remote.form.hostname" = "ホスト名またはIP";
+"remote.form.port" = "ポート";
+"remote.form.protocol" = "プロトコル";
+"remote.form.section.auth" = "認証";
+"auth.username" = "ユーザー名";
+"remote.form.connect" = "接続";
+"remote.form.connectFailed" = "接続に失敗しました";
+"monitor.title" = "システム監視";
+"monitor.status.monitoring" = "監視中";
+"monitor.status.initializing" = "初期化中...";
+"monitor.action.stop" = "監視を停止";
+"monitor.waiting.cpuStable" = "CPU負荷の安定を待っています...";
+"monitor.waiting.tip" = "負荷が安定すると自動で監視を開始します\n（約10〜15秒）";
+"monitor.helper.suggest" = "管理者権限が必要な『高度監視』を有効にすると、GPU電力/温度/ファンなどのデータを取得できます。";
+"monitor.helper.enable" = "高度監視を有効化…";
+"monitor.helper.uninstall.tip" = "昇格Helperをアンインストールして既定状態に戻せます。";
+"monitor.helper.uninstall" = "Helper をアンインストール…";
+"monitor.overview" = "概要";
+"monitor.cpu.details" = "CPU 詳細";
+"monitor.memory.details" = "メモリ詳細";
+"monitor.gpu.details" = "GPU 詳細";
+"monitor.thermal.details" = "サーマル詳細";
+"monitor.indicator.health" = "総合ヘルス";
+"monitor.indicator.thermal" = "サーマル状態";
+"monitor.indicator.load" = "システム負荷";
+"thermal.nominal" = "正常";
+"thermal.fair" = "やや高温";
+"thermal.serious" = "高温";
+"thermal.critical" = "危険";
+"thermal.low" = "低温";
+"health.excellent" = "優";
+"health.good" = "良";
+"health.fair" = "可";
+"health.caution" = "注意";
+"health.warning" = "警告";
+"monitor.network.title" = "ネットワーク監視";
+"status.connected" = "接続済み";
+"status.disconnected" = "未接続";
+"monitor.network.upload" = "アップロード";
+"monitor.network.download" = "ダウンロード";
+"monitor.network.totalUpload" = "総アップロード";
+"monitor.network.totalDownload" = "総ダウンロード";
+"monitor.network.activeConnections" = "アクティブ接続";
+"monitor.network.quality" = "ネットワーク品質";
+"qrcode.generateFailed" = "QRコードの生成に失敗";
+"qrcode.regenerate" = "再生成";
