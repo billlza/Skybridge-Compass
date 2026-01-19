@@ -540,6 +540,12 @@ public final class TrustSyncService: ObservableObject {
             await updateActiveTrustRecords()
             SkyBridgeLogger.p2p.debug("Loaded \(records.count) trust records from Keychain")
         } catch {
+            // errSecParam(-50) 在部分系统/环境下会出现在 synchronizable 查询中；
+            // 对于启动期加载而言，视作“暂无可用 trust records”更合理，避免刷错误日志。
+            if let e = error as? TrustSyncError, case .keychainError(let status) = e, status == errSecParam {
+                SkyBridgeLogger.p2p.debug("Trust records load skipped (errSecParam=-50)")
+                return
+            }
             SkyBridgeLogger.p2p.error("Failed to load trust records: \(error.localizedDescription)")
         }
     }
@@ -664,46 +670,114 @@ public final class TrustSyncService: ObservableObject {
     
  /// 从 Keychain 加载所有记录
     private func loadAllFromKeychain() throws -> [TrustRecord] {
-        let query: [String: Any] = [
+        func copyItems(_ query: [String: Any]) throws -> [[String: Any]] {
+            var result: AnyObject?
+            let status = SecItemCopyMatching(query as CFDictionary, &result)
+            if status == errSecItemNotFound {
+                return []
+            }
+            guard status == errSecSuccess else {
+                throw TrustSyncError.keychainError(status)
+            }
+            return (result as? [[String: Any]]) ?? []
+        }
+        
+        func copyDataItems(_ query: [String: Any]) throws -> [Data] {
+            var result: AnyObject?
+            let status = SecItemCopyMatching(query as CFDictionary, &result)
+            if status == errSecItemNotFound {
+                return []
+            }
+            guard status == errSecSuccess else {
+                throw TrustSyncError.keychainError(status)
+            }
+            return (result as? [Data]) ?? []
+        }
+
+        let baseQuery: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: KeychainConstants.service,
-            kSecAttrSynchronizable as String: kSecAttrSynchronizableAny,
-            kSecReturnData as String: true,
-            kSecReturnAttributes as String: true,
+            kSecReturnData as String: kCFBooleanTrue as Any,
+            kSecReturnAttributes as String: kCFBooleanTrue as Any,
             kSecMatchLimit as String: kSecMatchLimitAll
         ]
         
-        var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        
-        if status == errSecItemNotFound {
-            return []
-        }
-        
-        guard status == errSecSuccess else {
-            throw TrustSyncError.keychainError(status)
-        }
-        
-        guard let items = result as? [[String: Any]] else {
-            return []
+        // data-only 查询：某些环境下同时返回 attributes + synchronizableAny 会 errSecParam(-50)
+        let baseQueryDataOnly: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: KeychainConstants.service,
+            kSecReturnData as String: kCFBooleanTrue as Any,
+            kSecMatchLimit as String: kSecMatchLimitAll
+        ]
+
+        // 首选：一次性拉取所有（含 synchronizable true/false）。
+        // 在部分系统/环境下，kSecAttrSynchronizableAny 会返回 errSecParam(-50)，因此提供降级方案。
+        var items: [[String: Any]] = []
+        do {
+            var q = baseQuery
+            q[kSecAttrSynchronizable as String] = kSecAttrSynchronizableAny
+            items = try copyItems(q)
+        } catch let TrustSyncError.keychainError(status) where status == errSecParam {
+            // 先尝试 data-only + synchronizableAny（不依赖 attributes）
+            do {
+                var q = baseQueryDataOnly
+                q[kSecAttrSynchronizable as String] = kSecAttrSynchronizableAny
+                let dataItems = try copyDataItems(q)
+                return decodeTrustRecords(from: dataItems)
+            } catch {
+                // 继续降级到分开查询
+            }
+
+            // 降级：分别拉取 non-sync 和 sync 项，再合并去重
+            var nonSync = baseQuery
+            nonSync[kSecAttrSynchronizable as String] = kCFBooleanFalse as Any
+            var sync = baseQuery
+            sync[kSecAttrSynchronizable as String] = kCFBooleanTrue as Any
+            let a: [[String: Any]]
+            do {
+                a = try copyItems(nonSync)
+            } catch let TrustSyncError.keychainError(status) where status == errSecParam {
+                a = []
+            }
+            let b: [[String: Any]]
+            do {
+                b = try copyItems(sync)
+            } catch let TrustSyncError.keychainError(status) where status == errSecParam {
+                // 某些环境下 “synchronizable=true” 会返回 errSecParam（例如未启用 iCloud Keychain），视作无同步项即可
+                b = []
+            }
+
+            // 合并去重（按 account）
+            var seen: Set<String> = []
+            var merged: [[String: Any]] = []
+            for item in (a + b) {
+                let account = item[kSecAttrAccount as String] as? String ?? UUID().uuidString
+                if seen.insert(account).inserted {
+                    merged.append(item)
+                }
+            }
+            items = merged
         }
         
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .millisecondsSince1970
         
+        let dataItems = items.compactMap { $0[kSecValueData as String] as? Data }
+        return decodeTrustRecords(from: dataItems, decoder: decoder)
+    }
+    
+    private func decodeTrustRecords(from dataItems: [Data], decoder: JSONDecoder = {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .millisecondsSince1970
+        return decoder
+    }()) -> [TrustRecord] {
         var records: [TrustRecord] = []
-        for item in items {
-            guard let account = item[kSecAttrAccount as String] as? String,
-                  account.hasPrefix(KeychainConstants.recordPrefix),
-                  let data = item[kSecValueData as String] as? Data else {
-                continue
-            }
-            
+        records.reserveCapacity(dataItems.count)
+        for data in dataItems {
             if let record = try? decoder.decode(TrustRecord.self, from: data) {
                 records.append(record)
             }
         }
-        
         return records
     }
     

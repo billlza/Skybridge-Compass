@@ -238,7 +238,8 @@ public actor HandshakeContext {
         identityKeyHandle: SigningKeyHandle?,
         identityPublicKey: Data,
         policy: HandshakePolicy = .default,
-        secureEnclaveKeyHandle: SigningKeyHandle? = nil
+        secureEnclaveKeyHandle: SigningKeyHandle? = nil,
+        offeredSuites: [CryptoSuite]? = nil
     ) async throws -> HandshakeMessageA {
         guard !isZeroized else {
             throw HandshakeError.contextZeroized
@@ -252,7 +253,12 @@ public actor HandshakeContext {
             throw HandshakeError.invalidState("Nonce not generated")
         }
         
-        let supportedSuites = try resolveSupportedSuites(policy: policy)
+        let supportedSuites: [CryptoSuite]
+        if let offeredSuites {
+            supportedSuites = try resolveSupportedSuites(offeredSuites: offeredSuites, policy: policy)
+        } else {
+            supportedSuites = try resolveSupportedSuites(policy: policy)
+        }
         var keyShares: [HandshakeKeyShare] = []
         var sentKeyShares: [CryptoSuite: Data] = [:]
         
@@ -964,7 +970,7 @@ extension HandshakeContext {
         }
     }
     
-    private func computeHandshakeId(for suite: CryptoSuite, replayTag: ReplayTag) throws -> String {
+    private func computeHandshakeId(for suite: CryptoSuite, replayTag: ReplayTag) throws -> Data {
         guard let localNonce = nonce?.data,
               let remoteNonce = peerNonce?.data else {
             throw HandshakeError.invalidState("Missing nonces for handshakeId")
@@ -980,14 +986,17 @@ extension HandshakeContext {
             responderNonce = localNonce
         }
         
-        var data = Data([replayTag.rawValue])
+        var data = Data()
+        data.reserveCapacity(1 + initiatorNonce.count + responderNonce.count + MemoryLayout<UInt16>.size)
+        var tag = replayTag.rawValue
+        data.append(&tag, count: 1)
         data.append(initiatorNonce)
         data.append(responderNonce)
         var wireId = suite.wireId.littleEndian
         data.append(Data(bytes: &wireId, count: MemoryLayout<UInt16>.size))
         
         let digest = SHA256.hash(data: data)
-        return digest.map { String(format: "%02x", $0) }.joined()
+        return Data(digest)
     }
 }
 
@@ -1008,7 +1017,39 @@ extension HandshakeContext {
         }
         return nil
     }
-    
+
+    private func resolveSupportedSuites(offeredSuites: [CryptoSuite], policy: HandshakePolicy) throws -> [CryptoSuite] {
+        guard !offeredSuites.isEmpty else {
+            throw HandshakeError.failed(.suiteNegotiationFailed)
+        }
+
+        var suites: [CryptoSuite] = []
+        suites.reserveCapacity(min(2, offeredSuites.count))
+
+        for suite in offeredSuites {
+            guard suiteMeetsHandshakePolicy(suite, policy: policy),
+                  suiteMeetsLocalCryptoPolicy(suite),
+                  providerForSuite(suite) != nil else {
+                continue
+            }
+
+            if suite.isPQC, peerKEMPublicKeys[suite] == nil {
+                continue
+            }
+
+            suites.append(suite)
+            if suites.count == 2 {
+                break
+            }
+        }
+
+        if suites.isEmpty {
+            throw HandshakeError.failed(.suiteNegotiationFailed)
+        }
+
+        return suites
+    }
+
     private func resolveSupportedSuites(policy: HandshakePolicy) throws -> [CryptoSuite] {
         var suites: [CryptoSuite] = []
         

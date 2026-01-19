@@ -363,6 +363,9 @@ public actor STUNService {
     private let logger = Logger(subsystem: "com.skybridge.signal", category: "STUN")
     
     private let stunServers = [
+        // SkyBridge 自建服务器 (首选)
+        ("54.92.79.99", UInt16(3478)),
+        // 公共备用服务器
         ("stun.l.google.com", UInt16(19302)),
         ("stun1.l.google.com", UInt16(19302)),
         ("stun.cloudflare.com", UInt16(3478))

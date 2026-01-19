@@ -12,23 +12,29 @@ actor HandshakeReplayCache {
     static let shared = HandshakeReplayCache()
     
     private let ttl: TimeInterval = 5 * 60
-    private var entries: [String: Date] = [:]
+    private let pruneInterval: TimeInterval = 1
+    private var lastPrune: TimeInterval = 0
+    private var entries: [Data: TimeInterval] = [:]
     
-    func registerIfNew(_ handshakeId: String, now: Date = Date()) -> Bool {
-        prune(now: now)
-        if let existing = entries[handshakeId], now.timeIntervalSince(existing) <= ttl {
+    func registerIfNew(_ handshakeId: Data, now: TimeInterval = ProcessInfo.processInfo.systemUptime) -> Bool {
+        if now - lastPrune >= pruneInterval {
+            prune(now: now)
+            lastPrune = now
+        }
+        if let existing = entries[handshakeId], now - existing <= ttl {
             return false
         }
         entries[handshakeId] = now
         return true
     }
     
-    func prune(now: Date = Date()) {
-        let cutoff = now.addingTimeInterval(-ttl)
+    func prune(now: TimeInterval = ProcessInfo.processInfo.systemUptime) {
+        let cutoff = now - ttl
         entries = entries.filter { $0.value >= cutoff }
     }
     
     func clearForTesting() {
         entries.removeAll()
+        lastPrune = 0
     }
 }

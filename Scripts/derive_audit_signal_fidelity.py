@@ -91,7 +91,7 @@ def main():
         )
         results.append({
             "scenario_class": f"drop_timeout_{policy}",
-            "expected_signal": "handshakeFailed=1, handshakeFallback=0",
+            "expected_signal": "handshakeFailed=1, cryptoDowngrade=0",
             "total_runs": total,
             "tp_rate": f"{tp:.2f}",
             "fp_rate": f"{fp:.2f}",
@@ -106,7 +106,7 @@ def main():
         )
         results.append({
             "scenario_class": f"corrupt_wrong_sig_{policy}",
-            "expected_signal": "handshakeFailed=1, handshakeFallback=0",
+            "expected_signal": "handshakeFailed=1, cryptoDowngrade=0",
             "total_runs": total,
             "tp_rate": f"{tp:.2f}",
             "fp_rate": f"{fp:.2f}",
@@ -121,7 +121,7 @@ def main():
         )
         results.append({
             "scenario_class": f"benign_ordering_{policy}",
-            "expected_signal": "handshakeFailed=0, handshakeFallback=0",
+            "expected_signal": "handshakeFailed=0, cryptoDowngrade=0",
             "total_runs": total,
             "tp_rate": f"{tp:.2f}",
             "fp_rate": f"{fp:.2f}",
@@ -135,7 +135,7 @@ def main():
         tp_rate = 1.0 if ((row["fallback_events"] > 0) == (expect_fallback == 1)) else 0.0
         results.append({
             "scenario_class": f"pqc_unavailable_{policy}",
-            "expected_signal": "handshakeFallback=1" if expect_fallback == 1 else "handshakeFallback=0",
+            "expected_signal": "cryptoDowngrade=1" if expect_fallback == 1 else "cryptoDowngrade=0",
             "total_runs": row["iterations"],
             "tp_rate": f"{tp_rate:.2f}",
             "fp_rate": f"{0.0:.2f}",

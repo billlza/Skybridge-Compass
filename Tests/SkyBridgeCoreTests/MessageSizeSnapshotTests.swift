@@ -290,7 +290,7 @@ final class MessageSizeSnapshotTests: XCTestCase {
 
         case .pqc:
             selectedSuite = .mlkem768MLDSA65
-            responderShare = Data(repeating: 0xDD, count: 1088)
+            responderShare = Data()
             signature = Data(repeating: 0xEE, count: 3309)
             identityPubKey = IdentityPublicKeys(
                 protocolPublicKey: Data(repeating: 0xFF, count: 1952),
@@ -298,7 +298,7 @@ final class MessageSizeSnapshotTests: XCTestCase {
                 secureEnclavePublicKey: nil
             ).encoded
             encryptedPayload = HPKESealedBox(
-                encapsulatedKey: Data(repeating: 0xAB, count: 1088),
+                encapsulatedKey: Data(),
                 nonce: Data(repeating: 0xCD, count: 12),
                 ciphertext: Data(repeating: 0x33, count: 64),
                 tag: Data(repeating: 0xEF, count: 16)

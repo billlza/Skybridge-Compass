@@ -180,24 +180,60 @@ public final class WeatherLocationService: NSObject, ObservableObject {
         }
     }
     
- /// 根据位置获取城市名称
+ /// 根据位置获取城市名称（支持中国地址格式：城市+区县）
     public func getCityName(for location: CLLocation) async throws -> String {
+        // 🔧 使用中文 locale 进行反地理编码
+        let chineseLocale = Locale(identifier: "zh_CN")
         return try await withCheckedThrowingContinuation { continuation in
-            geocoder.reverseGeocodeLocation(location) { [weak self] placemarks, error in
+            geocoder.reverseGeocodeLocation(location, preferredLocale: chineseLocale) { [weak self] placemarks, error in
                 if let error = error {
                     self?.log.error("地理编码失败: \(error.localizedDescription)")
                     continuation.resume(throwing: LocationError.geocodingFailed)
                     return
                 }
-                
-                guard let placemark = placemarks?.first,
-                      let city = placemark.locality ?? placemark.administrativeArea else {
+
+                guard let placemark = placemarks?.first else {
                     self?.log.error("无法获取城市名称")
                     continuation.resume(throwing: LocationError.geocodingFailed)
                     return
                 }
-                
-                continuation.resume(returning: city)
+
+                // 📝 调试：打印所有 placemark 属性
+                self?.log.info("📍 Placemark详情:")
+                self?.log.info("   - name: \(placemark.name ?? "nil")")
+                self?.log.info("   - locality: \(placemark.locality ?? "nil")")
+                self?.log.info("   - subLocality: \(placemark.subLocality ?? "nil")")
+                self?.log.info("   - administrativeArea: \(placemark.administrativeArea ?? "nil")")
+                self?.log.info("   - subAdministrativeArea: \(placemark.subAdministrativeArea ?? "nil")")
+
+                // 🔧 组合城市+区县
+                var components: [String] = []
+
+                // 城市级别 (locality 或 administrativeArea)
+                if let city = placemark.locality {
+                    components.append(city)
+                } else if let admin = placemark.administrativeArea {
+                    components.append(admin)
+                }
+
+                // 区县级别: subAdministrativeArea > subLocality
+                if let district = placemark.subAdministrativeArea, !components.contains(district) {
+                    components.append(district)
+                } else if let subLocality = placemark.subLocality, !components.contains(subLocality) {
+                    // 中国地址中 subLocality 可能包含区/街道信息
+                    components.append(subLocality)
+                }
+
+                let cityName = components.joined(separator: " ")
+
+                guard !cityName.isEmpty else {
+                    self?.log.error("无法获取城市名称")
+                    continuation.resume(throwing: LocationError.geocodingFailed)
+                    return
+                }
+
+                self?.log.info("📍 反地理编码结果: \(cityName)")
+                continuation.resume(returning: cityName)
             }
         }
     }

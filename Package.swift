@@ -12,6 +12,9 @@ let package = Package(
     ],
     products: [
         .executable(name: "SkyBridgeCompassApp", targets: ["SkyBridgeCompassApp"]),
+        .executable(name: "BaselineBenchRunner", targets: ["BaselineBenchRunner"]),
+        .executable(name: "HandshakeBenchRunner", targets: ["HandshakeBenchRunner"]),
+        .executable(name: "MessageSizeBenchRunner", targets: ["MessageSizeBenchRunner"]),
         .library(name: "SkyBridgeCore", targets: ["SkyBridgeCore"]),
         .library(name: "SkyBridgeUI", targets: ["SkyBridgeUI"]),
         // 中文注释：导出 OQSRAII 作为示例静态库，便于独立链接与集成
@@ -68,6 +71,11 @@ let package = Package(
                 .linkedFramework("VideoToolbox"),
                 .linkedFramework("CoreMedia")
             ]
+        ),
+        .target(
+            name: "NoiseKit",
+            dependencies: [],
+            path: "Sources/NoiseKit"
         ),
         .target(
             name: "SkyBridgeCore",
@@ -163,6 +171,16 @@ let package = Package(
             ],
             swiftSettings: []
         ),
+        .testTarget(
+            name: "SkyBridgeBenchTests",
+            dependencies: [
+                "SkyBridgeCore",
+                "OQSRAII",
+                "NoiseKit"
+            ],
+            path: "Tests/SkyBridgeBenchTests",
+            swiftSettings: []
+        ),
         // 小组件共享模型测试
         .testTarget(
             name: "SkyBridgeWidgetSharedTests",
@@ -202,6 +220,37 @@ let package = Package(
                 .linkedFramework("AuthenticationServices"),
                 // 中文注释：移除静默链接器告警，依赖库目标版本已统一为 14.0
             ]
+        ),
+        .executableTarget(
+            name: "BaselineBenchRunner",
+            dependencies: [
+                "SkyBridgeCore",
+                "NoiseKit"
+            ],
+            path: "Sources/BaselineBenchRunner",
+            linkerSettings: [
+                .linkedFramework("Network"),
+                .linkedFramework("Security"),
+                .linkedFramework("CryptoKit")
+            ]
+        ),
+        .executableTarget(
+            name: "HandshakeBenchRunner",
+            dependencies: [
+                "SkyBridgeCore",
+                "OQSRAII"
+            ],
+            path: "Sources/HandshakeBenchRunner",
+            linkerSettings: [
+                .linkedFramework("CryptoKit")
+            ]
+        ),
+        .executableTarget(
+            name: "MessageSizeBenchRunner",
+            dependencies: [
+                "SkyBridgeCore"
+            ],
+            path: "Sources/MessageSizeBenchRunner"
         ),
         // 小组件共享数据模型 - 轻量级，无外部依赖
         .target(

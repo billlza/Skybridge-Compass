@@ -62,9 +62,6 @@ public final class LocationManager: NSObject, ObservableObject, Sendable {
     private var isCoreLocationAuthorized: Bool {
         authorizationStatus == .authorizedAlways || authorizationStatus == .authorized
     }
-    private let maxRetryCount = 1
-    private var retriesRemaining = 0
-    private var activeRequestID = UUID()
     private var periodicRefreshTask: Task<Void, Never>?
     
  // MARK: - Errors
@@ -128,25 +125,52 @@ public final class LocationManager: NSObject, ObservableObject, Sendable {
     }
     
  // MARK: - Public Methods
-    
+
  /// 开始定位（智能降级）
     public func startLocating() async {
-        guard !isLocating else { return }
-        
+        guard !isLocating else {
+            logger.warning("⚠️ 定位已在进行中，跳过")
+            return
+        }
+
         isLocating = true
         error = nil
-        retriesRemaining = maxRetryCount
         logger.info("🔍 开始定位...")
-        
- // 策略1: 尝试CoreLocation
+
+        // 策略1: 尝试CoreLocation
         if await requestLocationAuthorization() {
-            await requestLocationUpdate()
+            // 请求位置更新，等待结果或超时
+            locationManager.requestLocation()
+
+            // 等待位置更新（最多10秒）
+            let startTime = Date()
+            while Date().timeIntervalSince(startTime) < 10 {
+                try? await Task.sleep(for: .milliseconds(200))
+
+                // 检查是否已获得位置
+                if let loc = currentLocation, loc.source == .coreLocation,
+                   Date().timeIntervalSince(loc.timestamp) < 5 {
+                    logger.info("✅ GPS定位成功")
+                    isLocating = false
+                    return
+                }
+
+                // 检查是否有错误
+                if self.error != nil {
+                    break
+                }
+            }
+
+            // 超时或错误，降级到IP定位
+            logger.warning("⚠️ GPS定位超时或失败，降级到IP定位")
+            await fallbackToIPGeolocation()
         } else {
- // 策略2: 降级到IP定位
+            // 策略2: 降级到IP定位
             logger.warning("⚠️ CoreLocation不可用，降级到IP定位")
             await fallbackToIPGeolocation()
-            isLocating = false
         }
+
+        isLocating = false
     }
     
  /// 请求位置权限
@@ -187,38 +211,32 @@ public final class LocationManager: NSObject, ObservableObject, Sendable {
         cacheLocation(location)
         logger.info("📍 手动设置位置: \(city ?? "未知")")
     }
-    
+
  // MARK: - Private Methods
-    
- /// 请求位置更新（单次）
-    private func requestLocationUpdate() async {
-        let requestID = UUID()
-        activeRequestID = requestID
-        
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            locationManager.requestLocation()
-            
- // 超时保护
-            Task { @MainActor in
-                try? await Task.sleep(for: .seconds(10))
-                guard activeRequestID == requestID else { return }
-                await handleLocationFailure(reason: .timeout)
-                continuation.resume()
-            }
-        }
-    }
-    
+
  /// 降级方案：IP地理定位
     private func fallbackToIPGeolocation() async {
+        // 🔧 修复：如果已有GPS定位，不要用IP定位覆盖
+        if let current = currentLocation, current.source == .coreLocation {
+            logger.info("📍 已有GPS定位，跳过IP定位降级")
+            return
+        }
+
         logger.info("🌐 使用IP地理定位")
-        
- // 使用免费的IP定位API (ipapi.co)
+
+        // 使用免费的IP定位API (ipapi.co)
         guard let url = URL(string: "https://ipapi.co/json/") else { return }
-        
+
         do {
             let (data, _) = try await URLSession.shared.data(from: url)
             let response = try JSONDecoder().decode(IPLocationResponse.self, from: data)
-            
+
+            // 再次检查：在网络请求期间可能已获得GPS定位
+            if let current = currentLocation, current.source == .coreLocation {
+                logger.info("📍 网络请求期间已获得GPS定位，放弃IP定位结果")
+                return
+            }
+
             let location = LocationInfo(
                 latitude: response.latitude,
                 longitude: response.longitude,
@@ -226,16 +244,16 @@ public final class LocationManager: NSObject, ObservableObject, Sendable {
                 country: response.country_name,
                 source: .ipGeolocation
             )
-            
+
             currentLocation = location
             cacheLocation(location)
             logger.info("✅ IP定位成功: \(response.city), \(response.country_name)")
-            
+
         } catch {
             logger.error("❌ IP定位失败: \(error.localizedDescription)")
             self.error = .networkError(error.localizedDescription)
-            
- // 最终降级：使用缓存
+
+            // 最终降级：使用缓存
             if let cached = loadCachedLocation() {
                 logger.info("📦 使用缓存位置")
                 currentLocation = cached
@@ -243,17 +261,45 @@ public final class LocationManager: NSObject, ObservableObject, Sendable {
         }
     }
     
- /// 反地理编码
+ /// 反地理编码 - 返回 "城市 区县" 格式
     private func reverseGeocode(location: CLLocation) async -> (city: String?, country: String?) {
         do {
-            let placemarks = try await geocoder.reverseGeocodeLocation(location)
+            // 🔧 使用中文 locale 进行反地理编码
+            let chineseLocale = Locale(identifier: "zh_CN")
+            let placemarks = try await geocoder.reverseGeocodeLocation(location, preferredLocale: chineseLocale)
             guard let placemark = placemarks.first else { return (nil, nil) }
- // 🔧 修复：中国地区 locality 可能为空，按优先级回退
-            let city = placemark.locality 
-                ?? placemark.subAdministrativeArea  // 区/县级市
-                ?? placemark.administrativeArea     // 省/直辖市
-                ?? placemark.subLocality            // 街道/镇
-            return (city, placemark.country)
+
+            // 📝 调试：打印所有 placemark 属性
+            logger.info("📍 Placemark详情:")
+            logger.info("   - name: \(placemark.name ?? "nil")")
+            logger.info("   - locality: \(placemark.locality ?? "nil")")
+            logger.info("   - subLocality: \(placemark.subLocality ?? "nil")")
+            logger.info("   - administrativeArea: \(placemark.administrativeArea ?? "nil")")
+            logger.info("   - subAdministrativeArea: \(placemark.subAdministrativeArea ?? "nil")")
+            logger.info("   - thoroughfare: \(placemark.thoroughfare ?? "nil")")
+            logger.info("   - country: \(placemark.country ?? "nil")")
+
+            // 🔧 组合城市+区县
+            var components: [String] = []
+
+            // 城市级别: locality > administrativeArea
+            if let locality = placemark.locality {
+                components.append(locality)
+            } else if let admin = placemark.administrativeArea {
+                components.append(admin)
+            }
+
+            // 区县级别: subAdministrativeArea > subLocality
+            if let district = placemark.subAdministrativeArea, !components.contains(district) {
+                components.append(district)
+            } else if let subLocality = placemark.subLocality, !components.contains(subLocality) {
+                // 中国地址中 subLocality 可能包含区/街道信息
+                components.append(subLocality)
+            }
+
+            let cityName = components.isEmpty ? nil : components.joined(separator: " ")
+            logger.info("📍 反地理编码结果: \(cityName ?? "nil")")
+            return (cityName, placemark.country)
         } catch {
             logger.error("❌ 反地理编码失败: \(error.localizedDescription)")
             return (nil, nil)
@@ -303,14 +349,14 @@ public final class LocationManager: NSObject, ObservableObject, Sendable {
 extension LocationManager: CLLocationManagerDelegate {
     nonisolated public func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
         guard let location = locations.last else { return }
-        
+
         Task { @MainActor in
-            logger.info("📍 位置更新: (\(location.coordinate.latitude), \(location.coordinate.longitude))")
-            activeRequestID = UUID()
-            
- // 反地理编码获取城市名
+            logger.info("📍 GPS位置更新: (\(location.coordinate.latitude), \(location.coordinate.longitude))")
+
+            // 反地理编码获取城市名
             let (city, country) = await reverseGeocode(location: location)
-            
+            logger.info("📍 反地理编码完成: 城市=\(city ?? "nil"), 国家=\(country ?? "nil")")
+
             let locationInfo = LocationInfo(
                 latitude: location.coordinate.latitude,
                 longitude: location.coordinate.longitude,
@@ -319,21 +365,20 @@ extension LocationManager: CLLocationManagerDelegate {
                 source: .coreLocation,
                 accuracy: location.horizontalAccuracy
             )
-            
+
             currentLocation = locationInfo
             cacheLocation(locationInfo)
             error = nil
-            retriesRemaining = maxRetryCount
-            isLocating = false
+            isLocating = false  // 确保状态正确
+            logger.info("✅ GPS定位完成: \(city ?? "未知城市")")
         }
     }
     
     nonisolated public func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
         Task { @MainActor in
             logger.error("❌ 定位失败: \(error.localizedDescription)")
-            activeRequestID = UUID()
-            
- // 根据错误类型设置
+
+            // 根据错误类型设置
             if let clError = error as? CLError {
                 switch clError.code {
                 case .denied:
@@ -341,12 +386,13 @@ extension LocationManager: CLLocationManagerDelegate {
                 default:
                     self.error = .unavailable
                 }
+            } else {
+                self.error = .unavailable
             }
-            
-            await handleLocationFailure(reason: self.error ?? .unavailable)
+            // 注意：不再调用handleLocationFailure，由startLocating()的轮询逻辑处理降级
         }
     }
-    
+
     nonisolated public func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
         let status = manager.authorizationStatus
         Task { @MainActor in
@@ -355,26 +401,8 @@ extension LocationManager: CLLocationManagerDelegate {
         }
     }
 
-// MARK: - Failure Handling & Periodic Refresh
-    
-    private func handleLocationFailure(reason: LocationError) async {
-        error = reason
-        
-        if isCoreLocationAuthorized {
-            if self.retriesRemaining > 0 {
-                self.retriesRemaining -= 1
-                logger.info("🔁 CoreLocation重试：剩余 \(self.retriesRemaining) 次")
-                await requestLocationUpdate()
-                return
-            }
-            await fallbackToIPGeolocation()
-        } else {
-            await fallbackToIPGeolocation()
-        }
-        
-        isLocating = false
-    }
-    
+// MARK: - Periodic Refresh
+
     private func startPeriodicCoreLocationRefresh() {
         periodicRefreshTask?.cancel()
         periodicRefreshTask = Task { [weak self] in
@@ -388,9 +416,7 @@ extension LocationManager: CLLocationManagerDelegate {
     private func refreshCoreLocationIfAuthorized() async {
         guard isCoreLocationAuthorized else { return }
         guard !isLocating else { return }
-        isLocating = true
-        retriesRemaining = maxRetryCount
-        await requestLocationUpdate()
+        await startLocating()
     }
 }
 

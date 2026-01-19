@@ -2,6 +2,7 @@ import Foundation
 import Network
 import OSLog
 import Combine
+import CryptoKit
 import os
 import Security
 
@@ -1304,7 +1305,139 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
  // 处理传入连接（统一入口），避免在后台队列直接操作 UI/状态
     @MainActor
     private func handleIncomingConnection(_ connection: NWConnection) {
+        // 等连接就绪后再启动入站读取/握手，避免在 .preparing 时启动导致循环直接退出
+        connection.stateUpdateHandler = { state in
+            switch state {
+            case .ready:
+                Task.detached(priority: .userInitiated) {
+                    await Self.consumeInboundHandshakeOrControlChannel(connection)
+                }
+            case .failed, .cancelled:
+                break
+            default:
+                break
+            }
+        }
         connection.start(queue: .global(qos: .utility))
+    }
+
+    // MARK: - Inbound control channel (HandshakeDriver compatibility)
+
+    nonisolated private static func consumeInboundHandshakeOrControlChannel(_ connection: NWConnection) async {
+        let logger = Logger(subsystem: "com.skybridge.discovery.optimized", category: "InboundHandshake")
+
+        // 理论上只会在 .ready 时调用，但这里加一层兜底，避免 race
+        if connection.state != .ready {
+            logger.info("⏳ 入站连接尚未 ready，等待就绪… current=\(String(describing: connection.state), privacy: .public)")
+            let becameReady = await waitUntilReady(connection, timeoutSeconds: 3.0)
+            logger.info("⏳ 入站连接等待结束: ready=\(becameReady, privacy: .public) state=\(String(describing: connection.state), privacy: .public)")
+        }
+
+        struct DirectHandshakeTransport: DiscoveryTransport {
+            let connection: NWConnection
+            func send(to peer: PeerIdentifier, data: Data) async throws {
+                var framed = Data()
+                var length = UInt32(data.count).bigEndian
+                framed.append(Data(bytes: &length, count: 4))
+                framed.append(data)
+                try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
+                    connection.send(content: framed, completion: .contentProcessed { err in
+                        if let err { c.resume(throwing: err) } else { c.resume() }
+                    })
+                }
+            }
+        }
+
+        func receiveFixed(_ length: Int) async throws -> Data {
+            enum InboundReceiveError: Error {
+                case eof
+                case shortRead(expected: Int, actual: Int)
+            }
+            return try await withCheckedThrowingContinuation { (c: CheckedContinuation<Data, Error>) in
+                connection.receive(minimumIncompleteLength: length, maximumLength: length) { data, _, _, err in
+                    if let err { c.resume(throwing: err) }
+                    else if let data {
+                        if data.count == length {
+                            c.resume(returning: data)
+                        } else {
+                            c.resume(throwing: InboundReceiveError.shortRead(expected: length, actual: data.count))
+                        }
+                    } else {
+                        c.resume(throwing: InboundReceiveError.eof)
+                    }
+                }
+            }
+        }
+
+        let transport = DirectHandshakeTransport(connection: connection)
+        let peer = PeerIdentifier(deviceId: "ios-\(connection.endpoint.debugDescription)")
+
+        let classicProvider = ClassicCryptoProvider()
+        let offeredSuites = classicProvider.supportedSuites.filter { !$0.isPQC && !$0.isHybrid }
+        let signatureProvider = ProtocolSignatureProviderSelector.select(for: .ed25519)
+        let identityPrivateKey = Curve25519.Signing.PrivateKey()
+        let identityKeyHandle: SigningKeyHandle = .softwareKey(identityPrivateKey.rawRepresentation)
+        let identityPublicKey = identityPrivateKey.publicKey.rawRepresentation
+        // iOS 端要求 IdentityPublicKeys 的“新 wire 格式”（带算法字节 + 长度），不能直接发裸 32B Ed25519
+        let identityPublicKeyWire = ProtocolIdentityPublicKeys(
+            protocolPublicKey: identityPublicKey,
+            protocolAlgorithm: .ed25519,
+            sePoPPublicKey: nil
+        ).asWire().encoded
+
+        let driver: HandshakeDriver
+        do {
+            driver = try HandshakeDriver(
+                transport: transport,
+                cryptoProvider: classicProvider,
+                protocolSignatureProvider: signatureProvider,
+                protocolSigningKeyHandle: identityKeyHandle,
+                sigAAlgorithm: .ed25519,
+                identityPublicKey: identityPublicKeyWire,
+                offeredSuites: offeredSuites,
+                policy: .default
+            )
+        } catch {
+            logger.error("❌ HandshakeDriver 初始化失败: \(error.localizedDescription, privacy: .public)")
+            return
+        }
+
+        logger.info("🤝 入站连接：启用 HandshakeDriver 兼容通道（iOS 互通） state=\(String(describing: connection.state), privacy: .public)")
+
+        do {
+            while connection.state == .ready {
+                logger.info("📥 等待入站帧（读取 4B length header）… state=\(String(describing: connection.state), privacy: .public)")
+                let lenData = try await receiveFixed(4)
+                let totalLen = lenData.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+                guard totalLen > 0 && totalLen < 1_048_576 else { break }
+                let payload = try await receiveFixed(Int(totalLen))
+                logger.info("📥 入站帧: \(payload.count, privacy: .public) bytes")
+                // Phase C2: optional traffic padding (SBP2) — unwrap before handing to handshake driver.
+                let unwrapped = TrafficPadding.unwrapIfNeeded(payload, label: "rx")
+                await driver.handleMessage(unwrapped, from: peer)
+                let st = await driver.getCurrentState()
+                logger.info("🤝 HandshakeDriver state: \(String(describing: st), privacy: .public)")
+            }
+        } catch {
+            // 连接被对端关闭 / 读取不足在真实网络环境下很常见（例如对端取消、并发探测连接等）。
+            // 这里降级为 debug，避免污染正常日志与论文采集数据。
+            if let ns = error as NSError?, ns.domain == "SkyBridgeInbound", ns.code == -1 {
+                logger.debug("ℹ️ 入站控制通道结束（EOF/short read）: \(ns.localizedDescription, privacy: .public)")
+            } else {
+                logger.debug("ℹ️ 入站控制通道结束: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+
+    nonisolated private static func waitUntilReady(_ connection: NWConnection, timeoutSeconds: Double) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        while Date() < deadline {
+            if connection.state == .ready { return true }
+            if case .failed = connection.state { return false }
+            if case .cancelled = connection.state { return false }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        return connection.state == .ready
     }
 
  /// 获取设备展示名称（回退到通用名称以保证稳定）

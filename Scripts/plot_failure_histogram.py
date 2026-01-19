@@ -82,7 +82,7 @@ def svg_bar_chart(data):
         value = max_val * i / ticks
         y = y_scale(value)
         elements.append(f'<line x1="{margin - 6}" y1="{y}" x2="{margin}" y2="{y}" stroke="#111" stroke-width="1"/>')
-    elements.append(f'<text x="{margin - 10}" y="{y + 4}" text-anchor="end" font-size="12" fill="#333">{int(value)}</text>')
+        elements.append(f'<text x="{margin - 10}" y="{y + 4}" text-anchor="end" font-size="12" fill="#333">{int(value)}</text>')
 
     for idx, label in enumerate(labels):
         base_x = margin + idx * group_width + bar_width / 2
@@ -96,13 +96,14 @@ def svg_bar_chart(data):
         elements.append(f'<text x="{base_x + bar_width / 2}" y="{height - margin + 26}" text-anchor="middle" font-size="12" fill="#333">{label}</text>')
 
     legend_x = width - margin - 180
-    legend_y = margin - 10
+    # Keep legend above the plot area so it never obscures bar tops at max scale.
+    legend_y = margin - 34
     elements.append(f'<rect x="{legend_x}" y="{legend_y}" width="12" height="12" fill="#4e79a7"/>')
     elements.append(f'<text x="{legend_x + 18}" y="{legend_y + 10}" font-size="12" fill="#333">E_handshakeFailed</text>')
     elements.append(f'<rect x="{legend_x}" y="{legend_y + 18}" width="12" height="12" fill="#f28e2b"/>')
     elements.append(f'<text x="{legend_x + 18}" y="{legend_y + 28}" font-size="12" fill="#333">E_cryptoDowngrade</text>')
 
-    elements.append(f'<text x="{width / 2}" y="{margin - 34}" text-anchor="middle" font-size="16" fill="#111">Failure-Mode Histogram (Observability)</text>')
+    elements.append(f'<text x="{width / 2}" y="{margin - 52}" text-anchor="middle" font-size="16" fill="#111">Failure-Mode Histogram (Observability)</text>')
     elements.append(f'<text x="{width / 2}" y="{height - 18}" text-anchor="middle" font-size="12" fill="#333">Fault class</text>')
     elements.append(f'<text x="20" y="{height / 2}" text-anchor="middle" font-size="12" fill="#333" transform="rotate(-90 20 {height / 2})">Event count (n=1000 per scenario)</text>')
 

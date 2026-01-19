@@ -49,12 +49,52 @@ final class PowerMetricsServiceClient: @unchecked Sendable {
         }
 
         let sendableProxy = SendableProxy(value: proxy)
+
+        // 取消安全的 continuation 盒子：避免 timeout 赢了后 task 被 cancel，但 continuation 永远不 resume 的问题
+        final class ContinuationBox<T: Sendable>: @unchecked Sendable {
+            private let lock = NSLock()
+            private var continuation: CheckedContinuation<T, Never>?
+            private var pendingValue: T?
+            private var hasResumed: Bool = false
+
+            func setContinuation(_ cont: CheckedContinuation<T, Never>) {
+                lock.lock()
+                defer { lock.unlock() }
+                if let pending = pendingValue, !hasResumed {
+                    hasResumed = true
+                    pendingValue = nil
+                    cont.resume(returning: pending)
+                    return
+                }
+                continuation = cont
+            }
+
+            func resumeOnce(_ value: T) {
+                lock.lock()
+                defer { lock.unlock() }
+                guard !hasResumed else { return }
+                hasResumed = true
+                if let cont = continuation {
+                    continuation = nil
+                    cont.resume(returning: value)
+                } else {
+                    pendingValue = value
+                }
+            }
+        }
         let result = await withTaskGroup(of: SnapshotResult.self) { group in
             group.addTask {
-                let data = await withCheckedContinuation { continuation in
-                    sendableProxy.value.fetchSnapshot { data in
-                        continuation.resume(returning: data)
+                let box = ContinuationBox<Data?>()
+                let data: Data? = await withTaskCancellationHandler {
+                    await withCheckedContinuation { (continuation: CheckedContinuation<Data?, Never>) in
+                        box.setContinuation(continuation)
+                        sendableProxy.value.fetchSnapshot { data in
+                            box.resumeOnce(data)
+                        }
                     }
+                } onCancel: {
+                    // timeout 赢了会 cancel 这个 task：这里必须 resume，让 continuation 结束
+                    box.resumeOnce(nil)
                 }
                 let snapshot = data.flatMap { try? JSONDecoder().decode(PowerMetricsSnapshot.self, from: $0) }
                 return .snapshot(snapshot)

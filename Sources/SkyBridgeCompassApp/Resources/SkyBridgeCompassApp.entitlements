@@ -22,6 +22,10 @@
 	<key>com.apple.developer.ubiquity-kvstore-identifier</key>
 	<string>$(TeamIdentifierPrefix)com.skybridge.compass</string>
 	
+	<!-- 定位权限 - GPS/BDS -->
+	<key>com.apple.security.personal-information.location</key>
+	<true/>
+
 	<!-- 网络权限 -->
 	<key>com.apple.security.network.client</key>
 	<true/>

@@ -362,8 +362,30 @@ class P2PPairingViewModel: ObservableObject {
     }
     
     private func generateQRCode() async {
- // 生成 QR 码数据
-        let qrData = "skybridge://pair?v=1&id=\(UUID().uuidString)&t=\(Int(Date().timeIntervalSince1970))"
+        // 生成 QR 码数据（与 iOS 端互通）：
+        // - iOS 端会把 skybridge://pair 解析成 QRCodeData.devicePairing
+        // - v=2 携带 addr/port/name/pk，iOS 可直接发起连接
+        let deviceId = UUID().uuidString
+        let deviceName = Host.current().localizedName ?? "Mac"
+        let ip = LocalIP.bestEffortIPv4() ?? "0.0.0.0"
+        let port = 9527
+        let ts = Int(Date().timeIntervalSince1970)
+        let exp = 300
+
+        var components = URLComponents()
+        components.scheme = "skybridge"
+        components.host = "pair"
+        components.queryItems = [
+            URLQueryItem(name: "v", value: "2"),
+            URLQueryItem(name: "id", value: deviceId),
+            URLQueryItem(name: "name", value: deviceName),
+            URLQueryItem(name: "addr", value: ip),
+            URLQueryItem(name: "port", value: "\(port)"),
+            URLQueryItem(name: "t", value: "\(ts)"),
+            URLQueryItem(name: "exp", value: "\(exp)")
+        ]
+
+        let qrData = components.url?.absoluteString ?? "skybridge://pair?v=2&id=\(deviceId)&t=\(ts)"
         
  // 生成 QR 码图像
         if let filter = CIFilter(name: "CIQRCodeGenerator") {
@@ -405,6 +427,40 @@ class P2PPairingViewModel: ObservableObject {
                 }
             }
         }
+    }
+}
+
+// MARK: - Local IP (best-effort, for LAN pairing)
+
+private enum LocalIP {
+    static func bestEffortIPv4() -> String? {
+        var address: String?
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return nil }
+        defer { freeifaddrs(ifaddr) }
+
+        for ptr in sequence(first: first, next: { $0.pointee.ifa_next }) {
+            let interface = String(cString: ptr.pointee.ifa_name)
+            let addrFamily = ptr.pointee.ifa_addr.pointee.sa_family
+            guard addrFamily == UInt8(AF_INET) else { continue }
+
+            // Wi‑Fi: en0，Ethernet: en*（macOS 常见）
+            if interface == "en0" || interface.hasPrefix("en") {
+                var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+                getnameinfo(
+                    ptr.pointee.ifa_addr,
+                    socklen_t(ptr.pointee.ifa_addr.pointee.sa_len),
+                    &hostname,
+                    socklen_t(hostname.count),
+                    nil,
+                    0,
+                    NI_NUMERICHOST
+                )
+                address = String(cString: hostname)
+                break
+            }
+        }
+        return address
     }
 }
 

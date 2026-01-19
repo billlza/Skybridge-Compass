@@ -267,6 +267,12 @@ struct SkyBridgeCompassApp: App {
             return
         }
         
+        // Phase C3: Boot self-test for SBP2 TrafficPadding + CSV stats.
+        // This guarantees we can see DIAG/CSV path even if no handshake happens yet.
+        // If you don't see these logs, you are not running the newly built binary.
+        _ = TrafficPadding.wrapIfEnabled(Data("boot".utf8), label: "boot")
+        Task { try? await TrafficPaddingStats.shared.flushToCSV() }
+
         WidgetCenter.shared.reloadAllTimelines()
         BackgroundTaskCoordinator.shared.registerSystemTasks()
         Self.configureNotificationsUnified()

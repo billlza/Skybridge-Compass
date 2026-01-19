@@ -34,7 +34,7 @@ private actor AttemptTracker {
 /// *For any* handshake with `preferPQC = true`:
 /// - First attempt SHALL use PQC-only `offeredSuites` (sigA = ML-DSA-65)
 /// - If first attempt fails with PQC unavailability error, second attempt SHALL use Classic-only `offeredSuites` (sigA = Ed25519)
-/// - Each fallback SHALL emit a `handshakeFallback` event
+/// - Each fallback SHALL emit a `cryptoDowngrade` event
 ///
 /// **硬断言**: 当 first attempt 失败原因是 `.timeout` 时，不得自动 fallback
 @available(macOS 14.0, iOS 17.0, *)
@@ -168,7 +168,7 @@ final class TwoAttemptHandshakeManagerPropertyTests: XCTestCase {
         noFallbackEvent.isInverted = true
         
         let subscriptionId = await SecurityEventEmitter.shared.subscribe { event in
-            if event.type == .handshakeFallback {
+            if event.type == .cryptoDowngrade {
                 noFallbackEvent.fulfill()
             }
         }
@@ -202,7 +202,7 @@ final class TwoAttemptHandshakeManagerPropertyTests: XCTestCase {
         let fallbackEvent = expectation(description: "Fallback event should be emitted")
         
         let subscriptionId = await SecurityEventEmitter.shared.subscribe { event in
-            if event.type == .handshakeFallback {
+            if event.type == .cryptoDowngrade {
                 fallbackEvent.fulfill()
             }
         }

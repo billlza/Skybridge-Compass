@@ -1,0 +1,154 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="550" viewBox="0 0 1000 550">
+
+  <defs>
+    <!-- Diagonal lines for Signature -->
+    <pattern id="hatch-diagonal" patternUnits="userSpaceOnUse" width="8" height="8" patternTransform="rotate(45)">
+      <line x1="0" y1="0" x2="0" y2="8" stroke="#000" stroke-width="1.5" stroke-opacity="0.4"/>
+    </pattern>
+    <!-- Cross hatch for KeyShare -->
+    <pattern id="hatch-crosshatch" patternUnits="userSpaceOnUse" width="8" height="8">
+      <line x1="0" y1="0" x2="8" y2="8" stroke="#000" stroke-width="1" stroke-opacity="0.35"/>
+      <line x1="8" y1="0" x2="0" y2="8" stroke="#000" stroke-width="1" stroke-opacity="0.35"/>
+    </pattern>
+    <!-- Dots for Identity -->
+    <pattern id="hatch-dots" patternUnits="userSpaceOnUse" width="6" height="6">
+      <circle cx="3" cy="3" r="1.2" fill="#fff" fill-opacity="0.5"/>
+    </pattern>
+    <!-- Horizontal lines for Overhead -->
+    <pattern id="hatch-horizontal" patternUnits="userSpaceOnUse" width="6" height="6">
+      <line x1="0" y1="3" x2="6" y2="3" stroke="#000" stroke-width="1" stroke-opacity="0.3"/>
+    </pattern>
+  </defs>
+
+<rect width="100%" height="100%" fill="#ffffff"/>
+<line x1="80" y1="470" x2="860" y2="470" stroke="#222" stroke-width="1.5"/>
+<line x1="80" y1="70" x2="80" y2="470" stroke="#222" stroke-width="1.5"/>
+<line x1="74" y1="470.0" x2="80" y2="470.0" stroke="#222" stroke-width="1"/>
+<text x="70" y="474.0" text-anchor="end" font-size="11" fill="#333">0</text>
+<line x1="74" y1="390.0" x2="80" y2="390.0" stroke="#222" stroke-width="1"/>
+<text x="70" y="394.0" text-anchor="end" font-size="11" fill="#333">1315</text>
+<line x1="74" y1="310.0" x2="80" y2="310.0" stroke="#222" stroke-width="1"/>
+<text x="70" y="314.0" text-anchor="end" font-size="11" fill="#333">2630</text>
+<line x1="74" y1="230.0" x2="80" y2="230.0" stroke="#222" stroke-width="1"/>
+<text x="70" y="234.0" text-anchor="end" font-size="11" fill="#333">3946</text>
+<line x1="74" y1="150.0" x2="80" y2="150.0" stroke="#222" stroke-width="1"/>
+<text x="70" y="154.0" text-anchor="end" font-size="11" fill="#333">5261</text>
+<line x1="74" y1="70.0" x2="80" y2="70.0" stroke="#222" stroke-width="1"/>
+<text x="70" y="74.0" text-anchor="end" font-size="11" fill="#333">6577</text>
+<rect x="100" y="468.0538239318838" width="90" height="1.9461760681161626" fill="#2A9D8F" />
+<rect x="100" y="468.0538239318838" width="90" height="1.9461760681161626" fill="url(#hatch-crosshatch)" />
+<rect x="100" y="468.0538239318838" width="90" height="1.9461760681161626" fill="none" stroke="#333" stroke-width="0.5" />
+<rect x="100" y="464.1614717956515" width="90" height="3.8923521362323252" fill="#E76F51" />
+<rect x="100" y="464.1614717956515" width="90" height="3.8923521362323252" fill="url(#hatch-diagonal)" />
+<rect x="100" y="464.1614717956515" width="90" height="3.8923521362323252" fill="none" stroke="#333" stroke-width="0.5" />
+<rect x="100" y="461.9720237190208" width="90" height="2.1894480766306827" fill="#264653" />
+<rect x="100" y="461.9720237190208" width="90" height="2.1894480766306827" fill="url(#hatch-dots)" />
+<rect x="100" y="461.9720237190208" width="90" height="2.1894480766306827" fill="none" stroke="#333" stroke-width="0.5" />
+<rect x="100" y="449.50433328265166" width="90" height="12.467690436369166" fill="#E9C46A" />
+<rect x="100" y="449.50433328265166" width="90" height="12.467690436369166" fill="url(#hatch-horizontal)" />
+<rect x="100" y="449.50433328265166" width="90" height="12.467690436369166" fill="none" stroke="#333" stroke-width="0.5" />
+<text x="145.0" y="441.50433328265166" text-anchor="middle" font-size="10" font-weight="bold" fill="#222">337B</text>
+<rect x="220" y="468.0538239318838" width="90" height="1.9461760681161626" fill="#2A9D8F" />
+<rect x="220" y="468.0538239318838" width="90" height="1.9461760681161626" fill="url(#hatch-crosshatch)" />
+<rect x="220" y="468.0538239318838" width="90" height="1.9461760681161626" fill="none" stroke="#333" stroke-width="0.5" />
+<rect x="220" y="464.1614717956515" width="90" height="3.8923521362323252" fill="#E76F51" />
+<rect x="220" y="464.1614717956515" width="90" height="3.8923521362323252" fill="url(#hatch-diagonal)" />
+<rect x="220" y="464.1614717956515" width="90" height="3.8923521362323252" fill="none" stroke="#333" stroke-width="0.5" />
+<rect x="220" y="461.9720237190208" width="90" height="2.1894480766306827" fill="#264653" />
+<rect x="220" y="461.9720237190208" width="90" height="2.1894480766306827" fill="url(#hatch-dots)" />
+<rect x="220" y="461.9720237190208" width="90" height="2.1894480766306827" fill="none" stroke="#333" stroke-width="0.5" />
+<rect x="220" y="446.88915919112054" width="90" height="15.082864527900258" fill="#E9C46A" />
+<rect x="220" y="446.88915919112054" width="90" height="15.082864527900258" fill="url(#hatch-horizontal)" />
+<rect x="220" y="446.88915919112054" width="90" height="15.082864527900258" fill="none" stroke="#333" stroke-width="0.5" />
+<text x="265.0" y="438.88915919112054" text-anchor="middle" font-size="10" font-weight="bold" fill="#222">380B</text>
+<rect x="390" y="403.83001368405047" width="90" height="66.16998631594953" fill="#2A9D8F" />
+<rect x="390" y="403.83001368405047" width="90" height="66.16998631594953" fill="url(#hatch-crosshatch)" />
+<rect x="390" y="403.83001368405047" width="90" height="66.16998631594953" fill="none" stroke="#333" stroke-width="0.5" />
+<rect x="390" y="202.58324464041357" width="90" height="201.2467690436369" fill="#E76F51" />
+<rect x="390" y="202.58324464041357" width="90" height="201.2467690436369" fill="url(#hatch-diagonal)" />
+<rect x="390" y="202.58324464041357" width="90" height="201.2467690436369" fill="none" stroke="#333" stroke-width="0.5" />
+<rect x="390" y="83.62323247681316" width="90" height="118.96001216360041" fill="#264653" />
+<rect x="390" y="83.62323247681316" width="90" height="118.96001216360041" fill="url(#hatch-dots)" />
+<rect x="390" y="83.62323247681316" width="90" height="118.96001216360041" fill="none" stroke="#333" stroke-width="0.5" />
+<rect x="390" y="71.03390603618674" width="90" height="12.589326440626426" fill="#E9C46A" />
+<rect x="390" y="71.03390603618674" width="90" height="12.589326440626426" fill="url(#hatch-horizontal)" />
+<rect x="390" y="71.03390603618674" width="90" height="12.589326440626426" fill="none" stroke="#333" stroke-width="0.5" />
+<text x="435.0" y="307.20662916223205" text-anchor="middle" font-size="9" font-weight="bold" fill="#000">3309</text>
+<text x="435.0" y="440.91500684202526" text-anchor="middle" font-size="9" font-weight="bold" fill="#fff">1088</text>
+<text x="435.0" y="90" text-anchor="middle" font-size="10" font-weight="bold" fill="#222">6560B</text>
+<rect x="510" y="403.83001368405047" width="90" height="66.16998631594953" fill="#2A9D8F" />
+<rect x="510" y="403.83001368405047" width="90" height="66.16998631594953" fill="url(#hatch-crosshatch)" />
+<rect x="510" y="403.83001368405047" width="90" height="66.16998631594953" fill="none" stroke="#333" stroke-width="0.5" />
+<rect x="510" y="202.58324464041357" width="90" height="201.2467690436369" fill="#E76F51" />
+<rect x="510" y="202.58324464041357" width="90" height="201.2467690436369" fill="url(#hatch-diagonal)" />
+<rect x="510" y="202.58324464041357" width="90" height="201.2467690436369" fill="none" stroke="#333" stroke-width="0.5" />
+<rect x="510" y="202.58324464041357" width="90" height="0.0" fill="#264653" />
+<rect x="510" y="202.58324464041357" width="90" height="0.0" fill="url(#hatch-dots)" />
+<rect x="510" y="202.58324464041357" width="90" height="0.0" fill="none" stroke="#333" stroke-width="0.5" />
+<rect x="510" y="135.92671430743502" width="90" height="66.65653033297856" fill="#E9C46A" />
+<rect x="510" y="135.92671430743502" width="90" height="66.65653033297856" fill="url(#hatch-horizontal)" />
+<rect x="510" y="135.92671430743502" width="90" height="66.65653033297856" fill="none" stroke="#333" stroke-width="0.5" />
+<text x="555.0" y="307.20662916223205" text-anchor="middle" font-size="9" font-weight="bold" fill="#000">3309</text>
+<text x="555.0" y="440.91500684202526" text-anchor="middle" font-size="9" font-weight="bold" fill="#fff">1088</text>
+<text x="555.0" y="127.92671430743502" text-anchor="middle" font-size="10" font-weight="bold" fill="#222">5493B</text>
+<rect x="680" y="403.83001368405047" width="90" height="66.16998631594953" fill="#2A9D8F" />
+<rect x="680" y="403.83001368405047" width="90" height="66.16998631594953" fill="url(#hatch-crosshatch)" />
+<rect x="680" y="403.83001368405047" width="90" height="66.16998631594953" fill="none" stroke="#333" stroke-width="0.5" />
+<rect x="680" y="202.58324464041357" width="90" height="201.2467690436369" fill="#E76F51" />
+<rect x="680" y="202.58324464041357" width="90" height="201.2467690436369" fill="url(#hatch-diagonal)" />
+<rect x="680" y="202.58324464041357" width="90" height="201.2467690436369" fill="none" stroke="#333" stroke-width="0.5" />
+<rect x="680" y="83.62323247681316" width="90" height="118.96001216360041" fill="#264653" />
+<rect x="680" y="83.62323247681316" width="90" height="118.96001216360041" fill="url(#hatch-dots)" />
+<rect x="680" y="83.62323247681316" width="90" height="118.96001216360041" fill="none" stroke="#333" stroke-width="0.5" />
+<rect x="680" y="70.00000000000001" width="90" height="13.623232476813138" fill="#E9C46A" />
+<rect x="680" y="70.00000000000001" width="90" height="13.623232476813138" fill="url(#hatch-horizontal)" />
+<rect x="680" y="70.00000000000001" width="90" height="13.623232476813138" fill="none" stroke="#333" stroke-width="0.5" />
+<text x="725.0" y="307.20662916223205" text-anchor="middle" font-size="9" font-weight="bold" fill="#000">3309</text>
+<text x="725.0" y="440.91500684202526" text-anchor="middle" font-size="9" font-weight="bold" fill="#fff">1088</text>
+<text x="725.0" y="90" text-anchor="middle" font-size="10" font-weight="bold" fill="#222">6577B</text>
+<rect x="800" y="403.83001368405047" width="90" height="66.16998631594953" fill="#2A9D8F" />
+<rect x="800" y="403.83001368405047" width="90" height="66.16998631594953" fill="url(#hatch-crosshatch)" />
+<rect x="800" y="403.83001368405047" width="90" height="66.16998631594953" fill="none" stroke="#333" stroke-width="0.5" />
+<rect x="800" y="202.58324464041357" width="90" height="201.2467690436369" fill="#E76F51" />
+<rect x="800" y="202.58324464041357" width="90" height="201.2467690436369" fill="url(#hatch-diagonal)" />
+<rect x="800" y="202.58324464041357" width="90" height="201.2467690436369" fill="none" stroke="#333" stroke-width="0.5" />
+<rect x="800" y="202.58324464041357" width="90" height="0.0" fill="#264653" />
+<rect x="800" y="202.58324464041357" width="90" height="0.0" fill="url(#hatch-dots)" />
+<rect x="800" y="202.58324464041357" width="90" height="0.0" fill="none" stroke="#333" stroke-width="0.5" />
+<rect x="800" y="134.8928082712483" width="90" height="67.69043636916527" fill="#E9C46A" />
+<rect x="800" y="134.8928082712483" width="90" height="67.69043636916527" fill="url(#hatch-horizontal)" />
+<rect x="800" y="134.8928082712483" width="90" height="67.69043636916527" fill="none" stroke="#333" stroke-width="0.5" />
+<text x="845.0" y="307.20662916223205" text-anchor="middle" font-size="9" font-weight="bold" fill="#000">3309</text>
+<text x="845.0" y="440.91500684202526" text-anchor="middle" font-size="9" font-weight="bold" fill="#fff">1088</text>
+<text x="845.0" y="126.8928082712483" text-anchor="middle" font-size="10" font-weight="bold" fill="#222">5510B</text>
+<text x="145.0" y="488" text-anchor="middle" font-size="10" fill="#222">MsgA</text>
+<text x="265.0" y="488" text-anchor="middle" font-size="10" fill="#222">MsgB</text>
+<text x="205.0" y="505" text-anchor="middle" font-size="11" font-weight="bold" fill="#333">Classic</text>
+<line x1="100" y1="492" x2="310" y2="492" stroke="#666" stroke-width="1"/>
+<text x="435.0" y="488" text-anchor="middle" font-size="10" fill="#222">MsgA</text>
+<text x="555.0" y="488" text-anchor="middle" font-size="10" fill="#222">MsgB</text>
+<text x="495.0" y="505" text-anchor="middle" font-size="11" font-weight="bold" fill="#333">PQC (liboqs)</text>
+<line x1="390" y1="492" x2="600" y2="492" stroke="#666" stroke-width="1"/>
+<text x="725.0" y="488" text-anchor="middle" font-size="10" fill="#222">MsgA</text>
+<text x="845.0" y="488" text-anchor="middle" font-size="10" fill="#222">MsgB</text>
+<text x="785.0" y="505" text-anchor="middle" font-size="11" font-weight="bold" fill="#333">PQC (CryptoKit)</text>
+<line x1="680" y1="492" x2="890" y2="492" stroke="#666" stroke-width="1"/>
+<rect x="870" y="100" width="16" height="16" fill="#2A9D8F" />
+<rect x="870" y="100" width="16" height="16" fill="url(#hatch-crosshatch)" />
+<rect x="870" y="100" width="16" height="16" fill="none" stroke="#333" stroke-width="0.5" />
+<text x="892" y="112" font-size="11" fill="#222">KeyShare</text>
+<rect x="870" y="124" width="16" height="16" fill="#E76F51" />
+<rect x="870" y="124" width="16" height="16" fill="url(#hatch-diagonal)" />
+<rect x="870" y="124" width="16" height="16" fill="none" stroke="#333" stroke-width="0.5" />
+<text x="892" y="136" font-size="11" fill="#222">Signature</text>
+<rect x="870" y="148" width="16" height="16" fill="#264653" />
+<rect x="870" y="148" width="16" height="16" fill="url(#hatch-dots)" />
+<rect x="870" y="148" width="16" height="16" fill="none" stroke="#333" stroke-width="0.5" />
+<text x="892" y="160" font-size="11" fill="#222">Identity</text>
+<rect x="870" y="172" width="16" height="16" fill="#E9C46A" />
+<rect x="870" y="172" width="16" height="16" fill="url(#hatch-horizontal)" />
+<rect x="870" y="172" width="16" height="16" fill="none" stroke="#333" stroke-width="0.5" />
+<text x="892" y="184" font-size="11" fill="#222">Overhead</text>
+<text x="470.0" y="40" text-anchor="middle" font-size="14" font-weight="bold" fill="#111">Handshake Message Size Breakdown</text>
+<text x="20" y="270.0" text-anchor="middle" font-size="11" fill="#333" transform="rotate(-90 20 270.0)">Bytes</text>
+</svg>

@@ -120,7 +120,7 @@ public struct OptionalNetworkMetrics: Sendable {
 
 // MARK: - HandshakeMetricsCollector
 
-/// 指标收集器 actor
+/// 指标收集器
 ///
 /// **设计决策**：
 /// - 使用 ContinuousClock 作为成员变量，支持测试注入
@@ -130,7 +130,7 @@ public struct OptionalNetworkMetrics: Sendable {
 ///
 /// Requirements: 6.1, 6.2, 6.3, 6.4
 @available(macOS 14.0, iOS 17.0, *)
-public actor HandshakeMetricsCollector {
+public final class HandshakeMetricsCollector: @unchecked Sendable {
     
  // MARK: - Properties
     

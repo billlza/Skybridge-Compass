@@ -73,7 +73,7 @@ final class PolicyDowngradeBenchTests: XCTestCase {
 
  // Allow async event emission to flush
         try await Task.sleep(for: .milliseconds(50))
-        let fallbackEvents = await collector.count(of: .handshakeFallback)
+        let fallbackEvents = await collector.count(of: .cryptoDowngrade)
         await collector.reset()
         let classicAttempts = await tracker.classicAttempts()
         return (classicAttempts: classicAttempts, fallbackEvents: fallbackEvents)

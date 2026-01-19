@@ -3,6 +3,7 @@
 // Copyright © 2024 SkyBridge. All rights reserved.
 
 import Foundation
+import Atomics
 
 /// Unified security event emitter with backpressure handling.
 ///
@@ -22,8 +23,11 @@ public actor SecurityEventEmitter {
     
  // MARK: - Singleton
     
- /// Shared instance for global event emission
+    /// Shared instance for global event emission
     public static let shared = SecurityEventEmitter()
+    private nonisolated static let hasSubscribersFlag = ManagedAtomic<Bool>(false)
+    // Phase A (TDSC): internal tamper-evident telemetry sink (AuditTrail)
+    private nonisolated static let hasAuditSinkFlag = ManagedAtomic<Bool>(true)
     
  // MARK: - Configuration
     
@@ -72,6 +76,9 @@ public actor SecurityEventEmitter {
  ///
  /// - Parameter event: The security event to emit
     public func emit(_ event: SecurityEvent) async {
+        // Always record to internal audit trail sink (even with zero UI subscribers)
+        await AuditTrail.shared.record(event)
+        if subscribers.isEmpty { return }
  // Meta-events bypass the queue entirely
         if event.isMetaEvent {
             await deliverToAllSubscribersDirect(event)
@@ -98,9 +105,21 @@ public actor SecurityEventEmitter {
  /// Use this when emitting from synchronous code (e.g., SignatureDBKeyManager.verify).
  ///
  /// - Parameter event: The security event to emit
-    public nonisolated static func emitDetached(_ event: SecurityEvent) {
+    public nonisolated static func emitDetached(_ event: @autoclosure () -> SecurityEvent) {
+        if !hasSubscribersFlag.load(ordering: .relaxed) && !hasAuditSinkFlag.load(ordering: .relaxed) {
+            return
+        }
+        let built = event()
         Task.detached {
-            await shared.emit(event)
+            await shared.emit(built)
+        }
+    }
+
+    /// Enable/disable the internal audit sink (defaults to enabled).
+    public nonisolated static func setAuditTrailEnabled(_ enabled: Bool) {
+        hasAuditSinkFlag.store(enabled, ordering: .relaxed)
+        Task.detached {
+            await AuditTrail.shared.setEnabled(enabled)
         }
     }
     
@@ -126,6 +145,7 @@ public actor SecurityEventEmitter {
             emitter: self
         )
         subscribers[id] = subscriberActor
+        Self.hasSubscribersFlag.store(true, ordering: .relaxed)
         return id
     }
     
@@ -134,6 +154,9 @@ public actor SecurityEventEmitter {
  /// - Parameter id: The subscription ID returned from subscribe()
     public func unsubscribe(_ id: UUID) {
         subscribers.removeValue(forKey: id)
+        if subscribers.isEmpty {
+            Self.hasSubscribersFlag.store(false, ordering: .relaxed)
+        }
     }
     
  /// Get current queue size (for monitoring/testing)

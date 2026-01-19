@@ -65,7 +65,7 @@ public enum AttemptPreparationError: Error, Sendable {
 ///
 /// 1. `preferPQC = true`: 先发 PQC-only MessageA (sigA=ML-DSA-65)，失败后再发 Classic-only MessageA (sigA=Ed25519)
 /// 2. `preferPQC = false`: 直接发 Classic-only MessageA
-/// 3. 每次 fallback 都发射 `handshakeFallback` event
+/// 3. 每次 fallback 都发射 `cryptoDowngrade` event
 /// 4. 硬规则仍然成立：每轮握手中 sigA 算法与 selectedSuite 必须兼容
 ///
 /// **Requirements: 1.4, 5.1, 9.1, 9.2, 9.3, 9.4, 9.5, 9.6**
@@ -73,26 +73,28 @@ public enum AttemptPreparationError: Error, Sendable {
 public struct TwoAttemptHandshakeManager: Sendable {
     
  // MARK: - Fallback Rate Limiting ( 9.3)
+
+    private static let fallbackCooldownSeconds: Int = 300
     
  /// Per-peer fallback 限流 actor
     private actor FallbackRateLimiter {
- /// 限流窗口（5 分钟）
-        private static let cooldownSeconds: Int = 300
-        
- /// 上次 fallback 时间记录
-        private var lastFallbackTimes: [String: Date] = [:]
+        private let clock = ContinuousClock()
+
+ /// 上次 fallback 时间记录（使用单调时钟，避免系统时间回拨影响限流）
+        private var lastFallbackTimes: [String: ContinuousClock.Instant] = [:]
         
  /// 检查是否允许 fallback
         func canFallback(deviceId: String) -> Bool {
             guard let lastTime = lastFallbackTimes[deviceId] else {
                 return true
             }
-            return Date().timeIntervalSince(lastTime) >= Double(Self.cooldownSeconds)
+            let elapsed = lastTime.duration(to: clock.now)
+            return elapsed >= .seconds(TwoAttemptHandshakeManager.fallbackCooldownSeconds)
         }
         
  /// 记录 fallback
         func recordFallback(deviceId: String) {
-            lastFallbackTimes[deviceId] = Date()
+            lastFallbackTimes[deviceId] = clock.now
         }
         
  /// 获取剩余冷却时间
@@ -100,9 +102,10 @@ public struct TwoAttemptHandshakeManager: Sendable {
             guard let lastTime = lastFallbackTimes[deviceId] else {
                 return 0
             }
-            let elapsed = Date().timeIntervalSince(lastTime)
-            let remaining = Double(Self.cooldownSeconds) - elapsed
-            return max(0, Int(remaining))
+            let elapsed = lastTime.duration(to: clock.now)
+            let elapsedSeconds = Int(elapsed.components.seconds)
+            let remaining = TwoAttemptHandshakeManager.fallbackCooldownSeconds - elapsedSeconds
+            return max(0, remaining)
         }
     }
     
@@ -154,7 +157,18 @@ public struct TwoAttemptHandshakeManager: Sendable {
         cryptoProvider: any CryptoProvider
     ) throws -> AttemptPreparation {
  // 1. 先 build suites
-        let buildResult = HandshakeOfferedSuites.build(strategy: strategy, cryptoProvider: cryptoProvider)
+        let buildResult: HandshakeOfferedSuites.BuildResult
+        switch strategy {
+        case .pqcOnly:
+            buildResult = HandshakeOfferedSuites.build(strategy: strategy, cryptoProvider: cryptoProvider)
+        case .classicOnly:
+            var availableSuites = cryptoProvider.supportedSuites
+            let classicSuites = ClassicCryptoProvider().supportedSuites
+            for suite in classicSuites where !availableSuites.contains(where: { $0.wireId == suite.wireId }) {
+                availableSuites.append(suite)
+            }
+            buildResult = HandshakeOfferedSuites.build(strategy: strategy, availableSuites: availableSuites)
+        }
         
  // 2. 检查是否为空
         let offeredSuites: [CryptoSuite]
@@ -297,15 +311,22 @@ public struct TwoAttemptHandshakeManager: Sendable {
         await rateLimiter.recordFallback(deviceId: deviceId)
         
  // 9.4: 发射 fallback 事件
-        let cooldown = 300 // 5 分钟
+        let cooldownSeconds = TwoAttemptHandshakeManager.fallbackCooldownSeconds
         SecurityEventEmitter.emitDetached(SecurityEvent(
-            type: .handshakeFallback,
+            type: .cryptoDowngrade,
             severity: .warning,
             message: "PQC handshake failed, falling back to Classic",
             context: [
                 "reason": String(describing: reason),
                 "deviceId": deviceId,
-                "cooldownSeconds": String(cooldown),
+                "cooldownSeconds": String(cooldownSeconds),
+                "cooldownRemainingSeconds": String(cooldownSeconds),
+                "policyRequirePQC": policy.requirePQC ? "1" : "0",
+                "policyAllowClassicFallback": policy.allowClassicFallback ? "1" : "0",
+                "policyMinimumTier": policy.minimumTier.rawValue,
+                "policyRequireSecureEnclavePoP": policy.requireSecureEnclavePoP ? "1" : "0",
+                "fromStrategy": HandshakeAttemptStrategy.pqcOnly.rawValue,
+                "toStrategy": HandshakeAttemptStrategy.classicOnly.rawValue,
                 "strategy": HandshakeAttemptStrategy.classicOnly.rawValue
             ]
         ))
@@ -348,12 +369,20 @@ public struct TwoAttemptHandshakeManager: Sendable {
                     }
  // 发射 fallback event
                     SecurityEventEmitter.emitDetached(SecurityEvent(
-                        type: .handshakeFallback,
+                        type: .cryptoDowngrade,
                         severity: .warning,
                         message: "PQC handshake failed, falling back to Classic",
                         context: [
                             "reason": String(describing: reason),
                             "deviceId": deviceId,
+                            "cooldownSeconds": String(TwoAttemptHandshakeManager.fallbackCooldownSeconds),
+                            "cooldownRemainingSeconds": String(TwoAttemptHandshakeManager.fallbackCooldownSeconds),
+                            "policyRequirePQC": policy.requirePQC ? "1" : "0",
+                            "policyAllowClassicFallback": policy.allowClassicFallback ? "1" : "0",
+                            "policyMinimumTier": policy.minimumTier.rawValue,
+                            "policyRequireSecureEnclavePoP": policy.requireSecureEnclavePoP ? "1" : "0",
+                            "fromStrategy": HandshakeAttemptStrategy.pqcOnly.rawValue,
+                            "toStrategy": HandshakeAttemptStrategy.classicOnly.rawValue,
                             "strategy": HandshakeAttemptStrategy.classicOnly.rawValue
                         ]
                     ))
@@ -408,7 +437,17 @@ public struct TwoAttemptHandshakeManager: Sendable {
         for strategy: HandshakeAttemptStrategy,
         cryptoProvider: any CryptoProvider
     ) -> HandshakeOfferedSuites.BuildResult {
-        return HandshakeOfferedSuites.build(strategy: strategy, cryptoProvider: cryptoProvider)
+        switch strategy {
+        case .pqcOnly:
+            return HandshakeOfferedSuites.build(strategy: strategy, cryptoProvider: cryptoProvider)
+        case .classicOnly:
+            var availableSuites = cryptoProvider.supportedSuites
+            let classicSuites = ClassicCryptoProvider().supportedSuites
+            for suite in classicSuites where !availableSuites.contains(where: { $0.wireId == suite.wireId }) {
+                availableSuites.append(suite)
+            }
+            return HandshakeOfferedSuites.build(strategy: strategy, availableSuites: availableSuites)
+        }
     }
     
  /// 根据策略获取 offeredSuites（向后兼容，使用静态列表）

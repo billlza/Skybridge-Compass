@@ -156,6 +156,8 @@ public actor HandshakeDriver {
     private let policy: HandshakePolicy
     
     private let cryptoPolicy: CryptoPolicy
+
+    private let offeredSuites: [CryptoSuite]?
     
  /// sigA 使用的签名算法（ 9.1）
  ///
@@ -246,6 +248,7 @@ public actor HandshakeDriver {
         self.sigAAlgorithm = sigAAlgorithm.wire
         self.policy = policy
         self.cryptoPolicy = cryptoPolicy
+        self.offeredSuites = offeredSuites
         self.timeout = timeout
         self.metricsCollector = metricsCollector ?? HandshakeMetricsCollector()
         self.trustProvider = trustProvider ?? DefaultHandshakeTrustProvider()
@@ -362,6 +365,7 @@ public actor HandshakeDriver {
         self.sigAAlgorithm = sigAAlgorithm
         self.policy = policy
         self.cryptoPolicy = cryptoPolicy
+        self.offeredSuites = nil
         self.timeout = timeout
         self.metricsCollector = metricsCollector ?? HandshakeMetricsCollector()
         self.trustProvider = trustProvider ?? DefaultHandshakeTrustProvider()
@@ -381,7 +385,7 @@ public actor HandshakeDriver {
         currentPeer = peer
         
  // 13.2: 记录握手开始 (Requirement 6.1)
-        await metricsCollector.recordStart()
+        metricsCollector.recordStart()
         
  // 创建握手上下文
  // 5.3: 传递分流的签名 provider
@@ -413,7 +417,8 @@ public actor HandshakeDriver {
                 identityKeyHandle: identityKeyHandle,
                 identityPublicKey: identityPublicKey,
                 policy: policy,
-                secureEnclaveKeyHandle: secureEnclaveKeyHandle
+                secureEnclaveKeyHandle: secureEnclaveKeyHandle,
+                offeredSuites: offeredSuites
             )
         } catch {
  // 构建失败时必须 zeroize ( 11.5)
@@ -427,9 +432,10 @@ public actor HandshakeDriver {
         
  // 发送 MessageA（失败时必须 zeroize - 11.5）
         do {
-            try await transport.send(to: peer, data: messageA.encoded)
+            let padded = HandshakePadding.wrapIfEnabled(messageA.encoded, label: "MessageA")
+            try await transport.send(to: peer, data: TrafficPadding.wrapIfEnabled(padded, label: "HS/MessageA"))
  // 13.2: 记录 MessageA 发送时间 (Requirement 6.1)
-            await metricsCollector.recordMessageASent()
+            metricsCollector.recordMessageASent()
         } catch {
             await ctx.zeroize()
             context = nil
@@ -481,27 +487,32 @@ public actor HandshakeDriver {
  /// - data: 消息数据
  /// - peer: 发送方
     public func handleMessage(_ data: Data, from peer: PeerIdentifier) async {
-        if isFinishedMessage(data) {
-            if let finished = try? HandshakeFinished.decode(from: data) {
+        // Phase C1: unwrap padded handshake frames (traffic-analysis mitigation).
+        let unwrapped = HandshakePadding.unwrapIfNeeded(data, label: "rx")
+
+        if isFinishedMessage(unwrapped) {
+            if let finished = try? HandshakeFinished.decode(from: unwrapped) {
                 await handleFinished(finished, from: peer)
                 return
             }
         }
         switch state {
+        case .sendingMessageA:
+            await handleMessageB(unwrapped)
         case .waitingMessageB:
-            await handleMessageB(data)
+            await handleMessageB(unwrapped)
         case .processingMessageB:
             SkyBridgeLogger.p2p.warning("Ignored handshake message during processingMessageB")
             
         case .waitingFinished:
-            if let finished = try? HandshakeFinished.decode(from: data) {
+            if let finished = try? HandshakeFinished.decode(from: unwrapped) {
                 await handleFinished(finished, from: peer)
             } else {
                 SkyBridgeLogger.p2p.warning("Unexpected message while waitingFinished")
             }
         case .idle:
  // 作为响应方处理 MessageA
-            await handleMessageA(data, from: peer)
+            await handleMessageA(unwrapped, from: peer)
             
         default:
  // 忽略非预期消息
@@ -544,8 +555,8 @@ public actor HandshakeDriver {
             ))
 
  // 记录取消指标
-            await metricsCollector.recordFinish()
-            lastMetrics = await metricsCollector.buildMetrics(
+            metricsCollector.recordFinish()
+            lastMetrics = metricsCollector.buildMetrics(
                 cryptoSuite: negotiatedSuite,
                 isFallback: isFallback,
                 failureReason: .cancelled
@@ -575,7 +586,7 @@ public actor HandshakeDriver {
  /// 处理 MessageA（响应方）
     private func handleMessageA(_ data: Data, from peer: PeerIdentifier) async {
         currentPeer = peer
-        await metricsCollector.recordStart()
+        metricsCollector.recordStart()
         
         do {
             let messageA = try HandshakeMessageA.decode(from: data)
@@ -639,7 +650,8 @@ public actor HandshakeDriver {
             
  // 发送 MessageB（失败时必须 zeroize - 11.5）
             do {
-                try await transport.send(to: peer, data: messageB.encoded)
+                let padded = HandshakePadding.wrapIfEnabled(messageB.encoded, label: "MessageB")
+                try await transport.send(to: peer, data: TrafficPadding.wrapIfEnabled(padded, label: "HS/MessageB"))
             } catch {
                 await handleHandshakeError(HandshakeError.failed(.transportError(error.localizedDescription)), context: ctx)
                 return
@@ -680,7 +692,8 @@ public actor HandshakeDriver {
                     direction: .responderToInitiator,
                     sessionKeys: sessionKeys
                 )
-                try await transport.send(to: peer, data: finished.encoded)
+                let padded = HandshakePadding.wrapIfEnabled(finished.encoded, label: "Finished")
+                try await transport.send(to: peer, data: TrafficPadding.wrapIfEnabled(padded, label: "HS/Finished"))
             } catch {
                 await transitionToFailed(.transportError(error.localizedDescription), negotiatedSuite: sessionKeys.negotiatedSuite)
                 return
@@ -699,7 +712,7 @@ public actor HandshakeDriver {
  /// 处理 MessageB（发起方）
     private func handleMessageB(_ data: Data) async {
  // 13.2: 记录 MessageB 接收时间 (Requirement 6.1)
-        await metricsCollector.recordMessageBReceived()
+        metricsCollector.recordMessageBReceived()
         
         guard let ctx = context else {
             await transitionToFailed(.invalidMessageFormat("No context available"))
@@ -821,7 +834,7 @@ public actor HandshakeDriver {
         }
         
  // 13.2: 记录超时 (Requirement 6.2)
-        await metricsCollector.recordTimeout()
+        metricsCollector.recordTimeout()
         
  // 超时后必须 zeroize ( 11.4)
         if let ctx = context {
@@ -918,7 +931,8 @@ public actor HandshakeDriver {
             if expectingFrom == .responder {
                 do {
                     let clientFinished = try makeFinished(direction: .initiatorToResponder, sessionKeys: sessionKeys)
-                    try await transport.send(to: peer, data: clientFinished.encoded)
+                    let padded = HandshakePadding.wrapIfEnabled(clientFinished.encoded, label: "Finished")
+                    try await transport.send(to: peer, data: TrafficPadding.wrapIfEnabled(padded, label: "HS/Finished"))
                 } catch {
                     await transitionToFailed(.transportError(error.localizedDescription), negotiatedSuite: sessionKeys.negotiatedSuite)
                     return
@@ -929,12 +943,27 @@ public actor HandshakeDriver {
             
             let negotiatedSuite = sessionKeys.negotiatedSuite
             let isFallback = cryptoProvider.activeSuite.isPQC && !negotiatedSuite.isPQC
-            await metricsCollector.recordFinish()
-            lastMetrics = await metricsCollector.buildMetrics(
+            metricsCollector.recordFinish()
+            lastMetrics = metricsCollector.buildMetrics(
                 cryptoSuite: negotiatedSuite,
                 isFallback: isFallback,
                 failureReason: nil
             )
+
+            // Phase A (TDSC): start tamper-evident audit chain anchored to transcript hash,
+            // and emit an explicit "handshake established" event with session metadata.
+            await AuditTrail.shared.beginSession(sessionId: sessionKeys.sessionId, anchor: sessionKeys.transcriptHash)
+            SecurityEventEmitter.emitDetached(SecurityEvent(
+                type: .handshakeEstablished,
+                severity: .info,
+                message: "Handshake established (Finished verified)",
+                context: [
+                    "sessionId": sessionKeys.sessionId,
+                    "peer": peer.deviceId,
+                    "suite": negotiatedSuite.rawValue,
+                    "transcriptHash": sessionKeys.transcriptHash.map { String(format: "%02x", $0) }.joined()
+                ]
+            ))
             
             finishOnce(with: .success(sessionKeys))
             
@@ -953,7 +982,7 @@ public actor HandshakeDriver {
         state = .failed(reason: reason)
 
  // 记录失败指标
-        await metricsCollector.recordFinish()
+        metricsCollector.recordFinish()
         let suite: CryptoSuite?
         if let negotiatedSuite {
             suite = negotiatedSuite
@@ -961,7 +990,7 @@ public actor HandshakeDriver {
             suite = await context?.negotiatedSuite
         }
         let isFallback = suite.map { cryptoProvider.activeSuite.isPQC && !$0.isPQC }
-        lastMetrics = await metricsCollector.buildMetrics(
+        lastMetrics = metricsCollector.buildMetrics(
             cryptoSuite: suite,
             isFallback: isFallback,
             failureReason: reason

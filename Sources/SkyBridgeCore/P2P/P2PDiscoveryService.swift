@@ -9,6 +9,7 @@
 import Foundation
 import Network
 import OSLog
+import CryptoKit
 import Combine
 
 /// 设备发现管理器 - 基于 2025 年 Apple 推荐栈
@@ -596,6 +597,40 @@ public class P2PDiscoveryService: BaseManager {
 
  /// 入站控制通道处理（统一格式 SecurePacket）
     private func handleInboundControlChannel(_ connection: NWConnection) async {
+        // 兼容 iOS 端 PQC HandshakeDriver 协议：当 payload 不是 SecurePacket(JSON) 时，
+        // 回退到 HandshakeDriver（长度前缀 framing 已一致：4B big-endian）
+        struct DirectHandshakeTransport: DiscoveryTransport {
+            let connection: NWConnection
+            func send(to peer: PeerIdentifier, data: Data) async throws {
+                var framed = Data()
+                var length = UInt32(data.count).bigEndian
+                framed.append(Data(bytes: &length, count: 4))
+                framed.append(data)
+                try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
+                    connection.send(content: framed, completion: .contentProcessed { err in
+                        if let err { c.resume(throwing: err) } else { c.resume() }
+                    })
+                }
+            }
+        }
+
+        var handshakeDriver: HandshakeDriver?
+        let handshakePeer = PeerIdentifier(deviceId: "ios-\(connection.endpoint.debugDescription)")
+        let handshakeTransport = DirectHandshakeTransport(connection: connection)
+        // 为兼容 Classic fallback，这里使用 Ed25519 identity（内存生成），并使用 ClassicCryptoProvider
+        let classicProvider = ClassicCryptoProvider()
+        let signatureProvider = ProtocolSignatureProviderSelector.select(for: .ed25519)
+        let identityPrivateKey = Curve25519.Signing.PrivateKey()
+        let identityKeyHandle: SigningKeyHandle = .softwareKey(identityPrivateKey.rawRepresentation)
+        let identityPublicKey = identityPrivateKey.publicKey.rawRepresentation
+        // iOS 端要求 IdentityPublicKeys 的“新 wire 格式”（带算法字节 + 长度），不能直接发裸 32B Ed25519
+        let identityPublicKeyWire = ProtocolIdentityPublicKeys(
+            protocolPublicKey: identityPublicKey,
+            protocolAlgorithm: .ed25519,
+            sePoPPublicKey: nil
+        ).asWire().encoded
+        let offeredSuites = classicProvider.supportedSuites.filter { !$0.isPQC && !$0.isHybrid }
+
         do {
             while connection.state == .ready {
  // 读取控制包长度（4字节，大端）
@@ -604,8 +639,11 @@ public class P2PDiscoveryService: BaseManager {
                 guard totalLen > 0 && totalLen < 1_048_576 else { break }
  // 读取控制负载
                 let payload = try await receiveData(length: Int(totalLen), from: connection)
+                // Phase C2: optional traffic padding (SBP2) — unwrap before JSON decode / handshake fallback.
+                let unwrapped = TrafficPadding.unwrapIfNeeded(payload, label: "rx")
+                do {
  // 解析 SecurePacket
-                let packet = try JSONDecoder().decode(SecurePacket.self, from: payload)
+                let packet = try JSONDecoder().decode(SecurePacket.self, from: unwrapped)
  // 验签
                 let ok = try await EnhancedPostQuantumCrypto().verify(packet.data, signature: packet.signature, for: packetSenderId(packet))
                 guard ok else {
@@ -622,6 +660,27 @@ public class P2PDiscoveryService: BaseManager {
                 case .heartbeat:
  // 发送 ACK（1字节 0x09）
                     try await sendAck(code: 0x09, to: connection)
+                }
+                } catch {
+                    // 非 SecurePacket：尝试作为 HandshakeDriver 的消息处理（与 iOS 互通）
+                    do {
+                        if handshakeDriver == nil {
+                            handshakeDriver = try HandshakeDriver(
+                                transport: handshakeTransport,
+                                cryptoProvider: classicProvider,
+                                protocolSignatureProvider: signatureProvider,
+                                protocolSigningKeyHandle: identityKeyHandle,
+                                sigAAlgorithm: .ed25519,
+                                identityPublicKey: identityPublicKeyWire,
+                                offeredSuites: offeredSuites,
+                                policy: .default
+                            )
+                            logger.info("🤝 已启用 HandshakeDriver 兼容通道（iOS 互通）")
+                        }
+                        await handshakeDriver?.handleMessage(unwrapped, from: handshakePeer)
+                    } catch {
+                        logger.error("❌ HandshakeDriver 初始化失败: \(error.localizedDescription)")
+                    }
                 }
             }
         } catch {

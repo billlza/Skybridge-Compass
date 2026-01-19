@@ -173,9 +173,9 @@ public final class SkyBridgeWeatherService: ObservableObject {
     private func fetchFromWttr(latitude: Double, longitude: Double, city: String?) async -> WeatherInfo? {
  // wttr.in 支持坐标查询
         let urlString = "https://wttr.in/\(latitude),\(longitude)?format=j1"
-        
+
         guard let url = URL(string: urlString) else { return nil }
-        
+
         do {
  // 配置轻量网络超时与不等待网络连接，避免请求阻塞主流程
             let config = URLSessionConfiguration.ephemeral
@@ -187,15 +187,18 @@ public final class SkyBridgeWeatherService: ObservableObject {
             request.timeoutInterval = 5.0
             let (data, _) = try await session.data(for: request)
             let response = try JSONDecoder().decode(WttrResponse.self, from: data)
-            
+
             guard let current = response.current_condition.first else { return nil }
-            
+
  // 解析天气状态
             let condition = parseWeatherCondition(code: Int(current.weatherCode) ?? 0, description: current.weatherDesc.first?.value ?? "")
-            
+
  // 计算AQI（如果有PM2.5数据）
             let aqi = calculateAQI(pm25: Double(current.pm2_5 ?? "0") ?? 0)
-            
+
+            // 🔧 优先使用传入的city，否则尝试从API响应获取，最后用坐标
+            let locationName = city ?? response.nearest_area?.first?.areaName?.first?.value ?? formatCoordinates(latitude, longitude)
+
             let weather = WeatherInfo(
                 temperature: Double(current.temp_C) ?? 0,
                 condition: condition,
@@ -204,36 +207,39 @@ public final class SkyBridgeWeatherService: ObservableObject {
                 visibility: Double(current.visibility) ?? nil,
                 aqi: aqi,
                 description: current.weatherDesc.first?.value ?? "未知",
-                location: city ?? "\(latitude), \(longitude)",
+                location: locationName,
                 source: "wttr.in"
             )
-            
+
             logger.info("✅ wttr.in 天气获取成功: \(condition.rawValue), \(weather.temperature)°C")
             return weather
-            
+
         } catch {
  // 请求失败时不阻塞主流程，记录简洁日志并返回nil以触发降级
             logger.debug("❌ wttr.in 请求失败(超时或网络不可用): \(error.localizedDescription)")
             return nil
         }
     }
-    
+
  /// Open-Meteo API (备用: 免费、开源、无需API key)
     private func fetchFromOpenMeteo(latitude: Double, longitude: Double, city: String?) async -> WeatherInfo? {
         let urlString = "https://api.open-meteo.com/v1/forecast?latitude=\(latitude)&longitude=\(longitude)&current=temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m,visibility&timezone=auto"
-        
+
         guard let url = URL(string: urlString) else { return nil }
-        
+
         do {
             let (data, _) = try await URLSession.shared.data(from: url)
             let response = try JSONDecoder().decode(OpenMeteoResponse.self, from: data)
-            
+
             let condition = parseWeatherCondition(code: response.current.weather_code, description: nil)
-            
+
  // 18.5: 安全处理 visibility optional (Requirements 8.1)
  // 使用 map 替代 force unwrap，更安全地处理 Optional
             let visibilityKm = response.current.visibility.map { $0 / 1000 }
-            
+
+            // 🔧 如果city为nil，尝试通过坐标反向解析或使用格式化坐标
+            let locationName = city ?? formatCoordinates(latitude, longitude)
+
             let weather = WeatherInfo(
                 temperature: response.current.temperature_2m,
                 condition: condition,
@@ -242,17 +248,24 @@ public final class SkyBridgeWeatherService: ObservableObject {
                 visibility: visibilityKm,
                 aqi: nil, // Open-Meteo 不提供AQI
                 description: condition.rawValue,
-                location: city ?? "\(latitude), \(longitude)",
+                location: locationName,
                 source: "Open-Meteo"
             )
-            
+
             logger.info("✅ Open-Meteo 天气获取成功: \(condition.rawValue), \(weather.temperature)°C")
             return weather
-            
+
         } catch {
             logger.error("❌ Open-Meteo 请求失败: \(error.localizedDescription)")
             return nil
         }
+    }
+
+    /// 格式化坐标为更友好的显示格式
+    private func formatCoordinates(_ latitude: Double, _ longitude: Double) -> String {
+        let latDir = latitude >= 0 ? "N" : "S"
+        let lonDir = longitude >= 0 ? "E" : "W"
+        return String(format: "%.2f°%@ %.2f°%@", abs(latitude), latDir, abs(longitude), lonDir)
     }
     
  /// 专门获取 AQI 数据（备用策略）
@@ -477,7 +490,8 @@ public final class SkyBridgeWeatherService: ObservableObject {
 
 private struct WttrResponse: Codable {
     let current_condition: [CurrentCondition]
-    
+    let nearest_area: [NearestArea]?
+
     struct CurrentCondition: Codable {
         let temp_C: String
         let weatherCode: String
@@ -486,8 +500,18 @@ private struct WttrResponse: Codable {
         let windspeedKmph: String
         let visibility: String
         let pm2_5: String?
-        
+
         struct Description: Codable {
+            let value: String
+        }
+    }
+
+    struct NearestArea: Codable {
+        let areaName: [NameValue]?
+        let region: [NameValue]?
+        let country: [NameValue]?
+
+        struct NameValue: Codable {
             let value: String
         }
     }

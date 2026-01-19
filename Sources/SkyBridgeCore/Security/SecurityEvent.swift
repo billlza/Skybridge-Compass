@@ -43,6 +43,9 @@ public enum SecurityEventType: String, Sendable, CaseIterable {
  /// P2P handshake failed
     case handshakeFailed = "handshake_failed"
     
+ /// P2P handshake established (explicit key confirmation complete)
+    case handshakeEstablished = "handshake_established"
+    
  /// Crypto downgrade occurred ( 14.3)
  /// Requirement 14.3: classic fallback 时发射此事件
     case cryptoDowngrade = "crypto_downgrade"
@@ -159,6 +162,7 @@ extension SecurityEventType {
         case .detailFileCorrupted: return .info
         case .cryptoProviderSelected: return .info
         case .handshakeFailed: return .warning
+        case .handshakeEstablished: return .info
         case .cryptoDowngrade: return .warning
         case .secureEnclaveSignatureInvalid: return .warning
  // Signature Mechanism Alignment Events
@@ -474,13 +478,13 @@ extension SecurityEvent {
         )
     }
     
- /// Create a handshake fallback event
+ /// Create a crypto downgrade event
  /// - Parameters:
  /// - fromSuite: The original suite attempted
  /// - toSuite: The fallback suite
  /// - reason: Reason for fallback
  /// - deviceId: Optional device ID
-    public static func handshakeFallback(
+    public static func cryptoDowngrade(
         fromSuite: String,
         toSuite: String,
         reason: String,
@@ -495,14 +499,24 @@ extension SecurityEvent {
             ctx["deviceId"] = devId
         }
         return SecurityEvent(
-            type: .handshakeFallback,
+            type: .cryptoDowngrade,
             severity: .warning,
-            message: "Handshake fallback from \(fromSuite) to \(toSuite): \(reason)",
+            message: "Crypto downgrade from \(fromSuite) to \(toSuite): \(reason)",
             context: ctx
         )
     }
+
+    @available(*, deprecated, message: "Use cryptoDowngrade(fromSuite:toSuite:reason:deviceId:)")
+    public static func handshakeFallback(
+        fromSuite: String,
+        toSuite: String,
+        reason: String,
+        deviceId: String? = nil
+    ) -> SecurityEvent {
+        cryptoDowngrade(fromSuite: fromSuite, toSuite: toSuite, reason: reason, deviceId: deviceId)
+    }
     
- /// Create a handshake fallback event with full context
+ /// Create a crypto downgrade event with full context
  /// - Parameters:
  /// - reason: Reason for fallback
  /// - deviceId: The peer device ID
@@ -511,7 +525,7 @@ extension SecurityEvent {
  /// - toStrategy: Fallback strategy
  ///
  /// **Requirements: 9.5, 11.7**
-    public static func handshakeFallbackWithContext(
+    public static func cryptoDowngradeWithContext(
         reason: String,
         deviceId: String,
         cooldownSeconds: Int,
@@ -519,9 +533,9 @@ extension SecurityEvent {
         toStrategy: String
     ) -> SecurityEvent {
         SecurityEvent(
-            type: .handshakeFallback,
+            type: .cryptoDowngrade,
             severity: .warning,
-            message: "Handshake fallback: \(reason)",
+            message: "Crypto downgrade: \(reason)",
             context: [
                 "reason": reason,
                 "deviceId": deviceId,
@@ -529,6 +543,23 @@ extension SecurityEvent {
                 "fromStrategy": fromStrategy,
                 "toStrategy": toStrategy
             ]
+        )
+    }
+
+    @available(*, deprecated, message: "Use cryptoDowngradeWithContext(reason:deviceId:cooldownSeconds:fromStrategy:toStrategy:)")
+    public static func handshakeFallbackWithContext(
+        reason: String,
+        deviceId: String,
+        cooldownSeconds: Int,
+        fromStrategy: String,
+        toStrategy: String
+    ) -> SecurityEvent {
+        cryptoDowngradeWithContext(
+            reason: reason,
+            deviceId: deviceId,
+            cooldownSeconds: cooldownSeconds,
+            fromStrategy: fromStrategy,
+            toStrategy: toStrategy
         )
     }
     

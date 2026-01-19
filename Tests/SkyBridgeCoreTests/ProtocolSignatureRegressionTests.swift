@@ -308,12 +308,12 @@ final class ProtocolSignatureRegressionTests: XCTestCase {
     
  // MARK: - 17.6: Downgrade 事件发射测试
     
- /// Regression 12.6: handshakeFallback 事件必须包含完整上下文
+ /// Regression 12.6: cryptoDowngrade 事件必须包含完整上下文
  ///
  /// **Validates: Requirements 12.6**
-    func testRegression_HandshakeFallbackEvent_HasContext() {
- // 创建 handshakeFallback 事件
-        let event = SecurityEvent.handshakeFallbackWithContext(
+    func testRegression_CryptoDowngradeEvent_HasContext() {
+ // 创建 cryptoDowngrade 事件
+        let event = SecurityEvent.cryptoDowngradeWithContext(
             reason: "pqcProviderUnavailable",
             deviceId: "test-device-123",
             cooldownSeconds: 300,
@@ -322,12 +322,12 @@ final class ProtocolSignatureRegressionTests: XCTestCase {
         )
         
  // 验证事件类型
-        XCTAssertEqual(event.type, .handshakeFallback,
-            "Event type MUST be handshakeFallback")
+        XCTAssertEqual(event.type, .cryptoDowngrade,
+            "Event type MUST be cryptoDowngrade")
         
  // 验证事件包含上下文
         XCTAssertFalse(event.context.isEmpty,
-            "handshakeFallback event MUST have context")
+            "cryptoDowngrade event MUST have context")
         
  // 验证上下文包含必要字段
         XCTAssertNotNil(event.context["reason"],

@@ -338,6 +338,7 @@ public actor ServiceAdvertiserCenter {
     public func startAdvertising(
         serviceName: String,
         serviceType: String,
+        txtRecord: NWTXTRecord? = nil,
         connectionHandler: (@Sendable (NWConnection) -> Void)? = nil,
         stateHandler: (@Sendable (NWListener.State) -> Void)? = nil
     ) throws -> UInt16 {
@@ -350,7 +351,10 @@ public actor ServiceAdvertiserCenter {
         let parameters = NWParameters.tcp
         parameters.includePeerToPeer = true
         let listener = try NWListener(using: parameters)
-        let service = NWListener.Service(name: serviceName, type: serviceType)
+
+        // 默认携带基础 TXT（iOS 端用于显示系统版本等）
+        let finalTXT = txtRecord ?? makeDefaultTXTRecord()
+        let service = NWListener.Service(name: serviceName, type: serviceType, domain: "local.", txtRecord: finalTXT)
         listener.service = service
         if let ch = connectionHandler {
             listener.newConnectionHandler = { conn in ch(conn) }
@@ -377,6 +381,7 @@ public actor ServiceAdvertiserCenter {
     public func startAdvertisingIfNeeded(
         serviceName: String,
         serviceType: String,
+        txtRecord: NWTXTRecord? = nil,
         connectionHandler: (@Sendable (NWConnection) -> Void)? = nil,
         stateHandler: (@Sendable (NWListener.State) -> Void)? = nil
     ) throws -> UInt16 {
@@ -386,9 +391,18 @@ public actor ServiceAdvertiserCenter {
         return try startAdvertising(
             serviceName: serviceName,
             serviceType: serviceType,
+            txtRecord: txtRecord,
             connectionHandler: connectionHandler,
             stateHandler: stateHandler
         )
+    }
+
+    private func makeDefaultTXTRecord() -> NWTXTRecord {
+        var record = NWTXTRecord()
+        record["platform"] = "macos"
+        record["osVersion"] = ProcessInfo.processInfo.operatingSystemVersionString
+        record["name"] = Host.current().localizedName ?? "Mac"
+        return record
     }
 
  /// 查询指定服务类型是否正在广播

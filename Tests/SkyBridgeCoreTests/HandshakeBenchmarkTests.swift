@@ -8,7 +8,7 @@ import Foundation
 
 /// Benchmark tests for handshake latency and throughput measurements.
 /// Run with `SKYBRIDGE_RUN_BENCH=1 swift test --filter HandshakeBenchmarkTests`
-/// Results are written to `Artifacts/handshake_bench_<date>.csv`
+/// Results are written to `Artifacts/handshake_bench_2026-01-06.csv`
 final class HandshakeBenchmarkTests: XCTestCase {
     
  // MARK: - Benchmark Configuration
@@ -118,6 +118,34 @@ final class HandshakeBenchmarkTests: XCTestCase {
         let stats = computeEnhancedStats(samples)
         reportRTTStats(configuration: "CryptoKit PQC (ML-KEM-768 + ML-DSA-65)", stats: stats)
     }
+
+    @available(macOS 26.0, iOS 26.0, *)
+    func testHandshakeLatency_AppleXWing() async throws {
+        try XCTSkipUnless(shouldRunBenchmarks, "Set SKYBRIDGE_RUN_BENCH=1 to run benchmarks")
+
+        let samples = try await measureHandshakeLatency(
+            providerType: .appleXWing,
+            iterations: Self.iterationCount,
+            warmup: Self.warmupCount
+        )
+
+        let stats = computeEnhancedStats(samples)
+        reportLatencyStats(configuration: "CryptoKit Hybrid (X-Wing + ML-DSA-65)", stats: stats)
+    }
+
+    @available(macOS 26.0, iOS 26.0, *)
+    func testHandshakeRTT_AppleXWing() async throws {
+        try XCTSkipUnless(shouldRunBenchmarks, "Set SKYBRIDGE_RUN_BENCH=1 to run benchmarks")
+
+        let samples = try await measureHandshakeRTT(
+            providerType: .appleXWing,
+            iterations: Self.iterationCount,
+            warmup: Self.warmupCount
+        )
+
+        let stats = computeEnhancedStats(samples)
+        reportRTTStats(configuration: "CryptoKit Hybrid (X-Wing + ML-DSA-65)", stats: stats)
+    }
     #endif
     
  // MARK: - Throughput Benchmarks (Table III)
@@ -165,6 +193,25 @@ final class HandshakeBenchmarkTests: XCTestCase {
         case classic
         case liboqsPQC
         case applePQC
+        case appleXWing
+    }
+
+    private struct BenchmarkContext {
+        let providerType: ProviderType
+        let provider: any CryptoProvider
+        let offeredSuites: [CryptoSuite]
+        let protocolSignatureProvider: any ProtocolSignatureProvider
+        let sigAAlgorithm: ProtocolSigningAlgorithm
+        let initiatorKeyHandle: SigningKeyHandle
+        let responderKeyHandle: SigningKeyHandle
+        let initiatorIdentityPublicKey: Data
+        let responderIdentityPublicKey: Data
+        let peer: PeerIdentifier
+        let trustProviderInitiator: any HandshakeTrustProvider
+        let trustProviderResponder: any HandshakeTrustProvider
+        let handshakeTimeout: Duration
+        let handshakePolicy: HandshakePolicy
+        let cryptoPolicy: CryptoPolicy
     }
     
     private struct HandshakeWireSizes: Sendable {
@@ -176,7 +223,8 @@ final class HandshakeBenchmarkTests: XCTestCase {
     private static let configurationNames: [ProviderType: String] = [
         .classic: "Classic (X25519 + Ed25519)",
         .liboqsPQC: "liboqs PQC (ML-KEM-768 + ML-DSA-65)",
-        .applePQC: "CryptoKit PQC (ML-KEM-768 + ML-DSA-65)"
+        .applePQC: "CryptoKit PQC (ML-KEM-768 + ML-DSA-65)",
+        .appleXWing: "CryptoKit Hybrid (X-Wing + ML-DSA-65)"
     ]
     private static let wireSizeRecorder = WireSizeRecorder()
     
@@ -199,73 +247,10 @@ final class HandshakeBenchmarkTests: XCTestCase {
         }
         return kemPublicKeys
     }
-    
- /// Measure handshake latency
- /// Requirements: 4.1, 4.3
-    @available(macOS 14.0, iOS 17.0, *)
-    private func measureHandshakeLatency(
-        providerType: ProviderType,
-        iterations: Int,
-        warmup: Int
-    ) async throws -> [Double] {
-        var samples: [Double] = []
-        
- // Warmup
-        for _ in 0..<warmup {
-            _ = try await performMockHandshake(providerType: providerType)
-        }
-        
- // Measured iterations
-        for _ in 0..<iterations {
-            let start = ContinuousClock.now
-            _ = try await performMockHandshake(providerType: providerType)
-            let elapsed = ContinuousClock.now - start
-            
- // Convert to milliseconds
-            let ms = Double(elapsed.components.seconds) * 1000.0 +
-                     Double(elapsed.components.attoseconds) / 1_000_000_000_000_000.0
-            samples.append(ms)
-        }
-        
-        return samples
-    }
 
- /// Measure handshake RTT (MessageB receive - MessageA send)
-    @available(macOS 14.0, iOS 17.0, *)
-    private func measureHandshakeRTT(
-        providerType: ProviderType,
-        iterations: Int,
-        warmup: Int
-    ) async throws -> [Double] {
-        var samples: [Double] = []
-
-        for _ in 0..<warmup {
-            _ = try await performMockHandshakeWithMetrics(providerType: providerType)
-        }
-
-        for _ in 0..<iterations {
-            let (_, metrics) = try await performMockHandshakeWithMetrics(providerType: providerType)
-            guard metrics.rttMs >= 0 else {
-                throw BenchmarkError.missingMetrics("RTT unavailable in metrics")
-            }
-            samples.append(metrics.rttMs)
-        }
-
-        return samples
-    }
-    
- /// Perform a mock handshake using auto-forwarded in-memory transport
- /// Requirements: 4.3
-    @available(macOS 14.0, iOS 17.0, *)
-    private func performMockHandshake(providerType: ProviderType) async throws -> Data {
-        let (transcriptHash, _) = try await performMockHandshakeWithMetrics(providerType: providerType)
-        return transcriptHash
-    }
-
-    private func performMockHandshakeWithMetrics(
+    private func prepareBenchmarkContext(
         providerType: ProviderType
-    ) async throws -> (transcriptHash: Data, metrics: HandshakeMetrics) {
- // Use ClassicCryptoProvider directly for classic mode (matches working runOneHandshake pattern)
+    ) async throws -> BenchmarkContext {
         let provider: any CryptoProvider
         switch providerType {
         case .classic:
@@ -286,29 +271,40 @@ final class HandshakeBenchmarkTests: XCTestCase {
             #else
             throw XCTSkip("Apple PQC SDK not available in this build")
             #endif
+        case .appleXWing:
+            #if HAS_APPLE_PQC_SDK
+            if #available(iOS 26.0, macOS 26.0, *) {
+                provider = AppleXWingCryptoProvider()
+            } else {
+                throw XCTSkip("Apple X-Wing not available on this OS version")
+            }
+            #else
+            throw XCTSkip("Apple PQC SDK not available in this build")
+            #endif
         }
-        
+
         let strategy: HandshakeAttemptStrategy = (providerType == .classic) ? .classicOnly : .pqcOnly
         let offeredSuitesResult = TwoAttemptHandshakeManager.getSuites(for: strategy, cryptoProvider: provider)
         guard case .suites(let offeredSuites) = offeredSuitesResult else {
             throw HandshakeError.emptyOfferedSuites
         }
-        
+
         let protocolSignatureProvider = ProtocolSignatureProviderSelector.select(for: provider.tier)
         let sigAAlgorithm = protocolSignatureProvider.signatureAlgorithm
-        
- // Generate identity key pairs for both sides
+
         let initiatorKeyPair = try await provider.generateKeyPair(for: .signing)
         let responderKeyPair = try await provider.generateKeyPair(for: .signing)
-        
- // Create signing key handles from private keys
         let initiatorKeyHandle = SigningKeyHandle.softwareKey(initiatorKeyPair.privateKey.bytes)
         let responderKeyHandle = SigningKeyHandle.softwareKey(responderKeyPair.privateKey.bytes)
-        
- // Create transports that auto-forward messages
-        let initiatorTransport = BenchmarkTransport()
-        let responderTransport = BenchmarkTransport()
-        
+        let initiatorIdentityPublicKey = encodeIdentityPublicKey(
+            initiatorKeyPair.publicKey.bytes,
+            algorithm: sigAAlgorithm.wire
+        )
+        let responderIdentityPublicKey = encodeIdentityPublicKey(
+            responderKeyPair.publicKey.bytes,
+            algorithm: sigAAlgorithm.wire
+        )
+
         let peer = PeerIdentifier(deviceId: "bench-peer")
         let peerKEMPublicKeys = try await makeKEMPublicKeysForPeer(
             offeredSuites: offeredSuites,
@@ -329,34 +325,147 @@ final class HandshakeBenchmarkTests: XCTestCase {
                 kemPublicKeys: peerKEMPublicKeys
             )
         }
-        
- // Create drivers with protocol signing capability
+
         let handshakeTimeout: Duration = (providerType == .classic) ? .seconds(15) : .seconds(25)
         let handshakePolicy: HandshakePolicy = (providerType == .classic) ? .default : .strictPQC
+        let cryptoPolicy: CryptoPolicy
+        switch providerType {
+        case .appleXWing:
+            cryptoPolicy = CryptoPolicy(
+                minimumSecurityTier: .hybridPreferred,
+                allowExperimentalHybrid: true,
+                advertiseHybrid: true,
+                requireHybridIfAvailable: true
+            )
+        default:
+            cryptoPolicy = .default
+        }
+
+        return BenchmarkContext(
+            providerType: providerType,
+            provider: provider,
+            offeredSuites: offeredSuites,
+            protocolSignatureProvider: protocolSignatureProvider,
+            sigAAlgorithm: sigAAlgorithm,
+            initiatorKeyHandle: initiatorKeyHandle,
+            responderKeyHandle: responderKeyHandle,
+            initiatorIdentityPublicKey: initiatorIdentityPublicKey,
+            responderIdentityPublicKey: responderIdentityPublicKey,
+            peer: peer,
+            trustProviderInitiator: trustProviderInitiator,
+            trustProviderResponder: trustProviderResponder,
+            handshakeTimeout: handshakeTimeout,
+            handshakePolicy: handshakePolicy,
+            cryptoPolicy: cryptoPolicy
+        )
+    }
+    
+ /// Measure handshake latency
+ /// Requirements: 4.1, 4.3
+    @available(macOS 14.0, iOS 17.0, *)
+    private func measureHandshakeLatency(
+        providerType: ProviderType,
+        iterations: Int,
+        warmup: Int
+    ) async throws -> [Double] {
+        var samples: [Double] = []
+        let context = try await prepareBenchmarkContext(providerType: providerType)
+        
+ // Warmup
+        for _ in 0..<warmup {
+            _ = try await performMockHandshake(context: context)
+        }
+        
+ // Measured iterations
+        for _ in 0..<iterations {
+            let start = ContinuousClock.now
+            _ = try await performMockHandshake(context: context)
+            let elapsed = ContinuousClock.now - start
+            
+ // Convert to milliseconds
+            let ms = Double(elapsed.components.seconds) * 1000.0 +
+                     Double(elapsed.components.attoseconds) / 1_000_000_000_000_000.0
+            samples.append(ms)
+        }
+        
+        return samples
+    }
+
+ /// Measure handshake RTT (MessageB receive - MessageA send)
+    @available(macOS 14.0, iOS 17.0, *)
+    private func measureHandshakeRTT(
+        providerType: ProviderType,
+        iterations: Int,
+        warmup: Int
+    ) async throws -> [Double] {
+        var samples: [Double] = []
+        let context = try await prepareBenchmarkContext(providerType: providerType)
+
+        for _ in 0..<warmup {
+            _ = try await performMockHandshakeWithMetrics(context: context)
+        }
+
+        for _ in 0..<iterations {
+            let (_, metrics) = try await performMockHandshakeWithMetrics(context: context)
+            guard metrics.rttMs >= 0 else {
+                throw BenchmarkError.missingMetrics("RTT unavailable in metrics")
+            }
+            samples.append(metrics.rttMs)
+        }
+
+        return samples
+    }
+    
+ /// Perform a mock handshake using auto-forwarded in-memory transport
+ /// Requirements: 4.3
+    @available(macOS 14.0, iOS 17.0, *)
+    private func performMockHandshake(providerType: ProviderType) async throws -> Data {
+        let context = try await prepareBenchmarkContext(providerType: providerType)
+        return try await performMockHandshake(context: context)
+    }
+
+    private func performMockHandshake(context: BenchmarkContext) async throws -> Data {
+        let (transcriptHash, _) = try await performMockHandshakeWithMetrics(context: context)
+        return transcriptHash
+    }
+
+    private func performMockHandshakeWithMetrics(
+        context: BenchmarkContext
+    ) async throws -> (transcriptHash: Data, metrics: HandshakeMetrics) {
+        let provider = context.provider
+        let offeredSuites = context.offeredSuites
+
+ // Create transports that auto-forward messages
+        let initiatorTransport = BenchmarkTransport()
+        let responderTransport = BenchmarkTransport()
+
+ // Create drivers with protocol signing capability
         let initiatorDriver = try HandshakeDriver(
             transport: initiatorTransport,
             cryptoProvider: provider,
-            protocolSignatureProvider: protocolSignatureProvider,
-            protocolSigningKeyHandle: initiatorKeyHandle,
-            sigAAlgorithm: sigAAlgorithm,
-            identityPublicKey: encodeIdentityPublicKey(initiatorKeyPair.publicKey.bytes),
+            protocolSignatureProvider: context.protocolSignatureProvider,
+            protocolSigningKeyHandle: context.initiatorKeyHandle,
+            sigAAlgorithm: context.sigAAlgorithm,
+            identityPublicKey: context.initiatorIdentityPublicKey,
             offeredSuites: offeredSuites,
-            policy: handshakePolicy,
-            timeout: handshakeTimeout,
-            trustProvider: trustProviderInitiator
+            policy: context.handshakePolicy,
+            cryptoPolicy: context.cryptoPolicy,
+            timeout: context.handshakeTimeout,
+            trustProvider: context.trustProviderInitiator
         )
         
         let responderDriver = try HandshakeDriver(
             transport: responderTransport,
             cryptoProvider: provider,
-            protocolSignatureProvider: protocolSignatureProvider,
-            protocolSigningKeyHandle: responderKeyHandle,
-            sigAAlgorithm: sigAAlgorithm,
-            identityPublicKey: encodeIdentityPublicKey(responderKeyPair.publicKey.bytes),
+            protocolSignatureProvider: context.protocolSignatureProvider,
+            protocolSigningKeyHandle: context.responderKeyHandle,
+            sigAAlgorithm: context.sigAAlgorithm,
+            identityPublicKey: context.responderIdentityPublicKey,
             offeredSuites: offeredSuites,
-            policy: handshakePolicy,
-            timeout: handshakeTimeout,
-            trustProvider: trustProviderResponder
+            policy: context.handshakePolicy,
+            cryptoPolicy: context.cryptoPolicy,
+            timeout: context.handshakeTimeout,
+            trustProvider: context.trustProviderResponder
         )
         
         await initiatorTransport.setOnSend { [responderDriver] peer, data in
@@ -367,7 +476,7 @@ final class HandshakeBenchmarkTests: XCTestCase {
         }
         
         let handshakeTask = Task {
-            try await initiatorDriver.initiateHandshake(with: peer)
+            try await initiatorDriver.initiateHandshake(with: context.peer)
         }
         
         let sessionKeys: SessionKeys
@@ -377,7 +486,7 @@ final class HandshakeBenchmarkTests: XCTestCase {
                     try await handshakeTask.value
                 }
                 group.addTask {
-                    try await Task.sleep(for: handshakeTimeout)
+                    try await Task.sleep(for: context.handshakeTimeout)
                     throw BenchmarkError.timeout("Handshake task timeout")
                 }
                 let result = try await group.next()!
@@ -400,8 +509,8 @@ final class HandshakeBenchmarkTests: XCTestCase {
                 messageBBytes: responderSent[0].1.count,
                 finishedBytes: initiatorSent[1].1.count + responderSent[1].1.count
             )
-            if let configuration = Self.configurationNames[providerType],
-               await Self.wireSizeRecorder.shouldRecord(providerType) {
+            if let configuration = Self.configurationNames[context.providerType],
+               await Self.wireSizeRecorder.shouldRecord(context.providerType) {
                 writeWireSizes(configuration: configuration, sizes: sizes)
             }
         }
@@ -458,6 +567,10 @@ final class HandshakeBenchmarkTests: XCTestCase {
         
         func setOnSend(_ handler: @escaping @Sendable (PeerIdentifier, Data) async -> Void) {
             onSend = handler
+            if !isDelivering {
+                isDelivering = true
+                Task { await flushPending() }
+            }
         }
         
         func send(to peer: PeerIdentifier, data: Data) async throws {
@@ -472,7 +585,7 @@ final class HandshakeBenchmarkTests: XCTestCase {
         func getSentMessages() -> [(PeerIdentifier, Data)] {
             sentMessages
         }
-        
+
         private func flushPending() async {
             await Task.yield()
             while !pending.isEmpty {

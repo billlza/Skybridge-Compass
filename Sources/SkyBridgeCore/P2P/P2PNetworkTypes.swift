@@ -15,10 +15,12 @@ public struct P2PSTUNServer: Codable, Sendable {
     
  /// 默认STUN服务器列表
     public static let defaultServers: [P2PSTUNServer] = [
-        P2PSTUNServer(host: "stun.l.google.com"),
-        P2PSTUNServer(host: "stun1.l.google.com"),
-        P2PSTUNServer(host: "stun2.l.google.com"),
-        P2PSTUNServer(host: "stun.cloudflare.com")
+        // SkyBridge 自建服务器 (首选)
+        P2PSTUNServer(host: "54.92.79.99", port: 3478),
+        // 公共备用服务器
+        P2PSTUNServer(host: "stun.l.google.com", port: 19302),
+        P2PSTUNServer(host: "stun1.l.google.com", port: 19302),
+        P2PSTUNServer(host: "stun.cloudflare.com", port: 3478)
     ]
 }
 
@@ -353,4 +355,154 @@ public struct P2PNetworkQuality: Codable, Sendable {
         self.quality = quality
         self.timestamp = timestamp
     }
+}
+
+// MARK: - P2P连接指标
+
+/// P2P连接指标 - 用于监控连接质量
+public struct P2PConnectionMetrics: Codable, Sendable {
+    /// 延迟（毫秒）
+    public let latencyMs: Double
+    /// 带宽（Mbps）
+    public let bandwidthMbps: Double
+    /// 丢包率（百分比）
+    public let packetLossPercent: Double
+    /// 加密模式
+    public let encryptionMode: String
+    /// 协议版本
+    public let protocolVersion: String
+    /// 对端能力
+    public let peerCapabilities: [String]
+    /// 是否启用后量子加密
+    public let pqcEnabled: Bool
+
+    public init(
+        latencyMs: Double,
+        bandwidthMbps: Double,
+        packetLossPercent: Double,
+        encryptionMode: String = "AES-256-GCM",
+        protocolVersion: String = "1.0",
+        peerCapabilities: [String] = [],
+        pqcEnabled: Bool = false
+    ) {
+        self.latencyMs = latencyMs
+        self.bandwidthMbps = bandwidthMbps
+        self.packetLossPercent = packetLossPercent
+        self.encryptionMode = encryptionMode
+        self.protocolVersion = protocolVersion
+        self.peerCapabilities = peerCapabilities
+        self.pqcEnabled = pqcEnabled
+    }
+}
+
+// MARK: - P2P视频编解码器类型
+
+/// P2P视频编解码器
+public enum P2PVideoCodec: String, Codable, CaseIterable, Sendable {
+    case h264 = "H.264"
+    case h265 = "H.265"
+    case vp9 = "VP9"
+    case av1 = "AV1"
+
+    public var displayName: String {
+        return rawValue
+    }
+}
+
+// MARK: - P2P屏幕镜像配置
+
+/// P2P屏幕镜像配置
+public struct P2PScreenMirrorConfig: Sendable {
+    /// 目标宽度
+    public let targetWidth: Int
+    /// 目标高度
+    public let targetHeight: Int
+    /// 目标帧率
+    public let targetFPS: Int
+    /// 目标比特率（bps）
+    public let targetBitrate: Int
+    /// 编解码器
+    public let codec: P2PVideoCodec
+    /// 是否使用硬件编码器
+    public let useHardwareEncoder: Bool
+
+    public init(
+        targetWidth: Int = 1920,
+        targetHeight: Int = 1080,
+        targetFPS: Int = 60,
+        targetBitrate: Int = 5_000_000,
+        codec: P2PVideoCodec = .h264,
+        useHardwareEncoder: Bool = true
+    ) {
+        self.targetWidth = targetWidth
+        self.targetHeight = targetHeight
+        self.targetFPS = targetFPS
+        self.targetBitrate = targetBitrate
+        self.codec = codec
+        self.useHardwareEncoder = useHardwareEncoder
+    }
+
+    /// 默认配置
+    public static let defaultConfig = P2PScreenMirrorConfig()
+
+    /// 低延迟配置
+    public static let lowLatencyConfig = P2PScreenMirrorConfig(
+        targetWidth: 1280,
+        targetHeight: 720,
+        targetFPS: 60,
+        targetBitrate: 2_500_000,
+        codec: .h264,
+        useHardwareEncoder: true
+    )
+
+    /// 高质量配置
+    public static let highQualityConfig = P2PScreenMirrorConfig(
+        targetWidth: 2560,
+        targetHeight: 1440,
+        targetFPS: 60,
+        targetBitrate: 15_000_000,
+        codec: .h265,
+        useHardwareEncoder: true
+    )
+}
+
+// MARK: - P2P协商加密配置
+
+/// P2P协商后的加密配置
+public struct P2PNegotiatedCryptoProfile: Codable, Sendable, Equatable {
+    /// 密钥交换算法
+    public let keyExchangeAlgorithm: String
+    /// 对称加密算法
+    public let symmetricCipher: String
+    /// 哈希算法
+    public let hashAlgorithm: String
+    /// 是否启用后量子加密
+    public let pqcEnabled: Bool
+    /// 协商时间戳（毫秒）
+    public let negotiatedAtMillis: Int64
+
+    public init(
+        keyExchangeAlgorithm: String = "X25519",
+        symmetricCipher: String = "AES-256-GCM",
+        hashAlgorithm: String = "SHA-256",
+        pqcEnabled: Bool = false,
+        negotiatedAtMillis: Int64 = Int64(Date().timeIntervalSince1970 * 1000)
+    ) {
+        self.keyExchangeAlgorithm = keyExchangeAlgorithm
+        self.symmetricCipher = symmetricCipher
+        self.hashAlgorithm = hashAlgorithm
+        self.pqcEnabled = pqcEnabled
+        self.negotiatedAtMillis = negotiatedAtMillis
+    }
+
+    /// 默认配置（经典加密）
+    public static let defaultProfile = P2PNegotiatedCryptoProfile()
+
+    /// 后量子加密配置
+    public static let pqcProfile = P2PNegotiatedCryptoProfile(
+        keyExchangeAlgorithm: "ML-KEM-768",
+        symmetricCipher: "AES-256-GCM",
+        hashAlgorithm: "SHA-256",
+        pqcEnabled: true
+    )
 }

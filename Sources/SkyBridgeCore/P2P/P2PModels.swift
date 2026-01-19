@@ -50,10 +50,12 @@ public struct STUNServer: Codable, Sendable {
     
  /// 默认STUN服务器列表
     public static let defaultServers = [
-        STUNServer(host: "stun.l.google.com"),
-        STUNServer(host: "stun1.l.google.com"),
-        STUNServer(host: "stun2.l.google.com"),
-        STUNServer(host: "stun.cloudflare.com")
+        // SkyBridge 自建服务器 (首选)
+        STUNServer(host: "54.92.79.99", port: 3478),
+        // 公共备用服务器
+        STUNServer(host: "stun.l.google.com", port: 19302),
+        STUNServer(host: "stun1.l.google.com", port: 19302),
+        STUNServer(host: "stun.cloudflare.com", port: 3478)
     ]
 }
 

@@ -23,6 +23,8 @@ public struct BonjourTXTRecordBuilder: Sendable {
  /// 可选字段
     public var platform: String?
     public var version: String?
+    /// 操作系统版本（用于 iOS/macOS UI 展示，例如 "macOS 26.2"）
+    public var osVersion: String?
     public var capabilities: [String]?
     public var name: String?
     
@@ -32,6 +34,7 @@ public struct BonjourTXTRecordBuilder: Sendable {
         uniqueId: String,
         platform: String? = nil,
         version: String? = nil,
+        osVersion: String? = nil,
         capabilities: [String]? = nil,
         name: String? = nil
     ) {
@@ -40,6 +43,7 @@ public struct BonjourTXTRecordBuilder: Sendable {
         self.uniqueId = uniqueId
         self.platform = platform
         self.version = version
+        self.osVersion = osVersion
         self.capabilities = capabilities
         self.name = name
     }
@@ -59,6 +63,9 @@ public struct BonjourTXTRecordBuilder: Sendable {
         }
         if let version = version {
             record["version"] = version
+        }
+        if let osVersion = osVersion {
+            record["osVersion"] = osVersion
         }
         if let capabilities = capabilities, !capabilities.isEmpty {
             record["capabilities"] = capabilities.joined(separator: ",")
@@ -398,6 +405,7 @@ extension BonjourTXTRecordBuilder {
             uniqueId: uniqueId,
             platform: SBPlatformType.current.rawValue,
             version: protocolVersion.versionString,
+            osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
             capabilities: capabilities.asStringArray,
             name: Host.current().localizedName
         )

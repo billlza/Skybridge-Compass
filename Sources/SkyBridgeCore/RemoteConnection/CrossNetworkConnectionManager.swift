@@ -26,9 +26,11 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     private let logger = Logger(subsystem: "com.skybridge.connection", category: "CrossNetwork")
     private let signalServer: SignalServerClient
     private let stunServers: [String] = [
+        // SkyBridge 自建服务器 (首选)
+        "stun:54.92.79.99:3478",
+        // 公共备用服务器
         "stun:stun.l.google.com:19302",
-        "stun:stun1.l.google.com:19302",
-        "stun:stun2.l.google.com:19302"
+        "stun:stun1.l.google.com:19302"
     ]
     private var activeListeners: [ConnectionListener] = []
     private var deviceFingerprint: String

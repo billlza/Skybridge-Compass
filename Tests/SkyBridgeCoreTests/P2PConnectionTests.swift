@@ -208,8 +208,7 @@ final class P2PConnectionTests: XCTestCase {
             encryptionMode: "AES-256-GCM",
             protocolVersion: "1.0",
             peerCapabilities: ["screen-mirror", "file-transfer"],
-            pqcEnabled: true,
-            timestamp: Date()
+            pqcEnabled: true
         )
         
  // Property: Latency must be non-negative
@@ -244,8 +243,7 @@ final class P2PConnectionTests: XCTestCase {
             encryptionMode: "ChaCha20-Poly1305",
             protocolVersion: "1.0",
             peerCapabilities: ["cap1", "cap2"],
-            pqcEnabled: false,
-            timestamp: Date(timeIntervalSince1970: 1700000000)
+            pqcEnabled: false
         )
         
  // Property: All fields should be accessible and have expected values
@@ -268,8 +266,7 @@ final class P2PConnectionTests: XCTestCase {
             encryptionMode: "AES-256-GCM",
             protocolVersion: "1.0",
             peerCapabilities: [],
-            pqcEnabled: false,
-            timestamp: Date()
+            pqcEnabled: false
         )
         
         XCTAssertTrue(highLatency.latencyMs > 100.0,
@@ -283,8 +280,7 @@ final class P2PConnectionTests: XCTestCase {
             encryptionMode: "AES-256-GCM",
             protocolVersion: "1.0",
             peerCapabilities: [],
-            pqcEnabled: false,
-            timestamp: Date()
+            pqcEnabled: false
         )
         
         XCTAssertTrue(highPacketLoss.packetLossPercent > 2.0,
@@ -343,8 +339,7 @@ final class P2PConnectionTests: XCTestCase {
             encryptionMode: "Unknown",
             protocolVersion: "v1",
             peerCapabilities: [],
-            pqcEnabled: false,
-            timestamp: Date()
+            pqcEnabled: false
         )
         
  // Property 5.7: Default latency should be 0

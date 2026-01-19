@@ -358,7 +358,7 @@ public struct CSVArtifactWriter {
 
 /// Fault injection benchmark tests for handshake protocol
 /// Run with `SKYBRIDGE_RUN_FI=1 swift test --filter HandshakeFaultInjectionBenchTests`
-/// Results are written to `Artifacts/fault_injection_<date>.csv`
+/// Results are written to `Artifacts/fault_injection_2026-01-06.csv`
 @available(macOS 14.0, iOS 17.0, *)
 final class HandshakeFaultInjectionBenchTests: XCTestCase {
     

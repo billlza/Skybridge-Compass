@@ -6,5 +6,13 @@
 	<array>
 		<string>group.com.skybridge.compass</string>
 	</array>
+	<!-- 定位权限 - GPS/BDS -->
+	<key>com.apple.security.personal-information.location</key>
+	<true/>
+	<!-- 网络权限 -->
+	<key>com.apple.security.network.client</key>
+	<true/>
+	<key>com.apple.security.network.server</key>
+	<true/>
 </dict>
 </plist>

@@ -413,15 +413,7 @@ private final class SSHClientConfigWrapper: @unchecked Sendable {
         self.serverAuthDelegate = serverAuthDelegate
     }
     
- /// 创建 NIOSSHHandler 并添加到 pipeline
- ///
- /// 注意：NIOSSHHandler 本身不是 Sendable（NIOSSH 库限制），
- /// 但在单一 EventLoop 上下文中使用是安全的。
- ///
- /// Swift 6.2.1 警告说明：
- /// - NIOSSH 库显式将 NIOSSHHandler 标记为不支持 Sendable
- /// - 这是第三方库的设计决策，无法在应用层完全消除警告
- /// - 使用 @unchecked Sendable 包装器确保运行时安全
+ /// 创建 NIOSSHHandler 并添加到 pipeline（EventLoop 上下文）
     func addHandlerToPipeline(_ channel: Channel) -> EventLoopFuture<Void> {
         let wrapper = UnsafeSSHHandlerBox(
             authDelegate: authDelegate,
@@ -433,18 +425,6 @@ private final class SSHClientConfigWrapper: @unchecked Sendable {
 }
 
 /// 不透明的 SSH Handler 盒子
-///
-/// Swift 6.2.1 已知限制：
-/// NIOSSH 库显式将 NIOSSHHandler 标记为不支持 Sendable：
-/// `@available(*, unavailable) extension NIOSSHHandler: Sendable {}`
-///
-/// 这导致任何使用 NIOSSHHandler 的代码都会产生警告，即使使用 @unchecked Sendable 包装。
-/// 这是第三方库的设计决策，需要等待 NIOSSH 库更新以完全支持 Swift 6。
-///
-/// 当前实现在运行时是安全的，因为：
-/// 1. Handler 只在 EventLoop 线程上创建和使用
-/// 2. 使用 @unchecked Sendable 确保类型系统允许跨并发域传递
-/// 3. 实际的线程安全由 NIO 框架保证
 private final class UnsafeSSHHandlerBox: @unchecked Sendable {
     private let authDelegate: NIOSSHClientUserAuthenticationDelegate
     private let serverAuthDelegate: NIOSSHClientServerAuthenticationDelegate
@@ -462,17 +442,28 @@ private final class UnsafeSSHHandlerBox: @unchecked Sendable {
     
  /// 添加 handler 到 pipeline（在 EventLoop 上下文中调用）
     func addToPipeline(_ pipeline: ChannelPipeline) -> EventLoopFuture<Void> {
- // 已知警告：NIOSSHHandler Sendable conformance unavailable
- // 这是 NIOSSH 库的限制，不影响运行时安全性
-        let handler = NIOSSHHandler(
-            role: .client(.init(
-                userAuthDelegate: authDelegate,
-                serverAuthDelegate: serverAuthDelegate
-            )),
-            allocator: allocator,
-            inboundChildChannelInitializer: nil
-        )
-        return pipeline.addHandler(handler)
+        @Sendable func makeHandler() -> NIOSSHHandler {
+            NIOSSHHandler(
+                role: .client(.init(
+                    userAuthDelegate: authDelegate,
+                    serverAuthDelegate: serverAuthDelegate
+                )),
+                allocator: allocator,
+                inboundChildChannelInitializer: nil
+            )
+        }
+        let eventLoop = pipeline.eventLoop
+        if eventLoop.inEventLoop {
+            do {
+                try pipeline.syncOperations.addHandler(makeHandler())
+                return eventLoop.makeSucceededFuture(())
+            } catch {
+                return eventLoop.makeFailedFuture(error)
+            }
+        }
+        return eventLoop.submit {
+            try pipeline.syncOperations.addHandler(makeHandler())
+        }
     }
 }
 

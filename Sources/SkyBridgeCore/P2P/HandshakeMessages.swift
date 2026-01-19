@@ -1030,7 +1030,7 @@ private enum HandshakeEncoding {
     
     static func expectedKeyShareLength(for suite: CryptoSuite) -> Int? {
         switch suite.wireId {
-        case 0x0001: return 1216   // X-Wing
+        case 0x0001: return 1120   // X-Wing ciphertext: X25519(32) + ML-KEM-768(1088)
         case 0x0101: return 1088   // ML-KEM-768
         case 0x1001: return 32     // X25519
         case 0x1002: return 65     // P-256

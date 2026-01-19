@@ -117,19 +117,19 @@ final class TwoAttemptHandshakeManagerTests: XCTestCase {
         }
     }
     
- /// Test classicOnly with no classic suites → throws classicProviderUnavailable
-    func testPrepareAttempt_ClassicOnly_NoClassicSuites_Throws() {
+    /// Test classicOnly with no classic suites in the selected cryptoProvider
+    /// falls back to the built-in Classic provider.
+    func testPrepareAttempt_ClassicOnly_NoClassicSuites_FallsBackToClassicProvider() throws {
         let provider = MockCryptoProvider(supportedSuites: pqcSuites)
         
-        XCTAssertThrowsError(try TwoAttemptHandshakeManager.prepareAttempt(
+        let preparation = try TwoAttemptHandshakeManager.prepareAttempt(
             strategy: .classicOnly,
             cryptoProvider: provider
-        )) { error in
-            guard case AttemptPreparationError.classicProviderUnavailable = error else {
-                XCTFail("Expected classicProviderUnavailable error")
-                return
-            }
-        }
+        )
+        
+        XCTAssertEqual(preparation.strategy, .classicOnly)
+        XCTAssertEqual(preparation.sigAAlgorithm, .ed25519)
+        XCTAssertEqual(preparation.offeredSuites, [.x25519Ed25519])
     }
     
  // MARK: - 9.2: Fallback Whitelist/Blacklist Tests

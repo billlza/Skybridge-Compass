@@ -9,7 +9,7 @@ final class DowngradeEventTests: XCTestCase {
         noFallbackEvent.isInverted = true
 
         let subscriptionId = await SecurityEventEmitter.shared.subscribe { event in
-            if event.type == .handshakeFallback {
+            if event.type == .cryptoDowngrade {
                 noFallbackEvent.fulfill()
             }
         }
@@ -36,7 +36,7 @@ final class DowngradeEventTests: XCTestCase {
         let contextBox = EventContextBox()
 
         let subscriptionId = await SecurityEventEmitter.shared.subscribe { event in
-            if event.type == .handshakeFallback {
+            if event.type == .cryptoDowngrade {
                 await contextBox.set(event.context)
                 fallbackEvent.fulfill()
             }
