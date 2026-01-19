@@ -1,13 +1,23 @@
-# SkyBridge Compass Pro (macOS)
+# SkyBridge Compass Pro
 
-SkyBridge Compass Pro 是面向 macOS 的设备管理与远程控制应用。本仓库已精简为仅包含 macOS 相关源码与论文资料。
+SkyBridge Compass Pro 是一个以 **跨平台协议内核（SkyBridgeCore）** 为中心的 P2P 连接/安全栈，并提供 macOS 应用形态与论文复现实验流水线（IEEE/TDSC）。
 
-## 目录结构
+> **平台说明（给审稿人）**：本仓库当前的构建入口是 **macOS**（SwiftPM `platforms: [.macOS(.v14)]`）。  
+> 同时，核心协议层包含若干 **iOS 专用代码路径**（使用 `#if os(iOS)` / `@available(iOS …)` 保护），用于保证 iOS 客户端与 macOS 互通时的行为一致性与可移植性。
 
-- `Sources/`：macOS 应用与核心模块源码
-- `Sources/Vendor/`：随项目分发的第三方框架
-- `Tests/`：测试用例
-- `Docs/`：论文与图表素材
+## Platform Map（macOS vs iOS 一眼分清）
+
+| 组件 | 平台 | 入口/目录 | 说明 |
+|---|---|---|---|
+| Protocol + Crypto + Bench core | macOS / iOS（代码路径） | `Sources/SkyBridgeCore/` | 协议实现（握手/会话/策略）、PQC/降级可审计、SBP1/SBP2 padding、统计与 CSV artifacts |
+| Shared SwiftUI views | macOS（构建）/ iOS（可移植代码） | `Sources/SkyBridgeUI/` | 共享 UI 组件；平台差异用 `#if os(...)` 保护 |
+| macOS app | macOS | `Sources/SkyBridgeCompassApp/` | macOS App 入口（SwiftUI + 菜单/窗口等） |
+| Tests / Paper benches | macOS（host） | `Tests/` | 论文评测、SBP2 sensitivity、fault-injection 等，输出 `Artifacts/*.csv` |
+| Paper sources + PDFs | n/a | `Docs/` | 主论文与 Supplementary 源码、生成表格与最终 PDF/DOCX |
+
+**如何定位 iOS-only 代码：**
+- 搜索 `#if os(iOS)` 或 `@available(iOS`（例如：文件系统路径、权限/系统能力差异）。
+- 例：`Sources/SkyBridgeCore/P2P/TrafficPaddingStats.swift` 在 iOS 写入 Documents，在 macOS 写入 Application Support。
 
 ## 环境要求
 
@@ -15,7 +25,7 @@ SkyBridge Compass Pro 是面向 macOS 的设备管理与远程控制应用。本
 - Xcode 15+
 - Swift 6.2+（由 Xcode 版本提供）
 
-## 构建与运行
+## 构建与运行（macOS）
 
 1. 用 Xcode 打开 `Package.swift`
 2. 选择 `SkyBridgeCompassApp` 作为运行目标
@@ -62,6 +72,11 @@ bash ./compile_paper.sh
 # 运行论文评测与生成 CSV/图表
 bash Scripts/run_paper_eval.sh
 ```
+
+### Artifact 输出定位（Reviewer 常用）
+- **CSV**：`Artifacts/*.csv`（由 `Scripts/run_paper_eval.sh` / bench tests 生成）
+- **表格（LaTeX）**：`Docs/tables/`、`Docs/supp_tables/`（由 `Scripts/make_tables.py` 生成，带日期一致性锁）
+- **图（PDF/PNG）**：`figures/*.pdf`（由 `Scripts/generate_ieee_figures.py` 生成）
 
 多批次（独立进程）性能统计复核：
 
