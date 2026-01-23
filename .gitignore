@@ -77,6 +77,7 @@ __pycache__/
 .vscode/
 .idea/
 .cursor/
+.mplconfig/
 .kiro/
 .trae/
 .sandbox-home/
@@ -163,6 +164,8 @@ fastlane/report.xml
 Docs/_docx_tmp/
 Docs/_docx_figs/
 Docs/__pycache__/
+Docs/_audit_main.txt
+Docs/_audit_supp.txt
 
 # Local placeholder assets
 ${BG_PNG}
@@ -174,3 +177,7 @@ Docs/IEEE_Paper_SkyBridge_Compass_patched(1)(1).docx
 # Local paper history snapshots
 paper_15p_baseline.pdf
 paper_15p_baseline_src/
+
+# Local backups (do not publish)
+SkyBridge Compass iOS__inside_release_backup_*/
+Docs/IEEE_Paper_SkyBridge_Compass_patched_BACKUP_*.docx

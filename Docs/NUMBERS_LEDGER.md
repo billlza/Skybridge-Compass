@@ -2,7 +2,7 @@
 
 ## STATUS: ALL NUMBERS VERIFIED CONSISTENT ✅
 
-Last verified: 2026-01-16
+Last verified: 2026-01-22
 
 ---
 
@@ -10,9 +10,9 @@ Last verified: 2026-01-16
 
 | Configuration | Latency mean | Latency p95 | RTT p50 | RTT p95 | Wire Size | Throughput |
 |---------------|--------------|-------------|---------|---------|-----------|------------|
-| Classic | 1.41 ms | 1.45 ms | 0.36 ms | 0.37 ms | 687 B | 3.7 GB/s |
-| liboqs PQC | 2.00 ms | 2.62 ms | 0.65 ms | 1.24 ms | 12,002 B | 3.7 GB/s |
-| CryptoKit PQC | 4.63 ms | 5.45 ms | 2.23 ms | 3.01 ms | 12,002 B | 3.7 GB/s |
+| Classic | 1.62 ms | 1.81 ms | 0.41 ms | 0.46 ms | 827 B | 3.7 GB/s |
+| liboqs PQC | 2.29 ms | 3.01 ms | 0.80 ms | 1.35 ms | 12,163 B | 3.7 GB/s |
+| CryptoKit PQC | 5.76 ms | 6.71 ms | 1.59 ms | 2.27 ms | 12,163 B | 3.7 GB/s |
 
 ---
 
@@ -20,16 +20,16 @@ Last verified: 2026-01-16
 
 | Metric | Abstract Value | Table Value | Status |
 |--------|---------------|-------------|--------|
-| Classic latency mean | 1.41 ms | 1.41 ms | ✅ MATCH |
-| Classic latency p95 | 1.45 ms | 1.45 ms | ✅ MATCH |
-| liboqs PQC latency mean | 2.00 ms | 2.00 ms | ✅ MATCH |
-| liboqs PQC latency p95 | 2.62 ms | 2.62 ms | ✅ MATCH |
-| CryptoKit PQC latency mean | 4.63 ms | 4.63 ms | ✅ MATCH |
-| CryptoKit PQC latency p95 | 5.45 ms | 5.45 ms | ✅ MATCH |
-| Classic wire size | 687 B | 687 B | ✅ MATCH |
-| liboqs PQC wire size | 12,002 B | 12,002 B | ✅ MATCH |
-| CryptoKit PQC wire size | 12,002 B | 12,002 B | ✅ MATCH |
-| X-Wing projection | ~12.1 KB | 12,130 B (Appendix) | ✅ MATCH (rounded) |
+| Classic latency mean | 1.62 ms | 1.62 ms | ✅ MATCH |
+| Classic latency p95 | 1.81 ms | 1.81 ms | ✅ MATCH |
+| liboqs PQC latency mean | 2.29 ms | 2.29 ms | ✅ MATCH |
+| liboqs PQC latency p95 | 3.01 ms | 3.01 ms | ✅ MATCH |
+| CryptoKit PQC latency mean | 5.76 ms | 5.76 ms | ✅ MATCH |
+| CryptoKit PQC latency p95 | 6.71 ms | 6.71 ms | ✅ MATCH |
+| Classic wire size | 827 B | 827 B | ✅ MATCH |
+| liboqs PQC wire size | 12,163 B | 12,163 B | ✅ MATCH |
+| CryptoKit PQC wire size | 12,163 B | 12,163 B | ✅ MATCH |
+| X-Wing wire size | 12,195 B | 12,195 B (main text) | ✅ MATCH |
 
 ---
 
@@ -38,7 +38,7 @@ Last verified: 2026-01-16
 All numbers are generated from CSV artifacts via `Scripts/make_tables.py`:
 
 ```
-Artifacts/
+Artifacts/ (ARTIFACT_DATE=2026-01-16)
   handshake_bench_2026-01-16.csv  → Latency data
   handshake_rtt_2026-01-16.csv    → RTT data
   message_sizes_2026-01-16.csv    → Wire size data
@@ -53,6 +53,16 @@ Docs/supp_tables/s2_rtt.tex      → Supplementary RTT details
 Docs/supp_tables/s3_message_sizes.tex → Supplementary message breakdown
 Docs/supp_tables/s7_traffic_padding.tex → Supplementary SBP2 traffic padding table
 Docs/supp_tables/s8_traffic_padding_sensitivity.tex → Supplementary SBP2 cap sensitivity table
+```
+
+Repeatability (multi-batch) notes:
+- Repeatability tables report observed batch count **B** and (when **B ≥ 2**) mean \(\pm\) 95\% CI across independent batches.
+- To generate multi-batch artifacts, rerun with process restarts, e.g. `ARTIFACT_DATE=YYYY-MM-DD SKYBRIDGE_BENCH_BATCHES=5 bash Scripts/run_paper_eval.sh`.
+
+System-level impact is generated from a separate artifact set:
+
+```
+Artifacts/system_impact_2026-01-22.csv → session-level connect/transfer metrics
 ```
 
 ---

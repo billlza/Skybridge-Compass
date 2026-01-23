@@ -2,15 +2,15 @@
 
 \begin{table*}[!t]
 \centering
-\caption{Supplementary Table \thetable: Repeatability across independent benchmark batches (RTT). Cells report mean $\pm$ 95\% CI across batches; each batch uses N=1000 iterations after 10 warmup runs.}
+\caption{Supplementary Table \thetable: Repeatability across independent benchmark batches (RTT). Table reports observed batch count $B$. Cells report mean and (when $B \ge 2$) $\pm$ 95\% CI across batches; each batch uses N=1000 iterations after 10 warmup runs.}
 \label{tab:supp-repeatability-rtt}
 \begin{tabular}{@{}lccccc@{}}
 \toprule
 Configuration & B & N/batch & mean (ms) & p50 (ms) & p95 (ms) \\
 \midrule
-Classic & 1 & 1000 & $0.414 \pm 0.000$ & $0.407 \pm 0.000$ & $0.463 \pm 0.000$ \\
-liboqs PQC & 1 & 1000 & $0.868 \pm 0.000$ & $0.805 \pm 0.000$ & $1.353 \pm 0.000$ \\
-CryptoKit PQC & 1 & 1000 & $1.658 \pm 0.000$ & $1.587 \pm 0.000$ & $2.275 \pm 0.000$ \\
+Classic & 1 & 1000 & $0.414$ & $0.407$ & $0.463$ \\
+liboqs PQC & 1 & 1000 & $0.868$ & $0.805$ & $1.353$ \\
+CryptoKit PQC & 1 & 1000 & $1.658$ & $1.587$ & $2.275$ \\
 \bottomrule
 \end{tabular}
 \end{table*}

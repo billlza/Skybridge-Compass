@@ -3,6 +3,7 @@
 \usepackage{url}
 \usepackage{array}
 \usepackage{calc}
+\usepackage{graphicx}
 \usepackage{amsmath,amssymb}
 \usepackage[hidelinks]{hyperref}
 \hypersetup{
@@ -67,8 +68,9 @@ This document provides extended data tables referenced in the main paper. All da
 \item Table~\ref{tab:supp-rtt} (RTT): Referenced in main paper Section~\ref{sec:evaluation}, supports Table~\ref{tab:perf-summary}
 \item Table~\ref{tab:supp-message-sizes} (Message Sizes): Referenced in main paper Section~\ref{sec:evaluation}, supports Table~\ref{tab:perf-summary} and Fig.~\ref{fig:message-size-breakdown}
 \item Table~\ref{tab:supp-loopback-wire} (Loopback Wire Sizes): Supports Table~\ref{tab:baseline-comparison} (baseline comparison)
-\item Tables~\ref{tab:supp-repeatability-latency}--\ref{tab:supp-repeatability-rtt} (Repeatability): Supports Section~\ref{sec:evaluation} (multi-batch confidence intervals)
+\item Tables~\ref{tab:supp-repeatability-latency}--\ref{tab:supp-repeatability-rtt} (Repeatability): Supports Section~\ref{sec:evaluation}. Tables report observed batch count $B$ and (when $B \ge 2$) 95\% confidence intervals across batches; set \texttt{SKYBRIDGE\_BENCH\_BATCHES=3}--\texttt{5} to reproduce multi-batch CIs.
 \item Table~\ref{tab:supp-traffic-padding} (Traffic Padding): Supports Section~\ref{sec:evaluation} (traffic analysis mitigation quantization/overhead)
+\item Table~\ref{tab:supp-realnet-microstudy} (Real-network micro-study): STUN path + 12~kB-class payload measurements across Wi-Fi / hotspot labels (generated from \texttt{Artifacts/realnet\_*}). (Cross-NAT inbound-reachability depends on ISP/upstream equipment and may be infeasible without administrative control; see note below.)
 \end{itemize}
 
 \subsection*{Table~\ref{tab:supp-latency}: Full Handshake Latency Statistics}
@@ -90,6 +92,12 @@ This document provides extended data tables referenced in the main paper. All da
 \subsection*{Table~\ref{tab:supp-traffic-padding-sensitivity}: SBP2 Bucket-Cap Sensitivity Study}
 
 \input{supp_tables/s8_traffic_padding_sensitivity}
+
+\subsection*{Table~\ref{tab:supp-realnet-microstudy}: Real-Network Micro-Study (External Validity)}
+
+\IfFileExists{supp_tables/s9_realnet_microstudy.tex}{\input{supp_tables/s9_realnet_microstudy}}{\noindent\textit{(Real-network micro-study table not present: run \texttt{Scripts/run\_real\_network\_probe.swift} and \texttt{Scripts/run\_real\_network\_e2e.swift}, then \texttt{python3 Scripts/aggregate\_realnet.py}.)}\par}
+
+\noindent\textit{Note: Cross-NAT direct inbound tests (no overlay/relay) are not universally feasible. In particular, double-NAT topologies (ISP router/modem upstream) and IPv6 inbound filtering can prevent any inbound reachability even when devices have global IPv6 addresses. In such environments, all client samples time out with empty connect-time fields, and we omit those rows from the main table to avoid conflating ``connectivity unavailable'' with protocol performance.}
 
 \textbf{Wire Size Summary:}
 \begin{itemize}
@@ -889,7 +897,23 @@ Representative suite names:
 \item \texttt{PolicyDowngradeBenchTests}
 \item \texttt{MessageSizeSnapshotTests}
 \end{itemize}
-All CSV outputs are date-stamped under \texttt{Artifacts/}.
+All CSV outputs are date-stamped under \texttt{Artifacts/}. To prevent mixing datasets across runs, set a fixed date suffix:
+\texttt{ARTIFACT\_DATE=YYYY-MM-DD} (or \texttt{SKYBRIDGE\_ARTIFACT\_DATE}).
+
+\textbf{Repeatability (Multi-batch).}
+Repeatability tables report observed batch count $B$ and (when $B \ge 2$) mean $\pm$ 95\% confidence intervals across independent batches.
+To reproduce multi-batch CIs, rerun with process restarts:
+\texttt{ARTIFACT\_DATE=YYYY-MM-DD SKYBRIDGE\_BENCH\_BATCHES=3--5 bash Scripts/run\_paper\_eval.sh}.
+
+\textbf{Real-network micro-study (External validity).}
+We provide two lightweight scripts:
+(i) \texttt{Scripts/run\_real\_network\_probe.swift} (STUN RTT + conservative NAT classification),
+and (ii) \texttt{Scripts/run\_real\_network\_e2e.swift} (TCP connect + first-byte + completion timing for a 12~kB-class payload).
+Pin filenames with \texttt{ARTIFACT\_DATE=YYYY-MM-DD}, run them across labels (same Wi-Fi / cross-NAT / hotspot), then aggregate into a Supplementary table via:
+\texttt{python3 Scripts/aggregate\_realnet.py}.
+
+\textbf{Note on inbound reachability.}
+Some home networks do not provide an inbound-reachable IPv4 address (e.g., double NAT behind an ISP router, CGNAT, DS-Lite, or WAN IPv4 shown as \texttt{0.0.0.0}). In these cases, IPv4 port-forwarding experiments will fail (client samples report \texttt{timeout} with empty \texttt{connect\_ms}). For a true cross-NAT condition without modifying upstream equipment, prefer IPv6 direct connectivity (when available) with an explicit IPv6 firewall allow-rule for TCP \texttt{44444}. If only an overlay/relay path is feasible, label the condition accordingly (e.g., \texttt{cross\_nat\_via\_relay}) and interpret results as overlay-mediated connectivity rather than raw Internet inbound reachability.
 
 \subsection*{Regression Testing}
 

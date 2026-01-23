@@ -140,12 +140,13 @@
 \newcommand{\artifacttarurl}{\artifacturl/archive/refs/tags/\artifacttag.tar.gz}
 \newcommand{\artifacttarsha}{90228458\allowbreak\hspace{0pt}587f095e\allowbreak\hspace{0pt}9cd403d3\allowbreak\hspace{0pt}d449f885\allowbreak\hspace{0pt}a2b8b002\allowbreak\hspace{0pt}057a76e6\allowbreak\hspace{0pt}f60c291e\allowbreak\hspace{0pt}45071388}
 \newcommand{\artifactdate}{2026-01-16}
+\newcommand{\artifactdateSystemImpact}{2026-01-22}
 \newcommand{\artifactcsv}[1]{\texttt{#1\_\artifactdate.csv}}
 \newcommand{\artifactpath}[1]{\texttt{Artifacts/#1\_\artifactdate.csv}}
 \newcommand{\implref}[2]{Implementation reference: \href{\artifacturl}{\artifacturlshort} (tag=\texttt{\artifacttag}, commit=\texttt{\artifactsha}), file: \texttt{#1}, lines: #2.}
 
 
-\title{SkyBridge Compass: A Crypto-Agile Peer-to-Peer Remote Desktop and File Transfer System with Auditable Downgrade Policy and Post-Quantum Readiness}
+\title{SkyBridge Compass: A Crypto-Agile P2P Handshake Framework for Remote Desktop and File Transfer with Auditable Downgrade Policy and Post-Quantum Readiness}
 \author{Zi'ang Li\IEEEcompsocitemizethanks{\IEEEcompsocthanksitem Independent Researcher, Tianjin, China. E-mail: 2403871950@qq.com.}}
 
 \begin{document}
@@ -399,7 +400,7 @@ size, and latency where available.
 \begin{table*}[!t]
 \centering
 \scriptsize
-\caption{Baseline comparison with widely deployed handshakes. Message counts and negotiation semantics are summarized from the TLS/QUIC/DTLS RFCs and Noise specification \cite{ref6,ref18,ref19,ref39}. Loopback latencies and wire sizes are measured with BaselineBenchRunner (release), N=1000; wire sizes report loopback p50/p95 (KB) and are cert-dependent for TLS/QUIC/DTLS. Noise wire size is pattern-dependent and reflects the XX pattern used in this baseline.}
+\caption{Baseline comparison with widely deployed handshakes. Message counts and negotiation semantics are summarized from the TLS/QUIC/DTLS RFCs and Noise specification \cite{ref6,ref18,ref19,ref39}. Loopback latencies and wire sizes are measured with BaselineBenchRunner (release), N=1000; wire sizes report loopback p50/p95 (kB) and are cert-dependent for TLS/QUIC/DTLS. Noise wire size is pattern-dependent and reflects the XX pattern used in this baseline.}
 \label{tab:baseline-comparison}
 \begin{tabular}{@{}
   >{\raggedright\arraybackslash}p{(\linewidth - 12\tabcolsep) * \real{0.14}}
@@ -410,7 +411,7 @@ size, and latency where available.
   >{\raggedright\arraybackslash}p{(\linewidth - 12\tabcolsep) * \real{0.14}}
   >{\raggedright\arraybackslash}p{(\linewidth - 12\tabcolsep) * \real{0.21}}@{}}
 \toprule\noalign{}
-Protocol & Suite nego. explicit & Auditable downgrade policy & Failure semantics & Msgs & Wire size (p50/p95, KB) & p50/p95 latency \\
+Protocol & Suite nego. explicit & Auditable downgrade policy & Failure semantics & Msgs & Wire size (p50/p95, kB) & p50/p95 latency \\
 \midrule\noalign{}
 TLS 1.3 \cite{ref6} & Yes (cipher suites, groups) & Downgrade prevention only; audit external & Alerts defined; audit external & 4 (1 RTT) & 8.6/8.7 & 8.53/14.01 ms \\
 QUIC \cite{ref18} & Yes (TLS 1.3) & Same as TLS 1.3 & Same as TLS 1.3 & 4 (1 RTT) & 7.6/14.1 & 0.34/11.37 ms \\
@@ -422,8 +423,10 @@ SkyBridge Compass & Yes (suite + policy bound) & Yes (explicit policy + events) 
 \end{table*}
 
 Loopback SkyBridge p95 latency is 1.57/\allowbreak 2.76/\allowbreak 7.53~ms for
-classic/\allowbreak liboqs/\allowbreak CryptoKit, remaining below
-TLS/QUIC/DTLS in this setup. The in-memory handshake microbench isolates
+classic/\allowbreak liboqs/\allowbreak CryptoKit in our loopback harness; these
+numbers are not directly comparable to TLS/QUIC/DTLS handshakes in
+production deployments, but provide a reproducible baseline under a
+consistent measurement setup. The in-memory handshake microbench isolates
 crypto/state-machine overhead (p95
 1.45/\allowbreak 2.62/\allowbreak 5.45~ms for
 classic/\allowbreak liboqs/\allowbreak CryptoKit) and is reported in
@@ -969,8 +972,14 @@ Sketches}\label{b.-security-goals-and-proof-sketches}
 \item \textbf{D3 (Audit evidence).} The minimal sufficient evidence set is the tuple \{event type, timestamp, deviceId, suiteId, failure reason code, policy mode, fallback flag, cooldown remaining\} (Property G8).
 \end{itemize}
 
-We state the core properties as invariants and provide non-formal proof
-sketches tied to protocol mechanics. Formal verification using model checking or symbolic analysis \cite{ref29} is planned for future work:
+We state the core properties as invariants and provide proof sketches
+tied to protocol mechanics. To strengthen reviewer-facing claims, we
+additionally provide a minimal symbolic model artifact (Tamarin) that
+captures suite negotiation, transcript binding, explicit key confirmation,
+and the fallback gate; lemmas are machine-checkable from the released
+artifact (\texttt{formal/skybridge\_minimal.spthy}). Full formalization of
+the entire Swift implementation (including concurrency and platform APIs)
+remains future work.
 
 \textbf{Property G1 (Negotiation Integrity):} The selected suite must be
 among the Initiator's offered suites and have a corresponding key
@@ -1003,7 +1012,9 @@ to the handshake transcript.\\
 
 \textbf{Property G3 (Session Key Secrecy):} The derived session keys
 remain secret under standard KEM/DH and signature security
-assumptions.\\
+assumptions. For KEM-based PQC suites in v1, we do not claim
+post-compromise forward secrecy: confidentiality holds only while
+long-term KEM private keys remain uncompromised.\\
 \emph{Proof sketch:}
 \begin{itemize}\tightlist
 \item
@@ -1197,10 +1208,12 @@ provider selection overhead, and data-plane throughput).
 
 \textbf{Environment:} All experiments are run on Apple Silicon (M1/M3 class) with macOS 26.x, where CryptoKit PQC is available when the SDK exposes ML-KEM/ML-DSA types. Build configuration uses Release (\texttt{-O}) with non-essential logging disabled. Timing uses a monotonic clock (\texttt{ContinuousClock}) with N=1000 iterations after 10 warmup runs; reported percentiles (p50/p95/p99) are computed directly from samples.
 
-\textbf{Repeatability:} For each configuration, we run 3--5 independent
-batches by restarting the benchmark test process; Supplementary
+\textbf{Repeatability:} We support multi-batch repeatability by
+restarting the benchmark test process for each batch. Supplementary
 Tables~\ref{tab:supp-repeatability-latency}--\ref{tab:supp-repeatability-rtt}
-report mean and 95\% confidence intervals across batches.
+report the number of observed batches ($B$) and (when $B \ge 2$) mean and
+95\% confidence intervals across batches. To reproduce multi-batch CIs,
+re-run the harness with \texttt{SKYBRIDGE\_BENCH\_BATCHES=3}--\texttt{5}.
 
 \textbf{Reproducibility:} We ship an opt-in benchmark suite under \texttt{Tests/\allowbreak SkyBridgeCoreTests/}. For a one-shot run, use \texttt{Scripts/\allowbreak run\_\allowbreak paper\_\allowbreak eval.sh}. The complete command reference and CSV artifact specifications are provided in the Supplementary Materials (Reproducibility).
 
@@ -1242,7 +1255,7 @@ key results; detailed test matrices and methodology are provided in the
 Supplementary Materials (Regression Testing).
 
 \textbf{Failure-Mode Robustness.}
-The actor-isolated handshake driver provides deterministic failure semantics without unhandled errors, double-resume, or sensitive-material leaks. We inject faults including timeout, malformed framing, invalid signatures, out-of-order delivery, and concurrent cancellation (n=1000 per scenario per policy).
+The actor-isolated handshake driver targets deterministic failure semantics; in our fault-injection tests we observed no unhandled errors, double-resume, or sensitive-material leaks. We inject faults including timeout, malformed framing, invalid signatures, out-of-order delivery, and concurrent cancellation (n=1000 per scenario per policy).
 
 \textbf{Unknown-suite handling:} We parse unknown suite identifiers as an
 explicit \texttt{unknown(wireId)} value and reject them if they appear in
@@ -1457,7 +1470,7 @@ available in Supplementary Tables~\ref{tab:supp-latency}--\ref{tab:supp-rtt}
 \end{figure}
 
 \textbf{Wire-Format Breakdown.}
-The 15$\times$ size increase from Classic (827~B) to PQC (12.2~KB) is dominated by ML-DSA signatures (3309~B) and ML-KEM ciphertexts (1088~B). Fig.~\ref{fig:message-size-breakdown} shows the per-field breakdown.
+The 15$\times$ size increase from Classic (827~B) to PQC (12.2~kB) is dominated by ML-DSA signatures (3309~B) and ML-KEM ciphertexts (1088~B). Fig.~\ref{fig:message-size-breakdown} shows the per-field breakdown.
 
 \begin{figure}
 \pandocbounded{{\centering\includegraphics[keepaspectratio,width=\columnwidth]{figures/fig_message_size_breakdown.pdf}\par}}
@@ -1469,7 +1482,37 @@ identity fields, framing overhead) for MessageA/MessageB across Classic, PQC (li
 Note: X-Wing hybrid KEM adds 32~B to MessageA's keyshare (1120~B vs 1088~B for ML-KEM-768), yielding a measured total handshake size of 12,195~B; detailed field breakdowns are available in Supplementary Table~\ref{tab:supp-message-sizes} (\texttt{MessageA.XWing}/\texttt{MessageB.XWing}).
 
 \textbf{Data-Plane and Provider Selection.}
-Post-handshake symmetric AEAD (AES-256-GCM) throughput reaches 3.7~GB/s for 1~MB payloads on Apple Silicon, with CPU cost of 0.25~ns/byte. In v1 the data-plane AEAD is fixed to AES-256-GCM and recorded separately from the handshake suite; thus throughput is independent of the negotiated KEM/signature suite. Provider selection overhead is sub-microsecond for cached paths (0.17~$\mu$s p50) and under 6~$\mu$s even for fallback scenarios. Detailed breakdowns are provided in the artifact CSV files.
+Post-handshake symmetric AEAD (AES-256-GCM) throughput reaches 3.7~GB/s for 1~MiB payloads on Apple Silicon, with CPU cost of 0.25~ns/byte. In v1 the data-plane AEAD is fixed to AES-256-GCM and recorded separately from the handshake suite; thus throughput is independent of the negotiated KEM/signature suite. Provider selection overhead is sub-microsecond for cached paths (0.17~$\mu$s p50) and under 6~$\mu$s even for fallback scenarios. Detailed breakdowns are provided in the artifact CSV files.
+
+\subsection{System-level Impact and Amortization}\label{sec:system-impact}
+The preceding microbenchmarks isolate handshake and cryptographic costs.
+To align evaluation with the \emph{remote desktop / file transfer} framing,
+we additionally measure user-visible, session-level metrics and quantify
+how one-time handshake cost amortizes over longer sessions and larger
+transfers.
+
+\textbf{Metrics:}
+(i) \texttt{T\_connect} (connect start $\rightarrow$ handshake established, including explicit Finished key confirmation and event emission),
+(ii) \texttt{T\_first\_frame} (connect start $\rightarrow$ first decrypted remote-desktop frame processed by the rendering path), and
+(iii) \texttt{T\_total} (connect start $\rightarrow$ completion of a bulk transfer over the negotiated session keys).
+
+\textbf{Method:}
+We reuse the production \texttt{HandshakeDriver} and negotiated
+\texttt{SessionKeys} and execute (a) one encrypted ``first frame''
+payload and (b) bulk encrypted transfer workloads of 1--100~MiB. Network
+conditions are emulated as deterministic RTT+jitter on a reliable stream;
+large data-plane payloads are bandwidth-limited (MiB/s) to avoid per-chunk
+RTT artifacts while remaining reproducible. Results are emitted to
+\texttt{Artifacts/system\_impact\_\artifactdateSystemImpact.csv} by
+\texttt{SystemImpactBenchTests}.
+
+\input{tables/system_impact}
+
+\begin{figure}
+\pandocbounded{{\centering\includegraphics[keepaspectratio,width=\columnwidth]{figures/fig_system_impact_amortization.pdf}\par}}
+\caption{System-level impact and amortization (p95). Top: \texttt{T\_connect} across RTT+jitter conditions. Bottom: total session time (\texttt{T\_total} = connect + transfer) versus file size under RTT 50$\pm$20~ms, showing that one-time handshake overhead is amortized by larger transfers. Data from \texttt{Artifacts/system\_impact\_\artifactdateSystemImpact.csv}.}
+\label{fig:system-impact-amortization}
+\end{figure}
 
 \textbf{Traffic Analysis Mitigation (SBP2 Padding).}
 To reduce attempt identifiability on the wire, SkyBridge optionally applies a constant-size framing layer (SBP2) that buckets framed payloads into powers-of-two-sized envelopes. Here, \textbf{SBP1} denotes \emph{handshake-frame padding} (MessageA/MessageB/Finished are padded to fixed buckets before transport), while \textbf{SBP2} denotes \emph{traffic framing and padding} applied to all framed payloads (control and encrypted data-plane) with a per-frame header and bucketed padding up to a configured cap.
@@ -1604,7 +1647,7 @@ reorder (10\% reorder, 50 ms, $\pm$20 ms) & 1.0000 & 368--370 & 0 \\
   \textbf{Real-Network End-to-End Evaluation:} Measure handshake
   distributions across diverse access networks (same Wi-Fi, different NAT
   paths, LTE hotspots) and compare TCP vs QUIC control channels for
-  12~KB-class handshakes, validating that observed loss/jitter/reorder
+  12~kB-class handshakes, validating that observed loss/jitter/reorder
   traces align with our fault taxonomy.
 \item
   \textbf{Formal Verification:} Apply model checking to the handshake
@@ -1656,7 +1699,8 @@ across heterogeneous device fleets.
 
 The limitations noted in Section~\ref{sec:limitations} do not change the
 core contribution: an auditable migration contract with concurrency-safe
-handshake semantics that are reproducible from released artifacts.
+handshake semantics that are reproducible from released artifacts under
+our stated threat model and measurement setup.
 
 
 

@@ -44,6 +44,27 @@ REFERENCE_CONFIG_PREFERENCE = [
     "Classic (X25519 + Ed25519)",
 ]
 
+# System impact canonical suite ids (Artifacts/system_impact_<date>.csv)
+SYSTEM_IMPACT_SUITES = [
+    ("classic", "Classic"),
+    ("pqc_liboqs", "liboqs PQC"),
+    ("pqc_cryptokit", "CryptoKit PQC"),
+]
+
+# System impact canonical network conditions (Artifacts/system_impact_<date>.csv)
+SYSTEM_IMPACT_CONDITIONS = [
+    ("ideal", "ideal"),
+    ("rtt50_j20", "RTT 50$\\pm$20 ms"),
+    ("rtt100_j50", "RTT 100$\\pm$50 ms"),
+]
+
+# Prefer these file sizes (bytes) for amortization reporting if present.
+SYSTEM_IMPACT_PREFERRED_FILE_BYTES = [
+    1 * 1024 * 1024,
+    10 * 1024 * 1024,
+    100 * 1024 * 1024,
+]
+
 # Ensure output directories exist
 TABLES_DIR.mkdir(parents=True, exist_ok=True)
 SUPP_DIR.mkdir(parents=True, exist_ok=True)
@@ -104,9 +125,49 @@ def select_common_artifact_date(prefixes: list[str]) -> str | None:
             return None
     return max(common) if common else None
 
+def _artifact_date_from_main_tex() -> str | None:
+    """
+    Prefer the artifact date pinned in the main paper TeX to avoid accidentally
+    selecting placeholder/future artifacts (e.g., 2099-01-01).
+    """
+    tex = PROJECT_ROOT / "Docs" / "IEEE_Paper_SkyBridge_Compass_patched.tex"
+    if not tex.exists():
+        return None
+    try:
+        s = tex.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return None
+    # \newcommand{\artifactdate}{YYYY-MM-DD}
+    import re
+    m = re.search(r"\\newcommand\\{\\artifactdate\\}\\{([^}]+)\\}", s)
+    if not m:
+        return None
+    v = (m.group(1) or "").strip()
+    return v if v else None
+
+def _is_future_date(yyyy_mm_dd: str, today: str) -> bool:
+    # Lexicographic compare is safe for YYYY-MM-DD.
+    return yyyy_mm_dd > today
+
 def _read_csv_rows(filepath):
     with open(filepath, 'r', newline='') as f:
         return list(csv.DictReader(f))
+
+def _percentile(samples: list[float], p: float) -> float:
+    if not samples:
+        return float("nan")
+    xs = sorted(samples)
+    if len(xs) == 1:
+        return xs[0]
+    idx = int((len(xs) - 1) * p)
+    return xs[max(0, min(idx, len(xs) - 1))]
+
+def _fmt_ms_p50_p95(samples_ms: list[float], decimals: int = 1) -> str:
+    p50 = _percentile(samples_ms, 0.50)
+    p95 = _percentile(samples_ms, 0.95)
+    if math.isnan(p50) or math.isnan(p95):
+        return "--"
+    return f"{p50:.{decimals}f}/{p95:.{decimals}f}"
 
 def _latex_escape(s: str) -> str:
     return (s
@@ -318,7 +379,7 @@ def generate_repeatability_latency_table(latency_runs):
     lines = [
         r"\begin{table*}[!t]",
         r"\centering",
-        r"\caption{Supplementary Table \thetable: Repeatability across independent benchmark batches (latency). Cells report mean $\pm$ 95\% CI across batches; each batch uses N=1000 iterations after 10 warmup runs.}",
+        r"\caption{Supplementary Table \thetable: Repeatability across independent benchmark batches (latency). Table reports observed batch count $B$. Cells report mean and (when $B \ge 2$) $\pm$ 95\% CI across batches; each batch uses N=1000 iterations after 10 warmup runs.}",
         r"\label{tab:supp-repeatability-latency}",
         r"\begin{tabular}{@{}lccccc@{}}",
         r"\toprule",
@@ -338,11 +399,20 @@ def generate_repeatability_latency_table(latency_runs):
         mean_mu, mean_ci, b = mean_and_ci(means)
         p50_mu, p50_ci, _ = mean_and_ci(p50s)
         p95_mu, p95_ci, _ = mean_and_ci(p95s)
+        if b < 2:
+            mean_cell = f"${mean_mu:.3f}$"
+            p50_cell = f"${p50_mu:.3f}$"
+            p95_cell = f"${p95_mu:.3f}$"
+        else:
+            # LaTeX plus/minus is `\pm` (single backslash). Do NOT emit `\\pm` (linebreak + "pm").
+            mean_cell = f"${mean_mu:.3f} \\pm {mean_ci:.3f}$"
+            p50_cell = f"${p50_mu:.3f} \\pm {p50_ci:.3f}$"
+            p95_cell = f"${p95_mu:.3f} \\pm {p95_ci:.3f}$"
         line = (
             f"{short} & {b} & {n_per} & "
-            f"${mean_mu:.3f} \\pm {mean_ci:.3f}$ & "
-            f"${p50_mu:.3f} \\pm {p50_ci:.3f}$ & "
-            f"${p95_mu:.3f} \\pm {p95_ci:.3f}$ \\\\"
+            f"{mean_cell} & "
+            f"{p50_cell} & "
+            f"{p95_cell} \\\\"
         )
         lines.append(line)
 
@@ -358,7 +428,7 @@ def generate_repeatability_rtt_table(rtt_runs):
     lines = [
         r"\begin{table*}[!t]",
         r"\centering",
-        r"\caption{Supplementary Table \thetable: Repeatability across independent benchmark batches (RTT). Cells report mean $\pm$ 95\% CI across batches; each batch uses N=1000 iterations after 10 warmup runs.}",
+        r"\caption{Supplementary Table \thetable: Repeatability across independent benchmark batches (RTT). Table reports observed batch count $B$. Cells report mean and (when $B \ge 2$) $\pm$ 95\% CI across batches; each batch uses N=1000 iterations after 10 warmup runs.}",
         r"\label{tab:supp-repeatability-rtt}",
         r"\begin{tabular}{@{}lccccc@{}}",
         r"\toprule",
@@ -378,11 +448,20 @@ def generate_repeatability_rtt_table(rtt_runs):
         mean_mu, mean_ci, b = mean_and_ci(means)
         p50_mu, p50_ci, _ = mean_and_ci(p50s)
         p95_mu, p95_ci, _ = mean_and_ci(p95s)
+        if b < 2:
+            mean_cell = f"${mean_mu:.3f}$"
+            p50_cell = f"${p50_mu:.3f}$"
+            p95_cell = f"${p95_mu:.3f}$"
+        else:
+            # LaTeX plus/minus is `\pm` (single backslash). Do NOT emit `\\pm` (linebreak + "pm").
+            mean_cell = f"${mean_mu:.3f} \\pm {mean_ci:.3f}$"
+            p50_cell = f"${p50_mu:.3f} \\pm {p50_ci:.3f}$"
+            p95_cell = f"${p95_mu:.3f} \\pm {p95_ci:.3f}$"
         line = (
             f"{short} & {b} & {n_per} & "
-            f"${mean_mu:.3f} \\pm {mean_ci:.3f}$ & "
-            f"${p50_mu:.3f} \\pm {p50_ci:.3f}$ & "
-            f"${p95_mu:.3f} \\pm {p95_ci:.3f}$ \\\\"
+            f"{mean_cell} & "
+            f"{p50_cell} & "
+            f"{p95_cell} \\\\"
         )
         lines.append(line)
 
@@ -468,7 +547,7 @@ def generate_perf_summary_table(latency, rtt, msg_sizes):
     lines = [
         r"\begin{table*}[!t]",
         r"\centering",
-        r"\caption{Performance Summary. All benchmarks on Apple Silicon (M1/M3), macOS 26.x, N=1000 iterations after 10 warmup runs. Wire Size counts payload-only handshake bytes (MessageA + MessageB + 2$\times$Finished); loopback wire sizes including transport overhead are reported separately in Table~\ref{tab:baseline-comparison} and Supplementary Table~S4. Data-plane AEAD is fixed to AES-256-GCM in v1, so throughput is independent of the negotiated handshake suite; throughput measured post-handshake on 1~MiB payloads.}",
+        r"\caption{Performance Summary. All benchmarks on Apple Silicon (M1/M3), macOS 26.x, N=1000 iterations after 10 warmup runs. Wire Size counts payload-only handshake bytes (MessageA + MessageB + 2$\times$Finished); loopback wire sizes including transport overhead are reported separately in Table~\ref{tab:baseline-comparison} and Supplementary Table~\ref{tab:supp-loopback-wire}. Data-plane AEAD is fixed to AES-256-GCM in v1, so throughput is independent of the negotiated handshake suite; throughput measured post-handshake on 1~MiB payloads.}",
         r"\label{tab:perf-summary}",
         r"\begin{tabular}{@{}lcccccc@{}}",
         r"\toprule",
@@ -729,6 +808,8 @@ def generate_supp_traffic_padding_sensitivity_table(rows):
     lines = [
         r"\begin{table*}[!t]",
         r"\centering",
+        r"\scriptsize",
+        r"\setlength{\tabcolsep}{3pt}",
         r"\caption{Supplementary Table \thetable: SBP2 bucket-cap sensitivity study. We vary the maximum bucket size (cap) and report padding overhead, cap coverage (fraction of frames whose framed payload exceeds the cap), and a privacy proxy (bucket entropy) for representative handshake, control, and data-plane workloads.}",
         r"\label{tab:supp-traffic-padding-sensitivity}",
         r"\begin{tabular}{@{}lrrrrrrrrr@{}}",
@@ -758,6 +839,131 @@ def generate_supp_traffic_padding_sensitivity_table(rows):
     ])
     return "\n".join(lines)
 
+def parse_system_impact(filepath: Path) -> list[dict[str, str]]:
+    """Parse system_impact CSV rows (raw)."""
+    return _read_csv_rows(filepath)
+
+def generate_system_impact_table(rows: list[dict[str, str]]) -> str:
+    """
+    Generate main paper table for system-level impact.
+
+    Columns:
+    - T_connect p50/p95 (ms) across conditions
+    - T_total p50/p95 (ms) for selected file sizes under RTT 50±20ms
+    """
+    present_file_bytes = sorted({int(r["file_bytes"]) for r in rows if r.get("file_bytes")})
+    chosen_file_bytes = [b for b in SYSTEM_IMPACT_PREFERRED_FILE_BYTES if b in present_file_bytes]
+    if not chosen_file_bytes:
+        chosen_file_bytes = present_file_bytes[:2]
+
+    def samples_for(condition: str, suite: str, file_bytes: int, metric: str) -> list[float]:
+        out: list[float] = []
+        for r in rows:
+            if r.get("condition") != condition:
+                continue
+            if r.get("suite") != suite:
+                continue
+            if int(r.get("file_bytes", "0") or "0") != int(file_bytes):
+                continue
+            v = r.get(metric)
+            if v is None or v == "":
+                continue
+            try:
+                x = float(v)
+            except ValueError:
+                continue
+            if math.isnan(x) or math.isinf(x):
+                continue
+            out.append(x)
+        return out
+
+    connect_file_bytes = min(chosen_file_bytes) if chosen_file_bytes else (present_file_bytes[0] if present_file_bytes else 0)
+    file_cols = " & ".join([f"{int(b/(1024*1024))} MiB" for b in chosen_file_bytes])
+
+    # Compute N for transparency (reviewer-friendly).
+    def _count_rows(condition: str, suite: str, file_bytes: int, metric: str) -> int:
+        n = 0
+        for r in rows:
+            if r.get("condition") != condition:
+                continue
+            if r.get("suite") != suite:
+                continue
+            if int(r.get("file_bytes", "0") or "0") != int(file_bytes):
+                continue
+            v = r.get(metric)
+            if v is None or v == "":
+                continue
+            try:
+                x = float(v)
+            except ValueError:
+                continue
+            if math.isnan(x):
+                continue
+            n += 1
+        return n
+
+    n_connect = min(
+        _count_rows(cond_id, suite_id, connect_file_bytes, "t_connect_ms")
+        for cond_id, _ in SYSTEM_IMPACT_CONDITIONS
+        for suite_id, _ in SYSTEM_IMPACT_SUITES
+    ) if rows else 0
+    n_total_by_size = {
+        int(b/(1024*1024)): min(
+            _count_rows("rtt50_j20", suite_id, b, "t_file_total_ms")
+            for suite_id, _ in SYSTEM_IMPACT_SUITES
+        )
+        for b in chosen_file_bytes
+    }
+    n_total_str = ", ".join([f"{k}MiB:N={v}" for k, v in n_total_by_size.items()])
+
+    lines: list[str] = []
+    lines.append(r"\begin{table*}[!t]")
+    lines.append(r"\centering")
+    lines.append(
+        r"\caption{System-level impact and amortization (p50/p95, ms). "
+        r"$T_{connect}$ is measured from connect start to handshake established (including Finished key confirmation and event emission). "
+        r"$T_{total}$ is measured from connect start to completion of an encrypted bulk transfer. "
+        r"Network conditions emulate deterministic RTT+jitter on a reliable stream; large data-plane payloads are bandwidth-limited (MiB/s) to avoid per-chunk RTT artifacts. "
+        rf"Runs: $N_{{connect}}$={n_connect}; $N_{{total}}$ (RTT 50$\pm$20 ms) = {n_total_str}. "
+        r"Data from \texttt{Artifacts/system\_impact\_<date>.csv}.}"
+    )
+    lines.append(r"\label{tab:system-impact}")
+    lines.append(r"\small")
+    colspec = "l" + ("c" * (len(SYSTEM_IMPACT_CONDITIONS) + len(chosen_file_bytes)))
+    lines.append(rf"\begin{{tabular}}{{@{{}}{colspec}@{{}}}}")
+    lines.append(r"\toprule")
+    lines.append(
+        rf"& \multicolumn{{{len(SYSTEM_IMPACT_CONDITIONS)}}}{{c}}{{\textbf{{$T_{{connect}}$ (p50/p95)}}}}"
+        rf" & \multicolumn{{{len(chosen_file_bytes)}}}{{c}}{{\textbf{{$T_{{total}}$ (p50/p95), RTT 50$\pm$20 ms}}}} \\"
+    )
+    lines.append(
+        rf"\cmidrule(lr){{2-{1+len(SYSTEM_IMPACT_CONDITIONS)}}} "
+        rf"\cmidrule(lr){{{2+len(SYSTEM_IMPACT_CONDITIONS)}-{1+len(SYSTEM_IMPACT_CONDITIONS)+len(chosen_file_bytes)}}}"
+    )
+    header_conds = " & ".join([label for _, label in SYSTEM_IMPACT_CONDITIONS])
+    lines.append(rf"\textbf{{Suite}} & {header_conds} & {file_cols} \\")
+    lines.append(r"\midrule")
+
+    for suite_id, suite_label in SYSTEM_IMPACT_SUITES:
+        connect_cells: list[str] = []
+        for cond_id, _ in SYSTEM_IMPACT_CONDITIONS:
+            vals = samples_for(cond_id, suite_id, connect_file_bytes, "t_connect_ms")
+            connect_cells.append(_fmt_ms_p50_p95(vals, decimals=1))
+
+        total_cells: list[str] = []
+        for fb in chosen_file_bytes:
+            vals = samples_for("rtt50_j20", suite_id, fb, "t_file_total_ms")
+            decimals = 1 if (vals and max(vals) < 1000) else 0
+            total_cells.append(_fmt_ms_p50_p95(vals, decimals=decimals))
+
+        row = " & ".join([r"\textbf{" + _latex_escape(suite_label) + "}", *connect_cells, *total_cells]) + r" \\"
+        lines.append(row)
+
+    lines.append(r"\bottomrule")
+    lines.append(r"\end{tabular}")
+    lines.append(r"\end{table*}")
+    return "\n".join(lines)
+
 def main():
     print("=" * 60)
     print("SkyBridge Compass Table Generator")
@@ -771,8 +977,48 @@ def main():
     #
     # If no common date exists, we fail loudly to prevent accidentally mixing datasets in the paper.
     requested_date = os.environ.get("ARTIFACT_DATE") or os.environ.get("SKYBRIDGE_ARTIFACT_DATE")
+    if requested_date:
+        requested_date = requested_date.strip()
+
+    # If not explicitly pinned, prefer the date pinned in the main paper TeX.
+    if not requested_date:
+        requested_date = _artifact_date_from_main_tex()
+
+    today = datetime.now().date().isoformat()
+
+    # Convenience: generate only the system-impact table (no dependency on other artifact sets).
+    if os.environ.get("SKYBRIDGE_ONLY_SYSTEM_IMPACT_TABLE") == "1":
+        if not requested_date:
+            latest = find_latest_csv("system_impact")
+            if latest is None:
+                raise SystemExit(f"ERROR: No system_impact_*.csv found in {ARTIFACTS_DIR}")
+            requested_date = latest.name[len("system_impact_"):-4]
+        sys_csv = select_artifact_csv("system_impact", requested_date, strict=True)
+        sys_rows = parse_system_impact(sys_csv)
+        sys_table = generate_system_impact_table(sys_rows)
+        sys_path = TABLES_DIR / "system_impact.tex"
+        with open(sys_path, "w") as f:
+            f.write(f"% Auto-generated by make_tables.py on {datetime.now().isoformat()}\n")
+            f.write(f"% DO NOT EDIT MANUALLY - regenerate from CSV artifacts\n")
+            f.write(f"% Source: {sys_csv.name}\n\n")
+            f.write(sys_table)
+        print(f"  -> {sys_path}")
+        print("\nDone!")
+        return
+
     required_prefixes = ["handshake_bench", "handshake_rtt", "message_sizes", "traffic_padding", "traffic_padding_sensitivity"]
+
     artifact_date = requested_date or select_common_artifact_date(required_prefixes)
+    if artifact_date and not requested_date and _is_future_date(artifact_date, today):
+        # Avoid selecting placeholder future artifacts unless the user explicitly pinned it.
+        # Pick the latest common date that is not in the future.
+        common_dates = None
+        for pref in required_prefixes:
+            dates = _date_suffixes_for_prefix(pref)
+            common_dates = dates if common_dates is None else (common_dates & dates)
+        candidates = sorted([d for d in (common_dates or set()) if not _is_future_date(d, today)])
+        artifact_date = candidates[-1] if candidates else artifact_date
+
     if artifact_date is None:
         raise SystemExit(
             "ERROR: No common ARTIFACT_DATE across required prefixes "
@@ -785,6 +1031,7 @@ def main():
     msg_csv = select_artifact_csv("message_sizes", artifact_date, strict=True)
     traffic_csv = select_artifact_csv("traffic_padding", artifact_date, strict=True)
     sens_csv = select_artifact_csv("traffic_padding_sensitivity", artifact_date, strict=True)
+    system_impact_csv = select_artifact_csv("system_impact", artifact_date, strict=False)
 
     print(f"\nUsing data files:")
     print(f"  Latency: {latency_csv}")
@@ -792,6 +1039,7 @@ def main():
     print(f"  Message Sizes: {msg_csv}")
     print(f"  Traffic Padding: {traffic_csv}")
     print(f"  Traffic Padding Sensitivity: {sens_csv}")
+    print(f"  System Impact: {system_impact_csv}")
     print(f"  -> ARTIFACT_DATE locked: {artifact_date}")
 
     # Parse data
@@ -802,6 +1050,7 @@ def main():
     rtt_runs = parse_rtt_runs(rtt_csv) if rtt_csv else {}
     traffic_rows = parse_traffic_padding(traffic_csv) if traffic_csv else []
     sens_rows = parse_traffic_padding_sensitivity(sens_csv) if sens_csv else []
+    system_rows = parse_system_impact(system_impact_csv) if system_impact_csv else []
 
     # Generate tables
     print("\nGenerating tables...")
@@ -869,6 +1118,19 @@ def main():
         f.write(f"% Auto-generated by make_tables.py\n\n")
         f.write(supp_rep_rtt)
     print(f"  -> {supp_rep_rtt_path}")
+
+    # System impact table (optional; requires matching ARTIFACT_DATE to avoid mixing datasets)
+    if system_rows:
+        sys_table = generate_system_impact_table(system_rows)
+        sys_path = TABLES_DIR / "system_impact.tex"
+        with open(sys_path, "w") as f:
+            f.write(f"% Auto-generated by make_tables.py on {datetime.now().isoformat()}\n")
+            f.write(f"% DO NOT EDIT MANUALLY - regenerate from CSV artifacts\n")
+            f.write(f"% Source: {system_impact_csv.name if system_impact_csv else 'N/A'}\n\n")
+            f.write(sys_table)
+        print(f"  -> {sys_path}")
+    else:
+        print("  -> (skip) system_impact table: missing Artifacts/system_impact_<ARTIFACT_DATE>.csv")
 
     # Print summary for Abstract verification
     print("\n" + "=" * 60)
