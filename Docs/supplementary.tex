@@ -38,12 +38,12 @@
 \newcommand{\real}[1]{#1}
 \newcommand{\artifacturl}{https://github.com/billlza/Skybridge-Compass}
 \newcommand{\artifacturlshort}{https://github.com/billlza/Skybridge-Compass}
-\newcommand{\artifacttag}{artifact-v1}
-\newcommand{\artifactsha}{8a68fa6e0fe7}
+\newcommand{\artifacttag}{artifact-v2}
+\newcommand{\artifactsha}{8635bf439cd4}
 \newcommand{\artifactzipurl}{\artifacturl/archive/refs/tags/\artifacttag.zip}
-\newcommand{\artifactzipsha}{354443f7\allowbreak{}cda3e25a\allowbreak{}51480a68\allowbreak{}3da1712a\allowbreak{}8ea9588a\allowbreak{}2bc510f4\allowbreak{}f716bd55\allowbreak{}3d6d72ac}
+\newcommand{\artifactzipsha}{b08659bf\allowbreak{}529c6295\allowbreak{}bf411bbe\allowbreak{}9f6150fa\allowbreak{}2ad555b4\allowbreak{}37f072ce\allowbreak{}73fdce7a\allowbreak{}0d130903}
 \newcommand{\artifacttarurl}{\artifacturl/archive/refs/tags/\artifacttag.tar.gz}
-\newcommand{\artifacttarsha}{90228458\allowbreak{}587f095e\allowbreak{}9cd403d3\allowbreak{}d449f885\allowbreak{}a2b8b002\allowbreak{}057a76e6\allowbreak{}f60c291e\allowbreak{}45071388}
+\newcommand{\artifacttarsha}{8890b674\allowbreak{}88194e77\allowbreak{}17bc10d2\allowbreak{}07f85a77\allowbreak{}ef89d6c1\allowbreak{}ec005672\allowbreak{}22dea641\allowbreak{}b6ef7f73\allowbreak{}a}
 \providecommand{\tightlist}{%
 	  \setlength{\itemsep}{0pt}\setlength{\parskip}{0pt}}
 
@@ -154,7 +154,7 @@ All data is generated from the artifact CSV files:
 \item \texttt{Artifacts/\allowbreak baseline\_\allowbreak summary\_\allowbreak <timestamp>.csv} (Table~\ref{tab:supp-loopback-wire})
 \end{itemize}
 
-These files can be regenerated using \texttt{Scripts/\allowbreak run\_\allowbreak paper\_\allowbreak eval.sh} from the artifact repository; \texttt{Scripts/\allowbreak make\_\allowbreak tables.py} selects the latest matching CSV by prefix.
+These files can be regenerated using \texttt{Scripts/\allowbreak run\_\allowbreak paper\_\allowbreak eval.sh} from the artifact repository; \texttt{Scripts/\allowbreak make\_\allowbreak tables.py} uses the main-paper-pinned \texttt{\string\artifactdate} (or an explicit \texttt{ARTIFACT\_DATE}) to avoid accidentally mixing datasets.
 
 Artifact release:
 \begin{itemize}\tightlist
