@@ -1,0 +1,43 @@
+name: SkyBridgeCompass-iOS
+
+options:
+  bundleIdPrefix: com.skybridge
+  deploymentTarget:
+    iOS: "17.0"
+
+targets:
+  SkyBridgeCompass-iOS:
+    type: application
+    platform: iOS
+    info:
+      path: "SkyBridgeCompassiOS/Supporting Files/Info.plist"
+    sources:
+      - path: SkyBridgeCompassiOS/Sources
+      - path: "SkyBridgeCompassiOS/Supporting Files/LaunchScreen.storyboard"
+        buildPhase: resources
+      - path: SkyBridgeCompassiOS/Resources
+        buildPhase: resources
+    dependencies:
+      - sdk: AppIntents.framework
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.skybridge.compass.ios
+        DEVELOPMENT_TEAM: YKUPL7Z869
+        TARGETED_DEVICE_FAMILY: "1,2"
+        INFOPLIST_FILE: "SkyBridgeCompassiOS/Supporting Files/Info.plist"
+        SWIFT_STRICT_CONCURRENCY: targeted
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: HAS_APPLE_PQC_SDK
+
+schemes:
+  SkyBridgeCompass-iOS:
+    build:
+      targets:
+        SkyBridgeCompass-iOS: all
+    run:
+      config: Debug
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release

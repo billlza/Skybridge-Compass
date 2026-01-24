@@ -1,0 +1,703 @@
+//
+// RemoteDesktopManager.swift
+// SkyBridgeCompassiOS
+//
+// 远程桌面管理器 - iOS 作为查看器/控制端
+// 支持查看和控制 macOS、Windows、Linux 设备的屏幕
+//
+// iOS 限制说明：
+// - iOS 不能作为被控端（系统限制，无法注入输入事件）
+// - iOS 可以使用 ReplayKit 进行屏幕广播，但只能用于直播
+// - iOS 主要作为远程桌面的查看器/控制端
+//
+
+import Foundation
+import Network
+import AVFoundation
+import VideoToolbox
+#if canImport(UIKit)
+import UIKit
+#endif
+
+// MARK: - Remote Desktop Constants
+
+/// 远程桌面常量
+public enum RemoteDesktopConstants {
+    /// 默认端口（5901：避免与系统 VNC 5900 冲突；与 macOS `RemoteControlServer` 对齐）
+    public static let defaultPort: UInt16 = 5901
+    
+    /// 默认帧率
+    public static let defaultFrameRate: Int = 30
+    
+    /// 默认比特率 (5 Mbps)
+    public static let defaultBitrate: UInt64 = 5_000_000
+    
+    /// 心跳间隔（秒）
+    public static let heartbeatInterval: TimeInterval = 5
+    
+    /// 连接超时（秒）
+    public static let connectionTimeout: TimeInterval = 30
+}
+
+// MARK: - Remote Message Types
+
+/// 远程消息类型（与 macOS `RemoteControlManager` 对齐）
+public enum RemoteMessageType: String, Codable, Sendable {
+    case screenData = "screenData"
+    case mouseEvent = "mouseEvent"
+    case keyboardEvent = "keyboardEvent"
+}
+
+/// 远程消息（与 macOS `RemoteControlManager.RemoteMessage` 对齐）
+public struct RemoteMessage: Codable, Sendable {
+    public let type: RemoteMessageType
+    public let payload: Data
+    
+    public init(type: RemoteMessageType, payload: Data) {
+        self.type = type
+        self.payload = payload
+    }
+}
+
+// MARK: - Screen Data
+
+/// 屏幕数据（与 macOS `RemoteControlManager.ScreenData` 对齐）
+public struct ScreenData: Codable, Sendable {
+    public let width: Int
+    public let height: Int
+    public let imageData: Data
+    public let timestamp: TimeInterval
+    public let format: String? // "jpeg" / "hevc" / "h264" / "bgra"
+    
+    public init(width: Int, height: Int, imageData: Data, timestamp: TimeInterval, format: String? = nil) {
+        self.width = width
+        self.height = height
+        self.imageData = imageData
+        self.timestamp = timestamp
+        self.format = format
+    }
+}
+
+// MARK: - Mouse Event
+
+/// 鼠标事件类型（与 macOS `RemoteControlManager.MouseEventType` 对齐）
+public enum MouseEventType: String, Codable, Sendable {
+    case leftMouseDown
+    case leftMouseUp
+    case rightMouseDown
+    case rightMouseUp
+    case mouseMoved
+    case scrollUp
+    case scrollDown
+}
+
+/// 鼠标事件（与 macOS `RemoteControlManager.RemoteMouseEvent` 对齐）
+public struct MouseEvent: Codable, Sendable {
+    public let type: MouseEventType
+    public let x: Double
+    public let y: Double
+    public let timestamp: TimeInterval
+    
+    public init(type: MouseEventType, x: Double, y: Double, timestamp: TimeInterval = Date().timeIntervalSince1970) {
+        self.type = type
+        self.x = x
+        self.y = y
+        self.timestamp = timestamp
+    }
+}
+
+// MARK: - Keyboard Event
+
+/// 键盘事件类型（与 macOS `RemoteControlManager.KeyboardEventType` 对齐）
+public enum KeyboardEventType: String, Codable, Sendable {
+    case keyDown
+    case keyUp
+}
+
+/// 键盘事件（与 macOS `RemoteControlManager.RemoteKeyboardEvent` 对齐）
+public struct KeyboardEvent: Codable, Sendable {
+    public let type: KeyboardEventType
+    public let keyCode: Int
+    public let timestamp: TimeInterval
+    
+    public init(type: KeyboardEventType, keyCode: Int, timestamp: TimeInterval = Date().timeIntervalSince1970) {
+        self.type = type
+        self.keyCode = keyCode
+        self.timestamp = timestamp
+    }
+}
+
+// MARK: - Connection State
+
+/// 远程桌面连接状态
+public enum RemoteDesktopState: Sendable, Equatable {
+    case disconnected
+    case connecting
+    case connected
+    case streaming
+    case error(String)
+
+    public static func == (lhs: RemoteDesktopState, rhs: RemoteDesktopState) -> Bool {
+        switch (lhs, rhs) {
+        case (.disconnected, .disconnected),
+             (.connecting, .connecting),
+             (.connected, .connected),
+             (.streaming, .streaming):
+            return true
+        case (.error(let a), .error(let b)):
+            return a == b
+        default:
+            return false
+        }
+    }
+}
+
+// MARK: - Remote Desktop Error
+
+/// 远程桌面错误
+public enum RemoteDesktopError: Error, LocalizedError, Sendable {
+    case connectionFailed(String)
+    case streamingFailed(String)
+    case decodingFailed(String)
+    case timeout
+    case notSupported(String)
+    case permissionDenied
+    case disconnected
+    
+    public var errorDescription: String? {
+        switch self {
+        case .connectionFailed(let reason): return "连接失败: \(reason)"
+        case .streamingFailed(let reason): return "流媒体失败: \(reason)"
+        case .decodingFailed(let reason): return "解码失败: \(reason)"
+        case .timeout: return "连接超时"
+        case .notSupported(let feature): return "不支持: \(feature)"
+        case .permissionDenied: return "权限被拒绝"
+        case .disconnected: return "连接已断开"
+        }
+    }
+}
+
+// MARK: - Video Decoder
+
+/// 视频解码器
+@available(iOS 17.0, *)
+actor VideoDecoder {
+    private var decompressionSession: VTDecompressionSession?
+    private var formatDescription: CMVideoFormatDescription?
+    private var lastDecodedFrame: CGImage?
+    
+    /// 解码 H.264/HEVC 帧
+    func decode(frameData: Data, format: String) async throws -> CGImage? {
+        // 对于 JPEG 格式，直接解码
+        if format == "jpeg" {
+            return decodeJPEG(frameData)
+        }
+        
+        // 对于 H.264/HEVC，使用 VideoToolbox
+        if format == "h264" || format == "hevc" {
+            return try await decodeVideoFrame(frameData, isHEVC: format == "hevc")
+        }
+        
+        // 对于 BGRA 原始数据
+        if format == "bgra" {
+            return decodeBGRA(frameData)
+        }
+        
+        return nil
+    }
+    
+    private func decodeJPEG(_ data: Data) -> CGImage? {
+        guard let dataProvider = CGDataProvider(data: data as CFData),
+              let image = CGImage(
+                jpegDataProviderSource: dataProvider,
+                decode: nil,
+                shouldInterpolate: true,
+                intent: .defaultIntent
+              ) else {
+            return nil
+        }
+        return image
+    }
+    
+    private func decodeBGRA(_ data: Data) -> CGImage? {
+        // 需要知道宽高才能解码 BGRA
+        // 这里简化处理，实际使用时需要从 ScreenData 获取宽高
+        return nil
+    }
+    
+    private func decodeVideoFrame(_ data: Data, isHEVC: Bool) async throws -> CGImage? {
+        // VideoToolbox 解码实现
+        // 这里是简化实现，实际需要完整的 NAL 单元解析和解码流程
+        return nil
+    }
+    
+    func cleanup() {
+        if let session = decompressionSession {
+            VTDecompressionSessionInvalidate(session)
+            decompressionSession = nil
+        }
+        formatDescription = nil
+        lastDecodedFrame = nil
+    }
+}
+
+// MARK: - RemoteDesktopManager
+
+/// 远程桌面管理器 - iOS 作为查看器/控制端
+@available(iOS 17.0, *)
+@MainActor
+public class RemoteDesktopManager: ObservableObject {
+    public static let instance = RemoteDesktopManager()
+    
+    // MARK: - Published Properties
+    
+    /// 是否正在流媒体
+    @Published public private(set) var isStreaming: Bool = false
+    
+    /// 当前连接
+    @Published public private(set) var currentConnection: Connection?
+    
+    /// 连接状态
+    @Published public private(set) var state: RemoteDesktopState = .disconnected
+    
+    /// 当前帧图像
+    @Published public private(set) var currentFrame: CGImage?
+    
+    /// 帧率
+    @Published public private(set) var frameRate: Double = 0
+    
+    /// 延迟（毫秒）
+    @Published public private(set) var latency: Double = 0
+    
+    /// 分辨率
+    @Published public private(set) var resolution: CGSize = .zero
+    
+    /// 是否全屏
+    @Published public var isFullscreen: Bool = false
+    
+    /// 画质设置
+    @Published public var quality: StreamQuality = .auto
+    
+    // MARK: - Private Properties
+    
+    private var networkConnection: NWConnection?
+    private let decoder = VideoDecoder()
+    private let queue = DispatchQueue(label: "com.skybridge.remotedesktop", qos: .userInteractive)
+    
+    private var heartbeatTimer: Timer?
+    private var frameCount: Int = 0
+    private var lastFrameTime: Date?
+    private var lastHeartbeatTime: Date?
+    
+    private let maxMessageBytes: Int = 8_000_000
+    private let maxPendingFrames: Int = 1
+    private var isDecodingFrame: Bool = false
+    private var pendingFrames: [ScreenData] = []
+    private let crossNetwork = CrossNetworkWebRTCManager.instance
+    
+    private init() {}
+    
+    // MARK: - Public Methods
+    
+    /// 连接到远程桌面
+    /// - Parameter device: 目标设备
+    public func connect(to device: DiscoveredDevice) async throws {
+        SkyBridgeLogger.shared.info("📺 连接到远程桌面: \(device.name)")
+        
+        state = .connecting
+        
+        do {
+            // 如果已存在跨网 WebRTC 会话（扫码建立），优先走 DataChannel（无需 NWConnection / 端口可达）
+            if case .connected = crossNetwork.state {
+                currentConnection = Connection(device: device, status: .connected)
+                state = .connected
+                isStreaming = true
+                state = .streaming
+                
+                // 订阅跨网屏幕帧
+                Task { [weak self] in
+                    guard let self else { return }
+                    for await _ in NotificationCenter.default.notifications(named: Notification.Name("CrossNetworkScreenDataUpdated")) {
+                        if let sd = self.crossNetwork.lastScreenData {
+                            await self.handleScreenData(sd)
+                        }
+                    }
+                }
+                
+                SkyBridgeLogger.shared.info("✅ 远程桌面已切换到 WebRTC(DataChannel) 传输")
+                return
+            }
+
+            // 建立连接：优先 Bonjour service（不依赖 IP/默认端口）
+            let endpoint: NWEndpoint
+            if device.services.contains(DiscoveredDevice.remoteControlServiceType) {
+                endpoint = .service(
+                    name: device.bonjourServiceName ?? device.name,
+                    type: DiscoveredDevice.remoteControlServiceType,
+                    domain: device.bonjourServiceDomain ?? "local.",
+                    interface: nil
+                )
+            } else if let ip = device.ipAddress, !ip.isEmpty {
+                let port = device.remoteControlPort ?? RemoteDesktopConstants.defaultPort
+                endpoint = .hostPort(host: .init(ip), port: .init(integerLiteral: port))
+            } else {
+                throw RemoteDesktopError.connectionFailed("设备缺少可连接地址（Bonjour/IP）")
+            }
+
+            let connection = try await createConnection(to: endpoint)
+            networkConnection = connection
+
+            // 创建 Connection 对象
+            currentConnection = Connection(device: device, status: .connected)
+            state = .connected
+            
+            // 开始接收数据
+            startReceiving()
+
+            // 直接进入 streaming（macOS 端无需 connect/heartbeat 握手）
+            try await startStreaming()
+            
+            SkyBridgeLogger.shared.info("✅ 远程桌面连接成功")
+            
+        } catch {
+            state = .error(error.localizedDescription)
+            throw error
+        }
+    }
+    
+    /// 开始流媒体
+    public func startStreaming() async throws {
+        guard state == .connected else {
+            throw RemoteDesktopError.connectionFailed("未连接")
+        }
+        
+        SkyBridgeLogger.shared.info("📺 开始远程桌面流")
+        
+        isStreaming = true
+        state = .streaming
+        frameCount = 0
+        lastFrameTime = Date()
+    }
+
+    /// 便捷入口：从 Connection 启动远程桌面（UI 侧直接调用）
+    public func startStreaming(from connection: Connection) async throws {
+        // 若当前不是该设备的连接，先建立网络连接
+        if currentConnection?.device.id != connection.device.id || state == .disconnected {
+            try await connect(to: connection.device)
+            // 用 UI 传入的 Connection 覆盖展示层信息（不影响底层 networkConnection）
+            currentConnection = connection
+        }
+        try await startStreaming()
+    }
+    
+    /// 停止流媒体
+    public func stopStreaming() async {
+        SkyBridgeLogger.shared.info("⏹️ 停止远程桌面流")
+        
+        isStreaming = false
+        if state == .streaming {
+            state = .connected
+        }
+    }
+    
+    /// 断开连接
+    public func disconnect() async {
+        SkyBridgeLogger.shared.info("🔌 断开远程桌面连接")
+        
+        // 关闭连接
+        networkConnection?.cancel()
+        networkConnection = nil
+        
+        // 清理解码器
+        await decoder.cleanup()
+        
+        // 重置状态
+        isStreaming = false
+        currentConnection = nil
+        currentFrame = nil
+        state = .disconnected
+        frameRate = 0
+        latency = 0
+        resolution = .zero
+        pendingFrames.removeAll()
+        isDecodingFrame = false
+    }
+    
+    // MARK: - Input Events
+    
+    /// 发送鼠标/触控事件
+    public func sendMouseEvent(_ event: MouseEvent) async {
+        guard isStreaming else { return }
+        
+        do {
+            let data = try JSONEncoder().encode(event)
+            let message = RemoteMessage(type: .mouseEvent, payload: data)
+            try await sendMessage(message)
+        } catch {
+            SkyBridgeLogger.shared.error("❌ 发送鼠标事件失败: \(error.localizedDescription)")
+        }
+    }
+    
+    /// 发送键盘事件
+    public func sendKeyboardEvent(_ event: KeyboardEvent) async {
+        guard isStreaming else { return }
+        
+        do {
+            let data = try JSONEncoder().encode(event)
+            let message = RemoteMessage(type: .keyboardEvent, payload: data)
+            try await sendMessage(message)
+        } catch {
+            SkyBridgeLogger.shared.error("❌ 发送键盘事件失败: \(error.localizedDescription)")
+        }
+    }
+    
+    /// 从触控转换为鼠标事件
+    public func handleTouch(at point: CGPoint, in bounds: CGRect, type: MouseEventType) {
+        // 将触控坐标转换为远程屏幕坐标
+        let normalizedX = point.x / bounds.width
+        let normalizedY = point.y / bounds.height
+        
+        let remoteX = normalizedX * resolution.width
+        let remoteY = normalizedY * resolution.height
+        
+        let event = MouseEvent(type: type, x: remoteX, y: remoteY)
+        
+        Task {
+            await sendMouseEvent(event)
+        }
+    }
+    
+    // MARK: - Private Methods - Connection
+    
+    private func createConnection(to endpoint: NWEndpoint) async throws -> NWConnection {
+        let parameters = NWParameters.tcp
+        parameters.includePeerToPeer = true
+        if let tcp = parameters.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
+            tcp.enableKeepalive = true
+            tcp.keepaliveIdle = 30
+            tcp.keepaliveInterval = 15
+            tcp.keepaliveCount = 4
+        }
+        
+        let connection = NWConnection(to: endpoint, using: parameters)
+        
+        final class ContinuationGate: @unchecked Sendable {
+            private let lock = NSLock()
+            private var didResume = false
+            func runOnce(_ body: () -> Void) {
+                lock.lock()
+                defer { lock.unlock() }
+                guard !didResume else { return }
+                didResume = true
+                body()
+            }
+        }
+
+        return try await withCheckedThrowingContinuation { continuation in
+            let gate = ContinuationGate()
+            
+            connection.stateUpdateHandler = { state in
+                switch state {
+                case .ready:
+                    gate.runOnce { continuation.resume(returning: connection) }
+                case .failed(let error):
+                    gate.runOnce {
+                        continuation.resume(throwing: RemoteDesktopError.connectionFailed(error.localizedDescription))
+                    }
+                case .cancelled:
+                    gate.runOnce { continuation.resume(throwing: RemoteDesktopError.disconnected) }
+                default:
+                    break
+                }
+            }
+            
+            connection.start(queue: queue)
+            
+            // 超时处理
+            queue.asyncAfter(deadline: .now() + RemoteDesktopConstants.connectionTimeout) {
+                gate.runOnce {
+                    connection.cancel()
+                    continuation.resume(throwing: RemoteDesktopError.timeout)
+                }
+            }
+        }
+    }
+    
+    private func sendMessage(_ message: RemoteMessage) async throws {
+        // WebRTC DataChannel path
+        if case .connected = crossNetwork.state {
+            try await crossNetwork.sendRemoteDesktopMessage(message)
+            return
+        }
+        
+        // NWConnection path (LAN)
+        guard let connection = networkConnection else { throw RemoteDesktopError.disconnected }
+        let data = try JSONEncoder().encode(message)
+        if data.count > maxMessageBytes { throw RemoteDesktopError.streamingFailed("消息过大：\(data.count) bytes") }
+        var length = UInt32(data.count).bigEndian
+        var framedData = Data(bytes: &length, count: 4)
+        framedData.append(data)
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            connection.send(content: framedData, completion: .contentProcessed { error in
+                if let error = error {
+                    continuation.resume(throwing: RemoteDesktopError.streamingFailed(error.localizedDescription))
+                } else {
+                    continuation.resume()
+                }
+            })
+        }
+    }
+    
+    // MARK: - Private Methods - Receiving
+    
+    private func startReceiving() {
+        guard let connection = networkConnection else { return }
+        
+        receiveNextMessage(from: connection)
+    }
+    
+    private func receiveNextMessage(from connection: NWConnection) {
+        // 先接收长度（4字节）
+        connection.receive(minimumIncompleteLength: 4, maximumLength: 4) { [weak self] data, _, isComplete, error in
+            guard let self = self else { return }
+            
+            if let error = error {
+                Task { @MainActor in
+                    self.state = .error(error.localizedDescription)
+                }
+                return
+            }
+            
+            guard let lengthData = data, lengthData.count == 4 else {
+                if !isComplete {
+                    Task { @MainActor in
+                        self.receiveNextMessage(from: connection)
+                    }
+                }
+                return
+            }
+            
+            let length = Int(lengthData.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian })
+            if length <= 0 || length > maxMessageBytes {
+                Task { @MainActor in
+                    self.state = .error("消息长度异常：\(length) bytes")
+                }
+                connection.cancel()
+                return
+            }
+            
+            // 接收消息体
+            connection.receive(minimumIncompleteLength: length, maximumLength: length) { [weak self] messageData, _, _, error in
+                guard let self = self else { return }
+                
+                if let error = error {
+                    Task { @MainActor in
+                        self.state = .error(error.localizedDescription)
+                    }
+                    return
+                }
+                
+                if let data = messageData {
+                    Task.detached(priority: .userInitiated) { [weak self] in
+                        guard let self else { return }
+                        do {
+                            let message = try JSONDecoder().decode(RemoteMessage.self, from: data)
+                            guard message.type == .screenData else { return }
+                            let screenData = try JSONDecoder().decode(ScreenData.self, from: message.payload)
+                            await self.handleScreenData(screenData)
+                        } catch {
+                            SkyBridgeLogger.shared.error("❌ 解析消息失败: \(error.localizedDescription)")
+                        }
+                    }
+                }
+                
+                // 继续接收下一条消息
+                Task { @MainActor in
+                    self.receiveNextMessage(from: connection)
+                }
+            }
+        }
+    }
+    
+    private func handleScreenData(_ screenData: ScreenData) async {
+        // 更新分辨率
+        resolution = CGSize(width: screenData.width, height: screenData.height)
+        
+        // 计算延迟
+        let now = Date().timeIntervalSince1970
+        latency = (now - screenData.timestamp) * 1000 // 转换为毫秒
+        
+        enqueueFrameForDecode(screenData)
+    }
+
+    private func enqueueFrameForDecode(_ screenData: ScreenData) {
+        if pendingFrames.isEmpty {
+            pendingFrames.append(screenData)
+        } else {
+            pendingFrames[pendingFrames.count - 1] = screenData
+            if pendingFrames.count > maxPendingFrames {
+                pendingFrames.removeFirst(pendingFrames.count - maxPendingFrames)
+            }
+        }
+        startDecodeLoopIfNeeded()
+    }
+
+    private func startDecodeLoopIfNeeded() {
+        guard !isDecodingFrame else { return }
+        guard let next = pendingFrames.popLast() else { return }
+        isDecodingFrame = true
+
+        let decoder = self.decoder
+        let imageData = next.imageData
+        let format = (next.format ?? "jpeg").lowercased()
+
+        Task { [weak self] in
+            guard let self else { return }
+            let frame = try? await decoder.decode(frameData: imageData, format: format)
+            if let frame {
+                self.currentFrame = frame
+                self.frameCount += 1
+                if let lastTime = self.lastFrameTime {
+                    let elapsed = Date().timeIntervalSince(lastTime)
+                    if elapsed >= 1.0 {
+                        self.frameRate = Double(self.frameCount) / elapsed
+                        self.frameCount = 0
+                        self.lastFrameTime = Date()
+                    }
+                }
+            }
+            self.isDecodingFrame = false
+            self.startDecodeLoopIfNeeded()
+        }
+    }
+    
+    // 心跳/剪贴板/连接握手：当前与 macOS 端的最小闭环协议不启用
+}
+
+// MARK: - Stream Quality
+
+/// 流媒体画质
+public enum StreamQuality: String, CaseIterable, Sendable {
+    case auto = "自动"
+    case low = "低 (720p)"
+    case medium = "中 (1080p)"
+    case high = "高 (4K)"
+    
+    public var resolution: CGSize {
+        switch self {
+        case .auto: return .zero
+        case .low: return CGSize(width: 1280, height: 720)
+        case .medium: return CGSize(width: 1920, height: 1080)
+        case .high: return CGSize(width: 3840, height: 2160)
+        }
+    }
+    
+    public var bitrate: UInt64 {
+        switch self {
+        case .auto: return 0
+        case .low: return 2_000_000
+        case .medium: return 5_000_000
+        case .high: return 15_000_000
+        }
+    }
+}
