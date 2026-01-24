@@ -32,7 +32,7 @@ import Security
             self.registerEndpoint = registerEndpoint
         }
     }
-    
+
  /// 与身份鉴权相关的统一错误类型。
     public enum AuthenticationError: LocalizedError {
         case configurationMissing
@@ -72,22 +72,24 @@ import Security
     private let keychainAccount = "primary"
 
     private var configuration: Configuration?
+    private var isSupabaseMode: Bool = false
 
     private init() {
         let config = URLSessionConfiguration.ephemeral
         config.waitsForConnectivity = true
         urlSession = URLSession(configuration: config)
-        
+
         super.init(category: "AuthenticationService")
-        
+
         configuration = Self.loadConfigurationFromEnvironment()
+        isSupabaseMode = false
         if let session = try? loadSessionFromKeychain() {
             sessionSubject.send(session)
         }
     }
-    
+
  // MARK: - 生命周期管理
-    
+
     override public func performInitialization() async {
         logger.info("AuthenticationService 初始化完成")
     }
@@ -96,22 +98,24 @@ import Security
     public func enableSupabaseMode(supabaseConfig: SupabaseService.Configuration) {
  // 更新Supabase配置
         SupabaseService.shared.updateConfiguration(supabaseConfig)
-        
- // 设置一个标记表示使用Supabase模式
-        self.configuration = Configuration(baseURL: URL(string: "supabase://enabled")!)
+        // 显式标记，避免用 URL scheme 当“哨兵值”
+        self.isSupabaseMode = true
+        // 避免误用旧的 server endpoints
+        self.configuration = nil
     }
-    
+
  /// 使用真实的配置覆盖默认设置，通常在应用启动阶段调用。
     public func updateConfiguration(_ configuration: Configuration) {
  // @MainActor 类中直接赋值，避免跨 actor 的并发闭包警告
         self.configuration = configuration
+        self.isSupabaseMode = false
     }
 
  /// 将 Sign in with Apple 返回的身份凭据交给后端换取 SkyBridge 会话。
     public func authenticateWithApple(identityToken: Data,
                                        authorizationCode: Data?) async throws -> AuthSession {
  // 检查是否使用Supabase模式
-        if configuration?.appleEndpoint.scheme == "supabase" {
+        if isSupabaseMode {
             let session = try await SupabaseService.shared.signInWithApple(
                 identityToken: identityToken.base64EncodedString(),
                 nonce: nil
@@ -120,7 +124,7 @@ import Security
             sessionSubject.send(session)
             return session
         }
-        
+
         let payload = ApplePayload(identityToken: identityToken.base64EncodedString(),
                                    authorizationCode: authorizationCode?.base64EncodedString())
         return try await performRequest(endpoint: configuration?.appleEndpoint, payload: payload)
@@ -135,7 +139,7 @@ import Security
         let payload = NebulaPayload(account: username, password: password)
         return try await performRequest(endpoint: configuration?.nebulaEndpoint, payload: payload)
     }
-    
+
  /// 验证星云MFA
  /// - Parameters:
  /// - mfaToken: MFA令牌
@@ -149,28 +153,28 @@ import Security
  /// 发送手机验证码
     public func sendPhoneVerificationCode(to phoneNumber: String) async throws -> String {
  // 检查是否使用Supabase模式
-        if configuration?.phoneEndpoint.scheme == "supabase" {
+        if isSupabaseMode {
             try await SupabaseService.shared.sendPhoneOTP(phone: phoneNumber)
             return "验证码已通过Supabase发送"
         }
-        
+
         guard let endpoint = configuration?.phoneEndpoint else {
             throw AuthenticationError.configurationMissing
         }
-        
+
         var request = URLRequest(url: endpoint.appendingPathComponent("send-code"))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        
+
         let payload = ["phoneNumber": phoneNumber]
         request.httpBody = try JSONSerialization.data(withJSONObject: payload)
-        
+
         let (data, response) = try await urlSession.data(for: request)
         guard let httpResponse = response as? HTTPURLResponse,
               (200..<300).contains(httpResponse.statusCode) else {
             throw AuthenticationError.server("发送验证码失败")
         }
-        
+
         if let result = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let message = result["message"] as? String {
             return message
@@ -181,13 +185,13 @@ import Security
  /// 使用手机号和短信验证码登录。
     public func loginPhone(number: String, code: String) async throws -> AuthSession {
  // 检查是否使用Supabase模式
-        if configuration?.phoneEndpoint.scheme == "supabase" {
+        if isSupabaseMode {
             let session = try await SupabaseService.shared.signInWithPhone(phone: number, token: code)
             try store(session: session)
             sessionSubject.send(session)
             return session
         }
-        
+
         let payload = PhonePayload(number: number, code: code)
         return try await performRequest(endpoint: configuration?.phoneEndpoint, payload: payload)
     }
@@ -199,14 +203,14 @@ import Security
  /// - Returns: 认证会话
     public func loginEmail(email: String, password: String) async throws -> AuthSession {
  // 检查是否使用Supabase模式
-        if configuration?.emailEndpoint.scheme == "supabase" {
+        if isSupabaseMode {
             let session = try await SupabaseService.shared.signInWithEmail(email: email, password: password)
  // 确保会话被正确存储和发布
             try store(session: session)
             sessionSubject.send(session)
             return session
         }
-        
+
         let payload = EmailPayload(email: email, password: password)
         return try await performRequest(endpoint: configuration?.emailEndpoint, payload: payload)
     }
@@ -243,6 +247,9 @@ import Security
 
     private func performRequest<P: Encodable>(endpoint: URL?, payload: P) async throws -> AuthSession {
         guard let endpoint else {
+            if isSupabaseMode {
+                throw AuthenticationError.server("当前为 Supabase 模式：该功能需要后端接口配置")
+            }
             throw AuthenticationError.configurationMissing
         }
         var request = URLRequest(url: endpoint)
@@ -319,13 +326,13 @@ import Security
            let url = URL(string: base) {
             return Configuration(baseURL: url)
         }
-        
+
  // 2. 尝试从 Info.plist 读取 (便于打包配置)
         if let base = Bundle.main.object(forInfoDictionaryKey: "SKYBRIDGE_AUTH_BASEURL") as? String,
            let url = URL(string: base) {
             return Configuration(baseURL: url)
         }
-        
+
  // 3. 默认 Fallback 配置 - 解决重启后环境变量丢失导致无法登录的问题
  // 注意：生产环境应确保使用正确的 API 地址
         #if DEBUG
@@ -333,11 +340,11 @@ import Security
         #else
         let defaultBase = "https://api.skybridge.com"
         #endif
-        
+
         if let url = URL(string: defaultBase) {
             return Configuration(baseURL: url)
         }
-        
+
         return nil
     }
 }

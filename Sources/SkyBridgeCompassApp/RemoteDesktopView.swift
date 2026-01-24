@@ -10,6 +10,7 @@ struct RemoteDesktopView: View {
     @State private var showingSettingsSheet = false
     @State private var searchText = ""
     @State private var selectedQuality: VideoQuality = .high
+    @State private var newConnectionPrefersAdvanced: Bool = false
  // 新增：维护从管理器发布的所有会话快照
     @State private var allSessions: [RemoteSessionSummary] = []
  // 新增：最近会话本地存储（断开后加入）
@@ -17,20 +18,20 @@ struct RemoteDesktopView: View {
  // 最近会话的时间戳映射，用于显示“最后连接时间”
     @State private var recentSessionsTimestamp: [UUID: Date] = [:]
     @EnvironmentObject var themeConfiguration: ThemeConfiguration
-    
+
  // MARK: - Metal 4 增强功能状态
     @State private var connectionMode: ConnectionMode = .auto  // 双通道模式
     @State private var showPerformanceOverlay = false  // 性能监控
     @State private var renderMetrics: RenderMetrics = .zero  // Metal 4 指标
-    
+
  // MARK: - macOS 15/26 窗口管理
     @Environment(\.openWindow) private var openWindow  // macOS 14+ 标准窗口打开方式
-    
+
     var body: some View {
         HStack(spacing: 0) {
  // 侧边栏 - 会话列表
             sessionSidebar
-            
+
  // 主内容区域
             Group {
                 if let session = selectedSession {
@@ -47,7 +48,10 @@ struct RemoteDesktopView: View {
             }
         }
         .sheet(isPresented: $showingConnectionSheet) {
-            NewConnectionSheet(isPresented: $showingConnectionSheet)
+            NewConnectionSheet(
+                isPresented: $showingConnectionSheet,
+                initiallyShowAdvanced: newConnectionPrefersAdvanced
+            )
         }
         .sheet(isPresented: $showingSettingsSheet) {
             RemoteDesktopSettingsView(isPresented: $showingSettingsSheet)
@@ -70,8 +74,8 @@ struct RemoteDesktopView: View {
         }
     }
 
-    
-    
+
+
  // MARK: - 侧边栏
     private var sessionSidebar: some View {
         VStack(spacing: 0) {
@@ -101,14 +105,14 @@ struct RemoteDesktopView: View {
             }
         }
     }
-    
+
     private var searchBar: some View {
         VStack(spacing: 12) {
  // 搜索框
             HStack {
                 Image(systemName: "magnifyingglass")
                     .foregroundColor(.secondary)
-                
+
                 TextField(LocalizationManager.shared.localizedString("remote.search.placeholder"), text: $searchText)
                     .textFieldStyle(.plain)
             }
@@ -116,20 +120,20 @@ struct RemoteDesktopView: View {
             .padding(.vertical, 8)
             .background(Color.white.opacity(0.06))
             .cornerRadius(10)
-            
+
  // 双通道模式选择器（Metal 4 新功能）
             connectionModeSelector
         }
         .padding(.horizontal, 16)
         .padding(.top, 16)
-        
+
     }
-    
+
  /// 双通道模式选择器 - 近距镜像 vs 远距 RDP
     private var connectionModeSelector: some View {
         HStack(spacing: 8) {
             ForEach(ConnectionMode.allCases, id: \.self) { mode in
-                Button(action: { 
+                Button(action: {
                     connectionMode = mode
  // 如果切换到近距模式，打开独立窗口（macOS 15/26 最佳实践）
                     if mode == .nearField {
@@ -155,7 +159,7 @@ struct RemoteDesktopView: View {
         .background(Color.white.opacity(0.06))
         .cornerRadius(10)
     }
-    
+
     private var sessionList: some View {
         List(selection: $selectedSession) {
             Section(LocalizationManager.shared.localizedString("remote.activeSessions")) {
@@ -186,36 +190,39 @@ struct RemoteDesktopView: View {
         .scrollContentBackground(.hidden)
         .background(Color.clear)
     }
-    
+
     private var bottomActionBar: some View {
         HStack(spacing: 12) {
-            Button(action: { showingConnectionSheet = true }) {
+            Button(action: {
+                newConnectionPrefersAdvanced = false
+                showingConnectionSheet = true
+            }) {
                 Label(LocalizationManager.shared.localizedString("remote.newConnection"), systemImage: "plus")
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
                     .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
             }
             .buttonStyle(.plain)
-            
+
             Spacer()
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
         .padding(.bottom, 6)
     }
-    
+
  // MARK: - 主内容区域
     private func remoteDesktopContent(for session: RemoteSessionSummary) -> some View {
         VStack(spacing: 0) {
  // 顶部控制栏
             remoteDesktopToolbar(for: session)
-            
+
  // 远程桌面显示区域
             remoteDisplayArea(for: session)
         }
         .background(Color.black)
     }
-    
+
     private func remoteDesktopToolbar(for session: RemoteSessionSummary) -> some View {
         HStack {
  // 连接信息
@@ -223,35 +230,35 @@ struct RemoteDesktopView: View {
                 Text(session.targetName)
                     .font(.headline)
                     .foregroundColor(.white)
-                
+
                 HStack(spacing: 8) {
                     Circle()
                         .fill(.green)
                         .frame(width: 8, height: 8)
-                    
+
                     Text("\(session.protocolDescription) • \(session.bandwidthMbps, specifier: "%.1f") Mbps")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
             }
-            
+
             Spacer()
-            
+
  // 控制按钮
             HStack(spacing: 8) {
  // 双通道模式徽章
                 connectionModeBadge
-                
+
                 Divider()
                     .frame(height: 20)
-                
+
  // Metal 4 性能监控开关
                 Button(action: { showPerformanceOverlay.toggle() }) {
                     Image(systemName: showPerformanceOverlay ? "chart.bar.fill" : "chart.bar")
                         .foregroundColor(showPerformanceOverlay ? .green : .white)
                 }
                 .help(LocalizationManager.shared.localizedString("remote.performance.monitor"))
-                
+
  // 质量设置
                 Menu {
                     ForEach(VideoQuality.allCases, id: \.self) { quality in
@@ -264,21 +271,21 @@ struct RemoteDesktopView: View {
                         .foregroundColor(.white)
                 }
                 .menuStyle(.borderlessButton)
-                
+
  // 设置按钮
                 Button(action: { showingSettingsSheet = true }) {
                     Image(systemName: "gearshape")
                         .foregroundColor(.white)
                 }
                 .help(LocalizationManager.shared.localizedString("remote.settings.help"))
-                
+
  // 全屏切换
                 Button(action: { isFullScreen.toggle() }) {
                     Image(systemName: isFullScreen ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
                         .foregroundColor(.white)
                 }
                 .buttonStyle(.borderless)
-                
+
  // 断开连接
                 Button(action: { disconnectSession(session) }) {
                     Image(systemName: "xmark.circle")
@@ -291,7 +298,7 @@ struct RemoteDesktopView: View {
         .padding(.vertical, 12)
         .background(Color.black.opacity(0.8))
     }
-    
+
  /// 连接模式徽章 - 显示当前使用的通道
     private var connectionModeBadge: some View {
         HStack(spacing: 4) {
@@ -307,7 +314,7 @@ struct RemoteDesktopView: View {
         .foregroundColor(connectionMode.badgeColor)
         .cornerRadius(4)
     }
-    
+
  /// Metal 4 性能监控覆盖层
     @ViewBuilder
     private var performanceOverlay: some View {
@@ -326,7 +333,7 @@ struct RemoteDesktopView: View {
                 .background(.green.opacity(0.2))
                 .foregroundColor(.green)
                 .cornerRadius(4)
-                
+
  // 性能指标
                 VStack(alignment: .trailing, spacing: 4) {
                     performanceMetric(
@@ -335,14 +342,14 @@ struct RemoteDesktopView: View {
                         value: "\(Int(renderMetrics.latencyMilliseconds))ms",
                         color: renderMetrics.latencyMilliseconds < 30 ? .green : .orange
                     )
-                    
+
                     performanceMetric(
                         icon: "arrow.down.circle",
                         label: "带宽",
                         value: String(format: "%.1f Mbps", renderMetrics.bandwidthMbps),
                         color: renderMetrics.bandwidthMbps > 50 ? .green : .orange
                     )
-                    
+
                     performanceMetric(
                         icon: "memorychip",
                         label: "GPU",
@@ -357,7 +364,7 @@ struct RemoteDesktopView: View {
             .padding(16)
         }
     }
-    
+
     private func remoteDisplayArea(for session: RemoteSessionSummary) -> some View {
         GeometryReader { geometry in
             RemoteDisplayView(
@@ -386,7 +393,7 @@ struct RemoteDesktopView: View {
                 )
         }
     }
-    
+
     private func connectionStatusOverlay(for session: RemoteSessionSummary) -> some View {
         Group {
             if session.status == SessionStatus.connecting {
@@ -394,7 +401,7 @@ struct RemoteDesktopView: View {
                     ProgressView()
                         .progressViewStyle(CircularProgressViewStyle(tint: .white))
                         .scaleEffect(1.5)
-                    
+
                     Text(String(format: LocalizationManager.shared.localizedString("remote.overlay.connectingTo"), session.targetName))
                         .font(.headline)
                         .foregroundColor(.white)
@@ -405,49 +412,66 @@ struct RemoteDesktopView: View {
             }
         }
     }
-    
+
  // MARK: - 空状态视图
     private var emptyStateView: some View {
         VStack(spacing: 24) {
             Image(systemName: "display")
                 .font(.system(size: 64))
                 .foregroundColor(.secondary)
-            
+
             VStack(spacing: 8) {
                 Text(LocalizationManager.shared.localizedString("remote.empty.title"))
                     .font(.title2)
                     .fontWeight(.medium)
-                
+
                 Text(LocalizationManager.shared.localizedString("remote.empty.subtitle"))
                     .font(.body)
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.center)
             }
-            
-            Button(LocalizationManager.shared.localizedString("remote.newConnection")) {
-                showingConnectionSheet = true
+
+            HStack(spacing: 12) {
+                Button(LocalizationManager.shared.localizedString("remote.connect.recommended")) {
+                    NotificationCenter.default.post(name: .skybridgeNavigateToDeviceDiscovery, object: nil)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+
+                Button(LocalizationManager.shared.localizedString("remote.connect.advanced")) {
+                    newConnectionPrefersAdvanced = true
+                    showingConnectionSheet = true
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.large)
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
         }
         .frame(maxWidth: 400)
     }
-    
+
  // MARK: - 工具栏按钮
     private var toolbarButtons: some View {
         Group {
-            Button(action: { showingConnectionSheet = true }) {
+            Menu {
+                Button(LocalizationManager.shared.localizedString("remote.connect.recommended")) {
+                    NotificationCenter.default.post(name: .skybridgeNavigateToDeviceDiscovery, object: nil)
+                }
+                Button(LocalizationManager.shared.localizedString("remote.connect.advanced")) {
+                    newConnectionPrefersAdvanced = true
+                    showingConnectionSheet = true
+                }
+            } label: {
                 Image(systemName: "plus")
             }
             .help(LocalizationManager.shared.localizedString("remote.toolbar.newConnection.help"))
-            
+
             Button(action: refreshSessions) {
                 Image(systemName: "arrow.clockwise")
             }
             .help(LocalizationManager.shared.localizedString("remote.toolbar.refresh.help"))
         }
     }
-    
+
  /// 性能指标行
     private func performanceMetric(icon: String, label: String, value: String, color: Color) -> some View {
         HStack(spacing: 6) {
@@ -463,40 +487,40 @@ struct RemoteDesktopView: View {
                 .foregroundColor(color)
         }
     }
-    
+
  // MARK: - 上下文菜单
     private func sessionContextMenu(for session: RemoteSessionSummary) -> some View {
         Group {
             Button(LocalizationManager.shared.localizedString("remote.context.focusWindow")) {
                 remoteDesktopManager.focus(on: session.id)
             }
-            
+
             Button(LocalizationManager.shared.localizedString("remote.context.disconnect")) {
                 disconnectSession(session)
             }
-            
+
             Divider()
-            
+
             Button(LocalizationManager.shared.localizedString("remote.context.copyInfo")) {
                 copySessionInfo(session)
             }
         }
     }
-    
+
     private func recentSessionContextMenu(for session: RemoteSessionSummary) -> some View {
         Group {
             Button(LocalizationManager.shared.localizedString("remote.context.reconnect")) {
                 reconnectToSession(session)
             }
-            
+
             Button(LocalizationManager.shared.localizedString("remote.context.removeFromHistory")) {
                 removeFromHistory(session)
             }
         }
     }
-    
+
  // MARK: - 输入事件处理
-    
+
  /// 处理鼠标事件并转发到远程桌面会话
     private func handleMouseEvent(location: CGPoint, eventType: NSEvent.EventType, buttonNumber: Int, for session: RemoteSessionSummary) {
  // 将鼠标事件转发到远程桌面管理器
@@ -508,7 +532,7 @@ struct RemoteDesktopView: View {
             buttonNumber: buttonNumber
         )
     }
-    
+
  /// 处理键盘事件并转发到远程桌面会话
     private func handleKeyboardEvent(keyCode: UInt16, isPressed: Bool, for session: RemoteSessionSummary) {
  // 将键盘事件转发到远程桌面管理器
@@ -518,7 +542,7 @@ struct RemoteDesktopView: View {
             isPressed: isPressed
         )
     }
-    
+
  /// 处理滚轮事件并转发到远程桌面会话
     private func handleScrollEvent(deltaX: CGFloat, deltaY: CGFloat, for session: RemoteSessionSummary) {
  // 将滚轮事件转发到远程桌面管理器
@@ -528,9 +552,9 @@ struct RemoteDesktopView: View {
             deltaY: Float(deltaY)
         )
     }
-    
+
  // MARK: - 会话管理
-    
+
     private var filteredActiveSessions: [RemoteSessionSummary] {
  // 从管理器发布的所有会话中，根据搜索文本过滤
         let keyword = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -540,7 +564,7 @@ struct RemoteDesktopView: View {
                    session.protocolDescription.localizedCaseInsensitiveContains(keyword)
         }
     }
-    
+
     private var filteredRecentSessions: [RemoteSessionSummary] {
         let keyword = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !keyword.isEmpty else { return recentSessionsStore }
@@ -549,13 +573,13 @@ struct RemoteDesktopView: View {
                    session.protocolDescription.localizedCaseInsensitiveContains(keyword)
         }
     }
-    
+
  // MARK: - 操作方法
     private func refreshSessions() {
  // 说明：调用管理器的公开刷新接口，重新发布当前会话快照与基础指标
         remoteDesktopManager.reloadSessions()
     }
-    
+
     private func disconnectSession(_ session: RemoteSessionSummary) {
  // 说明：断开指定会话，并将其加入最近会话存储，便于"最近连接"区展示
         Task { @MainActor in
@@ -568,19 +592,20 @@ struct RemoteDesktopView: View {
             }
         }
     }
-    
+
     private func copySessionInfo(_ session: RemoteSessionSummary) {
         let info = "远程桌面会话: \(session.targetName)\n协议: \(session.protocolDescription)\n带宽: \(session.bandwidthMbps) Mbps"
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(info, forType: .string)
     }
-    
+
     private func reconnectToSession(_ session: RemoteSessionSummary) {
  // 说明：由于摘要不携带主机/端口等连接参数，这里触发“新建连接”表单，
  // 由用户补全连接信息后重新建立会话。
+        newConnectionPrefersAdvanced = true
         showingConnectionSheet = true
     }
-    
+
     private func removeFromHistory(_ session: RemoteSessionSummary) {
  // 从最近会话本地存储移除
         recentSessionsStore.removeAll { $0.id == session.id }
@@ -592,34 +617,34 @@ struct RemoteDesktopView: View {
 struct SessionRowView: View {
     let session: RemoteSessionSummary
     let isSelected: Bool
-    
+
     var body: some View {
         HStack(spacing: 12) {
  // 状态指示器
             Circle()
                 .fill(statusColor)
                 .frame(width: 10, height: 10)
-            
+
  // 会话信息
             VStack(alignment: .leading, spacing: 2) {
                 Text(session.targetName)
                     .font(.headline)
                     .lineLimit(1)
-                
+
                 Text(session.protocolDescription)
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .lineLimit(1)
             }
-            
+
             Spacer()
-            
+
  // 带宽指示器
             VStack(alignment: .trailing, spacing: 2) {
                 Text("\(session.bandwidthMbps, specifier: "%.1f")")
                     .font(.caption)
                     .fontWeight(.medium)
-                
+
                 Text("Mbps")
                     .font(.caption2)
                     .foregroundColor(.secondary)
@@ -630,7 +655,7 @@ struct SessionRowView: View {
         .background(isSelected ? Color.accentColor.opacity(0.2) : Color.clear)
         .cornerRadius(8)
     }
-    
+
     private var statusColor: Color {
         switch session.status {
         case .connected:
@@ -652,26 +677,26 @@ struct RecentSessionRowView: View {
     let lastConnected: Date?
  /// 重新连接回调
     var onReconnect: (() -> Void)?
-    
+
     var body: some View {
         HStack(spacing: 12) {
             Image(systemName: "clock")
                 .foregroundColor(.secondary)
                 .frame(width: 16, height: 16)
-            
+
             VStack(alignment: .leading, spacing: 2) {
                 Text(session.targetName)
                     .font(.subheadline)
                     .lineLimit(1)
-                
+
                 Text(String(format: LocalizationManager.shared.localizedString("remote.recent.lastConnected"), formatLastConnected()))
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .lineLimit(1)
             }
-            
+
             Spacer()
-            
+
             Button(action: {
                 onReconnect?()
             }) {
@@ -684,7 +709,7 @@ struct RecentSessionRowView: View {
         .padding(.vertical, 6)
         .padding(.horizontal, 12)
     }
-    
+
     @MainActor
     private func formatLastConnected() -> String {
         guard let lastConnected else { return LocalizationManager.shared.localizedString("common.unknown") }
@@ -698,31 +723,60 @@ struct RecentSessionRowView: View {
 // MARK: - 新建连接表单
 struct NewConnectionSheet: View {
     @Binding var isPresented: Bool
+    let initiallyShowAdvanced: Bool
     @State private var hostname = ""
     @State private var port = "3389"
     @State private var username = ""
     @State private var password = ""
     @State private var selectedProtocol: RemoteProtocol = .rdp
+    @State private var showAdvanced: Bool
  // 连接错误提示
     @State private var connectError: String?
     @Environment(\.openWindow) private var openWindow
-    
+
+    init(isPresented: Binding<Bool>, initiallyShowAdvanced: Bool = false) {
+        self._isPresented = isPresented
+        self.initiallyShowAdvanced = initiallyShowAdvanced
+        self._showAdvanced = State(initialValue: initiallyShowAdvanced)
+    }
+
     var body: some View {
         NavigationView {
             Form {
-                Section(LocalizationManager.shared.localizedString("remote.form.section.connection")) {
-                    TextField(LocalizationManager.shared.localizedString("remote.form.hostname"), text: $hostname)
-                    TextField(LocalizationManager.shared.localizedString("remote.form.port"), text: $port)
-                    Picker(LocalizationManager.shared.localizedString("remote.form.protocol"), selection: $selectedProtocol) {
-                        ForEach(RemoteProtocol.allCases, id: \.self) { protocolType in
-                            Text(protocolType.displayName).tag(protocolType)
-                        }
+                Section(LocalizationManager.shared.localizedString("remote.form.recommended.section")) {
+                    Text(LocalizationManager.shared.localizedString("remote.form.recommended.body"))
+                        .font(.callout)
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Button(LocalizationManager.shared.localizedString("remote.form.openDeviceDiscovery")) {
+                        NotificationCenter.default.post(name: .skybridgeNavigateToDeviceDiscovery, object: nil)
+                        isPresented = false
                     }
                 }
-                
-                Section(LocalizationManager.shared.localizedString("remote.form.section.auth")) {
-                    TextField(LocalizationManager.shared.localizedString("auth.username"), text: $username)
-                    SecureField(LocalizationManager.shared.localizedString("auth.password"), text: $password)
+
+                Section {
+                    DisclosureGroup(
+                        LocalizationManager.shared.localizedString("remote.form.advanced.section"),
+                        isExpanded: $showAdvanced
+                    ) {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Picker(LocalizationManager.shared.localizedString("remote.form.protocol"), selection: $selectedProtocol) {
+                                ForEach(RemoteProtocol.allCases, id: \.self) { protocolType in
+                                    Text(protocolType.displayName).tag(protocolType)
+                                }
+                            }
+
+                            TextField(LocalizationManager.shared.localizedString("remote.form.hostname"), text: $hostname)
+                            TextField(LocalizationManager.shared.localizedString("remote.form.port"), text: $port)
+
+                            Divider()
+
+                            TextField(LocalizationManager.shared.localizedString("auth.username"), text: $username)
+                            SecureField(LocalizationManager.shared.localizedString("auth.password"), text: $password)
+                        }
+                        .padding(.vertical, 6)
+                    }
                 }
             }
             .formStyle(.grouped)
@@ -733,12 +787,12 @@ struct NewConnectionSheet: View {
                         isPresented = false
                     }
                 }
-                
+
                 ToolbarItem(placement: .confirmationAction) {
                     Button(LocalizationManager.shared.localizedString("remote.form.connect")) {
                         connectToRemote()
                     }
-                    .disabled(hostname.isEmpty || username.isEmpty)
+                    .disabled(!showAdvanced || hostname.isEmpty || username.isEmpty)
                 }
             }
         }
@@ -752,8 +806,24 @@ struct NewConnectionSheet: View {
         } message: {
             Text(connectError ?? "")
         }
+        .onChange(of: selectedProtocol) { _, newValue in
+            switch newValue {
+            case .rdp:
+                if port.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || port == "22" || port == "5900" {
+                    port = "3389"
+                }
+            case .ssh:
+                if port.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || port == "3389" || port == "5900" {
+                    port = "22"
+                }
+            case .vnc:
+                if port.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || port == "3389" || port == "22" {
+                    port = "5900"
+                }
+            }
+        }
     }
-    
+
     private func connectToRemote() {
  // 实现远程连接逻辑（按协议类型分发）
         guard let portValue = Int(port) else {
@@ -805,13 +875,13 @@ struct RemoteDesktopSettingsView: View {
     @Binding var isPresented: Bool
     @StateObject private var settingsManager = RemoteDesktopSettingsManager.shared
     @State private var selectedTab: SettingsTab = .display
-    
+
     var body: some View {
         NavigationView {
             VStack(spacing: 0) {
  // 设置标签页选择器
                 settingsTabPicker
-                
+
  // 设置内容区域
                 TabView(selection: $selectedTab) {
                     displaySettingsView
@@ -819,13 +889,13 @@ struct RemoteDesktopSettingsView: View {
                             Label("显示设置", systemImage: "display")
                         }
                         .tag(SettingsTab.display)
-                    
+
                     interactionSettingsView
                         .tabItem {
                             Label("交互设置", systemImage: "hand.point.up.left")
                         }
                         .tag(SettingsTab.interaction)
-                    
+
                     networkSettingsView
                         .tabItem {
                             Label("网络优化", systemImage: "network")
@@ -841,13 +911,13 @@ struct RemoteDesktopSettingsView: View {
                         resetSettings()
                     }
                 }
-                
+
                 ToolbarItemGroup(placement: .confirmationAction) {
                     Button("应用") {
                         applySettings()
                     }
                     .buttonStyle(.borderedProminent)
-                    
+
                     Button("完成") {
                         saveAndClose()
                     }
@@ -856,7 +926,7 @@ struct RemoteDesktopSettingsView: View {
         }
         .frame(width: 700, height: 600)
     }
-    
+
  // MARK: - 设置标签页选择器
     private var settingsTabPicker: some View {
         Picker("设置类别", selection: $selectedTab) {
@@ -867,7 +937,7 @@ struct RemoteDesktopSettingsView: View {
         .pickerStyle(.segmented)
         .padding()
     }
-    
+
  // MARK: - 显示设置视图
     private var displaySettingsView: some View {
         Form {
@@ -877,30 +947,30 @@ struct RemoteDesktopSettingsView: View {
                         Text(resolution.displayName).tag(resolution)
                     }
                 }
-                
+
                 Picker("色彩深度", selection: $settingsManager.settings.displaySettings.colorDepth) {
                     ForEach(ColorDepth.allCases, id: \.self) { depth in
                         Text(depth.displayName).tag(depth)
                     }
                 }
-                
+
                 Picker("刷新率", selection: $settingsManager.settings.displaySettings.refreshRate) {
                     ForEach(RefreshRate.allCases, id: \.self) { rate in
                         Text(rate.displayName).tag(rate)
                     }
                 }
-                
+
                 Toggle("全屏模式", isOn: $settingsManager.settings.displaySettings.fullScreenMode)
                 Toggle("多显示器支持", isOn: $settingsManager.settings.displaySettings.multiMonitorSupport)
             }
-            
+
             Section("视频质量") {
                 Picker("视频质量", selection: $settingsManager.settings.displaySettings.videoQuality) {
                     ForEach(VideoQuality.allCases, id: \.self) { quality in
                         Text(quality.displayName).tag(quality)
                     }
                 }
-                
+
                 VStack(alignment: .leading, spacing: 8) {
                     Text("压缩级别: \(Int(settingsManager.settings.displaySettings.compressionLevel))%")
                         .font(.subheadline)
@@ -919,11 +989,11 @@ struct RemoteDesktopSettingsView: View {
                     }
                 }
             }
-            
+
             Section("性能优化") {
                 Toggle("启用硬件加速", isOn: $settingsManager.settings.displaySettings.enableHardwareAcceleration)
                     .help("使用 GPU 加速视频解码和渲染")
-                
+
                 Toggle("Apple Silicon 优化", isOn: $settingsManager.settings.displaySettings.enableAppleSiliconOptimization)
                     .help("针对 Apple Silicon 芯片进行性能优化")
 
@@ -978,7 +1048,7 @@ struct RemoteDesktopSettingsView: View {
         }
         .formStyle(.grouped)
     }
-    
+
  // MARK: - 交互设置视图
     private var interactionSettingsView: some View {
         Form {
@@ -1000,7 +1070,7 @@ struct RemoteDesktopSettingsView: View {
                             .font(.caption)
                     }
                 }
-                
+
                 VStack(alignment: .leading, spacing: 8) {
                     Text("滚轮灵敏度: \(settingsManager.settings.interactionSettings.scrollSensitivity, specifier: "%.1f")")
                         .font(.subheadline)
@@ -1018,19 +1088,19 @@ struct RemoteDesktopSettingsView: View {
                             .font(.caption)
                     }
                 }
-                
+
                 Toggle("启用鼠标加速", isOn: $settingsManager.settings.interactionSettings.enableMouseAcceleration)
                 Toggle("启用触控板手势", isOn: $settingsManager.settings.interactionSettings.enableTrackpadGestures)
                 Toggle("启用右键菜单", isOn: $settingsManager.settings.interactionSettings.enableContextMenu)
             }
-            
+
             Section("键盘设置") {
                 Picker("键盘映射", selection: $settingsManager.settings.interactionSettings.keyboardMapping) {
                     ForEach(KeyboardMapping.allCases, id: \.self) { mapping in
                         Text(mapping.displayName).tag(mapping)
                     }
                 }
-                
+
                 VStack(alignment: .leading, spacing: 8) {
                     Text("双击间隔: \(settingsManager.settings.interactionSettings.doubleClickInterval) 毫秒")
                         .font(.subheadline)
@@ -1052,24 +1122,24 @@ struct RemoteDesktopSettingsView: View {
                     }
                 }
             }
-            
+
             Section("功能设置") {
                 Toggle("剪贴板同步", isOn: $settingsManager.settings.interactionSettings.enableClipboardSync)
                     .help("在本地和远程桌面之间同步剪贴板内容")
-                
+
                 Toggle("音频重定向", isOn: $settingsManager.settings.interactionSettings.enableAudioRedirection)
                     .help("将远程桌面的音频播放到本地设备")
-                
+
                 Toggle("打印机重定向", isOn: $settingsManager.settings.interactionSettings.enablePrinterRedirection)
                     .help("允许远程桌面使用本地打印机")
-                
+
                 Toggle("文件传输", isOn: $settingsManager.settings.interactionSettings.enableFileTransfer)
                     .help("启用本地和远程桌面之间的文件传输")
             }
         }
         .formStyle(.grouped)
     }
-    
+
  // MARK: - 网络优化设置视图
     private var networkSettingsView: some View {
         Form {
@@ -1079,7 +1149,7 @@ struct RemoteDesktopSettingsView: View {
                         Text(type.displayName).tag(type)
                     }
                 }
-                
+
                 VStack(alignment: .leading, spacing: 8) {
                     Text("带宽限制: \(settingsManager.settings.networkSettings.bandwidthLimit == 0 ? "无限制" : "\(Int(settingsManager.settings.networkSettings.bandwidthLimit)) Mbps")")
                         .font(.subheadline)
@@ -1097,7 +1167,7 @@ struct RemoteDesktopSettingsView: View {
                             .font(.caption)
                     }
                 }
-                
+
                 VStack(alignment: .leading, spacing: 8) {
                     Text("连接超时: \(settingsManager.settings.networkSettings.connectionTimeout) 秒")
                         .font(.subheadline)
@@ -1119,7 +1189,7 @@ struct RemoteDesktopSettingsView: View {
                     }
                 }
             }
-            
+
             Section("数据压缩") {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("压缩级别: \(settingsManager.settings.networkSettings.compressionLevel)")
@@ -1141,7 +1211,7 @@ struct RemoteDesktopSettingsView: View {
                             .font(.caption)
                     }
                 }
-                
+
                 VStack(alignment: .leading, spacing: 8) {
                     Text("缓冲区大小: \(settingsManager.settings.networkSettings.bufferSize) KB")
                         .font(.subheadline)
@@ -1163,20 +1233,20 @@ struct RemoteDesktopSettingsView: View {
                     }
                 }
             }
-            
+
             Section("高级选项") {
                 Toggle("启用网络加密", isOn: $settingsManager.settings.networkSettings.enableEncryption)
                     .help("使用 TLS 加密网络传输")
-                
+
                 Toggle("启用 UDP 传输", isOn: $settingsManager.settings.networkSettings.enableUDPTransport)
                     .help("使用 UDP 协议提高传输性能")
-                
+
                 Toggle("启用自适应质量", isOn: $settingsManager.settings.networkSettings.enableAdaptiveQuality)
                     .help("根据网络状况自动调整视频质量")
-                
+
                 Toggle("启用网络统计", isOn: $settingsManager.settings.networkSettings.enableNetworkStats)
                     .help("显示网络性能统计信息")
-                
+
                 VStack(alignment: .leading, spacing: 8) {
                     Text("最大重连次数: \(settingsManager.settings.networkSettings.maxReconnectAttempts)")
                         .font(.subheadline)
@@ -1235,18 +1305,18 @@ struct RemoteDesktopSettingsView: View {
         }
         .formStyle(.grouped)
     }
-    
+
  // MARK: - 操作方法
     private func resetSettings() {
         settingsManager.resetToDefaults()
     }
-    
+
     private func applySettings() {
         settingsManager.saveSettings()
  // 注意：设置将在下次创建新会话时自动应用
  // 如需立即应用到现有会话，请使用各会话的 applySettings 方法
     }
-    
+
     private func saveAndClose() {
         settingsManager.saveSettings()
         isPresented = false
@@ -1258,7 +1328,7 @@ enum SettingsTab: String, CaseIterable {
     case display = "display"
     case interaction = "interaction"
     case network = "network"
-    
+
     var displayName: String {
         switch self {
         case .display: return "显示设置"
@@ -1271,7 +1341,7 @@ enum SettingsTab: String, CaseIterable {
 // MARK: - 支持类型
 enum VideoQuality: CaseIterable {
     case low, medium, high, ultra
-    
+
     var displayName: String {
         switch self {
         case .low: return "低质量"
@@ -1284,7 +1354,7 @@ enum VideoQuality: CaseIterable {
 
 enum RemoteProtocol: CaseIterable {
     case rdp, vnc, ssh
-    
+
     var displayName: String {
         switch self {
         case .rdp: return "RDP"
@@ -1304,7 +1374,7 @@ enum ConnectionMode: String, CaseIterable {
     case auto = "auto"           // 自动选择
     case nearField = "near"      // 近距硬件镜像（ScreenCaptureKit + QUIC）
     case farFieldRDP = "far"     // 远距 RDP（FreeRDP 3.x）
-    
+
     @MainActor
     var shortName: String {
         switch self {
@@ -1313,7 +1383,7 @@ enum ConnectionMode: String, CaseIterable {
         case .farFieldRDP: return LocalizationManager.shared.localizedString("remote.connectionMode.far")
         }
     }
-    
+
     var iconName: String {
         switch self {
         case .auto: return "wand.and.stars"
@@ -1321,7 +1391,7 @@ enum ConnectionMode: String, CaseIterable {
         case .farFieldRDP: return "globe"
         }
     }
-    
+
     @MainActor
     var description: String {
         switch self {
@@ -1330,7 +1400,7 @@ enum ConnectionMode: String, CaseIterable {
         case .farFieldRDP: return LocalizationManager.shared.localizedString("remote.connectionMode.far.description")
         }
     }
-    
+
     var badgeColor: Color {
         switch self {
         case .auto: return .cyan
@@ -1344,6 +1414,6 @@ enum ConnectionMode: String, CaseIterable {
 struct RenderMetrics: Equatable {
     var bandwidthMbps: Double
     var latencyMilliseconds: Double
-    
+
     static let zero = RenderMetrics(bandwidthMbps: 0, latencyMilliseconds: 0)
 }

@@ -15,36 +15,36 @@ import SkyBridgeCore
 /// 支持 QR 码和 6 位数字码两种配对方式
 @available(macOS 14.0, iOS 17.0, *)
 public struct P2PPairingView: View {
-    
+
  // MARK: - State
-    
+
     @StateObject private var viewModel = P2PPairingViewModel()
     @State private var selectedTab: PairingTab = .qrCode
     @State private var manualCode: String = ""
     @FocusState private var isCodeFieldFocused: Bool
-    
+
  // MARK: - Environment
-    
+
     @Environment(\.dismiss) private var dismiss
-    
+
  // MARK: - Body
-    
+
     public init() {}
-    
+
     public var body: some View {
         VStack(spacing: 0) {
  // 标题栏
             headerView
-            
+
             Divider()
-            
+
  // 标签页选择器
             tabSelector
-            
+
  // 内容区域
             contentView
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-            
+
  // 底部状态栏
             statusBar
         }
@@ -57,9 +57,9 @@ public struct P2PPairingView: View {
             viewModel.stopPairing()
         }
     }
-    
+
  // MARK: - Header
-    
+
     private var headerView: some View {
         HStack {
             VStack(alignment: .leading, spacing: 4) {
@@ -69,9 +69,9 @@ public struct P2PPairingView: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
-            
+
             Spacer()
-            
+
             Button(action: { dismiss() }) {
                 Image(systemName: "xmark.circle.fill")
                     .font(.title2)
@@ -81,9 +81,9 @@ public struct P2PPairingView: View {
         }
         .padding()
     }
-    
+
  // MARK: - Tab Selector
-    
+
     private var tabSelector: some View {
         HStack(spacing: 0) {
             tabButton(tab: .qrCode, title: "QR 码", icon: "qrcode")
@@ -92,7 +92,7 @@ public struct P2PPairingView: View {
         .padding(.horizontal)
         .padding(.vertical, 8)
     }
-    
+
     private func tabButton(tab: PairingTab, title: String, icon: String) -> some View {
         Button(action: { selectedTab = tab }) {
             HStack(spacing: 6) {
@@ -108,9 +108,9 @@ public struct P2PPairingView: View {
         }
         .buttonStyle(.plain)
     }
-    
+
  // MARK: - Content
-    
+
     @ViewBuilder
     private var contentView: some View {
         switch selectedTab {
@@ -120,13 +120,13 @@ public struct P2PPairingView: View {
             manualCodeView
         }
     }
-    
+
  // MARK: - QR Code View
-    
+
     private var qrCodeView: some View {
         VStack(spacing: 24) {
             Spacer()
-            
+
  // QR 码显示
             if let qrImage = viewModel.qrCodeImage {
                 Image(nsImage: qrImage)
@@ -141,18 +141,18 @@ public struct P2PPairingView: View {
                 ProgressView()
                     .frame(width: 200, height: 200)
             }
-            
+
  // 说明文字
             VStack(spacing: 8) {
                 Text("使用 iOS 设备扫描此 QR 码")
                     .font(.headline)
-                
+
                 Text("在 iOS 设备上打开 SkyBridge Compass，选择「扫描配对」")
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.center)
             }
-            
+
  // 过期倒计时
             if let expiresIn = viewModel.qrCodeExpiresIn {
                 HStack(spacing: 4) {
@@ -162,46 +162,46 @@ public struct P2PPairingView: View {
                 .font(.caption)
                 .foregroundColor(expiresIn < 60 ? .orange : .secondary)
             }
-            
+
  // 刷新按钮
             Button(action: { viewModel.refreshQRCode() }) {
                 Label("刷新 QR 码", systemImage: "arrow.clockwise")
             }
             .buttonStyle(.bordered)
-            
+
             Spacer()
         }
         .padding()
     }
-    
+
  // MARK: - Manual Code View
-    
+
     private var manualCodeView: some View {
         VStack(spacing: 24) {
             Spacer()
-            
+
  // 图标
             Image(systemName: "number.circle.fill")
                 .font(.system(size: 60))
                 .foregroundColor(.accentColor)
-            
+
  // 说明
             VStack(spacing: 8) {
                 Text("输入配对码")
                     .font(.headline)
-                
+
                 Text("在 iOS 设备上显示的 6 位数字配对码")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
-            
+
  // 输入框
             HStack(spacing: 8) {
                 ForEach(0..<6, id: \.self) { index in
                     codeDigitView(index: index)
                 }
             }
-            
+
  // 隐藏的文本输入框
             TextField("", text: $manualCode)
                 .textFieldStyle(.plain)
@@ -216,13 +216,13 @@ public struct P2PPairingView: View {
                     } else {
                         manualCode = String(filtered.prefix(6))
                     }
-                    
+
  // 自动提交
                     if manualCode.count == 6 {
                         viewModel.pairWithCode(manualCode)
                     }
                 }
-            
+
  // 配对按钮
             Button(action: { viewModel.pairWithCode(manualCode) }) {
                 Text("配对")
@@ -230,7 +230,7 @@ public struct P2PPairingView: View {
             }
             .buttonStyle(.borderedProminent)
             .disabled(manualCode.count != 6 || viewModel.isPairing)
-            
+
             Spacer()
         }
         .padding()
@@ -241,10 +241,10 @@ public struct P2PPairingView: View {
             isCodeFieldFocused = true
         }
     }
-    
+
     private func codeDigitView(index: Int) -> some View {
         let digit = index < manualCode.count ? String(manualCode[manualCode.index(manualCode.startIndex, offsetBy: index)]) : ""
-        
+
         return Text(digit)
             .font(.system(size: 32, weight: .bold, design: .monospaced))
             .frame(width: 44, height: 56)
@@ -255,9 +255,9 @@ public struct P2PPairingView: View {
                     .stroke(index == manualCode.count ? Color.accentColor : Color.gray.opacity(0.3), lineWidth: index == manualCode.count ? 2 : 1)
             )
     }
-    
+
  // MARK: - Status Bar
-    
+
     private var statusBar: some View {
         HStack {
  // 状态指示器
@@ -265,14 +265,14 @@ public struct P2PPairingView: View {
                 Circle()
                     .fill(viewModel.statusColor)
                     .frame(width: 8, height: 8)
-                
+
                 Text(viewModel.statusText)
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
-            
+
             Spacer()
-            
+
  // 错误信息
             if let error = viewModel.errorMessage {
                 Text(error)
@@ -298,53 +298,53 @@ private enum PairingTab {
 @available(macOS 14.0, iOS 17.0, *)
 @MainActor
 class P2PPairingViewModel: ObservableObject {
-    
+
     @Published var qrCodeImage: NSImage?
     @Published var qrCodeExpiresIn: Int?
     @Published var isPairing: Bool = false
     @Published var errorMessage: String?
     @Published var statusText: String = "等待配对"
     @Published var statusColor: Color = .gray
-    
+
     private var expirationTimer: Timer?
-    
+
     func startPairing() {
         statusText = "正在生成 QR 码..."
         statusColor = .orange
-        
+
  // 生成 QR 码
         Task {
             await generateQRCode()
         }
     }
-    
+
     func stopPairing() {
         expirationTimer?.invalidate()
         expirationTimer = nil
     }
-    
+
     func refreshQRCode() {
         Task {
             await generateQRCode()
         }
     }
-    
+
     func pairWithCode(_ code: String) {
         guard code.count == 6 else { return }
-        
+
         isPairing = true
         statusText = "正在配对..."
         statusColor = .orange
         errorMessage = nil
-        
+
         Task {
             do {
  // 调用配对服务
  // try await sessionManager.pairWithCode(code, device: selectedDevice)
-                
+
  // 模拟配对延迟
                 try await Task.sleep(nanoseconds: 2_000_000_000)
-                
+
                 await MainActor.run {
                     isPairing = false
                     statusText = "配对成功"
@@ -360,7 +360,7 @@ class P2PPairingViewModel: ObservableObject {
             }
         }
     }
-    
+
     private func generateQRCode() async {
         // 生成 QR 码数据（与 iOS 端互通）：
         // - iOS 端会把 skybridge://pair 解析成 QRCodeData.devicePairing
@@ -386,33 +386,33 @@ class P2PPairingViewModel: ObservableObject {
         ]
 
         let qrData = components.url?.absoluteString ?? "skybridge://pair?v=2&id=\(deviceId)&t=\(ts)"
-        
+
  // 生成 QR 码图像
         if let filter = CIFilter(name: "CIQRCodeGenerator") {
             filter.setValue(qrData.data(using: .utf8), forKey: "inputMessage")
             filter.setValue("H", forKey: "inputCorrectionLevel")
-            
+
             if let outputImage = filter.outputImage {
                 let transform = CGAffineTransform(scaleX: 10, y: 10)
                 let scaledImage = outputImage.transformed(by: transform)
-                
+
                 let rep = NSCIImageRep(ciImage: scaledImage)
                 let nsImage = NSImage(size: rep.size)
                 nsImage.addRepresentation(rep)
-                
+
                 await MainActor.run {
                     qrCodeImage = nsImage
                     qrCodeExpiresIn = 300 // 5 分钟
                     statusText = "等待扫描"
                     statusColor = .blue
                 }
-                
+
  // 启动倒计时
                 startExpirationTimer()
             }
         }
     }
-    
+
     private func startExpirationTimer() {
         expirationTimer?.invalidate()
         expirationTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
@@ -439,27 +439,50 @@ private enum LocalIP {
         guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return nil }
         defer { freeifaddrs(ifaddr) }
 
+        // Collect candidate IPv4s by interface priority.
+        // Priority: VPN (utun*) > Wi‑Fi (en0) > other en*
+        var candidates: [(priority: Int, ip: String)] = []
+
         for ptr in sequence(first: first, next: { $0.pointee.ifa_next }) {
-            let interface = String(cString: ptr.pointee.ifa_name)
+            let interface = decodeCString(ptr.pointee.ifa_name)
             let addrFamily = ptr.pointee.ifa_addr.pointee.sa_family
             guard addrFamily == UInt8(AF_INET) else { continue }
 
-            // Wi‑Fi: en0，Ethernet: en*（macOS 常见）
-            if interface == "en0" || interface.hasPrefix("en") {
-                var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-                getnameinfo(
-                    ptr.pointee.ifa_addr,
-                    socklen_t(ptr.pointee.ifa_addr.pointee.sa_len),
-                    &hostname,
-                    socklen_t(hostname.count),
-                    nil,
-                    0,
-                    NI_NUMERICHOST
-                )
-                address = String(cString: hostname)
-                break
+            var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            getnameinfo(
+                ptr.pointee.ifa_addr,
+                socklen_t(ptr.pointee.ifa_addr.pointee.sa_len),
+                &hostname,
+                socklen_t(hostname.count),
+                nil,
+                0,
+                NI_NUMERICHOST
+            )
+            let ip = decodeCCharBuffer(hostname)
+            guard !ip.isEmpty,
+                  !ip.hasPrefix("127."),
+                  !ip.hasPrefix("169.254") else { continue }
+
+            let priority: Int
+            if interface.hasPrefix("utun") {
+                priority = 0
+            } else if interface == "en0" {
+                priority = 1
+            } else if interface.hasPrefix("en") {
+                priority = 2
+            } else {
+                continue
             }
+            candidates.append((priority, ip))
         }
+
+        if let best = candidates.sorted(by: { a, b in
+            if a.priority != b.priority { return a.priority < b.priority }
+            return a.ip < b.ip
+        }).first {
+            address = best.ip
+        }
+
         return address
     }
 }

@@ -12,13 +12,13 @@ import Foundation
 public struct RegexMatchResultInternal: Sendable {
  /// Range location in the input
     public let location: Int
-    
+
  /// Range length
     public let length: Int
-    
+
  /// Captured groups (if any)
     public let capturedGroups: [String]
-    
+
     public init(location: Int, length: Int, capturedGroups: [String] = []) {
         self.location = location
         self.length = length
@@ -32,19 +32,19 @@ public struct RegexMatchResultInternal: Sendable {
 public enum RegexMatchingError: Error, Sendable {
  /// Matching timed out
     case timeout
-    
+
  /// Invalid regex pattern
     case invalidPattern(String)
-    
+
  /// Input data too large
     case inputTooLarge(actual: Int, max: Int)
-    
+
  /// XPC connection failed
     case connectionFailed(String)
-    
+
  /// Internal error
     case internalError(String)
-    
+
  /// Matching was cancelled
     case cancelled
 }
@@ -76,23 +76,26 @@ public enum RegexMatchingError: Error, Sendable {
 /// matching with -based timeout. Note: cancellation is best-effort
 /// and may not interrupt NSRegularExpression backtracking.
 public actor RegexMatchingExecutor {
-    
+
  // MARK: - Properties
-    
+
  /// Security limits configuration
     private let limits: SecurityLimits
-    
+
  /// Whether to use XPC isolation (can be disabled for testing)
     private let useXPCIsolation: Bool
-    
+
  /// XPC connection to helper (lazy initialized)
     private var xpcConnection: NSXPCConnection?
-    
+
  /// Whether XPC helper is available
     private var xpcAvailable: Bool?
-    
+
+    /// Backoff until next XPC retry (avoid log spam when helper is not present)
+    private var nextXPCRetryAt: Date = .distantPast
+
  // MARK: - Initialization
-    
+
  /// Initialize with security limits.
  ///
  /// - Parameters:
@@ -102,9 +105,9 @@ public actor RegexMatchingExecutor {
         self.limits = limits
         self.useXPCIsolation = useXPCIsolation
     }
-    
+
  // MARK: - Public API
-    
+
  /// Execute regex matching with timeout protection.
  ///
  /// - Parameters:
@@ -124,9 +127,13 @@ public actor RegexMatchingExecutor {
                 max: limits.perPatternInputLimit
             )
         }
-        
+
  // Try XPC isolation first, fall back to in-process if unavailable
         if useXPCIsolation {
+            // If we've already detected the helper is unavailable, skip XPC and fall back immediately.
+            if xpcAvailable == false || Date() < nextXPCRetryAt {
+                return try await matchInProcess(pattern: pattern, text: text)
+            }
             do {
                 return try await matchViaXPC(pattern: pattern.pattern, inputData: inputData)
             } catch RegexMatchingError.connectionFailed {
@@ -137,7 +144,7 @@ public actor RegexMatchingExecutor {
             return try await matchInProcess(pattern: pattern, text: text)
         }
     }
-    
+
  /// Execute regex matching with a pattern string.
  ///
  /// - Parameters:
@@ -156,19 +163,19 @@ public actor RegexMatchingExecutor {
         } catch {
             throw RegexMatchingError.invalidPattern(error.localizedDescription)
         }
-        
+
         return try await match(pattern: regex, in: text)
     }
-    
+
  /// Terminate the XPC helper process.
  /// Call this when the executor is no longer needed.
     public func terminate() {
         xpcConnection?.invalidate()
         xpcConnection = nil
     }
-    
+
  // MARK: - XPC Matching
-    
+
  /// Match via XPC helper process.
     private func matchViaXPC(
         pattern: String,
@@ -176,19 +183,31 @@ public actor RegexMatchingExecutor {
     ) async throws -> [RegexMatchResultInternal] {
  // Get or create XPC connection
         let connection = try getOrCreateXPCConnection()
-        
- // Get remote proxy
-        guard let proxy = connection.remoteObjectProxy as? RegexMatchingProtocolProxy else {
+
+        // Get remote proxy (with error handler so we can disable XPC on failure)
+        let proxyAny = connection.remoteObjectProxyWithErrorHandler { [weak self] _ in
+            Task { [weak self] in
+                await self?.markXPCUnavailableAndBackoff()
+            }
+        }
+        guard let proxy = proxyAny as? RegexMatchingProtocolProxy else {
+            markXPCUnavailableAndBackoff()
             throw RegexMatchingError.connectionFailed("Failed to get XPC proxy")
         }
-        
+
  // Calculate timeout in milliseconds
         let timeoutMs = Int(limits.perPatternTimeout * 1000)
-        
+
  // Perform matching via XPC
         return try await withCheckedThrowingContinuation { continuation in
             proxy.matchPattern(pattern, in: inputData, timeoutMs: timeoutMs) { results, error in
                 if let error = error {
+                    // Helper responded but indicates failure; if it looks like an XPC-layer issue, back off.
+                    if error.code == 4 {
+                        Task { [weak self] in
+                            await self?.markXPCUnavailableAndBackoff()
+                        }
+                    }
                     switch error.code {
                     case 1: // timeout
                         continuation.resume(throwing: RegexMatchingError.timeout)
@@ -209,69 +228,98 @@ public actor RegexMatchingExecutor {
                             capturedGroups: result.capturedGroups
                         )
                     }
+                    Task { [weak self] in
+                        // Mark helper as available after a successful round-trip.
+                        await self?.markXPCAvailable()
+                    }
                     continuation.resume(returning: internalResults)
                 } else {
+                    Task { [weak self] in
+                        await self?.markXPCAvailable()
+                    }
                     continuation.resume(returning: [])
                 }
             }
         }
     }
-    
+
  /// Get or create XPC connection to helper.
     private func getOrCreateXPCConnection() throws -> NSXPCConnection {
+        if xpcAvailable == false || Date() < nextXPCRetryAt {
+            throw RegexMatchingError.connectionFailed("XPC helper unavailable")
+        }
         if let connection = xpcConnection {
             return connection
         }
-        
+
  // Create new connection to XPC service
  // Note: In production, this would connect to a bundled XPC service
  // For now, we use a Mach service name
         let connection = NSXPCConnection(
             serviceName: "com.skybridge.RegexMatchingHelper"
         )
-        
+
  // Configure interface
         connection.remoteObjectInterface = NSXPCInterface(
             with: RegexMatchingProtocolProxy.self
         )
-        
+
  // Set up error handler
         connection.invalidationHandler = { [weak self] in
             Task { [weak self] in
                 await self?.handleConnectionInvalidation()
             }
         }
-        
+
         connection.interruptionHandler = { [weak self] in
             Task { [weak self] in
                 await self?.handleConnectionInterruption()
             }
         }
-        
+
  // Resume connection
         connection.resume()
-        
+
  // Store connection
         xpcConnection = connection
-        
+        // Optimistically mark as available; will be flipped to unavailable on invalidation/error.
+        xpcAvailable = true
+
         return connection
     }
-    
+
  /// Handle XPC connection invalidation.
     private func handleConnectionInvalidation() {
         xpcConnection = nil
         xpcAvailable = false
+        // Back off to avoid repeated connect spam/logs when helper isn't present.
+        nextXPCRetryAt = Date().addingTimeInterval(60)
     }
-    
+
  /// Handle XPC connection interruption.
     private func handleConnectionInterruption() {
  // Connection interrupted, will be re-established on next use
         xpcConnection?.invalidate()
         xpcConnection = nil
+        xpcAvailable = false
+        nextXPCRetryAt = Date().addingTimeInterval(60)
     }
-    
+
+    private func markXPCUnavailableAndBackoff() {
+        xpcConnection?.invalidate()
+        xpcConnection = nil
+        xpcAvailable = false
+        nextXPCRetryAt = Date().addingTimeInterval(60)
+    }
+
+    private func markXPCAvailable() {
+        // Clear backoff on success
+        xpcAvailable = true
+        nextXPCRetryAt = .distantPast
+    }
+
  // MARK: - In-Process Matching (Fallback)
-    
+
  /// Match in-process with -based timeout.
  ///
  /// **Warning**: cancellation is best-effort and may not interrupt
@@ -283,16 +331,16 @@ public actor RegexMatchingExecutor {
     ) async throws -> [RegexMatchResultInternal] {
  // Create timeout
         let timeoutNanoseconds = UInt64(limits.perPatternTimeout * 1_000_000_000)
-        
+
         return try await withThrowingTaskGroup(of: [RegexMatchResultInternal].self) { group in
  // Add matching
             group.addTask {
                 let range = NSRange(text.startIndex..., in: text)
                 let matches = pattern.matches(in: text, options: [], range: range)
-                
+
  // Check for cancellation
                 try Task.checkCancellation()
-                
+
                 return matches.map { match in
                     var capturedGroups: [String] = []
                     for i in 0..<match.numberOfRanges {
@@ -311,21 +359,21 @@ public actor RegexMatchingExecutor {
                     )
                 }
             }
-            
+
  // Add timeout
             group.addTask {
                 try await Task.sleep(nanoseconds: timeoutNanoseconds)
                 throw RegexMatchingError.timeout
             }
-            
+
  // Wait for first result
             guard let result = try await group.next() else {
                 throw RegexMatchingError.internalError("No result from task group")
             }
-            
+
  // Cancel remaining tasks
             group.cancelAll()
-            
+
             return result
         }
     }
@@ -342,7 +390,7 @@ public actor RegexMatchingExecutor {
         timeoutMs: Int,
         reply: @escaping @Sendable ([RegexMatchResultProxy]?, RegexMatchErrorProxy?) -> Void
     )
-    
+
     func ping(reply: @escaping @Sendable (Bool) -> Void)
 }
 
@@ -351,22 +399,22 @@ public actor RegexMatchingExecutor {
     @objc let location: Int
     @objc let length: Int
     @objc let capturedGroups: [String]
-    
+
     init(location: Int, length: Int, capturedGroups: [String]) {
         self.location = location
         self.length = length
         self.capturedGroups = capturedGroups
         super.init()
     }
-    
+
     static var supportsSecureCoding: Bool { true }
-    
+
     func encode(with coder: NSCoder) {
         coder.encode(location, forKey: "location")
         coder.encode(length, forKey: "length")
         coder.encode(capturedGroups, forKey: "capturedGroups")
     }
-    
+
     required init?(coder: NSCoder) {
         self.location = coder.decodeInteger(forKey: "location")
         self.length = coder.decodeInteger(forKey: "length")
@@ -382,20 +430,20 @@ public actor RegexMatchingExecutor {
 @objc class RegexMatchErrorProxy: NSObject, NSSecureCoding {
     @objc let code: Int
     @objc let message: String
-    
+
     init(code: Int, message: String) {
         self.code = code
         self.message = message
         super.init()
     }
-    
+
     static var supportsSecureCoding: Bool { true }
-    
+
     func encode(with coder: NSCoder) {
         coder.encode(code, forKey: "code")
         coder.encode(message, forKey: "message")
     }
-    
+
     required init?(coder: NSCoder) {
         self.code = coder.decodeInteger(forKey: "code")
         self.message = coder.decodeObject(of: NSString.self, forKey: "message") as? String ?? ""

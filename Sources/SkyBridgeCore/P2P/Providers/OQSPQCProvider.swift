@@ -24,25 +24,35 @@ import OQSRAII
 /// 用于不支持原生 Apple PQC 的系统
 @available(macOS 14.0, iOS 17.0, *)
 public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
-    
+
  // MARK: - CryptoProvider Protocol
-    
+
     public let providerName = "liboqs"
     public let tier: CryptoTier = .liboqsPQC
     public let activeSuite: CryptoSuite = .mlkem768MLDSA65
-    
+
  // MARK: - Constants
-    
+
     private static let nonceSize = 12  // AES-GCM nonce
     private static let tagSize = 16    // AES-GCM tag
     private static let aesKeySize = 32 // AES-256
-    
+    // ⚠️ Interop requirement:
+    // Keep KDF parameters identical across ApplePQCCryptoProvider and OQSPQCCryptoProvider,
+    // otherwise Apple↔OQS mixed deployments will fail with CryptoKitError (e.g. error 3) when opening MessageB.
+    private static let hkdfSaltLabel = "SkyBridge-KDF-Salt-v1|"
+
+    private static func hkdfSalt(info: Data) -> Data {
+        var data = Data(hkdfSaltLabel.utf8)
+        data.append(info)
+        return Data(SHA256.hash(data: data))
+    }
+
  // MARK: - Initialization
-    
+
     public init() {}
-    
+
  // MARK: - HPKE Operations
-    
+
  /// HPKE 封装 (ML-KEM-768 + AES-256-GCM)
  /// - Parameters:
  /// - plaintext: 明文数据
@@ -65,15 +75,15 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
                 usage: .keyExchange
             )
         }
-        
+
  // 2. 使用 ML-KEM-768 封装生成共享密钥
         let ctLen = oqs_raii_mlkem768_ciphertext_length()
         let ssLen = oqs_raii_mlkem768_shared_secret_length()
-        
+
  // 使用 SecureBytes 保护共享密钥
         let sharedSecretSecure = SecureBytes(count: Int(ssLen))
         var ciphertext = [UInt8](repeating: 0, count: Int(ctLen))
-        
+
         let encapsResult = recipientPublicKey.withUnsafeBytes { pkPtr -> Int32 in
             guard let pkBase = pkPtr.baseAddress else { return OQSRAII_FAIL }
             return sharedSecretSecure.withUnsafeMutableBytes { ssPtr -> Int32 in
@@ -88,17 +98,17 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
                 )
             }
         }
-        
+
         guard encapsResult == OQSRAII_SUCCESS else {
             throw CryptoProviderError.encapsulationFailed
         }
-        
+
  // 3. 从共享密钥派生对称密钥 (HKDF-SHA256)
         let derivedKey = try deriveSymmetricKey(
             from: sharedSecretSecure.data,
             info: info
         )
-        
+
  // 4. 生成随机 nonce
         var nonceBytes = [UInt8](repeating: 0, count: Self.nonceSize)
         let status = SecRandomCopyBytes(kSecRandomDefault, nonceBytes.count, &nonceBytes)
@@ -106,10 +116,10 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
             throw CryptoProviderError.keyGenerationFailed("Failed to generate nonce")
         }
         let nonce = try AES.GCM.Nonce(data: Data(nonceBytes))
-        
+
  // 5. AES-GCM 加密
         let sealedBox = try AES.GCM.seal(plaintext, using: derivedKey, nonce: nonce)
-        
+
         return HPKESealedBox(
             encapsulatedKey: Data(ciphertext),
             nonce: Data(nonceBytes),
@@ -138,14 +148,14 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
                 usage: .keyExchange
             )
         }
-        
+
  // 2. 使用 ML-KEM-768 封装生成共享密钥
         let ctLen = oqs_raii_mlkem768_ciphertext_length()
         let ssLen = oqs_raii_mlkem768_shared_secret_length()
-        
+
         let sharedSecretSecure = SecureBytes(count: Int(ssLen))
         var ciphertext = [UInt8](repeating: 0, count: Int(ctLen))
-        
+
         let encapsResult = recipientPublicKey.withUnsafeBytes { pkPtr -> Int32 in
             guard let pkBase = pkPtr.baseAddress else { return OQSRAII_FAIL }
             return sharedSecretSecure.withUnsafeMutableBytes { ssPtr -> Int32 in
@@ -160,17 +170,17 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
                 )
             }
         }
-        
+
         guard encapsResult == OQSRAII_SUCCESS else {
             throw CryptoProviderError.encapsulationFailed
         }
-        
+
  // 3. 从共享密钥派生对称密钥 (HKDF-SHA256)
         let derivedKey = try deriveSymmetricKey(
             from: sharedSecretSecure.data,
             info: info
         )
-        
+
  // 4. 生成随机 nonce
         var nonceBytes = [UInt8](repeating: 0, count: Self.nonceSize)
         let status = SecRandomCopyBytes(kSecRandomDefault, nonceBytes.count, &nonceBytes)
@@ -178,10 +188,10 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
             throw CryptoProviderError.keyGenerationFailed("Failed to generate nonce")
         }
         let nonce = try AES.GCM.Nonce(data: Data(nonceBytes))
-        
+
  // 5. AES-GCM 加密
         let sealedBox = try AES.GCM.seal(plaintext, using: derivedKey, nonce: nonce)
-        
+
         return (
             sealedBox: HPKESealedBox(
                 encapsulatedKey: Data(ciphertext),
@@ -195,7 +205,7 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
         throw CryptoProviderError.providerNotAvailable(.liboqs)
         #endif
     }
-    
+
  /// HPKE 解封装
  /// - Parameters:
  /// - sealedBox: 密封盒
@@ -210,7 +220,7 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
         let secureKey = SecureBytes(data: privateKey)
         return try await hpkeOpen(sealedBox: sealedBox, privateKey: secureKey, info: info)
     }
-    
+
  /// HPKE 解封装（SecureBytes 版本）
     public func hpkeOpen(
         sealedBox: HPKESealedBox,
@@ -228,7 +238,7 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
                 usage: .keyExchange
             )
         }
-        
+
  // 2. 验证密文长度
         let expectedCtLen = oqs_raii_mlkem768_ciphertext_length()
         guard sealedBox.encapsulatedKey.count == expectedCtLen else {
@@ -237,11 +247,11 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
                 actual: sealedBox.encapsulatedKey.count
             )
         }
-        
+
  // 3. 使用 ML-KEM-768 解封装恢复共享密钥
         let ssLen = oqs_raii_mlkem768_shared_secret_length()
         let sharedSecretSecure = SecureBytes(count: Int(ssLen))
-        
+
         let decapsResult = sealedBox.encapsulatedKey.withUnsafeBytes { ctPtr -> Int32 in
             guard let ctBase = ctPtr.baseAddress else { return OQSRAII_FAIL }
             return privateKey.withUnsafeBytes { skPtr -> Int32 in
@@ -259,17 +269,17 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
                 }
             }
         }
-        
+
         guard decapsResult == OQSRAII_SUCCESS else {
             throw CryptoProviderError.decapsulationFailed
         }
-        
+
  // 4. 派生对称密钥
         let derivedKey = try deriveSymmetricKey(
             from: sharedSecretSecure.data,
             info: info
         )
-        
+
  // 5. 构建 AES.GCM.SealedBox
         let nonce = try AES.GCM.Nonce(data: sealedBox.nonce)
         let gcmSealedBox = try AES.GCM.SealedBox(
@@ -277,7 +287,7 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
             ciphertext: sealedBox.ciphertext,
             tag: sealedBox.tag
         )
-        
+
  // 6. AES-GCM 解密
         let plaintext = try AES.GCM.open(gcmSealedBox, using: derivedKey)
         return plaintext
@@ -303,7 +313,7 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
                 usage: .keyExchange
             )
         }
-        
+
  // 2. 验证密文长度
         let expectedCtLen = oqs_raii_mlkem768_ciphertext_length()
         guard sealedBox.encapsulatedKey.count == expectedCtLen else {
@@ -312,11 +322,11 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
                 actual: sealedBox.encapsulatedKey.count
             )
         }
-        
+
  // 3. 使用 ML-KEM-768 解封装恢复共享密钥
         let ssLen = oqs_raii_mlkem768_shared_secret_length()
         let sharedSecretSecure = SecureBytes(count: Int(ssLen))
-        
+
         let decapsResult = sealedBox.encapsulatedKey.withUnsafeBytes { ctPtr -> Int32 in
             guard let ctBase = ctPtr.baseAddress else { return OQSRAII_FAIL }
             return privateKey.withUnsafeBytes { skPtr -> Int32 in
@@ -334,17 +344,17 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
                 }
             }
         }
-        
+
         guard decapsResult == OQSRAII_SUCCESS else {
             throw CryptoProviderError.decapsulationFailed
         }
-        
+
  // 4. 派生对称密钥
         let derivedKey = try deriveSymmetricKey(
             from: sharedSecretSecure.data,
             info: info
         )
-        
+
  // 5. 构建 AES.GCM.SealedBox
         let nonce = try AES.GCM.Nonce(data: sealedBox.nonce)
         let gcmSealedBox = try AES.GCM.SealedBox(
@@ -352,7 +362,7 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
             ciphertext: sealedBox.ciphertext,
             tag: sealedBox.tag
         )
-        
+
  // 6. AES-GCM 解密
         let plaintext = try AES.GCM.open(gcmSealedBox, using: derivedKey)
         return (plaintext: plaintext, sharedSecret: sharedSecretSecure)
@@ -376,13 +386,13 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
                 usage: .keyExchange
             )
         }
-        
+
         let ctLen = oqs_raii_mlkem768_ciphertext_length()
         let ssLen = oqs_raii_mlkem768_shared_secret_length()
-        
+
         let sharedSecretSecure = SecureBytes(count: Int(ssLen))
         var ciphertext = [UInt8](repeating: 0, count: Int(ctLen))
-        
+
         let encapsResult = recipientPublicKey.withUnsafeBytes { pkPtr -> Int32 in
             guard let pkBase = pkPtr.baseAddress else { return OQSRAII_FAIL }
             return sharedSecretSecure.withUnsafeMutableBytes { ssPtr -> Int32 in
@@ -397,11 +407,11 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
                 )
             }
         }
-        
+
         guard encapsResult == OQSRAII_SUCCESS else {
             throw CryptoProviderError.encapsulationFailed
         }
-        
+
         return (encapsulatedKey: Data(ciphertext), sharedSecret: sharedSecretSecure)
         #else
         throw CryptoProviderError.providerNotAvailable(.liboqs)
@@ -422,7 +432,7 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
                 usage: .keyExchange
             )
         }
-        
+
         let expectedCtLen = oqs_raii_mlkem768_ciphertext_length()
         guard encapsulatedKey.count == expectedCtLen else {
             throw CryptoProviderError.invalidKeyLength(
@@ -432,10 +442,10 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
                 usage: .keyExchange
             )
         }
-        
+
         let ssLen = oqs_raii_mlkem768_shared_secret_length()
         let sharedSecretSecure = SecureBytes(count: Int(ssLen))
-        
+
         let decapsResult = encapsulatedKey.withUnsafeBytes { ctPtr -> Int32 in
             guard let ctBase = ctPtr.baseAddress else { return OQSRAII_FAIL }
             return privateKey.withUnsafeBytes { skPtr -> Int32 in
@@ -453,19 +463,19 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
                 }
             }
         }
-        
+
         guard decapsResult == OQSRAII_SUCCESS else {
             throw CryptoProviderError.decapsulationFailed
         }
-        
+
         return sharedSecretSecure
         #else
         throw CryptoProviderError.providerNotAvailable(.liboqs)
         #endif
     }
-    
+
  // MARK: - Signature Operations
-    
+
  /// ML-DSA-65 签名
     public func sign(data: Data, using keyHandle: SigningKeyHandle) async throws -> Data {
         let privateKey: Data
@@ -490,12 +500,12 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
                 usage: .signing
             )
         }
-        
+
  // 2. 分配签名缓冲区
         let maxSigLen = oqs_raii_mldsa65_signature_length()
         var signature = [UInt8](repeating: 0, count: Int(maxSigLen))
         var actualSigLen = maxSigLen
-        
+
  // 3. 执行签名
         let signResult = data.withUnsafeBytes { msgPtr -> Int32 in
             guard let msgBase = msgPtr.baseAddress else { return OQSRAII_FAIL }
@@ -511,18 +521,18 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
                 )
             }
         }
-        
+
         guard signResult == OQSRAII_SUCCESS else {
             throw CryptoProviderError.signatureFailed
         }
-        
+
  // 4. 返回实际长度的签名
         return Data(signature.prefix(Int(actualSigLen)))
         #else
         throw CryptoProviderError.providerNotAvailable(.liboqs)
         #endif
     }
-    
+
  /// ML-DSA-65 验签
  /// - Parameters:
  /// - data: 原始数据
@@ -541,7 +551,7 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
                 usage: .signing
             )
         }
-        
+
  // 2. 执行验签
         let isValid = data.withUnsafeBytes { msgPtr -> Bool in
             guard let msgBase = msgPtr.baseAddress else { return false }
@@ -560,15 +570,15 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
                 }
             }
         }
-        
+
         return isValid
         #else
         throw CryptoProviderError.providerNotAvailable(.liboqs)
         #endif
     }
-    
+
  // MARK: - Key Generation
-    
+
  /// 生成密钥对
  /// - Parameter usage: 密钥用途
  /// - Returns: 密钥对
@@ -584,19 +594,19 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
         throw CryptoProviderError.providerNotAvailable(.liboqs)
         #endif
     }
-    
+
  // MARK: - Private Methods
-    
+
     #if canImport(OQSRAII)
  /// 生成 ML-KEM-768 密钥对
     private func generateMLKEM768KeyPair() throws -> KeyPair {
         let pkLen = oqs_raii_mlkem768_public_key_length()
         let skLen = oqs_raii_mlkem768_secret_key_length()
-        
+
         var publicKeyBytes = [UInt8](repeating: 0, count: Int(pkLen))
  // 使用 SecureBytes 保护私钥
         let privateKeySecure = SecureBytes(count: Int(skLen))
-        
+
         let result = privateKeySecure.withUnsafeMutableBytes { skPtr -> Int32 in
             guard let skBase = skPtr.baseAddress else { return OQSRAII_FAIL }
             return oqs_raii_mlkem768_keypair(
@@ -606,11 +616,11 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
                 Int(skLen)
             )
         }
-        
+
         guard result == OQSRAII_SUCCESS else {
             throw CryptoProviderError.keyGenerationFailed("ML-KEM-768 keypair generation failed")
         }
-        
+
         return KeyPair(
             publicKey: KeyMaterial(
                 suite: activeSuite,
@@ -624,16 +634,16 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
             )
         )
     }
-    
+
  /// 生成 ML-DSA-65 密钥对
     private func generateMLDSA65KeyPair() throws -> KeyPair {
         let pkLen = oqs_raii_mldsa65_public_key_length()
         let skLen = oqs_raii_mldsa65_secret_key_length()
-        
+
         var publicKeyBytes = [UInt8](repeating: 0, count: Int(pkLen))
  // 使用 SecureBytes 保护私钥
         let privateKeySecure = SecureBytes(count: Int(skLen))
-        
+
         let result = privateKeySecure.withUnsafeMutableBytes { skPtr -> Int32 in
             guard let skBase = skPtr.baseAddress else { return OQSRAII_FAIL }
             return oqs_raii_mldsa65_keypair(
@@ -643,11 +653,11 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
                 Int(skLen)
             )
         }
-        
+
         guard result == OQSRAII_SUCCESS else {
             throw CryptoProviderError.keyGenerationFailed("ML-DSA-65 keypair generation failed")
         }
-        
+
         return KeyPair(
             publicKey: KeyMaterial(
                 suite: activeSuite,
@@ -662,13 +672,13 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
         )
     }
     #endif
-    
+
  /// 从共享密钥派生对称密钥 (HKDF-SHA256)
     private func deriveSymmetricKey(from sharedSecret: Data, info: Data) throws -> SymmetricKey {
         let inputKey = SymmetricKey(data: sharedSecret)
         return HKDF<SHA256>.deriveKey(
             inputKeyMaterial: inputKey,
-            salt: Data(),
+            salt: Self.hkdfSalt(info: info),
             info: info,
             outputByteCount: Self.aesKeySize
         )
@@ -680,13 +690,13 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
 extension CryptoProviderError {
  /// ML-KEM 封装失败
     static let encapsulationFailed = CryptoProviderError.operationFailed("ML-KEM encapsulation failed")
-    
+
  /// ML-KEM 解封装失败
     static let decapsulationFailed = CryptoProviderError.operationFailed("ML-KEM decapsulation failed")
-    
+
  /// 签名失败
     static let signatureFailed = CryptoProviderError.operationFailed("ML-DSA signature failed")
-    
+
  /// 密文长度无效
     static func invalidCiphertextLength(expected: Int, actual: Int) -> CryptoProviderError {
         .operationFailed("Invalid ciphertext length: expected \(expected), got \(actual)")

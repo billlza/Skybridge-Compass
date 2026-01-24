@@ -17,7 +17,7 @@
     <string>APPL</string>
     <key>CFBundleExecutable</key>
     <string>SkyBridgeCompassApp</string>
-    
+
     <!-- 认证服务配置 -->
     <key>SKYBRIDGE_AUTH_BASEURL</key>
     <string>https://hloqytmhjludmuhwyyzb.supabase.co</string>
@@ -25,30 +25,40 @@
     <!-- 网络权限配置 -->
     <key>NSLocalNetworkUsageDescription</key>
     <string>SkyBridge Compass Pro 需要访问本地网络以发现和连接附近的设备，实现安全的点对点通信和文件传输功能。</string>
-    
+
     <!-- 蓝牙权限配置 -->
     <key>NSBluetoothAlwaysUsageDescription</key>
     <string>SkyBridge Compass Pro 需要使用蓝牙来发现和连接附近的设备，提供无缝的设备间通信体验。</string>
-    
+
     <!-- USB设备访问权限 -->
     <key>NSUSBUsageDescription</key>
     <string>SkyBridge Compass Pro 需要访问USB设备以检测和管理连接的设备，包括iPhone、iPad、Android设备和存储设备。</string>
-    
+
     <!-- Bonjour 服务配置 -->
     <key>NSBonjourServices</key>
     <array>
         <string>_skybridge._tcp</string>
         <string>_skybridge._udp</string>
+        <!-- SkyBridge feature services -->
+        <string>_skybridge-transfer._tcp</string>
+        <string>_skybridge-remote._tcp</string>
+
+        <!-- Discovery toggles (Settings.EnableCompanionLink / EnableCompatibilityMode) -->
+        <string>_companion-link._tcp</string>
+        <string>_services._dns-sd._udp</string>
+        <string>_airplay._tcp</string>
+        <string>_rdlink._tcp</string>
+        <string>_sftp-ssh._tcp</string>
         <string>_http._tcp</string>
         <string>_https._tcp</string>
     </array>
-    
+
     <!-- 位置服务权限（用于网络发现、天气显示） -->
     <key>NSLocationUsageDescription</key>
     <string>SkyBridge Compass Pro 需要访问您的位置以显示天气并优化附近设备发现与连接性能。</string>
     <key>NSLocationWhenInUseUsageDescription</key>
     <string>SkyBridge Compass Pro 需要位置信息来优化本地网络设备发现和连接性能。</string>
-    
+
     <!-- 网络扩展权限 -->
     <key>com.apple.developer.networking.networkextension</key>
     <array>
@@ -56,7 +66,7 @@
         <string>content-filter-provider</string>
         <string>packet-tunnel-provider</string>
     </array>
-    
+
     <!-- 应用传输安全配置 -->
     <key>NSAppTransportSecurity</key>
     <dict>
@@ -75,19 +85,19 @@
             </dict>
         </dict>
     </dict>
-    
+
     <!-- 支持的设备类型 -->
     <key>LSRequiresIPhoneOS</key>
     <false/>
-    
+
     <!-- 最低系统版本要求 -->
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
-    
+
     <!-- 应用类别 -->
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.utilities</string>
-    
+
     <!-- 支持的文档类型 -->
     <key>CFBundleDocumentTypes</key>
     <array>
@@ -102,19 +112,19 @@
             </array>
         </dict>
     </array>
-    
+
     <!-- 硬件加速支持 -->
     <key>NSSupportsAutomaticGraphicsSwitching</key>
     <true/>
-    
+
     <!-- 高分辨率支持 -->
     <key>NSHighResolutionCapable</key>
     <true/>
-    
+
     <!-- 主界面文件 -->
     <key>NSMainStoryboardFile</key>
     <string>Main</string>
-    
+
     <!-- 应用图标文件 -->
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>

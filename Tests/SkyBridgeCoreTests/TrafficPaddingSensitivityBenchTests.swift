@@ -24,11 +24,7 @@ final class TrafficPaddingSensitivityBenchTests: XCTestCase {
     }
 
     private var artifactDate: String {
-        if let v = ProcessInfo.processInfo.environment["ARTIFACT_DATE"], !v.isEmpty { return v }
-        if let v = ProcessInfo.processInfo.environment["SKYBRIDGE_ARTIFACT_DATE"], !v.isEmpty { return v }
-        let df = DateFormatter()
-        df.dateFormat = "yyyy-MM-dd"
-        return df.string(from: Date())
+        ArtifactDate.current()
     }
 
     func testTrafficPaddingSensitivityStudy() async throws {

@@ -14,38 +14,38 @@ import Network
 @available(macOS 14.0, *)
 @MainActor
 public final class UnifiedOnlineDeviceManager: ObservableObject {
-    
+
  // MARK: - 单例
-    
+
     public static let shared = UnifiedOnlineDeviceManager()
-    
+
  // MARK: - 发布属性
-    
+
  /// 在线设备列表(本机 + 当前在线 + 最近连接)
     @Published public private(set) var onlineDevices: [OnlineDevice] = []
-    
+
  /// 本机设备
     @Published public private(set) var localDevice: OnlineDevice?
-    
+
  /// 扫描状态
     @Published public private(set) var isScanning = false
-    
+
  /// 设备分类统计
     @Published public private(set) var deviceStats: DeviceStats = DeviceStats()
-    
+
  // MARK: - 私有属性
-    
+
     private let logger = Logger(subsystem: "com.skybridge.unified", category: "OnlineDeviceManager")
-    
+
  /// 设备去重映射表: 唯一标识符 -> OnlineDevice
     private var deviceMap: [String: OnlineDevice] = [:]
-    
+
  /// 设备持久化存储
     private let storage = DeviceStorage()
-    
+
  /// 订阅集合
     private var cancellables = Set<AnyCancellable>()
-    
+
  /// 子管理器
     private let networkDiscovery = DeviceDiscoveryManagerOptimized()
     private let usbDiscovery = USBDeviceDiscoveryManager()
@@ -55,12 +55,12 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
  /// 本机物理网卡 MAC 地址集合（缓存）
     private var localMacAddresses: Set<String> = []
     private var pathMonitor: NWPathMonitor?
-    
+
  /// 设备清理定时器(移除长时间离线的设备)
     private var cleanupTimer: Timer?
-    
+
  // MARK: - 初始化
-    
+
     private init() {
         logger.info("🚀 初始化统一在线设备管理器")
         setupObservers()
@@ -71,25 +71,25 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         startPathMonitor()
         startCleanupTimer()
     }
-    
+
  // MARK: - 公开方法
-    
+
  /// 启动设备发现
     public func startDiscovery() {
         guard !isScanning else { return }
-        
+
         logger.info("🔍 启动统一设备发现")
  // 启动前同步一次全局设置，确保底层发现模块使用最新开关状态
         applyDiscoverySettingsFromGlobalConfig()
         isScanning = true
-        
+
  // 启动网络发现
         networkDiscovery.startScanning()
-        
+
  // 启动USB发现
         usbDiscovery.startMonitoring()
         usbDiscovery.scanUSBDevices()
-        
+
  // 启动iCloud发现
         if iCloudDiscovery == nil {
             iCloudDiscovery = iCloudDeviceDiscoveryManager()
@@ -105,78 +105,142 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
             self.startDiscovery()
         }
     }
-    
+
  /// 停止设备发现
     public func stopDiscovery() {
         logger.info("⏹️ 停止统一设备发现")
-        
+
         networkDiscovery.stopScanning()
         usbDiscovery.stopMonitoring()
         iCloudDiscovery?.stopDiscovery()
-        
+
         isScanning = false
     }
-    
+
  /// 刷新设备列表
     public func refreshDevices() {
-        logger.info("🔄 刷新设备列表")
- // 刷新前同步一次设置，确保下一次启动使用最新开关状态
+        // UX fix:
+        // A hard stop/start here interrupts ongoing handshakes/transfers and causes repeated reconnect loops.
+        // We only do a **soft refresh**: apply settings, ensure discovery is running, and trigger lightweight
+        // refresh operations that do not tear down listeners/browsers.
+        logger.info("🔄 刷新设备列表（软刷新：不停止/不重启发现服务）")
         applyDiscoverySettingsFromGlobalConfig()
-        
-        stopDiscovery()
-        
-        Task {
-            try? await Task.sleep(nanoseconds: 500_000_000)
+
+        if !isScanning {
             startDiscovery()
+            return
         }
+
+        // Lightweight nudges (no stop):
+        usbDiscovery.scanUSBDevices()
+        if iCloudDiscovery == nil {
+            iCloudDiscovery = iCloudDeviceDiscoveryManager()
+        }
+        Task { await iCloudDiscovery?.refreshDevices() }
     }
-    
+
  /// 根据ID查找设备
     public func device(withId id: UUID) -> OnlineDevice? {
         return onlineDevices.first { $0.id == id }
     }
-    
+
  /// 根据唯一标识符查找设备
     public func device(withIdentifier identifier: String) -> OnlineDevice? {
         return deviceMap[identifier]
     }
-    
+
  /// 标记设备为已连接
     public func markDeviceAsConnected(_ deviceId: UUID) {
         guard let index = onlineDevices.firstIndex(where: { $0.id == deviceId }) else { return }
-        
+
         var device = onlineDevices[index]
         device.connectionStatus = .connected
         device.lastConnectedAt = Date()
-        
+        if device.guardStatus == nil { device.guardStatus = "守护中" }
+
         onlineDevices[index] = device
         deviceMap[device.uniqueIdentifier] = device
-        
+
  // 持久化
         storage.saveDevice(device)
-        
+
         logger.info("✅ 设备标记为已连接: \(device.name)")
     }
-    
+
+    /// 标记设备为已连接（入站连接场景：没有点击“连接”，但握手已完成）
+    public func markDeviceAsConnected(
+        peerId: String,
+        displayName: String,
+        cryptoKind: String,
+        suite: String,
+        guardStatus: String = "守护中"
+    ) {
+        if let idx = onlineDevices.firstIndex(where: { $0.name == displayName }) {
+            var device = onlineDevices[idx]
+            device.connectionStatus = .connected
+            device.lastConnectedAt = Date()
+            device.lastCryptoKind = cryptoKind
+            device.lastCryptoSuite = suite
+            device.guardStatus = guardStatus
+            onlineDevices[idx] = device
+            deviceMap[device.uniqueIdentifier] = device
+            storage.saveDevice(device)
+            updateDevicesList()
+            logger.info("✅ 设备标记为已连接(匹配name): \(device.name)")
+            return
+        }
+
+        // Fallback: create a lightweight record so it shows up immediately in UI.
+        let now = Date()
+        let new = OnlineDevice(
+            id: UUID(),
+            name: displayName,
+            deviceType: .unknown,
+            ipv4: nil,
+            ipv6: nil,
+            macAddress: nil,
+            serialNumber: nil,
+            connectionTypes: [.wifi],
+            services: ["_skybridge._tcp"],
+            portMap: [:],
+            uniqueIdentifier: "recent:\(peerId)",
+            sources: [.skybridgeBonjour],
+            discoveredAt: now,
+            lastSeen: now,
+            connectionStatus: .connected,
+            lastConnectedAt: now,
+            lastCryptoKind: cryptoKind,
+            lastCryptoSuite: suite,
+            guardStatus: guardStatus,
+            isLocalDevice: false,
+            isAuthorized: false
+        )
+        deviceMap[new.uniqueIdentifier] = new
+        onlineDevices.append(new)
+        storage.saveDevice(new)
+        updateDevicesList()
+        logger.info("✅ 设备标记为已连接(新增recent): \(displayName, privacy: .public)")
+    }
+
  /// 标记设备为已授权(iCloud)
     public func markDeviceAsAuthorized(_ deviceId: UUID) {
         guard let index = onlineDevices.firstIndex(where: { $0.id == deviceId }) else { return }
-        
+
         var device = onlineDevices[index]
         device.isAuthorized = true
         device.lastConnectedAt = Date()
-        
+
         onlineDevices[index] = device
         deviceMap[device.uniqueIdentifier] = device
-        
+
  // 持久化
         storage.saveDevice(device)
-        
+
         logger.info("✅ 设备标记为已授权: \(device.name)")
     }
-    
+
  // MARK: - 私有方法
-    
+
  /// 设置观察者
     private func setupObservers() {
  // 观察网络设备变化
@@ -186,7 +250,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                 self?.handleNetworkDevicesUpdate(devices)
             }
             .store(in: &cancellables)
-        
+
  // 观察USB设备变化
         usbDiscovery.$usbDevices
             .receive(on: DispatchQueue.main)
@@ -204,20 +268,22 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
  // 是否启用 companion‑link 服务类型（Apple Continuity）
         networkDiscovery.enableCompanionLink = settings.enableCompanionLink
     }
-    
+
  /// 处理网络设备更新
     private func handleNetworkDevicesUpdate(_ devices: [DiscoveredDevice]) {
         logger.debug("📡 网络设备更新: \(devices.count) 台")
-        
+
         for device in devices {
             let identifier = generateUniqueIdentifier(
+                stableDeviceId: device.deviceId,
+                pubKeyFP: device.pubKeyFP,
                 macAddress: device.uniqueIdentifier,
                 serialNumber: nil,
                 name: device.name,
                 ipv4: device.ipv4,
                 ipv6: device.ipv6
             )
-            
+
             mergeOrCreateDevice(
                 identifier: identifier,
                 name: device.name,
@@ -232,23 +298,25 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                 source: DeviceSource.skybridgeBonjour
             )
         }
-        
+
         updateDevicesList()
     }
-    
+
  /// 处理USB设备更新
     private func handleUSBDevicesUpdate(_ devices: [USBDevice]) {
         logger.debug("🔌 USB设备更新: \(devices.count) 台")
-        
+
         for device in devices {
             let identifier = generateUniqueIdentifier(
+                stableDeviceId: nil,
+                pubKeyFP: nil,
                 macAddress: nil,
                 serialNumber: device.serialNumber,
                 name: device.name,
                 ipv4: nil,
                 ipv6: nil
             )
-            
+
             mergeOrCreateDevice(
                 identifier: identifier,
                 name: device.name,
@@ -263,26 +331,28 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                 source: DeviceSource.skybridgeUSB
             )
         }
-        
+
         updateDevicesList()
     }
-    
+
  /// 处理iCloud设备更新
     private func handleiCloudDevicesUpdate(_ devices: [iCloudDevice]) {
         logger.debug("☁️ iCloud设备更新: \(devices.count) 台")
-        
+
         for device in devices {
             let identifier = generateUniqueIdentifier(
+                stableDeviceId: nil,
+                pubKeyFP: nil,
                 macAddress: nil,
                 serialNumber: device.id,  // 使用id作为序列号
                 name: device.name,
                 ipv4: device.ipAddress,
                 ipv6: nil
             )
-            
+
  // 从model推断设备类型
             let deviceType = inferDeviceTypeFromModel(device.model)
-            
+
             mergeOrCreateDevice(
                 identifier: identifier,
                 name: device.name,
@@ -298,14 +368,14 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                 isAuthorized: true
             )
         }
-        
+
         updateDevicesList()
     }
-    
+
  /// 从model字符串推断设备类型
     private func inferDeviceTypeFromModel(_ model: String) -> DeviceClassifier.DeviceType {
         let lowercased = model.lowercased()
-        if lowercased.contains("iphone") || lowercased.contains("ipad") || 
+        if lowercased.contains("iphone") || lowercased.contains("ipad") ||
            lowercased.contains("mac") || lowercased.contains("macbook") {
             return .computer
         } else if lowercased.contains("watch") {
@@ -318,7 +388,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
             return .unknown
         }
     }
-    
+
  /// 合并或创建设备
     private func mergeOrCreateDevice(
         identifier: String,
@@ -365,9 +435,9 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                 deviceType: existingDevice.deviceType,
                 sources: existingDevice.sources
             )
-            
+
             deviceMap[identifier] = existingDevice
-            
+
             logger.debug("🔄 合并设备信息: \(name)")
         } else {
  // 尝试通过其他标识符找到相似设备
@@ -408,11 +478,11 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                         deviceType: existingDevice.deviceType,
                         sources: existingDevice.sources
                     )
-                    
+
  // 更新两个标识符的映射
                     deviceMap[identifier] = existingDevice
                     deviceMap[similarIdentifier] = existingDevice
-                    
+
                     logger.debug("🔄 发现相似设备并合并: \(name)")
                 }
             } else {
@@ -443,14 +513,14 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                     ),
                     isAuthorized: isAuthorized
                 )
-                
+
                 deviceMap[identifier] = newDevice
-                
+
                 logger.info("✅ 发现新设备: \(name)")
             }
         }
     }
-    
+
  /// 智能查找相似设备
     private func findSimilarDevice(
         name: String,
@@ -471,7 +541,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                     return identifier
                 }
             }
-            
+
  // 2. 序列号匹配(非常可靠)
             if let serial = serialNumber, let existingSN = device.serialNumber,
                !serial.isEmpty, !existingSN.isEmpty {
@@ -479,7 +549,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                     return identifier
                 }
             }
-            
+
  // 3. IP地址匹配(较可靠)
             if let ip = ipv4, let existingIp = device.ipv4,
                !ip.isEmpty, !existingIp.isEmpty {
@@ -487,22 +557,22 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                     return identifier
                 }
             }
-            
+
             if let ip6 = ipv6, let existingIp6 = device.ipv6,
                !ip6.isEmpty, !existingIp6.isEmpty {
                 if ip6 == existingIp6 {
                     return identifier
                 }
             }
-            
+
  // 4. 标准化名称匹配
             let normalizedName = normalizeDeviceName(name)
             let normalizedExisting = normalizeDeviceName(device.name)
-            
+
             if !normalizedName.isEmpty && normalizedName == normalizedExisting {
                 return identifier
             }
-            
+
  // 5. 名称包含关系
             if name.contains(device.name) || device.name.contains(name) {
                 let lengthDiff = abs(name.count - device.name.count)
@@ -511,19 +581,19 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                 }
             }
         }
-        
+
         return nil
     }
-    
+
  /// 合并设备信息
     private func mergeDeviceInfo(existing: OnlineDevice, new: OnlineDevice) -> OnlineDevice {
         var merged = existing
-        
+
  // 使用更详细的名称
         if new.name.count > existing.name.count {
             merged.name = new.name
         }
-        
+
  // 合并IP地址
         if merged.ipv4 == nil, let newIp = new.ipv4 {
             merged.ipv4 = newIp
@@ -531,70 +601,91 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         if merged.ipv6 == nil, let newIp6 = new.ipv6 {
             merged.ipv6 = newIp6
         }
-        
+
  // 合并MAC地址
         if merged.macAddress == nil, let newMac = new.macAddress {
             merged.macAddress = newMac
         }
-        
+
  // 合并序列号
         if merged.serialNumber == nil, let newSerial = new.serialNumber {
             merged.serialNumber = newSerial
         }
-        
+
  // 合并连接类型
         merged.connectionTypes.formUnion(new.connectionTypes)
-        
+
  // 合并服务
         for service in new.services {
             if !merged.services.contains(service) {
                 merged.services.append(service)
             }
         }
-        
+
  // 合并端口映射
         merged.portMap.merge(new.portMap) { current, _ in current }
-        
+
  // 合并设备来源
         for source in new.sources {
             if !merged.sources.contains(source) {
                 merged.sources.append(source)
             }
         }
-        
+
  // 更新最后发现时间
         merged.lastSeen = Date()
-        
+
  // 更新授权状态
         if new.isAuthorized {
             merged.isAuthorized = true
         }
-        
+
         return merged
     }
-    
+
  /// 更新设备列表
     private func updateDevicesList() {
         let now = Date()
-        
+
  // 获取所有唯一设备
         var uniqueDevices: [OnlineDevice] = []
         var processedIds = Set<UUID>()
-        
+
         for device in deviceMap.values {
             if !processedIds.contains(device.id) {
                 uniqueDevices.append(device)
                 processedIds.insert(device.id)
             }
         }
-        
- // 更新设备状态
+
+        // Update device status:
+        // - Preserve "connected" for active secure sessions (ConnectionPresenceService)
+        // - Otherwise fall back to lastSeen heuristics
+        let activePeerIds: Set<String> = {
+            if #available(macOS 14.0, iOS 17.0, *) {
+                return Set(ConnectionPresenceService.shared.activeConnections.map(\.id))
+            }
+            return []
+        }()
+
+        func isActivelyConnected(_ device: OnlineDevice) -> Bool {
+            // Our inbound "recently connected" records use uniqueIdentifier: "recent:<peerId>"
+            if device.uniqueIdentifier.hasPrefix("recent:") {
+                let peerId = String(device.uniqueIdentifier.dropFirst("recent:".count))
+                return activePeerIds.contains(peerId)
+            }
+            return false
+        }
+
+        // 更新设备状态
         for i in 0..<uniqueDevices.count {
             let device = uniqueDevices[i]
             let timeSinceLastSeen = now.timeIntervalSince(device.lastSeen)
-            
+
  // 判断设备状态
             if device.isLocalDevice {
+                uniqueDevices[i].connectionStatus = .connected
+            } else if isActivelyConnected(device) {
                 uniqueDevices[i].connectionStatus = .connected
             } else if timeSinceLastSeen < 60 {
  // 60秒内有响应,认为在线
@@ -607,7 +698,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                 uniqueDevices[i].connectionStatus = .offline
             }
         }
-        
+
  // 过滤设备:
  // 1. 本机(始终显示)
  // 2. 在线设备
@@ -622,26 +713,26 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
             device.lastConnectedAt != nil ||
             device.isAuthorized
         }
-        
+
  // 排序: 本机 > 已连接 > 在线 > 离线
         onlineDevices = filteredDevices.sorted { lhs, rhs in
             if lhs.isLocalDevice != rhs.isLocalDevice {
                 return lhs.isLocalDevice
             }
-            
+
             if lhs.connectionStatus != rhs.connectionStatus {
                 return lhs.connectionStatus.priority > rhs.connectionStatus.priority
             }
-            
+
             return lhs.name < rhs.name
         }
-        
+
  // 更新统计
         updateDeviceStats()
-        
+
         logger.debug("📊 设备列表更新: \(self.onlineDevices.count) 台在线")
     }
-    
+
  /// 更新设备统计
     private func updateDeviceStats() {
         deviceStats = DeviceStats(
@@ -651,39 +742,48 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
             authorized: onlineDevices.filter { $0.isAuthorized }.count
         )
     }
-    
+
  /// 生成唯一标识符
     private func generateUniqueIdentifier(
+        stableDeviceId: String?,
+        pubKeyFP: String?,
         macAddress: String?,
         serialNumber: String?,
         name: String,
         ipv4: String?,
         ipv6: String?
     ) -> String {
- // 优先级: MAC地址 > 序列号 > IPv4 > IPv6 > 名称
+        // 优先级（强→弱）:
+        // deviceId (stable) > pubKeyFP (stable) > MAC地址 > 序列号 > IPv4 > IPv6 > 名称
+        if let id = stableDeviceId, !id.isEmpty {
+            return "id:\(id)"
+        }
+        if let fp = pubKeyFP, fp.count == 64, fp.allSatisfy({ $0.isHexDigit }) {
+            return "fp:\(fp)"
+        }
         if let mac = macAddress, !mac.isEmpty {
             return "mac:\(mac.lowercased())"
         }
-        
+
         if let serial = serialNumber, !serial.isEmpty {
             return "serial:\(serial)"
         }
-        
+
         if let ip = ipv4, !ip.isEmpty {
             return "ip:\(ip)"
         }
-        
+
         if let ip6 = ipv6, !ip6.isEmpty {
             return "ip:\(ip6)"
         }
-        
+
         return "name:\(name)"
     }
-    
+
  /// 标准化设备名称
     private func normalizeDeviceName(_ name: String) -> String {
         var normalized = name.lowercased()
-        
+
  // 去除常见前缀
         let prefixes = ["的", "de", "s-", "i-", "@"]
         for prefix in prefixes {
@@ -691,21 +791,21 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                 normalized.removeSubrange(range)
             }
         }
-        
+
  // 去除空格和特殊字符
         normalized = normalized
             .replacingOccurrences(of: " ", with: "")
             .replacingOccurrences(of: "-", with: "")
             .replacingOccurrences(of: "_", with: "")
-        
+
         return normalized
     }
-    
+
  /// 识别本机设备
     private func identifyLocalDevice() {
         let hostname = Host.current().localizedName ?? "Mac"
         let identifier = "local:\(hostname)"
-        
+
         let local = OnlineDevice(
             id: UUID(),
             name: hostname,
@@ -726,12 +826,12 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
             isLocalDevice: true,
             isAuthorized: true
         )
-        
+
         localDevice = local
         deviceMap[identifier] = local
-        
+
         updateDevicesList()
-        
+
         logger.info("✅ 识别本机设备: \(hostname)")
     }
 
@@ -845,11 +945,11 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         }
         updateDevicesList()
     }
-    
+
  /// 加载持久化的设备
     private func loadPersistedDevices() {
         let devices = storage.loadDevices()
-        
+
         for device in devices {
  // 标记为离线,等待重新发现
             var offlineDevice = device
@@ -862,17 +962,17 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                 deviceType: offlineDevice.deviceType,
                 sources: offlineDevice.sources
             )
-            
+
             deviceMap[device.uniqueIdentifier] = offlineDevice
         }
-        
+
         updateDevicesList()
  // 一次性清洗历史缓存中的本机污染
         recomputeLocalFlagsForAllDevices()
-        
+
         logger.info("📂 加载历史设备: \(devices.count) 台")
     }
-    
+
  /// 启动清理定时器
     private func startCleanupTimer() {
         cleanupTimer = Timer.scheduledTimer(withTimeInterval: 60.0, repeats: true) { [weak self] _ in
@@ -881,28 +981,28 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
             }
         }
     }
-    
+
  /// 清理长时间离线的设备
     private func cleanupOfflineDevices() {
         let now = Date()
         let timeout: TimeInterval = 300 // 5分钟
-        
+
  // 移除超时且没有连接历史的设备
         deviceMap = deviceMap.filter { _, device in
             if device.isLocalDevice {
                 return true // 保留本机
             }
-            
+
             if device.lastConnectedAt != nil || device.isAuthorized {
                 return true // 保留有历史的设备
             }
-            
+
             return now.timeIntervalSince(device.lastSeen) < timeout
         }
-        
+
         updateDevicesList()
     }
-    
+
  /// 映射USB设备类型
     private func mapUSBDeviceType(_ usbType: USBDeviceType) -> DeviceClassifier.DeviceType {
         switch usbType {
@@ -920,7 +1020,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
             return .unknown
         }
     }
-    
+
  /// 映射设备类型名称
     private func mapDeviceTypeName(_ typeName: String) -> DeviceClassifier.DeviceType {
         switch typeName.lowercased() {
@@ -968,13 +1068,18 @@ public struct OnlineDevice: Identifiable, Hashable, Sendable {
     public var lastSeen: Date
     public var connectionStatus: OnlineDeviceStatus
     public var lastConnectedAt: Date?
+    /// Best-effort crypto info for last successful handshake (UI-only).
+    public var lastCryptoKind: String?
+    public var lastCryptoSuite: String?
+    /// UI hint: whether we are actively guarding this connection (keepalive enabled).
+    public var guardStatus: String?
     public var isLocalDevice: Bool
     public var isAuthorized: Bool
-    
+
     public static func == (lhs: OnlineDevice, rhs: OnlineDevice) -> Bool {
         lhs.id == rhs.id
     }
-    
+
     public func hash(into hasher: inout Hasher) {
         hasher.combine(id)
     }
@@ -987,7 +1092,7 @@ public enum OnlineDeviceStatus: String, Sendable, Codable {
     case connected = "已连接"
     case online = "在线"
     case offline = "离线"
-    
+
     var priority: Int {
         switch self {
         case .connected: return 3
@@ -1003,7 +1108,7 @@ public struct DeviceStats: Sendable {
     public var online: Int = 0
     public var connected: Int = 0
     public var authorized: Int = 0
-    
+
     public init(total: Int = 0, online: Int = 0, connected: Int = 0, authorized: Int = 0) {
         self.total = total
         self.online = online
@@ -1026,21 +1131,21 @@ private class DeviceStorage {
         let schemaVersion: Int
         let devices: [OnlineDevice]
     }
-    
+
     func saveDevice(_ device: OnlineDevice) {
         var devices = loadDevices()
-        
+
  // 移除旧版本
         devices.removeAll { $0.id == device.id }
-        
+
  // 添加新版本
         devices.append(device)
-        
+
  // 只保留最近100台设备
         if devices.count > 100 {
             devices = Array(devices.suffix(100))
         }
-        
+
         do {
  // V2 写入使用包装结构，包含 schemaVersion。
             let payload = PersistedDevicesPayload(schemaVersion: schemaVersion, devices: devices)
@@ -1051,12 +1156,12 @@ private class DeviceStorage {
             logger.error("❌ 保存设备失败: \(error.localizedDescription)")
         }
     }
-    
+
     func loadDevices() -> [OnlineDevice] {
         guard let data = userDefaults.data(forKey: storageKey) else {
             return []
         }
-        
+
  // 优先按 V2 格式解析。
         if let payload = try? JSONDecoder().decode(PersistedDevicesPayload.self, from: data) {
             if payload.schemaVersion == schemaVersion {
@@ -1096,6 +1201,59 @@ extension OnlineDevice: Codable {
         case id, name, deviceType, ipv4, ipv6, macAddress, serialNumber
         case connectionTypes, services, portMap, uniqueIdentifier, sources
         case discoveredAt, lastSeen, connectionStatus, lastConnectedAt
+        case lastCryptoKind, lastCryptoSuite, guardStatus
         case isLocalDevice, isAuthorized
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+
+        id = try container.decode(UUID.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        deviceType = try container.decode(DeviceClassifier.DeviceType.self, forKey: .deviceType)
+        ipv4 = try container.decodeIfPresent(String.self, forKey: .ipv4)
+        ipv6 = try container.decodeIfPresent(String.self, forKey: .ipv6)
+        macAddress = try container.decodeIfPresent(String.self, forKey: .macAddress)
+        serialNumber = try container.decodeIfPresent(String.self, forKey: .serialNumber)
+        connectionTypes = try container.decode(Set<DeviceConnectionType>.self, forKey: .connectionTypes)
+        services = try container.decode([String].self, forKey: .services)
+        portMap = try container.decode([String: Int].self, forKey: .portMap)
+        uniqueIdentifier = try container.decode(String.self, forKey: .uniqueIdentifier)
+        sources = try container.decode([DeviceSource].self, forKey: .sources)
+        discoveredAt = try container.decode(Date.self, forKey: .discoveredAt)
+        lastSeen = try container.decode(Date.self, forKey: .lastSeen)
+        connectionStatus = try container.decode(OnlineDeviceStatus.self, forKey: .connectionStatus)
+        lastConnectedAt = try container.decodeIfPresent(Date.self, forKey: .lastConnectedAt)
+        lastCryptoKind = try container.decodeIfPresent(String.self, forKey: .lastCryptoKind)
+        lastCryptoSuite = try container.decodeIfPresent(String.self, forKey: .lastCryptoSuite)
+        guardStatus = try container.decodeIfPresent(String.self, forKey: .guardStatus)
+        isLocalDevice = try container.decode(Bool.self, forKey: .isLocalDevice)
+        isAuthorized = try container.decode(Bool.self, forKey: .isAuthorized)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        try container.encode(deviceType, forKey: .deviceType)
+        try container.encodeIfPresent(ipv4, forKey: .ipv4)
+        try container.encodeIfPresent(ipv6, forKey: .ipv6)
+        try container.encodeIfPresent(macAddress, forKey: .macAddress)
+        try container.encodeIfPresent(serialNumber, forKey: .serialNumber)
+        try container.encode(connectionTypes, forKey: .connectionTypes)
+        try container.encode(services, forKey: .services)
+        try container.encode(portMap, forKey: .portMap)
+        try container.encode(uniqueIdentifier, forKey: .uniqueIdentifier)
+        try container.encode(sources, forKey: .sources)
+        try container.encode(discoveredAt, forKey: .discoveredAt)
+        try container.encode(lastSeen, forKey: .lastSeen)
+        try container.encode(connectionStatus, forKey: .connectionStatus)
+        try container.encodeIfPresent(lastConnectedAt, forKey: .lastConnectedAt)
+        try container.encodeIfPresent(lastCryptoKind, forKey: .lastCryptoKind)
+        try container.encodeIfPresent(lastCryptoSuite, forKey: .lastCryptoSuite)
+        try container.encodeIfPresent(guardStatus, forKey: .guardStatus)
+        try container.encode(isLocalDevice, forKey: .isLocalDevice)
+        try container.encode(isAuthorized, forKey: .isAuthorized)
     }
 }

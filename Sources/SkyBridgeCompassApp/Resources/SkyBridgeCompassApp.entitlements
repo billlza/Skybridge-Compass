@@ -46,11 +46,10 @@
 	
 	<!-- App Sandbox（开发模式可以禁用） -->
 	<key>com.apple.security.app-sandbox</key>
-	<false/>
+	<true/>
 	
 	<!-- 用于调试 -->
 	<key>com.apple.security.get-task-allow</key>
 	<true/>
 </dict>
 </plist>
-

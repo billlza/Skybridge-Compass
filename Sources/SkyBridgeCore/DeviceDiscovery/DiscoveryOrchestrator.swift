@@ -174,21 +174,21 @@ actor DiscoveryJob {
 public actor DiscoveryOrchestrator {
 
  // MARK: - 冷却期配置
-    
+
  /// 冷却期配置
     public struct CooldownConfig: Sendable {
  /// 冷却期时长（秒），默认 300 秒
         public var duration: TimeInterval = 300
-        
+
  /// 是否允许手动触发覆盖冷却期，默认允许
         public var allowManualOverride: Bool = true
-        
+
         public init(duration: TimeInterval = 300, allowManualOverride: Bool = true) {
             self.duration = duration
             self.allowManualOverride = allowManualOverride
         }
     }
-    
+
  // MARK: - 属性
 
     private let logger = Logger(
@@ -198,13 +198,13 @@ public actor DiscoveryOrchestrator {
 
  /// 当前正在运行的 Job；保证同一时刻最多一个。
     private var currentJob: DiscoveryJob?
-    
+
  /// 冷却期配置
     private var cooldownConfig = CooldownConfig()
-    
+
  /// 上次扫描完成时间
     private var lastJobFinishedAt: Date?
-    
+
  /// 当前是否处于冷却期
     private var isCoolingDown: Bool {
         guard let lastFinish = lastJobFinishedAt else { return false }
@@ -236,12 +236,12 @@ public actor DiscoveryOrchestrator {
             logger.info("⏱️ 处于冷却期，忽略自动扫描请求（剩余 \(Int(remaining)) 秒）")
             return
         }
-        
+
  // 如果用户手动触发且允许覆盖，记录日志
         if isCoolingDown && isUserTriggered && cooldownConfig.allowManualOverride {
             logger.info("🚀 用户手动触发扫描，覆盖冷却期限制")
         }
-        
+
  // 如果上一次扫描还没停，先取消掉
         if let job = currentJob {
             logger.debug("Cancelling previous discovery job: \(job.id.uuidString, privacy: .public)")
@@ -262,7 +262,7 @@ public actor DiscoveryOrchestrator {
         """)
 
         await job.start(network: network, usb: usb, bluetooth: bluetooth)
-        
+
  // 🆕 扫描完成后记录时间（用于冷却期）
  // 注意：这里是异步启动，实际完成时间由 job 内部控制
  // 我们在这里记录一个启动时间 + maxDuration 的估算值
@@ -274,7 +274,7 @@ public actor DiscoveryOrchestrator {
             }
         }
     }
-    
+
  /// 记录扫描任务完成时间
     private func recordJobCompletion() {
         self.lastJobFinishedAt = Date()
@@ -287,7 +287,7 @@ public actor DiscoveryOrchestrator {
         logger.info("🛑 Stopping discovery job \(job.id.uuidString, privacy: .public)")
         await job.cancel()
         currentJob = nil
-        
+
  // 停止时也记录完成时间
         recordJobCompletion()
     }
@@ -296,25 +296,25 @@ public actor DiscoveryOrchestrator {
     public func isRunning() -> Bool {
         currentJob != nil
     }
-    
+
  /// 检查是否处于冷却期
     public func checkCoolingDown() -> Bool {
         return isCoolingDown
     }
-    
+
  /// 获取冷却期剩余时间（秒）
     public func getCooldownRemaining() -> TimeInterval {
         guard let lastFinish = lastJobFinishedAt else { return 0 }
         let elapsed = Date().timeIntervalSince(lastFinish)
         return max(0, cooldownConfig.duration - elapsed)
     }
-    
+
  /// 配置冷却期参数
     public func configureCooldown(config: CooldownConfig) {
         self.cooldownConfig = config
         logger.info("⚙️ 冷却期配置已更新: duration=\(config.duration)s, allowManualOverride=\(config.allowManualOverride)")
     }
-    
+
  /// 重置冷却期（立即允许下次扫描）
     public func resetCooldown() {
         lastJobFinishedAt = nil
@@ -350,6 +350,12 @@ public actor ServiceAdvertiserCenter {
 
         let parameters = NWParameters.tcp
         parameters.includePeerToPeer = true
+        if let tcpOptions = parameters.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
+            tcpOptions.enableKeepalive = true
+            tcpOptions.keepaliveIdle = 30
+            tcpOptions.keepaliveInterval = 15
+            tcpOptions.keepaliveCount = 4
+        }
         let listener = try NWListener(using: parameters)
 
         // 默认携带基础 TXT（iOS 端用于显示系统版本等）

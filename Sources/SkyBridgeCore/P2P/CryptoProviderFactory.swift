@@ -16,43 +16,43 @@ import Foundation
 /// Provider 工厂 - 单一事实来源
 /// 负责能力探测和 Provider 选择
 public enum CryptoProviderFactory {
-    
+
  // MARK: - SelectionPolicy
-    
+
  /// Provider 选择策略
     public enum SelectionPolicy: String, Sendable {
  /// 优先 PQC（默认）
         case preferPQC = "preferPQC"
-        
+
  /// 强制 PQC（不可用则失败）
         case requirePQC = "requirePQC"
-        
+
  /// 仅经典算法
         case classicOnly = "classicOnly"
     }
-    
+
  // MARK: - Capability
-    
+
  /// 能力探测结果
     public struct Capability: Sendable {
  /// macOS 26+ CryptoKit PQC 是否可用
         public let hasApplePQC: Bool
-        
+
  /// liboqs 是否可用
         public let hasLiboqs: Bool
-        
+
  /// 操作系统版本
         public let osVersion: String
-        
+
         public init(hasApplePQC: Bool, hasLiboqs: Bool, osVersion: String) {
             self.hasApplePQC = hasApplePQC
             self.hasLiboqs = hasLiboqs
             self.osVersion = osVersion
         }
     }
-    
+
  // MARK: - Public API
-    
+
  /// 创建 Provider
  /// - Parameters:
  /// - policy: 选择策略
@@ -66,39 +66,39 @@ public enum CryptoProviderFactory {
     ) -> any CryptoProvider {
         let capability = detectCapability(environment: environment)
         let provider = selectProvider(capability: capability, policy: policy)
-        
+
  // 发射选择事件（可观测性）
         emitProviderSelectedEvent(
             provider: provider,
             capability: capability,
             policy: policy
         )
-        
+
         return provider
     }
-    
+
  /// 仅探测能力（不创建 Provider）
     public static func detectCapability(
         environment: any CryptoEnvironment = SystemCryptoEnvironment.system
     ) -> Capability {
         let osVersion = ProcessInfo.processInfo.operatingSystemVersionString
-        
+
         var hasApplePQC = false
         if #available(iOS 26.0, macOS 26.0, *) {
             hasApplePQC = environment.checkApplePQCAvailable()
         }
-        
+
         let hasLiboqs = environment.checkLiboqsAvailable()
-        
+
         return Capability(
             hasApplePQC: hasApplePQC,
             hasLiboqs: hasLiboqs,
             osVersion: osVersion
         )
     }
-    
+
  // MARK: - Private Methods
-    
+
  /// 选择 Provider
  ///
  /// **关键**：ApplePQCProvider 引用必须用 #if HAS_APPLE_PQC_SDK 包裹
@@ -120,7 +120,7 @@ public enum CryptoProviderFactory {
                 return OQSPQCProvider()
             }
             return ClassicProvider()
-            
+
         case .requirePQC:
             #if HAS_APPLE_PQC_SDK
             if capability.hasApplePQC {
@@ -134,22 +134,30 @@ public enum CryptoProviderFactory {
             }
  // 返回一个会抛错的 Provider
             return UnavailablePQCProvider()
-            
+
         case .classicOnly:
             return ClassicProvider()
         }
     }
-    
+
  /// 发射 Provider 选择事件
     private static func emitProviderSelectedEvent(
         provider: any CryptoProvider,
         capability: Capability,
         policy: SelectionPolicy
     ) {
+        let compiledWithApplePQCSDK: Bool = {
+            #if HAS_APPLE_PQC_SDK
+            return true
+            #else
+            return false
+            #endif
+        }()
+
  // 使用 provider.tier 而非字符串判断
         let selectedTier = provider.tier
         let fallbackFromPreferred: Bool
-        
+
         switch selectedTier {
         case .nativePQC:
             fallbackFromPreferred = false
@@ -159,10 +167,10 @@ public enum CryptoProviderFactory {
         case .classic:
             fallbackFromPreferred = policy == .preferPQC
         }
-        
+
  // 确定 severity
         let severity: SecurityEventSeverity = fallbackFromPreferred ? .warning : .info
-        
+
  // 创建事件
         let event = SecurityEvent(
             type: .cryptoProviderSelected,
@@ -174,12 +182,13 @@ public enum CryptoProviderFactory {
                 "providerName": provider.providerName,
                 "suite": provider.activeSuite.rawValue,
                 "osVersion": capability.osVersion,
+                "compiledWithApplePQCSDK": String(compiledWithApplePQCSDK),
                 "hasApplePQC": String(capability.hasApplePQC),
                 "hasLiboqs": String(capability.hasLiboqs),
                 "policy": policy.rawValue
             ]
         )
-        
+
         SecurityEventEmitter.emitDetached(event)
     }
 }
@@ -191,27 +200,27 @@ internal struct UnavailablePQCProvider: CryptoProvider, Sendable {
     let providerName = "Unavailable"
     let tier: CryptoTier = .classic
     let activeSuite: CryptoSuite = .x25519Ed25519
-    
+
     func hpkeSeal(plaintext: Data, recipientPublicKey: Data, info: Data) async throws -> HPKESealedBox {
         throw CryptoProviderError.providerNotAvailable(.cryptoKitPQC)
     }
-    
+
     func hpkeOpen(sealedBox: HPKESealedBox, privateKey: Data, info: Data) async throws -> Data {
         throw CryptoProviderError.providerNotAvailable(.cryptoKitPQC)
     }
-    
+
     func hpkeOpen(sealedBox: HPKESealedBox, privateKey: SecureBytes, info: Data) async throws -> Data {
         throw CryptoProviderError.providerNotAvailable(.cryptoKitPQC)
     }
-    
+
     func sign(data: Data, using keyHandle: SigningKeyHandle) async throws -> Data {
         throw CryptoProviderError.providerNotAvailable(.cryptoKitPQC)
     }
-    
+
     func verify(data: Data, signature: Data, publicKey: Data) async throws -> Bool {
         throw CryptoProviderError.providerNotAvailable(.cryptoKitPQC)
     }
-    
+
     func generateKeyPair(for usage: KeyUsage) async throws -> KeyPair {
         throw CryptoProviderError.providerNotAvailable(.cryptoKitPQC)
     }
@@ -237,7 +246,7 @@ internal typealias OQSPQCProvider = OQSPQCCryptoProvider
 public protocol CryptoEnvironment: Sendable {
  /// 检查 Apple PQC 是否可用
     func checkApplePQCAvailable() -> Bool
-    
+
  /// 检查 liboqs 是否可用
     func checkLiboqsAvailable() -> Bool
 }
@@ -247,9 +256,9 @@ public protocol CryptoEnvironment: Sendable {
 /// 系统环境
 public struct SystemCryptoEnvironment: CryptoEnvironment, Sendable {
     public static let system = SystemCryptoEnvironment()
-    
+
     private init() {}
-    
+
  /// 检查 Apple PQC 是否可用
  ///
  /// **关键设计决策**：
@@ -266,7 +275,7 @@ public struct SystemCryptoEnvironment: CryptoEnvironment, Sendable {
         #endif
         return false
     }
-    
+
     public func checkLiboqsAvailable() -> Bool {
         #if canImport(OQSRAII)
         return true
@@ -283,16 +292,16 @@ public struct SystemCryptoEnvironment: CryptoEnvironment, Sendable {
 public struct MockCryptoEnvironment: CryptoEnvironment, Sendable {
     public let hasApplePQC: Bool
     public let hasLiboqs: Bool
-    
+
     public init(hasApplePQC: Bool = false, hasLiboqs: Bool = false) {
         self.hasApplePQC = hasApplePQC
         self.hasLiboqs = hasLiboqs
     }
-    
+
     public func checkApplePQCAvailable() -> Bool {
         hasApplePQC
     }
-    
+
     public func checkLiboqsAvailable() -> Bool {
         hasLiboqs
     }

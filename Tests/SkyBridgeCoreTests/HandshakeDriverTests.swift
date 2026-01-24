@@ -17,63 +17,63 @@ import CryptoKit
 /// Mock transport for testing HandshakeDriver
 @available(macOS 14.0, iOS 17.0, *)
 actor MockDiscoveryTransport: DiscoveryTransport {
-    
+
  /// Sent messages (peer, data)
     private(set) var sentMessages: [(PeerIdentifier, Data)] = []
-    
+
  /// Whether send should fail
     private var _shouldFailSend: Bool = false
-    
+
  /// Error to throw when send fails
     private var _sendError: Error = NSError(domain: "MockTransport", code: 1, userInfo: nil)
-    
+
  /// Delay before send completes (for testing timing)
     private var _sendDelay: Duration = .zero
-    
+
  /// Message handler for incoming messages
     var messageHandler: ((PeerIdentifier, Data) async -> Void)?
-    
+
     func send(to peer: PeerIdentifier, data: Data) async throws {
         if _sendDelay > .zero {
             try await Task.sleep(for: _sendDelay)
         }
-        
+
         if _shouldFailSend {
             throw _sendError
         }
-        
+
         sentMessages.append((peer, data))
     }
-    
+
  /// Simulate receiving a message
     func simulateReceive(from peer: PeerIdentifier, data: Data) async {
         await messageHandler?(peer, data)
     }
-    
+
  /// Clear sent messages
     func clearMessages() {
         sentMessages = []
     }
-    
+
  /// Get sent message count
     func getSentMessageCount() -> Int {
         return sentMessages.count
     }
-    
+
     func getSentMessages() -> [(PeerIdentifier, Data)] {
         return sentMessages
     }
-    
+
  /// Configure to fail sends
     func setShouldFailSend(_ value: Bool) {
         _shouldFailSend = value
     }
-    
+
  /// Configure send error
     func setSendError(_ error: Error) {
         _sendError = error
     }
-    
+
  /// Configure send delay
     func setSendDelay(_ delay: Duration) {
         _sendDelay = delay
@@ -86,7 +86,7 @@ actor MockDiscoveryTransport: DiscoveryTransport {
 struct StaticTrustProvider: HandshakeTrustProvider, Sendable {
     let deviceId: String
     let fingerprint: String?
-    
+
     func trustedFingerprint(for deviceId: String) async -> String? {
         guard deviceId == self.deviceId else { return nil }
         return fingerprint
@@ -96,7 +96,7 @@ struct StaticTrustProvider: HandshakeTrustProvider, Sendable {
         guard deviceId == self.deviceId else { return [:] }
         return [:]
     }
-    
+
     func trustedSecureEnclavePublicKey(for deviceId: String) async -> Data? {
         guard deviceId == self.deviceId else { return nil }
         return nil
@@ -107,27 +107,27 @@ struct StaticTrustProvider: HandshakeTrustProvider, Sendable {
 
 @available(macOS 14.0, iOS 17.0, *)
 final class HandshakeDriverTests: XCTestCase {
-    
+
  // MARK: - Test Fixtures
-    
+
     private var transport: MockDiscoveryTransport!
     private var provider: ClassicCryptoProvider!
     private var identityKeyPair: KeyPair!
-    
+
     override func setUp() async throws {
         try await super.setUp()
         transport = MockDiscoveryTransport()
         provider = ClassicCryptoProvider()
         identityKeyPair = try await provider.generateKeyPair(for: .signing)
     }
-    
+
     override func tearDown() async throws {
         transport = nil
         provider = nil
         identityKeyPair = nil
         try await super.tearDown()
     }
-    
+
     private func fingerprint(_ data: Data) -> String {
         let digest = SHA256.hash(data: data)
         return digest.map { String(format: "%02x", $0) }.joined()
@@ -172,83 +172,83 @@ final class HandshakeDriverTests: XCTestCase {
             trustProvider: trustProvider
         )
     }
-    
+
  // MARK: - Property 4: Handshake State Machine Validity
-    
+
  /// **Property 4: Handshake State Machine Validity**
  /// *For any* sequence of handshake events, the HandshakeDriver SHALL only
  /// transition through valid state sequences:
  /// idle → sendingMessageA → waitingMessageB → established | failed
  /// **Validates: Requirements 4.1, 4.2**
-    
+
  /// Test that driver starts in idle state
     func testProperty4_InitialStateIsIdle() async throws {
         let driver = try makeDriver(timeout: .seconds(5))
-        
+
         let state = await driver.getCurrentState()
         guard case .idle = state else {
             XCTFail("Initial state should be idle, got \(state)")
             return
         }
     }
-    
+
  /// Test that initiating handshake transitions to sendingMessageA then waitingMessageB
     func testProperty4_InitiateTransitionsToWaitingMessageB() async throws {
         let driver = try makeDriver(timeout: .seconds(5))
-        
+
         let peer = PeerIdentifier(deviceId: "test-peer")
-        
+
  // Start handshake in background
         let handshakeTask = Task {
             try await driver.initiateHandshake(with: peer)
         }
-        
+
  // Give time for state transition
         try await Task.sleep(for: .milliseconds(100))
-        
+
         let state = await driver.getCurrentState()
         guard case .waitingMessageB = state else {
             XCTFail("State should be waitingMessageB after initiate, got \(state)")
             handshakeTask.cancel()
             return
         }
-        
+
  // Verify message was sent
         let sentCount = await transport.getSentMessageCount()
         XCTAssertEqual(sentCount, 1, "Should have sent MessageA")
-        
+
  // Cancel to clean up
         await driver.cancel()
         handshakeTask.cancel()
     }
-    
+
  /// Test that transport failure transitions to failed state
     func testProperty4_TransportFailureTransitionsToFailed() async throws {
         await transport.setShouldFailSend(true)
-        
+
         let driver = try makeDriver(timeout: .seconds(5))
-        
+
         let peer = PeerIdentifier(deviceId: "test-peer")
-        
+
         do {
             _ = try await driver.initiateHandshake(with: peer)
             XCTFail("Should have thrown error")
         } catch {
  // Expected
         }
-        
+
         let state = await driver.getCurrentState()
         guard case .failed(let reason) = state else {
             XCTFail("State should be failed after transport error, got \(state)")
             return
         }
-        
+
         guard case .transportError = reason else {
             XCTFail("Failure reason should be transportError, got \(reason)")
             return
         }
     }
-    
+
     func testIdentityPinningMismatchFailsHandshake() async throws {
         let trustedKeyPair = try await provider.generateKeyPair(for: .signing)
         let untrustedKeyPair = try await provider.generateKeyPair(for: .signing)
@@ -256,9 +256,9 @@ final class HandshakeDriverTests: XCTestCase {
             deviceId: "test-peer",
             fingerprint: fingerprint(trustedKeyPair.publicKey.bytes)
         )
-        
+
         let driver = try makeDriver(trustProvider: trustProvider)
-        
+
         let initiatorContext = try await HandshakeContext.create(
             role: .initiator,
             cryptoProvider: provider
@@ -267,16 +267,16 @@ final class HandshakeDriverTests: XCTestCase {
             identityKeyHandle: .softwareKey(untrustedKeyPair.privateKey.bytes),
             identityPublicKey: encodeIdentityPublicKey(untrustedKeyPair.publicKey.bytes)
         )
-        
+
         let peer = PeerIdentifier(deviceId: "test-peer")
         await driver.handleMessage(messageA.encoded, from: peer)
-        
+
         let state = await driver.getCurrentState()
         guard case .failed(let reason) = state else {
             XCTFail("Expected failed state, got \(state)")
             return
         }
-        
+
         guard case .identityMismatch = reason else {
             XCTFail("Expected identityMismatch, got \(reason)")
             return
@@ -293,14 +293,14 @@ final class HandshakeDriverTests: XCTestCase {
             identityKeyHandle: .softwareKey(initiatorKeyPair.privateKey.bytes),
             identityPublicKey: encodeIdentityPublicKey(initiatorKeyPair.publicKey.bytes)
         )
-        
+
         let driver = try makeDriver()
-        
+
         let peer = PeerIdentifier(deviceId: "test-peer")
         await driver.handleMessage(messageA.encoded, from: peer)
 
         try await Task.sleep(for: .milliseconds(50))
-        
+
         let stateBeforeFinished = await driver.getCurrentState()
         guard case .waitingFinished(_, let sessionKeys, let expectingFrom) = stateBeforeFinished else {
             XCTFail("Expected waitingFinished after sending MessageB, got \(stateBeforeFinished)")
@@ -309,15 +309,15 @@ final class HandshakeDriverTests: XCTestCase {
         XCTAssertEqual(expectingFrom, .initiator)
         XCTAssertFalse(sessionKeys.sendKey.isEmpty, "sendKey should not be empty")
         XCTAssertFalse(sessionKeys.receiveKey.isEmpty, "receiveKey should not be empty")
-        
+
         let sentMessages = await transport.getSentMessages()
         XCTAssertEqual(sentMessages.count, 2, "Responder should send MessageB and Finished")
-        
+
         let initiatorFinished = makePeerFinishedFromInitiator(sessionKeys: sessionKeys)
         await driver.handleMessage(initiatorFinished.encoded, from: peer)
-        
+
         try await Task.sleep(for: .milliseconds(50))
-        
+
         let stateAfterFinished = await driver.getCurrentState()
         guard case .established(let establishedKeys) = stateAfterFinished else {
             XCTFail("Expected established after Finished, got \(stateAfterFinished)")
@@ -341,18 +341,18 @@ final class HandshakeDriverTests: XCTestCase {
 
         let peer = PeerIdentifier(deviceId: "test-peer")
         await driver.handleMessage(messageA.encoded, from: peer)
-        
+
         try await Task.sleep(for: .milliseconds(50))
-        
+
         let state = await driver.getCurrentState()
         guard case .waitingFinished(_, let sessionKeys, _) = state else {
             XCTFail("Expected waitingFinished before metrics, got \(state)")
             return
         }
-        
+
         let initiatorFinished = makePeerFinishedFromInitiator(sessionKeys: sessionKeys)
         await driver.handleMessage(initiatorFinished.encoded, from: peer)
-        
+
         try await Task.sleep(for: .milliseconds(50))
 
         let metrics = await driver.getLastMetrics()
@@ -375,21 +375,21 @@ final class HandshakeDriverTests: XCTestCase {
         let mac = HMAC<SHA256>.authenticationCode(for: sessionKeys.transcriptHash, using: macKey)
         return HandshakeFinished(direction: .initiatorToResponder, mac: Data(mac))
     }
-    
+
  /// Test that double initiate throws alreadyInProgress
     func testProperty4_DoubleInitiateThrowsAlreadyInProgress() async throws {
         let driver = try makeDriver(timeout: .seconds(10))
-        
+
         let peer = PeerIdentifier(deviceId: "test-peer")
-        
+
  // Start first handshake
         let firstTask = Task {
             try await driver.initiateHandshake(with: peer)
         }
-        
+
  // Give time for state transition
         try await Task.sleep(for: .milliseconds(100))
-        
+
  // Try to start second handshake
         do {
             _ = try await driver.initiateHandshake(with: peer)
@@ -402,69 +402,69 @@ final class HandshakeDriverTests: XCTestCase {
                 XCTFail("Expected alreadyInProgress, got \(error)")
             }
         }
-        
+
  // Clean up
         await driver.cancel()
         firstTask.cancel()
     }
-    
+
  /// Test that cancel transitions to failed with cancelled reason
     func testProperty4_CancelTransitionsToFailedCancelled() async throws {
         let driver = try makeDriver(timeout: .seconds(10))
-        
+
         let peer = PeerIdentifier(deviceId: "test-peer")
-        
+
  // Start handshake
         let handshakeTask = Task {
             try await driver.initiateHandshake(with: peer)
         }
-        
+
  // Give time for state transition
         try await Task.sleep(for: .milliseconds(100))
-        
+
  // Cancel
         await driver.cancel()
-        
+
         let state = await driver.getCurrentState()
         guard case .failed(let reason) = state else {
             XCTFail("State should be failed after cancel, got \(state)")
             handshakeTask.cancel()
             return
         }
-        
+
         XCTAssertEqual(reason, .cancelled, "Failure reason should be cancelled")
         handshakeTask.cancel()
     }
-    
+
  // MARK: - Property 6: Handshake Timeout Enforcement
-    
+
  /// **Property 6: Handshake Timeout Enforcement**
  /// *For any* handshake that exceeds the configured timeout, the HandshakeDriver
  /// SHALL transition to failed state within a reasonable scheduling window
  /// (typically < 1 second, depending on system load).
  /// **Validates: Requirements 4.5, 5.4**
-    
+
  /// Test that timeout triggers failure
     func testProperty6_TimeoutTriggersFailure() async throws {
  // Use very short timeout for testing
         let shortTimeout: Duration = .milliseconds(200)
-        
+
         let driver = try makeDriver(timeout: shortTimeout)
-        
+
         let peer = PeerIdentifier(deviceId: "test-peer")
-        
+
         let startTime = ContinuousClock.now
-        
+
         do {
             _ = try await driver.initiateHandshake(with: peer)
             XCTFail("Should have timed out")
         } catch let error as HandshakeError {
             let elapsed = ContinuousClock.now - startTime
-            
+
  // Verify timeout occurred within reasonable window (< 1s SLA)
  // Allow some tolerance for scheduling
             XCTAssertLessThan(elapsed, .seconds(1), "Timeout should occur within 1 second SLA")
-            
+
  // Verify it's a timeout error
             guard case .failed(let reason) = error else {
                 XCTFail("Expected failed error, got \(error)")
@@ -472,7 +472,7 @@ final class HandshakeDriverTests: XCTestCase {
             }
             XCTAssertEqual(reason, .timeout, "Failure reason should be timeout")
         }
-        
+
  // Verify state is failed
         let state = await driver.getCurrentState()
         guard case .failed(let reason) = state else {
@@ -481,36 +481,36 @@ final class HandshakeDriverTests: XCTestCase {
         }
         XCTAssertEqual(reason, .timeout, "Failure reason should be timeout")
     }
-    
+
  /// Test that timeout respects configured duration
     func testProperty6_TimeoutRespectsConfiguredDuration() async throws {
  // Test with different timeout values
         let timeouts: [Duration] = [.milliseconds(100), .milliseconds(300), .milliseconds(500)]
-        
+
         for timeout in timeouts {
             let driver = try makeDriver(timeout: timeout)
-            
+
             let peer = PeerIdentifier(deviceId: "test-peer-\(timeout)")
-            
+
             let startTime = ContinuousClock.now
-            
+
             do {
                 _ = try await driver.initiateHandshake(with: peer)
                 XCTFail("Should have timed out for timeout \(timeout)")
             } catch {
                 let elapsed = ContinuousClock.now - startTime
-                
+
  // Timeout should occur after configured duration but within SLA
  // Allow tolerance for scheduling (100ms tolerance as per design)
                 let minExpected = timeout
                 let maxExpected = timeout + .milliseconds(500) // Allow 500ms scheduling tolerance
-                
+
                 XCTAssertGreaterThanOrEqual(elapsed, minExpected,
                     "Timeout should not occur before configured duration")
                 XCTAssertLessThan(elapsed, maxExpected,
                     "Timeout should occur within reasonable scheduling window")
             }
-            
+
  // Clear transport for next iteration
             await transport.clearMessages()
         }
@@ -540,25 +540,25 @@ final class HandshakeDriverTests: XCTestCase {
             XCTAssertNil(metrics.isFallback)
         }
     }
-    
+
  /// Test that successful completion before timeout doesn't trigger timeout
     func testProperty6_SuccessBeforeTimeoutDoesNotTriggerTimeout() async throws {
         let driver = try makeDriver(timeout: .seconds(5))
-        
+
         let peer = PeerIdentifier(deviceId: "test-peer")
-        
+
  // Start handshake
         let handshakeTask = Task {
             try await driver.initiateHandshake(with: peer)
         }
-        
+
  // Give time for MessageA to be sent
         try await Task.sleep(for: .milliseconds(100))
-        
+
  // Simulate receiving MessageB (create a valid response)
  // For this test, we'll cancel instead since creating valid MessageB is complex
         await driver.cancel()
-        
+
  // Verify we got cancelled, not timeout
         let state = await driver.getCurrentState()
         guard case .failed(let reason) = state else {
@@ -566,54 +566,54 @@ final class HandshakeDriverTests: XCTestCase {
             handshakeTask.cancel()
             return
         }
-        
+
         XCTAssertEqual(reason, .cancelled, "Should be cancelled, not timeout")
         handshakeTask.cancel()
     }
-    
+
  // MARK: - Double Resume Protection Tests (P0)
-    
+
  /// Test that finishOnce prevents double resume
     func testP0_FinishOncePreventDoubleResume() async throws {
         let driver = try makeDriver(timeout: .seconds(5))
-        
+
         let peer = PeerIdentifier(deviceId: "test-peer")
-        
+
  // Start handshake
         let handshakeTask = Task {
             try await driver.initiateHandshake(with: peer)
         }
-        
+
  // Give time for state transition
         try await Task.sleep(for: .milliseconds(100))
-        
+
  // Cancel should work without crash (tests finishOnce)
         await driver.cancel()
-        
+
  // Second cancel should be safe (no double resume)
         await driver.cancel()
-        
+
  // Should not crash
         handshakeTask.cancel()
     }
-    
+
  // MARK: - Context Zeroization Tests
-    
+
  /// Test that context is zeroized on failure
     func testContextZeroizedOnFailure() async throws {
         await transport.setShouldFailSend(true)
-        
+
         let driver = try makeDriver()
-        
+
         let peer = PeerIdentifier(deviceId: "test-peer")
-        
+
         do {
             _ = try await driver.initiateHandshake(with: peer)
             XCTFail("Should have thrown error")
         } catch {
  // Expected - context should be zeroized internally
         }
-        
+
  // State should be failed
         let state = await driver.getCurrentState()
         guard case .failed = state else {
@@ -621,24 +621,24 @@ final class HandshakeDriverTests: XCTestCase {
             return
         }
     }
-    
+
  /// Test that context is zeroized on cancel
     func testContextZeroizedOnCancel() async throws {
         let driver = try makeDriver(timeout: .seconds(10))
-        
+
         let peer = PeerIdentifier(deviceId: "test-peer")
-        
+
  // Start handshake
         let handshakeTask = Task {
             try await driver.initiateHandshake(with: peer)
         }
-        
+
  // Give time for state transition
         try await Task.sleep(for: .milliseconds(100))
-        
+
  // Cancel - should zeroize context
         await driver.cancel()
-        
+
  // State should be failed with cancelled
         let state = await driver.getCurrentState()
         guard case .failed(let reason) = state else {
@@ -647,23 +647,23 @@ final class HandshakeDriverTests: XCTestCase {
             return
         }
         XCTAssertEqual(reason, .cancelled)
-        
+
         handshakeTask.cancel()
     }
-    
+
  /// Test that context is zeroized on timeout
     func testContextZeroizedOnTimeout() async throws {
         let driver = try makeDriver(timeout: .milliseconds(100))
-        
+
         let peer = PeerIdentifier(deviceId: "test-peer")
-        
+
         do {
             _ = try await driver.initiateHandshake(with: peer)
             XCTFail("Should have timed out")
         } catch {
  // Expected - context should be zeroized internally
         }
-        
+
  // State should be failed with timeout
         let state = await driver.getCurrentState()
         guard case .failed(let reason) = state else {
@@ -672,52 +672,52 @@ final class HandshakeDriverTests: XCTestCase {
         }
         XCTAssertEqual(reason, .timeout)
     }
-    
+
  // MARK: - Property 2: Signing Callback Invocation Tests
  // **Feature: p2p-todo-completion, Property 2: Signing Callback Invocation**
  // **Validates: Requirements 2.1, 2.2**
-    
+
  /// **Property 2: Signing Callback Invocation**
  /// *For any* HandshakeDriver configured with a SigningCallback, all signing
  /// operations should use the callback instead of raw key data.
-    
+
  /// Test that signData uses callback when provided
     func testProperty2_SignDataUsesCallbackWhenProvided() async throws {
         let mockCallback = MockSigningCallback()
-        
+
         let driver = try makeDriver(identityKeyHandle: .callback(mockCallback))
-        
+
  // Test data to sign
         let testData = Data("test-data-to-sign".utf8)
-        
+
  // Call signData
         let signature = try await driver.signData(testData)
-        
+
  // Verify callback was invoked
         let callCount = await mockCallback.getSignCallCount()
         XCTAssertEqual(callCount, 1, "Signing callback should be called once")
-        
+
  // Verify the data passed to callback
         let lastData = await mockCallback.getLastSignedData()
         XCTAssertEqual(lastData, testData, "Callback should receive the correct data")
-        
+
  // Verify signature is from callback
         XCTAssertEqual(signature, MockSigningCallback.mockSignature, "Should return callback's signature")
     }
-    
+
  /// Test that signData falls back to raw key when no callback
     func testProperty2_SignDataFallsBackToRawKey() async throws {
         let driver = try makeDriver()
-        
+
  // Test data to sign
         let testData = Data("test-data-to-sign".utf8)
-        
+
  // Call signData - should use CryptoProvider
         let signature = try await driver.signData(testData)
-        
+
  // Verify signature is valid (from CryptoProvider)
         XCTAssertFalse(signature.isEmpty, "Should produce a signature")
-        
+
  // Verify signature can be verified
         let isValid = try await provider.verify(
             data: testData,
@@ -726,7 +726,7 @@ final class HandshakeDriverTests: XCTestCase {
         )
         XCTAssertTrue(isValid, "Signature should be valid")
     }
-    
+
  /// Test that signData surfaces callback errors
     func testProperty2_SignDataThrowsWhenCallbackFails() async throws {
         let mockCallback = MockSigningCallback()
@@ -743,18 +743,18 @@ final class HandshakeDriverTests: XCTestCase {
  // Expected
         }
     }
-    
+
  /// Test that callback takes priority over raw key
     func testProperty2_CallbackTakesPriorityOverSoftwareKey() async throws {
         let mockCallback = MockSigningCallback()
-        
+
         let driver = try makeDriver(identityKeyHandle: .callback(mockCallback))
-        
+
         let testData = Data("priority-test".utf8)
-        
+
  // Call signData
         let signature = try await driver.signData(testData)
-        
+
  // Verify callback was used (not raw key)
         let callCount = await mockCallback.getSignCallCount()
         XCTAssertEqual(callCount, 1, "Callback should be called")
@@ -1021,9 +1021,7 @@ final class HandshakeDriverTests: XCTestCase {
         print("[BENCH] Provider selection PQC unavailable (us): \(pqcUnavailableStats.describe(unit: "us"))")
         print("[BENCH] Provider selection self-test failure (us): \(selfTestFailureStats.describe(unit: "us"))")
 
-        let dateFormatter = DateFormatter()
-        dateFormatter.dateFormat = "yyyy-MM-dd"
-        let dateString = dateFormatter.string(from: Date())
+        let dateString = ArtifactDate.current()
         let artifactsDir = URL(fileURLWithPath: "Artifacts")
         try FileManager.default.createDirectory(at: artifactsDir, withIntermediateDirectories: true)
         let csvPath = artifactsDir.appendingPathComponent("provider_selection_\(dateString).csv")
@@ -1245,46 +1243,46 @@ private struct StaticTrustProviderWithKEM: HandshakeTrustProvider, Sendable {
 /// **Feature: p2p-todo-completion, Property 2: Signing Callback Invocation**
 @available(macOS 14.0, iOS 17.0, *)
 actor MockSigningCallback: SigningCallback {
-    
+
  /// Mock signature returned by sign()
     static let mockSignature = Data("mock-signature-from-callback".utf8)
-    
+
  /// Number of times sign() was called
     private var signCallCount: Int = 0
-    
+
  /// Last data passed to sign()
     private var lastSignedData: Data?
-    
+
  /// Whether sign should throw an error
     private var shouldFail: Bool = false
-    
+
     func sign(data: Data) async throws -> Data {
         signCallCount += 1
         lastSignedData = data
-        
+
         if shouldFail {
             throw NSError(domain: "MockSigningCallback", code: 1, userInfo: [
                 NSLocalizedDescriptionKey: "Mock signing failure"
             ])
         }
-        
+
         return Self.mockSignature
     }
-    
+
  // MARK: - Test Helpers
-    
+
     func getSignCallCount() -> Int {
         return signCallCount
     }
-    
+
     func getLastSignedData() -> Data? {
         return lastSignedData
     }
-    
+
     func setShouldFail(_ value: Bool) {
         shouldFail = value
     }
-    
+
     func reset() {
         signCallCount = 0
         lastSignedData = nil
@@ -1298,23 +1296,23 @@ actor MockSigningCallback: SigningCallback {
 /// **Validates: Requirements 7.1, 7.4, 7.5**
 @available(macOS 14.0, iOS 17.0, *)
 final class HandshakeDriverPhase2InitTests: XCTestCase {
-    
+
     var transport: MockDiscoveryTransport!
     var cryptoProvider: ClassicCryptoProvider!
-    
+
     override func setUp() async throws {
         transport = MockDiscoveryTransport()
         cryptoProvider = ClassicCryptoProvider()
     }
-    
+
  // MARK: - 5.6: Empty Suites → throw emptyOfferedSuites
-    
+
  /// Test that empty offeredSuites throws emptyOfferedSuites error
     func testEmptySuitesThrowsEmptyOfferedSuites() throws {
         let ed25519Provider = ClassicSignatureProvider()
         let ed25519Key = SigningKeyHandle.softwareKey(Data(repeating: 0x42, count: 32))
         let identityPublicKey = encodeIdentityPublicKey(Data(repeating: 0x01, count: 32))
-        
+
         XCTAssertThrowsError(
             try HandshakeDriver(
                 transport: transport,
@@ -1332,19 +1330,19 @@ final class HandshakeDriverPhase2InitTests: XCTestCase {
             }
         }
     }
-    
+
  // MARK: - 5.6: Suites 混装 → throw homogeneityViolation
-    
+
  /// Test that mixing PQC and Classic suites with ML-DSA-65 throws homogeneityViolation
     func testMixedSuitesWithMLDSAThrowsHomogeneityViolation() throws {
         let pqcProvider = PQCSignatureProvider(backend: .oqs)
  // ML-DSA-65 需要 64 bytes seed 或 4032 bytes full key
         let mldsaKey = SigningKeyHandle.softwareKey(Data(repeating: 0x42, count: 64))
         let identityPublicKey = encodeIdentityPublicKey(Data(repeating: 0x01, count: 1952), algorithm: .mlDSA65)
-        
+
  // 混装 PQC 和 Classic suites
         let mixedSuites: [CryptoSuite] = [.mlkem768MLDSA65, .x25519Ed25519]
-        
+
         XCTAssertThrowsError(
             try HandshakeDriver(
                 transport: transport,
@@ -1363,16 +1361,16 @@ final class HandshakeDriverPhase2InitTests: XCTestCase {
             XCTAssertTrue(message.contains("non-PQC"), "Message should mention non-PQC suites")
         }
     }
-    
+
  /// Test that mixing PQC and Classic suites with Ed25519 throws homogeneityViolation
     func testMixedSuitesWithEd25519ThrowsHomogeneityViolation() throws {
         let ed25519Provider = ClassicSignatureProvider()
         let ed25519Key = SigningKeyHandle.softwareKey(Data(repeating: 0x42, count: 32))
         let identityPublicKey = encodeIdentityPublicKey(Data(repeating: 0x01, count: 32))
-        
+
  // 混装 PQC 和 Classic suites
         let mixedSuites: [CryptoSuite] = [.x25519Ed25519, .mlkem768MLDSA65]
-        
+
         XCTAssertThrowsError(
             try HandshakeDriver(
                 transport: transport,
@@ -1391,16 +1389,16 @@ final class HandshakeDriverPhase2InitTests: XCTestCase {
             XCTAssertTrue(message.contains("PQC"), "Message should mention PQC suites")
         }
     }
-    
+
  // MARK: - 5.6: Provider/Algorithm Mismatch → throw providerAlgorithmMismatch
-    
+
  /// Test that provider algorithm mismatch throws providerAlgorithmMismatch
     func testProviderAlgorithmMismatchThrows() throws {
  // 使用 Ed25519 provider 但声明 ML-DSA-65 算法
         let ed25519Provider = ClassicSignatureProvider()
         let mldsaKey = SigningKeyHandle.softwareKey(Data(repeating: 0x42, count: 64))
         let identityPublicKey = encodeIdentityPublicKey(Data(repeating: 0x01, count: 32))
-        
+
         XCTAssertThrowsError(
             try HandshakeDriver(
                 transport: transport,
@@ -1420,16 +1418,16 @@ final class HandshakeDriverPhase2InitTests: XCTestCase {
             XCTAssertEqual(algorithm, "ML-DSA-65")
         }
     }
-    
+
  // MARK: - 5.6: KeyHandle 类型错/长度错 → throw signatureAlgorithmMismatch
-    
+
  /// Test that wrong key length for Ed25519 throws signatureAlgorithmMismatch
     func testWrongKeyLengthForEd25519Throws() throws {
         let ed25519Provider = ClassicSignatureProvider()
  // Ed25519 需要 32 或 64 bytes，这里给 16 bytes
         let wrongKey = SigningKeyHandle.softwareKey(Data(repeating: 0x42, count: 16))
         let identityPublicKey = encodeIdentityPublicKey(Data(repeating: 0x01, count: 32))
-        
+
         XCTAssertThrowsError(
             try HandshakeDriver(
                 transport: transport,
@@ -1449,14 +1447,14 @@ final class HandshakeDriverPhase2InitTests: XCTestCase {
             XCTAssertTrue(keyHandleType.contains("16 bytes"), "Should mention wrong key length")
         }
     }
-    
+
  /// Test that wrong key length for ML-DSA-65 throws signatureAlgorithmMismatch
     func testWrongKeyLengthForMLDSAThrows() throws {
         let pqcProvider = PQCSignatureProvider(backend: .oqs)
  // ML-DSA-65 需要 64 或 4032 bytes，这里给 32 bytes
         let wrongKey = SigningKeyHandle.softwareKey(Data(repeating: 0x42, count: 32))
         let identityPublicKey = encodeIdentityPublicKey(Data(repeating: 0x01, count: 1952), algorithm: .mlDSA65)
-        
+
         XCTAssertThrowsError(
             try HandshakeDriver(
                 transport: transport,
@@ -1476,15 +1474,15 @@ final class HandshakeDriverPhase2InitTests: XCTestCase {
             XCTAssertTrue(keyHandleType.contains("32 bytes"), "Should mention wrong key length")
         }
     }
-    
+
  // MARK: - Positive Tests: Valid Initialization
-    
+
  /// Test that valid Ed25519 configuration succeeds
     func testValidEd25519ConfigurationSucceeds() throws {
         let ed25519Provider = ClassicSignatureProvider()
         let ed25519Key = SigningKeyHandle.softwareKey(Data(repeating: 0x42, count: 32))
         let identityPublicKey = encodeIdentityPublicKey(Data(repeating: 0x01, count: 32))
-        
+
  // Should not throw
         let driver = try HandshakeDriver(
             transport: transport,
@@ -1495,16 +1493,16 @@ final class HandshakeDriverPhase2InitTests: XCTestCase {
             identityPublicKey: identityPublicKey,
             offeredSuites: [.x25519Ed25519]
         )
-        
+
         XCTAssertNotNil(driver)
     }
-    
+
  /// Test that valid ML-DSA-65 configuration succeeds
     func testValidMLDSAConfigurationSucceeds() throws {
         let pqcProvider = PQCSignatureProvider(backend: .oqs)
         let mldsaKey = SigningKeyHandle.softwareKey(Data(repeating: 0x42, count: 64))
         let identityPublicKey = encodeIdentityPublicKey(Data(repeating: 0x01, count: 1952), algorithm: .mlDSA65)
-        
+
  // Should not throw
         let driver = try HandshakeDriver(
             transport: transport,
@@ -1515,17 +1513,17 @@ final class HandshakeDriverPhase2InitTests: XCTestCase {
             identityPublicKey: identityPublicKey,
             offeredSuites: [.mlkem768MLDSA65]
         )
-        
+
         XCTAssertNotNil(driver)
     }
-    
+
  /// Test that callback key handle bypasses length validation
     func testCallbackKeyHandleBypassesLengthValidation() throws {
         let ed25519Provider = ClassicSignatureProvider()
         let callback = MockSigningCallback()
         let callbackKey = SigningKeyHandle.callback(callback)
         let identityPublicKey = encodeIdentityPublicKey(Data(repeating: 0x01, count: 32))
-        
+
  // Should not throw - callback bypasses length validation
         let driver = try HandshakeDriver(
             transport: transport,
@@ -1536,7 +1534,7 @@ final class HandshakeDriverPhase2InitTests: XCTestCase {
             identityPublicKey: identityPublicKey,
             offeredSuites: [.x25519Ed25519]
         )
-        
+
         XCTAssertNotNil(driver)
     }
 }

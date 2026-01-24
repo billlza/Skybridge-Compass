@@ -5,6 +5,7 @@ import Combine
 import CryptoKit
 import os
 import Security
+import UserNotifications
 
 #if canImport(SkyBridgeCore)
 // 当作为模块导入时
@@ -20,9 +21,9 @@ import Security
 /// 4. 使用actor隔离并发操作
 @MainActor
 public class DeviceDiscoveryManagerOptimized: ObservableObject {
-    
+
  // MARK: - 发布的属性
-    
+
     @Published public var discoveredDevices: [DiscoveredDevice] = []
     @Published public var connectionStatus: DeviceDiscoveryConnectionStatus = .disconnected
  /// 加密状态（TLS版本），用于UI展示
@@ -31,25 +32,25 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
  /// 中文说明：当启用TLS时，尝试在握手阶段通过验证回调获取协议与cipher suite，并发布到UI。
     @Published public var tlsHandshakeDetails: TLSHandshakeDetails? = nil
     @Published public var isScanning: Bool = false
-    
+
  // MARK: - 私有属性
-    
+
     private let logger = Logger(subsystem: "com.skybridge.discovery.optimized", category: "Performance")
-    
+
  // 使用专用的高优先级并发队列
     private let discoveryQueue = DispatchQueue(
         label: "com.skybridge.discovery.optimized",
         qos: .userInitiated,
         attributes: .concurrent
     )
-    
+
     private var browsers: [NWBrowser] = []
     private var listener: NWListener?
     private var connections: [String: NWConnection] = [:]
-    
+
  // 使用 actor 来管理设备缓存，避免数据竞争
     private let deviceCache = DeviceCache()
-    
+
  // 批量更新控制（事件驱动 + 防抖）
     private var flushTask: Task<Void, Never>?
  /// 统一身份解析器，用于设备指纹生成与合并决策。
@@ -57,11 +58,11 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
  /// 外部候选指纹提供者（例如来自 DeviceDiscoveryService 的 SSDP/ARP/HTTP 指纹聚合）。
     private var fingerprintProvider: (@Sendable (DiscoveredDevice) async -> IdentityFingerprint?)?
     private var pendingUpdates: Set<DiscoveredDevice> = []
-    
+
  // USB设备管理器
     private var usbManager: USBCConnectionManager?
     private var usbCancellable: AnyCancellable?
-    
+
  // 服务类型瘦身 - 默认仅SkyBridge，兼容/调试模式可扩展其余类型
  // 服务类型分类 - 核心服务（默认扫描）
     private let coreServiceTypes = [
@@ -75,7 +76,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         "_device-info._tcp",
         "_android._tcp"
     ]
-    
+
  // 扩展服务类型（仅在兼容模式下启用）
     private let extendedServiceTypes = [
         "_printer._tcp",
@@ -88,11 +89,11 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         "_raop._tcp",
         "_workstation._tcp"
     ]
-    
+
  /// 兼容模式开关（默认关闭）；可选启用 companion-link
     public var enableCompatibilityMode: Bool = false
     public var enableCompanionLink: Bool = false
-    
+
  /// IPv6 支持开关（从 SettingsManager 同步）
     public var enableIPv6Support: Bool = false {
         didSet {
@@ -100,7 +101,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             logger.info("🌐 IPv6 支持已\(enabled ? "启用" : "禁用")")
         }
     }
-    
+
  /// 新发现算法开关（从 SettingsManager 同步）
  /// 新算法使用并行扫描 + 智能去重 + 指纹优先匹配
     public var useNewDiscoveryAlgorithm: Bool = false {
@@ -109,36 +110,36 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             logger.info("🔬 发现算法已切换为: \(useNew ? "新算法(并行+指纹)" : "经典算法")")
         }
     }
-    
+
     private func effectiveServiceTypes() -> [String] {
  // 1. 基础核心服务
         var types = coreServiceTypes
-        
+
  // 2. 如果未启用 Companion Link，移除相关服务（虽然 core 中包含，这里做个双重检查或过滤）
         if !enableCompanionLink {
             types.removeAll { $0 == "_companion-link._tcp" }
         }
-        
+
  // 3. 兼容模式下添加扩展服务
         if enableCompatibilityMode {
             types.append(contentsOf: extendedServiceTypes)
         }
-        
+
         return types
     }
     private let serviceDomain = "local."
-    
+
     public init() {
         logger.info("🚀 初始化高性能设备发现管理器")
-        
+
  // 初始化USB管理器
         setupUSBManager()
     }
-    
+
  /// 设置USB设备管理器
     private func setupUSBManager() {
         usbManager = USBCConnectionManager()
-        
+
  // 订阅USB设备变化
         usbCancellable = usbManager?.$discoveredUSBDevices
             .sink { [weak self] usbDevices in
@@ -147,32 +148,32 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                 }
             }
     }
-    
+
  /// 处理USB设备更新
     private func handleUSBDevicesUpdate(_ usbDevices: [USBDeviceInfo]) async {
         logger.info("🔌 收到USB设备更新，共 \(usbDevices.count) 台设备")
-        
+
         for usbDevice in usbDevices {
  // 将USB设备转换为DiscoveredDevice
             let discoveredDevice = convertUSBDeviceToDiscoveredDevice(usbDevice)
-            
+
  // 直接添加到待处理更新队列（会被批量刷新机制处理，包含去重逻辑）
             pendingUpdates.insert(discoveredDevice)
             scheduleFlush()
-            
+
             logger.info("✅ 添加USB设备到发现列表: \(discoveredDevice.name)")
         }
     }
-    
+
  /// 将USB设备信息转换为DiscoveredDevice
     private func convertUSBDeviceToDiscoveredDevice(_ usbDevice: USBDeviceInfo) -> DiscoveredDevice {
  // 使用序列号作为唯一标识符，如果没有序列号则使用设备ID
         let uniqueId = usbDevice.serialNumber ?? usbDevice.deviceID
-        
+
  // 构建服务列表
         var services: [String] = ["USB"]
         services.append(contentsOf: usbDevice.capabilities)
-        
+
         return DiscoveredDevice(
             id: UUID(),
             name: usbDevice.name,
@@ -187,9 +188,9 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             isLocalDevice: false  // 初始化为 false，由 applyLocalFlag 统一判定
         )
     }
-    
+
  // MARK: - 公共方法
-    
+
  /// 开始扫描 - 完全异步化
     public func startScanning() {
         guard !isScanning else {
@@ -198,20 +199,20 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         }
         logger.info("🔍 开始高性能扫描（包括USB设备）")
         isScanning = true
-        
+
  // 改为事件驱动 + 防抖，无需定时器
-        
+
  // 在后台并发启动所有浏览器
         Task.detached(priority: .userInitiated) { [weak self] in
             await self?.startBrowsersConcurrently()
         }
-        
+
  // 异步启动广播（捕获服务类型，避免在后台线程读取 MainActor 隔离状态）
         let serviceTypeForBroadcast = "_skybridge._tcp"
         Task.detached(priority: .utility) { [weak self, serviceTypeForBroadcast] in
             await self?.startAdvertisingBackground(serviceType: serviceTypeForBroadcast)
         }
-        
+
  // 扫描USB设备
         Task { @MainActor [weak self] in
             await self?.scanUSBDevices()
@@ -235,34 +236,34 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         }
         stopScanning()
     }
-    
+
  /// 扫描USB设备
     private func scanUSBDevices() async {
         logger.info("🔌 开始扫描USB设备")
-        
+
         guard let usbManager = usbManager else {
             logger.warning("⚠️ USB管理器未初始化")
             return
         }
-        
+
  // 触发MFi设备扫描
         await usbManager.scanForMFiDevices()
-        
+
  // 触发USB设备扫描
         await usbManager.scanForUSBDevices()
-        
+
         logger.info("✅ USB设备扫描完成")
     }
-    
+
  /// 停止扫描
     public func stopScanning() {
         logger.info("⏹️ 停止扫描")
         isScanning = false
-        
+
  // 取消防抖任务
         flushTask?.cancel()
         flushTask = nil
-        
+
  // 取消所有浏览器（在后台）
         Task.detached { [weak self] in
             guard let self = self else { return }
@@ -273,9 +274,9 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                 self.browsers.removeAll()
             }
         }
-        
+
         stopAdvertising()
-        
+
  // 扫描结束后清洗缓存，确保本机唯一性
         Task { [weak self] in
             let selfId = await SelfIdentityProvider.shared.snapshot()
@@ -284,12 +285,12 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             }
         }
     }
-    
+
  /// 连接到设备 - 完全异步
  /// 根据 enableIPv6Support 设置决定是否优先使用 IPv6 地址
     public func connectToDevice(_ device: DiscoveredDevice) async throws {
         logger.info("连接设备: \(device.name)")
-        
+
  // 根据 IPv6 设置选择地址
         let hostAddress: String
         if enableIPv6Support, let ipv6 = device.ipv6, !ipv6.isEmpty {
@@ -303,7 +304,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         } else {
             throw DeviceDiscoveryError.deviceNotConnected
         }
-        
+
         let host = NWEndpoint.Host(hostAddress)
         let portInt = device.portMap.values.first ?? 0
         guard portInt > 0 else { throw DeviceDiscoveryError.scanningFailed }
@@ -358,7 +359,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                         "alpn": details.alpn ?? ""
                     ])
                 }
-                
+
  // 证书链基础验证（若系统策略允许）
                 let secTrust = sec_trust_copy_ref(trust).takeRetainedValue()
                 var error: CFError?
@@ -367,22 +368,37 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                 complete(ok)
             }, .main)
             encryptionStatus = net.encryptionAlgorithm.displayName
+            if let tcpOptions = params.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
+                tcpOptions.enableKeepalive = true
+                tcpOptions.keepaliveIdle = 30
+                tcpOptions.keepaliveInterval = 15
+                tcpOptions.keepaliveCount = 4
+            }
             connection = NWConnection(to: endpoint, using: params)
         } else {
             encryptionStatus = "不加密"
-            connection = NWConnection(to: endpoint, using: .tcp)
+            let params = NWParameters.tcp
+            params.includePeerToPeer = true
+            params.allowLocalEndpointReuse = true
+            if let tcpOptions = params.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
+                tcpOptions.enableKeepalive = true
+                tcpOptions.keepaliveIdle = 30
+                tcpOptions.keepaliveInterval = 15
+                tcpOptions.keepaliveCount = 4
+            }
+            connection = NWConnection(to: endpoint, using: params)
         }
         connections[device.id.uuidString] = connection
-        
+
         connection.stateUpdateHandler = { [weak self] state in
             Task { @MainActor in
                 self?.handleConnectionStateUpdate(state, for: device.id.uuidString)
             }
         }
-        
+
  // 在后台队列启动连接
         connection.start(queue: discoveryQueue)
-        
+
         try await waitForConnection(connection)
         logger.info("✅ 连接成功: \(device.name)")
     }
@@ -407,7 +423,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             self.alpn = alpn
             self.sni = sni
         }
-        
+
  /// 将 tls_protocol_version_t 映射为可读字符串
  /// 中文说明：API返回的协议枚举转换为中文友好名称
         public static func string(from v: tls_protocol_version_t) -> String {
@@ -418,7 +434,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             default: return "未知版本"
             }
         }
-        
+
  /// 将 tls_ciphersuite_t 映射为常见TLS 1.3密码套件名称
  /// 中文说明：常见套件包含 AES-GCM 与 CHACHA20-POLY1305，其他值以十六进制显示
  /// 内部桥接工具：将 `tls_ciphersuite_t` 安全转换为 `UInt16`
@@ -466,9 +482,9 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
  // 仅在连接未被取消时返回，避免使用已失效连接
         return connection
     }
-    
+
  // MARK: - 私有方法（性能优化核心）
-    
+
  /// 并发启动所有浏览器
     private func startBrowsersConcurrently() async {
  // 在兼容模式下，先动态扫描服务目录，再合并到有效服务类型集合
@@ -525,14 +541,14 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
  // 读取 actor 内的最终快照
         return await accumulator.snapshot()
     }
-    
+
  /// 启动单个浏览器（在后台队列）
  /// 根据 enableIPv6Support 设置配置网络参数
     private func startSingleBrowser(serviceType: String) async {
         let descriptor = NWBrowser.Descriptor.bonjour(type: serviceType, domain: serviceDomain)
         let parameters = NWParameters()
         parameters.includePeerToPeer = true
-        
+
  // 根据 IPv6 设置配置协议栈
         if enableIPv6Support {
  // 允许 IPv4 和 IPv6 双栈
@@ -542,31 +558,31 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
  // 仅 IPv4
             parameters.requiredInterfaceType = .other
         }
-        
+
         let browser = NWBrowser(for: descriptor, using: parameters)
-        
+
         browser.stateUpdateHandler = { [weak self] state in
             Task { @MainActor in
                 self?.handleBrowserStateUpdate(state, for: serviceType)
             }
         }
-        
+
         browser.browseResultsChangedHandler = { [weak self] results, changes in
  // 在后台队列处理结果变化
             Task.detached(priority: .userInitiated) {
                 await self?.handleBrowseResultsChanged(results: results, changes: changes, serviceType: serviceType)
             }
         }
-        
+
  // 在专用队列启动浏览器（非主线程）
         browser.start(queue: discoveryQueue)
-        
+
         await MainActor.run {
             self.browsers.append(browser)
             self.logger.debug("✅ 浏览器已启动: \(serviceType)")
         }
     }
-    
+
  /// 事件驱动的防抖刷新（200ms）
     private func scheduleFlush() {
         flushTask?.cancel()
@@ -579,26 +595,26 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             }
         }
     }
-    
+
  /// 刷新待处理的更新（批量UI更新）
     private func flushPendingUpdates() async {
         guard !pendingUpdates.isEmpty else { return }
-        
+
         let updates = pendingUpdates
         pendingUpdates.removeAll()
-        
+
  // 批量生成候选弱指纹并持久化，提高后续合并命中率
         let fpMap = await generateFingerprintsBatch(for: updates)
-        
+
  // 获取本机强身份快照
         let selfId = await SelfIdentityProvider.shared.snapshot()
-        
+
  // 批量更新设备列表（严格防止不同设备错误合并）
         for device in updates {
  // 硬闸：只有 SkyBridge 来源才允许判定本机
             let eligibleForLocal =
                 device.services.contains(where: { $0.lowercased().contains("skybridge") })
-            
+
             if !eligibleForLocal {
  // 非 SkyBridge 来源：强制清空强身份，确保永远非本机
                 var sanitized = device
@@ -606,20 +622,20 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                 sanitized.deviceId = nil
                 sanitized.pubKeyFP = nil
                 sanitized.macSet.removeAll()
-                
+
                 #if DEBUG
                 logger.debug("🚫 非SkyBridge来源[\(device.name)]，强制清空强身份，isLocal=false")
                 #endif
-                
+
  // 继续使用清理后的设备
                 let candidateFP = fpMap[sanitized.id] ?? nil
                 let mergeIndex = await identityResolver.findMergeIndex(in: discoveredDevices, candidate: sanitized, candidateFP: candidateFP)
-                
+
                 if let index = mergeIndex, discoveredDevices.indices.contains(index) {
                     let existingDevice = discoveredDevices[index]
                     let betterName = sanitized.name.count > existingDevice.name.count ? sanitized.name : existingDevice.name
                     let mergedConnectionTypes = sanitized.connectionTypes.union(existingDevice.connectionTypes)
-                    
+
                     let updatedDevice = DiscoveredDevice(
                         id: existingDevice.id,
                         name: betterName,
@@ -641,21 +657,21 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                 }
                 continue // 跳过后续的本机判定
             }
-            
+
  // 改为通过 IdentityResolver 进行统一决策，避免跨源误并。
  // 若存在外部指纹提供者，则生成候选指纹参与合并判定。
             let candidateFP = fpMap[device.id] ?? nil
             let mergeIndex = await identityResolver.findMergeIndex(in: discoveredDevices, candidate: device, candidateFP: candidateFP)
-            
+
  // 判定候选设备是否为本机（强身份硬匹配）
             let candidateIsLocal = await identityResolver.resolveIsLocal(device, selfId: selfId)
-            
+
             #if DEBUG
  // DEBUG 日志：精简版 - 只打印强身份来源和匹配结果
             let source = "Bonjour"
             let deviceIdValid = device.deviceId != nil && !device.deviceId!.isEmpty && device.deviceId!.count >= 8
             let pubKeyFPValid = device.pubKeyFP != nil && !device.pubKeyFP!.isEmpty && device.pubKeyFP!.count == 64
-            
+
  // 判定触发了哪条优先级
             var matchedRule = "无匹配"
             if candidateIsLocal {
@@ -665,7 +681,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                     matchedRule = "优先级B:pubKeyFP"
                 }
             }
-            
+
             logger.debug("""
                 [\(source)] \(device.name): \
                 deviceId=\(deviceIdValid ? "✓" : "✗") \
@@ -673,25 +689,25 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                 → \(candidateIsLocal ? "本机" : "非本机") \
                 (\(matchedRule))
                 """)
-            
+
  // 异常警告：品牌设备被误判
-            if candidateIsLocal && (device.name.lowercased().contains("hp") || 
-                                    device.name.lowercased().contains("dell") || 
+            if candidateIsLocal && (device.name.lowercased().contains("hp") ||
+                                    device.name.lowercased().contains("dell") ||
                                     device.name.lowercased().contains("lenovo")) {
                 logger.warning("⚠️ 异常: 品牌设备[\(device.name)]判为本机, 触发规则:\(matchedRule)")
             }
             #endif
-            
+
             if let index = mergeIndex, discoveredDevices.indices.contains(index) {
                 let existingDevice = discoveredDevices[index]
-                
+
  // 判定现有设备是否为本机
                 let existingIsLocal = await identityResolver.resolveIsLocal(existingDevice, selfId: selfId)
-                
+
                 #if DEBUG
                 logger.debug("🔄 合并判定 [\(existingDevice.name)]: existing=\(existingIsLocal), candidate=\(candidateIsLocal)")
                 #endif
-                
+
  // 1️⃣ 强匹配检查（只有强身份匹配才允许合并）
                 let validId: (String?) -> Bool = { id in
                     guard let id = id, !id.isEmpty, id.count >= 8 else { return false }
@@ -701,11 +717,13 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                     guard let fp = fp, fp.count == 64, fp.allSatisfy({ $0.isHexDigit }) else { return false }
                     return true
                 }
-                
+
+                // Allow same-record updates (same UUID) even if strong identity fields weren't present in the initial placeholder.
                 let strongMatch =
+                    (existingDevice.id == device.id) ||
                     (validId(existingDevice.deviceId) && validId(device.deviceId) && existingDevice.deviceId == device.deviceId) ||
                     (validFP(existingDevice.pubKeyFP) && validFP(device.pubKeyFP) && existingDevice.pubKeyFP == device.pubKeyFP)
-                
+
  // 若非强匹配，禁止合并（视为不同设备）
                 guard strongMatch else {
                     #if DEBUG
@@ -717,15 +735,15 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                     discoveredDevices.append(newDevice)
                     continue
                 }
-                
+
  // 2️⃣ 开始合并（基于 existing）
                 var merged = existingDevice
-                
+
  // 2.1 始终更新 transient 字段（IP、在线状态、延迟等）
                 merged._updateTransient(ipv4: device.ipv4, ipv6: device.ipv6)
                 merged.signalStrength = device.signalStrength ?? merged.signalStrength
                 merged.connectionTypes = merged.connectionTypes.union(device.connectionTypes)
-                
+
  // 2.2 字段保护策略
                 if existingIsLocal && !candidateIsLocal {
  // 本机记录不被第三方候选覆盖 identity/name/services
@@ -740,7 +758,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                     merged._updateDisplayNameIfAllowed(betterName)
                     merged.services = Array(Set(device.services + merged.services))
                     merged.portMap = device.portMap.merging(merged.portMap) { new, _ in new }
-                    
+
  // 合并强身份字段（优先非空）
                     merged.deviceId = device.deviceId ?? merged.deviceId
                     merged.pubKeyFP = device.pubKeyFP ?? merged.pubKeyFP
@@ -748,7 +766,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
  // bestUniqueIdentifier 是同步方法，无需 await
                     merged.uniqueIdentifier = identityResolver.bestUniqueIdentifier(existing: merged, candidate: device, candidateFP: candidateFP)
                 }
-                
+
  // 3️⃣ DEBUG 断言：防止第三方设备误判为本机
                 #if DEBUG
                 if merged.source != DeviceSource.skybridgeBonjour &&
@@ -759,10 +777,10 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                     merged.source = existingDevice.source
                 }
                 #endif
-                
+
  // 4️⃣ 重新应用本机标志（统一写入点）
                 applyLocalFlag(&merged, selfId: selfId)
-                
+
                 discoveredDevices[index] = merged
                 logger.debug("🔄 合并设备: \(merged.name) - 本机: \(merged.isLocalDevice)")
             } else {
@@ -773,13 +791,13 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                 logger.debug("➕ 新设备: \(device.name) - 连接方式: \(device.connectionTypes), 本机: \(candidateIsLocal)")
             }
         }
-        
+
  // 单本机硬阀：确保列表中最多只有一个本机标记
         await hardClampSingleLocal(selfId: selfId)
-        
+
         logger.debug("📊 批量更新了 \(updates.count) 个设备，当前总数: \(self.discoveredDevices.count)")
     }
-    
+
  /// 批量生成弱指纹（优先使用外部提供者，否则回退到端口谱散列），并持久化到缓存
     private func generateFingerprintsBatch(for devices: Set<DiscoveredDevice>) async -> [UUID: IdentityFingerprint?] {
         var result: [UUID: IdentityFingerprint?] = [:]
@@ -819,19 +837,19 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         }
         return result
     }
-    
+
  /// 单本机硬阀：确保设备列表中最多只有一个本机标记
  /// 中文说明：即使前面判定有误差，这里也会强制校正，只保留最强匹配者为本机。
     private func hardClampSingleLocal(selfId: SelfIdentitySnapshot) async {
         let locals = self.discoveredDevices.filter { $0.isLocalDevice }
-        
+
         guard locals.count > 1 else {
  // 0或1个本机标记，无需处理
             return
         }
-        
+
         logger.warning("⚠️ 检测到多个本机标记（\(locals.count)个），执行硬阀校正")
-        
+
         #if DEBUG
  // DEBUG：列出所有被误判为本机的设备
         for (idx, local) in locals.enumerated() {
@@ -844,47 +862,47 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                 """)
         }
         #endif
-        
+
  // 重新计算所有设备的 isLocal 状态
         for i in self.discoveredDevices.indices {
             let device = self.discoveredDevices[i]
             let isLocal = await identityResolver.resolveIsLocal(device, selfId: selfId)
             self.discoveredDevices[i].setIsLocalDeviceByDiscovery(isLocal)
         }
-        
+
  // 再次检查是否仍有多个本机标记（极端情况：脏数据）
         let finalLocals = self.discoveredDevices.enumerated().filter { $0.element.isLocalDevice }
-        
+
         if finalLocals.count > 1 {
             logger.error("❌ 硬阀后仍有多个本机标记，保留最强匹配者")
-            
+
  // 优先级：deviceId 匹配 > pubKeyFP 匹配 > MAC 匹配 > 第一个
             var keepIndex: Int? = nil
-            
+
  // 优先级 A：deviceId 匹配
-            keepIndex = finalLocals.first(where: { 
+            keepIndex = finalLocals.first(where: {
                 $0.element.deviceId == selfId.deviceId && !(selfId.deviceId.isEmpty)
             })?.offset
-            
+
  // 优先级 B：pubKeyFP 匹配
             if keepIndex == nil {
-                keepIndex = finalLocals.first(where: { 
+                keepIndex = finalLocals.first(where: {
                     $0.element.pubKeyFP == selfId.pubKeyFP && !(selfId.pubKeyFP.isEmpty)
                 })?.offset
             }
-            
+
  // 优先级 C：MAC 交集匹配
             if keepIndex == nil {
                 keepIndex = finalLocals.first(where: {
                     !$0.element.macSet.intersection(selfId.macSet).isEmpty
                 })?.offset
             }
-            
+
  // 默认：保留第一个
             if keepIndex == nil {
                 keepIndex = finalLocals.first?.offset
             }
-            
+
  // 清除其他所有本机标记
             if let keep = keepIndex {
                 for (idx, _) in finalLocals where idx != keep {
@@ -902,8 +920,8 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
     public func setFingerprintProvider(_ provider: @escaping @Sendable (DiscoveredDevice) async -> IdentityFingerprint?) {
         fingerprintProvider = provider
     }
-    
-    
+
+
  /// 处理浏览结果变化（异步+批量）
     private func handleBrowseResultsChanged(
         results: Set<NWBrowser.Result>,
@@ -925,22 +943,23 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             }
         }
     }
-    
+
  /// 异步添加设备（在后台解析网络信息）
     private func addDiscoveredDeviceAsync(from result: NWBrowser.Result, serviceType: String) async {
  // 快速提取基本信息（不阻塞）
         let deviceName = extractDeviceNameQuick(from: result)
+        let strong = extractStrongIdentityQuick(from: result)
         let deviceId = UUID()
-        
+
  // 守卫：非 SkyBridge serviceType 的设备强制标记为非本机
         let isSkyBridgeService = serviceType.lowercased().contains("skybridge")
-        
+
         #if DEBUG
         if !isSkyBridgeService {
             logger.debug("🔍 Bonjour 发现非SkyBridge服务: [\(deviceName)] serviceType=\(serviceType)")
         }
         #endif
-        
+
  // 创建临时设备（先显示，后更新网络信息）
         let tempDevice = DiscoveredDevice(
             id: deviceId,
@@ -950,22 +969,24 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             services: [serviceType],
             portMap: [serviceType: 0],
             connectionTypes: [.wifi], // 网络发现默认为Wi-Fi
-            uniqueIdentifier: nil,
+            uniqueIdentifier: strong.deviceId ?? nil,
             signalStrength: nil,
-            isLocalDevice: false // 非SkyBridge服务默认非本机，后续由resolveIsLocal统一判定
+            isLocalDevice: false, // 非SkyBridge服务默认非本机，后续由resolveIsLocal统一判定
+            deviceId: strong.deviceId,
+            pubKeyFP: strong.pubKeyFP
         )
-        
+
  // 立即添加到待处理更新（快速显示）
         await MainActor.run(resultType: Void.self) { [weak self] in
             self?.pendingUpdates.insert(tempDevice)
             self?.scheduleFlush()
         }
-        
+
  // 在后台异步解析网络信息
         Task.detached(priority: .utility) { [weak self] in
             guard let self = self else { return }
             let (ipv4, ipv6, port) = await self.extractNetworkInfoAsync(from: result)
-            
+
  // 更新设备信息
             let updatedDevice = DiscoveredDevice(
                 id: deviceId,
@@ -975,18 +996,20 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                 services: [serviceType],
                 portMap: [serviceType: port],
                 connectionTypes: [.wifi],
-                uniqueIdentifier: ipv4 ?? ipv6,
+                uniqueIdentifier: strong.deviceId ?? (ipv4 ?? ipv6),
                 signalStrength: await self.measureLinkQuality(host: ipv4 ?? ipv6, port: port),
-                isLocalDevice: false // 后续由 resolveIsLocal 统一判定
+                isLocalDevice: false, // 后续由 resolveIsLocal 统一判定
+                deviceId: strong.deviceId,
+                pubKeyFP: strong.pubKeyFP
             )
-            
+
             await MainActor.run(resultType: Void.self) { [weak self] in
                 self?.pendingUpdates.insert(updatedDevice)
                 self?.scheduleFlush()
             }
         }
     }
-    
+
  /// 快速提取设备名称（不进行DNS查询）
     private func extractDeviceNameQuick(from result: NWBrowser.Result) -> String {
         if case .service(let name, _, _, _) = result.endpoint {
@@ -995,24 +1018,24 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         }
         return "未知设备"
     }
-    
+
  /// 异步提取网络信息（使用NWConnection而非同步DNS）
     private func extractNetworkInfoAsync(from result: NWBrowser.Result) async -> (ipv4: String?, ipv6: String?, port: Int) {
         var port: Int = 0
-        
+
         if case .service(_, _, let servicePort, _) = result.endpoint {
             port = Int(servicePort) ?? 0
         }
-        
+
  // 使用 NWConnection 异步解析（不阻塞）
         guard case .service = result.endpoint else {
             return (nil, nil, port)
         }
-        
+
  // 从接口快速获取IP（不使用DNS）
         var ipv4: String?
         var ipv6: String?
-        
+
         if !result.interfaces.isEmpty {
             for interface in result.interfaces {
                 if let addresses = await getIPAddressesForInterfaceAsync(interface.name) {
@@ -1021,7 +1044,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                 }
             }
         }
-        
+
         return (ipv4, ipv6, port)
     }
 
@@ -1035,18 +1058,18 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             let params = NWParameters(tls: nil, tcp: tcp)
             let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(host), port: NWEndpoint.Port(integerLiteral: UInt16(effectivePort)))
             let conn = NWConnection(to: endpoint, using: params)
-            
+
  // 🔧 修复：使用线程安全的状态管理类（Swift 6并发安全）
             final class ResumeState: @unchecked Sendable {
                 private let lock = NSLock()
                 private var _hasResumed = false
-                
+
                 var hasResumed: Bool {
                     lock.lock()
                     defer { lock.unlock() }
                     return _hasResumed
                 }
-                
+
                 func markResumed() -> Bool {
                     lock.lock()
                     defer { lock.unlock() }
@@ -1055,15 +1078,15 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                     return true
                 }
             }
-            
+
             let state = ResumeState()
-            
+
             conn.stateUpdateHandler = { connectionState in
                 switch connectionState {
                 case .ready:
  // 只有第一次调用会返回true
                     guard state.markResumed() else { return }
-                    
+
                     let end = DispatchTime.now()
                     let nanos = end.uptimeNanoseconds - start.uptimeNanoseconds
                     let ms = Double(nanos) / 1_000_000.0
@@ -1072,51 +1095,51 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                     continuation.resume(returning: score)
                     conn.stateUpdateHandler = nil // 清理handler防止后续调用
                     conn.cancel()
-                    
+
                 case .failed(_), .cancelled:
  // 只有第一次调用会返回true
                     guard state.markResumed() else { return }
-                    
+
                     continuation.resume(returning: nil)
                     conn.stateUpdateHandler = nil // 清理handler
-                    
+
                 default:
                     break
                 }
             }
             conn.start(queue: discoveryQueue)
-            
+
  // 🔧 添加超时机制，防止永不resume
             discoveryQueue.asyncAfter(deadline: .now() + 3.0) {
                 guard state.markResumed() else { return }
-                
+
                 continuation.resume(returning: nil)
                 conn.stateUpdateHandler = nil
                 conn.cancel()
             }
         }
     }
-    
+
  /// 异步获取接口IP地址（使用getifaddrs，更快）
     private func getIPAddressesForInterfaceAsync(_ interfaceName: String) async -> (ipv4: String?, ipv6: String?)? {
         return await Task.detached(priority: .utility) {
             var ipv4: String?
             var ipv6: String?
             var ifaddrs: UnsafeMutablePointer<ifaddrs>?
-            
+
             guard getifaddrs(&ifaddrs) == 0 else { return nil }
             defer { freeifaddrs(ifaddrs) }
-            
+
             var interface = ifaddrs
             while interface != nil {
                 defer { interface = interface?.pointee.ifa_next }
-                
+
                 guard let ifa = interface?.pointee,
                       String(decoding: Data(bytes: ifa.ifa_name, count: Int(strlen(ifa.ifa_name))), as: UTF8.self) == interfaceName,
                       let addr = ifa.ifa_addr else {
                     continue
                 }
-                
+
                 if addr.pointee.sa_family == UInt8(AF_INET) {
                     var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
                     if getnameinfo(ifa.ifa_addr, socklen_t(addr.pointee.sa_len),
@@ -1143,17 +1166,25 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                     }
                 }
             }
-            
+
             return (ipv4, ipv6)
         }.value
     }
-    
+
     private func removeDiscoveredDeviceAsync(from result: NWBrowser.Result) async {
- // 精确移除（基于设备名称）
+        // Prefer strong identity removal when available; fall back to name.
+        let strong = extractStrongIdentityQuick(from: result)
+        if let stableId = strong.deviceId, !stableId.isEmpty {
+            await MainActor.run {
+                discoveredDevices.removeAll { $0.deviceId == stableId }
+            }
+            return
+        }
+// 精确移除（基于设备名称）
         if case .service(let name, _, _, _) = result.endpoint {
             let cleanName = name.replacingOccurrences(of: "._tcp", with: "")
                                .replacingOccurrences(of: ".local", with: "")
-            
+
             await MainActor.run {
  // 只移除完全匹配的设备
                 discoveredDevices.removeAll { device in
@@ -1164,15 +1195,18 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             }
         }
     }
-    
+
     private func updateDiscoveredDeviceAsync(from result: NWBrowser.Result, serviceType: String) async {
  // 更新现有设备信息（不添加新设备）
         let deviceName = extractDeviceNameQuick(from: result)
+        let strong = extractStrongIdentityQuick(from: result)
         let (ipv4, ipv6, port) = await extractNetworkInfoAsync(from: result)
-        
+
         await MainActor.run {
  // 查找现有设备
             if let index = discoveredDevices.firstIndex(where: { existingDevice in
+                // Prefer stable deviceId match when available.
+                if let sid = strong.deviceId, !sid.isEmpty, existingDevice.deviceId == sid { return true }
                 if let existingIPv4 = existingDevice.ipv4, let newIPv4 = ipv4, existingIPv4 == newIPv4 {
                     return true
                 }
@@ -1184,12 +1218,12 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                 let existingDevice = discoveredDevices[index]
                 var newServices = existingDevice.services
                 var newPortMap = existingDevice.portMap
-                
+
                 if !existingDevice.services.contains(serviceType) {
                     newServices.append(serviceType)
                     newPortMap[serviceType] = port
                 }
-                
+
                 let updatedDevice = DiscoveredDevice(
                     id: existingDevice.id,
                     name: existingDevice.name,
@@ -1198,14 +1232,30 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                     services: newServices,
                     portMap: newPortMap,
                     connectionTypes: existingDevice.connectionTypes,
-                    uniqueIdentifier: existingDevice.uniqueIdentifier
+                    uniqueIdentifier: strong.deviceId ?? existingDevice.uniqueIdentifier,
+                    signalStrength: existingDevice.signalStrength,
+                    source: existingDevice.source,
+                    isLocalDevice: existingDevice.isLocalDevice,
+                    deviceId: strong.deviceId ?? existingDevice.deviceId,
+                    pubKeyFP: strong.pubKeyFP ?? existingDevice.pubKeyFP,
+                    macSet: existingDevice.macSet
                 )
                 discoveredDevices[index] = updatedDevice
                 logger.debug("🔄 更新设备: \(deviceName)")
             }
         }
     }
-    
+
+    private func extractStrongIdentityQuick(from result: NWBrowser.Result) -> (deviceId: String?, pubKeyFP: String?) {
+        if case .bonjour(let txtRecord) = result.metadata {
+            let dict = BonjourTXTParser.parse(txtRecord)
+            let devId = dict["deviceId"] ?? dict["id"] ?? dict["deviceID"] ?? dict["device_id"]
+            let fp = dict["pubKeyFP"] ?? dict["pubKeyFp"] ?? dict["pubkeyfp"]
+            return (devId, fp)
+        }
+        return (nil, nil)
+    }
+
     private func handleBrowserStateUpdate(_ state: NWBrowser.State, for serviceType: String) {
  // 异步记录日志，不阻塞
         Task.detached(priority: .background) { [weak self] in
@@ -1221,7 +1271,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             }
         }
     }
-    
+
     private func handleConnectionStateUpdate(_ state: NWConnection.State, for deviceId: String) {
         Task { @MainActor in
             switch state {
@@ -1237,7 +1287,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             }
         }
     }
-    
+
     private func startAdvertising() {
  // 在后台异步启动 Bonjour 广播，避免占用主线程 RunLoop
         logger.info("📡 开始广播")
@@ -1246,9 +1296,21 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
  // 使用统一广播中心，确保同一服务类型只存在一个 NWListener，且运行在全局队列
             do {
                 let serviceType = "_skybridge._tcp"
+                // Strong identity TXT (deviceId/pubKeyFP) enables stable binding on peers.
+                let snap = await SelfIdentityProvider.shared.snapshot()
+                var txt = NWTXTRecord()
+                txt["platform"] = "macos"
+                txt["osVersion"] = ProcessInfo.processInfo.operatingSystemVersionString
+                txt["name"] = Self.resolveDeviceName()
+                if !snap.deviceId.isEmpty { txt["deviceId"] = snap.deviceId }
+                if !snap.pubKeyFP.isEmpty { txt["pubKeyFP"] = snap.pubKeyFP }
+                // model/chip are optional; keep best-effort and cheap.
+                let model = await SelfIdentityProvider.shared.getRegistrationDeviceInfo().hardwareModel
+                if !model.isEmpty { txt["modelName"] = model }
                 let port = try await ServiceAdvertiserCenter.shared.startAdvertising(
                     serviceName: self.getDeviceName(),
                     serviceType: serviceType,
+                    txtRecord: txt,
                     connectionHandler: { [weak self] connection in
                         Task { @MainActor in self?.handleIncomingConnection(connection) }
                     },
@@ -1277,9 +1339,21 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                 bgLogger.debug("📡 广播已在运行，忽略重复启动: \(serviceType)")
                 return
             }
+
+            // Strong identity TXT: allow peers to bind by stable deviceId (no name collision issues).
+            let snap = await SelfIdentityProvider.shared.snapshot()
+            var txt = NWTXTRecord()
+            txt["platform"] = "macos"
+            txt["osVersion"] = ProcessInfo.processInfo.operatingSystemVersionString
+            txt["name"] = Self.resolveDeviceName()
+            if !snap.deviceId.isEmpty { txt["deviceId"] = snap.deviceId }
+            if !snap.pubKeyFP.isEmpty { txt["pubKeyFP"] = snap.pubKeyFP }
+            let model = await SelfIdentityProvider.shared.getRegistrationDeviceInfo().hardwareModel
+            if !model.isEmpty { txt["modelName"] = model }
             let port = try await ServiceAdvertiserCenter.shared.startAdvertising(
                 serviceName: Self.resolveDeviceName(),
                 serviceType: serviceType,
+                txtRecord: txt,
                 connectionHandler: { [weak self] connection in
                     Task { @MainActor in self?.handleIncomingConnection(connection) }
                 },
@@ -1296,7 +1370,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             bgLogger.error("❌ 启动广播服务失败: \(error.localizedDescription, privacy: .public)")
         }
     }
-    
+
     private func stopAdvertising() {
         listener?.cancel()
         listener = nil
@@ -1348,58 +1422,175 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             }
         }
 
-        func receiveFixed(_ length: Int) async throws -> Data {
-            enum InboundReceiveError: Error {
-                case eof
-                case shortRead(expected: Int, actual: Int)
-            }
+        // NWConnection.receive(...) 可能出现短读（即使设置了 minimumIncompleteLength），
+        // 直接假设 “data.count == length” 会导致不稳定的 InboundReceiveError error 1。
+        // 因此这里使用 receiveExactly 逐步拼装，直到满足长度或遇到 EOF。
+        func receiveSome(max: Int) async throws -> Data {
+            enum InboundReceiveError: Error { case eof }
             return try await withCheckedThrowingContinuation { (c: CheckedContinuation<Data, Error>) in
-                connection.receive(minimumIncompleteLength: length, maximumLength: length) { data, _, _, err in
-                    if let err { c.resume(throwing: err) }
-                    else if let data {
-                        if data.count == length {
-                            c.resume(returning: data)
-                        } else {
-                            c.resume(throwing: InboundReceiveError.shortRead(expected: length, actual: data.count))
-                        }
-                    } else {
-                        c.resume(throwing: InboundReceiveError.eof)
-                    }
+                connection.receive(minimumIncompleteLength: 1, maximumLength: max) { data, _, isComplete, err in
+                    if let err { c.resume(throwing: err); return }
+                    if let data, !data.isEmpty { c.resume(returning: data); return }
+                    if isComplete { c.resume(throwing: InboundReceiveError.eof); return }
+                    // No data but not complete: treat as EOF-ish for safety.
+                    c.resume(throwing: InboundReceiveError.eof)
                 }
             }
         }
 
+        func receiveExactly(_ length: Int) async throws -> Data {
+            var buffer = Data()
+            buffer.reserveCapacity(length)
+            while buffer.count < length {
+                let remaining = length - buffer.count
+                let chunk = try await receiveSome(max: min(65536, remaining))
+                buffer.append(chunk)
+            }
+            return buffer
+        }
+
         let transport = DirectHandshakeTransport(connection: connection)
-        let peer = PeerIdentifier(deviceId: "ios-\(connection.endpoint.debugDescription)")
 
-        let classicProvider = ClassicCryptoProvider()
-        let offeredSuites = classicProvider.supportedSuites.filter { !$0.isPQC && !$0.isHybrid }
-        let signatureProvider = ProtocolSignatureProviderSelector.select(for: .ed25519)
-        let identityPrivateKey = Curve25519.Signing.PrivateKey()
-        let identityKeyHandle: SigningKeyHandle = .softwareKey(identityPrivateKey.rawRepresentation)
-        let identityPublicKey = identityPrivateKey.publicKey.rawRepresentation
-        // iOS 端要求 IdentityPublicKeys 的“新 wire 格式”（带算法字节 + 长度），不能直接发裸 32B Ed25519
-        let identityPublicKeyWire = ProtocolIdentityPublicKeys(
-            protocolPublicKey: identityPublicKey,
-            protocolAlgorithm: .ed25519,
-            sePoPPublicKey: nil
-        ).asWire().encoded
+        // Use a stable peer id aligned with iOS discovery (bonjour:<name>@<domain>) when possible.
+        // This avoids churn across reconnects and improves trust/pairing semantics.
+        let peerDeviceId: String = {
+            switch connection.endpoint {
+            case .service(let name, _, let domain, _):
+                let d = domain.isEmpty ? "local." : domain
+                return "bonjour:\(name)@\(d)"
+            default:
+                return "peer:\(connection.endpoint.debugDescription)"
+            }
+        }()
+        let peer = PeerIdentifier(deviceId: peerDeviceId)
 
-        let driver: HandshakeDriver
-        do {
-            driver = try HandshakeDriver(
-                transport: transport,
-                cryptoProvider: classicProvider,
-                protocolSignatureProvider: signatureProvider,
-                protocolSigningKeyHandle: identityKeyHandle,
-                sigAAlgorithm: .ed25519,
-                identityPublicKey: identityPublicKeyWire,
-                offeredSuites: offeredSuites,
-                policy: .default
-            )
-        } catch {
-            logger.error("❌ HandshakeDriver 初始化失败: \(error.localizedDescription, privacy: .public)")
-            return
+        // ⚠️ 关键修复：不要硬编码 classic-only。
+        // iOS 26.2 会优先 PQC（ML-DSA-65 + ML-KEM-768）；如果 mac 端这里固定 Ed25519 会导致 suite 不一致，
+        // 触发 iOS 端 fallback（再叠加 fallbackRateLimited 就会出现你截图里的循环失败）。
+        var driver: HandshakeDriver? = nil
+        var sessionKeys: SessionKeys? = nil
+        var heartbeatTask: Task<Void, Never>? = nil
+        var didMarkConnected = false
+
+        let peerIdForPresence = peer.deviceId
+        let endpointDescriptionForPresence = connection.endpoint.debugDescription
+
+        func cryptoKind(for suite: CryptoSuite) -> String {
+            if suite.isHybrid { return "Hybrid" }
+            if suite.isPQCGroup { return "ApplePQC" }
+            return "Classic"
+        }
+
+        func displayNameFromPeerId(_ peerId: String) -> String {
+            // Format: bonjour:<name>@local.
+            if peerId.hasPrefix("bonjour:") {
+                let rest = peerId.dropFirst("bonjour:".count)
+                return rest.split(separator: "@", maxSplits: 1).first.map(String.init) ?? peerId
+            }
+            return peerId
+        }
+
+        func extractIPFromPeerId(_ peerId: String) -> (ipv4: String?, ipv6: String?) {
+            // Examples:
+            // - peer:fe80::c47:6caa:...%en0.52802
+            // - peer:192.168.0.104.53321
+            guard peerId.hasPrefix("peer:") else { return (nil, nil) }
+            var rest = String(peerId.dropFirst("peer:".count))
+            // Drop trailing ".<port>" if present
+            if let lastDot = rest.lastIndex(of: "."),
+               rest[rest.index(after: lastDot)...].allSatisfy({ $0.isNumber }) {
+                rest = String(rest[..<lastDot])
+            }
+            // Drop interface scope "%en0" for IPv6 comparisons
+            let withoutScope = rest.split(separator: "%", maxSplits: 1).first.map(String.init) ?? rest
+            if withoutScope.contains(":") {
+                return (nil, withoutScope)
+            }
+            if withoutScope.contains(".") {
+                return (withoutScope, nil)
+            }
+            return (nil, nil)
+        }
+
+        func postConnectedUX(keys: SessionKeys) {
+            guard !didMarkConnected else { return }
+            didMarkConnected = true
+
+            let suite = keys.negotiatedSuite
+            let kind = cryptoKind(for: suite)
+            let fallbackName = displayNameFromPeerId(peerIdForPresence)
+            let extracted = extractIPFromPeerId(peerIdForPresence)
+
+            Task { @MainActor in
+                // Best-effort: map raw peer:<ip> to a known device name from unified discovery.
+                let resolvedName: String = {
+                    let devices = UnifiedOnlineDeviceManager.shared.onlineDevices
+                    if let v6 = extracted.ipv6,
+                       let d = devices.first(where: { ($0.ipv6?.contains(v6) ?? false) }) {
+                        return d.name
+                    }
+                    if let v4 = extracted.ipv4,
+                       let d = devices.first(where: { $0.ipv4 == v4 }) {
+                        return d.name
+                    }
+                    // If endpoint is a bonjour service, prefer that name.
+                    if endpointDescriptionForPresence.contains("bonjour:") {
+                        return endpointDescriptionForPresence
+                            .replacingOccurrences(of: "bonjour:", with: "")
+                            .split(separator: "@", maxSplits: 1)
+                            .first
+                            .map(String.init) ?? fallbackName
+                    }
+                    return fallbackName
+                }()
+
+                ConnectionPresenceService.shared.markConnected(
+                    peerId: peerIdForPresence,
+                    displayName: resolvedName,
+                    cryptoKind: kind,
+                    suite: suite.rawValue
+                )
+
+                UnifiedOnlineDeviceManager.shared.markDeviceAsConnected(
+                    peerId: peerIdForPresence,
+                    displayName: resolvedName,
+                    cryptoKind: kind,
+                    suite: suite.rawValue,
+                    guardStatus: "守护中"
+                )
+
+                SettingsManager.shared.sendSystemNotification(
+                    title: "✅ 已连接 \(resolvedName)",
+                    body: "\(kind) · \(suite.rawValue) · 守护连接中",
+                    categoryIdentifier: "DISCOVERY_ALERT"
+                )
+            }
+        }
+
+        func isLikelyHandshakeControlPacket(_ data: Data) -> Bool {
+            // Handshake control frames include:
+            // - MessageA/MessageB: first byte == protocolVersion
+            // - FINISHED: magic "FIN1" (0x46 0x49 0x4E 0x31) + version + direction + mac
+            //
+            // If we misclassify FINISHED as "business ciphertext", we will try AES.GCM.open(...)
+            // and log CryptoKitError, then *never* pass FINISHED into HandshakeDriver (stuck in waitingFinished).
+            if data.count >= 4, data.prefix(4).elementsEqual([0x46, 0x49, 0x4E, 0x31]) {
+                return true
+            }
+            // Fast path: first byte is protocol version for MessageA/MessageB.
+            return data.first == HandshakeConstants.protocolVersion
+        }
+
+        func decryptAppPayload(_ ciphertext: Data, with keys: SessionKeys) throws -> Data {
+            let key = SymmetricKey(data: keys.receiveKey)
+            let box = try AES.GCM.SealedBox(combined: ciphertext)
+            return try AES.GCM.open(box, using: key)
+        }
+
+        @Sendable func encryptAppPayload(_ plaintext: Data, with keys: SessionKeys) throws -> Data {
+            let key = SymmetricKey(data: keys.sendKey)
+            let sealed = try AES.GCM.seal(plaintext, using: key)
+            return sealed.combined ?? Data()
         }
 
         logger.info("🤝 入站连接：启用 HandshakeDriver 兼容通道（iOS 互通） state=\(String(describing: connection.state), privacy: .public)")
@@ -1407,16 +1598,326 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         do {
             while connection.state == .ready {
                 logger.info("📥 等待入站帧（读取 4B length header）… state=\(String(describing: connection.state), privacy: .public)")
-                let lenData = try await receiveFixed(4)
+                let lenData = try await receiveExactly(4)
                 let totalLen = lenData.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
                 guard totalLen > 0 && totalLen < 1_048_576 else { break }
-                let payload = try await receiveFixed(Int(totalLen))
+                let payload = try await receiveExactly(Int(totalLen))
                 logger.info("📥 入站帧: \(payload.count, privacy: .public) bytes")
-                // Phase C2: optional traffic padding (SBP2) — unwrap before handing to handshake driver.
-                let unwrapped = TrafficPadding.unwrapIfNeeded(payload, label: "rx")
-                await driver.handleMessage(unwrapped, from: peer)
+                // Phase C2: optional traffic padding (SBP2)
+                let trafficUnwrapped = TrafficPadding.unwrapIfNeeded(payload, label: "rx")
+                // Phase C1: handshake padding (SBP1) used by iOS for MessageA/MessageB framing
+                let frame = HandshakePadding.unwrapIfNeeded(trafficUnwrapped, label: "rx")
+
+                // Rekey / renegotiation support:
+                // iOS strictPQC bootstrap establishes a Classic session first, then initiates a new PQC handshake
+                // on the same transport. If we keep the old driver, it will treat the new MessageA as "unexpected"
+                // (e.g. "Unexpected message while waitingFinished") and iOS will fail with versionMismatch.
+                if let currentDriver = driver, isLikelyHandshakeControlPacket(frame),
+                   let _ = try? HandshakeMessageA.decode(from: frame) {
+                    let st = await currentDriver.getCurrentState()
+                    switch st {
+                    case .waitingFinished, .established:
+                        logger.info("🔁 入站 rekey：在现有会话状态=\(String(describing: st), privacy: .public) 收到新的 MessageA，重置 HandshakeDriver 以进入新一轮协商")
+                        driver = nil
+                        sessionKeys = nil
+                    default:
+                        break
+                    }
+                }
+
+                // Post-handshake: decrypt & handle app messages (pairingIdentityExchange, etc.)
+                if let keys = sessionKeys, !isLikelyHandshakeControlPacket(frame) {
+                    do {
+                        let plaintext = try decryptAppPayload(frame, with: keys)
+                        if let msg = try? JSONDecoder().decode(AppMessage.self, from: plaintext) {
+                            switch msg {
+                            case .heartbeat(let hb):
+                                // Best-effort: use heartbeat metadata to resolve the real device name/id.
+                                let suite = keys.negotiatedSuite
+                                let kind = cryptoKind(for: suite)
+                                let resolvedName: String? = {
+                                    if let dn = hb.deviceName, !dn.isEmpty { return dn }
+                                    if let model = hb.modelName, !model.isEmpty { return model }
+                                    return nil
+                                }()
+                                if let resolvedName {
+                                    Task { @MainActor in
+                                        ConnectionPresenceService.shared.markConnected(
+                                            peerId: peerIdForPresence,
+                                            displayName: resolvedName,
+                                            cryptoKind: kind,
+                                            suite: suite.rawValue
+                                        )
+                                        UnifiedOnlineDeviceManager.shared.markDeviceAsConnected(
+                                            peerId: peerIdForPresence,
+                                            displayName: resolvedName,
+                                            cryptoKind: kind,
+                                            suite: suite.rawValue,
+                                            guardStatus: "守护中"
+                                        )
+                                    }
+                                }
+                            case .pairingIdentityExchange(let payload):
+                                let endpoint = connection.endpoint.debugDescription
+                                let displayName: String = {
+                                    if let dn = payload.deviceName, !dn.isEmpty { return dn }
+                                    if case .service(let name, _, _, _) = connection.endpoint { return name }
+                                    return peer.deviceId
+                                }()
+                                let request = PairingTrustApprovalService.Request(
+                                    peerEndpoint: endpoint,
+                                    declaredDeviceId: payload.deviceId,
+                                    displayName: displayName,
+                                    model: payload.modelName,
+                                    platform: payload.platform,
+                                    osVersion: payload.osVersion,
+                                    kemKeyCount: payload.kemPublicKeys.count
+                                )
+                                let decision = await PairingTrustApprovalService.shared.decide(for: request)
+                                guard decision != PairingTrustApprovalService.Decision.reject else {
+                                    logger.info("🛑 Pairing/trust request rejected (no KEM reply): deviceId=\(payload.deviceId, privacy: .public)")
+                                    break
+                                }
+
+                                // Persist peer KEM identity keys for PQC suite negotiation.
+                                // Without this, the next PQC rekey will fail on macOS with suiteNegotiationFailed
+                                // because `peerKEMPublicKeys[suite] == nil`.
+                                do {
+                                    // Persist two records:
+                                    // - canonical: keyed by declared stable deviceId (used for UI and policy)
+                                    // - alias: keyed by current transport peer id (e.g., bonjour:<name>@local.) (used for handshake lookups)
+                                    let baseCaps: [String] = [
+                                        "trusted",
+                                        "pqc_bootstrap",
+                                        "platform=\(payload.platform ?? "")",
+                                        "osVersion=\(payload.osVersion ?? "")",
+                                        "modelName=\(payload.modelName ?? "")",
+                                        "chip=\(payload.chip ?? "")",
+                                        "peerEndpoint=\(peer.deviceId)"
+                                    ]
+                                    let canonical = TrustRecord(
+                                        deviceId: payload.deviceId,
+                                        pubKeyFP: "", // intentionally empty: do not enable strict identity pinning during bootstrap
+                                        publicKey: Data(),
+                                        secureEnclavePublicKey: nil,
+                                        protocolPublicKey: nil,
+                                        legacyP256PublicKey: nil,
+                                        signatureAlgorithm: nil,
+                                        kemPublicKeys: payload.kemPublicKeys,
+                                        attestationLevel: .none,
+                                        attestationData: nil,
+                                        capabilities: baseCaps,
+                                        signature: Data(),
+                                        deviceName: displayName
+                                    )
+                                    _ = try await TrustSyncService.shared.addTrustRecord(canonical)
+
+                                    if peer.deviceId != payload.deviceId {
+                                        let aliasCaps = baseCaps + ["alias=true", "declaredDeviceId=\(payload.deviceId)"]
+                                        let alias = TrustRecord(
+                                            deviceId: peer.deviceId,
+                                            pubKeyFP: "",
+                                            publicKey: Data(),
+                                            secureEnclavePublicKey: nil,
+                                            protocolPublicKey: nil,
+                                            legacyP256PublicKey: nil,
+                                            signatureAlgorithm: nil,
+                                            kemPublicKeys: payload.kemPublicKeys,
+                                            attestationLevel: .none,
+                                            attestationData: nil,
+                                            capabilities: aliasCaps,
+                                            signature: Data(),
+                                            deviceName: displayName
+                                        )
+                                        _ = try await TrustSyncService.shared.addTrustRecord(alias)
+                                    }
+
+                                    logger.info("🔑 已保存对端 KEM 公钥到 TrustSync：declared=\(payload.deviceId, privacy: .public) peer=\(peer.deviceId, privacy: .public) keys=\(payload.kemPublicKeys.count, privacy: .public)")
+                                } catch {
+                                    logger.error("❌ 保存对端 KEM 公钥失败（将导致 PQC rekey 失败）: \(error.localizedDescription, privacy: .public)")
+                                }
+
+                                // Reply with our KEM identity public keys (bootstrap for iOS initiator).
+                                let provider = CryptoProviderFactory.make(policy: .preferPQC)
+                                let suites = provider.supportedSuites.filter { $0.isPQCGroup }
+                                let km = DeviceIdentityKeyManager.shared
+                                var kemKeys: [KEMPublicKeyInfo] = []
+                                for s in suites {
+                                    if let pk = try? await km.getKEMPublicKey(for: s, provider: provider) {
+                                        kemKeys.append(KEMPublicKeyInfo(suiteWireId: s.wireId, publicKey: pk))
+                                    }
+                                }
+                                let localId = await SelfIdentityProvider.shared.snapshot().deviceId
+                                let localName = Host.current().localizedName
+                                let localPlatform = "macOS"
+                                let localOS = ProcessInfo.processInfo.operatingSystemVersionString
+                                let localModel = "Mac"
+                                let reply = AppMessage.pairingIdentityExchange(.init(
+                                    deviceId: localId,
+                                    kemPublicKeys: kemKeys,
+                                    deviceName: localName,
+                                    modelName: localModel,
+                                    platform: localPlatform,
+                                    osVersion: localOS,
+                                    chip: nil
+                                ))
+                                let outPlain = try JSONEncoder().encode(reply)
+                                let outCipher = try encryptAppPayload(outPlain, with: keys)
+                                let outPadded = TrafficPadding.wrapIfEnabled(outCipher, label: "tx")
+                                try await transport.send(to: peer, data: outPadded)
+                                logger.info("🔑 已回传本机 KEM 公钥：count=\(kemKeys.count, privacy: .public) decision=\(decision.rawValue, privacy: .public)")
+                            default:
+                                break
+                            }
+                        }
+                    } catch {
+                        logger.debug("ℹ️ 业务消息解密/解析失败（忽略）：\(error.localizedDescription, privacy: .public)")
+                    }
+                    continue
+                }
+
+                // 延迟初始化：必须先看到 MessageA 才能知道对端 offeredSuites 属于 PQC 组还是 Classic 组，
+                // 从而选择 sigAAlgorithm / provider / identity key。
+                if driver == nil {
+                    if let messageA = try? HandshakeMessageA.decode(from: frame) {
+                        let peerHasPQCGroup = messageA.supportedSuites.contains { $0.isPQCGroup }
+                        let peerHasClassicGroup = messageA.supportedSuites.contains { !$0.isPQCGroup }
+                        let compatibilityModeEnabled = UserDefaults.standard.bool(forKey: "Settings.EnableCompatibilityMode")
+                        let requestedPolicy = HandshakePolicy.recommendedDefault(compatibilityModeEnabled: compatibilityModeEnabled)
+
+                        // IMPORTANT (paper-aligned legacy gating):
+                        // On macOS 26+ default is strictPQC, which would reject classic-only MessageA.
+                        // But strictPQC onboarding requires a one-time classic bootstrap to provision KEM identity keys.
+                        // Therefore: if peer offered classic-only, we MUST allow a classic policy on this responder.
+                        let effectivePolicy: HandshakePolicy = {
+                            if peerHasPQCGroup { return requestedPolicy }
+                            if requestedPolicy.requirePQC {
+                                logger.info("🧩 legacyBootstrap(inbound): strictPQC enabled but peer offered classic-only. Allowing classic bootstrap channel for KEM provisioning. peer=\(peer.deviceId, privacy: .public)")
+                            }
+                            return HandshakePolicy(requirePQC: false, allowClassicFallback: false, minimumTier: .classic, requireSecureEnclavePoP: false)
+                        }()
+
+                        // Choose provider first, then derive sigA/offeredSuites from local capability.
+                        var selection: CryptoProviderFactory.SelectionPolicy = .classicOnly
+                        var cryptoProvider: any CryptoProvider = CryptoProviderFactory.make(policy: .classicOnly)
+                        var sigAAlgorithm: ProtocolSigningAlgorithm = .ed25519
+                        var offeredSuites: [CryptoSuite] = cryptoProvider.supportedSuites.filter { !$0.isPQCGroup }
+
+                        if peerHasPQCGroup {
+                            selection = (effectivePolicy.requirePQC ? .requirePQC : .preferPQC)
+                            cryptoProvider = CryptoProviderFactory.make(policy: selection)
+                            let localPQCSuites = cryptoProvider.supportedSuites.filter { $0.isPQCGroup }
+
+                            if localPQCSuites.isEmpty {
+                                if effectivePolicy.requirePQC {
+                                    logger.error("❌ PQC required by policy but no PQC provider available on this device. peer=\(peer.deviceId, privacy: .public)")
+                                    return
+                                }
+                                if peerHasClassicGroup {
+                                    selection = .classicOnly
+                                    cryptoProvider = CryptoProviderFactory.make(policy: selection)
+                                    sigAAlgorithm = .ed25519
+                                    offeredSuites = cryptoProvider.supportedSuites.filter { !$0.isPQCGroup }
+                                    logger.info("🧩 inboundFallback(classic): peer advertises PQC but local PQC unavailable; falling back to classic handshake. peer=\(peer.deviceId, privacy: .public)")
+                            } else {
+                                    logger.error("❌ Peer offered PQC-only suites but local PQC unavailable; cannot continue. peer=\(peer.deviceId, privacy: .public)")
+                                    return
+                                }
+                            } else {
+                                sigAAlgorithm = .mlDSA65
+                                offeredSuites = localPQCSuites
+                            }
+                        } else {
+                            selection = .classicOnly
+                            cryptoProvider = CryptoProviderFactory.make(policy: selection)
+                            sigAAlgorithm = .ed25519
+                            offeredSuites = cryptoProvider.supportedSuites.filter { !$0.isPQCGroup }
+                        }
+
+                        let keyManager = DeviceIdentityKeyManager.shared
+                        let (protocolPublicKey, signingKeyHandle): (Data, SigningKeyHandle)
+                        if sigAAlgorithm == .mlDSA65 {
+                            (protocolPublicKey, signingKeyHandle) = try await keyManager.getOrCreateMLDSASigningKey()
+                        } else {
+                            (protocolPublicKey, signingKeyHandle) = try await keyManager.getOrCreateProtocolSigningKey()
+                        }
+
+        let identityPublicKeyWire = ProtocolIdentityPublicKeys(
+                            protocolPublicKey: protocolPublicKey,
+                            protocolAlgorithm: sigAAlgorithm,
+            sePoPPublicKey: nil
+        ).asWire().encoded
+
+        do {
+            driver = try HandshakeDriver(
+                transport: transport,
+                                cryptoProvider: cryptoProvider,
+                                protocolSignatureProvider: ProtocolSignatureProviderSelector.select(for: sigAAlgorithm),
+                                protocolSigningKeyHandle: signingKeyHandle,
+                                sigAAlgorithm: sigAAlgorithm,
+                identityPublicKey: identityPublicKeyWire,
+                offeredSuites: offeredSuites,
+                                policy: effectivePolicy
+            )
+                            logger.info("🤝 入站 HandshakeDriver 初始化完成: sigA=\(sigAAlgorithm.rawValue, privacy: .public) provider=\(String(describing: type(of: cryptoProvider)), privacy: .public)")
+        } catch {
+                            logger.error("❌ 入站 HandshakeDriver 初始化失败: \(error.localizedDescription, privacy: .public)")
+            return
+        }
+
+                        // 继续处理当前这帧 MessageA（不要丢）
+                    } else {
+                        logger.debug("ℹ️ 入站首帧不是 MessageA（忽略，等待下一帧） size=\(frame.count, privacy: .public)")
+                        continue
+                    }
+                }
+
+                if let driver {
+                await driver.handleMessage(frame, from: peer)
                 let st = await driver.getCurrentState()
                 logger.info("🤝 HandshakeDriver state: \(String(describing: st), privacy: .public)")
+
+                switch st {
+                case .waitingFinished(_, let keys, _):
+                    sessionKeys = keys
+                    postConnectedUX(keys: keys)
+                case .established(let keys):
+                    sessionKeys = keys
+                    postConnectedUX(keys: keys)
+                default:
+                    break
+                }
+                }
+
+                // Start heartbeat once we have session keys (only once).
+                if heartbeatTask == nil, let keys = sessionKeys {
+                    heartbeatTask = Task.detached(priority: .utility) {
+                        while !Task.isCancelled, connection.state == .ready {
+                            do {
+                                try await Task.sleep(for: .seconds(10))
+                                let localId = await SelfIdentityProvider.shared.snapshot().deviceId
+                                let localName = Host.current().localizedName
+                                let localPlatform = "macOS"
+                                let localOS = ProcessInfo.processInfo.operatingSystemVersionString
+                                let msg = AppMessage.heartbeat(.init(
+                                    sentAt: Date(),
+                                    deviceId: localId,
+                                    deviceName: localName,
+                                    modelName: "Mac",
+                                    platform: localPlatform,
+                                    osVersion: localOS,
+                                    chip: nil
+                                ))
+                                let plain = try JSONEncoder().encode(msg)
+                                let cipher = try encryptAppPayload(plain, with: keys)
+                                let padded = TrafficPadding.wrapIfEnabled(cipher, label: "tx/hb")
+                                try await transport.send(to: peer, data: padded)
+                            } catch {
+                                break
+                            }
+                        }
+                }
+                }
             }
         } catch {
             // 连接被对端关闭 / 读取不足在真实网络环境下很常见（例如对端取消、并发探测连接等）。
@@ -1425,6 +1926,13 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                 logger.debug("ℹ️ 入站控制通道结束（EOF/short read）: \(ns.localizedDescription, privacy: .public)")
             } else {
                 logger.debug("ℹ️ 入站控制通道结束: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+
+        heartbeatTask?.cancel()
+        if didMarkConnected {
+            Task { @MainActor in
+                ConnectionPresenceService.shared.markDisconnected(peerId: peerIdForPresence)
             }
         }
     }
@@ -1464,7 +1972,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             break
         }
     }
-    
+
     private func waitForConnection(_ connection: NWConnection) async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             let resumed = OSAllocatedUnfairLock(initialState: false)
@@ -1478,15 +1986,15 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                         return false
                     }
                 }
-                
+
                 guard shouldResume else { return }
-                
+
  // 标记为已恢复，避免重复调用
  // withLock 返回闭包的值，这里闭包返回 Void，不需要返回值
                 resumed.withLock { isResumed in
                     isResumed = true
                 }
-                
+
                 switch state {
                 case .ready:
                     continuation.resume()
@@ -1498,18 +2006,18 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             }
         }
     }
-    
+
  // MARK: - 本机判定核心（"永久防第三方设备变本机"）
-    
+
  /// 推断设备来源（source）
     private func inferSource(from serviceType: String) -> DeviceSource {
         let lower = serviceType.lowercased()
-        
+
  // SkyBridge 自有服务
         if lower.contains("skybridge") {
             return DeviceSource.skybridgeBonjour
         }
-        
+
  // 第三方 Bonjour 服务
         if lower.contains("airplay") ||
            lower.contains("ipp") ||
@@ -1519,10 +2027,10 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
            lower.contains("sftp") {
             return DeviceSource.thirdPartyBonjour
         }
-        
+
         return DeviceSource.unknown
     }
-    
+
  /// A. 统一写入点：唯一能调用 setIsLocalDeviceByDiscovery() 的地方
     private func applyLocalFlag(_ device: inout DiscoveredDevice, selfId: SelfIdentitySnapshot) {
  // 前置检查：只有 SkyBridge 来源才有资格成为本机
@@ -1531,7 +2039,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             device.source == .skybridgeP2P ||
             device.source == .skybridgeUSB ||
             device.source == .skybridgeCloud
-        
+
         if !eligible {
  // 非本服务：强制清零身份字段
             device.deviceId = nil
@@ -1540,12 +2048,12 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             device.setIsLocalDeviceByDiscovery(false)
             return
         }
-        
+
  // 同步判定本机（使用内联实现避免异步复杂度）
         let local = resolveIsLocalSync(device: device, selfId: selfId)
         device.setIsLocalDeviceByDiscovery(local)
     }
-    
+
  /// 同步版本的本机判定（内联 IdentityResolver 逻辑）
     private func resolveIsLocalSync(device: DiscoveredDevice, selfId: SelfIdentitySnapshot) -> Bool {
  // 前置检查：selfId 为空不允许判定本机
@@ -1555,7 +2063,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             }
             return false
         }
-        
+
  // 优先级 A：deviceId 硬匹配
         if let deviceId = device.deviceId,
            !deviceId.isEmpty,
@@ -1565,7 +2073,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
            deviceId == selfId.deviceId {
             return true
         }
-        
+
  // 优先级 B：pubKeyFP 硬匹配
         if let pubKeyFP = device.pubKeyFP,
            !pubKeyFP.isEmpty,
@@ -1576,7 +2084,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
            pubKeyFP == selfId.pubKeyFP {
             return true
         }
-        
+
  // 优先级 C：MAC 地址匹配（仅 SkyBridge 来源）
         if !device.macSet.isEmpty && !selfId.macSet.isEmpty {
             let overlap = device.macSet.intersection(selfId.macSet)
@@ -1584,14 +2092,14 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                 return true
             }
         }
-        
+
  // 🔧 修复：优先级 D - 主机名匹配（用于 Bonjour 发现的本机服务）
  // 当设备没有强身份字段时，通过主机名判定本机
         if let localHostname = Host.current().localizedName {
             let deviceNameLower = device.name.lowercased()
             let hostnameLower = localHostname.lowercased()
  // 检查设备名是否包含本机主机名（如 "Lza的MacBook Pro" 包含 "lza的macbook pro"）
-            if deviceNameLower == hostnameLower || 
+            if deviceNameLower == hostnameLower ||
                deviceNameLower.contains(hostnameLower) ||
                hostnameLower.contains(deviceNameLower) {
  // 额外检查：确保是 SkyBridge 服务或本机 IP
@@ -1604,23 +2112,23 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                 }
             }
         }
-        
+
         return false
     }
-    
+
  /// 检查 IP 是否为本机 IP
     private func isLocalIP(_ ip: String) -> Bool {
  // 获取本机所有 IP 地址
         var ifaddrs: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&ifaddrs) == 0 else { return false }
         defer { freeifaddrs(ifaddrs) }
-        
+
         var interface = ifaddrs
         while interface != nil {
             defer { interface = interface?.pointee.ifa_next }
             guard let ifa = interface?.pointee,
                   let addr = ifa.ifa_addr else { continue }
-            
+
             if addr.pointee.sa_family == UInt8(AF_INET) {
                 var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
                 if getnameinfo(addr, socklen_t(addr.pointee.sa_len),
@@ -1636,7 +2144,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         }
         return false
     }
-    
+
  /// B. 刷新后清洗：对历史缓存污染进行一次性清洗
     private func sanitizeCache(_ selfId: SelfIdentitySnapshot) {
         for i in discoveredDevices.indices {
@@ -1644,13 +2152,13 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         }
         hardClampSingleLocalSync(selfId: selfId)
     }
-    
+
  /// C. 周期末兜底（同步版本）：确保全局只有一个本机（"单机硬化"）
  /// 注意：异步版本见 `hardClampSingleLocal(selfId:) async`
     private func hardClampSingleLocalSync(selfId: SelfIdentitySnapshot) {
         var localCount = 0
         var firstLocalIndex: Int?
-        
+
         for (index, device) in discoveredDevices.enumerated() {
             if device.isLocalDevice {
                 localCount += 1
@@ -1659,11 +2167,11 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                 }
             }
         }
-        
+
  // 如果发现多个本机，只保留第一个强匹配的
         if localCount > 1 {
             logger.warning("⚠️ 检测到多个本机设备（\(localCount)个），执行硬化清零")
-            
+
             for i in discoveredDevices.indices {
                 if i != firstLocalIndex {
                     discoveredDevices[i].setIsLocalDeviceByDiscovery(false)
@@ -1676,15 +2184,15 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
 // MARK: - 设备缓存 Actor
 actor DeviceCache {
     private var cache: [UUID: DiscoveredDevice] = [:]
-    
+
     func add(_ device: DiscoveredDevice) {
         cache[device.id] = device
     }
-    
+
     func remove(_ id: UUID) {
         cache.removeValue(forKey: id)
     }
-    
+
     func getAll() -> [DiscoveredDevice] {
         Array(cache.values)
     }

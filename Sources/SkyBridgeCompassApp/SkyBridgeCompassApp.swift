@@ -15,22 +15,22 @@ struct SkyBridgeCompassApp: App {
     @StateObject private var supabaseConfiguration = SupabaseConfiguration.shared
     @StateObject private var vncLaunchContext = VNCLaunchContext.shared
     @StateObject private var sshLaunchContext = SSHLaunchContext.shared
-    
+
  /// 天气服务 - 提供天气数据和位置服务
     @StateObject private var weatherDataService = WeatherDataService()
     @StateObject private var weatherLocationService = WeatherLocationService()
     @StateObject private var weatherIntegrationManager = WeatherIntegrationManager.shared
     @StateObject private var weatherEffectsSettings = WeatherEffectsSettings.shared
-    
+
  /// 设置管理器（延迟初始化以避免阻塞）
     @StateObject private var settingsManager = SettingsManager.shared
-    
+
  /// 启动协调器 - 管理分阶段加载
     @StateObject private var startupCoordinator = StartupCoordinator.shared
-    
+
  /// 本地化管理器
     @StateObject private var localizationManager = LocalizationManager.shared
-    
+
     private let renderConfig: DMGBackgroundRenderConfig?
     private let iconApplied: Bool
 
@@ -75,7 +75,7 @@ struct SkyBridgeCompassApp: App {
                 if renderConfig == nil {
  // 开始协调启动流程
                     await startupCoordinator.startCoordinatedLaunch()
-                    
+
  // 启动完成后配置Supabase
                     if supabaseConfiguration.isConfigured {
  // 启用AuthenticationService的Supabase模式
@@ -95,7 +95,7 @@ struct SkyBridgeCompassApp: App {
         }
         .environmentObject(vncLaunchContext)
         .environmentObject(sshLaunchContext)
-        
+
  // 偏好设置窗口
         Settings {
             PreferencesView()
@@ -111,7 +111,7 @@ struct SkyBridgeCompassApp: App {
                 .environmentObject(themeConfiguration)
                 .environmentObject(supabaseConfiguration)
         }
-        
+
 // 近距硬件镜像窗口 - macOS 15/26 最佳实践
 // 说明：macOS Tahoe 26 已于 2025-09-15 正式发布，CryptoKit 原生支持 HPKE X-Wing、ML-KEM、ML-DSA
         WindowGroup(id: "near-field-mirror") {
@@ -132,7 +132,7 @@ struct SkyBridgeCompassApp: App {
                 .keyboardShortcut("n", modifiers: [.command, .shift])
             }
         }
-        
+
  // 🆕 跨网络连接窗口 - 三维连接矩阵
  // 动态二维码 + iCloud 设备链 + 智能连接码
         WindowGroup(id: "cross-network-connection") {
@@ -153,7 +153,7 @@ struct SkyBridgeCompassApp: App {
                 .keyboardShortcut("k", modifiers: [.command, .shift])
             }
         }
-        
+
  // 🆕 VNC 查看器窗口
         WindowGroup(id: "vnc-viewer") {
             VNCViewerView()
@@ -173,7 +173,7 @@ struct SkyBridgeCompassApp: App {
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentSize)
     }
-    
+
  /// 打开跨网络连接窗口（已在 @available(macOS 14.0, *) 作用域内）
     @MainActor
     private func openCrossNetworkWindow() {
@@ -181,7 +181,7 @@ struct SkyBridgeCompassApp: App {
             NSWorkspace.shared.open(URL(string: "skybridge://cross-network")!)
         #endif
     }
-    
+
  /// 打开近距镜像窗口（已在 @available(macOS 14.0, *) 作用域内）
     @MainActor
     private func openNearFieldWindow() {
@@ -191,9 +191,9 @@ struct SkyBridgeCompassApp: App {
             NSWorkspace.shared.open(URL(string: "skybridge://near-field")!)
         #endif
     }
-    
+
  // MARK: - 启动加载界面
-    
+
  /// 启动加载界面 - 显示启动进度和当前加载的组件
     private var startupLoadingView: some View {
         ZStack {
@@ -201,23 +201,23 @@ struct SkyBridgeCompassApp: App {
             StarryBackground()
                 .opacity(0.8)
                 .ignoresSafeArea(.all)
-            
+
             VStack(spacing: 32) {
  // 应用图标和标题
                 VStack(spacing: 16) {
                     Image(systemName: "globe.americas.fill")
                         .font(.system(size: 64, weight: .light))
                         .foregroundColor(.blue)
-                    
+
                     Text("SkyBridge Compass Pro")
                         .font(.largeTitle.weight(.medium))
                         .foregroundColor(.white)
-                    
+
                     Text("正在启动应用程序...")
                         .font(.headline)
                         .foregroundColor(.secondary)
                 }
-                
+
  // 启动进度
                 VStack(spacing: 16) {
  // 进度条
@@ -225,25 +225,25 @@ struct SkyBridgeCompassApp: App {
                         .progressViewStyle(LinearProgressViewStyle())
                         .tint(.blue)
                         .frame(width: 300)
-                    
+
  // 当前阶段和组件
                     VStack(spacing: 8) {
                         Text(startupCoordinator.currentStage.description)
                             .font(.subheadline.weight(.medium))
                             .foregroundColor(.white)
-                        
+
                         if !startupCoordinator.currentLoadingComponent.isEmpty {
                             Text("正在加载: \(startupCoordinator.currentLoadingComponent)")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                         }
-                        
+
                         Text("\(Int(startupCoordinator.progress * 100))%")
                             .font(.caption.monospacedDigit())
                             .foregroundColor(.blue)
                     }
                 }
-                
+
  // 错误信息（如果有）
                 if let error = startupCoordinator.startupError {
                     Text("启动错误: \(error)")
@@ -257,7 +257,7 @@ struct SkyBridgeCompassApp: App {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
-    
+
     init() {
         let renderConfig = DMGBackgroundRenderConfig.fromProcessInfo()
         self.renderConfig = renderConfig
@@ -266,30 +266,35 @@ struct SkyBridgeCompassApp: App {
             DMGBackgroundRenderer.renderAndTerminate(config: renderConfig)
             return
         }
-        
+
         // Phase C3: Boot self-test for SBP2 TrafficPadding + CSV stats.
         // This guarantees we can see DIAG/CSV path even if no handshake happens yet.
         // If you don't see these logs, you are not running the newly built binary.
         _ = TrafficPadding.wrapIfEnabled(Data("boot".utf8), label: "boot")
         Task { try? await TrafficPaddingStats.shared.flushToCSV() }
 
-        WidgetCenter.shared.reloadAllTimelines()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+            WidgetCenter.shared.getCurrentConfigurations { result in
+                guard case .success(let configurations) = result, !configurations.isEmpty else { return }
+                WidgetCenter.shared.reloadAllTimelines()
+            }
+        }
         BackgroundTaskCoordinator.shared.registerSystemTasks()
         Self.configureNotificationsUnified()
         let applied = Self.applyAppIconIfAvailable()
         self.iconApplied = applied
-        
+
  // 🔧 修复命令行启动时的键盘输入问题
  // 确保应用能够接收键盘输入和焦点事件
         DispatchQueue.main.async {
             Self.activateApplicationForKeyboardInput()
-            
+
  // 🖱️ 启动全局鼠标追踪器（苹果官方推荐方式）
  // 延迟 1 秒确保窗口已创建
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                 GlobalMouseTracker.shared.startTracking()
             }
-            
+
  // 🆕 初始化菜单栏图标
  // Requirements: 1.1 - 应用启动后在状态栏显示 SkyBridge 图标
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
@@ -297,13 +302,13 @@ struct SkyBridgeCompassApp: App {
                 Self.setupMenuBarNotificationHandlers()
             }
         }
-        
+
  // 配置受信公钥白名单提供者（Supabase）
  // 🔒 安全改进：从安全配置加载凭据，不再硬编码
         if let supabaseURL = ProcessInfo.processInfo.environment["SUPABASE_URL"],
            let supabaseAnon = ProcessInfo.processInfo.environment["SUPABASE_ANON_KEY"] {
             RemoteDesktopManager.shared.bootstrapTrustedKeysFromSupabase(
-                url: supabaseURL, 
+                url: supabaseURL,
                 anonKey: supabaseAnon
             )
         } else {
@@ -311,7 +316,7 @@ struct SkyBridgeCompassApp: App {
             Task { @MainActor in
                 if let config = try? KeychainManager.shared.retrieveSupabaseConfig() {
                     RemoteDesktopManager.shared.bootstrapTrustedKeysFromSupabase(
-                        url: config.url, 
+                        url: config.url,
                         anonKey: config.anonKey
                     )
                 } else {
@@ -327,7 +332,7 @@ struct SkyBridgeCompassApp: App {
             DeprecationTracker.shared.printReport()
         }
         #endif
-        
+
  // 前台分层恢复 - 避免应用激活时所有子系统同时抢占资源导致峰值
         NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: nil) { _ in
  // 按图片最佳实践使用 而非 .detached，继承当前 actor 更安全
@@ -346,18 +351,18 @@ struct SkyBridgeCompassApp: App {
             }
         }
     }
-    
+
  /// 激活应用以接收键盘输入
  /// 解决通过命令行启动时TextField无法输入的问题
     @MainActor
     private static func activateApplicationForKeyboardInput() {
  // 设置应用为常规应用类型（而非后台应用）
         NSApp.setActivationPolicy(.regular)
-        
+
  // 激活应用，忽略其他应用的状态
  // 这对于命令行启动的GUI应用是必需的
         NSApp.activate(ignoringOtherApps: true)
-        
+
  // 确保应用窗口获得焦点
  // Swift 6.2: 使用 + MainActor 替代 DispatchQueue 以保持 actor 隔离
         Task { @MainActor in
@@ -367,12 +372,12 @@ struct SkyBridgeCompassApp: App {
                 window.makeFirstResponder(window.contentView)
             }
         }
-        
+
         SkyBridgeLogger.ui.debugOnly("🎯 应用已激活，键盘输入功能已启用")
     }
-    
+
  // MARK: - 静态配置方法
-    
+
  /// 配置通知权限
     @MainActor
     private static func configureNotifications() {
@@ -381,7 +386,7 @@ struct SkyBridgeCompassApp: App {
             SkyBridgeLogger.ui.debugOnly("跳过通知配置：命令行环境")
             return
         }
-        
+
         Task {
             do {
                 let center = UNUserNotificationCenter.current()
@@ -392,7 +397,7 @@ struct SkyBridgeCompassApp: App {
             }
         }
     }
-    
+
  /// 配置通知权限（统一入口）
  /// 说明：
  /// - 在应用启动阶段统一申请系统通知权限，并注册通知类别
@@ -425,7 +430,7 @@ struct SkyBridgeCompassApp: App {
             SkyBridgeLogger.ui.debugOnly("📣 [通知配置] 应用(\(bundleIdentifier))系统通知权限已\(granted ? "授予" : "拒绝")")
         }
     }
-    
+
  /// 设置菜单栏通知处理器
  /// Requirements: 1.4, 2.4, 3.3, 3.4, 4.3
     @MainActor
@@ -445,7 +450,7 @@ struct SkyBridgeCompassApp: App {
                 }
             }
         }
-        
+
  // 处理打开设备详情请求
  // Requirements: 2.4
         NotificationCenter.default.addObserver(
@@ -461,7 +466,7 @@ struct SkyBridgeCompassApp: App {
                 }
             }
         }
-        
+
  // 处理打开屏幕镜像请求
  // Requirements: 3.4
         NotificationCenter.default.addObserver(
@@ -473,7 +478,7 @@ struct SkyBridgeCompassApp: App {
                 NSWorkspace.shared.open(URL(string: "skybridge://near-field")!)
             }
         }
-        
+
  // 处理文件传输请求
  // Requirements: 3.3
         NotificationCenter.default.addObserver(
@@ -489,7 +494,7 @@ struct SkyBridgeCompassApp: App {
  // 文件 URL 由主窗口处理
             }
         }
-        
+
  // 处理打开设置请求（回退方式）
  // Requirements: 3.5
         NotificationCenter.default.addObserver(
@@ -505,10 +510,10 @@ struct SkyBridgeCompassApp: App {
                 }
             }
         }
-        
+
         SkyBridgeLogger.ui.debugOnly("✅ 菜单栏通知处理器已设置")
     }
-    
+
  /// 应用应用图标（如果可用）
     @MainActor
     private static func applyAppIconIfAvailable() -> Bool {
@@ -542,6 +547,7 @@ private struct RootContainerView: View {
     @EnvironmentObject private var dashboardModel: DashboardViewModel
     @EnvironmentObject private var authModel: AuthenticationViewModel
     @Environment(\.iconMissingHint) private var iconMissingHint
+    @StateObject private var pairingTrustApproval = PairingTrustApprovalService.shared
 
     var body: some View {
  // 移除调试日志以减少重复渲染的日志噪音
@@ -584,6 +590,14 @@ private struct RootContainerView: View {
                     .padding(12)
                     .zIndex(0) // 避免遮挡右上角工具按钮
             }
+        }
+        .sheet(item: Binding(get: { pairingTrustApproval.pendingRequest }, set: { _ in })) { req in
+            PairingTrustApprovalSheet(
+                request: req,
+                onDecision: { decision in
+                    pairingTrustApproval.resolve(req, decision: decision)
+                }
+            )
         }
     }
 }

@@ -32,9 +32,9 @@ public struct NotificationBellView: View {
  // 事件详情弹窗状态
     @State private var showEventDetailAlert: Bool = false
     @State private var selectedEventDetail: String? = nil
-    
+
     public init() {}
-    
+
     public var body: some View { bellContent }
 
  /// 主体视图内容（拆分以降低类型推断复杂度）
@@ -83,7 +83,7 @@ public struct NotificationBellView: View {
                     .buttonStyle(.borderless)
                 }
                 .padding(.bottom, 4)
-                
+
                 if events.isEmpty {
                     Text("暂无通知")
                         .foregroundColor(.secondary)
@@ -119,7 +119,7 @@ public struct NotificationBellView: View {
             }
             .padding(12)
             .frame(width: 360)
-            .onAppear { 
+            .onAppear {
                 unreadCount = 0
             }
         }
@@ -183,7 +183,13 @@ public struct NotificationBellView: View {
         .onReceive(NotificationCenter.default.publisher(for: Notification.Name("FileTransferCompleted"))) { note in
             let fileName = (note.userInfo?["fileName"] as? String) ?? "未知文件"
             let fileSize = (note.userInfo?["fileSize"] as? Int64) ?? 0
-            appendEvent(title: "文件传输完成", detail: "\(fileName) · \(byteCount(fileSize))", success: true, icon: "checkmark.circle.fill")
+            let direction = (note.userInfo?["direction"] as? String) ?? ""
+            let localPath = (note.userInfo?["localPath"] as? String)
+            var detail = "\(fileName) · \(byteCount(fileSize))"
+            if let localPath, !localPath.isEmpty, direction == "incoming" {
+                detail += " · 已保存到 \(localPath)"
+            }
+            appendEvent(title: "文件传输完成", detail: detail, success: true, icon: "checkmark.circle.fill")
         }
         .onReceive(NotificationCenter.default.publisher(for: Notification.Name("FileTransferFailed"))) { note in
             let fileName = (note.userInfo?["fileName"] as? String) ?? "未知文件"
@@ -221,7 +227,7 @@ public struct NotificationBellView: View {
         }
         )
     }
-    
+
 private func appendEvent(from note: Notification, fallbackTitle: String, success: Bool, icon: String) {
         var detail: String? = nil
         if let info = note.userInfo {
@@ -246,15 +252,15 @@ private func appendEvent(from note: Notification, fallbackTitle: String, success
         if events.count > maxEvents { events.removeLast(events.count - maxEvents) }
         if !showPopover { unreadCount += 1 }
     }
-    
+
  // MARK: - 欢迎消息
-    
+
     private var welcomeMessage: String {
         let userName = authModel.currentSession?.displayName ?? NSUserName()
         let timeGreeting = getTimeGreeting()
         return "\(userName)，\(timeGreeting)！"
     }
-    
+
     private var welcomeIcon: String {
         let hour = Calendar.current.component(.hour, from: Date())
         switch hour {
@@ -269,7 +275,7 @@ private func appendEvent(from note: Notification, fallbackTitle: String, success
         default: return "hand.wave.fill"  // 默认
         }
     }
-    
+
     private func getTimeGreeting() -> String {
         let hour = Calendar.current.component(.hour, from: Date())
         switch hour {
@@ -284,9 +290,9 @@ private func appendEvent(from note: Notification, fallbackTitle: String, success
         default: return "你好"
         }
     }
-    
+
  // MARK: - 启动欢迎和休息提醒
-    
+
     private func sendWelcomeMessageIfNeeded() {
  // 检查是否已经发送过启动欢迎消息（本次会话内）
         if !hasShownWelcome {
@@ -297,16 +303,16 @@ private func appendEvent(from note: Notification, fallbackTitle: String, success
             hasShownWelcome = true
         }
     }
-    
+
     private func scheduleRestReminders() {
  // 启动后台任务检查休息提醒
         Task {
             while true {
                 try? await Task.sleep(nanoseconds: 300_000_000_000) // 每5分钟检查一次
-                
+
                 let now = Date()
                 let timeSinceStart = now.timeIntervalSince(appStartTime)
-                
+
  // 检查是否超过1小时
                 if timeSinceStart >= restReminderInterval {
  // 检查是否已经发送过休息提醒（避免重复发送）
@@ -316,12 +322,12 @@ private func appendEvent(from note: Notification, fallbackTitle: String, success
                             continue // 距离上次提醒不足1小时，跳过
                         }
                     }
-                    
+
  // 发送休息提醒
                     sendRestReminder()
                     lastRestReminder = now
                 }
-                
+
  // 连续使用满3小时的强提示（每3小时仅提示一次）
                 if timeSinceStart >= (3 * 3600) {
                     if let last3h = lastThreeHourReminder {
@@ -337,7 +343,7 @@ private func appendEvent(from note: Notification, fallbackTitle: String, success
             }
         }
     }
-    
+
  /// 每小时健康与天气提示（丰富程度增强：夜深了提示、天气防护建议）
     private func scheduleHourlyWellness() {
         Task {
@@ -349,21 +355,21 @@ private func appendEvent(from note: Notification, fallbackTitle: String, success
                     return true
                 }()
                 if !shouldSend { continue }
-                
+
  // 夜深了（22:00~05:00）主动提示休息
                 let hour = Calendar.current.component(.hour, from: now)
                 if hour >= 22 || hour < 5 {
                     appendEvent(title: "🌙 夜深了，注意休息", detail: "建议放松眼睛，保证睡眠质量", success: true, icon: "moon.stars.fill")
                 }
-                
+
  // 天气防护建议（依据实时天气或退化为通用提示）
                 sendWeatherAdvice()
-                
+
                 lastHourlyAdvice = now
             }
         }
     }
-    
+
     private func sendRestReminder() {
         let reminders = [
             ("🌊 您已连续使用1小时", "休息片刻，喝杯水，保护您的眼睛", "cup.and.saucer.fill"),
@@ -372,16 +378,16 @@ private func appendEvent(from note: Notification, fallbackTitle: String, success
             ("💡 建议休息", "做几个深呼吸，缓解疲劳", "lungs.fill"),
             ("☕️ 休息一下", "起身活动，保持最佳状态", "hand.raised.fill")
         ]
-        
+
         let randomReminder = reminders.randomElement() ?? reminders[0]
         appendEvent(title: randomReminder.0, detail: randomReminder.1, success: true, icon: randomReminder.2)
     }
-    
+
  /// 连续三小时强提醒
     private func sendThreeHourReminder() {
         appendEvent(title: "⏳ 连续使用3小时", detail: "建议充分休息、补充水分并活动一下", success: true, icon: "figure.walk")
     }
-    
+
  /// 天气防护建议（晴天防晒、雨天防雨、雪天防雪、雾霾/雾建议佩戴口罩）
     private func sendWeatherAdvice() {
  // 优先使用集成天气的数据源（wttr.in / Open‑Meteo），避免WeatherKit未初始化导致类型为unknown

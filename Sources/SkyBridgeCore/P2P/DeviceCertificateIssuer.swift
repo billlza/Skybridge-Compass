@@ -23,10 +23,10 @@ import CryptoKit
 public enum CertificateSignerType: String, Codable, Sendable {
  /// 自签名（设备自己签名）
     case selfSigned = "self-signed"
-    
+
  /// 配对确认（PAKE 成功后由对端确认）
     case pairingConfirmed = "pairing-confirmed"
-    
+
  /// 用户域签名（企业 CA 签名）
     case userDomainSigned = "user-domain-signed"
 }
@@ -37,49 +37,49 @@ public enum CertificateSignerType: String, Codable, Sendable {
 public struct P2PIdentityCertificate: Codable, Sendable, Equatable, TranscriptEncodable {
  /// 设备 ID
     public let deviceId: String
-    
+
  /// 公钥 (DER 编码)
     public let publicKey: Data
-    
+
  /// 公钥指纹 (SHA-256 hex, 64 chars)
     public let pubKeyFP: String
 
  /// KEM 身份公钥（可选）
     public let kemPublicKeys: [KEMPublicKeyInfo]?
-    
+
  /// 证明等级
     public let attestationLevel: P2PAttestationLevel
-    
+
  /// 证明数据（App Attest 数据，需服务器验证）
     public let attestationData: Data?
-    
+
  /// 设备能力
     public let capabilities: [String]
-    
+
  /// 签名者类型
     public let signerType: CertificateSignerType
-    
+
  /// 签名者 ID（如果是配对确认或域签名）
     public let signerId: String?
-    
+
  /// 证书版本
     public let version: Int
-    
+
  /// 创建时间
     public let createdAt: Date
-    
+
  /// 过期时间
     public let expiresAt: Date
-    
+
  /// 签名
     public let signature: Data
 
-    
+
  /// 短 ID（用于 UI 显示）
     public var shortId: String {
         String(pubKeyFP.prefix(P2PConstants.pubKeyFPDisplayLength))
     }
-    
+
     public init(
         deviceId: String,
         publicKey: Data,
@@ -110,12 +110,12 @@ public struct P2PIdentityCertificate: Codable, Sendable, Equatable, TranscriptEn
         self.expiresAt = expiresAt ?? createdAt.addingTimeInterval(365 * 24 * 60 * 60)
         self.signature = signature
     }
-    
+
  /// 证书是否过期
     public var isExpired: Bool {
         Date() > expiresAt
     }
-    
+
  /// 确定性编码（用于 Transcript）
     public func deterministicEncode() throws -> Data {
         var encoder = DeterministicEncoder()
@@ -140,7 +140,7 @@ public struct P2PIdentityCertificate: Codable, Sendable, Equatable, TranscriptEn
  // 注意：签名不进入编码（签名是对其他字段的签名）
         return encoder.finalize()
     }
-    
+
  /// 获取待签名数据
     public func dataToSign() throws -> Data {
         try deterministicEncode()
@@ -159,7 +159,7 @@ public enum CertificateError: Error, LocalizedError, Sendable {
     case invalidPublicKey
     case untrusted
     case attestationRequired
-    
+
     public var errorDescription: String? {
         switch self {
         case .generationFailed(let reason):
@@ -187,26 +187,26 @@ public enum CertificateError: Error, LocalizedError, Sendable {
 /// 设备证书签发器
 @available(macOS 14.0, iOS 17.0, *)
 public actor P2PIdentityCertificateIssuer {
-    
+
  // MARK: - Singleton
-    
+
  /// 共享实例
     public static let shared = P2PIdentityCertificateIssuer()
-    
+
  // MARK: - Properties
-    
+
  /// 密钥管理器
     private let keyManager = DeviceIdentityKeyManager.shared
-    
+
  /// 缓存的本机证书
     private var cachedCertificate: P2PIdentityCertificate?
-    
+
  // MARK: - Initialization
-    
+
     private init() {}
-    
+
  // MARK: - Public Methods
-    
+
  /// 获取或创建本机证书
  /// - Returns: 设备证书
     public func getOrCreateLocalCertificate() async throws -> P2PIdentityCertificate {
@@ -214,23 +214,23 @@ public actor P2PIdentityCertificateIssuer {
         if let cached = cachedCertificate, !cached.isExpired {
             return cached
         }
-        
+
  // 创建新证书
         let certificate = try await createSelfSignedCertificate()
         cachedCertificate = certificate
         return certificate
     }
-    
+
  /// 创建自签名证书
  /// - Returns: 自签名设备证书
     public func createSelfSignedCertificate() async throws -> P2PIdentityCertificate {
  // 获取身份密钥
         let keyInfo = try await keyManager.getOrCreateIdentityKey()
         let kemPublicKeys = try await getLocalKEMPublicKeys()
-        
+
  // 获取设备能力
         let capabilities = getDeviceCapabilities()
-        
+
  // 创建未签名证书
         let unsignedCert = P2PIdentityCertificate(
             deviceId: keyInfo.deviceId,
@@ -244,11 +244,11 @@ public actor P2PIdentityCertificateIssuer {
             signerId: nil,
             signature: Data() // 临时空签名
         )
-        
+
  // 签名
         let dataToSign = try unsignedCert.dataToSign()
         let signature = try await keyManager.sign(data: dataToSign)
-        
+
  // 创建签名后的证书
         let signedCert = P2PIdentityCertificate(
             deviceId: keyInfo.deviceId,
@@ -262,7 +262,7 @@ public actor P2PIdentityCertificateIssuer {
             signerId: nil,
             signature: signature
         )
-        
+
         SkyBridgeLogger.p2p.info("Created self-signed certificate: \(signedCert.shortId)")
         return signedCert
     }
@@ -272,15 +272,15 @@ public actor P2PIdentityCertificateIssuer {
         guard provider.activeSuite.isPQC else {
             return []
         }
-        
+
         var keys: [KEMPublicKeyInfo] = []
-        
+
         let primaryPublicKey = try await keyManager.getKEMPublicKey(
             for: provider.activeSuite,
             provider: provider
         )
         keys.append(KEMPublicKeyInfo(suiteWireId: provider.activeSuite.wireId, publicKey: primaryPublicKey))
-        
+
         #if HAS_APPLE_PQC_SDK
         if #available(iOS 26.0, macOS 26.0, *) {
             if provider.tier == .nativePQC, provider.activeSuite != .xwingMLDSA {
@@ -293,11 +293,11 @@ public actor P2PIdentityCertificateIssuer {
             }
         }
         #endif
-        
+
         return keys
     }
 
-    
+
  /// 创建配对确认证书
  /// - Parameters:
  /// - peerCertificate: 对端证书
@@ -309,12 +309,12 @@ public actor P2PIdentityCertificateIssuer {
     ) async throws -> P2PIdentityCertificate {
  // 获取本机身份密钥
         let keyInfo = try await keyManager.getOrCreateIdentityKey()
-        
+
  // 验证对端证书
         guard try await verifyCertificate(peerCertificate) else {
             throw CertificateError.invalidSignature
         }
-        
+
  // 创建确认证书（本机签名对端的证书）
         let confirmedCert = P2PIdentityCertificate(
             deviceId: peerCertificate.deviceId,
@@ -328,11 +328,11 @@ public actor P2PIdentityCertificateIssuer {
             signerId: keyInfo.deviceId,
             signature: Data() // 临时空签名
         )
-        
+
  // 使用本机密钥签名
         let dataToSign = try confirmedCert.dataToSign()
         let signature = try await keyManager.sign(data: dataToSign)
-        
+
  // 创建签名后的证书
         let signedCert = P2PIdentityCertificate(
             deviceId: peerCertificate.deviceId,
@@ -346,11 +346,11 @@ public actor P2PIdentityCertificateIssuer {
             signerId: keyInfo.deviceId,
             signature: signature
         )
-        
+
         SkyBridgeLogger.p2p.info("Created pairing-confirmed certificate for: \(signedCert.shortId)")
         return signedCert
     }
-    
+
  /// 验证证书
  /// - Parameter certificate: 待验证证书
  /// - Returns: 是否验证通过
@@ -359,13 +359,13 @@ public actor P2PIdentityCertificateIssuer {
         if certificate.isExpired {
             throw CertificateError.expired
         }
-        
+
  // 验证公钥指纹
         let computedFP = computePublicKeyFingerprint(certificate.publicKey)
         guard computedFP == certificate.pubKeyFP else {
             throw CertificateError.invalidPublicKey
         }
-        
+
  // 根据签名者类型验证签名
         switch certificate.signerType {
         case .selfSigned:
@@ -374,7 +374,7 @@ public actor P2PIdentityCertificateIssuer {
                 certificate: certificate,
                 signerPublicKey: certificate.publicKey
             )
-            
+
         case .pairingConfirmed:
  // 配对确认：需要签名者的公钥
             guard let signerId = certificate.signerId else {
@@ -388,13 +388,23 @@ public actor P2PIdentityCertificateIssuer {
                 certificate: certificate,
                 signerPublicKey: signerRecord.publicKey
             )
-            
+
         case .userDomainSigned:
- // 用户域签名：需要 CA 公钥
-            throw CertificateError.verificationFailed("User domain verification not implemented")
+            // 用户域签名：使用“已配置的域 CA 公钥”验证
+            // 安全默认：若未配置 CA，则拒绝（不允许 silent accept）
+            guard certificate.signerId != nil else {
+                throw CertificateError.verificationFailed("Missing domain signer ID")
+            }
+            guard let caKey = UserDomainCATrustStore.getCAPublicKeyDER() else {
+                throw CertificateError.untrusted
+            }
+            return try await verifySignature(
+                certificate: certificate,
+                signerPublicKey: caKey
+            )
         }
     }
-    
+
  /// 验证证书签名
     private func verifySignature(
         certificate: P2PIdentityCertificate,
@@ -407,13 +417,13 @@ public actor P2PIdentityCertificateIssuer {
             publicKey: signerPublicKey
         )
     }
-    
+
  /// 计算公钥指纹
     private func computePublicKeyFingerprint(_ publicKey: Data) -> String {
         let hash = SHA256.hash(data: publicKey)
         return hash.map { String(format: "%02x", $0) }.joined()
     }
-    
+
  /// 获取设备能力
     private func getDeviceCapabilities() -> [String] {
         var capabilities: [String] = [
@@ -421,30 +431,30 @@ public actor P2PIdentityCertificateIssuer {
             "file-transfer",
             "screen-mirror"
         ]
-        
+
         #if os(macOS)
         capabilities.append("remote-desktop-host")
         capabilities.append("system-control")
         #endif
-        
+
         #if os(iOS)
         capabilities.append("touch-input")
         capabilities.append("replaykit")
         #endif
-        
+
  // 检查 PQC 支持
         if #available(iOS 26.0, macOS 26.0, *) {
             capabilities.append("pqc-native")
         }
-        
+
         return capabilities
     }
-    
+
  /// 清除缓存
     public func clearCache() {
         cachedCertificate = nil
     }
-    
+
  /// 刷新证书（轮换密钥后调用）
     public func refreshCertificate() async throws -> P2PIdentityCertificate {
         cachedCertificate = nil
@@ -458,13 +468,13 @@ public actor P2PIdentityCertificateIssuer {
 public struct CertificateValidationResult: Sendable {
  /// 是否有效
     public let isValid: Bool
-    
+
  /// 验证错误（如果有）
     public let error: CertificateError?
-    
+
  /// 信任等级
     public let trustLevel: TrustLevel
-    
+
  /// 信任等级
     public enum TrustLevel: Int, Sendable {
         case untrusted = 0
@@ -472,18 +482,18 @@ public struct CertificateValidationResult: Sendable {
         case pairingConfirmed = 2
         case domainSigned = 3
     }
-    
+
     public init(isValid: Bool, error: CertificateError? = nil, trustLevel: TrustLevel) {
         self.isValid = isValid
         self.error = error
         self.trustLevel = trustLevel
     }
-    
+
  /// 成功结果
     public static func success(trustLevel: TrustLevel) -> CertificateValidationResult {
         CertificateValidationResult(isValid: true, trustLevel: trustLevel)
     }
-    
+
  /// 失败结果
     public static func failure(_ error: CertificateError) -> CertificateValidationResult {
         CertificateValidationResult(isValid: false, error: error, trustLevel: .untrusted)

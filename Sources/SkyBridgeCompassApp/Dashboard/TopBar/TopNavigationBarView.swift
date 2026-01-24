@@ -7,13 +7,13 @@ import os.log
 public struct TopNavigationBarView: View {
     @EnvironmentObject var appModel: DashboardViewModel
     @EnvironmentObject var themeConfiguration: ThemeConfiguration
-    
+
     @Binding var showManualConnectSheet: Bool
     @Binding var manualIP: String
     @Binding var manualPort: String
     @Binding var manualCode: String
     @Binding var realtimeFPS: String
-    
+
     public init(
         showManualConnectSheet: Binding<Bool>,
         manualIP: Binding<String>,
@@ -27,7 +27,7 @@ public struct TopNavigationBarView: View {
         self._manualCode = manualCode
         self._realtimeFPS = realtimeFPS
     }
-    
+
     public var body: some View {
         HStack {
  // 应用图标和标题
@@ -35,27 +35,27 @@ public struct TopNavigationBarView: View {
  // 使用Bundle.module加载PNG图标文件
                 CustomGlobeIconView(cornerRadius: 6)
                     .frame(width: 28, height: 28)
-                
+
                 Text(LocalizationManager.shared.localizedString("app.name"))
                     .font(.title2)
                     .fontWeight(.semibold)
                     .foregroundColor(themeConfiguration.primaryTextColor)
                     .id("app-title") // 添加稳定的ID，避免重复创建
             }
-            
+
             Spacer()
-            
+
  // 连接状态指示器
             connectionStatusIndicator
-            
+
  // 在"未连接"和"通知中心"之间显示实时FPS（仅受设置开关控制）
             if SettingsManager.shared.showRealtimeFPS {
                 fpsIndicator
             }
-            
+
  // 通知铃铛（在"刷子"左侧）
             NotificationBellView()
-            
+
  // 主题切换按钮（刷子）
             themeToggleButton
         }
@@ -99,7 +99,7 @@ public struct TopNavigationBarView: View {
             .frame(width: 380)
         }
     }
-    
+
  // MARK: - 连接状态指示器
     private var connectionStatusIndicator: some View {
         HStack(spacing: 8) {
@@ -107,10 +107,16 @@ public struct TopNavigationBarView: View {
                 .fill(appModel.connectionStatus == .connected ? Color.green : Color.red)
                 .frame(width: 8, height: 8)
                 .animation(themeConfiguration.easeAnimation, value: appModel.connectionStatus)
-            
+
+            if appModel.connectionStatus == .connected, let detail = appModel.connectionDetail, !detail.isEmpty {
+                Text(LocalizationManager.shared.localizedString("device.status.connected") + " · " + detail)
+                    .font(.caption)
+                    .foregroundColor(themeConfiguration.secondaryTextColor)
+            } else {
             Text(appModel.connectionStatus == .connected ? LocalizationManager.shared.localizedString("device.status.connected") : LocalizationManager.shared.localizedString("status.disconnected"))
                 .font(.caption)
                 .foregroundColor(themeConfiguration.secondaryTextColor)
+            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
@@ -139,7 +145,7 @@ public struct TopNavigationBarView: View {
                 .stroke(themeConfiguration.borderColor, lineWidth: 1)
         )
     }
-    
+
  // MARK: - 主题切换按钮
     private var themeToggleButton: some View {
         Menu {
@@ -155,9 +161,9 @@ public struct TopNavigationBarView: View {
                     }
                 }
             }
-            
+
             Divider()
-            
+
             Button(action: {
                 selectCustomBackground()
             }) {
@@ -166,9 +172,9 @@ public struct TopNavigationBarView: View {
                     Image(systemName: "photo")
                 }
             }
-            
+
             Divider()
-            
+
             Button(action: {
                 themeConfiguration.toggleAnimations()
             }) {
@@ -179,7 +185,7 @@ public struct TopNavigationBarView: View {
                     }
                 }
             }
-            
+
             Button(action: {
                 themeConfiguration.toggleGlassEffects()
             }) {
@@ -203,14 +209,14 @@ public struct TopNavigationBarView: View {
         }
         .menuStyle(.borderlessButton)
     }
-    
+
     private func selectCustomBackground() {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.image]
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
-        
+
         panel.begin { response in
             if response == .OK, let url = panel.url {
                 themeConfiguration.setCustomBackgroundImage(path: url.path(percentEncoded: false))

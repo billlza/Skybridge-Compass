@@ -8,7 +8,6 @@
 //
 
 import SwiftUI
-import SkyBridgeCore
 
 /// 光斑粒子（阳光在玻璃上的反射）
 struct LightSpot: Identifiable {
@@ -72,10 +71,12 @@ public struct CinematicClearSkyEffectView: View {
     @State private var ambientAcc: TimeInterval = 0
     @State private var reflectionAcc: TimeInterval = 0
     
- // 🖱️ 交互式驱散
-    @StateObject private var clearManager = InteractiveClearManager()
+ // 🖱️ 交互式驱散（由统一入口 WeatherEffectView 注入；避免重复创建/重复监听）
+    @ObservedObject private var clearManager: InteractiveClearManager
     
-    public init() {}
+    public init(clearManager: InteractiveClearManager) {
+        self.clearManager = clearManager
+    }
     
     public var body: some View {
         GeometryReader { geometry in
@@ -124,19 +125,6 @@ public struct CinematicClearSkyEffectView: View {
         .onDisappear {
  // 🛑 统一暂停所有特效系统并释放计时器
             pauseAllEffectSystems()
- // 🔥 停止交互式清空管理器
-            Task {
- // stop() 为同步方法，直接调用；移除不必要的 await。
-            clearManager.stop()
-            }
-        }
- // 🔥 使用 onReceive 自动管理监听器生命周期
-        .onReceive(NotificationCenter.default.publisher(for: GlobalMouseTracker.mouseMovedNotification)) { notification in
-            if let locationValue = notification.userInfo?["location"] as? NSValue {
-                let nsPoint = locationValue.pointValue
-                let location = CGPoint(x: nsPoint.x, y: nsPoint.y)
-                clearManager.handleMouseMove(location)
-            }
         }
  // 📡 远程桌面会话指标：用于统一暂停/恢复所有系统
         .onReceive(RemoteDesktopManager.shared.metrics) { snapshot in

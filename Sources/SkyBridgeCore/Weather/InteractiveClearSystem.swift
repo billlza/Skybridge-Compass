@@ -24,7 +24,7 @@ public struct DynamicClearZone: Identifiable, Sendable {
     public let maxLifetime: TimeInterval  // 最大生命周期（60秒）
     public var fadeSpeed: Float  // 恢复速度
     public let createdAt: Date  // 创建时间，用于跨视图桥接时的衰减逻辑
-    
+
     public init(
         center: CGPoint,
         radius: CGFloat,
@@ -40,19 +40,19 @@ public struct DynamicClearZone: Identifiable, Sendable {
         self.fadeSpeed = Float(1.0 / maxLifetime)
         self.createdAt = Date()
     }
-    
+
  /// 更新状态（随时间衰减）
     public mutating func update(deltaTime: TimeInterval) {
         lifetime += deltaTime
-        
+
  // 渐进恢复：strength从1.0衰减到0
         let progress = Float(lifetime / maxLifetime)
         strength = max(0, 1.0 - progress)
-        
+
  // 范围也逐渐缩小
         radius = radius * (1.0 - CGFloat(progress) * 0.3)
     }
-    
+
  /// 是否已过期
     public var isExpired: Bool {
         return lifetime >= maxLifetime
@@ -76,11 +76,11 @@ public class MouseTrailTracker: ObservableObject {
     private let maxTrailLength = 10
     let velocityThreshold: CGFloat = 280  // 挥动触发速度阈值（像素/秒），提高以降低灵敏度
     private var smoothedVelocity: CGFloat = 0     // 指数平滑后的速度
-    
+
  /// 添加轨迹点
     func addPoint(_ point: CGPoint) {
         let now = Date().timeIntervalSince1970
-        
+
  // 计算速度（如果有前一个点）
         var velocity: CGFloat = 0
         if let lastPoint = trail.last {
@@ -90,26 +90,26 @@ public class MouseTrailTracker: ObservableObject {
                 velocity = distance / CGFloat(deltaTime)
             }
         }
-        
+
         let newPoint = MouseTrailPoint(
             position: point,
             timestamp: now,
             velocity: velocity
         )
-        
+
         trail.append(newPoint)
-        
+
  // 限制轨迹长度
         if trail.count > maxTrailLength {
             trail.removeFirst()
         }
     }
-    
+
  /// 获取当前平均速度
     func getAverageVelocity() -> CGFloat {
-        guard !trail.isEmpty else { 
+        guard !trail.isEmpty else {
             currentVelocity = 0
-            return 0 
+            return 0
         }
         let recentTrail = trail.suffix(5)
         let totalVelocity = recentTrail.reduce(0) { $0 + $1.velocity }
@@ -119,7 +119,7 @@ public class MouseTrailTracker: ObservableObject {
         currentVelocity = smoothedVelocity
         return smoothedVelocity
     }
-    
+
  /// 检测是否触发"挥动"
     func isSwipeDetected() -> Bool {
  // 需连续3个采样点均超过阈值，且最近150ms内路径累计长度达到门槛，避免短促抖动误触发
@@ -134,13 +134,13 @@ public class MouseTrailTracker: ObservableObject {
         let now = Date().timeIntervalSince1970
         let recentPoints = trail.reversed().prefix(10).filter { now - $0.timestamp <= 0.15 }
         var totalPath: CGFloat = 0
-        
+
  // Swift 6.2.1 最佳实践：在使用范围前检查边界条件
         guard recentPoints.count >= 2 else {
  // 点数不足，无法计算路径
             return false
         }
-        
+
         for i in 1..<recentPoints.count {
             let a = recentPoints[i-1].position
             let b = recentPoints[i].position
@@ -152,14 +152,14 @@ public class MouseTrailTracker: ObservableObject {
         let avgOK = velocity > (velocityThreshold * 1.1)
         return pathOK && (consecutiveOK || avgOK)
     }
-    
+
  /// 获取驱散强度（基于速度）
     func getClearStrength() -> Float {
         let velocity = getAverageVelocity()
         let normalized = min(1.0, Float(velocity / 2000))
         return 0.15 + normalized * 0.45
     }
-    
+
  /// 获取驱散半径（基于速度）
     func getClearRadius() -> CGFloat {
         let velocity = getAverageVelocity()
@@ -168,7 +168,7 @@ public class MouseTrailTracker: ObservableObject {
         let radius = baseRadius + (baseRadius * velocityMultiplier)
         return radius
     }
-    
+
  /// 清空轨迹
     func clear() {
         trail.removeAll()
@@ -179,27 +179,27 @@ public class MouseTrailTracker: ObservableObject {
 
 @MainActor
 public class InteractiveClearManager: ObservableObject, @unchecked Sendable {
-    
+
  // MARK: - 生命周期管理
-    
+
  /// 管理器是否已启动
     @Published public private(set) var isStarted: Bool = false
-    
+
     @Published public private(set) var clearZones: [DynamicClearZone] = []
-    
+
  /// 🌟 全局透明度（0=完全透明/显示星空，1=完全不透明/显示天气）
     @Published public private(set) var globalOpacity: Double = 1.0
-    
+
  /// 驱散能量（0-100%）
     @Published public private(set) var disperseEnergy: Double = 0.0
 
  /// 目标全局透明度（用于平滑过渡）
  /// 说明：通过将不透明度目标值与实际值解耦，避免用户一次挥动造成视觉瞬间跳变。
     private var targetGlobalOpacity: Double = 1.0
-    
+
  /// 🔥 暴露鼠标追踪器以供调试面板使用
     public var mouseTracker = MouseTrailTracker()
-    
+
  // 将原先使用 RunLoop 定时器的更新循环改为 Swift 并发 驱动，
  // 目的：避免在 App 进入不同的 RunLoop 模式（如菜单跟踪、滚动等）时 Timer 被停滞，
  // 导致“挥动后不恢复/透明度不更新”等间歇性失效问题。.sleep 不受 RunLoop 模式影响，
@@ -220,16 +220,16 @@ public class InteractiveClearManager: ObservableObject, @unchecked Sendable {
     private var isSwipeActive: Bool = false
     private var fullClearUntil: TimeInterval = 0
     private var lastMinorZoneTime: TimeInterval = 0
-    
+
  // 空间分桶（Spatial Hash）用于加速清除强度查询
  // 采用固定网格大小（60px），将清除区域按其圆形包围盒映射到若干桶中，
  // 查询时仅遍历目标点所在桶及其邻域，避免全量遍历，降低CPU占用。
     private let bucketCellSize: CGFloat = 60
     private var zoneBuckets: [Int: [Int]] = [:]
-    
+
  // 计算桶键（将网格坐标压缩为单个Int）
     private func bucketKey(_ bx: Int, _ by: Int) -> Int { (bx << 20) ^ by }
-    
+
  // 将指定索引的清除区域映射到桶
     private func assignZoneToBuckets(index: Int) {
         guard index >= 0 && index < clearZones.count else { return }
@@ -247,23 +247,23 @@ public class InteractiveClearManager: ObservableObject, @unchecked Sendable {
             }
         }
     }
-    
+
  // 重建所有桶（区域半径随时间变化，使用轻量级每帧重建）
     private func rebuildZoneBuckets() {
         zoneBuckets.removeAll(keepingCapacity: true)
         for i in 0..<clearZones.count { assignZoneToBuckets(index: i) }
     }
-    
+
  // 🔧 优化：鼠标事件处理频率限制（15 FPS = 66.7ms间隔）
  // 从每帧处理降低到15 FPS，大幅降低CPU占用和能耗
     private var lastMouseProcessTime: TimeInterval = 0
     private let mouseProcessInterval: TimeInterval = 1.0 / 15.0  // 15 FPS处理频率
-    
+
     private static let logger = OSLog(subsystem: "com.skybridge.compass", category: "InteractiveClear")
-    
+
     public init() {
         os_log(.info, log: Self.logger, "🌊 InteractiveClearManager 初始化")
-        
+
  // 自动启动管理器
         Task { @MainActor in
  // start() 为同步方法，直接调用即可；移除不必要的 try/await 与 catch。
@@ -271,50 +271,76 @@ public class InteractiveClearManager: ObservableObject, @unchecked Sendable {
             os_log(.info, log: Self.logger, "✅ InteractiveClearManager 自动启动成功")
         }
     }
-    
+
  // MARK: - 生命周期管理方法
-    
+
  /// 启动交互式清空管理器
  // 保持与现有调用方兼容（onAppear 等直接调用），
  // 因此 start() 维持同步签名，不要求 await/throws。
     public func start() {
         guard !isStarted else { return }
-        
+
         os_log(.info, log: Self.logger, "🚀 启动交互式清空管理器")
         isStarted = true
-        
+
         startUpdateLoop()
     }
-    
+
  /// 停止交互式清空管理器
     public func stop() {
         guard isStarted else { return }
-        
+
         os_log(.info, log: Self.logger, "⏹️ 停止交互式清空管理器")
         isStarted = false
-        
+
         stopUpdateLoop()
     }
-    
+
  /// 清理资源
     public func cleanup() async {
         os_log(.info, log: Self.logger, "🧹 清理交互式清空管理器资源")
-        
+
  // 停止更新循环
         stopUpdateLoop()
-        
+
  // 清理数据
         clearZones.removeAll()
         globalOpacity = 1.0
         disperseEnergy = 0.0
         mouseMoveCount = 0
-        
+
  // 清理鼠标追踪器
         mouseTracker.clear()
-        
+
         isStarted = false
     }
-    
+
+    /// 重置“驱散/透明度”相关状态（不停止更新循环）。
+    ///
+    /// 用途：当天气条件切换时，避免上一种天气被用户驱散到近乎透明后，
+    /// 下一种天气（例如多云）继承同一 `globalOpacity` 而“看起来完全没有云”。
+    @MainActor
+    public func resetDisperseState() {
+        // 清空局部区域与空间分桶
+        clearZones.removeAll()
+        zoneBuckets.removeAll()
+        disperseEnergy = 0.0
+        targetGlobalOpacity = 1.0
+        globalOpacity = 1.0
+
+        // 交互状态
+        swipeTimestamps.removeAll()
+        isSwipeActive = false
+        fullClearUntil = 0
+        lastDisperseTrigger = 0
+        lastBelowThresholdAt = 0
+        energyWindowStart = 0
+        energyWindowGain = 0
+        lastMinorZoneTime = 0
+        mouseMoveCount = 0
+        mouseTracker.clear()
+    }
+
  /// 处理鼠标移动
     public func handleMouseMove(_ location: CGPoint) {
  // 🔧 优化：限制鼠标事件处理频率到15 FPS，降低CPU占用和能耗
@@ -325,30 +351,30 @@ public class InteractiveClearManager: ObservableObject, @unchecked Sendable {
             return
         }
         lastMouseProcessTime = now
-        
+
         mouseMoveCount += 1
         mouseTracker.addPoint(location)
-        
+
  // 🔥 强制调试：每次鼠标移动都打印（前10次）
         #if DEBUG
         if mouseMoveCount <= 10 {
-            os_log(.debug, log: Self.logger, "🖱️🔥 鼠标移动事件 #%d: (%d, %d) - 管理器已启动: %@", 
+            os_log(.debug, log: Self.logger, "🖱️🔥 鼠标移动事件 #%d: (%d, %d) - 管理器已启动: %@",
                    mouseMoveCount, Int(location.x), Int(location.y), isStarted ? "是" : "否")
         }
-        
+
  // 🔥 调试：每10次打印一次鼠标位置
         if mouseMoveCount % 10 == 0 {
             let velocity = mouseTracker.getAverageVelocity()
-            os_log(.debug, log: Self.logger, "🖱️ 鼠标移动 #%d: (%d, %d), 速度=%.1f", 
+            os_log(.debug, log: Self.logger, "🖱️ 鼠标移动 #%d: (%d, %d), 速度=%.1f",
                    mouseMoveCount, Int(location.x), Int(location.y), Double(velocity))
         }
-        
+
  // 添加调试日志
         if mouseMoveCount % 50 == 0 {
             SkyBridgeLogger.ui.debugOnly("🖱️ Mouse move detected at: (\(location.x), \(location.y))")
         }
         #endif
-        
+
  // 检测挥动手势（上升沿触发，每次约33%能量）
         let velocity = mouseTracker.getAverageVelocity()
         let nowTime = Date().timeIntervalSince1970
@@ -475,7 +501,7 @@ public class InteractiveClearManager: ObservableObject, @unchecked Sendable {
  // 更新挥动状态（用于上升沿检测）
         isSwipeActive = swipeNow
     }
-    
+
  /// 更新全局透明度
     private func updateGlobalOpacity() {
  // 目标透明度：能量越高，透明度越低
@@ -498,7 +524,7 @@ public class InteractiveClearManager: ObservableObject, @unchecked Sendable {
         updateGlobalOpacity()
         fullClearUntil = Date().timeIntervalSince1970 + 1.8
     }
-    
+
  /// 创建清空区域
     private func createClearZone(at location: CGPoint) {
  // 说明：半径基于最近平均速度计算；在采样时刻速度可能瞬时归零，导致半径退化为100。
@@ -513,30 +539,30 @@ public class InteractiveClearManager: ObservableObject, @unchecked Sendable {
             SkyBridgeLogger.ui.debugOnly("🔧 半径安全回退: 速度快照=0，采用半径=\(radius)")
             #endif
         }
-        
+
         let newZone = DynamicClearZone(
             center: location,
             radius: radius,
             strength: strength,
             maxLifetime: 60.0
         )
-        
+
         clearZones.append(newZone)
  // 新增区域后标记需要重建桶（在更新循环中执行）
         #if DEBUG
  // 调试：统一在此记录实际创建的清除区域参数，确保日志与实际使用值一致
         SkyBridgeLogger.ui.debugOnly("🎯 InteractiveClearManager: 新增清除区域 - 位置: (\(location.x), \(location.y)) 半径: \(radius) 强度: \(strength) 总数: \(clearZones.count)")
         #endif
-        
+
  // 限制最大区域数量
         if clearZones.count > 20 {
             clearZones.removeFirst()
         }
-        
+
  // 清空轨迹
         mouseTracker.clear()
     }
-    
+
  /// 手动添加清空区域（用于点击）
     public func addClearZone(at location: CGPoint, radius: CGFloat = 100) {
         let zone = DynamicClearZone(
@@ -545,15 +571,15 @@ public class InteractiveClearManager: ObservableObject, @unchecked Sendable {
             strength: 0.8,
             maxLifetime: 60.0
         )
-        
+
         clearZones.append(zone)
  // 新增区域后标记需要重建桶（在更新循环中执行）
-        
+
         #if DEBUG
  // 添加调试日志
         SkyBridgeLogger.ui.debugOnly("🎯 InteractiveClearManager: 添加清除区域 - 位置: (\(location.x), \(location.y)) 半径: \(radius) 总数: \(clearZones.count)")
         #endif
-        
+
         if clearZones.count > 20 {
             clearZones.removeFirst()
             #if DEBUG
@@ -576,7 +602,7 @@ public class InteractiveClearManager: ObservableObject, @unchecked Sendable {
         let normalized = min(1.0, Float(velocity / 2000))
         return 0.3 + normalized * 0.7
     }
-    
+
  /// 启动更新循环
     private func startUpdateLoop() {
  // 启动并发任务版本的更新循环，避免 RunLoop 模式切换导致 Timer 不触发。
@@ -584,7 +610,7 @@ public class InteractiveClearManager: ObservableObject, @unchecked Sendable {
 
  // 若已有旧的 ，先取消（防止重复启动）
         updateTask?.cancel()
-        
+
         updateTask = Task { [weak self] in
  // 使用连续时钟提升时间测量精度
             let clock = ContinuousClock()
@@ -633,7 +659,7 @@ public class InteractiveClearManager: ObservableObject, @unchecked Sendable {
                         #if DEBUG
  // 调试输出（每5秒打印一次）
                         if Int(currentTime) % 5 == 0 && Int(currentTime * 10) % 10 == 0 {
-                            os_log(.debug, log: Self.logger, "🔄 恢复中... 能量: %.1f%% -> %.1f%%, 透明度: %.1f%%", 
+                            os_log(.debug, log: Self.logger, "🔄 恢复中... 能量: %.1f%% -> %.1f%%, 透明度: %.1f%%",
                                    oldEnergy, self.disperseEnergy, self.globalOpacity * 100)
                         }
                         #endif
@@ -664,7 +690,7 @@ public class InteractiveClearManager: ObservableObject, @unchecked Sendable {
             }
         }
     }
-    
+
  /// 停止更新
     public func stopUpdateLoop() {
  // 停止并发更新任务，确保不会继续修改状态。
@@ -673,7 +699,7 @@ public class InteractiveClearManager: ObservableObject, @unchecked Sendable {
         updateTask?.cancel()
         updateTask = nil
     }
-    
+
  /// 获取指定位置的总驱散强度
     public func getClearStrengthAt(_ point: CGPoint) -> Float {
  // 若无区域，直接返回0
@@ -683,7 +709,7 @@ public class InteractiveClearManager: ObservableObject, @unchecked Sendable {
         let by = Int(floor(point.y / bucketCellSize))
         let maxRadius = clearZones.map { $0.radius }.max() ?? bucketCellSize
         let extent = max(0, Int(ceil(maxRadius / bucketCellSize)))
-        
+
  // 收集候选区域索引（邻域桶）
         var candidateIndices = Set<Int>()
         for dx in -extent...extent {
@@ -694,7 +720,7 @@ public class InteractiveClearManager: ObservableObject, @unchecked Sendable {
                 }
             }
         }
-        
+
  // 若邻域为空，退化为全量遍历（保证正确性）
         let indicesToCheck: [Int]
         if candidateIndices.isEmpty {
@@ -702,7 +728,7 @@ public class InteractiveClearManager: ObservableObject, @unchecked Sendable {
         } else {
             indicesToCheck = Array(candidateIndices)
         }
-        
+
         var totalStrength: Float = 0
         for i in indicesToCheck {
             let zone = clearZones[i]
@@ -729,7 +755,7 @@ public class InteractiveClearManager: ObservableObject, @unchecked Sendable {
             startUpdateLoop()
         }
     }
-    
+
  // Timer will be automatically invalidated when deallocated
 }
 
@@ -738,16 +764,16 @@ public class InteractiveClearManager: ObservableObject, @unchecked Sendable {
 /// 全屏鼠标跟踪视图
 public struct InteractiveMouseTrackingView: NSViewRepresentable {
     let onMouseMove: (CGPoint) -> Void
-    
+
     private static let logger = OSLog(subsystem: "com.skybridge.compass", category: "MouseTracking")
-    
+
     public init(onMouseMove: @escaping (CGPoint) -> Void) {
         self.onMouseMove = onMouseMove
         #if DEBUG
         os_log(.debug, log: InteractiveMouseTrackingView.logger, "🔥 InteractiveMouseTrackingView: 初始化")
         #endif
     }
-    
+
     public func makeNSView(context: Context) -> NSView {
         #if DEBUG
         os_log(.debug, log: InteractiveMouseTrackingView.logger, "🔥 InteractiveMouseTrackingView: makeNSView 被调用")
@@ -759,7 +785,7 @@ public struct InteractiveMouseTrackingView: NSViewRepresentable {
         #endif
         return view
     }
-    
+
     public func updateNSView(_ nsView: NSView, context: Context) {
         if let trackingView = nsView as? MouseTrackingNSView {
             trackingView.onMouseMove = onMouseMove
@@ -770,51 +796,51 @@ public struct InteractiveMouseTrackingView: NSViewRepresentable {
 class MouseTrackingNSView: NSView {
     var onMouseMove: ((CGPoint) -> Void)?
     private var globalMonitor: Any?
-    
+
  // 🔧 优化：限制全局监听器的日志频率，降低性能开销
     private var eventCount = 0
     private var lastLogTime: TimeInterval = 0
     private let logInterval: TimeInterval = 2.0  // 每2秒最多记录一次日志
-    
+
     private static let logger = OSLog(subsystem: "com.skybridge.compass", category: "MouseTracking")
-    
+
     override init(frame frameRect: NSRect) {
         #if DEBUG
         os_log(.debug, log: MouseTrackingNSView.logger, "🔥🔥🔥 MouseTrackingNSView: init 开始, frame=%@", String(describing: frameRect))
         #endif
         super.init(frame: frameRect)
         self.wantsLayer = true
-        
+
  // 使用全局事件监听器（不依赖 hitTest）
  // 这样可以：1) 接收鼠标移动事件，2) 让点击穿透
         #if DEBUG
         os_log(.debug, log: MouseTrackingNSView.logger, "🔥🔥🔥 MouseTrackingNSView: 准备调用 setupGlobalMonitor")
         #endif
         setupGlobalMonitor()
-        
+
         #if DEBUG
         os_log(.debug, log: MouseTrackingNSView.logger, "🖱️🔥🔥🔥 MouseTrackingNSView: 初始化完成（全局监听模式）")
         #endif
     }
-    
+
     required init?(coder: NSCoder) {
         return nil
     }
-    
+
     private func setupGlobalMonitor() {
         #if DEBUG
         SkyBridgeLogger.ui.debugOnly("🔧 Setting up global mouse monitor...")
         #endif
-        
+
  // 监听本地鼠标移动事件
         globalMonitor = NSEvent.addLocalMonitorForEvents(matching: .mouseMoved) { [weak self] event in
             guard let self = self else {
  // self已释放，直接返回事件
                 return event
             }
-            
+
             self.eventCount += 1
-            
+
             guard self.window != nil else {
                 #if DEBUG
                 let now = Date().timeIntervalSince1970
@@ -825,14 +851,14 @@ class MouseTrackingNSView: NSView {
                 #endif
                 return event
             }
-            
+
  // 获取鼠标在窗口中的位置
             let locationInWindow = event.locationInWindow
             let locationInView = self.convert(locationInWindow, from: nil)
-            
+
  // 检查鼠标是否在视图范围内
             let isInBounds = self.bounds.contains(locationInView)
-            
+
             #if DEBUG
  // 🔧 优化：大幅降低日志频率，仅在必要时记录
             let now = Date().timeIntervalSince1970
@@ -840,24 +866,24 @@ class MouseTrackingNSView: NSView {
                 self.lastLogTime = now
                 if self.eventCount % 100 == 0 {
                     SkyBridgeLogger.ui.debugOnly("🖱️ Global mouse monitor - Window: \(String(describing: locationInWindow)) View: \(String(describing: locationInView)) InBounds: \(isInBounds) Events: \(self.eventCount)")
-                    os_log(.debug, log: MouseTrackingNSView.logger, "🖱️ 鼠标位置 - 窗口: (%d, %d), 视图: (%d, %d), 事件数: %d", 
-                           Int(locationInWindow.x), Int(locationInWindow.y), 
-                           Int(locationInView.x), Int(locationInView.y), 
+                    os_log(.debug, log: MouseTrackingNSView.logger, "🖱️ 鼠标位置 - 窗口: (%d, %d), 视图: (%d, %d), 事件数: %d",
+                           Int(locationInWindow.x), Int(locationInWindow.y),
+                           Int(locationInView.x), Int(locationInView.y),
                            self.eventCount)
                 }
             }
             #endif
-            
+
             if isInBounds {
  // 转换坐标系（AppKit的y轴从下到上，需要翻转）
                 let flippedY = self.bounds.height - locationInView.y
                 let point = CGPoint(x: locationInView.x, y: flippedY)
                 self.onMouseMove?(point)
             }
-            
+
             return event  // 让事件继续传播，不阻挡点击
         }
-        
+
         #if DEBUG
         if globalMonitor != nil {
             SkyBridgeLogger.ui.debugOnly("✅ Global mouse monitor setup successfully")
@@ -868,7 +894,7 @@ class MouseTrackingNSView: NSView {
         }
         #endif
     }
-    
+
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         if let window = self.window {
@@ -878,12 +904,12 @@ class MouseTrackingNSView: NSView {
             #endif
         }
     }
-    
+
  // 🔥 让点击穿透此视图
     override func hitTest(_ point: NSPoint) -> NSView? {
         return nil  // 返回 nil 让所有点击事件穿透
     }
-    
+
  // 注意：不在 deinit 清理 globalMonitor 以避免 Swift 6 并发问题
  // 由于闭包中使用了 weak self，视图销毁后闭包会自动失效，不会造成内存问题
 }
@@ -893,11 +919,11 @@ class MouseTrackingNSView: NSView {
 @available(macOS 14.0, *)
 public struct ClearZoneDebugView: View {
     @ObservedObject var manager: InteractiveClearManager
-    
+
     public init(manager: InteractiveClearManager) {
         self.manager = manager
     }
-    
+
     public var body: some View {
         Canvas { context, size in
             for zone in manager.clearZones {
@@ -908,12 +934,12 @@ public struct ClearZoneDebugView: View {
                     width: zone.radius * 2,
                     height: zone.radius * 2
                 )
-                
+
                 let gradient = Gradient(colors: [
                     Color.red.opacity(Double(zone.strength) * 0.3),
                     Color.red.opacity(0)
                 ])
-                
+
                 context.fill(
                     Path(ellipseIn: rect),
                     with: .radialGradient(
@@ -923,7 +949,7 @@ public struct ClearZoneDebugView: View {
                         endRadius: zone.radius
                     )
                 )
-                
+
  // 显示信息
                 context.draw(
                     Text("\(Int(zone.strength * 100))%")

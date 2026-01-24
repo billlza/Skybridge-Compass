@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import SkyBridgeCore
+import Foundation
 
 /// SSH 交互式终端窗口视图
 struct SSHTerminalView: View {
@@ -9,7 +10,7 @@ struct SSHTerminalView: View {
     @State private var inputLine: String = ""
     @State private var connectError: String?
  // 终端滚动与缓冲控制
-    @State private var autoScrollToBottom: Bool = true // 是否在新输出时自动滚动到底部
+    @AppStorage("ssh.autoScrollToBottom") private var autoScrollToBottom: Bool = true // 是否在新输出时自动滚动到底部
     @State private var bufferedOutput: String = ""     // 环形缓冲区的当前文本视图
     private let bufferLineLimit: Int = 2000             // 缓冲区行数上限，避免内存无限增长
 

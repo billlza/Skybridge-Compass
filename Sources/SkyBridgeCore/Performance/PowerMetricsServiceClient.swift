@@ -14,6 +14,8 @@ final class PowerMetricsServiceClient: @unchecked Sendable {
     private var lastSnapshot: PowerMetricsSnapshot?
     private var lastFetchTime: Date = .distantPast
     private let minFetchInterval: TimeInterval = 10.0
+    private var serviceAvailable: Bool? = nil
+    private var nextRetryAt: Date = .distantPast
 
     func fetchLatestSnapshot() async -> PowerMetricsSnapshot? {
         let now = Date()
@@ -22,15 +24,30 @@ final class PowerMetricsServiceClient: @unchecked Sendable {
         }
         lastFetchTime = now
 
+        // If we've already detected the helper is unavailable, skip repeated connection attempts.
+        if serviceAvailable == false || now < nextRetryAt {
+            return lastSnapshot
+        }
+
  // 若系统无服务则直接返回nil
         guard let conn = ensureConnection() else { return lastSnapshot }
-        guard let proxy = conn.remoteObjectProxyWithErrorHandler({ _ in }) as? PowerMetricsXPCProtocol else {
+        guard let proxy = conn.remoteObjectProxyWithErrorHandler({ [weak self] _ in
+            // Helper missing / connection invalidated → back off to avoid system log spam.
+            self?.serviceAvailable = false
+            self?.nextRetryAt = Date().addingTimeInterval(60)
+            self?.connection?.invalidate()
+            self?.connection = nil
+        }) as? PowerMetricsXPCProtocol else {
+            serviceAvailable = false
+            nextRetryAt = Date().addingTimeInterval(60)
             return lastSnapshot
         }
 
         let snapshot = await fetchSnapshotWithTimeout(proxy: proxy, timeout: 0.2)
         if let snapshot {
             lastSnapshot = snapshot
+            serviceAvailable = true
+            nextRetryAt = .distantPast
         }
         return lastSnapshot
     }
@@ -117,12 +134,20 @@ final class PowerMetricsServiceClient: @unchecked Sendable {
     }
 
     private func ensureConnection() -> NSXPCConnection? {
+        if serviceAvailable == false || Date() < nextRetryAt {
+            return nil
+        }
         if let c = connection { return c }
         let c = NSXPCConnection(machServiceName: serviceName, options: .privileged)
         c.remoteObjectInterface = NSXPCInterface(with: PowerMetricsXPCProtocol.self)
-        c.invalidationHandler = { [weak self] in self?.connection = nil }
+        c.invalidationHandler = { [weak self] in
+            self?.connection = nil
+            self?.serviceAvailable = false
+            self?.nextRetryAt = Date().addingTimeInterval(60)
+        }
         c.resume()
         connection = c
+        serviceAvailable = true
         return c
     }
 }

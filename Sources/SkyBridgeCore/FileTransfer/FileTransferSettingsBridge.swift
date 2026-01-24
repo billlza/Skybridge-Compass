@@ -7,17 +7,17 @@ import Combine
 @MainActor
 public final class FileTransferSettingsBridge: ObservableObject {
     public static let shared = FileTransferSettingsBridge()
-    
+
     private let videoSettings = VideoTransferSettingsManager.shared
     private let settings = SettingsManager.shared
-    private let fileTransferManager = FileTransferManager()
+    private let fileTransferManager = FileTransferManager.shared
     private var cancellables = Set<AnyCancellable>()
-    
+
     private var pendingApplyWorkItem: DispatchWorkItem?
     private let debounceInterval: TimeInterval = 0.0 // 仅手动触发，默认不自动
-    
+
     private init() {}
-    
+
  /// 手动应用当前设置到后端（安全合并）
     public func apply() {
         pendingApplyWorkItem?.cancel()
@@ -38,12 +38,12 @@ public final class FileTransferSettingsBridge: ObservableObject {
             self.apply()
         }
     }
-    
+
  /// 更新接收目录
     public func updateReceiveDirectory(_ url: URL?) {
         fileTransferManager.setReceiveBaseDirectory(url)
     }
-    
+
     private func applyFileTransferSettings() {
  // 并发、缓冲区等运行时设置
         fileTransferManager.updateSettings(
@@ -54,14 +54,14 @@ public final class FileTransferSettingsBridge: ObservableObject {
         )
  // 通知开关、自动重试等策略在下一步扩展（需要在 FileTransferManager 增加策略接口）
     }
-    
+
     private func applyVideoSettings() {
  // 将视频传输设置同步到远程桌面设置管理器
         let rd = RemoteDesktopSettingsManager.shared
         rd.settings.displaySettings.refreshRate = videoSettings.selectedFrameRate.refreshRate
         rd.settings.displaySettings.videoQuality = videoSettings.compressionQuality.videoQuality
         rd.saveSettings()
-        
+
  // 通知活动会话应用新设置
         Task { @MainActor in
  // 通过RemoteDesktopManager通知活动会话更新设置

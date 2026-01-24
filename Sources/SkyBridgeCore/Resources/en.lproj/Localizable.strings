@@ -118,6 +118,29 @@
 "discovery.searchPlaceholder" = "Search devices...";
 "discovery.noMatch" = "No matching devices";
 "discovery.adjustSearch" = "Try adjusting your search terms";
+"discovery.diagnostics.title" = "Discovery Diagnostics";
+"discovery.diagnostics.permission" = "Permissions & Configuration";
+"discovery.diagnostics.network" = "Network Status";
+"discovery.diagnostics.scanning" = "Scanning Status";
+"discovery.diagnostics.failures" = "Recent Failures";
+"discovery.diagnostics.localNetwork" = "Local Network";
+"discovery.diagnostics.bonjourWhitelist" = "Bonjour Whitelist";
+"discovery.diagnostics.connection" = "Connection";
+"discovery.diagnostics.localDiscovery" = "Local Discovery";
+"discovery.diagnostics.localIP" = "Local IP";
+"discovery.diagnostics.discoveredDevices" = "Discovered Devices";
+"discovery.diagnostics.scanningServices" = "Scanning Services";
+"discovery.diagnostics.lastScan" = "Last Scan";
+"discovery.diagnostics.clear" = "Clear";
+"discovery.diagnostics.configured" = "Configured";
+"discovery.diagnostics.incomplete" = "Incomplete";
+"discovery.diagnostics.available" = "Available";
+"discovery.diagnostics.unavailable" = "Unavailable";
+"discovery.diagnostics.missingServices" = "Missing Bonjour service declarations:";
+"discovery.diagnostics.justNow" = "Just now";
+"discovery.diagnostics.minutesAgo" = "%d minutes ago";
+"discovery.diagnostics.hoursAgo" = "%d hours ago";
+"discovery.diagnostics.daysAgo" = "%d days ago";
 "dashboard.noDevicesFound" = "No Devices Found";
 "dashboard.checkNetwork" = "Check your network connection";
 
@@ -620,7 +643,7 @@
 "remote.newConnection" = "New Connection";
 "remote.overlay.connectingTo" = "Connecting to %@...";
 "remote.empty.title" = "Select a session to start Remote Desktop";
-"remote.empty.subtitle" = "Choose an active session on the left, or create a new connection";
+"remote.empty.subtitle" = "Recommended: use Device Discovery for one‑tap connection. Manual RDP/VNC/SSH is an advanced fallback.";
 "remote.toolbar.newConnection.help" = "Create a remote connection";
 "remote.toolbar.refresh.help" = "Refresh sessions";
 "remote.performance.monitor" = "Metal 4 Performance Monitor";
@@ -719,6 +742,14 @@
 "auth.username" = "Username";
 "remote.form.connect" = "Connect";
 "remote.form.connectFailed" = "Connection Failed";
+
+// New: recommended entry + advanced disclosure
+"remote.connect.recommended" = "Connect via Device Discovery (Recommended)";
+"remote.connect.advanced" = "Advanced: Manual (RDP/VNC/SSH)";
+"remote.form.recommended.section" = "Recommended";
+"remote.form.recommended.body" = "Most users don't need to enter IP/port manually. Go to Device Discovery and pick a device to connect.";
+"remote.form.openDeviceDiscovery" = "Open Device Discovery";
+"remote.form.advanced.section" = "Advanced: Manual Setup (RDP/VNC/SSH)";
 "monitor.title" = "System Monitor";
 "monitor.status.monitoring" = "Monitoring";
 "monitor.status.initializing" = "Initializing...";

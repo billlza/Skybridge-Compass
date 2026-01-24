@@ -8,7 +8,6 @@
 //
 
 import SwiftUI
-import SkyBridgeCore
 
 /// 物理真实雪花粒子（增强版）
 struct PhysicsSnowflake: Identifiable {
@@ -54,11 +53,13 @@ public struct CinematicSnowEffectView: View {
     @State private var windNoiseTimer: Timer?
     @State private var ambientWindNoiseLevel: Double = 0.0
     
- // 交互式驱散管理器
-    @StateObject private var clearManager = InteractiveClearManager()
+ // 交互式驱散管理器（由统一入口 WeatherEffectView 注入；避免重复创建/重复监听）
+    @ObservedObject private var clearManager: InteractiveClearManager
     private let physicsActor = SnowPhysicsActor()
     
-    public init() {}
+    public init(clearManager: InteractiveClearManager) {
+        self.clearManager = clearManager
+    }
     
     public var body: some View {
         GeometryReader { geometry in
@@ -206,14 +207,6 @@ public struct CinematicSnowEffectView: View {
         }
         .onDisappear {
             pauseAllEffectSystems()
-            clearManager.stop()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: GlobalMouseTracker.mouseMovedNotification)) { notification in
-            if let locationValue = notification.userInfo?["location"] as? NSValue {
-                let nsPoint = locationValue.pointValue
-                let location = CGPoint(x: nsPoint.x, y: nsPoint.y)
-                clearManager.handleMouseMove(location)
-            }
         }
         .onReceive(RemoteDesktopManager.shared.metrics) { snapshot in
             isRemoteDesktopActive = snapshot.activeSessions > 0

@@ -25,80 +25,80 @@ import CryptoKit
 /// - isZeroized 标志防止重复使用已清理的上下文
 @available(macOS 14.0, iOS 17.0, *)
 public actor HandshakeContext {
-    
+
  // MARK: - Properties
-    
+
  /// 握手角色
     public let role: HandshakeRole
-    
+
  /// 使用的加密 Provider
     private let cryptoProvider: any CryptoProvider
-    
+
  /// Hybrid Provider（例如 X-Wing），可选
     private let hybridProvider: (any CryptoProvider)?
-    
+
  /// 签名 Provider（用于身份签名，旧版本兼容）
     private let signatureProvider: any CryptoProvider
-    
+
  /// 协议签名 Provider（ 5.3: sigA/sigB 专用）
  /// **Requirements: 7.2, 7.3**
     private let protocolSignatureProvider: (any ProtocolSignatureProvider)?
-    
+
  /// SE PoP 签名 Provider（ 5.3: seSigA/seSigB 专用）
  /// **Requirements: 7.2, 7.3**
     private let sePoPSignatureProvider: (any SePoPSignatureProvider)?
-    
+
  /// 经典兜底 Provider（用于 classic fallback）
     private let classicProvider: any CryptoProvider
-    
+
     private let cryptoPolicy: CryptoPolicy
 
  /// 对端 KEM 身份公钥（按套件）
     private let peerKEMPublicKeys: [CryptoSuite: Data]
-    
+
  /// 临时私钥（按套件存储）
     private var keyExchangePrivateKeys: [CryptoSuite: SecureBytes] = [:]
-    
+
  /// 临时公钥（按套件存储）
     public private(set) var keyExchangePublicKeys: [CryptoSuite: Data] = [:]
-    
+
  /// MessageA transcript hash（用于 MessageB 绑定）
     private var transcriptHashA: SecureBytes?
-    
+
  /// MessageB transcript hash（用于会话密钥派生）
     private var transcriptHashB: SecureBytes?
-    
+
  /// 随机 nonce
     private var nonce: SecureBytes?
 
  /// 握手共享密钥（用于会话密钥派生）
-    
+
  /// 对端 nonce（用于 replay 检测）
     private var peerNonce: SecureBytes?
-    
+
  /// 是否已被清理
     public private(set) var isZeroized: Bool = false
-    
+
  /// 对端 KeyShare（收到后设置）
     public private(set) var peerKeyShares: [CryptoSuite: Data] = [:]
 
  /// KEM 共享密钥（按套件保存）
     private var kemSharedSecrets: [CryptoSuite: SecureBytes] = [:]
-    
+
  /// 协商的套件
     public private(set) var negotiatedSuite: CryptoSuite?
-    
+
  /// 本地能力
     public let localCapabilities: CryptoCapabilities
-    
+
  /// 已发送的 supportedSuites（发起方用于校验）
     private var sentSupportedSuites: [CryptoSuite] = []
-    
+
  /// 已发送的 keyShares（发起方用于校验）
     private var sentKeyShares: [CryptoSuite: Data] = [:]
-    
+
  // MARK: - Initialization
-    
+
     private init(
         role: HandshakeRole,
         cryptoProvider: any CryptoProvider,
@@ -122,9 +122,9 @@ public actor HandshakeContext {
         self.localCapabilities = localCapabilities
         self.peerKEMPublicKeys = peerKEMPublicKeys
     }
-    
+
  // MARK: - Factory Method
-    
+
  /// 创建握手上下文
  /// - Parameters:
  /// - role: 握手角色
@@ -167,7 +167,7 @@ public actor HandshakeContext {
         #else
         hybridProvider = nil
         #endif
-        
+
         let context = HandshakeContext(
             role: role,
             cryptoProvider: cryptoProvider,
@@ -180,15 +180,15 @@ public actor HandshakeContext {
             localCapabilities: localCapabilities,
             peerKEMPublicKeys: peerKEMPublicKeys
         )
-        
+
  // 生成 nonce
         try await context.generateNonce()
-        
+
         return context
     }
-    
+
  // MARK: - Key Generation
-    
+
  /// 生成临时密钥对
     private func generateEphemeralKeyPair(
         for suite: CryptoSuite,
@@ -197,35 +197,35 @@ public actor HandshakeContext {
         guard !isZeroized else {
             throw HandshakeError.contextZeroized
         }
-        
+
         if keyExchangePrivateKeys[suite] != nil {
             return
         }
-        
+
         let keyPair = try await provider.generateKeyPair(for: .keyExchange)
-        
+
  // 使用 SecureBytes 存储私钥
         keyExchangePrivateKeys[suite] = SecureBytes(data: keyPair.privateKey.bytes)
         keyExchangePublicKeys[suite] = keyPair.publicKey.bytes
     }
-    
+
  /// 生成随机 nonce
     private func generateNonce() throws {
         guard !isZeroized else {
             throw HandshakeError.contextZeroized
         }
-        
+
         var nonceBytes = [UInt8](repeating: 0, count: 32)
         let status = SecRandomCopyBytes(kSecRandomDefault, nonceBytes.count, &nonceBytes)
         guard status == errSecSuccess else {
             throw HandshakeError.failed(.cryptoError("Failed to generate nonce"))
         }
-        
+
         nonce = SecureBytes(data: Data(nonceBytes))
     }
-    
+
  // MARK: - Message Building
-    
+
  /// 构建 MessageA（发起方调用）
  /// - Parameter identityKeyHandle: 身份密钥句柄（用于签名）
  /// - Parameter identityPublicKey: 身份公钥
@@ -244,15 +244,15 @@ public actor HandshakeContext {
         guard !isZeroized else {
             throw HandshakeError.contextZeroized
         }
-        
+
         guard role == .initiator else {
             throw HandshakeError.invalidState("Only initiator can build MessageA")
         }
-        
+
         guard let nonceData = nonce?.data else {
             throw HandshakeError.invalidState("Nonce not generated")
         }
-        
+
         let supportedSuites: [CryptoSuite]
         if let offeredSuites {
             supportedSuites = try resolveSupportedSuites(offeredSuites: offeredSuites, policy: policy)
@@ -261,7 +261,7 @@ public actor HandshakeContext {
         }
         var keyShares: [HandshakeKeyShare] = []
         var sentKeyShares: [CryptoSuite: Data] = [:]
-        
+
         for suite in supportedSuites {
             guard let provider = providerForSuite(suite) else {
                 continue
@@ -283,11 +283,11 @@ public actor HandshakeContext {
                 sentKeyShares[suite] = share
             }
         }
-        
+
         guard !keyShares.isEmpty else {
             throw HandshakeError.failed(.suiteNegotiationFailed)
         }
-        
+
         let messageA = HandshakeMessageA(
             version: HandshakeConstants.protocolVersion,
             supportedSuites: supportedSuites,
@@ -298,14 +298,14 @@ public actor HandshakeContext {
             signature: Data(),
             identityPublicKey: identityPublicKey
         )
-        
+
  // 14.2: 构建待签名数据（包含域分离前缀）
         let dataToSign = messageA.signaturePreimage
-        
+
  // 计算 transcriptA
         let transcriptA = SHA256.hash(data: messageA.transcriptBytes)
         transcriptHashA = SecureBytes(data: Data(transcriptA))
-        
+
  // 签名
         let signature = try await signHandshakeData(dataToSign, identityKeyHandle: identityKeyHandle)
         let seSigPreimage = messageA.secureEnclaveSignaturePreimage
@@ -333,10 +333,10 @@ public actor HandshakeContext {
             ))
             seSignature = nil
         }
-        
+
         self.sentSupportedSuites = supportedSuites
         self.sentKeyShares = sentKeyShares
-        
+
         return HandshakeMessageA(
             version: messageA.version,
             supportedSuites: messageA.supportedSuites,
@@ -349,7 +349,7 @@ public actor HandshakeContext {
             secureEnclaveSignature: seSignature
         )
     }
-    
+
  /// 处理 MessageA（响应方调用）
  /// - Parameter messageA: 收到的 MessageA
  /// - Parameter policy: 本地握手策略（用于降级攻击防护）
@@ -366,11 +366,11 @@ public actor HandshakeContext {
         guard !isZeroized else {
             throw HandshakeError.contextZeroized
         }
-        
+
         guard role == .responder else {
             throw HandshakeError.invalidState("Only responder can process MessageA")
         }
-        
+
         let identityKeys: IdentityPublicKeys
         do {
             identityKeys = try messageA.decodedIdentityPublicKeys()
@@ -384,7 +384,7 @@ public actor HandshakeContext {
             signature: messageA.signature,
             publicKey: identityKeys.protocolPublicKey
         )
-        
+
         guard isValid else {
             throw HandshakeError.failed(.signatureVerificationFailed)
         }
@@ -396,11 +396,11 @@ public actor HandshakeContext {
         if policy.requireSecureEnclavePoP, messageA.secureEnclaveSignature == nil {
             throw HandshakeError.failed(.secureEnclavePoPRequired)
         }
-        
+
         if policy.requireSecureEnclavePoP, secureEnclavePublicKey == nil {
             throw HandshakeError.failed(.secureEnclavePoPRequired)
         }
-        
+
         if let seSig = messageA.secureEnclaveSignature {
             let sePreimage = messageA.secureEnclaveSignaturePreimage
             if let sePublicKey = secureEnclavePublicKey {
@@ -409,7 +409,7 @@ public actor HandshakeContext {
                     signature: seSig,
                     publicKey: sePublicKey
                 )) ?? false
-                
+
                 if !seValid {
                     if policy.requireSecureEnclavePoP {
                         throw HandshakeError.failed(.secureEnclaveSignatureInvalid)
@@ -435,14 +435,14 @@ public actor HandshakeContext {
                 ))
             }
         }
-        
+
  // 保存对端 KeyShare
         peerKeyShares = Dictionary(uniqueKeysWithValues: messageA.keyShares.map { ($0.suite, $0.shareBytes) })
         peerNonce = SecureBytes(data: messageA.clientNonce)
-        
+
  // 保存对端能力（用于降级攻击检测）
         peerCapabilities = messageA.capabilities
-        
+
         let selectedSuite = try selectSuite(
             from: messageA,
             localPolicy: policy
@@ -454,7 +454,7 @@ public actor HandshakeContext {
                   let encapsulatedKey = peerKeyShares[selectedSuite] else {
                 throw HandshakeError.invalidState("Missing KEM key share for \(selectedSuite.rawValue)")
             }
-            
+
             let keyManager = DeviceIdentityKeyManager.shared
             let localKEM = try await keyManager.getOrCreateKEMIdentityKey(
                 for: selectedSuite,
@@ -466,17 +466,17 @@ public actor HandshakeContext {
             )
             kemSharedSecrets[selectedSuite] = sharedSecret
         }
-        
+
         try await ensureNotReplay(for: selectedSuite, replayTag: .messageA)
-        
+
  // 更新 transcriptA
         let transcriptA = SHA256.hash(data: messageA.transcriptBytes)
         transcriptHashA = SecureBytes(data: Data(transcriptA))
     }
-    
+
  /// 对端能力（收到后设置）
     public private(set) var peerCapabilities: CryptoCapabilities?
-    
+
  /// 构建 MessageB（响应方调用）
  /// - Parameter identityKeyHandle: 身份密钥句柄（用于签名）
  /// - Parameter identityPublicKey: 身份公钥
@@ -494,31 +494,31 @@ public actor HandshakeContext {
         guard !isZeroized else {
             throw HandshakeError.contextZeroized
         }
-        
+
         guard role == .responder else {
             throw HandshakeError.invalidState("Only responder can build MessageB")
         }
-        
+
         guard let nonceData = nonce?.data,
               let suite = negotiatedSuite,
               let peerShare = peerKeyShares[suite],
               let provider = providerForSuite(suite) else {
             throw HandshakeError.invalidState("Missing required data for MessageB")
         }
-        
+
         guard let transcriptHashA = transcriptHashA?.noCopyData() else {
             throw HandshakeError.invalidState("Missing transcript hash for MessageA")
         }
-        
+
         let responderShare: Data
         let sealedBox: HPKESealedBox
         let sharedSecretForSession: SecureBytes
-        
+
         if suite.isPQC {
             guard let sharedSecret = kemSharedSecrets[suite] else {
                 throw HandshakeError.invalidState("Missing KEM shared secret for \(suite.rawValue)")
             }
-            
+
             let payloadData = (try? localCapabilities.deterministicEncode()) ?? Data()
             sealedBox = try sealPayloadWithSharedSecret(
                 sharedSecret,
@@ -540,7 +540,7 @@ public actor HandshakeContext {
             sharedSecretForSession = sealResult.sharedSecret
             responderShare = sealedBox.encapsulatedKey
         }
-        
+
         let messageB = HandshakeMessageB(
             version: HandshakeConstants.protocolVersion,
             selectedSuite: suite,
@@ -550,14 +550,14 @@ public actor HandshakeContext {
             signature: Data(),
             identityPublicKey: identityPublicKey
         )
-        
+
  // 14.2: 构建待签名数据（包含 transcriptA）
         let dataToSign = messageB.signaturePreimage(transcriptHashA: transcriptHashA)
-        
+
  // 更新 transcriptB
         let transcriptB = SHA256.hash(data: messageB.transcriptBytes)
         transcriptHashB = SecureBytes(data: Data(transcriptB))
-        
+
  // 签名
         let signature = try await signHandshakeData(dataToSign, identityKeyHandle: identityKeyHandle)
         let seSigPreimage = messageB.secureEnclaveSignaturePreimage(transcriptHashA: transcriptHashA)
@@ -585,7 +585,7 @@ public actor HandshakeContext {
             ))
             seSignature = nil
         }
-        
+
         let signedMessage = HandshakeMessageB(
             version: messageB.version,
             selectedSuite: messageB.selectedSuite,
@@ -598,7 +598,7 @@ public actor HandshakeContext {
         )
         return (message: signedMessage, sharedSecret: sharedSecretForSession)
     }
-    
+
  /// 处理 MessageB（发起方调用）
  /// - Parameter messageB: 收到的 MessageB
  /// - Parameter policy: 本地握手策略（用于降级攻击防护）
@@ -616,17 +616,17 @@ public actor HandshakeContext {
         guard !isZeroized else {
             throw HandshakeError.contextZeroized
         }
-        
+
         guard role == .initiator else {
             throw HandshakeError.invalidState("Only initiator can process MessageB")
         }
-        
+
  // 14.4: 检查 requirePQC 策略
  // Requirement 14.4: requirePQC 策略下 PQC 不可用时直接失败
         if policy.requirePQC && !messageB.selectedSuite.isPQC {
             throw HandshakeError.failed(.suiteNegotiationFailed)
         }
-        
+
         guard let transcriptHashA = transcriptHashA?.noCopyData() else {
             throw HandshakeError.invalidState("Missing transcript hash for MessageA")
         }
@@ -646,7 +646,7 @@ public actor HandshakeContext {
             signature: messageB.signature,
             publicKey: identityKeys.protocolPublicKey
         )
-        
+
         guard isValid else {
             throw HandshakeError.failed(.signatureVerificationFailed)
         }
@@ -658,11 +658,11 @@ public actor HandshakeContext {
         if policy.requireSecureEnclavePoP, messageB.secureEnclaveSignature == nil {
             throw HandshakeError.failed(.secureEnclavePoPRequired)
         }
-        
+
         if policy.requireSecureEnclavePoP, secureEnclavePublicKey == nil {
             throw HandshakeError.failed(.secureEnclavePoPRequired)
         }
-        
+
         if let seSig = messageB.secureEnclaveSignature {
             let sePreimage = messageB.secureEnclaveSignaturePreimage(transcriptHashA: transcriptHashA)
             if let sePublicKey = secureEnclavePublicKey {
@@ -671,7 +671,7 @@ public actor HandshakeContext {
                     signature: seSig,
                     publicKey: sePublicKey
                 )) ?? false
-                
+
                 if !seValid {
                     if policy.requireSecureEnclavePoP {
                         throw HandshakeError.failed(.secureEnclaveSignatureInvalid)
@@ -697,11 +697,11 @@ public actor HandshakeContext {
                 ))
             }
         }
-        
+
  // 更新 transcriptB
         let transcriptB = SHA256.hash(data: messageB.transcriptBytes)
         transcriptHashB = SecureBytes(data: Data(transcriptB))
-        
+
  // 检查 suite 是否在 supportedSuites 且有 keyShare
         let selectedSuite = messageB.selectedSuite
         guard sentSupportedSuites.contains(selectedSuite),
@@ -712,14 +712,14 @@ public actor HandshakeContext {
         guard messageB.responderShare == messageB.encryptedPayload.encapsulatedKey else {
             throw HandshakeError.failed(.invalidMessageFormat("Responder share mismatch"))
         }
-        
+
  // 保存对端 KeyShare
         peerKeyShares[selectedSuite] = messageB.responderShare
         peerNonce = SecureBytes(data: messageB.serverNonce)
         negotiatedSuite = selectedSuite
-        
+
         try await ensureNotReplay(for: selectedSuite, replayTag: .messageB)
-        
+
  // 14.3: 检测降级并发射事件
  // Requirement 14.3: suite 降级时发射 SecurityEvent(.cryptoDowngrade)
         let proposedSuite = sentSupportedSuites.first ?? cryptoProvider.activeSuite
@@ -731,17 +731,25 @@ public actor HandshakeContext {
                 severity: .warning,
                 message: "Suite downgrade accepted by responder",
                 context: [
+                    // Paper terminology alignment:
+                    "downgradeResistance": "policy_gate+no_timeout_fallback+rate_limited",
+                    "policyInTranscript": "1",
+                    "transcriptBinding": "1",
                     "reason": downgradeReason,
                     "proposedSuite": proposedSuite.rawValue,
                     "selectedSuite": selectedSuite.rawValue,
                     "proposedWireId": String(proposedSuite.wireId),
                     "selectedWireId": String(selectedSuite.wireId),
                     "preferredIndex": "0",
-                    "selectedIndex": String(selectedIndex)
+                    "selectedIndex": String(selectedIndex),
+                    "policyRequirePQC": policy.requirePQC ? "1" : "0",
+                    "policyAllowClassicFallback": policy.allowClassicFallback ? "1" : "0",
+                    "policyMinimumTier": policy.minimumTier.rawValue,
+                    "policyRequireSecureEnclavePoP": policy.requireSecureEnclavePoP ? "1" : "0"
                 ]
             ))
         }
-        
+
         if cryptoPolicy.allowExperimentalHybrid,
            cryptoPolicy.requireHybridIfAvailable,
            let advertisedHybrid = sentSupportedSuites.first(where: { $0.isHybrid }),
@@ -749,12 +757,12 @@ public actor HandshakeContext {
            selectedSuite != advertisedHybrid {
             throw HandshakeError.failed(.suiteNegotiationFailed)
         }
-        
+
         if selectedSuite.isPQC {
             guard let payloadSecret = kemSharedSecrets[selectedSuite] else {
                 throw HandshakeError.invalidState("Missing KEM shared secret for \(selectedSuite.rawValue)")
             }
-            
+
             _ = try openPayloadWithSharedSecret(
                 messageB.encryptedPayload,
                 sharedSecret: payloadSecret,
@@ -763,19 +771,19 @@ public actor HandshakeContext {
             kemSharedSecrets.removeValue(forKey: selectedSuite)
             return try deriveSessionKeys(sharedSecret: payloadSecret)
         }
-        
+
  // 解密 payload（经典 DH 套件）
         guard let provider = providerForSuite(selectedSuite),
               let ephPrivKey = keyExchangePrivateKeys[selectedSuite] else {
             throw HandshakeError.invalidState("Ephemeral private key not available")
         }
-        
+
         let openResult = try await provider.kemDemOpenWithSecret(
             sealedBox: messageB.encryptedPayload,
             privateKey: ephPrivKey,
             info: Data("handshake-payload".utf8)
         )
-        
+
  // 派生会话密钥
         return try deriveSessionKeys(sharedSecret: openResult.sharedSecret)
     }
@@ -785,16 +793,16 @@ public actor HandshakeContext {
         guard !isZeroized else {
             throw HandshakeError.contextZeroized
         }
-        
+
         guard role == .responder else {
             throw HandshakeError.invalidState("Only responder can finalize session keys")
         }
-        
+
         return try deriveSessionKeys(sharedSecret: sharedSecret)
     }
 
  // MARK: - KEM Payload Helpers
-    
+
     private func sealPayloadWithSharedSecret(
         _ sharedSecret: SecureBytes,
         plaintext: Data,
@@ -809,14 +817,14 @@ public actor HandshakeContext {
             info: info,
             outputByteCount: 32
         )
-        
+
         var nonceBytes = [UInt8](repeating: 0, count: 12)
         let status = SecRandomCopyBytes(kSecRandomDefault, nonceBytes.count, &nonceBytes)
         guard status == errSecSuccess else {
             throw HandshakeError.failed(.cryptoError("Failed to generate payload nonce"))
         }
         let nonce = try AES.GCM.Nonce(data: Data(nonceBytes))
-        
+
         let sealedBox = try AES.GCM.seal(plaintext, using: derivedKey, nonce: nonce)
         return HPKESealedBox(
             encapsulatedKey: encapsulatedKey,
@@ -825,7 +833,7 @@ public actor HandshakeContext {
             tag: sealedBox.tag
         )
     }
-    
+
     private func openPayloadWithSharedSecret(
         _ sealedBox: HPKESealedBox,
         sharedSecret: SecureBytes,
@@ -839,7 +847,7 @@ public actor HandshakeContext {
             info: info,
             outputByteCount: 32
         )
-        
+
         let nonce = try AES.GCM.Nonce(data: sealedBox.nonce)
         let gcmSealedBox = try AES.GCM.SealedBox(
             nonce: nonce,
@@ -848,9 +856,9 @@ public actor HandshakeContext {
         )
         return try AES.GCM.open(gcmSealedBox, using: derivedKey)
     }
-    
+
  // MARK: - Key Derivation
-    
+
  /// 派生会话密钥
     private func deriveSessionKeys(sharedSecret: SecureBytes) throws -> SessionKeys {
         guard let transcriptA = transcriptHashA?.noCopyData(),
@@ -860,7 +868,7 @@ public actor HandshakeContext {
               let remoteNonce = peerNonce?.data else {
             throw HandshakeError.invalidState("Missing transcript, suite, nonces, or shared secret")
         }
-        
+
         let clientNonce: Data
         let serverNonce: Data
         if role == .initiator {
@@ -870,7 +878,7 @@ public actor HandshakeContext {
             clientNonce = remoteNonce
             serverNonce = localNonce
         }
-        
+
         var kdfInfo = Data("SkyBridge-KDF".utf8)
         var suiteWireId = suite.wireId.littleEndian
         kdfInfo.append(Data(bytes: &suiteWireId, count: MemoryLayout<UInt16>.size))
@@ -878,12 +886,12 @@ public actor HandshakeContext {
         kdfInfo.append(transcriptB)
         kdfInfo.append(clientNonce)
         kdfInfo.append(serverNonce)
-        
+
         let inputKey = SymmetricKey(data: sharedSecret)
         var saltInput = Data("SkyBridge-KDF-Salt-v1|".utf8)
         saltInput.append(kdfInfo)
         let salt = Data(SHA256.hash(data: saltInput))
-        
+
  // Key derivation uses direction-based labels for symmetric key agreement:
  // - Both sides derive the same key for initiator→responder direction
  // - Both sides derive the same key for responder→initiator direction
@@ -891,21 +899,21 @@ public actor HandshakeContext {
  // Responder: sendKey = R2I, receiveKey = I2R
         let i2rInfo = kdfInfo + Data("handshake|initiator_to_responder".utf8)
         let r2iInfo = kdfInfo + Data("handshake|responder_to_initiator".utf8)
-        
+
         let sendKeyData = HKDF<SHA256>.deriveKey(
             inputKeyMaterial: inputKey,
             salt: salt,
             info: role == .initiator ? i2rInfo : r2iInfo,
             outputByteCount: 32
         )
-        
+
         let receiveKeyData = HKDF<SHA256>.deriveKey(
             inputKeyMaterial: inputKey,
             salt: salt,
             info: role == .initiator ? r2iInfo : i2rInfo,
             outputByteCount: 32
         )
-        
+
         var transcriptDigestInput = Data()
         transcriptDigestInput.append(transcriptA)
         transcriptDigestInput.append(transcriptB)
@@ -917,21 +925,21 @@ public actor HandshakeContext {
             role: role,
             transcriptHash: Data(fullTranscriptHash)
         )
-        
+
         kemSharedSecrets[suite]?.zeroize()
         kemSharedSecrets.removeValue(forKey: suite)
         sharedSecret.zeroize()
         return sessionKeys
     }
-    
+
  // MARK: - Zeroization
-    
+
  /// 清理敏感数据
  ///
  /// **关键**：必须在握手完成或失败后调用
     public func zeroize() {
         guard !isZeroized else { return }
-        
+
  // SecureBytes 的 deinit 会自动擦除内存
         keyExchangePrivateKeys.removeAll()
         for (_, secret) in kemSharedSecrets {
@@ -942,13 +950,13 @@ public actor HandshakeContext {
         transcriptHashB = nil
         nonce = nil
         peerNonce = nil
-        
+
  // 清除公钥（非敏感但也清理）
         keyExchangePublicKeys.removeAll()
         peerKeyShares.removeAll()
         sentSupportedSuites.removeAll()
         sentKeyShares.removeAll()
-        
+
         isZeroized = true
     }
 }
@@ -961,7 +969,7 @@ extension HandshakeContext {
         case messageA = 0xA1
         case messageB = 0xB1
     }
-    
+
     private func ensureNotReplay(for suite: CryptoSuite, replayTag: ReplayTag) async throws {
         let handshakeId = try computeHandshakeId(for: suite, replayTag: replayTag)
         let isNew = await HandshakeReplayCache.shared.registerIfNew(handshakeId)
@@ -969,13 +977,13 @@ extension HandshakeContext {
             throw HandshakeError.failed(.replayDetected)
         }
     }
-    
+
     private func computeHandshakeId(for suite: CryptoSuite, replayTag: ReplayTag) throws -> Data {
         guard let localNonce = nonce?.data,
               let remoteNonce = peerNonce?.data else {
             throw HandshakeError.invalidState("Missing nonces for handshakeId")
         }
-        
+
         let initiatorNonce: Data
         let responderNonce: Data
         if role == .initiator {
@@ -985,7 +993,7 @@ extension HandshakeContext {
             initiatorNonce = remoteNonce
             responderNonce = localNonce
         }
-        
+
         var data = Data()
         data.reserveCapacity(1 + initiatorNonce.count + responderNonce.count + MemoryLayout<UInt16>.size)
         var tag = replayTag.rawValue
@@ -994,7 +1002,7 @@ extension HandshakeContext {
         data.append(responderNonce)
         var wireId = suite.wireId.littleEndian
         data.append(Data(bytes: &wireId, count: MemoryLayout<UInt16>.size))
-        
+
         let digest = SHA256.hash(data: data)
         return Data(digest)
     }
@@ -1033,7 +1041,10 @@ extension HandshakeContext {
                 continue
             }
 
-            if suite.isPQC, peerKEMPublicKeys[suite] == nil {
+            // IMPORTANT:
+            // - For initiator, PQC KEM requires the peer's KEM *public key* to encapsulate.
+            // - For responder, PQC KEM does NOT require peer KEM public keys; it decapsulates using *local* KEM private key + encapsulatedKey from MessageA.
+            if role == .initiator, suite.isPQC, peerKEMPublicKeys[suite] == nil {
                 continue
             }
 
@@ -1052,19 +1063,19 @@ extension HandshakeContext {
 
     private func resolveSupportedSuites(policy: HandshakePolicy) throws -> [CryptoSuite] {
         var suites: [CryptoSuite] = []
-        
+
         if let hybridProvider, cryptoPolicy.allowExperimentalHybrid, cryptoPolicy.advertiseHybrid {
             let hybridSuite = hybridProvider.activeSuite
             if suiteMeetsHandshakePolicy(hybridSuite, policy: policy),
                suiteMeetsLocalCryptoPolicy(hybridSuite),
                hybridSuite.isHybrid,
-               peerKEMPublicKeys[hybridSuite] != nil {
+               (role == .responder || peerKEMPublicKeys[hybridSuite] != nil) {
                 if cryptoPolicy.minimumSecurityTier == .hybridPreferred {
                     suites.append(hybridSuite)
                 }
             }
         }
-        
+
         let primarySuite = cryptoProvider.activeSuite
         if suites.isEmpty {
             guard suiteMeetsHandshakePolicy(primarySuite, policy: policy),
@@ -1072,8 +1083,8 @@ extension HandshakeContext {
                 throw HandshakeError.failed(.suiteNegotiationFailed)
             }
         }
-        
-        if primarySuite.isPQC && peerKEMPublicKeys[primarySuite] == nil {
+
+        if role == .initiator, primarySuite.isPQC && peerKEMPublicKeys[primarySuite] == nil {
             if policy.requirePQC && suites.isEmpty {
                 throw HandshakeError.failed(.suiteNegotiationFailed)
             }
@@ -1081,11 +1092,11 @@ extension HandshakeContext {
                   suiteMeetsLocalCryptoPolicy(primarySuite) {
             suites.append(primarySuite)
         }
-        
+
         if suites.isEmpty {
             throw HandshakeError.failed(.suiteNegotiationFailed)
         }
-        
+
         let reserveSecondSlotForHybrid = cryptoPolicy.allowExperimentalHybrid && cryptoPolicy.advertiseHybrid && hybridProvider != nil
         if suites.count < 2, policy.allowClassicFallback, suites.first?.isPQC == true, !reserveSecondSlotForHybrid {
             if suiteMeetsHandshakePolicy(.x25519Ed25519, policy: policy),
@@ -1105,39 +1116,40 @@ extension HandshakeContext {
                suiteMeetsHandshakePolicy(hybridSuite, policy: policy),
                suiteMeetsLocalCryptoPolicy(hybridSuite),
                hybridSuite.isHybrid,
-               peerKEMPublicKeys[hybridSuite] != nil {
+               (role == .responder || peerKEMPublicKeys[hybridSuite] != nil) {
                 suites.append(hybridSuite)
             }
         }
-        
+
         if suites.count > 2 {
             suites = Array(suites.prefix(2))
         }
-        
+
         return suites
     }
-    
+
     private func suiteMeetsHandshakePolicy(_ suite: CryptoSuite, policy: HandshakePolicy) -> Bool {
         if policy.requirePQC && !suite.isPQC {
             return false
         }
-        
-        if !policy.allowClassicFallback && !suite.isPQC {
-            return false
-        }
-        
+        // NOTE:
+        // `allowClassicFallback` is about whether we *may* append / negotiate a classic suite as a fallback
+        // when PQC is otherwise available. It must NOT forbid classic-only handshakes (e.g. legacy bootstrap)
+        // where `requirePQC == false` and `minimumTier == .classic`.
+        //
+        // The "no classic" property is already enforced by `requirePQC == true` (strictPQC).
         if policy.minimumTier != .classic && !suite.isPQC {
             return false
         }
-        
+
         return true
     }
-    
+
     private func suiteMeetsLocalCryptoPolicy(_ suite: CryptoSuite) -> Bool {
         if suite.isHybrid && !cryptoPolicy.allowExperimentalHybrid {
             return false
         }
-        
+
         switch cryptoPolicy.minimumSecurityTier {
         case .classicOnly:
             return !suite.isPQC
@@ -1149,13 +1161,13 @@ extension HandshakeContext {
             return true
         }
     }
-    
+
     private func selectSuite(
         from messageA: HandshakeMessageA,
         localPolicy: HandshakePolicy
     ) throws -> CryptoSuite {
         var skipped: [String] = []
-        
+
         if cryptoPolicy.allowExperimentalHybrid,
            cryptoPolicy.requireHybridIfAvailable {
             if let forcedHybrid = messageA.supportedSuites.first(where: { suite in
@@ -1164,14 +1176,14 @@ extension HandshakeContext {
                 if !suiteMeetsHandshakePolicy(suite, policy: localPolicy) { return false }
                 if !suiteMeetsLocalCryptoPolicy(suite) { return false }
                 if !suiteMeetsHandshakePolicy(suite, policy: messageA.policy) { return false }
-                if peerKEMPublicKeys[suite] == nil { return false }
+                if role == .initiator, peerKEMPublicKeys[suite] == nil { return false }
                 if !messageA.keyShares.contains(where: { $0.suite == suite }) { return false }
                 return true
             }) {
                 return forcedHybrid
             }
         }
-        
+
         for (index, suite) in messageA.supportedSuites.enumerated() {
             let reason: String?
             if providerForSuite(suite) == nil {
@@ -1180,19 +1192,19 @@ extension HandshakeContext {
                 reason = "local_policy_rejected"
             } else if !suiteMeetsHandshakePolicy(suite, policy: messageA.policy) {
                 reason = "peer_policy_rejected"
-            } else if suite.isPQC && peerKEMPublicKeys[suite] == nil {
+            } else if role == .initiator, suite.isPQC && peerKEMPublicKeys[suite] == nil {
                 reason = "missing_peer_kem_key"
             } else if !messageA.keyShares.contains(where: { $0.suite == suite }) {
                 reason = "missing_keyshare"
             } else {
                 reason = nil
             }
-            
+
             if let reason {
                 skipped.append("\(suite.rawValue)=\(reason)")
                 continue
             }
-            
+
             if index != 0, let preferredSuite = messageA.supportedSuites.first {
                 SecurityEventEmitter.emitDetached(SecurityEvent(
                     type: .cryptoDowngrade,
@@ -1208,10 +1220,10 @@ extension HandshakeContext {
                     ]
                 ))
             }
-            
+
             return suite
         }
-        
+
         throw HandshakeError.failed(.suiteNegotiationFailed)
     }
 }
@@ -1231,16 +1243,16 @@ extension HandshakeContext {
         guard let identityKeyHandle = identityKeyHandle else {
             throw HandshakeError.noSigningCapability
         }
-        
+
  // 5.3: 优先使用 protocolSignatureProvider
         if let protocolProvider = protocolSignatureProvider {
             return try await protocolProvider.sign(data, key: identityKeyHandle)
         }
-        
+
  // 旧版本兼容：使用 signatureProvider
         return try await signatureProvider.sign(data: data, using: identityKeyHandle)
     }
-    
+
     private func verifyHandshakeData(
         _ data: Data,
         signature: Data,
@@ -1250,7 +1262,7 @@ extension HandshakeContext {
         if let protocolProvider = protocolSignatureProvider {
             return try await protocolProvider.verify(data, signature: signature, publicKey: publicKey)
         }
-        
+
  // 旧版本兼容：使用 signatureProvider
         return try await signatureProvider.verify(
             data: data,

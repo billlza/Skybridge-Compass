@@ -23,7 +23,7 @@ public final class VNCClient: RemoteProtocolClient, @unchecked Sendable {
  /// - host: 主机地址
  /// - port: 端口号（默认 5900）
     public func probe(host: String, port: UInt16) async throws {
-        let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(host), port: NWEndpoint.Port(rawValue: port)!)
+        let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(host), port: try NWEndpoint.Port.validated(port))
         let params = NWParameters.tcp
         let connection = NWConnection(to: endpoint, using: params)
         connection.start(queue: queue)
@@ -53,7 +53,7 @@ public final class VNCClient: RemoteProtocolClient, @unchecked Sendable {
 
         connection.cancel()
     }
-    
+
  /// 读取 VNC 服务器版本
     private func readServerVersion(connection: NWConnection) async throws -> VNCVersionInfo? {
         return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<VNCVersionInfo?, Error>) in
@@ -62,13 +62,13 @@ public final class VNCClient: RemoteProtocolClient, @unchecked Sendable {
                     continuation.resume(throwing: error)
                     return
                 }
-                
+
                 guard let data = data, !data.isEmpty,
                       let versionString = String(data: data, encoding: .ascii) else {
                     continuation.resume(returning: nil)
                     return
                 }
-                
+
                 let trimmed = versionString.trimmingCharacters(in: .whitespacesAndNewlines)
                 let info = VNCVersionInfo(
                     version: trimmed,
@@ -78,7 +78,7 @@ public final class VNCClient: RemoteProtocolClient, @unchecked Sendable {
             }
         }
     }
-    
+
  /// 解析 RFB 协议版本
     private func parseProtocolVersion(_ version: String) -> String {
         if version.contains("003.008") {
@@ -90,15 +90,15 @@ public final class VNCClient: RemoteProtocolClient, @unchecked Sendable {
         }
         return "Unknown"
     }
-    
+
  /// 检查 VNC 服务版本
  /// - Returns: VNC 版本信息
     public func checkVersion(host: String, port: UInt16 = 5900) async throws -> VNCVersionInfo? {
-        let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(host), port: NWEndpoint.Port(rawValue: port)!)
+        let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(host), port: try NWEndpoint.Port.validated(port))
         let params = NWParameters.tcp
         let connection = NWConnection(to: endpoint, using: params)
         connection.start(queue: queue)
-        
+
  // 等待连接
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             connection.stateUpdateHandler = { state in
@@ -114,7 +114,7 @@ public final class VNCClient: RemoteProtocolClient, @unchecked Sendable {
                 }
             }
         }
-        
+
         let info = try await readServerVersion(connection: connection)
         connection.cancel()
         return info

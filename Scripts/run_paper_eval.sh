@@ -8,6 +8,12 @@ mkdir -p Artifacts
 
 test_target="SkyBridgeCoreTests"
 
+# Keep artifact date suffix consistent across all benches/tables.
+# Prefer ARTIFACT_DATE, fall back to SKYBRIDGE_ARTIFACT_DATE for compatibility.
+if [[ -z "${ARTIFACT_DATE:-}" ]] && [[ -n "${SKYBRIDGE_ARTIFACT_DATE:-}" ]]; then
+  export ARTIFACT_DATE="${SKYBRIDGE_ARTIFACT_DATE}"
+fi
+
 swift_flags=()
 if command -v xcrun >/dev/null 2>&1; then
   sdk_path="$(xcrun --sdk macosx --show-sdk-path 2>/dev/null || true)"

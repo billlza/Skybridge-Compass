@@ -15,7 +15,7 @@ public actor KeychainManager {
     public static let shared = KeychainManager()
     private let logger = Logger(subsystem: "com.skybridge.compass", category: "KeychainManager")
     private init() {}
-    
+
     private nonisolated static var useInMemoryKeychain: Bool {
         let env = ProcessInfo.processInfo.environment
         if env["SKYBRIDGE_KEYCHAIN_IN_MEMORY"] == "1" { return true }
@@ -26,7 +26,7 @@ public actor KeychainManager {
     private nonisolated static let inMemoryLock = NSLock()
 
  // MARK: - Keychain 基础操作（nonisolated - Keychain 本身线程安全）
-    
+
     public nonisolated func importKey(data: Data, service: String, account: String) -> Bool {
         if Self.useInMemoryKeychain {
             let key = service + "|" + account
@@ -47,7 +47,7 @@ public actor KeychainManager {
         if status != errSecSuccess { logger.error("Key 导入失败: \(status)") }
         return status == errSecSuccess
     }
-    
+
     public nonisolated func exportKey(service: String, account: String) -> Data? {
         if Self.useInMemoryKeychain {
             let key = service + "|" + account
@@ -73,7 +73,7 @@ public actor KeychainManager {
     }
 
  // MARK: - 对称密钥存取（AES-GCM等）
-    
+
     public nonisolated func storeSymmetricKey(_ key: SymmetricKey, account: String) -> Bool {
         let data = key.withUnsafeBytes { Data($0) }
         if Self.useInMemoryKeychain {
@@ -121,7 +121,7 @@ public actor KeychainManager {
     }
 
  // MARK: - Secure Enclave P256 签名密钥对
-    
+
     public nonisolated func generateSecureEnclaveSigningKey(tag: String) -> SecureEnclave.P256.Signing.PrivateKey? {
         do {
             let privateKey = try SecureEnclave.P256.Signing.PrivateKey(compactRepresentable: true)
@@ -151,7 +151,7 @@ public actor KeychainManager {
         if status != errSecSuccess { logger.error("Enclave Key 引用存储失败: \(status)") }
         return status == errSecSuccess
     }
-    
+
     public nonisolated func loadEnclaveKeyReference(tag: Data) -> SecKey? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassKey,
@@ -169,7 +169,7 @@ public actor KeychainManager {
     }
 
  // MARK: - 非SE P256 签名密钥对（回退）
-    
+
     public nonisolated func generateP256SigningKeypair(tag: String) -> (private: P256.Signing.PrivateKey, public: P256.Signing.PublicKey)? {
         let priv = P256.Signing.PrivateKey()
         let pub = priv.publicKey
@@ -195,7 +195,7 @@ public actor KeychainManager {
  // 保留上方显式 SecItemAdd/SecItemCopyMatching 实现，避免重复定义
 
  // MARK: - 底层Keychain封装
-    
+
  /// 底层 Keychain 写入（nonisolated - Keychain API 线程安全）
     private nonisolated func storeKeyData(_ data: Data, service: String, account: String) -> Bool {
         if Self.useInMemoryKeychain {
@@ -243,7 +243,7 @@ public actor KeychainManager {
     }
 
  // MARK: - Keychain 去重与清理
-    
+
  /// 根据 service 前缀扫描并清理重复项（同一 account 下保留最新一条）
  ///
  /// nonisolated - Keychain 扫描和删除操作是系统级线程安全的
@@ -293,10 +293,40 @@ extension KeychainManager {
         let ok = storeKeyData(Data(key.utf8), service: "SkyBridge.Weather", account: "OpenWeatherMap")
         if !ok { throw NSError(domain: "Keychain", code: -1) }
     }
-    
+
     public nonisolated func retrieveWeatherAPIKey() throws -> String {
         guard let data = loadKeyData(service: "SkyBridge.Weather", account: "OpenWeatherMap"), let str = String(data: data, encoding: .utf8) else { throw NSError(domain: "Keychain", code: -2) }
         return str
+    }
+
+    public nonisolated func storeAppleUserID(_ userID: String) throws {
+        let trimmed = userID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { throw NSError(domain: "Keychain", code: -20) }
+        let ok = storeKeyData(Data(trimmed.utf8), service: "SkyBridge.Auth", account: "AppleUserID")
+        if !ok { throw NSError(domain: "Keychain", code: -21) }
+    }
+
+    public nonisolated func retrieveAppleUserID() -> String? {
+        guard let data = loadKeyData(service: "SkyBridge.Auth", account: "AppleUserID"),
+              let str = String(data: data, encoding: .utf8) else { return nil }
+        let trimmed = str.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    public nonisolated func deleteAppleUserID() {
+        if Self.useInMemoryKeychain {
+            let key = "SkyBridge.Auth" + "|" + "AppleUserID"
+            Self.inMemoryLock.lock()
+            Self.inMemoryStore.removeValue(forKey: key)
+            Self.inMemoryLock.unlock()
+            return
+        }
+        let del: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: "SkyBridge.Auth",
+            kSecAttrAccount as String: "AppleUserID"
+        ]
+        SecItemDelete(del as CFDictionary)
     }
 
     public nonisolated func storeSupabaseConfig(url: String, anonKey: String, serviceRoleKey: String?) throws {
@@ -306,7 +336,7 @@ extension KeychainManager {
         let ok3 = serviceRoleKey.map { storeKeyData(Data($0.utf8), service: base, account: "ServiceRoleKey") } ?? true
         if !ok1 || !ok2 || !ok3 { throw NSError(domain: "Keychain", code: -3) }
     }
-    
+
     public nonisolated func retrieveSupabaseConfig() throws -> SupabaseConfig {
         let base = "SkyBridge.Supabase"
         guard let url = loadKeyData(service: base, account: "URL").flatMap({ String(data: $0, encoding: .utf8) }),
@@ -321,7 +351,7 @@ extension KeychainManager {
         let ok2 = storeKeyData(Data(clientSecret.utf8), service: base, account: "ClientSecret")
         if !ok1 || !ok2 { throw NSError(domain: "Keychain", code: -4) }
     }
-    
+
     public nonisolated func retrieveNebulaConfig() throws -> NebulaConfig {
         let base = "SkyBridge.Nebula"
         guard let cid = loadKeyData(service: base, account: "ClientId").flatMap({ String(data: $0, encoding: .utf8) }),
@@ -335,7 +365,7 @@ extension KeychainManager {
         let ok2 = storeKeyData(Data(accessKeySecret.utf8), service: base, account: "AccessKeySecret")
         if !ok1 || !ok2 { throw NSError(domain: "Keychain", code: -5) }
     }
-    
+
     public nonisolated func retrieveSMSConfig() throws -> SMSConfig {
         let base = "SkyBridge.SMS"
         guard let akid = loadKeyData(service: base, account: "AccessKeyId").flatMap({ String(data: $0, encoding: .utf8) }),
@@ -356,32 +386,32 @@ extension KeychainManager {
 @available(macOS 14.0, *)
 extension KeychainManager {
  // MARK: - 对端签名公钥持久化（P256.Signing.PublicKey 原始表示）
-    
+
  /// 将对端签名公钥以原始字节存入钥匙串，按 peerId 区分
     public nonisolated func storePeerSigningPublicKey(_ keyData: Data, peerId: String) -> Bool {
         let ok = storeKeyData(keyData, service: "SkyBridge.PeerSigningPub", account: peerId)
         if !ok { logger.error("对端签名公钥存储失败: \(peerId)") }
         return ok
     }
-    
+
  /// 读取指定 peerId 的对端签名公钥原始字节
     public nonisolated func retrievePeerSigningPublicKey(_ peerId: String) -> Data? {
         return loadKeyData(service: "SkyBridge.PeerSigningPub", account: peerId)
     }
-    
+
  // MARK: - 设备标识管理
-    
+
  /// 获取或生成持久化设备 ID (UUID)
  /// 优先从 Keychain 读取，不存在则生成并保存
     public nonisolated func getOrGenerateDeviceId() -> String {
         let service = "SkyBridge.Identity"
         let account = "DeviceUUID"
-        
+
         if let data = loadKeyData(service: service, account: account),
            let uuidString = String(data: data, encoding: .utf8) {
             return uuidString
         }
-        
+
         let newUUID = UUID().uuidString
         if let data = newUUID.data(using: .utf8) {
             _ = storeKeyData(data, service: service, account: account)

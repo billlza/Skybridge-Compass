@@ -16,8 +16,14 @@
 //   --timeout-ms 1500 --out-dir Artifacts
 //
 // Outputs:
-//   Artifacts/realnet_stun_samples_<timestamp>_<label>.csv
-//   Artifacts/realnet_stun_summary_<timestamp>_<label>.csv
+//   Artifacts/realnet_stun_samples_<stamp>_<label>.csv
+//   Artifacts/realnet_stun_summary_<stamp>_<label>.csv
+//
+// Reproducibility:
+//   To keep filenames stable across multi-run paper artifacts, you can pin <stamp> via:
+//     ARTIFACT_DATE=YYYY-MM-DD (or SKYBRIDGE_ARTIFACT_DATE)
+//   or pass:
+//     --artifact-date YYYY-MM-DD
 //
 import Foundation
 import Network
@@ -107,6 +113,7 @@ struct Config {
     var samplesPerServer: Int = 50
     var timeoutMs: Int = 1500
     var outDir: String = "Artifacts"
+    var artifactDate: String? = nil
 }
 
 func parseArgs() throws -> Config {
@@ -120,6 +127,10 @@ func parseArgs() throws -> Config {
             i += 1
             guard i < args.count else { throw ProbeError.invalidArgument("Missing value for --label") }
             config.label = sanitizeLabel(args[i])
+        case "--artifact-date":
+            i += 1
+            guard i < args.count else { throw ProbeError.invalidArgument("Missing value for --artifact-date") }
+            config.artifactDate = args[i].trimmingCharacters(in: .whitespacesAndNewlines)
         case "--server":
             i += 1
             guard i < args.count else { throw ProbeError.invalidArgument("Missing value for --server") }
@@ -164,6 +175,7 @@ func printUsageAndExit() -> Never {
 
     Options:
       --label <name>           Tag this run (default: run)
+      --artifact-date <date>   Pin output filename stamp (e.g., 2026-01-16). If omitted, uses ARTIFACT_DATE env or a timestamp.
       --server <host:port>     Add STUN server (repeatable)
       --samples <n>            Samples per server (default: 50)
       --timeout-ms <ms>        Per-sample recv timeout (default: 1500)
@@ -494,6 +506,15 @@ func timestampForFilename() -> String {
     return f.string(from: Date())
 }
 
+func stampForFilename(config: Config) -> String {
+    // Prefer explicit CLI, then env, then timestamp.
+    if let d = config.artifactDate, !d.isEmpty { return sanitizeLabel(d) }
+    let env = ProcessInfo.processInfo.environment
+    if let v = env["ARTIFACT_DATE"], !v.isEmpty { return sanitizeLabel(v) }
+    if let v = env["SKYBRIDGE_ARTIFACT_DATE"], !v.isEmpty { return sanitizeLabel(v) }
+    return timestampForFilename()
+}
+
 func classifyNAT(local: Endpoint, mappedByServer: [STUNServerSpec: Endpoint]) -> String {
     if mappedByServer.values.contains(local) {
         return "no_nat"
@@ -513,7 +534,7 @@ func classifyNAT(local: Endpoint, mappedByServer: [STUNServerSpec: Endpoint]) ->
 do {
     let config = try parseArgs()
     let timestampISO = isoFormatter.string(from: Date())
-    let stamp = timestampForFilename()
+    let stamp = stampForFilename(config: config)
     let label = config.label
 
     let outDir = config.outDir

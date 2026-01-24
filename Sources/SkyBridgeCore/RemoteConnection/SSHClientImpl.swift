@@ -45,9 +45,9 @@ public struct SSHCommandResult: Sendable {
     public let stdout: String
     public let stderr: String
     public let executionTime: TimeInterval
-    
+
     public var isSuccess: Bool { exitCode == 0 }
-    
+
     public init(exitCode: Int, stdout: String, stderr: String, executionTime: TimeInterval) {
         self.exitCode = exitCode
         self.stdout = stdout
@@ -73,7 +73,7 @@ public struct SSHClientImplConfiguration: Sendable {
     public let connectionTimeout: TimeInterval
     public let commandTimeout: TimeInterval
     public let keepAliveInterval: TimeInterval?
-    
+
     public init(
         host: String,
         port: UInt16 = 22,
@@ -100,37 +100,37 @@ public struct SSHClientImplConfiguration: Sendable {
 /// - 支持交互式 Shell 和命令执行
 @available(macOS 14.0, *)
 public final class SSHClientImpl: @unchecked Sendable {
-    
+
  // MARK: - Properties
-    
+
     private let logger = Logger(subsystem: "com.skybridge.compass", category: "SSHClientImpl")
     private let eventLoopGroup: MultiThreadedEventLoopGroup
     private var channel: Channel?
     private var sshHandler: NIOSSHHandler?
     public let configuration: SSHClientImplConfiguration
-    
+
  // 命令输出收集器
     private var outputCollector: SSHOutputCollector?
-    
+
     @MainActor
     public private(set) var state: SSHConnectionState = .disconnected
-    
+
     @MainActor
     public private(set) var serverBanner: String?
-    
+
  // MARK: - Initialization
-    
+
     public init(configuration: SSHClientImplConfiguration) {
         self.configuration = configuration
         self.eventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: 1)
     }
-    
+
     deinit {
         try? eventLoopGroup.syncShutdownGracefully()
     }
-    
+
  // MARK: - Connection
-    
+
  /// 连接到 SSH 服务器
     @MainActor
     public func connect(authMethod: SSHAuthMethod) async throws {
@@ -138,18 +138,18 @@ public final class SSHClientImpl: @unchecked Sendable {
             logger.warning("SSH 连接已存在或正在进行中")
             return
         }
-        
+
         state = .connecting
         logger.info("🔌 开始 SSH 连接: \(self.configuration.host):\(self.configuration.port)")
-        
+
         do {
  // 创建认证处理器
             let authDelegate = try createAuthDelegate(method: authMethod)
-            
+
             let host = configuration.host
             let port = configuration.port
             let group = eventLoopGroup
-            
+
  // Swift 6.2.1: 使用 withoutActuallyEscaping 避免 Sendable 警告
  // NIOSSH 的代理类型不符合 Sendable，但在此上下文中是安全的
             let channel = try await performSSHConnection(
@@ -158,18 +158,18 @@ public final class SSHClientImpl: @unchecked Sendable {
                 group: group,
                 authDelegate: authDelegate
             )
-            
+
             self.channel = channel
             state = .connected
             logger.info("✅ SSH 连接成功: \(self.configuration.host)")
-            
+
         } catch {
             state = .failed(error)
             logger.error("❌ SSH 连接失败: \(error.localizedDescription)")
             throw error
         }
     }
-    
+
  /// 断开连接
     @MainActor
     public func disconnect() async {
@@ -177,31 +177,31 @@ public final class SSHClientImpl: @unchecked Sendable {
             try? await channel.close()
             self.channel = nil
         }
-        
+
         state = .disconnected
         logger.info("🔌 SSH 连接已断开")
     }
-    
+
  // MARK: - Command Execution
-    
+
  /// 执行 SSH 命令
     @MainActor
     public func execute(_ command: String) async throws -> SSHCommandResult {
         guard case .connected = state else {
             throw SSHClientImplError.sessionNotConnected
         }
-        
+
         guard let channel = channel else {
             throw SSHClientImplError.sessionNotConnected
         }
-        
+
         let startTime = Date()
         logger.info("🖥️ 执行命令: \(command)")
-        
+
  // 创建输出收集器
         let collector = SSHOutputCollector()
         self.outputCollector = collector
-        
+
         do {
  // 创建子通道执行命令
             let result = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<SSHCommandResult, Error>) in
@@ -212,7 +212,7 @@ public final class SSHClientImpl: @unchecked Sendable {
                     ),
                     promise: nil
                 )
-                
+
  // 等待结果并构建返回
                 _ = channel.eventLoop.scheduleTask(in: .seconds(Int64(configuration.commandTimeout))) {
                     let executionTime = Date().timeIntervalSince(startTime)
@@ -225,13 +225,13 @@ public final class SSHClientImpl: @unchecked Sendable {
                     continuation.resume(returning: result)
                 }
             }
-            
+
             return result
-            
+
         } catch {
             let executionTime = Date().timeIntervalSince(startTime)
             logger.error("❌ 命令执行失败: \(error.localizedDescription)")
-            
+
             return SSHCommandResult(
                 exitCode: -1,
                 stdout: "",
@@ -240,34 +240,44 @@ public final class SSHClientImpl: @unchecked Sendable {
             )
         }
     }
-    
+
  /// 执行命令并获取输出（简化版本，使用 NWConnection）
     @MainActor
     public func executeSimple(_ command: String) async throws -> SSHCommandResult {
         guard case .connected = state else {
             throw SSHClientImplError.sessionNotConnected
         }
-        
+
         let startTime = Date()
         logger.info("🖥️ 执行简化命令: \(command)")
-        
+
  // 使用简化的执行方式 - 通过 Network.framework
         let host = configuration.host
         let port = configuration.port
         let timeout = configuration.commandTimeout
-        
+
  // Swift 6.2.1: 使用线程安全的数据收集器
         let dataCollector = ThreadSafeDataCollector()
-        
+
         return try await withCheckedThrowingContinuation { continuation in
             let queue = DispatchQueue(label: "ssh.execute")
-            let endpoint = NWEndpoint.hostPort(
-                host: NWEndpoint.Host(host),
-                port: NWEndpoint.Port(rawValue: port)!
-            )
-            
+            let nwPort: NWEndpoint.Port
+            do {
+                nwPort = try NWEndpoint.Port.validated(port)
+            } catch {
+                let result = SSHCommandResult(
+                    exitCode: -1,
+                    stdout: "",
+                    stderr: error.localizedDescription,
+                    executionTime: Date().timeIntervalSince(startTime)
+                )
+                continuation.resume(returning: result)
+                return
+            }
+            let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(host), port: nwPort)
+
             let connection = NWConnection(to: endpoint, using: .tcp)
-            
+
             connection.stateUpdateHandler = { state in
                 switch state {
                 case .ready:
@@ -285,7 +295,7 @@ public final class SSHClientImpl: @unchecked Sendable {
                     break
                 }
             }
-            
+
  // 设置超时
             queue.asyncAfter(deadline: .now() + timeout) {
                 connection.cancel()
@@ -297,11 +307,11 @@ public final class SSHClientImpl: @unchecked Sendable {
                 )
                 continuation.resume(returning: result)
             }
-            
+
             connection.start(queue: queue)
         }
     }
-    
+
  /// 执行多个命令（顺序执行）
     @MainActor
     public func executeMultiple(_ commands: [String]) async throws -> [SSHCommandResult] {
@@ -309,7 +319,7 @@ public final class SSHClientImpl: @unchecked Sendable {
         for command in commands {
             let result = try await execute(command)
             results.append(result)
-            
+
  // 如果命令失败，可选择是否继续
             if !result.isSuccess {
                 logger.warning("⚠️ 命令失败，继续执行剩余命令: \(command)")
@@ -317,7 +327,7 @@ public final class SSHClientImpl: @unchecked Sendable {
         }
         return results
     }
-    
+
  /// 检查连接是否存活
     @MainActor
     public var isConnected: Bool {
@@ -326,31 +336,31 @@ public final class SSHClientImpl: @unchecked Sendable {
         }
         return false
     }
-    
+
  // MARK: - Interactive Shell
-    
+
  /// 创建交互式 Shell 会话
     @MainActor
     public func createShellSession() async throws -> SSHShellSession {
         guard case .connected = state else {
             throw SSHClientImplError.sessionNotConnected
         }
-        
+
         guard let channel = channel else {
             throw SSHClientImplError.sessionNotConnected
         }
-        
+
         logger.info("🐚 创建交互式 Shell 会话")
-        
+
         return SSHShellSession(
             channel: channel,
             eventLoop: channel.eventLoop,
             logger: logger
         )
     }
-    
+
  // MARK: - Private Helpers
-    
+
  /// 执行 SSH 连接
  /// Swift 6.2.1: 将 NIOSSH 的非 Sendable 类型隔离在 nonisolated 方法中
  /// Swift 6.2.1: nonisolated 方法避免 actor 隔离问题
@@ -368,22 +378,22 @@ public final class SSHClientImpl: @unchecked Sendable {
             port: Int(port),
             trustOnFirstUse: trustOnFirstUse
         )
-        
+
  // Swift 6.2.1: 使用包装器传递配置，避免闭包中直接捕获非 Sendable 类型
         let sshConfig = SSHClientConfigWrapper(
             authDelegate: authDelegate,
             serverAuthDelegate: serverAuthDelegate
         )
-        
+
         let bootstrap = ClientBootstrap(group: group)
             .channelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .channelInitializer { channel -> EventLoopFuture<Void> in
                 sshConfig.addHandlerToPipeline(channel)
             }
-        
+
         return try await bootstrap.connect(host: host, port: Int(port)).get()
     }
-    
+
     private func createAuthDelegate(method: SSHAuthMethod) throws -> SendableAuthDelegate {
         switch method {
         case .password(let password):
@@ -407,12 +417,12 @@ public final class SSHClientImpl: @unchecked Sendable {
 private final class SSHClientConfigWrapper: @unchecked Sendable {
     let authDelegate: SendableAuthDelegate
     let serverAuthDelegate: NIOSSHClientServerAuthenticationDelegate
-    
+
     init(authDelegate: SendableAuthDelegate, serverAuthDelegate: NIOSSHClientServerAuthenticationDelegate) {
         self.authDelegate = authDelegate
         self.serverAuthDelegate = serverAuthDelegate
     }
-    
+
  /// 创建 NIOSSHHandler 并添加到 pipeline（EventLoop 上下文）
     func addHandlerToPipeline(_ channel: Channel) -> EventLoopFuture<Void> {
         let wrapper = UnsafeSSHHandlerBox(
@@ -429,7 +439,7 @@ private final class UnsafeSSHHandlerBox: @unchecked Sendable {
     private let authDelegate: NIOSSHClientUserAuthenticationDelegate
     private let serverAuthDelegate: NIOSSHClientServerAuthenticationDelegate
     private let allocator: ByteBufferAllocator
-    
+
     init(
         authDelegate: NIOSSHClientUserAuthenticationDelegate,
         serverAuthDelegate: NIOSSHClientServerAuthenticationDelegate,
@@ -439,7 +449,7 @@ private final class UnsafeSSHHandlerBox: @unchecked Sendable {
         self.serverAuthDelegate = serverAuthDelegate
         self.allocator = allocator
     }
-    
+
  /// 添加 handler 到 pipeline（在 EventLoop 上下文中调用）
     func addToPipeline(_ pipeline: ChannelPipeline) -> EventLoopFuture<Void> {
         @Sendable func makeHandler() -> NIOSSHHandler {
@@ -474,13 +484,13 @@ private final class UnsafeSSHHandlerBox: @unchecked Sendable {
 private final class ThreadSafeDataCollector: @unchecked Sendable {
     private let lock = NSLock()
     private var _data = Data()
-    
+
     var data: Data {
         lock.lock()
         defer { lock.unlock() }
         return _data
     }
-    
+
     func append(_ newData: Data) {
         lock.lock()
         defer { lock.unlock() }
@@ -496,37 +506,37 @@ private final class SSHOutputCollector: @unchecked Sendable {
     private var _stdout: String = ""
     private var _stderr: String = ""
     private var _exitCode: Int?
-    
+
     var stdout: String {
         lock.lock()
         defer { lock.unlock() }
         return _stdout
     }
-    
+
     var stderr: String {
         lock.lock()
         defer { lock.unlock() }
         return _stderr
     }
-    
+
     var exitCode: Int? {
         lock.lock()
         defer { lock.unlock() }
         return _exitCode
     }
-    
+
     func appendStdout(_ data: String) {
         lock.lock()
         defer { lock.unlock() }
         _stdout += data
     }
-    
+
     func appendStderr(_ data: String) {
         lock.lock()
         defer { lock.unlock() }
         _stderr += data
     }
-    
+
     func setExitCode(_ code: Int) {
         lock.lock()
         defer { lock.unlock() }
@@ -542,36 +552,36 @@ public final class SSHShellSession: @unchecked Sendable {
     private let channel: Channel
     private let eventLoop: EventLoop
     private let logger: Logger
-    
+
     private var inputBuffer: String = ""
     private var outputBuffer: String = ""
-    
+
  /// 输出回调
     public var onOutput: ((String) -> Void)?
-    
+
  /// 错误回调
     public var onError: ((String) -> Void)?
-    
+
     init(channel: Channel, eventLoop: EventLoop, logger: Logger) {
         self.channel = channel
         self.eventLoop = eventLoop
         self.logger = logger
     }
-    
+
  /// 发送输入到 Shell
     public func send(_ input: String) async throws {
         let data = input.data(using: .utf8) ?? Data()
         var buffer = channel.allocator.buffer(capacity: data.count)
         buffer.writeBytes(data)
-        
+
         try await channel.writeAndFlush(SSHChannelData(type: .channel, data: .byteBuffer(buffer)))
     }
-    
+
  /// 发送命令（自动添加换行符）
     public func sendCommand(_ command: String) async throws {
         try await send(command + "\n")
     }
-    
+
  /// 关闭 Shell 会话
     public func close() async throws {
         try await channel.close()
@@ -585,11 +595,11 @@ public final class SSHShellSession: @unchecked Sendable {
 /// Swift 6.2.1: 用于包装 NIOSSH 的非 Sendable 代理类型
 private final class SendableAuthDelegate: NIOSSHClientUserAuthenticationDelegate, @unchecked Sendable {
     private let wrapped: NIOSSHClientUserAuthenticationDelegate
-    
+
     init(_ delegate: NIOSSHClientUserAuthenticationDelegate) {
         self.wrapped = delegate
     }
-    
+
     func nextAuthenticationType(
         availableMethods: NIOSSHAvailableUserAuthenticationMethods,
         nextChallengePromise: EventLoopPromise<NIOSSHUserAuthenticationOffer?>
@@ -604,12 +614,12 @@ private final class SendableAuthDelegate: NIOSSHClientUserAuthenticationDelegate
 private final class PasswordAuthDelegate: NIOSSHClientUserAuthenticationDelegate, @unchecked Sendable {
     private let username: String
     private let password: String
-    
+
     init(username: String, password: String) {
         self.username = username
         self.password = password
     }
-    
+
     func nextAuthenticationType(
         availableMethods: NIOSSHAvailableUserAuthenticationMethods,
         nextChallengePromise: EventLoopPromise<NIOSSHUserAuthenticationOffer?>
@@ -630,10 +640,10 @@ private final class PasswordAuthDelegate: NIOSSHClientUserAuthenticationDelegate
 private final class PublicKeyAuthDelegate: NIOSSHClientUserAuthenticationDelegate, @unchecked Sendable {
     private let username: String
     private let privateKey: NIOSSHPrivateKey
-    
+
     init(username: String, privateKeyData: Data) throws {
         self.username = username
-        
+
  // 尝试解析为 Ed25519 密钥
         do {
             let ed25519Key = try Curve25519.Signing.PrivateKey(rawRepresentation: privateKeyData)
@@ -642,7 +652,7 @@ private final class PublicKeyAuthDelegate: NIOSSHClientUserAuthenticationDelegat
             throw SSHClientImplError.invalidPrivateKey
         }
     }
-    
+
     func nextAuthenticationType(
         availableMethods: NIOSSHAvailableUserAuthenticationMethods,
         nextChallengePromise: EventLoopPromise<NIOSSHUserAuthenticationOffer?>
@@ -666,14 +676,14 @@ private final class PublicKeyAuthDelegate: NIOSSHClientUserAuthenticationDelegat
 @MainActor
 public final class SSHConnectionManager: ObservableObject {
     public static let shared = SSHConnectionManager()
-    
+
     @Published public private(set) var connections: [String: SSHClientImpl] = [:]
     @Published public private(set) var activeConnectionId: String?
-    
+
     private let logger = Logger(subsystem: "com.skybridge.compass", category: "SSHConnectionManager")
-    
+
     private init() {}
-    
+
  /// 创建新连接
     public func createConnection(
         id: String = UUID().uuidString,
@@ -683,23 +693,23 @@ public final class SSHConnectionManager: ObservableObject {
         connections[id] = client
         return client
     }
-    
+
  /// 获取连接
     public func getConnection(id: String) -> SSHClientImpl? {
         return connections[id]
     }
-    
+
  /// 关闭连接
     public func closeConnection(id: String) async {
         guard let client = connections[id] else { return }
         await client.disconnect()
         connections.removeValue(forKey: id)
-        
+
         if activeConnectionId == id {
             activeConnectionId = nil
         }
     }
-    
+
  /// 关闭所有连接
     public func closeAllConnections() async {
         for (id, client) in connections {
@@ -709,7 +719,7 @@ public final class SSHConnectionManager: ObservableObject {
         connections.removeAll()
         activeConnectionId = nil
     }
-    
+
  /// 设置活动连接
     public func setActiveConnection(id: String) {
         if connections.keys.contains(id) {
@@ -737,10 +747,10 @@ public extension SSHClientImpl {
             username: username
         )
         let client = SSHClientImpl(configuration: config)
-        
+
         try await client.connect(authMethod: .password(password))
         defer { Task { await client.disconnect() } }
-        
+
         return try await client.execute(command)
     }
 }

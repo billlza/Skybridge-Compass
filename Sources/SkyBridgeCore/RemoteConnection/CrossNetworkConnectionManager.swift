@@ -3,6 +3,13 @@ import Network
 import CryptoKit
 import Combine
 import OSLog
+import CoreGraphics
+import ImageIO
+import ApplicationServices
+import UniformTypeIdentifiers
+#if os(iOS)
+import UIKit
+#endif
 
 /// 跨网络连接管理器 - 2025年创新架构
 ///
@@ -12,31 +19,48 @@ import OSLog
 /// 3. 智能连接码 + P2P 穿透（通用方案）
 @MainActor
 public final class CrossNetworkConnectionManager: ObservableObject {
-    
+
+    /// Shared instance so multiple views (connection + file transfer) can operate on the same active WebRTC session.
+    public static let shared = CrossNetworkConnectionManager()
+
  // MARK: - 发布属性
-    
+
     @Published public var connectionCode: String?
     @Published public var qrCodeData: Data?
     @Published public var availableCloudDevices: [CloudDevice] = []
     @Published public var connectionStatus: CrossNetworkConnectionStatus = .idle
     @Published public var currentConnection: RemoteConnection?
-    
+
  // MARK: - 私有属性
-    
+
     private let logger = Logger(subsystem: "com.skybridge.connection", category: "CrossNetwork")
     private let signalServer: SignalServerClient
-    private let stunServers: [String] = [
+    private let iceServers: [String] = [
         // SkyBridge 自建服务器 (首选)
-        "stun:54.92.79.99:3478",
+        SkyBridgeServerConfig.stunURL,
+        // TURN（中继兜底）
+        SkyBridgeServerConfig.turnURL,
         // 公共备用服务器
         "stun:stun.l.google.com:19302",
         "stun:stun1.l.google.com:19302"
     ]
     private var activeListeners: [ConnectionListener] = []
     private var deviceFingerprint: String
-    
+
+    // MARK: - WebRTC (ICE / DataChannel)
+
+    private var signalingClient: WebSocketSignalingClient?
+    private var webrtcSessionsBySessionId: [String: WebRTCSession] = [:]
+    private var pendingWebRTCOfferSessionIds: Set<String> = []
+    private var webrtcRemoteIdBySessionId: [String: String] = [:]
+    private var webrtcControlTasksBySessionId: [String: Task<Void, Never>] = [:]
+    private var webrtcSessionKeysBySessionId: [String: SessionKeys] = [:]
+
+    // File transfer waiters (sessionID|transferId|op|chunkIndex -> continuation)
+    private var webrtcFileTransferWaiters: [String: CheckedContinuation<CrossNetworkFileTransferMessage, Error>] = [:]
+
  // MARK: - 连接状态
-    
+
  /// 跨网络连接状态 - 符合Swift 6.2.1的Sendable要求和严格并发控制
  /// 注意：这是CrossNetworkConnectionManager专用的连接状态，与全局ConnectionStatus不同
     public enum CrossNetworkConnectionStatus: Sendable {
@@ -47,28 +71,28 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         case connected
         case failed(String) // 使用String而不是Error，以符合Sendable要求
     }
-    
+
  // 为了向后兼容，保留类型别名（但建议使用 CrossNetworkConnectionStatus）
     @available(*, deprecated, renamed: "CrossNetworkConnectionStatus", message: "使用 CrossNetworkConnectionStatus 以避免与全局 ConnectionStatus 冲突")
     public typealias ConnectionStatus = CrossNetworkConnectionStatus
-    
+
  // MARK: - 初始化
-    
+
     public init() {
         self.signalServer = SignalServerClient()
         self.deviceFingerprint = Self.generateDeviceFingerprint()
-        
+
         logger.info("跨网络连接管理器初始化完成")
     }
-    
+
  // MARK: - 1️⃣ 动态二维码连接
-    
+
  /// 生成动态加密二维码
  /// 包含：设备指纹 + 临时密钥 + ICE 候选信息 + 过期时间
     public func generateDynamicQRCode(validDuration: TimeInterval = 300) async throws -> Data {
         logger.info("生成动态二维码，有效期: \(validDuration)秒")
         connectionStatus = .generating
-        
+
  // 1. 生成会话密钥对（Curve25519 用于密钥协商）
  // 会话密钥用于后续P2P加密握手，独立于签名密钥
         let agreementPrivateKey = Curve25519.KeyAgreement.PrivateKey()
@@ -84,16 +108,11 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             .joined()
  // 签名时间戳，用于时效与重放保护
         let signatureTimestamp = Date().timeIntervalSince1970
-        
+
  // 2. 注册到信号服务器
         let sessionID = UUID().uuidString
-        _ = try await signalServer.registerSession(
-            sessionID: sessionID,
-            deviceFingerprint: deviceFingerprint,
-            publicKey: agreementPublicKey.rawRepresentation,
-            validDuration: validDuration
-        )
-        
+        // 注意：WebRTC 模式下，二维码只承担“会话引导”作用，真正的 offer/answer/ICE 通过 WebSocket 信令交换。
+
  // 3. 构建 QR 码数据结构
  // 为统一验签，签名覆盖规范化负载（参照 P2PSecurityManager）
  // 规范化负载包含：设备ID/名称/类型/地址/端口/系统版本/能力列表/时间戳/指纹
@@ -109,7 +128,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             fingerprintHex: signingFingerprintHex
         )
         let signature = try signingPrivateKey.signature(for: canonicalPayload)
-        
+
         let qrData = DynamicQRCodeData(
             version: 2,
             sessionID: sessionID,
@@ -119,51 +138,51 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             signingPublicKey: signingPublicKeyData,           // 用于验签的公钥
             signature: signature.rawRepresentation,           // P256 ECDSA 原始签名
             signatureTimestamp: signatureTimestamp,
-            iceServers: stunServers,
+            iceServers: iceServers,
             expiresAt: Date().addingTimeInterval(validDuration)
         )
-        
+
  // 4. 编码为 JSON + Base64
         let encoder = JSONEncoder()
         let jsonData = try encoder.encode(qrData)
         let base64String = jsonData.base64EncodedString()
-        
+
  // 5. 添加协议前缀（用于识别）
         let qrString = "skybridge://connect/\(base64String)"
-        
+
         self.qrCodeData = qrString.data(using: .utf8)
         self.connectionStatus = .waiting(code: sessionID)
-        
- // 6. 启动监听
-        startListeningForConnection(sessionID: sessionID, privateKey: agreementPrivateKey)
-        
+
+        // 6. 启动 WebRTC offerer（等待对端扫码后通过 signaling 完成 SDP/ICE，DataChannel ready 后进入 connected）
+        startWebRTCOfferSession(sessionID: sessionID)
+
         logger.info("✅ 动态二维码生成成功，会话ID: \(sessionID)")
         return qrCodeData!
     }
-    
+
  /// 扫描并解析动态二维码
     public func scanDynamicQRCode(_ data: Data) async throws -> RemoteConnection {
         logger.info("扫描动态二维码")
-        
+
         guard let qrString = String(data: data, encoding: .utf8),
               qrString.hasPrefix("skybridge://connect/") else {
             throw CrossNetworkConnectionError.invalidQRCode
         }
-        
+
  // 1. 解析 QR 码
         let base64Part = qrString.replacingOccurrences(of: "skybridge://connect/", with: "")
         guard let jsonData = Data(base64Encoded: base64Part) else {
             throw CrossNetworkConnectionError.invalidQRCode
         }
-        
+
         let decoder = JSONDecoder()
         let qrData = try decoder.decode(DynamicQRCodeData.self, from: jsonData)
-        
+
  // 2. 验证有效期
         guard qrData.expiresAt > Date() else {
             throw CrossNetworkConnectionError.qrCodeExpired
         }
-        
+
  // 3. 验证签名（统一接入 P2PSecurityManager）
  // 基于二维码中的签名公钥与签名，对规范化负载进行验签
         let securityManager = P2PSecurityManager()
@@ -198,201 +217,1196 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             logger.error("二维码验签失败：\(verifyResult.reason ?? "未知原因")")
             throw CrossNetworkConnectionError.invalidSignature
         }
-        
- // 4. 建立 P2P 连接
-        let connection = try await establishP2PConnection(with: qrData)
-        
+
+        // 4. 建立 WebRTC DataChannel 连接（跨网）
+        let connection = try await establishWebRTCConnection(with: qrData)
+
         self.currentConnection = connection
         self.connectionStatus = .connected
-        
+
         logger.info("✅ 通过二维码连接成功")
         return connection
     }
-    
+
  // MARK: - 2️⃣ iCloud 设备链连接
-    
+
  /// 发现同 Apple ID 下的所有设备
     public func discoverCloudDevices() async throws {
         logger.info("🔍 发现 iCloud 设备链")
-        
+
  // 使用 CloudKitService 获取设备列表
         await CloudKitService.shared.refreshDevices()
-        
+
  // 获取设备列表（排除当前设备）
         let currentDeviceId = Self.generateDeviceFingerprint()
         let allDevices = CloudKitService.shared.devices
-        
+
  // 过滤掉当前设备和离线设备（1小时内活跃）
         let activeDevices = allDevices.filter { device in
             device.id != currentDeviceId &&
             device.lastSeenAt.timeIntervalSinceNow > -3600
         }
-        
+
         self.availableCloudDevices = activeDevices
         logger.info("✅ 发现 \(activeDevices.count) 台 iCloud 设备")
     }
-    
+
  /// 通过 iCloud 设备链连接
     public func connectToCloudDevice(_ device: CloudDevice) async throws -> RemoteConnection {
         logger.info("连接到 iCloud 设备: \(device.name)")
         connectionStatus = .connecting
-        
+
  // 1. 通过 iCloud KV Store 交换 ICE 候选
         let sessionID = UUID().uuidString
         let offer = try await createConnectionOffer(sessionID: sessionID)
-        
+
  // 2. 写入 offer 到 iCloud
         let kvStore = NSUbiquitousKeyValueStore.default
         if let offerData = try? JSONEncoder().encode(offer) {
             kvStore.set(offerData, forKey: "skybridge.offer.\(device.id)")
             kvStore.synchronize()
         }
-        
+
  // 3. 等待 answer（轮询或推送）
         let answer = try await waitForAnswer(deviceID: device.id, timeout: 30)
-        
+
  // 4. 建立连接
         let connection = try await finalizeConnection(offer: offer, answer: answer)
-        
+
         self.currentConnection = connection
         self.connectionStatus = .connected
-        
+
         logger.info("✅ 通过 iCloud 连接成功")
         return connection
     }
-    
+
  // MARK: - 3️⃣ 智能连接码
-    
+
  /// 生成智能连接码（6位字母数字）
     public func generateConnectionCode() async throws -> String {
         logger.info("生成智能连接码")
         connectionStatus = .generating
-        
- // 1. 生成短码
+
+        // 1) 生成短码（6 位，排除易混淆字符）
         let code = Self.generateShortCode()
-        
- // 2. 生成密钥对
-        let privateKey = Curve25519.KeyAgreement.PrivateKey()
-        let publicKey = privateKey.publicKey
-        
- // 3. 注册到信号服务器
-        _ = try await signalServer.registerConnectionCode(
-            code: code,
-            deviceFingerprint: deviceFingerprint,
-            deviceName: Host.current().localizedName ?? "Mac",
-            publicKey: publicKey.rawRepresentation,
-            validDuration: 600 // 10分钟有效期
-        )
-        
+
+        // 2) 对齐“零配置跨网”方案：直接把 code 当作 WebRTC sessionId。
+        //    iOS 端只需输入同一 code 即可 join 同一 signaling room 并完成 offer/answer/ICE。
         self.connectionCode = code
         self.connectionStatus = .waiting(code: code)
-        
- // 4. 启动监听
-        startListeningForCodeConnection(code: code, privateKey: privateKey)
-        
+
+        // 3) 启动 WebRTC offerer（等待对端输入 code 后 join，同会话完成 SDP/ICE，DataChannel ready）
+        startWebRTCOfferSession(sessionID: code)
+
         logger.info("✅ 连接码生成成功: \(code)")
         return code
     }
-    
+
  /// 通过连接码连接
     public func connectWithCode(_ code: String) async throws -> RemoteConnection {
-        logger.info("使用连接码连接: \(code)")
+        // 作为“输入方”（answerer）加入对端创建的 sessionId=code 的 WebRTC 会话。
+        let normalized = String(code.prefix(6).uppercased().filter { $0.isLetter || $0.isNumber })
+        logger.info("使用连接码连接: \(normalized)")
         connectionStatus = .connecting
-        
- // 1. 从信号服务器查询设备信息
-        let deviceInfo = try await signalServer.queryConnectionCode(code: code)
-        
- // 2. 验证设备指纹
-        guard Self.isValidDeviceFingerprint(deviceInfo.deviceFingerprint) else {
-            throw CrossNetworkConnectionError.invalidDevice
+
+        ensureSignalingConnected()
+
+        let sessionID = normalized
+
+        // 动态获取 TURN 凭据（带缓存和回退）
+        let ice = await SkyBridgeServerConfig.dynamicICEConfig()
+        logger.info("📡 连接码模式使用动态 TURN 凭据: user=\(ice.turnUsername.prefix(8))...")
+
+        let session = WebRTCSession(sessionId: sessionID, localDeviceId: deviceFingerprint, role: .answerer, ice: ice)
+
+        session.onLocalAnswer = { [weak self] sdp in
+            guard let self else { return }
+            Task { await self.sendSignal(.init(sessionId: sessionID, from: self.deviceFingerprint, type: .answer, payload: .init(sdp: sdp))) }
         }
-        
- // 3. 建立 P2P 连接（STUN/TURN）
-        let connection = try await establishP2PConnectionWithCode(
-            code: code,
-            deviceInfo: deviceInfo
-        )
-        
-        self.currentConnection = connection
-        self.connectionStatus = .connected
-        
-        logger.info("✅ 通过连接码连接成功")
+        session.onLocalICECandidate = { [weak self] payload in
+            guard let self else { return }
+            Task { await self.sendSignal(.init(sessionId: sessionID, from: self.deviceFingerprint, type: .iceCandidate, payload: payload)) }
+        }
+        session.onReady = { [weak self] in
+            guard let self else { return }
+            Task { @MainActor in
+                self.logger.info("✅ WebRTC answerer ready: session=\(sessionID, privacy: .public)")
+                self.currentConnection = RemoteConnection(id: sessionID, deviceName: "Remote Device", transport: .webrtc(session))
+                self.connectionStatus = .connected
+                self.startWebRTCInboundHandshakeAndControlLoop(sessionID: sessionID, session: session, endpointDescription: "webrtc:\(sessionID)")
+            }
+        }
+
+        webrtcSessionsBySessionId[sessionID] = session
+
+        do {
+            try session.start()
+        } catch {
+            logger.error("❌ connectWithCode(WebRTC) start failed: \(error.localizedDescription, privacy: .public)")
+            connectionStatus = .failed(error.localizedDescription)
+            throw error
+        }
+
+        // best-effort join
+        await sendSignal(.init(sessionId: sessionID, from: deviceFingerprint, type: .join, payload: nil))
+
+        let connection = RemoteConnection(id: sessionID, deviceName: "Remote Device", transport: .webrtc(session))
+        logger.info("✅ 通过连接码开始连接（等待对端 offer）")
         return connection
     }
-    
+
  // MARK: - 私有方法 - P2P 连接建立
-    
+
     private func establishP2PConnection(with qrData: DynamicQRCodeData) async throws -> RemoteConnection {
         logger.info("建立 P2P 连接（二维码模式）")
-        
+
  // 1. 创建 NWConnection（QUIC over UDP for P2P）
         let parameters = NWParameters.quic(alpn: ["skybridge-p2p"])
-        
+
  // 2. ICE 候选协商
         let iceCandidate = try await negotiateICE(
             sessionID: qrData.sessionID,
             remotePublicKey: qrData.publicKey
         )
-        
+
  // 3. 建立连接
         let endpoint = NWEndpoint.hostPort(
             host: NWEndpoint.Host(iceCandidate.host),
             port: NWEndpoint.Port(integerLiteral: iceCandidate.port)
         )
-        
+
         let connection = NWConnection(to: endpoint, using: parameters)
         connection.start(queue: .global(qos: .userInitiated))
-        
+
  // 4. 等待连接就绪
         try await waitForConnection(connection)
-        
+
         return RemoteConnection(
             id: qrData.sessionID,
             deviceName: qrData.deviceName,
-            connection: connection,
-            encryptionKey: try Self.deriveSharedSecret(
-                localPrivateKey: Curve25519.KeyAgreement.PrivateKey(), // 简化示例，真实实现应与会话密钥匹配
-                remotePublicKey: qrData.publicKey
-            )
+            transport: .nw(connection)
         )
     }
-    
+
+    // MARK: - WebRTC Connection
+
+    private func ensureSignalingConnected() {
+        if signalingClient != nil { return }
+        guard let url = URL(string: SkyBridgeServerConfig.signalingWebSocketURL) else { return }
+        let client = WebSocketSignalingClient(url: url)
+        self.signalingClient = client
+        Task {
+            await client.setOnEnvelope { [weak self] env in
+                Task { @MainActor in
+                    self?.handleSignalingEnvelope(env)
+                }
+            }
+            await client.connect()
+        }
+    }
+
+    private func startWebRTCOfferSession(sessionID: String) {
+        ensureSignalingConnected()
+        guard webrtcSessionsBySessionId[sessionID] == nil else { return }
+        guard !pendingWebRTCOfferSessionIds.contains(sessionID) else { return }
+        pendingWebRTCOfferSessionIds.insert(sessionID)
+
+        // 异步获取动态 TURN 凭据
+        Task { @MainActor in
+            await self.startWebRTCOfferSessionWithDynamicCredentials(sessionID: sessionID)
+        }
+    }
+
+    private func startWebRTCOfferSessionWithDynamicCredentials(sessionID: String) async {
+        defer { pendingWebRTCOfferSessionIds.remove(sessionID) }
+        guard webrtcSessionsBySessionId[sessionID] == nil else { return }
+
+        // 动态获取 TURN 凭据（带缓存和回退）
+        let ice = await SkyBridgeServerConfig.dynamicICEConfig()
+        logger.info("📡 使用动态 TURN 凭据: user=\(ice.turnUsername.prefix(8))...")
+
+        let session = WebRTCSession(sessionId: sessionID, localDeviceId: deviceFingerprint, role: .offerer, ice: ice)
+        session.onLocalOffer = { [weak self] sdp in
+            guard let self else { return }
+            Task {
+                await self.sendSignal(.init(sessionId: sessionID, from: self.deviceFingerprint, type: .offer, payload: .init(sdp: sdp)))
+            }
+        }
+        session.onLocalICECandidate = { [weak self] payload in
+            guard let self else { return }
+            Task {
+                await self.sendSignal(.init(sessionId: sessionID, from: self.deviceFingerprint, type: .iceCandidate, payload: payload))
+            }
+        }
+        session.onReady = { [weak self] in
+            guard let self else { return }
+            Task { @MainActor in
+                self.logger.info("✅ WebRTC offerer ready: session=\(sessionID, privacy: .public)")
+                // 当前 UI 只需要体现“已连接”；后续会把 DataChannel 接入握手/控制通道。
+                self.currentConnection = RemoteConnection(id: sessionID, deviceName: "Remote Device", transport: .webrtc(session))
+                self.connectionStatus = .connected
+
+                // 启动“握手/控制通道”消费者：把 DataChannel 当作一条 length-framed byte stream，复用现有 HandshakeDriver / AppMessage 逻辑。
+                self.startWebRTCInboundHandshakeAndControlLoop(sessionID: sessionID, session: session, endpointDescription: "webrtc:\(sessionID)")
+            }
+        }
+
+        webrtcSessionsBySessionId[sessionID] = session
+
+        do {
+            try session.start()
+        } catch {
+            logger.error("❌ startWebRTCOfferSession failed: \(error.localizedDescription, privacy: .public)")
+            connectionStatus = .failed(error.localizedDescription)
+        }
+    }
+
+    private func establishWebRTCConnection(with qrData: DynamicQRCodeData) async throws -> RemoteConnection {
+        ensureSignalingConnected()
+
+        let sessionID = qrData.sessionID
+
+        // 动态获取 TURN 凭据（带缓存和回退）
+        let ice = await SkyBridgeServerConfig.dynamicICEConfig()
+        logger.info("📡 answerer 使用动态 TURN 凭据: user=\(ice.turnUsername.prefix(8))...")
+
+        let session = WebRTCSession(sessionId: sessionID, localDeviceId: deviceFingerprint, role: .answerer, ice: ice)
+
+        session.onLocalAnswer = { [weak self] sdp in
+            guard let self else { return }
+            Task {
+                await self.sendSignal(.init(sessionId: sessionID, from: self.deviceFingerprint, type: .answer, payload: .init(sdp: sdp)))
+            }
+        }
+        session.onLocalICECandidate = { [weak self] payload in
+            guard let self else { return }
+            Task {
+                await self.sendSignal(.init(sessionId: sessionID, from: self.deviceFingerprint, type: .iceCandidate, payload: payload))
+            }
+        }
+
+        webrtcSessionsBySessionId[sessionID] = session
+
+        try session.start()
+
+        // 主动发送 join，帮助服务端/对端建立“同会话订阅”的心智模型（服务端可忽略）
+        await sendSignal(.init(sessionId: sessionID, from: deviceFingerprint, type: .join, payload: nil))
+
+        return RemoteConnection(id: sessionID, deviceName: qrData.deviceName, transport: .webrtc(session))
+    }
+
+    private func sendSignal(_ env: WebRTCSignalingEnvelope) async {
+        do {
+            try await signalingClient?.send(env)
+        } catch {
+            logger.error("❌ signaling send failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private func handleSignalingEnvelope(_ env: WebRTCSignalingEnvelope) {
+        guard env.from != deviceFingerprint else { return }
+        guard let session = webrtcSessionsBySessionId[env.sessionId] else { return }
+
+        // 记录对端 id（用于未来做定向路由）
+        if webrtcRemoteIdBySessionId[env.sessionId] == nil {
+            webrtcRemoteIdBySessionId[env.sessionId] = env.from
+        }
+
+        switch env.type {
+        case .offer:
+            if let sdp = env.payload?.sdp {
+                session.setRemoteOffer(sdp)
+            }
+        case .answer:
+            if let sdp = env.payload?.sdp {
+                session.setRemoteAnswer(sdp)
+            }
+        case .iceCandidate:
+            if let p = env.payload, let c = p.candidate {
+                session.addRemoteICECandidate(candidate: c, sdpMid: p.sdpMid, sdpMLineIndex: p.sdpMLineIndex)
+            }
+        case .join, .leave:
+            break
+        }
+    }
+
+    // MARK: - WebRTC File Transfer (macOS → iOS)
+
+    private enum WebRTCFileTransferWaitError: LocalizedError {
+        case timeout
+        case cancelled
+        case failed(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .timeout:
+                return "跨网文件传输等待超时"
+            case .cancelled:
+                return "跨网文件传输已取消"
+            case .failed(let msg):
+                return "跨网文件传输失败: \(msg)"
+            }
+        }
+    }
+
+    private func fileTransferWaiterKey(sessionID: String, transferId: String, op: CrossNetworkFileTransferOp, chunkIndex: Int?) -> String {
+        let idx = chunkIndex ?? -1
+        return "\(sessionID)|\(transferId)|\(op.rawValue)|\(idx)"
+    }
+
+    private func resumeFileTransferWaiter(sessionID: String, message: CrossNetworkFileTransferMessage) {
+        let key = fileTransferWaiterKey(sessionID: sessionID, transferId: message.transferId, op: message.op, chunkIndex: message.chunkIndex)
+        if let waiter = webrtcFileTransferWaiters.removeValue(forKey: key) {
+            waiter.resume(returning: message)
+            return
+        }
+
+        // Also allow awaiting without chunkIndex.
+        let keyNoIdx = fileTransferWaiterKey(sessionID: sessionID, transferId: message.transferId, op: message.op, chunkIndex: nil)
+        if let waiter = webrtcFileTransferWaiters.removeValue(forKey: keyNoIdx) {
+            waiter.resume(returning: message)
+            return
+        }
+    }
+
+    private func failFileTransferWaiters(sessionID: String, transferId: String, message: String) {
+        let prefix = "\(sessionID)|\(transferId)|"
+        let keys = webrtcFileTransferWaiters.keys.filter { $0.hasPrefix(prefix) }
+        for k in keys {
+            if let w = webrtcFileTransferWaiters.removeValue(forKey: k) {
+                w.resume(throwing: WebRTCFileTransferWaitError.failed(message))
+            }
+        }
+    }
+
+    private func waitForFileTransferMessage(
+        sessionID: String,
+        transferId: String,
+        op: CrossNetworkFileTransferOp,
+        chunkIndex: Int? = nil,
+        timeoutSeconds: TimeInterval = 20
+    ) async throws -> CrossNetworkFileTransferMessage {
+        let key = fileTransferWaiterKey(sessionID: sessionID, transferId: transferId, op: op, chunkIndex: chunkIndex)
+        if webrtcFileTransferWaiters[key] != nil {
+            throw WebRTCFileTransferWaitError.cancelled
+        }
+
+        return try await withCheckedThrowingContinuation { (c: CheckedContinuation<CrossNetworkFileTransferMessage, Error>) in
+            webrtcFileTransferWaiters[key] = c
+
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                do { try await Task.sleep(for: .seconds(timeoutSeconds)) } catch { return }
+                if let pending = self.webrtcFileTransferWaiters.removeValue(forKey: key) {
+                    pending.resume(throwing: WebRTCFileTransferWaitError.timeout)
+                }
+            }
+        }
+    }
+
+    private func encryptAppPayload(_ plaintext: Data, with keys: SessionKeys) throws -> Data {
+        let key = SymmetricKey(data: keys.sendKey)
+        let sealed = try AES.GCM.seal(plaintext, using: key)
+        return sealed.combined ?? Data()
+    }
+
+    private func sendFramed(_ payload: Data, over session: WebRTCSession) throws {
+        var framed = Data()
+        var length = UInt32(payload.count).bigEndian
+        framed.append(Data(bytes: &length, count: 4))
+        framed.append(payload)
+        try session.send(framed)
+    }
+
+    private func sendFileTransferMessage(sessionID: String, session: WebRTCSession, keys: SessionKeys, message: CrossNetworkFileTransferMessage) throws {
+        let plain = try JSONEncoder().encode(message)
+        let enc = try encryptAppPayload(plain, with: keys)
+        let padded = TrafficPadding.wrapIfEnabled(enc, label: "tx/webrtc-file")
+        try sendFramed(padded, over: session)
+    }
+
+    /// Send a local file to the currently connected iOS peer over WebRTC DataChannel (zero-config cross-network).
+    public func sendFileToConnectedPeer(_ url: URL) async throws {
+        guard case .connected = connectionStatus,
+              let conn = currentConnection,
+              case .webrtc(let session) = conn.transport
+        else {
+            throw WebRTCFileTransferWaitError.failed("未建立跨网连接")
+        }
+
+        let sessionID = conn.id
+        guard let keys = webrtcSessionKeysBySessionId[sessionID] else {
+            throw WebRTCFileTransferWaitError.failed("握手未完成（会话密钥不可用）")
+        }
+
+        // Validate file
+        let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
+        if let type = attrs[.type] as? FileAttributeType, type == .typeDirectory {
+            throw WebRTCFileTransferWaitError.failed("暂不支持直接发送文件夹")
+        }
+        let fileSize = (attrs[.size] as? NSNumber)?.int64Value ?? 0
+        guard fileSize > 0 else {
+            throw WebRTCFileTransferWaitError.failed("文件大小无效")
+        }
+
+        let transferId = UUID().uuidString
+        let remoteId = webrtcRemoteIdBySessionId[sessionID] ?? "webrtc-peer"
+        let remoteName = conn.deviceName
+
+        FileTransferManager.shared.beginExternalOutboundTransfer(
+            transferId: transferId,
+            fileURL: url,
+            fileSize: fileSize,
+            toDeviceId: remoteId,
+            toDeviceName: remoteName
+        )
+
+        do {
+            // DataChannel framing: keep chunks moderate; receiver writes at offset = idx * chunkSize.
+            let chunkSize = 64 * 1024
+            let totalChunks = Int(ceil(Double(fileSize) / Double(chunkSize)))
+
+            let snap = await SelfIdentityProvider.shared.snapshot()
+            let meta = CrossNetworkFileTransferMessage(
+                op: .metadata,
+                transferId: transferId,
+                senderDeviceId: snap.deviceId.isEmpty ? deviceFingerprint : snap.deviceId,
+                senderDeviceName: Host.current().localizedName,
+                fileName: url.lastPathComponent,
+                fileSize: fileSize,
+                chunkSize: chunkSize,
+                totalChunks: totalChunks,
+                mimeType: nil
+            )
+            try sendFileTransferMessage(sessionID: sessionID, session: session, keys: keys, message: meta)
+
+            _ = try await waitForFileTransferMessage(sessionID: sessionID, transferId: transferId, op: .metadataAck, timeoutSeconds: 15)
+
+            let handle = try FileHandle(forReadingFrom: url)
+            defer { try? handle.close() }
+
+            var sentBytes: Int64 = 0
+            var chunkIndex = 0
+
+            while sentBytes < fileSize {
+                let remaining = Int(fileSize - sentBytes)
+                let readLen = min(chunkSize, max(0, remaining))
+                if readLen <= 0 { break }
+
+                try handle.seek(toOffset: UInt64(sentBytes))
+                let data = handle.readData(ofLength: readLen)
+                if data.isEmpty { break }
+
+                let msg = CrossNetworkFileTransferMessage(
+                    op: .chunk,
+                    transferId: transferId,
+                    chunkIndex: chunkIndex,
+                    chunkData: data,
+                    rawSize: data.count
+                )
+                try sendFileTransferMessage(sessionID: sessionID, session: session, keys: keys, message: msg)
+
+                let ack = try await waitForFileTransferMessage(
+                    sessionID: sessionID,
+                    transferId: transferId,
+                    op: .chunkAck,
+                    chunkIndex: chunkIndex,
+                    timeoutSeconds: 30
+                )
+
+                if ack.op == .error {
+                    throw WebRTCFileTransferWaitError.failed(ack.message ?? "remote error")
+                }
+
+                let progressed = ack.receivedBytes ?? (sentBytes + Int64(data.count))
+                sentBytes = min(fileSize, max(sentBytes + Int64(data.count), progressed))
+                chunkIndex += 1
+
+                FileTransferManager.shared.updateExternalOutboundProgress(
+                    transferId: transferId,
+                    transferredBytes: sentBytes
+                )
+            }
+
+            let done = CrossNetworkFileTransferMessage(op: .complete, transferId: transferId)
+            try sendFileTransferMessage(sessionID: sessionID, session: session, keys: keys, message: done)
+            _ = try await waitForFileTransferMessage(sessionID: sessionID, transferId: transferId, op: .completeAck, timeoutSeconds: 30)
+
+            FileTransferManager.shared.completeExternalOutboundTransfer(transferId: transferId)
+        } catch {
+            FileTransferManager.shared.failExternalOutboundTransfer(transferId: transferId, errorMessage: error.localizedDescription)
+            throw error
+        }
+    }
+
+    // MARK: - WebRTC -> Handshake/Control Channel
+
+    private actor InboundChunkQueue {
+        private var pending: [Data] = []
+        private var waiters: [CheckedContinuation<Data, Error>] = []
+        private var finished = false
+
+        enum QueueError: Error { case finished }
+
+        func push(_ data: Data) {
+            guard !finished else { return }
+            if let w = waiters.first {
+                waiters.removeFirst()
+                w.resume(returning: data)
+                return
+            }
+            pending.append(data)
+        }
+
+        func finish() {
+            finished = true
+            let ws = waiters
+            waiters.removeAll()
+            ws.forEach { $0.resume(throwing: QueueError.finished) }
+        }
+
+        func next() async throws -> Data {
+            if let first = pending.first {
+                pending.removeFirst()
+                return first
+            }
+            if finished { throw QueueError.finished }
+            return try await withCheckedThrowingContinuation { c in
+                waiters.append(c)
+            }
+        }
+    }
+
+    private func startWebRTCInboundHandshakeAndControlLoop(sessionID: String, session: WebRTCSession, endpointDescription: String) {
+        if webrtcControlTasksBySessionId[sessionID] != nil { return }
+
+        let queue = InboundChunkQueue()
+        session.onData = { data in
+            Task { await queue.push(data) }
+        }
+
+        webrtcControlTasksBySessionId[sessionID] = Task { [weak self] in
+            guard let self else { return }
+            await self.consumeInboundHandshakeOrControlChannelWebRTC(
+                sessionID: sessionID,
+                session: session,
+                endpointDescription: endpointDescription,
+                inbound: queue
+            )
+        }
+    }
+
+    private func consumeInboundHandshakeOrControlChannelWebRTC(
+        sessionID: String,
+        session: WebRTCSession,
+        endpointDescription: String,
+        inbound: InboundChunkQueue
+    ) async {
+        struct DirectHandshakeTransport: DiscoveryTransport {
+            let sendRaw: @Sendable (Data) async throws -> Void
+            func send(to peer: PeerIdentifier, data: Data) async throws { try await sendRaw(data) }
+        }
+
+        @Sendable func sendFramed(_ data: Data) async throws {
+            var framed = Data()
+            var length = UInt32(data.count).bigEndian
+            framed.append(Data(bytes: &length, count: 4))
+            framed.append(data)
+            try await MainActor.run {
+                try session.send(framed)
+            }
+        }
+
+        func receiveSome(max: Int) async throws -> Data {
+            let d = try await inbound.next()
+            if d.count <= max { return d }
+            return d.prefix(max)
+        }
+
+        func receiveExactly(_ length: Int) async throws -> Data {
+            var buffer = Data()
+            buffer.reserveCapacity(length)
+            while buffer.count < length {
+                let remaining = length - buffer.count
+                let chunk = try await receiveSome(max: min(65536, remaining))
+                buffer.append(chunk)
+            }
+            return buffer
+        }
+
+        let transport = DirectHandshakeTransport(sendRaw: { data in
+            try await sendFramed(data)
+        })
+
+        // 使用 sessionID 作为“临时 peer id”，真实 deviceId 会在 pairingIdentityExchange / 业务层里出现。
+        let peer = PeerIdentifier(deviceId: "webrtc-\(sessionID)")
+
+        var driver: HandshakeDriver?
+        var sessionKeys: SessionKeys?
+
+        func isLikelyHandshakeControlPacket(_ data: Data) -> Bool {
+            if data.count == 38, (try? HandshakeFinished.decode(from: data)) != nil { return true }
+            if (try? HandshakeMessageA.decode(from: data)) != nil { return true }
+            if (try? HandshakeMessageB.decode(from: data)) != nil { return true }
+            return false
+        }
+
+        func encryptAppPayload(_ plaintext: Data, with keys: SessionKeys) throws -> Data {
+            let key = SymmetricKey(data: keys.sendKey)
+            let sealed = try AES.GCM.seal(plaintext, using: key)
+            return sealed.combined ?? Data()
+        }
+
+        func decryptAppPayload(_ ciphertext: Data, with keys: SessionKeys) throws -> Data {
+            let key = SymmetricKey(data: keys.receiveKey)
+            let box = try AES.GCM.SealedBox(combined: ciphertext)
+            return try AES.GCM.open(box, using: key)
+        }
+
+        enum RemoteMessageTypeWire: String, Codable { case screenData, mouseEvent, keyboardEvent }
+        struct RemoteMessageWire: Codable {
+            let type: RemoteMessageTypeWire
+            let payload: Data
+        }
+        enum MouseEventTypeWire: String, Codable {
+            case leftMouseDown, leftMouseUp, rightMouseDown, rightMouseUp, mouseMoved, scrollUp, scrollDown
+        }
+        struct MouseEventWire: Codable {
+            let type: MouseEventTypeWire
+            let x: Double
+            let y: Double
+            let timestamp: TimeInterval
+        }
+        enum KeyboardEventTypeWire: String, Codable { case keyDown, keyUp }
+        struct KeyboardEventWire: Codable {
+            let type: KeyboardEventTypeWire
+            let keyCode: Int
+            let timestamp: TimeInterval
+        }
+        struct ScreenDataWire: Codable {
+            let width: Int
+            let height: Int
+            let imageData: Data
+            let timestamp: TimeInterval
+            let format: String?
+        }
+
+        struct InboundFileTransferState {
+            let transferId: String
+            let fileName: String
+            let fileSize: Int64
+            let chunkSize: Int
+            let totalChunks: Int
+            let senderDeviceId: String
+            let senderDeviceName: String?
+            let tempURL: URL
+            let finalURL: URL
+            let handle: FileHandle
+            var receivedBytes: Int64
+        }
+        var inboundFileTransfers: [String: InboundFileTransferState] = [:]
+
+        func sanitizeFileName(_ name: String) -> String {
+            let last = (name as NSString).lastPathComponent
+            // Avoid empty / reserved names.
+            let trimmed = last.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? "SkyBridgeFile" : trimmed
+        }
+
+        func makeUniqueDestinationURL(baseDir: URL, fileName: String) -> URL {
+            let safe = sanitizeFileName(fileName)
+            let ext = (safe as NSString).pathExtension
+            let stem = (safe as NSString).deletingPathExtension
+
+            var candidate = baseDir.appendingPathComponent(safe)
+            var idx = 1
+            while FileManager.default.fileExists(atPath: candidate.path) {
+                let altName: String
+                if ext.isEmpty {
+                    altName = "\(stem) (\(idx))"
+                } else {
+                    altName = "\(stem) (\(idx)).\(ext)"
+                }
+                candidate = baseDir.appendingPathComponent(altName)
+                idx += 1
+            }
+            return candidate
+        }
+
+        func ensureAccessibilityPermission() -> Bool {
+            if AXIsProcessTrusted() { return true }
+            let opts = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
+            _ = AXIsProcessTrustedWithOptions(opts)
+            return AXIsProcessTrusted()
+        }
+
+        func handleMouseEvent(_ event: MouseEventWire) {
+            guard ensureAccessibilityPermission() else { return }
+            let displayID = CGMainDisplayID()
+            let screenH = Double(CGDisplayPixelsHigh(displayID))
+            let point = CGPoint(x: event.x, y: screenH - event.y)
+            func post(_ e: CGEvent?) { e?.post(tap: .cghidEventTap) }
+            switch event.type {
+            case .mouseMoved:
+                post(CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left))
+            case .leftMouseDown:
+                post(CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: point, mouseButton: .left))
+            case .leftMouseUp:
+                post(CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left))
+            case .rightMouseDown:
+                post(CGEvent(mouseEventSource: nil, mouseType: .rightMouseDown, mouseCursorPosition: point, mouseButton: .right))
+            case .rightMouseUp:
+                post(CGEvent(mouseEventSource: nil, mouseType: .rightMouseUp, mouseCursorPosition: point, mouseButton: .right))
+            case .scrollUp:
+                post(CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: 20, wheel2: 0, wheel3: 0))
+            case .scrollDown:
+                post(CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: -20, wheel2: 0, wheel3: 0))
+            }
+        }
+
+        func handleKeyboardEvent(_ event: KeyboardEventWire) {
+            guard ensureAccessibilityPermission() else { return }
+            let keyCode = CGKeyCode(event.keyCode)
+            let down = (event.type == .keyDown)
+            let cg = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: down)
+            cg?.post(tap: .cghidEventTap)
+        }
+
+        func jpegData(from image: CGImage, quality: CGFloat = 0.55) -> Data? {
+            let data = NSMutableData()
+            guard let dest = CGImageDestinationCreateWithData(data, UTType.jpeg.identifier as CFString, 1, nil) else { return nil }
+            CGImageDestinationAddImage(dest, image, [kCGImageDestinationLossyCompressionQuality: quality] as CFDictionary)
+            guard CGImageDestinationFinalize(dest) else { return nil }
+            return data as Data
+        }
+
+        logger.info("🤝 WebRTC 控制通道：启动入站握手/消息循环 session=\(sessionID, privacy: .public)")
+
+        do {
+            while true {
+                let lenData = try await receiveExactly(4)
+                let totalLen = lenData.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+                guard totalLen > 0 && totalLen < 1_048_576 else { break }
+                let payload = try await receiveExactly(Int(totalLen))
+
+                let trafficUnwrapped = TrafficPadding.unwrapIfNeeded(payload, label: "rx/webrtc")
+                let frame = HandshakePadding.unwrapIfNeeded(trafficUnwrapped, label: "rx/webrtc")
+
+                if let keys = sessionKeys, !isLikelyHandshakeControlPacket(frame) {
+                    do {
+                        let plaintext = try decryptAppPayload(frame, with: keys)
+                        if let msg = try? JSONDecoder().decode(AppMessage.self, from: plaintext) {
+                            switch msg {
+                            case .pairingIdentityExchange(let payload):
+                                let request = PairingTrustApprovalService.Request(
+                                    peerEndpoint: endpointDescription,
+                                    declaredDeviceId: payload.deviceId,
+                                    displayName: payload.deviceName ?? payload.deviceId,
+                                    model: payload.modelName,
+                                    platform: payload.platform,
+                                    osVersion: payload.osVersion,
+                                    kemKeyCount: payload.kemPublicKeys.count
+                                )
+                                let decision = await PairingTrustApprovalService.shared.decide(for: request)
+                                guard decision != PairingTrustApprovalService.Decision.reject else { break }
+
+                                let provider = CryptoProviderFactory.make(policy: .preferPQC)
+                                let suites = provider.supportedSuites.filter { $0.isPQCGroup }
+                                let km = DeviceIdentityKeyManager.shared
+                                var kemKeys: [KEMPublicKeyInfo] = []
+                                for s in suites {
+                                    if let pk = try? await km.getKEMPublicKey(for: s, provider: provider) {
+                                        kemKeys.append(KEMPublicKeyInfo(suiteWireId: s.wireId, publicKey: pk))
+                                    }
+                                }
+                                let localId = await SelfIdentityProvider.shared.snapshot().deviceId
+                                let localPlatform: String = {
+#if os(macOS)
+                                    return "macOS"
+#elseif os(iOS)
+                                    return "iOS"
+#else
+                                    return "unknown"
+#endif
+                                }()
+                                let localOS = ProcessInfo.processInfo.operatingSystemVersionString
+                                let localName: String? = {
+#if os(macOS)
+                                    return Host.current().localizedName
+#elseif os(iOS)
+                                    return UIDevice.current.name
+#else
+                                    return nil
+#endif
+                                }()
+                                let localModel: String? = {
+#if os(macOS)
+                                    return "Mac"
+#elseif os(iOS)
+                                    return UIDevice.current.model
+#else
+                                    return nil
+#endif
+                                }()
+                                let reply = AppMessage.pairingIdentityExchange(.init(
+                                    deviceId: localId,
+                                    kemPublicKeys: kemKeys,
+                                    deviceName: localName,
+                                    modelName: localModel,
+                                    platform: localPlatform,
+                                    osVersion: localOS,
+                                    chip: nil
+                                ))
+                                let outPlain = try JSONEncoder().encode(reply)
+                                let outCipher = try encryptAppPayload(outPlain, with: keys)
+                                let outPadded = TrafficPadding.wrapIfEnabled(outCipher, label: "tx/webrtc")
+                                try await sendFramed(outPadded)
+                            default:
+                                break
+                            }
+                        } else if let ft = try? JSONDecoder().decode(CrossNetworkFileTransferMessage.self, from: plaintext), ft.version == 1 {
+                            switch ft.op {
+                            case .metadata:
+                                guard
+                                    let fileName = ft.fileName,
+                                    let fileSize = ft.fileSize,
+                                    let chunkSize = ft.chunkSize,
+                                    let totalChunks = ft.totalChunks
+                                else {
+                                    let err = CrossNetworkFileTransferMessage(
+                                        op: .error,
+                                        transferId: ft.transferId,
+                                        message: "Invalid metadata (missing fileName/fileSize/chunkSize/totalChunks)"
+                                    )
+                                    let outPlain = try JSONEncoder().encode(err)
+                                    let outCipher = try encryptAppPayload(outPlain, with: keys)
+                                    let outPadded = TrafficPadding.wrapIfEnabled(outCipher, label: "tx/webrtc-ft-error")
+                                    try await sendFramed(outPadded)
+                                    break
+                                }
+
+                                let baseDir = FileManager.default
+                                    .urls(for: .downloadsDirectory, in: .userDomainMask).first!
+                                    .appendingPathComponent("SkyBridge", isDirectory: true)
+                                try? FileManager.default.createDirectory(at: baseDir, withIntermediateDirectories: true)
+
+                                let finalURL = makeUniqueDestinationURL(baseDir: baseDir, fileName: fileName)
+                                let tempURL = baseDir.appendingPathComponent(".skybridge-\(ft.transferId).partial")
+                                _ = FileManager.default.createFile(atPath: tempURL.path, contents: nil)
+
+                                let handle = try FileHandle(forWritingTo: tempURL)
+                                let senderId = ft.senderDeviceId ?? endpointDescription
+                                let senderName = ft.senderDeviceName ?? senderId
+
+                                inboundFileTransfers[ft.transferId] = InboundFileTransferState(
+                                    transferId: ft.transferId,
+                                    fileName: fileName,
+                                    fileSize: fileSize,
+                                    chunkSize: chunkSize,
+                                    totalChunks: totalChunks,
+                                    senderDeviceId: senderId,
+                                    senderDeviceName: senderName,
+                                    tempURL: tempURL,
+                                    finalURL: finalURL,
+                                    handle: handle,
+                                    receivedBytes: 0
+                                )
+
+                                await MainActor.run {
+                                    FileTransferManager.shared.beginExternalInboundTransfer(
+                                        transferId: ft.transferId,
+                                        fileName: fileName,
+                                        fileSize: fileSize,
+                                        fromDeviceId: senderId,
+                                        fromDeviceName: senderName
+                                    )
+                                }
+
+                                let ack = CrossNetworkFileTransferMessage(op: .metadataAck, transferId: ft.transferId)
+                                let outPlain = try JSONEncoder().encode(ack)
+                                let outCipher = try encryptAppPayload(outPlain, with: keys)
+                                let outPadded = TrafficPadding.wrapIfEnabled(outCipher, label: "tx/webrtc-ft-metaAck")
+                                try await sendFramed(outPadded)
+
+                            case .chunk:
+                                guard
+                                    let idx = ft.chunkIndex,
+                                    let data = ft.chunkData
+                                else { break }
+                                guard var st = inboundFileTransfers[ft.transferId] else {
+                                    let err = CrossNetworkFileTransferMessage(
+                                        op: .error,
+                                        transferId: ft.transferId,
+                                        message: "Unknown transferId (no metadata)"
+                                    )
+                                    let outPlain = try JSONEncoder().encode(err)
+                                    let outCipher = try encryptAppPayload(outPlain, with: keys)
+                                    let outPadded = TrafficPadding.wrapIfEnabled(outCipher, label: "tx/webrtc-ft-error")
+                                    try await sendFramed(outPadded)
+                                    break
+                                }
+
+                                let rawSize = ft.rawSize ?? data.count
+                                let offset = Int64(idx) * Int64(st.chunkSize)
+                                try st.handle.seek(toOffset: UInt64(max(0, offset)))
+                                try st.handle.write(contentsOf: data)
+
+                                st.receivedBytes = min(st.fileSize, max(st.receivedBytes, offset + Int64(rawSize)))
+                                inboundFileTransfers[ft.transferId] = st
+
+                                await MainActor.run {
+                                    FileTransferManager.shared.updateExternalInboundProgress(
+                                        transferId: st.transferId,
+                                        transferredBytes: st.receivedBytes
+                                    )
+                                }
+
+                                let ack = CrossNetworkFileTransferMessage(
+                                    op: .chunkAck,
+                                    transferId: st.transferId,
+                                    chunkIndex: idx,
+                                    receivedBytes: st.receivedBytes
+                                )
+                                let outPlain = try JSONEncoder().encode(ack)
+                                let outCipher = try encryptAppPayload(outPlain, with: keys)
+                                let outPadded = TrafficPadding.wrapIfEnabled(outCipher, label: "tx/webrtc-ft-chunkAck")
+                                try await sendFramed(outPadded)
+
+                            case .complete:
+                                guard let st = inboundFileTransfers[ft.transferId] else { break }
+
+                                do {
+                                    try st.handle.close()
+                                } catch {
+                                    // ignore close error
+                                }
+
+                                if st.receivedBytes < st.fileSize {
+                                    await MainActor.run {
+                                        FileTransferManager.shared.failExternalTransfer(
+                                            transferId: st.transferId,
+                                            errorMessage: "Incomplete file: \(st.receivedBytes)/\(st.fileSize)"
+                                        )
+                                    }
+                                    inboundFileTransfers.removeValue(forKey: st.transferId)
+                                    let err = CrossNetworkFileTransferMessage(
+                                        op: .error,
+                                        transferId: st.transferId,
+                                        message: "Incomplete file"
+                                    )
+                                    let outPlain = try JSONEncoder().encode(err)
+                                    let outCipher = try encryptAppPayload(outPlain, with: keys)
+                                    let outPadded = TrafficPadding.wrapIfEnabled(outCipher, label: "tx/webrtc-ft-error")
+                                    try await sendFramed(outPadded)
+                                    break
+                                }
+
+                                // Move temp -> final
+                                do {
+                                    if FileManager.default.fileExists(atPath: st.finalURL.path) {
+                                        try? FileManager.default.removeItem(at: st.finalURL)
+                                    }
+                                    try FileManager.default.moveItem(at: st.tempURL, to: st.finalURL)
+                                } catch {
+                                    await MainActor.run {
+                                        FileTransferManager.shared.failExternalTransfer(
+                                            transferId: st.transferId,
+                                            errorMessage: "Save failed: \(error.localizedDescription)"
+                                        )
+                                    }
+                                    inboundFileTransfers.removeValue(forKey: st.transferId)
+                                    let err = CrossNetworkFileTransferMessage(
+                                        op: .error,
+                                        transferId: st.transferId,
+                                        message: "Save failed"
+                                    )
+                                    let outPlain = try JSONEncoder().encode(err)
+                                    let outCipher = try encryptAppPayload(outPlain, with: keys)
+                                    let outPadded = TrafficPadding.wrapIfEnabled(outCipher, label: "tx/webrtc-ft-error")
+                                    try await sendFramed(outPadded)
+                                    break
+                                }
+
+                                await MainActor.run {
+                                    FileTransferManager.shared.completeExternalInboundTransfer(
+                                        transferId: st.transferId,
+                                        savedTo: st.finalURL
+                                    )
+                                }
+                                inboundFileTransfers.removeValue(forKey: st.transferId)
+
+                                let ack = CrossNetworkFileTransferMessage(op: .completeAck, transferId: st.transferId)
+                                let outPlain = try JSONEncoder().encode(ack)
+                                let outCipher = try encryptAppPayload(outPlain, with: keys)
+                                let outPadded = TrafficPadding.wrapIfEnabled(outCipher, label: "tx/webrtc-ft-completeAck")
+                                try await sendFramed(outPadded)
+
+                            case .cancel:
+                                if let st = inboundFileTransfers[ft.transferId] {
+                                    try? st.handle.close()
+                                    try? FileManager.default.removeItem(at: st.tempURL)
+                                    await MainActor.run {
+                                        FileTransferManager.shared.failExternalTransfer(
+                                            transferId: st.transferId,
+                                            errorMessage: ft.message ?? "Cancelled"
+                                        )
+                                    }
+                                    inboundFileTransfers.removeValue(forKey: st.transferId)
+                                }
+                            case .error:
+                                // Fail any pending macOS->iOS send waiters for this transfer.
+                                self.failFileTransferWaiters(
+                                    sessionID: sessionID,
+                                    transferId: ft.transferId,
+                                    message: ft.message ?? "unknown"
+                                )
+                            case .metadataAck, .chunkAck, .completeAck:
+                                // Acks for macOS -> iOS sending.
+                                self.resumeFileTransferWaiter(sessionID: sessionID, message: ft)
+                            }
+                        } else if let rm = try? JSONDecoder().decode(RemoteMessageWire.self, from: plaintext) {
+                            switch rm.type {
+                            case .mouseEvent:
+                                if let evt = try? JSONDecoder().decode(MouseEventWire.self, from: rm.payload) {
+                                    handleMouseEvent(evt)
+                                }
+                            case .keyboardEvent:
+                                if let evt = try? JSONDecoder().decode(KeyboardEventWire.self, from: rm.payload) {
+                                    handleKeyboardEvent(evt)
+                                }
+                            case .screenData:
+                                break
+                            }
+                        }
+                    } catch {
+                        logger.debug("ℹ️ WebRTC 业务消息解密/解析失败（忽略）：\(error.localizedDescription, privacy: .public)")
+                    }
+                    continue
+                }
+
+                if driver == nil {
+                    if let messageA = try? HandshakeMessageA.decode(from: frame) {
+                        let hasPQCGroup = messageA.supportedSuites.contains { $0.isPQCGroup }
+                        let compatibilityModeEnabled = UserDefaults.standard.bool(forKey: "Settings.EnableCompatibilityMode")
+                        let handshakePolicy = HandshakePolicy.recommendedDefault(compatibilityModeEnabled: compatibilityModeEnabled)
+                        let sigAAlgorithm: ProtocolSigningAlgorithm = hasPQCGroup ? .mlDSA65 : .ed25519
+                        let selection: CryptoProviderFactory.SelectionPolicy = {
+                            if hasPQCGroup { return (handshakePolicy.requirePQC ? .requirePQC : .preferPQC) }
+                            return .classicOnly
+                        }()
+                        let cryptoProvider = CryptoProviderFactory.make(policy: selection)
+                        let offeredSuites: [CryptoSuite] = hasPQCGroup
+                        ? cryptoProvider.supportedSuites.filter { $0.isPQCGroup }
+                        : cryptoProvider.supportedSuites.filter { !$0.isPQCGroup }
+
+                        let keyManager = DeviceIdentityKeyManager.shared
+                        let (protocolPublicKey, signingKeyHandle): (Data, SigningKeyHandle)
+                        if sigAAlgorithm == .mlDSA65 {
+                            (protocolPublicKey, signingKeyHandle) = try await keyManager.getOrCreateMLDSASigningKey()
+                        } else {
+                            (protocolPublicKey, signingKeyHandle) = try await keyManager.getOrCreateProtocolSigningKey()
+                        }
+
+                        let identityPublicKeyWire = ProtocolIdentityPublicKeys(
+                            protocolPublicKey: protocolPublicKey,
+                            protocolAlgorithm: sigAAlgorithm,
+                            sePoPPublicKey: nil
+                        ).asWire().encoded
+
+                        driver = try HandshakeDriver(
+                            transport: transport,
+                            cryptoProvider: cryptoProvider,
+                            protocolSignatureProvider: ProtocolSignatureProviderSelector.select(for: sigAAlgorithm),
+                            protocolSigningKeyHandle: signingKeyHandle,
+                            sigAAlgorithm: sigAAlgorithm,
+                            identityPublicKey: identityPublicKeyWire,
+                            offeredSuites: offeredSuites,
+                            policy: handshakePolicy
+                        )
+                        logger.info("🤝 WebRTC 入站 HandshakeDriver 初始化完成: sigA=\(sigAAlgorithm.rawValue, privacy: .public)")
+                    } else {
+                        continue
+                    }
+                }
+
+                guard let driver else { continue }
+                await driver.handleMessage(frame, from: peer)
+                let st = await driver.getCurrentState()
+                switch st {
+                case .waitingFinished(_, let keys, _):
+                    sessionKeys = keys
+                    self.webrtcSessionKeysBySessionId[sessionID] = keys
+                case .established(let keys):
+                    sessionKeys = keys
+                    self.webrtcSessionKeysBySessionId[sessionID] = keys
+                    // Start low-FPS screen streaming over the encrypted channel (MVP).
+                    Task { @MainActor [weak session] in
+                        guard let session else { return }
+                        while !Task.isCancelled {
+                            try? await Task.sleep(for: .milliseconds(250))
+                            guard let img = CGDisplayCreateImage(CGMainDisplayID()) else { continue }
+                            guard let jpg = jpegData(from: img) else { continue }
+                            let sd = ScreenDataWire(
+                                width: img.width,
+                                height: img.height,
+                                imageData: jpg,
+                                timestamp: Date().timeIntervalSince1970,
+                                format: "jpeg"
+                            )
+                            guard let payload = try? JSONEncoder().encode(sd) else { continue }
+                            let msg = RemoteMessageWire(type: .screenData, payload: payload)
+                            guard let plain = try? JSONEncoder().encode(msg) else { continue }
+                            guard let enc = try? encryptAppPayload(plain, with: keys) else { continue }
+                            let padded = TrafficPadding.wrapIfEnabled(enc, label: "tx/webrtc-screen")
+                            // framed send must be on MainActor for WebRTCSession.send
+                            var framed = Data()
+                            var length = UInt32(padded.count).bigEndian
+                            framed.append(Data(bytes: &length, count: 4))
+                            framed.append(padded)
+                            try? session.send(framed)
+                        }
+                    }
+                default:
+                    break
+                }
+            }
+        } catch {
+            logger.debug("ℹ️ WebRTC 控制通道结束: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
     private func establishP2PConnectionWithCode(code: String, deviceInfo: CrossNetworkDeviceInfo) async throws -> RemoteConnection {
         logger.info("建立 P2P 连接（连接码模式）")
-        
+
  // 类似二维码模式，但使用连接码查询的设备信息
         let parameters = NWParameters.quic(alpn: ["skybridge-p2p"])
-        
+
         let iceCandidate = try await negotiateICEWithCode(
             code: code,
             deviceInfo: deviceInfo
         )
-        
+
         let endpoint = NWEndpoint.hostPort(
             host: NWEndpoint.Host(iceCandidate.host),
             port: NWEndpoint.Port(integerLiteral: iceCandidate.port)
         )
-        
+
         let connection = NWConnection(to: endpoint, using: parameters)
         connection.start(queue: .global(qos: .userInitiated))
-        
+
         try await waitForConnection(connection)
-        
+
         return RemoteConnection(
             id: code,
             deviceName: deviceInfo.deviceName,
-            connection: connection,
-            encryptionKey: try Self.deriveSharedSecret(
-                localPrivateKey: Curve25519.KeyAgreement.PrivateKey(),
-                remotePublicKey: deviceInfo.publicKey
-            )
+            transport: .nw(connection)
         )
     }
-    
+
     private func negotiateICE(sessionID: String, remotePublicKey: Data) async throws -> ICECandidate {
  // 1. 首先尝试获取本地地址（用于局域网直连）
         let localAddresses = getLocalIPAddresses()
-        
+
  // 2. 尝试使用 STUN 获取公网地址
         if let stunResult = await STUNService.shared.getPublicAddress() {
             logger.info("🌐 STUN 返回公网地址: \(stunResult.address):\(stunResult.port)")
@@ -402,7 +1416,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 type: .srflx // Server Reflexive (STUN 反射地址)
             )
         }
-        
+
  // 3. 回退到本地地址
         if let firstLocal = localAddresses.first {
             logger.info("📍 使用本地地址: \(firstLocal)")
@@ -412,30 +1426,30 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 type: .host
             )
         }
-        
+
         throw CrossNetworkConnectionError.networkError
     }
-    
+
     private func negotiateICEWithCode(code: String, deviceInfo: CrossNetworkDeviceInfo) async throws -> ICECandidate {
  // 与 negotiateICE 相同的逻辑
         return try await negotiateICE(sessionID: code, remotePublicKey: deviceInfo.publicKey)
     }
-    
+
  /// 获取本地 IP 地址列表
     private func getLocalIPAddresses() -> [String] {
         var addresses: [String] = []
         var ifaddr: UnsafeMutablePointer<ifaddrs>?
-        
+
         guard getifaddrs(&ifaddr) == 0, let firstAddr = ifaddr else {
             return addresses
         }
         defer { freeifaddrs(ifaddr) }
-        
+
         var ptr = firstAddr
         while true {
             let interface = ptr.pointee
             let addrFamily = interface.ifa_addr.pointee.sa_family
-            
+
             if addrFamily == UInt8(AF_INET) {
                 let name = String(cString: interface.ifa_name)
                 if name.hasPrefix("en") || name.hasPrefix("bridge") {
@@ -455,14 +1469,14 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     }
                 }
             }
-            
+
             guard let next = interface.ifa_next else { break }
             ptr = next
         }
-        
+
         return addresses
     }
-    
+
     private func waitForConnection(_ connection: NWConnection) async throws {
         try await withCheckedThrowingContinuation { continuation in
             connection.stateUpdateHandler = { state in
@@ -477,15 +1491,15 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             }
         }
     }
-    
+
  // MARK: - 监听逻辑
-    
+
     private func startListeningForConnection(sessionID: String, privateKey: Curve25519.KeyAgreement.PrivateKey) {
         logger.info("开始监听连接请求：\(sessionID)")
-        
+
         let listener = ConnectionListener(sessionID: sessionID, privateKey: privateKey)
         activeListeners.append(listener)
-        
+
         Task {
             await listener.start { [weak self] connection in
                 guard let self = self else { return }
@@ -496,13 +1510,13 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             }
         }
     }
-    
+
     private func startListeningForCodeConnection(code: String, privateKey: Curve25519.KeyAgreement.PrivateKey) {
         logger.info("开始监听连接码请求：\(code)")
-        
+
         let listener = ConnectionListener(sessionID: code, privateKey: privateKey)
         activeListeners.append(listener)
-        
+
         Task {
             await listener.start { [weak self] connection in
                 guard let self = self else { return }
@@ -513,9 +1527,9 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             }
         }
     }
-    
+
  // MARK: - iCloud 连接辅助
-    
+
     private func createConnectionOffer(sessionID: String) async throws -> ConnectionOffer {
         return ConnectionOffer(
             sessionID: sessionID,
@@ -524,63 +1538,62 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             timestamp: Date()
         )
     }
-    
+
     private func waitForAnswer(deviceID: String, timeout: TimeInterval) async throws -> ConnectionAnswer {
  // 轮询 iCloud KV Store
         let startTime = Date()
         while Date().timeIntervalSince(startTime) < timeout {
             let kvStore = NSUbiquitousKeyValueStore.default
             kvStore.synchronize()
-            
+
             if let answerData = kvStore.data(forKey: "skybridge.answer.\(deviceFingerprint)"),
                let answer = try? JSONDecoder().decode(ConnectionAnswer.self, from: answerData) {
                 return answer
             }
-            
+
             try await Task.sleep(nanoseconds: 1_000_000_000) // 1秒
         }
-        
+
         throw CrossNetworkConnectionError.timeout
     }
-    
+
     private func finalizeConnection(offer: ConnectionOffer, answer: ConnectionAnswer) async throws -> RemoteConnection {
  // 使用 offer/answer 建立最终连接
         let parameters = NWParameters.quic(alpn: ["skybridge-p2p"])
-        
+
  // 简化实现
         let endpoint = NWEndpoint.hostPort(
             host: .ipv4(.loopback),
             port: 5000
         )
-        
+
         let connection = NWConnection(to: endpoint, using: parameters)
         connection.start(queue: .global(qos: .userInitiated))
-        
+
         try await waitForConnection(connection)
-        
+
         return RemoteConnection(
             id: offer.sessionID,
             deviceName: "Remote Device",
-            connection: connection,
-            encryptionKey: SymmetricKey(size: .bits256)
+            transport: .nw(connection)
         )
     }
-    
+
  // MARK: - 工具方法
-    
+
     private static func generateDeviceFingerprint() -> String {
  // 生成唯一设备指纹（基于硬件信息）
         let deviceInfo = "\(Host.current().localizedName ?? "")\(ProcessInfo.processInfo.hostName)"
         let hash = SHA256.hash(data: deviceInfo.utf8Data)
         return hash.compactMap { String(format: "%02x", $0) }.joined().prefix(16).uppercased()
     }
-    
+
     private static func generateShortCode() -> String {
  // 生成 6 位字母数字码（排除易混淆字符：0/O, 1/I/l）
         let charset = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
         return String((0..<6).compactMap { _ in charset.randomElement() })
     }
-    
+
     private static func buildCanonicalSignaturePayload(
         id: String,
         name: String,
@@ -597,12 +1610,12 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         let canonical = "id=\(id)|name=\(name)|type=\(type.rawValue)|address=\(address)|port=\(port)|os=\(osVersion)|cap=\(capsJoined)|ts=\(timestamp)|fp=\(fingerprintHex)"
         return canonical.data(using: .utf8) ?? Data()
     }
-    
+
     private static func isValidDeviceFingerprint(_ fingerprint: String) -> Bool {
  // 验证设备指纹格式
         return fingerprint.count == 16 && fingerprint.allSatisfy { $0.isHexDigit }
     }
-    
+
     private static func deriveSharedSecret(localPrivateKey: Curve25519.KeyAgreement.PrivateKey, remotePublicKey: Data) throws -> SymmetricKey {
         let remoteKey = try Curve25519.KeyAgreement.PublicKey(rawRepresentation: remotePublicKey)
         let sharedSecret = try localPrivateKey.sharedSecretFromKeyAgreement(with: remoteKey)
@@ -655,7 +1668,7 @@ struct ICECandidate {
     let host: String
     let port: UInt16
     let type: CandidateType
-    
+
     enum CandidateType {
         case host, srflx, relay
     }
@@ -678,23 +1691,30 @@ struct ConnectionAnswer: Codable {
 }
 
 /// 远程连接对象
-public struct RemoteConnection: Sendable {
+///
+/// 说明：跨网连接未来会统一承载 “握手/控制/文件/视频” 等通道。
+/// 当前阶段先落地 WebRTC DataChannel 的可达性与信令闭环。
+public struct RemoteConnection: @unchecked Sendable {
+    public enum Transport: @unchecked Sendable {
+        case webrtc(WebRTCSession)
+        case nw(NWConnection)
+    }
+
     public let id: String
     public let deviceName: String
-    public let connection: NWConnection
-    public let encryptionKey: SymmetricKey
+    public let transport: Transport
 }
 
 /// 连接监听器
 actor ConnectionListener {
     let sessionID: String
     let privateKey: Curve25519.KeyAgreement.PrivateKey
-    
+
     init(sessionID: String, privateKey: Curve25519.KeyAgreement.PrivateKey) {
         self.sessionID = sessionID
         self.privateKey = privateKey
     }
-    
+
     func start(onConnection: @escaping @Sendable (RemoteConnection) async -> Void) async {
  // 监听逻辑（简化）
     }
@@ -706,12 +1726,12 @@ actor SignalServerClient {
  // 注册会话到信号服务器
         return sessionID
     }
-    
+
     func registerConnectionCode(code: String, deviceFingerprint: String, deviceName: String, publicKey: Data, validDuration: TimeInterval) async throws -> String {
  // 注册连接码
         return code
     }
-    
+
     func queryConnectionCode(code: String) async throws -> CrossNetworkDeviceInfo {
  // 查询连接码对应的设备信息
         return CrossNetworkDeviceInfo(

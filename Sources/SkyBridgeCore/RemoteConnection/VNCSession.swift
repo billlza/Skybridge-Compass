@@ -38,7 +38,7 @@ public final class VNCSession: ObservableObject {
     public func start() async throws {
         guard !running else { return }
         running = true
-        let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(host), port: NWEndpoint.Port(rawValue: port)!)
+        let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(host), port: try NWEndpoint.Port.validated(port))
         let conn = NWConnection(to: endpoint, using: .tcp)
         connection = conn
         conn.start(queue: queue)

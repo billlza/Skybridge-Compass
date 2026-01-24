@@ -18,36 +18,39 @@ import Combine
 /// 继承 BaseManager，统一管理器模式和生命周期管理
 @MainActor
 public class P2PDiscoveryService: BaseManager {
-    
+
  // MARK: - 发布的属性（给 SwiftUI / 视图层用）
-    
+
  /// 发现的设备列表（Bonjour + 自定义逻辑融合）
     @Published public var discoveredDevices: [DiscoveredDevice] = []
  /// P2P设备列表（供上层统一使用）
     @Published public var p2pDevices: [P2PDevice] = []
-    
+
  /// 当前连接状态（只是对 connections 字典的一个抽象）
     @Published public var connectionStatus: P2PDiscoveryConnectionStatus = .disconnected
-    
+
+    /// 当前已建立的入站会话数量（用于 UI 显示“被连接/已连接”）
+    @Published public private(set) var activeInboundSessions: Int = 0
+
  /// 是否正在扫描（有无浏览器在跑）
     @Published public var isScanning: Bool = false
  /// P2P发现是否运行中
     @Published public var isDiscovering: Bool = false
  /// 是否正在广播服务
     @Published public var isAdvertising: Bool = false
-    
+
  // MARK: - 私有属性
-    
+
  /// Bonjour 浏览器（一个 serviceType 对应一个 NWBrowser）
     private var browsers: [NWBrowser] = []
-    
+
  /// Bonjour 监听器（本机作为服务端被发现）
     private var listener: NWListener?
-    
+
  /// 当前活跃连接（按 DiscoveredDevice.id.uuidString 存）
     private var connections: [String: NWConnection] = [:]
     private var txtResolveCooldown: [String: Date] = [:]
-    
+
  /// 服务类型瘦身策略 - 默认仅SkyBridge；兼容/调试模式可扩展
     private let allServiceTypes = [
         "_skybridge._tcp",
@@ -67,60 +70,61 @@ public class P2PDiscoveryService: BaseManager {
         }
         return base
     }
-    
+
     private let serviceDomain = "local."
-    
+
  // MARK: - 初始化
-    
+
     public init() {
         super.init(category: "DeviceDiscoveryManager")
         $discoveredDevices
             .map { $0.map { Self.mapToP2PDevice($0) } }
             .assign(to: &self.$p2pDevices)
     }
-    
+
  // MARK: - BaseManager 重写
-    
+
  /// 执行设备发现管理器的初始化逻辑
     public override func performInitialization() async {
         await super.performInitialization()
         logger.info("✅ 设备发现管理器初始化完成")
     }
-    
+
  /// 启动设备发现管理器
     public override func performStart() async throws {
         logger.info("🚀 启动设备发现服务")
         startScanning()
     }
-    
+
  /// 停止设备发现管理器
     public override func performStop() async {
         logger.info("🛑 停止设备发现服务")
         stopScanning()
     }
-    
+
  /// 清理资源
     public override func cleanup() {
         super.cleanup()
-        
+
  // 清理发现的设备
         discoveredDevices.removeAll()
         connectionStatus = .disconnected
+        activeInboundSessions = 0
         isScanning = false
-        
+
  // 清理网络连接
         connections.values.forEach { $0.cancel() }
         connections.removeAll()
-        
+
  // 停止 Bonjour 浏览 / 广播
         browsers.forEach { $0.cancel() }
         browsers.removeAll()
         listener?.cancel()
         listener = nil
     }
-    
+
  // MARK: - 公共方法（扫描 / 连接）
-    
+
  /// 开始扫描设备 - 2025 增强版：多服务类型扫描（全基于 Network.framework）
     public func startScanning() {
         guard isInitialized else {
@@ -131,27 +135,27 @@ public class P2PDiscoveryService: BaseManager {
             logger.debug("startScanning() 忽略：已经在扫描中")
             return
         }
-        
+
         let selected = effectiveServiceTypes()
         logger.info("🔍 开始扫描设备（Bonjour，服务类型：\(selected)）")
         isScanning = true
         isDiscovering = true
-        
+
  // 为每种服务类型创建独立的浏览器
         for serviceType in selected {
             let descriptor = NWBrowser.Descriptor.bonjour(type: serviceType, domain: serviceDomain)
             let parameters = NWParameters()
             parameters.includePeerToPeer = true  // 支持点对点（AWDL / 直连）
-            
+
             let browser = NWBrowser(for: descriptor, using: parameters)
-            
+
  // 设置状态更新处理器
             browser.stateUpdateHandler = { [weak self, serviceType] state in
                 Task { @MainActor in
                     self?.handleBrowserStateUpdate(state, for: serviceType)
                 }
             }
-            
+
  // 设置结果变化处理器
             browser.browseResultsChangedHandler = { [weak self, serviceType] results, changes in
                 Task { @MainActor in
@@ -160,14 +164,14 @@ public class P2PDiscoveryService: BaseManager {
                                                      serviceType: serviceType)
                 }
             }
-            
+
  // 启动浏览器
             browser.start(queue: .global(qos: .utility))
             browsers.append(browser)
-            
+
             logger.debug("  ✅ 启动浏览器: \(serviceType)")
         }
-        
+
  // 同时启动监听器以便其他设备发现我们
         startAdvertising()
     }
@@ -184,31 +188,42 @@ public class P2PDiscoveryService: BaseManager {
 
  /// 刷新设备列表（重启扫描）
     public func refreshDevices() async {
-        stopScanning()
-        startScanning()
+        // UX fix:
+        // A hard stop/start here interrupts ongoing handshakes/transfers and creates reconnect loops.
+        // For "refresh", we keep browsers/listener running and simply clear transient caches.
+        logger.info("🔄 刷新设备列表（软刷新：不停止扫描/不重启广播）")
+        discoveredDevices.removeAll()
+        connections.values.forEach { $0.cancel() }
+        connections.removeAll()
+        txtResolveCooldown.removeAll()
+        connectionStatus = .disconnected
+        // Ensure advertising is on while scanning.
+        if isScanning, !isAdvertising {
+            startAdvertising()
+        }
     }
-    
+
  /// 停止扫描设备
     public func stopScanning() {
         guard isScanning else { return }
-        
+
         logger.info("⏹️ 停止扫描设备")
         isScanning = false
         isDiscovering = false
-        
+
  // 取消所有浏览器
         for browser in browsers {
             browser.cancel()
         }
         browsers.removeAll()
-        
+
         stopAdvertising()
     }
-    
+
  /// 连接到指定设备（基于 IPv4 + 主服务端口）
     public func connectToDevice(_ device: DiscoveredDevice) async throws {
         logger.info("尝试连接到设备: \(device.name)")
-        
+
  // 从设备信息中获取连接地址
         guard let ipv4 = device.ipv4 else {
             throw P2PDiscoveryError.deviceNotConnected
@@ -217,17 +232,17 @@ public class P2PDiscoveryService: BaseManager {
             logger.debug("忽略本机地址，跳过连接尝试: \(ipv4)")
             throw P2PDiscoveryError.connectionCancelled
         }
-        
+
  // 选取发现的端口（不得回落默认值）
         let preferredKey = device.services.first ?? "_skybridge._tcp"
         let portValue = device.portMap[preferredKey] ?? device.portMap.values.first ?? 0
         guard portValue > 0, let port = NWEndpoint.Port(rawValue: UInt16(portValue)) else {
             throw P2PDiscoveryError.scanningFailed
         }
-        
+
         let host = NWEndpoint.Host(ipv4)
         let endpoint = NWEndpoint.hostPort(host: host, port: port)
-        
+
  // 应用统一 TLS 策略（近距连接）
         let net = RemoteDesktopSettingsManager.shared.settings.networkSettings
         let connection: NWConnection
@@ -235,47 +250,58 @@ public class P2PDiscoveryService: BaseManager {
            let tls = TLSConfigurator.options(for: net.encryptionAlgorithm) {
             let tcp = NWProtocolTCP.Options()
             let params = NWParameters(tls: tls, tcp: tcp)
+            // 🧷 关键：补齐 peer-to-peer + reuse + keepalive，降低“空闲被清理→幽灵断开”
+            params.includePeerToPeer = true
+            params.allowLocalEndpointReuse = true
+            if let tcpOptions = params.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
+                tcpOptions.enableKeepalive = true
+                tcpOptions.keepaliveIdle = 30
+                tcpOptions.keepaliveInterval = 15
+                tcpOptions.keepaliveCount = 4
+                tcpOptions.noDelay = true
+            }
             connection = NWConnection(to: endpoint, using: params)
         } else {
-            connection = NWConnection(to: endpoint, using: .tcp)
+            let params = NWParameters.tcp
+            params.includePeerToPeer = true
+            params.allowLocalEndpointReuse = true
+            if let tcpOptions = params.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
+                tcpOptions.enableKeepalive = true
+                tcpOptions.keepaliveIdle = 30
+                tcpOptions.keepaliveInterval = 15
+                tcpOptions.keepaliveCount = 4
+                tcpOptions.noDelay = true
+            }
+            connection = NWConnection(to: endpoint, using: params)
         }
-        
+
         connections[device.id.uuidString] = connection
         connectionStatus = .connecting
-        
- // 启动连接
-        connection.stateUpdateHandler = { [weak self] state in
-            Task { @MainActor in
-                self?.handleConnectionStateUpdate(state, for: device.id.uuidString)
-            }
-        }
-        
-        connection.start(queue: DispatchQueue.global(qos: .userInitiated))
-        
- // 等待连接建立
-        try await waitForConnection(connection)
-        
+
+        // 等待连接建立（内部会设置 stateUpdateHandler 并启动连接）
+        try await waitForConnection(connection, deviceId: device.id.uuidString)
+
         logger.info("✅ 成功连接到设备: \(device.name)")
     }
-    
+
  /// 断开与指定设备的连接
     public func disconnectFromDevice(_ deviceId: String) {
         logger.info("🔌 断开设备连接: \(deviceId)")
-        
+
         connections[deviceId]?.cancel()
         connections.removeValue(forKey: deviceId)
-        
+
         if connections.isEmpty {
             connectionStatus = .disconnected
         }
     }
-    
+
  /// 发送数据到指定设备
     public func sendData(_ data: Data, to deviceId: String) async throws {
         guard let connection = connections[deviceId] else {
             throw P2PDiscoveryError.deviceNotConnected
         }
-        
+
         return try await withCheckedThrowingContinuation { continuation in
             connection.send(content: data, completion: .contentProcessed { error in
                 if let error = error {
@@ -286,9 +312,9 @@ public class P2PDiscoveryService: BaseManager {
             })
         }
     }
-    
+
  // MARK: - Bonjour 广播（本机作为服务端）
-    
+
  /// 启动广播服务（Bonjour）
     @MainActor public func startAdvertising() {
         logger.info("📡 开始广播服务")
@@ -300,7 +326,7 @@ public class P2PDiscoveryService: BaseManager {
             existing.cancel()
             listener = nil
         }
-        
+
         Task { @MainActor in
             if await ServiceAdvertiserCenter.shared.isAdvertising("_skybridge._tcp") {
                 logger.debug("📡 广播中心已在运行，忽略重复启动")
@@ -329,7 +355,7 @@ public class P2PDiscoveryService: BaseManager {
             }
         }
     }
-    
+
  /// 停止广播服务
     private func stopAdvertising() {
         logger.info("📡 停止广播服务")
@@ -337,9 +363,9 @@ public class P2PDiscoveryService: BaseManager {
         listener = nil
         isAdvertising = false
     }
-    
+
  // MARK: - Bonjour 浏览结果处理
-    
+
  /// 处理浏览器状态更新
     private func handleBrowserStateUpdate(_ state: NWBrowser.State, for serviceType: String) {
         switch state {
@@ -353,7 +379,7 @@ public class P2PDiscoveryService: BaseManager {
             break
         }
     }
-    
+
  /// 处理浏览结果变化 - 增强版：支持多服务类型
     private func handleBrowseResultsChanged(
         results: Set<NWBrowser.Result>,
@@ -375,12 +401,12 @@ public class P2PDiscoveryService: BaseManager {
             }
         }
     }
-    
+
  /// 添加发现的设备 - 增强版：识别设备类型
     private func addDiscoveredDevice(from result: NWBrowser.Result, serviceType: String) {
         let deviceName = extractDeviceName(from: result)
         let (ipv4, ipv6, port) = extractNetworkInfo(from: result)
-        
+
  // 根据服务类型推断设备类型（纯 UI 用，不影响连接逻辑）
         var detectedDeviceType = ""
         if serviceType.contains("airplay") {
@@ -396,7 +422,7 @@ public class P2PDiscoveryService: BaseManager {
                 detectedDeviceType = " 🍎"
             }
         }
-        
+
  // 创建 DiscoveredDevice 实例，使用从 result 中提取的真实网络信息
         let device = DiscoveredDevice(
             id: UUID(),
@@ -410,7 +436,7 @@ public class P2PDiscoveryService: BaseManager {
             signalStrength: nil,
             isLocalDevice: isProbablyLocalDevice(name: deviceName, ipv4: ipv4, ipv6: ipv6)
         )
-        
+
  // 检查是否已存在相同的设备（基于 IP 地址，更准确）
         if let existingIndex = discoveredDevices.firstIndex(where: { existingDevice in
  // 优先使用 IP 地址匹配
@@ -497,14 +523,14 @@ public class P2PDiscoveryService: BaseManager {
             }
         }
     }
-    
+
  /// 移除设备
     private func removeDiscoveredDevice(from result: NWBrowser.Result) {
         let deviceId = extractDeviceName(from: result)
         discoveredDevices.removeAll { $0.name == deviceId }
         logger.info("设备已离线: \(deviceId)")
     }
-    
+
  /// 更新设备信息
     private func updateDiscoveredDevice(from result: NWBrowser.Result, serviceType: String) {
         let deviceId = extractDeviceName(from: result)
@@ -513,9 +539,9 @@ public class P2PDiscoveryService: BaseManager {
             logger.info("🔄 更新[\(serviceType)]: \(deviceId) - IPv4: \(ipv4 ?? "无")")
         }
     }
-    
+
  // MARK: - 监听器 / 连接状态
-    
+
  /// 处理监听器状态更新
     private func handleListenerStateUpdate(_ state: NWListener.State) {
         switch state {
@@ -529,22 +555,22 @@ public class P2PDiscoveryService: BaseManager {
             break
         }
     }
-    
+
  /// 处理新连接（传入 TCP）
     private func handleNewConnection(_ connection: NWConnection) {
         logger.info("🔗 收到新连接")
-        
+
  // 设置连接状态处理器
         connection.stateUpdateHandler = { [weak self] state in
             Task { @MainActor in
                 self?.handleIncomingConnectionStateUpdate(state, connection: connection)
             }
         }
-        
+
  // 启动连接
         connection.start(queue: .global())
     }
-    
+
  /// 处理主动发起的连接状态更新
     private func handleConnectionStateUpdate(_ state: NWConnection.State, for deviceId: String) {
         switch state {
@@ -563,15 +589,17 @@ public class P2PDiscoveryService: BaseManager {
             break
         }
     }
-    
+
  /// 处理传入连接状态更新
     private func handleIncomingConnectionStateUpdate(_ state: NWConnection.State, connection: NWConnection) {
         switch state {
         case .ready:
             logger.info("✅ 传入连接就绪")
- // 处理传入控制通道（握手/验签/能力协商），避免阻塞主线程
-            Task {
-                await self.handleInboundControlChannel(connection)
+            // 处理传入控制通道（握手/验签/能力协商）
+            // 重要：P2PDiscoveryService 是 @MainActor；入站读取/握手必须放到后台，
+            // 否则主线程繁忙时会导致对端握手超时并主动断开。
+            Task.detached(priority: .userInitiated) { [weak self] in
+                await self?.handleInboundControlChannel(connection)
             }
         case .failed(let error):
             if case NWError.posix(let posixErr) = error, posixErr == .ECONNREFUSED || posixErr == .EADDRNOTAVAIL {
@@ -579,6 +607,7 @@ public class P2PDiscoveryService: BaseManager {
             } else {
                 logger.error("❌ 传入连接失败: \(error.localizedDescription)")
             }
+            connection.cancel()
         case .cancelled:
             logger.info("⏹️ 传入连接已取消")
         default:
@@ -595,10 +624,37 @@ public class P2PDiscoveryService: BaseManager {
         let timestamp: TimeInterval
     }
 
- /// 入站控制通道处理（统一格式 SecurePacket）
-    private func handleInboundControlChannel(_ connection: NWConnection) async {
-        // 兼容 iOS 端 PQC HandshakeDriver 协议：当 payload 不是 SecurePacket(JSON) 时，
-        // 回退到 HandshakeDriver（长度前缀 framing 已一致：4B big-endian）
+    /// 入站控制通道处理（优先 SecurePacket(JSON)，否则回退 HandshakeDriver，与 iOS 互通）
+    nonisolated private func handleInboundControlChannel(_ connection: NWConnection) async {
+        let logger = Logger(subsystem: "com.skybridge.Compass", category: "P2PInboundHandshake")
+        var didMarkEstablished = false
+        defer {
+            if didMarkEstablished {
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    self.activeInboundSessions = max(0, self.activeInboundSessions - 1)
+                    if self.activeInboundSessions == 0, self.connections.isEmpty {
+                        self.connectionStatus = .disconnected
+                    }
+                }
+            }
+        }
+
+        func waitUntilReady(timeoutSeconds: Double) async -> Bool {
+            let deadline = Date().addingTimeInterval(timeoutSeconds)
+            while Date() < deadline {
+                if connection.state == .ready { return true }
+                if case .failed = connection.state { return false }
+                if case .cancelled = connection.state { return false }
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+            return connection.state == .ready
+        }
+
+        if connection.state != .ready {
+            _ = await waitUntilReady(timeoutSeconds: 3.0)
+        }
+
         struct DirectHandshakeTransport: DiscoveryTransport {
             let connection: NWConnection
             func send(to peer: PeerIdentifier, data: Data) async throws {
@@ -614,100 +670,175 @@ public class P2PDiscoveryService: BaseManager {
             }
         }
 
-        var handshakeDriver: HandshakeDriver?
-        let handshakePeer = PeerIdentifier(deviceId: "ios-\(connection.endpoint.debugDescription)")
-        let handshakeTransport = DirectHandshakeTransport(connection: connection)
-        // 为兼容 Classic fallback，这里使用 Ed25519 identity（内存生成），并使用 ClassicCryptoProvider
-        let classicProvider = ClassicCryptoProvider()
-        let signatureProvider = ProtocolSignatureProviderSelector.select(for: .ed25519)
-        let identityPrivateKey = Curve25519.Signing.PrivateKey()
-        let identityKeyHandle: SigningKeyHandle = .softwareKey(identityPrivateKey.rawRepresentation)
-        let identityPublicKey = identityPrivateKey.publicKey.rawRepresentation
-        // iOS 端要求 IdentityPublicKeys 的“新 wire 格式”（带算法字节 + 长度），不能直接发裸 32B Ed25519
-        let identityPublicKeyWire = ProtocolIdentityPublicKeys(
-            protocolPublicKey: identityPublicKey,
-            protocolAlgorithm: .ed25519,
-            sePoPPublicKey: nil
-        ).asWire().encoded
-        let offeredSuites = classicProvider.supportedSuites.filter { !$0.isPQC && !$0.isHybrid }
+        func receiveFixed(_ length: Int) async throws -> Data {
+            enum InboundReceiveError: Error {
+                case eof
+                case shortRead(expected: Int, actual: Int)
+            }
+            return try await withCheckedThrowingContinuation { (c: CheckedContinuation<Data, Error>) in
+                connection.receive(minimumIncompleteLength: length, maximumLength: length) { data, _, _, err in
+                    if let err { c.resume(throwing: err) }
+                    else if let data {
+                        if data.count == length {
+                            c.resume(returning: data)
+                        } else {
+                            c.resume(throwing: InboundReceiveError.shortRead(expected: length, actual: data.count))
+                        }
+                    } else {
+                        c.resume(throwing: InboundReceiveError.eof)
+                    }
+                }
+            }
+        }
+
+        func sendAck(_ code: UInt8) async throws {
+            try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
+                connection.send(content: Data([code]), completion: .contentProcessed { err in
+                    if let err { c.resume(throwing: err) } else { c.resume() }
+                })
+            }
+        }
+
+        func packetSenderId(_ packet: SecurePacket) -> String { String(packet.timestamp) }
+
+        let transport = DirectHandshakeTransport(connection: connection)
+        let peer = PeerIdentifier(deviceId: "ios-\(connection.endpoint.debugDescription)")
+        var driver: HandshakeDriver?
+
+        logger.info("🤝 入站连接：启用 HandshakeDriver 兼容通道（iOS 互通） state=\(String(describing: connection.state), privacy: .public)")
 
         do {
             while connection.state == .ready {
- // 读取控制包长度（4字节，大端）
-                let lenData = try await receiveData(length: 4, from: connection)
+                let lenData = try await receiveFixed(4)
                 let totalLen = lenData.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
                 guard totalLen > 0 && totalLen < 1_048_576 else { break }
- // 读取控制负载
-                let payload = try await receiveData(length: Int(totalLen), from: connection)
-                // Phase C2: optional traffic padding (SBP2) — unwrap before JSON decode / handshake fallback.
+
+                let payload = try await receiveFixed(Int(totalLen))
                 let unwrapped = TrafficPadding.unwrapIfNeeded(payload, label: "rx")
-                do {
- // 解析 SecurePacket
-                let packet = try JSONDecoder().decode(SecurePacket.self, from: unwrapped)
- // 验签
-                let ok = try await EnhancedPostQuantumCrypto().verify(packet.data, signature: packet.signature, for: packetSenderId(packet))
-                guard ok else {
-                    logger.error("❌ 入站控制包验签失败")
+
+                if let packet = try? JSONDecoder().decode(SecurePacket.self, from: unwrapped) {
+                    do {
+                        let ok = try await EnhancedPostQuantumCrypto().verify(packet.data, signature: packet.signature, for: packetSenderId(packet))
+                        guard ok else {
+                            logger.error("❌ 入站控制包验签失败")
+                            continue
+                        }
+                    } catch {
+                        logger.error("❌ 入站控制包验签异常: \(error.localizedDescription, privacy: .public)")
+                        continue
+                    }
+
+                    switch packet.type {
+                    case .message:
+                        NotificationCenter.default.post(name: Notification.Name("P2PInboundMessage"), object: self, userInfo: ["payload": packet.data])
+                    case .keyExchange:
+                        NotificationCenter.default.post(name: Notification.Name("P2PInboundKeyExchange"), object: self, userInfo: ["payload": packet.data])
+                    case .heartbeat:
+                        try await sendAck(0x09)
+                    }
                     continue
                 }
- // 类型处理
-                switch packet.type {
-                case .message:
-                    NotificationCenter.default.post(name: Notification.Name("P2PInboundMessage"), object: self, userInfo: ["payload": packet.data])
-                case .keyExchange:
- // 入站密钥交换：按 QuantumSecureP2PNetwork 的流程触发换钥
-                    NotificationCenter.default.post(name: Notification.Name("P2PInboundKeyExchange"), object: self, userInfo: ["payload": packet.data])
-                case .heartbeat:
- // 发送 ACK（1字节 0x09）
-                    try await sendAck(code: 0x09, to: connection)
-                }
-                } catch {
-                    // 非 SecurePacket：尝试作为 HandshakeDriver 的消息处理（与 iOS 互通）
-                    do {
-                        if handshakeDriver == nil {
-                            handshakeDriver = try HandshakeDriver(
-                                transport: handshakeTransport,
-                                cryptoProvider: classicProvider,
-                                protocolSignatureProvider: signatureProvider,
-                                protocolSigningKeyHandle: identityKeyHandle,
-                                sigAAlgorithm: .ed25519,
+
+                // 延迟初始化：必须先看到 MessageA 才知道对端 offeredSuites 分组，
+                // 从而选择本机可用的 (sigAAlgorithm / provider / offeredSuites) 组合。
+                if driver == nil {
+                    if let messageA = try? HandshakeMessageA.decode(from: unwrapped) {
+                        let peerHasPQCGroup = messageA.supportedSuites.contains { $0.isPQCGroup }
+                        let peerHasClassicGroup = messageA.supportedSuites.contains { !$0.isPQCGroup }
+                        let compatibilityModeEnabled = UserDefaults.standard.bool(forKey: "Settings.EnableCompatibilityMode")
+                        let policy = HandshakePolicy.recommendedDefault(compatibilityModeEnabled: compatibilityModeEnabled)
+
+                        // Pick provider first, then derive sigA/offeredSuites from what we can actually support.
+                        var selection: CryptoProviderFactory.SelectionPolicy = .classicOnly
+                        var cryptoProvider: any CryptoProvider = CryptoProviderFactory.make(policy: .classicOnly)
+                        var sigAAlgorithm: ProtocolSigningAlgorithm = .ed25519
+                        var offeredSuites: [CryptoSuite] = cryptoProvider.supportedSuites.filter { !$0.isPQCGroup }
+
+                        if peerHasPQCGroup {
+                            selection = policy.requirePQC ? .requirePQC : .preferPQC
+                            cryptoProvider = CryptoProviderFactory.make(policy: selection)
+                            let localPQCSuites = cryptoProvider.supportedSuites.filter { $0.isPQCGroup }
+
+                            if localPQCSuites.isEmpty {
+                                if policy.requirePQC {
+                                    logger.error("❌ PQC required by policy but no PQC provider available on this device. peer=\(peer.deviceId, privacy: .public)")
+                                    return
+                                }
+                                // Best-effort classic fallback only if peer also advertises classic suites.
+                                if peerHasClassicGroup {
+                                    selection = .classicOnly
+                                    cryptoProvider = CryptoProviderFactory.make(policy: selection)
+                                    sigAAlgorithm = .ed25519
+                                    offeredSuites = cryptoProvider.supportedSuites.filter { !$0.isPQCGroup }
+                                    logger.info("🧩 inboundFallback(classic): peer advertises PQC but local PQC unavailable; falling back to classic handshake. peer=\(peer.deviceId, privacy: .public)")
+                            } else {
+                                    logger.error("❌ Peer offered PQC-only suites but local PQC unavailable; cannot continue. peer=\(peer.deviceId, privacy: .public)")
+                                    return
+                                }
+                            } else {
+                                sigAAlgorithm = .mlDSA65
+                                offeredSuites = localPQCSuites
+                            }
+                        } else {
+                            // Peer is classic-only.
+                            selection = .classicOnly
+                            cryptoProvider = CryptoProviderFactory.make(policy: selection)
+                            sigAAlgorithm = .ed25519
+                            offeredSuites = cryptoProvider.supportedSuites.filter { !$0.isPQCGroup }
+                        }
+
+                        let keyManager = DeviceIdentityKeyManager.shared
+                        let (protocolPublicKey, signingKeyHandle): (Data, SigningKeyHandle)
+                        if sigAAlgorithm == .mlDSA65 {
+                            (protocolPublicKey, signingKeyHandle) = try await keyManager.getOrCreateMLDSASigningKey()
+                        } else {
+                            (protocolPublicKey, signingKeyHandle) = try await keyManager.getOrCreateProtocolSigningKey()
+                        }
+
+                        let identityPublicKeyWire = ProtocolIdentityPublicKeys(
+                            protocolPublicKey: protocolPublicKey,
+                            protocolAlgorithm: sigAAlgorithm,
+                            sePoPPublicKey: nil
+                        ).asWire().encoded
+
+                        do {
+                            driver = try HandshakeDriver(
+                                transport: transport,
+                                cryptoProvider: cryptoProvider,
+                                protocolSignatureProvider: ProtocolSignatureProviderSelector.select(for: sigAAlgorithm),
+                                protocolSigningKeyHandle: signingKeyHandle,
+                                sigAAlgorithm: sigAAlgorithm,
                                 identityPublicKey: identityPublicKeyWire,
                                 offeredSuites: offeredSuites,
-                                policy: .default
+                                policy: policy
                             )
-                            logger.info("🤝 已启用 HandshakeDriver 兼容通道（iOS 互通）")
+                            logger.info("🤝 入站 HandshakeDriver 初始化完成: sigA=\(sigAAlgorithm.rawValue, privacy: .public) provider=\(String(describing: type(of: cryptoProvider)), privacy: .public)")
+                        } catch {
+                            logger.error("❌ 入站 HandshakeDriver 初始化失败: \(error.localizedDescription, privacy: .public)")
+                            return
                         }
-                        await handshakeDriver?.handleMessage(unwrapped, from: handshakePeer)
-                    } catch {
-                        logger.error("❌ HandshakeDriver 初始化失败: \(error.localizedDescription)")
+                    } else {
+                        logger.debug("ℹ️ 入站首帧不是 MessageA（忽略，等待下一帧） size=\(unwrapped.count, privacy: .public)")
+                        continue
+                    }
+                }
+
+                guard let driver else { continue }
+                await driver.handleMessage(unwrapped, from: peer)
+                let st = await driver.getCurrentState()
+                logger.debug("🤝 HandshakeDriver state: \(String(describing: st), privacy: .public)")
+
+                if !didMarkEstablished, case .established = st {
+                    didMarkEstablished = true
+                    Task { @MainActor [weak self] in
+                        guard let self else { return }
+                        self.activeInboundSessions += 1
+                        self.connectionStatus = .connected
                     }
                 }
             }
         } catch {
-            logger.error("❌ 入站控制通道处理异常: \(error.localizedDescription)")
-        }
-    }
-
- /// 提取控制包发送方标识（若上层无显式字段，则以当前连接的 peerId 映射）
-    private func packetSenderId(_ packet: SecurePacket) -> String { String(packet.timestamp) }
-
- /// 发送简易 ACK（单字节）
-    private func sendAck(code: UInt8, to connection: NWConnection) async throws {
-        try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
-            connection.send(content: Data([code]), completion: .contentProcessed { err in
-                if let err = err { c.resume(throwing: err) } else { c.resume() }
-            })
-        }
-    }
-
- /// 入站读取固定长度数据
-    private func receiveData(length: Int, from connection: NWConnection) async throws -> Data {
-        return try await withCheckedThrowingContinuation { (c: CheckedContinuation<Data, Error>) in
-            connection.receive(minimumIncompleteLength: length, maximumLength: length) { data, _, _, err in
-                if let err = err { c.resume(throwing: err) }
-                else if let data = data, data.count == length { c.resume(returning: data) }
-                else { c.resume(throwing: NSError(domain: "P2PInbound", code: -1)) }
-            }
+            logger.debug("ℹ️ 入站控制通道结束: \(error.localizedDescription, privacy: .public)")
         }
     }
 
@@ -763,33 +894,61 @@ public class P2PDiscoveryService: BaseManager {
         if !localName.isEmpty, norm(name) == norm(localName) { return true }
         return false
     }
-    
- /// 等待连接建立
-    private func waitForConnection(_ connection: NWConnection) async throws {
-        return try await withCheckedThrowingContinuation { continuation in
+
+    /// 等待连接建立（负责设置 stateUpdateHandler + 启动连接）
+    private func waitForConnection(_ connection: NWConnection, deviceId: String) async throws {
+        try await withCheckedThrowingContinuation { continuation in
             let resumed = OSAllocatedUnfairLock(initialState: false)
-            
-            connection.stateUpdateHandler = { state in
-                resumed.withLock { isResumed in
-                    guard !isResumed else { return }
-                    
-                    switch state {
-                    case .ready:
+            connection.stateUpdateHandler = { [weak self] state in
+                switch state {
+                case .ready:
+                    connection.stateUpdateHandler = nil
+                    let shouldResume = resumed.withLock { isResumed -> Bool in
+                        guard !isResumed else { return false }
                         isResumed = true
+                        return true
+                    }
+                    guard shouldResume else { return }
+                    Task { @MainActor in
+                        self?.handleConnectionStateUpdate(state, for: deviceId)
                         continuation.resume()
-                    case .failed(let error):
+                    }
+                case .failed(let error):
+                    connection.stateUpdateHandler = nil
+                    let shouldResume = resumed.withLock { isResumed -> Bool in
+                        guard !isResumed else { return false }
                         isResumed = true
+                        return true
+                    }
+                    guard shouldResume else { return }
+                    Task { @MainActor in
+                        self?.handleConnectionStateUpdate(state, for: deviceId)
                         continuation.resume(throwing: error)
-                    case .cancelled:
+                    }
+                case .cancelled:
+                    connection.stateUpdateHandler = nil
+                    let shouldResume = resumed.withLock { isResumed -> Bool in
+                        guard !isResumed else { return false }
                         isResumed = true
+                        return true
+                    }
+                    guard shouldResume else { return }
+                    Task { @MainActor in
+                        self?.handleConnectionStateUpdate(state, for: deviceId)
                         continuation.resume(throwing: P2PDiscoveryError.connectionCancelled)
-                    default:
-                        break
+                    }
+                default:
+                    Task { @MainActor in
+                        self?.handleConnectionStateUpdate(state, for: deviceId)
                     }
                 }
             }
 
-            DispatchQueue.global().asyncAfter(deadline: .now() + 5.0) {
+            let connectionQueue = DispatchQueue(label: "com.skybridge.p2p.discovery.connection", qos: .utility)
+            connection.start(queue: connectionQueue)
+
+            Task {
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
                 let shouldResume = resumed.withLock { isResumed -> Bool in
                     guard !isResumed else { return false }
                     isResumed = true
@@ -798,26 +957,28 @@ public class P2PDiscoveryService: BaseManager {
                 guard shouldResume else { return }
                 connection.stateUpdateHandler = nil
                 connection.cancel()
-                continuation.resume(throwing: P2PDiscoveryError.connectionCancelled)
+                await MainActor.run {
+                    continuation.resume(throwing: P2PDiscoveryError.connectionCancelled)
+                }
             }
         }
     }
-    
+
  // MARK: - 辅助方法：名称 / 网络信息解析
-    
+
  /// 获取本机设备名称
     private func getDeviceName() -> String {
         return Host.current().localizedName ?? "SkyBridge设备"
     }
-    
+
  /// 从结果中提取设备名称 - 2025 增强版
     private func extractDeviceName(from result: NWBrowser.Result) -> String {
         var deviceName = "未知设备"
-        
+
         if case .service(let name, _, _, _) = result.endpoint {
  // 使用服务名作为基础
             deviceName = name
-            
+
  // 尝试从 result.metadata 获取 TXT 记录（使用统一解析器）
             let metadata = result.metadata
             if case .bonjour(let txtRecord) = metadata {
@@ -826,61 +987,61 @@ public class P2PDiscoveryService: BaseManager {
                 if let friendlyName = deviceInfo.name ?? deviceInfo.hostname {
                     deviceName = friendlyName
                 }
-                
+
  // 添加设备类型信息
                 if let deviceType = deviceInfo.type ?? deviceInfo.model {
                     deviceName += " (\(deviceType))"
                 }
             }
-            
+
  // 清理设备名称
             deviceName = cleanDeviceName(deviceName)
-            
+
             if isProbablyLocalDevice(name: deviceName, ipv4: nil, ipv6: nil) {
                 deviceName += " (本机)"
             }
         }
-        
+
         logger.info("提取设备名称: \(deviceName)")
         return deviceName
     }
-    
+
  /// 解析 TXT 记录（已废弃，请使用 BonjourTXTParser）
     @available(*, deprecated, message: "Use BonjourTXTParser.parse instead")
     private func parseTXTRecord(_ txtRecord: NWTXTRecord) -> [String: String]? {
         let dict = BonjourTXTParser.parse(txtRecord)
         return dict.isEmpty ? nil : dict
     }
-    
+
  /// 清理设备名称
     private func cleanDeviceName(_ name: String) -> String {
         var cleaned = name
-        
+
         cleaned = cleaned.replacingOccurrences(of: "._tcp", with: "")
         cleaned = cleaned.replacingOccurrences(of: "._udp", with: "")
         cleaned = cleaned.replacingOccurrences(of: ".local", with: "")
-        
+
         cleaned = cleaned.trimmingCharacters(in: .whitespaces)
-        
+
         if cleaned.count > 50 {
             cleaned = String(cleaned.prefix(47)) + "..."
         }
-        
+
         return cleaned
     }
-    
+
  /// 从 IP 地址反向解析主机名
     private func resolveHostnameFromIP(_ ipAddress: String) -> String? {
         var hints = addrinfo()
         hints.ai_family = AF_UNSPEC
         hints.ai_socktype = SOCK_STREAM
-        
+
         var result: UnsafeMutablePointer<addrinfo>?
         guard getaddrinfo(ipAddress, nil, &hints, &result) == 0 else {
             return nil
         }
         defer { freeaddrinfo(result) }
-        
+
         var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
         if getnameinfo(result?.pointee.ai_addr,
                        socklen_t(result?.pointee.ai_addrlen ?? 0),
@@ -892,27 +1053,27 @@ public class P2PDiscoveryService: BaseManager {
             let trimmed = bytes.prefix { $0 != 0 }
             return String(decoding: trimmed, as: UTF8.self)
         }
-        
+
         return nil
     }
-    
+
  /// 从结果中提取网络信息 - 2025 增强版
     private func extractNetworkInfo(from result: NWBrowser.Result) -> (ipv4: String?, ipv6: String?, port: Int) {
         var ipv4: String?
         var ipv6: String?
         var port: Int = 0 // 未知端口，必须依靠服务端点提供
-        
+
         if case .service(_, _, let servicePort, _) = result.endpoint {
             port = Int(servicePort) ?? 0
         }
-        
+
  // 方法 1: 从 NWBrowser.Result.interfaces 提取（macOS 14+）
         if !result.interfaces.isEmpty {
  // 优先使用 Wi-Fi 接口
             for interface in result.interfaces {
                 let interfaceName = interface.name
                 logger.debug("检查网络接口: \(interfaceName)")
-                
+
                 if let addresses = getIPAddressesForInterface(interfaceName) {
                     if ipv4 == nil {
                         ipv4 = addresses.ipv4
@@ -923,11 +1084,11 @@ public class P2PDiscoveryService: BaseManager {
                 }
             }
         }
-        
+
  // 方法 2: 使用 NWEndpoint 直接解析（通过 DNS）
         if case .service(let name, let type, _, _) = result.endpoint {
             let host = NWEndpoint.Host(name + "." + type.replacingOccurrences(of: "_", with: "") + ".local")
-            
+
             if let resolvedAddresses = resolveHost(host) {
                 if ipv4 == nil {
                     ipv4 = resolvedAddresses.ipv4
@@ -937,13 +1098,13 @@ public class P2PDiscoveryService: BaseManager {
                 }
             }
         }
-        
+
  // 方法 3: 使用 NetService (兼容性后备)
         if ipv4 == nil && ipv6 == nil {
             if case .service(let name, let type, _, _) = result.endpoint {
                 let netService = NetService(domain: "local.", type: type, name: name)
                 netService.resolve(withTimeout: 1.0)
-                
+
                 if let addresses = netService.addresses {
                     for addressData in addresses {
                         let address = extractIPAddress(from: addressData)
@@ -959,33 +1120,33 @@ public class P2PDiscoveryService: BaseManager {
                 }
             }
         }
-        
+
         logger.info("解析设备网络信息 - IPv4: \(ipv4 ?? "无"), IPv6: \(ipv6 ?? "无"), 端口: \(port)")
         return (ipv4, ipv6, port)
     }
-    
+
  /// 通过接口名称获取 IP 地址
     private func getIPAddressesForInterface(_ interfaceName: String) -> (ipv4: String?, ipv6: String?)? {
         var ifaddr: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&ifaddr) == 0 else { return nil }
         defer { freeifaddrs(ifaddr) }
-        
+
         var ipv4: String?
         var ipv6: String?
         var ptr = ifaddr
-        
+
         while ptr != nil {
             defer { ptr = ptr?.pointee.ifa_next }
-            
+
             guard let interface = ptr?.pointee else { continue }
             let name = String(decoding: Data(bytes: interface.ifa_name,
                                              count: Int(strlen(interface.ifa_name))),
                               as: UTF8.self)
-            
+
  // 匹配接口名（Wi-Fi / AWDL 等）
             if name == interfaceName || name.hasPrefix("en") || name.hasPrefix("awdl") {
                 let addr = interface.ifa_addr.pointee
-                
+
                 if addr.sa_family == UInt8(AF_INET) {
  // IPv4
                     var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
@@ -1029,36 +1190,36 @@ public class P2PDiscoveryService: BaseManager {
                 }
             }
         }
-        
+
         if ipv4 != nil || ipv6 != nil {
             return (ipv4, ipv6)
         }
         return nil
     }
-    
+
  /// 解析主机名为 IP 地址
     private func resolveHost(_ host: NWEndpoint.Host) -> (ipv4: String?, ipv6: String?)? {
         var ipv4: String?
         var ipv6: String?
-        
+
         var hints = addrinfo()
         hints.ai_family = AF_UNSPEC  // IPv4 或 IPv6
         hints.ai_socktype = SOCK_STREAM
-        
+
         var result: UnsafeMutablePointer<addrinfo>?
         let hostString = "\(host)"
-        
+
         guard getaddrinfo(hostString, nil, &hints, &result) == 0 else {
             return nil
         }
         defer { freeaddrinfo(result) }
-        
+
         var ptr = result
         while ptr != nil {
             defer { ptr = ptr?.pointee.ai_next }
-            
+
             guard let addr = ptr?.pointee else { continue }
-            
+
             if addr.ai_family == AF_INET {
  // IPv4
                 var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
@@ -1093,13 +1254,13 @@ public class P2PDiscoveryService: BaseManager {
                 }
             }
         }
-        
+
         if ipv4 != nil || ipv6 != nil {
             return (ipv4, ipv6)
         }
         return nil
     }
-    
+
  /// 从地址数据中提取 IP 地址字符串
     private func extractIPAddress(from data: Data) -> String {
         return data.withUnsafeBytes { bytes in
@@ -1107,7 +1268,7 @@ public class P2PDiscoveryService: BaseManager {
                   let sockaddr = bytes.bindMemory(to: sockaddr.self).baseAddress else {
                 return "未知地址"
             }
-            
+
             switch Int32(sockaddr.pointee.sa_family) {
             case AF_INET:
                 guard bytes.count >= MemoryLayout<sockaddr_in>.size,
@@ -1116,7 +1277,7 @@ public class P2PDiscoveryService: BaseManager {
                     return "未知地址"
                 }
                 return String(cString: cstr)
-                
+
             case AF_INET6:
                 guard bytes.count >= MemoryLayout<sockaddr_in6>.size,
                       let addr = bytes.bindMemory(to: sockaddr_in6.self).baseAddress else {
@@ -1130,7 +1291,7 @@ public class P2PDiscoveryService: BaseManager {
                 let data = Data(bytes: buffer, count: Int(INET6_ADDRSTRLEN))
                 let trimmed = data.prefix { $0 != 0 }
                 return String(decoding: trimmed, as: UTF8.self)
-                
+
             default:
                 return "未知地址"
             }
@@ -1233,7 +1394,7 @@ internal struct P2PNetworkDiscoveredDevice: Identifiable, Sendable {
     public var metadata: NWTXTRecord?
     public let discoveredAt: Date
     public var lastSeen: Date = Date()
-    
+
     public init(id: String, name: String, endpoint: NWEndpoint, metadata: NWTXTRecord?, discoveredAt: Date) {
         self.id = id
         self.name = name
@@ -1251,7 +1412,7 @@ public enum P2PDiscoveryConnectionStatus: String, CaseIterable {
     case reconnecting = "重连中"
     case failed = "连接失败"
     case timeout = "连接超时"
-    
+
     public var displayName: String {
         return rawValue
     }
@@ -1262,7 +1423,7 @@ public enum P2PDiscoveryError: Error, LocalizedError {
     case deviceNotConnected
     case connectionCancelled
     case scanningFailed
-    
+
     public var errorDescription: String? {
         switch self {
         case .deviceNotConnected:

@@ -614,7 +614,7 @@
 "remote.newConnection" = "新しい接続";
 "remote.overlay.connectingTo" = "%@ に接続中...";
 "remote.empty.title" = "セッションを選択してリモートデスクトップを開始";
-"remote.empty.subtitle" = "左のリストからアクティブなセッションを選ぶか、新しい接続を作成";
+"remote.empty.subtitle" = "おすすめ：デバイス検出でワンタップ接続。手動の RDP/VNC/SSH は上級者向けの代替手段です。";
 "remote.toolbar.newConnection.help" = "リモート接続を作成";
 "remote.toolbar.refresh.help" = "セッションを更新";
 "remote.performance.monitor" = "Metal 4 パフォーマンスモニタ";
@@ -711,6 +711,14 @@
 "auth.username" = "ユーザー名";
 "remote.form.connect" = "接続";
 "remote.form.connectFailed" = "接続に失敗しました";
+
+// New: recommended entry + advanced disclosure
+"remote.connect.recommended" = "デバイス検出で接続（推奨）";
+"remote.connect.advanced" = "上級：手動（RDP/VNC/SSH）";
+"remote.form.recommended.section" = "推奨";
+"remote.form.recommended.body" = "多くの場合、IP/ポートの手入力は不要です。デバイス検出でデバイスを選んで接続してください。";
+"remote.form.openDeviceDiscovery" = "デバイス検出を開く";
+"remote.form.advanced.section" = "上級：手動設定（RDP/VNC/SSH）";
 "monitor.title" = "システム監視";
 "monitor.status.monitoring" = "監視中";
 "monitor.status.initializing" = "初期化中...";

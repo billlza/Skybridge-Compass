@@ -18,13 +18,14 @@ final class DashboardViewModel: ObservableObject {
     @Published private(set) var discoveredDevices: [DiscoveredDevice] = []
     @Published private(set) var transferTasks: [FileTransferTask] = []
     @Published private(set) var discoveryStatus: String = "等待扫描真实设备"
+    @Published private(set) var connectionDetail: String? = nil
     @Published private(set) var tenants: [TenantDescriptor] = []
     @Published private(set) var activeTenant: TenantDescriptor?
-    
+
  // 🆕 统一的在线设备列表(使用新的统一管理器)
     @Published public var onlineDevices: [OnlineDevice] = []
     @Published public var deviceStats: DeviceStats = DeviceStats()
-    
+
  // 性能监控相关属性
     @Published private(set) var performanceMetrics = SkyBridgeCore.PerformanceMetrics(
         frameRate: 60.0,
@@ -41,7 +42,7 @@ final class DashboardViewModel: ObservableObject {
     @Published private(set) var powerState: SkyBridgeCore.PowerState = .normal
     @Published private(set) var performanceRecommendations: [PerformanceRecommendation] = []
     @Published private(set) var overallPerformanceState: OverallPerformanceState = .optimal
-    
+
  // 添加设置界面显示状态的回调
     var onNavigateToSettings: (() -> Void)?
 
@@ -51,24 +52,27 @@ final class DashboardViewModel: ObservableObject {
     private let connectionManager = ConnectionManager()  // 添加连接管理器以支持USB设备扫描
     private let usbcManager = USBCConnectionManager()    // 直接监听USB设备连接，计入在线设备
     private let sessionService = RemoteDesktopManager.shared
-    private let fileTransferService = FileTransferManager()
+    private let fileTransferService = FileTransferManager.shared
+    private lazy var fileTransferListener = FileTransferListenerService(manager: fileTransferService)
+    private let remoteControlManager = RemoteControlManager()
+    private lazy var remoteControlServer = RemoteControlServer(manager: remoteControlManager)
     let systemMetricsService = SystemMetricsService()
     private let tenantController = TenantAccessController.shared
-    
+
  // 🆕 统一的在线设备管理器(单例)
     private let unifiedDeviceManager = UnifiedOnlineDeviceManager.shared
-    
+
  // 性能优化组件
     private var performanceCoordinator: PerformanceCoordinator?
     private var isNetworkOnline: Bool = false
     private var localIPv4: String? = nil
     private var pendingUpdate: DispatchWorkItem? = nil
-    
+
     private var cancellables = Set<AnyCancellable>()
     private var isAuthenticated: Bool {
         tenantController.accessToken != nil
     }
-    
+
  /// 设备扫描状态
     var isScanning: Bool {
         discoveryService.isScanning
@@ -85,7 +89,7 @@ final class DashboardViewModel: ObservableObject {
             self?.openSettings()
         }
     }
-    
+
     deinit {
  // 移除通知观察者
         NotificationCenter.default.removeObserver(self)
@@ -113,18 +117,18 @@ final class DashboardViewModel: ObservableObject {
         SkyBridgeLogger.ui.debugOnly("🔍 [DashboardViewModel] 服务已启动，仅启动系统监控")
         #endif
             systemMetricsService.startMonitoring()
-            return 
+            return
         }
-        
+
         #if DEBUG
         SkyBridgeLogger.ui.debugOnly("🚀 [DashboardViewModel] 启动所有后台服务")
         #endif
-        
+
         tenantController.bootstrap()
-        
+
  // 启动系统指标监控
         systemMetricsService.startMonitoring()
-        
+
  // 检查设备发现服务是否已启动，避免重复初始化
         if !discoveryService.isScanning {
             #if DEBUG
@@ -136,13 +140,13 @@ final class DashboardViewModel: ObservableObject {
             SkyBridgeLogger.ui.debugOnly("🔍 [DashboardViewModel] 设备发现服务已在运行")
             #endif
         }
-        
+
  // 启动连接管理器以支持USB设备扫描
         #if DEBUG
         SkyBridgeLogger.ui.debugOnly("🔌 [DashboardViewModel] 启动连接管理器")
         #endif
         connectionManager.scanAvailableConnections()  // 触发USB设备扫描
-        
+
  // 检查P2P服务是否已启动
         if !p2pDiscoveryService.isAdvertising {
  // 启动P2P广播服务（由系统分配端口，避免撞车）
@@ -155,7 +159,7 @@ final class DashboardViewModel: ObservableObject {
             SkyBridgeLogger.ui.debugOnly("🔍 [DashboardViewModel] P2P广播服务已在运行")
             #endif
         }
-        
+
  // 检查P2P发现是否已启动
         if !p2pDiscoveryService.isDiscovering {
             #if DEBUG
@@ -170,7 +174,21 @@ final class DashboardViewModel: ObservableObject {
             SkyBridgeLogger.ui.debugOnly("🔍 [DashboardViewModel] P2P设备发现已在运行")
             #endif
         }
-        
+
+        // 启动文件传输入站监听（iOS ↔ macOS 互传的最小闭环）
+        do {
+            try fileTransferListener.start()
+        } catch {
+            SkyBridgeLogger.ui.error("❌ 启动文件传输监听失败: \(error.localizedDescription, privacy: .public)")
+        }
+
+        // 启动 iPhone → Mac 远程桌面/控制服务（JPEG 流 + 输入注入）
+        do {
+            try remoteControlServer.start()
+        } catch {
+            SkyBridgeLogger.ui.error("❌ 启动远程控制服务失败: \(error.localizedDescription, privacy: .public)")
+        }
+
  // 初始化性能协调器
         if let device = MTLCreateSystemDefaultDevice() {
             performanceCoordinator = PerformanceCoordinator(device: device)
@@ -203,7 +221,7 @@ final class DashboardViewModel: ObservableObject {
                 self?.mergeDiscoveredDevices(networkDevices: state.devices)
             }
             .store(in: &cancellables)
-            
+
  // 添加P2P设备发现监听
         p2pDiscoveryService.$p2pDevices
             .receive(on: DispatchQueue.main)
@@ -211,16 +229,16 @@ final class DashboardViewModel: ObservableObject {
                 self?.mergeDiscoveredDevices(p2pDevices: p2pDevices)
             }
             .store(in: &cancellables)
-            
+
  // 启动P2P设备发现（仅启动发现，不启动广播）
  // p2pDiscoveryService.startDiscovery() // 已在上面检查并启动
-        
+
  // 🆕 启动统一设备管理器
         #if DEBUG
         SkyBridgeLogger.ui.debugOnly("🌐 [DashboardViewModel] 启动统一在线设备管理器")
         #endif
         unifiedDeviceManager.startDiscovery()
-        
+
  // 🆕 订阅统一设备列表
  // 🔧 优化：添加节流和去重，减少不必要的状态更新
         unifiedDeviceManager.$onlineDevices
@@ -234,7 +252,7 @@ final class DashboardViewModel: ObservableObject {
                 #endif
             }
             .store(in: &cancellables)
-        
+
  // 🆕 订阅设备统计
  // 🔧 优化：添加节流，减少频繁更新（DeviceStats可能未实现Equatable，所以不使用removeDuplicates）
         unifiedDeviceManager.$deviceStats
@@ -276,7 +294,7 @@ final class DashboardViewModel: ObservableObject {
             }
             .sink { [weak self] in self?.transferTasks = $0 }
             .store(in: &cancellables)
-        
+
  // 根据传输任务与会话状态更新仪表盘计数
  // 🔧 优化：合并到上面的sink中，避免重复订阅
  // 已在上面的sink中调用updateDashboardCounts，这里可以移除
@@ -287,10 +305,49 @@ final class DashboardViewModel: ObservableObject {
             .sink { [weak self] _ in self?.updateDashboardCounts() }
             .store(in: &cancellables)
 
- // 监听连接状态（使用 ConnectionManager 的真实连接状态）
-        connectionManager.$connectionStatus
+        // 监听连接状态（聚合：ConnectionManager + P2P（主动/被动） + 文件传输活动）
+        let base = Publishers.CombineLatest4(
+            connectionManager.$connectionStatus,
+            p2pDiscoveryService.$connectionStatus,
+            p2pDiscoveryService.$activeInboundSessions,
+            fileTransferService.$isTransferring
+        )
+
+        Publishers.CombineLatest(
+            base,
+            ConnectionPresenceService.shared.$activeConnections
+        )
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] status in self?.connectionStatus = status }
+        .sink { [weak self] baseTuple, presenceConnections in
+                guard let self else { return }
+            let (baseStatus, p2pStatus, inboundCount, isTransferring) = baseTuple
+
+            // Detail string for UX: show crypto + guard when present.
+            if let newest = presenceConnections.sorted(by: { $0.connectedAt > $1.connectedAt }).first {
+                self.connectionDetail = "\(newest.cryptoKind) · \(newest.suite) · 守护中"
+            } else {
+                self.connectionDetail = nil
+            }
+
+                // If we are actively transferring, treat as "connected" for top bar UX.
+                if isTransferring {
+                    self.connectionStatus = .connected
+                    return
+                }
+            if !presenceConnections.isEmpty {
+                self.connectionStatus = .connected
+                return
+            }
+                if inboundCount > 0 {
+                    self.connectionStatus = .connected
+                    return
+                }
+                if baseStatus == .connected || p2pStatus == .connected {
+                    self.connectionStatus = .connected
+                    return
+                }
+                self.connectionStatus = .disconnected
+            }
             .store(in: &cancellables)
 
         NotificationCenter.default.publisher(for: .skyBridgeIntentConnect)
@@ -327,15 +384,15 @@ final class DashboardViewModel: ObservableObject {
         systemMetricsService.stopMonitoring()
         performanceCoordinator?.stopPerformanceCoordination()
         performanceCoordinator = nil
-        
+
  // 🆕 停止统一设备管理器
         unifiedDeviceManager.stopDiscovery()
     }
-    
+
  /// 设置性能监控
     private func setupPerformanceMonitoring() {
         guard let coordinator = performanceCoordinator else { return }
-        
+
  // 监听性能指标更新
  // 🔧 优化：添加节流，减少频繁的性能指标更新
         coordinator.$performanceMetrics
@@ -345,7 +402,7 @@ final class DashboardViewModel: ObservableObject {
                 self?.performanceMetrics = metrics
             }
             .store(in: &cancellables)
-        
+
  // 监听热量状态更新 - 从性能指标中获取
  // 🔧 优化：添加去重，只在状态真正改变时更新
         coordinator.$performanceMetrics
@@ -356,7 +413,7 @@ final class DashboardViewModel: ObservableObject {
                 self?.thermalState = state
             }
             .store(in: &cancellables)
-        
+
  // 监听电源状态更新 - 从性能指标中获取
  // 🔧 优化：添加去重，只在状态真正改变时更新
         coordinator.$performanceMetrics
@@ -367,7 +424,7 @@ final class DashboardViewModel: ObservableObject {
                 self?.powerState = state
             }
             .store(in: &cancellables)
-        
+
  // 监听性能建议更新 - 从协调器获取
  // 🔧 优化：降低更新频率，从5秒增加到10秒，减少不必要的计算
         Timer.publish(every: 10.0, on: .main, in: .common)
@@ -377,7 +434,7 @@ final class DashboardViewModel: ObservableObject {
                 self.performanceRecommendations = coordinator.getCurrentPerformanceRecommendations()
             }
             .store(in: &cancellables)
-        
+
  // 监听整体性能状态更新
         coordinator.$overallPerformanceState
             .receive(on: DispatchQueue.main)
@@ -385,7 +442,7 @@ final class DashboardViewModel: ObservableObject {
                 self?.overallPerformanceState = state
             }
             .store(in: &cancellables)
-        
+
  // 启动性能监控
         coordinator.startPerformanceCoordination()
     }
@@ -462,7 +519,7 @@ final class DashboardViewModel: ObservableObject {
             }
         }
     }
-    
+
  /// 🆕 连接到在线设备(新的统一设备类型)
     func connect(to onlineDevice: OnlineDevice) async {
  // 将OnlineDevice转换为DiscoveredDevice以兼容现有的连接逻辑
@@ -477,10 +534,10 @@ final class DashboardViewModel: ObservableObject {
             uniqueIdentifier: onlineDevice.uniqueIdentifier,
             signalStrength: nil
         )
-        
+
  // 标记为已连接
         unifiedDeviceManager.markDeviceAsConnected(onlineDevice.id)
-        
+
  // 执行连接
         await connect(to: discoveredDevice)
     }
@@ -538,9 +595,9 @@ final class DashboardViewModel: ObservableObject {
         #if DEBUG
         SkyBridgeLogger.ui.debugOnly("🔄 DashboardViewModel: P2P设备数量: \(p2pDevices?.count ?? 0)")
         #endif
-        
+
         var mergedDevices: [DiscoveredDevice] = []
-        
+
  // 添加网络扫描发现的设备
         if let networkDevices = networkDevices {
             mergedDevices.append(contentsOf: networkDevices)
@@ -557,7 +614,7 @@ final class DashboardViewModel: ObservableObject {
             SkyBridgeLogger.ui.debugOnly("🔄 DashboardViewModel: 保留了 \(existingNetworkDevices.count) 个现有网络设备")
             #endif
         }
-        
+
  // 转换并添加P2P设备
         if let p2pDevices = p2pDevices {
             let convertedP2PDevices = p2pDevices.map { p2pDevice in
@@ -567,7 +624,7 @@ final class DashboardViewModel: ObservableObject {
             #if DEBUG
             SkyBridgeLogger.ui.debugOnly("🔄 DashboardViewModel: 转换并添加了 \(convertedP2PDevices.count) 个P2P设备")
             #endif
-            
+
  // 打印P2P设备详情
             for p2pDevice in p2pDevices {
                 #if DEBUG
@@ -584,10 +641,10 @@ final class DashboardViewModel: ObservableObject {
             SkyBridgeLogger.ui.debugOnly("🔄 DashboardViewModel: 保留了 \(existingP2PDevices.count) 个现有P2P设备")
             #endif
         }
-        
+
  // 🔧 智能去重：使用更完善的去重逻辑
         var uniqueDevices: [DiscoveredDevice] = []
-        
+
         for device in mergedDevices {
  // 检查是否已存在相似设备
             if let existingIndex = uniqueDevices.firstIndex(where: { existing in
@@ -596,20 +653,20 @@ final class DashboardViewModel: ObservableObject {
                    !uid.isEmpty, !existingUid.isEmpty, uid == existingUid {
                     return true
                 }
-                
+
  // 2. 检查 IP 地址
                 if let ip = device.ipv4, let existingIp = existing.ipv4,
                    !ip.isEmpty, !existingIp.isEmpty, ip == existingIp {
                     return true
                 }
-                
+
  // 3. 检查标准化名称
                 let normalizedName = normalizeDeviceName(device.name)
                 let normalizedExisting = normalizeDeviceName(existing.name)
                 if !normalizedName.isEmpty && normalizedName == normalizedExisting {
                     return true
                 }
-                
+
  // 4. 检查名称包含关系
                 if device.name.contains(existing.name) || existing.name.contains(device.name) {
                     let lengthDiff = abs(device.name.count - existing.name.count)
@@ -617,7 +674,7 @@ final class DashboardViewModel: ObservableObject {
                         return true
                     }
                 }
-                
+
                 return false
             }) {
  // 设备已存在，合并信息
@@ -633,9 +690,9 @@ final class DashboardViewModel: ObservableObject {
                 #endif
             }
         }
-        
+
         discoveredDevices = uniqueDevices
-        
+
         #if DEBUG
         SkyBridgeLogger.ui.debugOnly("🔄 DashboardViewModel: 最终设备列表数量: \(discoveredDevices.count)")
         #endif
@@ -644,7 +701,7 @@ final class DashboardViewModel: ObservableObject {
             SkyBridgeLogger.ui.debugOnly("   \(index + 1). \(device.name) - \(device.ipv4 ?? device.ipv6 ?? "无IP") - 服务: \(device.services)")
             #endif
         }
-        
+
  // 更新发现状态
         if discoveredDevices.isEmpty {
             discoveryStatus = "未发现设备，正在扫描..."
@@ -655,13 +712,13 @@ final class DashboardViewModel: ObservableObject {
  // 设备列表变化后刷新仪表盘计数
         updateDashboardCounts()
     }
-    
+
  // MARK: - 智能设备去重辅助函数
-    
+
  /// 标准化设备名称（去除常见前缀和后缀）
     private func normalizeDeviceName(_ name: String) -> String {
         var normalized = name.lowercased()
-        
+
  // 去除常见前缀
         let prefixes = ["的", "de", "s-", "i-", "@"]
         for prefix in prefixes {
@@ -669,21 +726,21 @@ final class DashboardViewModel: ObservableObject {
                 normalized.removeSubrange(range)
             }
         }
-        
+
  // 去除空格和特殊字符
         normalized = normalized.replacingOccurrences(of: " ", with: "")
                                 .replacingOccurrences(of: "-", with: "")
                                 .replacingOccurrences(of: "_", with: "")
-        
+
         return normalized
     }
-    
+
  /// 合并设备信息
     private func mergeDeviceInfo(existing: DiscoveredDevice, new: DiscoveredDevice) -> DiscoveredDevice {
  // 合并 IP 地址
         let mergedIPv4 = existing.ipv4 ?? new.ipv4
         let mergedIPv6 = existing.ipv6 ?? new.ipv6
-        
+
  // 合并服务列表
         var mergedServices = existing.services
         for service in new.services {
@@ -691,26 +748,26 @@ final class DashboardViewModel: ObservableObject {
                 mergedServices.append(service)
             }
         }
-        
+
  // 合并端口映射
         var mergedPortMap = existing.portMap
         for (key, value) in new.portMap {
             mergedPortMap[key] = value
         }
-        
+
  // 合并连接类型
         var mergedConnectionTypes = existing.connectionTypes
         mergedConnectionTypes.formUnion(new.connectionTypes)
-        
+
  // 更新唯一标识符
         let mergedUniqueId = existing.uniqueIdentifier ?? new.uniqueIdentifier
-        
+
  // 更新信号强度
         let mergedStrength = new.signalStrength ?? existing.signalStrength
-        
+
  // 使用更详细的名称
         let mergedName = new.name.count > existing.name.count ? new.name : existing.name
-        
+
         return DiscoveredDevice(
             id: existing.id,
             name: mergedName,
@@ -723,13 +780,13 @@ final class DashboardViewModel: ObservableObject {
             signalStrength: mergedStrength
         )
     }
-    
+
  /// 将P2PDevice转换为DiscoveredDevice
     private func convertP2PDeviceToDiscoveredDevice(_ p2pDevice: P2PDevice) -> DiscoveredDevice {
  // 根据P2P设备的能力转换为服务列表
         var services: [String] = ["_skybridge._tcp"]
         var portMap: [String: Int] = ["_skybridge._tcp": Int(p2pDevice.port)]
-        
+
  // 根据设备能力添加相应的服务
         for capability in p2pDevice.capabilities {
             switch capability {
@@ -746,7 +803,7 @@ final class DashboardViewModel: ObservableObject {
                 break
             }
         }
-        
+
         return DiscoveredDevice(
             id: UUID(uuidString: p2pDevice.id) ?? UUID(),
             name: p2pDevice.name,
@@ -769,12 +826,12 @@ final class DashboardViewModel: ObservableObject {
         pendingUpdate?.cancel()
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
-            
+
  // 🆕 使用统一设备管理器的设备数量
             let onlineCount = self.deviceStats.online
             let connectedCount = self.deviceStats.connected
             let totalDevices = self.deviceStats.total
-            
+
  // 兼容：如果统一设备列表为空，使用旧的计数逻辑
             let actualOnlineDevices: Int
             if totalDevices > 0 {
@@ -783,20 +840,20 @@ final class DashboardViewModel: ObservableObject {
  // 回退到旧的逻辑
                 let discoveredCount = self.discoveredDevices.count
                 let usbCount = self.usbcManager.discoveredUSBDevices.filter { info in
-                    switch info.deviceType { 
-                    case .appleMFi, .androidDevice, .audioDevice: 
-                        return true 
-                    default: 
+                    switch info.deviceType {
+                    case .appleMFi, .androidDevice, .audioDevice:
+                        return true
+                    default:
                         return false
                     }
                 }.count
                 actualOnlineDevices = (discoveredCount + usbCount == 0 && self.isNetworkOnline) ? 1 : (discoveredCount + usbCount)
             }
-            
+
             self.metrics.onlineDevices = actualOnlineDevices
             self.metrics.activeSessions = self.sessions.filter { $0.status == .connected }.count
             self.metrics.fileTransfers = self.transferTasks.count
-            
+
             #if DEBUG
             SkyBridgeLogger.ui.debugOnly("📊 DashboardViewModel: 在线设备统计")
             SkyBridgeLogger.ui.debugOnly("   在线设备: \(onlineCount)")

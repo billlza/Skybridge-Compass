@@ -10,30 +10,30 @@ import Combine
 /// 4. 支持设备筛选和搜索
 @available(macOS 14.0, *)
 public struct UnifiedDeviceListView: View {
-    
+
  // MARK: - 状态管理
-    
+
     @StateObject private var discoveryManager = UnifiedDeviceDiscoveryManager()
     @State private var searchText = ""
     @State private var selectedDevice: UnifiedDevice?
     @State private var showingDeviceDetail = false
     @State private var filterConnectionType: DeviceConnectionType? = nil
-    
+
     public init() {}
-    
+
  // MARK: - 视图主体
-    
+
     public var body: some View {
         NavigationView {
             VStack(spacing: 0) {
  // 顶部工具栏
                 topToolbar
-                
+
                 Divider()
-                
+
  // 连接方式过滤器
                 connectionTypeFilter
-                
+
  // 设备列表
                 deviceList
             }
@@ -47,18 +47,17 @@ public struct UnifiedDeviceListView: View {
         .onAppear {
             discoveryManager.startScanning()
         }
-        .onDisappear {
-            discoveryManager.stopScanning()
-        }
+        // UX fix: keep discovery running; stopping on view transitions causes disruptive stop/start loops
+        // and can break ongoing handshakes/transfers.
         .sheet(isPresented: $showingDeviceDetail) {
             if let device = selectedDevice {
                 UnifiedDeviceDetailView(device: device)
             }
         }
     }
-    
+
  // MARK: - 子视图
-    
+
  /// 顶部工具栏
     private var topToolbar: some View {
         HStack {
@@ -79,9 +78,9 @@ public struct UnifiedDeviceListView: View {
                         .foregroundColor(.secondary)
                 }
             }
-            
+
             Spacer()
-            
+
  // 设备统计
             HStack(spacing: 16) {
                 statisticsBadge(
@@ -89,16 +88,16 @@ public struct UnifiedDeviceListView: View {
                     count: filteredDevices.count,
                     color: .blue
                 )
-                
+
                 statisticsBadge(
                     title: "多连接",
                     count: filteredDevices.filter { $0.hasMultipleConnections }.count,
                     color: .purple
                 )
             }
-            
+
             Spacer()
-            
+
  // 搜索框
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass")
@@ -116,7 +115,7 @@ public struct UnifiedDeviceListView: View {
         .padding(.vertical, 12)
         .background(Color(NSColor.windowBackgroundColor))
     }
-    
+
  /// 连接方式过滤器
     private var connectionTypeFilter: some View {
         ScrollView(.horizontal, showsIndicators: false) {
@@ -131,7 +130,7 @@ public struct UnifiedDeviceListView: View {
                         filterConnectionType = nil
                     }
                 )
-                
+
  // 各种连接方式过滤
                 ForEach(DeviceConnectionType.allCases.filter { $0 != .unknown }, id: \.self) { type in
                     let count = devicesCount(for: type)
@@ -153,7 +152,7 @@ public struct UnifiedDeviceListView: View {
         }
         .background(Color(NSColor.controlBackgroundColor).opacity(0.5))
     }
-    
+
  /// 设备列表
     private var deviceList: some View {
         ScrollView {
@@ -172,18 +171,18 @@ public struct UnifiedDeviceListView: View {
             .padding(20)
         }
     }
-    
+
  /// 空状态视图
     private var emptyStateView: some View {
         VStack(spacing: 16) {
             Image(systemName: discoveryManager.isScanning ? "wifi.router" : "antenna.radiowaves.left.and.right.slash")
                 .font(.system(size: 48))
                 .foregroundColor(.secondary)
-            
+
             Text(discoveryManager.isScanning ? "正在扫描..." : "未发现设备")
                 .font(.title2)
                 .fontWeight(.medium)
-            
+
             if !discoveryManager.isScanning {
                 Button("开始扫描") {
                     discoveryManager.startScanning()
@@ -194,7 +193,7 @@ public struct UnifiedDeviceListView: View {
         .frame(maxWidth: .infinity)
         .padding(.vertical, 60)
     }
-    
+
  /// 工具栏按钮
     private var toolbarButtons: some View {
         Group {
@@ -203,7 +202,7 @@ public struct UnifiedDeviceListView: View {
             }) {
                 Label("刷新", systemImage: "arrow.clockwise")
             }
-            
+
             if discoveryManager.isScanning {
                 Button(action: {
                     discoveryManager.stopScanning()
@@ -219,18 +218,18 @@ public struct UnifiedDeviceListView: View {
             }
         }
     }
-    
+
  // MARK: - 辅助方法
-    
+
  /// 过滤后的设备列表
     private var filteredDevices: [UnifiedDevice] {
         var devices = discoveryManager.unifiedDevices
-        
+
  // 按连接方式过滤
         if let filterType = filterConnectionType {
             devices = devices.filter { $0.connectionTypes.contains(filterType) }
         }
-        
+
  // 按搜索文本过滤
         if !searchText.isEmpty {
             devices = devices.filter { device in
@@ -239,22 +238,22 @@ public struct UnifiedDeviceListView: View {
                 device.serialNumber?.localizedCaseInsensitiveContains(searchText) == true
             }
         }
-        
+
         return devices
     }
-    
+
  /// 统计指定连接方式的设备数量
     private func devicesCount(for type: DeviceConnectionType) -> Int {
         return discoveryManager.unifiedDevices.filter { $0.connectionTypes.contains(type) }.count
     }
-    
+
  /// 统计标签
     private func statisticsBadge(title: String, count: Int, color: Color) -> some View {
         HStack(spacing: 6) {
             Text(title)
                 .font(.caption)
                 .foregroundColor(.secondary)
-            
+
             Text("\(count)")
                 .font(.caption)
                 .fontWeight(.semibold)
@@ -275,17 +274,17 @@ struct FilterButton: View {
     let count: Int
     let isSelected: Bool
     let action: () -> Void
-    
+
     var body: some View {
         Button(action: action) {
             HStack(spacing: 6) {
                 Image(systemName: icon)
                     .font(.system(size: 12))
-                
+
                 Text(title)
                     .font(.caption)
                     .fontWeight(.medium)
-                
+
                 if count > 0 {
                     Text("\(count)")
                         .font(.caption2)
@@ -317,20 +316,20 @@ struct FilterButton: View {
 struct UnifiedDeviceCard: View {
     let device: UnifiedDevice
     let onTap: () -> Void
-    
+
     var body: some View {
         Button(action: onTap) {
             HStack(spacing: 16) {
  // 设备图标
                 deviceIcon
-                
+
  // 设备信息
                 VStack(alignment: .leading, spacing: 6) {
  // 设备名称
                     Text(device.name)
                         .font(.headline)
                         .foregroundColor(.primary)
-                    
+
  // IP地址和序列号
                     HStack(spacing: 8) {
                         if let ipv4 = device.ipv4 {
@@ -338,14 +337,14 @@ struct UnifiedDeviceCard: View {
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                         }
-                        
+
                         if let serial = device.serialNumber {
                             Label(serial, systemImage: "number")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                         }
                     }
-                    
+
  // 连接方式标签
                     MultiConnectionTypeBadge(
                         connectionTypes: device.connectionTypes,
@@ -353,9 +352,9 @@ struct UnifiedDeviceCard: View {
                         maxDisplay: 3
                     )
                 }
-                
+
                 Spacer()
-                
+
  // 设备类型和状态
                 VStack(alignment: .trailing, spacing: 6) {
  // 设备类型标签
@@ -368,7 +367,7 @@ struct UnifiedDeviceCard: View {
                             .foregroundColor(deviceTypeColor(device.deviceType))
                             .cornerRadius(4)
                     }
-                    
+
  // 多连接标识
                     if device.hasMultipleConnections {
                         HStack(spacing: 4) {
@@ -379,7 +378,7 @@ struct UnifiedDeviceCard: View {
                         }
                         .foregroundColor(.purple)
                     }
-                    
+
  // 最后发现时间
                     Text(timeAgoText)
                         .font(.caption2)
@@ -393,9 +392,9 @@ struct UnifiedDeviceCard: View {
         }
         .buttonStyle(.plain)
     }
-    
+
  // MARK: - 私有属性
-    
+
     private var deviceIcon: some View {
         Image(systemName: device.deviceType.icon)
             .font(.system(size: 28))
@@ -404,7 +403,7 @@ struct UnifiedDeviceCard: View {
             .background(deviceTypeColor(device.deviceType).opacity(0.1))
             .cornerRadius(10)
     }
-    
+
     private var timeAgoText: String {
         let interval = Date().timeIntervalSince(device.lastSeen)
         if interval < 5 {
@@ -417,7 +416,7 @@ struct UnifiedDeviceCard: View {
             return "\(Int(interval / 3600))小时前"
         }
     }
-    
+
     private func deviceTypeDisplayName(_ type: DeviceClassifier.DeviceType) -> String {
         switch type {
         case .computer: return "计算机"
@@ -431,7 +430,7 @@ struct UnifiedDeviceCard: View {
         case .unknown: return "未知"
         }
     }
-    
+
     private func deviceTypeColor(_ type: DeviceClassifier.DeviceType) -> Color {
         switch type {
         case .computer: return .blue
@@ -452,26 +451,26 @@ struct UnifiedDeviceCard: View {
 struct UnifiedDeviceDetailView: View {
     let device: UnifiedDevice
     @Environment(\.dismiss) private var dismiss
-    
+
     var body: some View {
         NavigationView {
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
  // 设备基本信息
                     deviceBasicInfo
-                    
+
                     Divider()
-                    
+
  // 连接方式详情
                     connectionTypesSection
-                    
+
                     Divider()
-                    
+
  // 网络信息
                     networkInfoSection
-                    
+
                     Divider()
-                    
+
  // 可用服务
                     if !device.services.isEmpty {
                         servicesSection
@@ -490,37 +489,37 @@ struct UnifiedDeviceDetailView: View {
         }
         .frame(minWidth: 500, minHeight: 400)
     }
-    
+
     private var deviceBasicInfo: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("基本信息")
                 .font(.title3)
                 .fontWeight(.semibold)
-            
+
             infoRow(label: "设备名称", value: device.name)
             infoRow(label: "设备类型", value: deviceTypeDisplayName(device.deviceType))
-            
+
             if let serial = device.serialNumber {
                 infoRow(label: "序列号", value: serial)
             }
-            
+
             infoRow(label: "发现时间", value: formatDate(device.discoveredAt))
             infoRow(label: "最后发现", value: formatDate(device.lastSeen))
         }
     }
-    
+
     private var connectionTypesSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("连接方式")
                 .font(.title3)
                 .fontWeight(.semibold)
-            
+
             FlowLayout(spacing: 8) {
                 ForEach(Array(device.connectionTypes), id: \.self) { type in
                     ConnectionTypeBadge(connectionType: type, size: .large)
                 }
             }
-            
+
             if device.hasMultipleConnections {
                 HStack(spacing: 8) {
                     Image(systemName: "info.circle.fill")
@@ -535,21 +534,21 @@ struct UnifiedDeviceDetailView: View {
             }
         }
     }
-    
+
     private var networkInfoSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("网络信息")
                 .font(.title3)
                 .fontWeight(.semibold)
-            
+
             if let ipv4 = device.ipv4 {
                 infoRow(label: "IPv4 地址", value: ipv4)
             }
-            
+
             if let ipv6 = device.ipv6 {
                 infoRow(label: "IPv6 地址", value: ipv6)
             }
-            
+
             if device.ipv4 == nil && device.ipv6 == nil {
                 Text("无网络地址信息")
                     .font(.caption)
@@ -557,24 +556,24 @@ struct UnifiedDeviceDetailView: View {
             }
         }
     }
-    
+
     private var servicesSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("可用服务")
                 .font(.title3)
                 .fontWeight(.semibold)
-            
+
             ForEach(device.services, id: \.self) { service in
                 HStack {
                     Image(systemName: "circle.fill")
                         .font(.system(size: 6))
                         .foregroundColor(.green)
-                    
+
                     Text(service)
                         .font(.body)
-                    
+
                     Spacer()
-                    
+
                     if let port = device.portMap[service] {
                         Text(":\(port)")
                             .font(.caption)
@@ -584,20 +583,20 @@ struct UnifiedDeviceDetailView: View {
             }
         }
     }
-    
+
     private func infoRow(label: String, value: String) -> some View {
         HStack {
             Text(label + ":")
                 .font(.body)
                 .foregroundColor(.secondary)
                 .frame(width: 100, alignment: .leading)
-            
+
             Text(value)
                 .font(.body)
                 .textSelection(.enabled)
         }
     }
-    
+
     private func deviceTypeDisplayName(_ type: DeviceClassifier.DeviceType) -> String {
         switch type {
         case .computer: return "计算机"
@@ -611,7 +610,7 @@ struct UnifiedDeviceDetailView: View {
         case .unknown: return "未知设备"
         }
     }
-    
+
     private func formatDate(_ date: Date) -> String {
         let formatter = DateFormatter()
         formatter.dateStyle = .medium
@@ -624,16 +623,16 @@ struct UnifiedDeviceDetailView: View {
 @available(macOS 14.0, *)
 struct FlowLayout: Layout {
     var spacing: CGFloat = 8
-    
+
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
         let sizes = subviews.map { $0.sizeThatFits(.unspecified) }
-        
+
         var totalHeight: CGFloat = 0
         var totalWidth: CGFloat = 0
-        
+
         var lineWidth: CGFloat = 0
         var lineHeight: CGFloat = 0
-        
+
         for size in sizes {
             if lineWidth + size.width > proposal.width ?? 0 {
                 totalHeight += lineHeight + spacing
@@ -643,36 +642,36 @@ struct FlowLayout: Layout {
                 lineWidth += size.width + spacing
                 lineHeight = max(lineHeight, size.height)
             }
-            
+
             totalWidth = max(totalWidth, lineWidth)
         }
-        
+
         totalHeight += lineHeight
-        
+
         return CGSize(width: totalWidth, height: totalHeight)
     }
-    
+
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
         let sizes = subviews.map { $0.sizeThatFits(.unspecified) }
-        
+
         var lineX = bounds.minX
         var lineY = bounds.minY
         var lineHeight: CGFloat = 0
-        
+
         for (index, subview) in subviews.enumerated() {
             let size = sizes[index]
-            
+
             if lineX + size.width > bounds.maxX {
                 lineY += lineHeight + spacing
                 lineHeight = 0
                 lineX = bounds.minX
             }
-            
+
             subview.place(
                 at: CGPoint(x: lineX, y: lineY),
                 proposal: ProposedViewSize(size)
             )
-            
+
             lineHeight = max(lineHeight, size.height)
             lineX += size.width + spacing
         }

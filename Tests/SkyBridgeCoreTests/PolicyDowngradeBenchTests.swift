@@ -83,9 +83,7 @@ final class PolicyDowngradeBenchTests: XCTestCase {
         let artifactsDir = URL(fileURLWithPath: "Artifacts")
         try FileManager.default.createDirectory(at: artifactsDir, withIntermediateDirectories: true)
 
-        let dateFormatter = DateFormatter()
-        dateFormatter.dateFormat = "yyyy-MM-dd"
-        let dateString = dateFormatter.string(from: Date())
+        let dateString = ArtifactDate.current()
         let csvPath = artifactsDir.appendingPathComponent("policy_downgrade_\(dateString).csv")
 
         var content = "policy,iterations,classic_attempts,fallback_events\n"

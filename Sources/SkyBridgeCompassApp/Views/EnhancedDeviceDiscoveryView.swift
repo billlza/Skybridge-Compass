@@ -20,16 +20,19 @@ public struct EnhancedDeviceDiscoveryView: View {
     @EnvironmentObject var themeConfiguration: ThemeConfiguration
  // 统一日志记录器，采用Apple推荐的Logger API（macOS 14+），避免使用过时的os_log。
     private let logger = Logger(subsystem: "com.skybridge.SkyBridgeCompassApp", category: "DeviceDiscovery")
-    
+
  // 🆕 使用统一的在线设备管理器(单例)
     @ObservedObject private var unifiedDeviceManager = UnifiedOnlineDeviceManager.shared
-    
+
+    // Trusted / paired devices (from TrustSyncService)
+    @StateObject private var trustSync = TrustSyncService.shared
+
  // 跨网络连接
     @StateObject private var crossNetworkManager = CrossNetworkConnectionManager()
-    
+
  // 🆕 真实iCloud设备发现(不再单独使用,已整合到统一管理器中)
  // @StateObject private var iCloudManager = iCloudDeviceDiscoveryManager()
-    
+
  // UI 状态
     @State private var selectedConnectionMode: DiscoveryMode = .localScan
     @State private var searchText = ""
@@ -42,16 +45,19 @@ public struct EnhancedDeviceDiscoveryView: View {
     @State private var manualPort: String = "11550"
     @State private var manualCode: String = ""
     @State private var hoveredConnectionMode: DiscoveryMode? = nil
-    
 
-    
+    @State private var selectedTrustedRecord: TrustRecord?
+    @State private var showTrustedRecordSheet: Bool = false
+
+
+
     public var body: some View {
         VStack(spacing: 0) {
  // 顶部：连接方式切换
             connectionModePicker
-            
+
             Divider()
-            
+
  // 主内容区
             ScrollView {
                 VStack(spacing: 20) {
@@ -105,14 +111,41 @@ public struct EnhancedDeviceDiscoveryView: View {
  // 🆕 使用统一设备管理器,自动整合所有发现源
             unifiedDeviceManager.startDiscovery()
         }
+        .sheet(isPresented: $showTrustedRecordSheet) {
+            if let record = selectedTrustedRecord {
+                TrustedDeviceDetailView(
+                    record: record,
+                    onRemoveTrust: { idsToRevoke, declaredDeviceId in
+                        Task { @MainActor in
+                            // Clear policy first so future requests prompt again.
+                            if let declaredDeviceId {
+                                PairingTrustApprovalService.shared.clearPolicy(for: declaredDeviceId)
+                            }
+                            // Revoke all related ids (canonical + alias).
+                            for id in idsToRevoke {
+                                try? await TrustSyncService.shared.revokeTrustRecord(deviceId: id)
+                            }
+                            // Close sheet
+                            selectedTrustedRecord = nil
+                            showTrustedRecordSheet = false
+                        }
+                    }
+                )
+                .frame(width: 520, height: 420)
+                .padding(20)
+            } else {
+                EmptyView()
+                    .frame(width: 520, height: 420)
+            }
+        }
         .onDisappear {
  // 注意:统一设备管理器是单例,不应在这里停止
  // 它会在DashboardViewModel中统一管理生命周期
         }
     }
-    
+
  // MARK: - 连接方式选择器
-    
+
     private var connectionModePicker: some View {
         HStack(spacing: 0) {
             ForEach(DiscoveryMode.allCases) { mode in
@@ -126,7 +159,7 @@ public struct EnhancedDeviceDiscoveryView: View {
                 .allowsHitTesting(false)
         )
     }
-    
+
     private func connectionModeButton(_ mode: DiscoveryMode) -> some View {
         let isSelected = selectedConnectionMode == mode
         let isHovered = hoveredConnectionMode == mode
@@ -192,9 +225,9 @@ public struct EnhancedDeviceDiscoveryView: View {
             .accessibilityLabel(Text(mode.title))
         }
     }
-    
+
  // MARK: - 1️⃣ 本地扫描（原有功能增强）
-    
+
     private var localScanSection: some View {
         VStack(alignment: .leading, spacing: 16) {
  // 说明卡片
@@ -204,7 +237,7 @@ public struct EnhancedDeviceDiscoveryView: View {
                 description: LocalizationManager.shared.localizedString("discovery.localScan.description"),
                 color: .green
             )
-            
+
  // 扫描控制
             HStack(spacing: 12) {
                 if unifiedDeviceManager.isScanning {
@@ -216,9 +249,9 @@ public struct EnhancedDeviceDiscoveryView: View {
                             .foregroundColor(.secondary)
                     }
                 }
-                
+
                 Spacer()
-                
+
                 Toggle(LocalizationManager.shared.localizedString("discovery.compatibilityMode"), isOn: Binding(
                     get: { SettingsManager.shared.enableCompatibilityMode },
                     set: { SettingsManager.shared.enableCompatibilityMode = $0; unifiedDeviceManager.refreshDevices() }
@@ -279,15 +312,94 @@ public struct EnhancedDeviceDiscoveryView: View {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .stroke(themeConfiguration.borderColor, lineWidth: 1)
             )
-            
+
+            // 我的设备（固定展示，不依赖扫描结果；避免被“在线设备”列表/过滤逻辑吞掉）
+            if let my = unifiedDeviceManager.localDevice {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("我的设备")
+                        .font(.headline)
+
+                    OnlineDeviceCard(device: my) {
+                        // no-op: 本机不需要“连接”
+                    }
+
+                    // 当前已连接设备（即使尚未“信任/配对”，也应在这里可见）
+                    let connectedNow = unifiedDeviceManager.onlineDevices
+                        .filter { !$0.isLocalDevice && $0.connectionStatus == .connected }
+                        .sorted { ($0.lastConnectedAt ?? .distantPast) > ($1.lastConnectedAt ?? .distantPast) }
+                    if !connectedNow.isEmpty {
+                        ForEach(connectedNow) { dev in
+                            OnlineDeviceCard(device: dev) {
+                                // already connected; no-op
+                            }
+                        }
+                    }
+                }
+                .padding(16)
+                .background(themeConfiguration.cardBackgroundMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(Color.blue.opacity(0.6), lineWidth: 1)
+                )
+            }
+
+            // 受信任设备（已配对/已允许）——来自 TrustSyncService
+            let trustedRecords = trustedRecordsForUI
+            if !trustedRecords.isEmpty {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("已信任设备")
+                        .font(.headline)
+
+                    ForEach(trustedRecords) { record in
+                        TrustedDeviceCard(
+                            record: record,
+                            subtitle: trustedRecordSubtitle(record),
+                            status: trustedRecordStatus(record)
+                        ) {
+                            selectedTrustedRecord = record
+                            showTrustedRecordSheet = true
+                        }
+                    }
+                }
+                .padding(16)
+                .background(themeConfiguration.cardBackgroundMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(Color.green.opacity(0.5), lineWidth: 1)
+                )
+            }
+
+            // 最近连接（不等同于“信任/已配对”，但应立即可见）
+            let recentlyConnected = unifiedDeviceManager.onlineDevices
+                .filter { !$0.isLocalDevice && $0.lastConnectedAt != nil }
+                .sorted { ($0.lastConnectedAt ?? .distantPast) > ($1.lastConnectedAt ?? .distantPast) }
+            if !recentlyConnected.isEmpty {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("最近连接")
+                        .font(.headline)
+                    ForEach(recentlyConnected) { device in
+                        OnlineDeviceCard(device: device) {
+                            // If already connected, no-op; otherwise, we keep this as a future reconnect entry.
+                            connectToOnlineDevice(device)
+                        }
+                    }
+                }
+                .padding(16)
+                .background(themeConfiguration.cardBackgroundMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(Color.green.opacity(0.35), lineWidth: 1)
+                )
+            }
+
  // 设备列表
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
-                    Text(String(format: LocalizationManager.shared.localizedString("discovery.onlineDevices"), unifiedDeviceManager.onlineDevices.count))
+                    Text(String(format: LocalizationManager.shared.localizedString("discovery.onlineDevices"), onlineNonLocalDevices.count))
                         .font(.headline)
-                    
+
                     Spacer()
-                    
+
  // 搜索框
                     HStack(spacing: 8) {
                         Image(systemName: "magnifyingglass")
@@ -304,15 +416,15 @@ public struct EnhancedDeviceDiscoveryView: View {
                     )
                     .frame(width: 200)
                 }
-                
-                if filteredOnlineDevices.isEmpty {
+
+                if filteredOnlineDevicesNonLocal.isEmpty {
                     emptyStateView(
                         icon: "antenna.radiowaves.left.and.right.slash",
                         title: LocalizationManager.shared.localizedString("discovery.noDevices.title"),
                         message: unifiedDeviceManager.isScanning ? LocalizationManager.shared.localizedString("discovery.noDevices.scanning") : LocalizationManager.shared.localizedString("discovery.noDevices.startPrompt")
                     )
                 } else {
-                    ForEach(filteredOnlineDevices) { device in
+                    ForEach(filteredOnlineDevicesNonLocal) { device in
                         OnlineDeviceCard(device: device) {
                             connectToOnlineDevice(device)
                         }
@@ -321,21 +433,104 @@ public struct EnhancedDeviceDiscoveryView: View {
             }
         }
     }
-    
-    private var filteredOnlineDevices: [OnlineDevice] {
+
+    // MARK: - Trusted Devices helpers
+
+    private var trustedRecordsForUI: [TrustRecord] {
+        // We prefer canonical records (not aliases) to avoid duplicates.
+        // Aliases exist to keep handshake lookups working for bonjour:<name>@local. peer ids.
+        trustSync.activeTrustRecords
+            .filter { !$0.capabilities.contains(where: { $0.lowercased().hasPrefix("alias=true") }) }
+            .filter { $0.capabilities.contains(where: { $0.lowercased() == "trusted" || $0.lowercased() == "pqc_bootstrap" || $0.lowercased().hasPrefix("trusted") }) }
+            .sorted { $0.updatedAt > $1.updatedAt }
+    }
+
+    private func trustedRecordCaps(_ record: TrustRecord) -> [String: String] {
+        var dict: [String: String] = [:]
+        for item in record.capabilities {
+            let parts = item.split(separator: "=", maxSplits: 1).map(String.init)
+            if parts.count == 2 {
+                dict[parts[0]] = parts[1]
+            }
+        }
+        return dict
+    }
+
+    private func trustedRecordSubtitle(_ record: TrustRecord) -> String {
+        let c = trustedRecordCaps(record)
+        let platform = c["platform"].flatMap { $0.isEmpty ? nil : $0 }
+        let osVersion = c["osVersion"].flatMap { $0.isEmpty ? nil : $0 }
+        let modelName = c["modelName"].flatMap { $0.isEmpty ? nil : $0 }
+        let chip = c["chip"].flatMap { $0.isEmpty ? nil : $0 }
+
+        var parts: [String] = []
+        if let modelName { parts.append(modelName) }
+        if let chip { parts.append(chip) }
+        if let platform, let osVersion {
+            parts.append("\(platform) \(osVersion)")
+        } else if let platform {
+            parts.append(platform)
+        }
+        return parts.isEmpty ? record.deviceId : parts.joined(separator: " · ")
+    }
+
+    private func trustedRecordStatus(_ record: TrustRecord) -> OnlineDeviceStatus {
+        // Two-step mapping (fast + 100% accurate when strong id is present):
+        // 1) Strong: match by stable deviceId (preferred). This becomes 100% accurate once discovery advertises deviceId.
+        // 2) Weak fallback: match by peerEndpoint/name to avoid showing "offline" when strong id isn't available yet.
+        let caps = trustedRecordCaps(record)
+
+        let strongIdKey = "id:\(record.deviceId)"
+        if let dev = unifiedDeviceManager.onlineDevices.first(where: { $0.uniqueIdentifier == strongIdKey }) {
+            return dev.connectionStatus
+        }
+
+        var candidateNames: [String] = []
+        if let peer = caps["peerEndpoint"], !peer.isEmpty {
+            if let n = extractBonjourName(from: peer) {
+                candidateNames.append(n)
+            }
+        }
+        if let dn = record.deviceName, !dn.isEmpty {
+            candidateNames.append(dn)
+        }
+
+        for name in candidateNames {
+            if let dev = unifiedDeviceManager.onlineDevices.first(where: { $0.name == name }) {
+                return dev.connectionStatus
+            }
+        }
+        return .offline
+    }
+
+    private func extractBonjourName(from peerEndpoint: String) -> String? {
+        // Format: "bonjour:<name>@<domain>"
+        guard peerEndpoint.hasPrefix("bonjour:") else { return nil }
+        let rest = peerEndpoint.dropFirst("bonjour:".count)
+        // Split at "@"
+        let parts = rest.split(separator: "@", maxSplits: 1).map(String.init)
+        guard let name = parts.first, !name.isEmpty else { return nil }
+        return name
+    }
+
+    private var onlineNonLocalDevices: [OnlineDevice] {
+        unifiedDeviceManager.onlineDevices.filter { !$0.isLocalDevice }
+    }
+
+    private var filteredOnlineDevicesNonLocal: [OnlineDevice] {
         if searchText.isEmpty {
-            return unifiedDeviceManager.onlineDevices
+            return onlineNonLocalDevices
         } else {
-            return unifiedDeviceManager.onlineDevices.filter {
+            return onlineNonLocalDevices.filter {
                 $0.name.localizedCaseInsensitiveContains(searchText) ||
                 $0.ipv4?.contains(searchText) == true ||
                 $0.ipv6?.contains(searchText) == true
             }
         }
     }
-    
+
  // MARK: - 2️⃣ 动态二维码
-    
+
     private var qrCodeSection: some View {
         VStack(spacing: 20) {
             InfoBanner(
@@ -344,25 +539,25 @@ public struct EnhancedDeviceDiscoveryView: View {
                 description: LocalizationManager.shared.localizedString("discovery.qrCode.description"),
                 color: .blue
             )
-            
+
             HStack(spacing: 32) {
  // 左侧：生成二维码
                 VStack(spacing: 16) {
                     Text(LocalizationManager.shared.localizedString("discovery.qrCode.thisDevice"))
                         .font(.title3)
                         .fontWeight(.semibold)
-                    
+
                     if let qrData = crossNetworkManager.qrCodeData {
                         QRCodeView(data: qrData)
                             .frame(width: 220, height: 220)
                             .background(Color.white)
                             .cornerRadius(12)
                             .shadow(color: .black.opacity(0.1), radius: 4)
-                        
+
                         Text(LocalizationManager.shared.localizedString("discovery.qrCode.scanPrompt"))
                             .font(.caption)
                             .foregroundColor(.secondary)
-                        
+
                         if case .waiting = crossNetworkManager.connectionStatus {
                             HStack(spacing: 8) {
                                 ProgressView()
@@ -372,7 +567,7 @@ public struct EnhancedDeviceDiscoveryView: View {
                                     .foregroundColor(.secondary)
                             }
                         }
-                        
+
                         Button(LocalizationManager.shared.localizedString("discovery.qrCode.regenerate")) {
                             Task {
                                 try? await crossNetworkManager.generateDynamicQRCode()
@@ -399,15 +594,15 @@ public struct EnhancedDeviceDiscoveryView: View {
                         .buttonStyle(.plain)
                     }
                 }
-                
+
                 Divider()
-                
+
  // 右侧：扫描二维码
                 VStack(spacing: 16) {
                     Text(LocalizationManager.shared.localizedString("discovery.qrCode.otherDevice"))
                         .font(.title3)
                         .fontWeight(.semibold)
-                    
+
                     Button(action: {
  // 打开二维码扫描弹窗
                         showingScanner = true
@@ -416,10 +611,10 @@ public struct EnhancedDeviceDiscoveryView: View {
                             Image(systemName: "camera.viewfinder")
                                 .font(.system(size: 48))
                                 .foregroundColor(.green)
-                            
+
                             Text(LocalizationManager.shared.localizedString("discovery.qrCode.scanButton"))
                                 .font(.headline)
-                            
+
                             Text(LocalizationManager.shared.localizedString("discovery.qrCode.cameraPrompt"))
                                 .font(.caption)
                                 .foregroundColor(.secondary)
@@ -481,18 +676,18 @@ public struct EnhancedDeviceDiscoveryView: View {
             }
         }
     }
-    
+
  // MARK: - 3️⃣ iCloud 设备链（统一设备显示）
-    
+
  // MARK: - View Models
     @StateObject private var deviceChainViewModel: CloudDeviceListViewModel
-    
+
     public init(deviceChainViewModel: CloudDeviceListViewModel = CloudDeviceListViewModel()) {
         _deviceChainViewModel = StateObject(wrappedValue: deviceChainViewModel)
     }
-    
+
  // MARK: - 3️⃣ iCloud 设备链（统一设备显示）
-    
+
     private var cloudLinkSection: some View {
         VStack(spacing: 20) {
             InfoBanner(
@@ -501,17 +696,17 @@ public struct EnhancedDeviceDiscoveryView: View {
                 description: LocalizationManager.shared.localizedString("discovery.icloud.description"),
                 color: .purple
             )
-            
+
  // 状态指示器
             HStack(spacing: 12) {
                 statusIndicator
-                
+
                 Spacer()
-                
+
                 Text(deviceChainViewModel.accountStatusDescription)
                     .font(.caption)
                     .foregroundColor(.secondary)
-                
+
                 Button(LocalizationManager.shared.localizedString("discovery.icloud.refresh")) {
                     Task {
                         await deviceChainViewModel.refreshDevices()
@@ -523,7 +718,7 @@ public struct EnhancedDeviceDiscoveryView: View {
             .padding(12)
             .background(Color(NSColor.controlBackgroundColor).opacity(0.5))
             .cornerRadius(8)
-            
+
             if deviceChainViewModel.authorizedDevices.isEmpty {
                 VStack(spacing: 16) {
                     emptyStateView(
@@ -540,7 +735,7 @@ public struct EnhancedDeviceDiscoveryView: View {
                         Text("\(LocalizationManager.shared.localizedString("discovery.icloud.authorizedDevices")) (\(deviceChainViewModel.authorizedDevices.count))")
                             .font(.headline)
                     }
-                    
+
                     ForEach(deviceChainViewModel.authorizedDevices) { device in
                         CloudDeviceRow(
                             device: mapToCloudDevice(device),
@@ -554,7 +749,7 @@ public struct EnhancedDeviceDiscoveryView: View {
             }
         }
     }
-    
+
  /// 状态指示器
     private var statusIndicator: some View {
         HStack(spacing: 8) {
@@ -573,15 +768,15 @@ public struct EnhancedDeviceDiscoveryView: View {
             }
         }
     }
-    
+
  // MARK: - Cloud Device Row
-    
+
     struct CloudDeviceRow: View {
         let device: CloudDevice
         let currentDeviceId: String?
         let onConnect: () -> Void
         @EnvironmentObject var themeConfiguration: ThemeConfiguration
-        
+
         var body: some View {
             HStack(spacing: 16) {
  // 设备图标
@@ -591,12 +786,12 @@ public struct EnhancedDeviceDiscoveryView: View {
                     .frame(width: 50, height: 50)
                     .background(Color.blue.opacity(0.1))
                     .cornerRadius(10)
-                
+
                 VStack(alignment: .leading, spacing: 6) {
                     HStack(spacing: 8) {
                         Text(device.name)
                             .font(.headline)
-                        
+
                         if let currentId = currentDeviceId, device.id == currentId {
                             Text(LocalizationManager.shared.localizedString("discovery.device.thisDevice"))
                                 .font(.caption2)
@@ -607,11 +802,11 @@ public struct EnhancedDeviceDiscoveryView: View {
                                 .clipShape(RoundedRectangle(cornerRadius: 4))
                         }
                     }
-                    
+
                     Text(device.deviceModel)
                         .font(.caption)
                         .foregroundColor(.secondary)
-                    
+
                     HStack(spacing: 4) {
                         Circle()
                             .fill(device.isOnline ? Color.green : Color.gray)
@@ -619,18 +814,18 @@ public struct EnhancedDeviceDiscoveryView: View {
                         Text(device.isOnline ? LocalizationManager.shared.localizedString("discovery.device.status.online") : LocalizationManager.shared.localizedString("discovery.device.status.offline"))
                             .font(.caption2)
                             .foregroundColor(.secondary)
-                        
+
                         Text("•")
                             .foregroundColor(.secondary)
-                        
+
                         Text(timeAgoText)
                             .font(.caption2)
                             .foregroundColor(.secondary)
                     }
                 }
-                
+
                 Spacer()
-                
+
                 if currentDeviceId == nil || device.id != currentDeviceId {
                     Button(LocalizationManager.shared.localizedString("discovery.action.connect")) {
                         onConnect()
@@ -646,7 +841,7 @@ public struct EnhancedDeviceDiscoveryView: View {
                     .stroke(themeConfiguration.borderColor, lineWidth: 1)
             )
         }
-        
+
         private var deviceIcon: String {
             switch device.type {
             case .mac: return "laptopcomputer"
@@ -654,7 +849,7 @@ public struct EnhancedDeviceDiscoveryView: View {
             case .iPad: return "ipad"
             }
         }
-        
+
         private var timeAgoText: String {
             let interval = Date().timeIntervalSince(device.lastSeen)
             if interval < 60 {
@@ -668,14 +863,14 @@ public struct EnhancedDeviceDiscoveryView: View {
             }
         }
     }
-    
+
  // MARK: - 在线设备卡片(新)
-    
+
     struct OnlineDeviceCard: View {
         let device: OnlineDevice
         let onConnect: () -> Void
         @EnvironmentObject var themeConfiguration: ThemeConfiguration
-        
+
         var body: some View {
             HStack(spacing: 16) {
  // 设备图标
@@ -685,12 +880,12 @@ public struct EnhancedDeviceDiscoveryView: View {
                     .frame(width: 50, height: 50)
                     .background(statusColor.opacity(0.1))
                     .cornerRadius(10)
-                
+
                 VStack(alignment: .leading, spacing: 6) {
                     HStack(spacing: 8) {
                         Text(device.name)
                             .font(.headline)
-                        
+
  // 本机标签
                         if device.isLocalDevice {
                             Text(LocalizationManager.shared.localizedString("discovery.device.thisDevice"))
@@ -701,7 +896,7 @@ public struct EnhancedDeviceDiscoveryView: View {
                                 .foregroundColor(.white)
                                 .clipShape(RoundedRectangle(cornerRadius: 4))
                         }
-                        
+
  // 已授权标签
                         if device.isAuthorized {
                             Image(systemName: "checkmark.shield.fill")
@@ -709,13 +904,13 @@ public struct EnhancedDeviceDiscoveryView: View {
                                 .foregroundColor(.green)
                         }
                     }
-                    
+
                     if let ipv4 = device.ipv4 {
                         Text("IP: \(ipv4)")
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
-                    
+
  // 连接类型标签
                     if !device.connectionTypes.isEmpty {
                         HStack(spacing: 6) {
@@ -734,15 +929,22 @@ public struct EnhancedDeviceDiscoveryView: View {
                             }
                         }
                     }
-                    
+
  // 连接状态
                     Text(device.connectionStatus.rawValue)
                         .font(.caption2)
                         .foregroundColor(.secondary)
+
+                    // Crypto/guard summary (best-effort)
+                    if let kind = device.lastCryptoKind, let suite = device.lastCryptoSuite, device.connectionStatus == .connected {
+                        Text("\(kind) · \(suite) · \(device.guardStatus ?? "守护中")")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                    }
                 }
-                
+
                 Spacer()
-                
+
  // 连接按钮(仅对非本机在线设备显示)
                 if !device.isLocalDevice && device.connectionStatus == .online {
  // 若设备未公开端口，则标记为“不可连接”并禁用按钮
@@ -761,7 +963,7 @@ public struct EnhancedDeviceDiscoveryView: View {
                     .stroke(device.isLocalDevice ? Color.blue : themeConfiguration.borderColor, lineWidth: device.isLocalDevice ? 2 : 1)
             )
         }
-        
+
         private var deviceIcon: String {
             switch device.deviceType {
             case .computer: return "laptopcomputer"
@@ -775,7 +977,7 @@ public struct EnhancedDeviceDiscoveryView: View {
             case .unknown: return "questionmark.circle"
             }
         }
-        
+
         private var statusColor: Color {
             switch device.connectionStatus {
             case .connected: return .green
@@ -783,7 +985,7 @@ public struct EnhancedDeviceDiscoveryView: View {
             case .offline: return .gray
             }
         }
-        
+
         private func connectionTypeColor(for type: DeviceConnectionType) -> Color {
             switch type {
             case .wifi: return Color.blue.opacity(0.8)
@@ -795,14 +997,14 @@ public struct EnhancedDeviceDiscoveryView: View {
             }
         }
     }
-    
+
  // MARK: - 本地设备卡片
-    
+
     struct LocalDeviceCard: View {
         let device: DiscoveredDevice
         let onConnect: () -> Void
         @EnvironmentObject var themeConfiguration: ThemeConfiguration
-        
+
         var body: some View {
             HStack(spacing: 16) {
  // 设备图标
@@ -812,17 +1014,17 @@ public struct EnhancedDeviceDiscoveryView: View {
                     .frame(width: 50, height: 50)
                     .background(Color.blue.opacity(0.1))
                     .cornerRadius(10)
-                
+
                 VStack(alignment: .leading, spacing: 6) {
                     Text(device.name)
                         .font(.headline)
-                    
+
                     if let ipv4 = device.ipv4 {
                         Text("IP: \(ipv4)")
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
-                    
+
  // 连接类型标签
                     if !device.connectionTypes.isEmpty {
                         HStack(spacing: 6) {
@@ -842,9 +1044,9 @@ public struct EnhancedDeviceDiscoveryView: View {
                         }
                     }
                 }
-                
+
                 Spacer()
-                
+
  // 本地设备若未公开端口，同样视为不可连接
                 let availablePort = device.portMap.values.first ?? 0
                 Button(availablePort > 0 ? LocalizationManager.shared.localizedString("discovery.action.connect") : LocalizationManager.shared.localizedString("discovery.action.notConnectable")) {
@@ -860,7 +1062,7 @@ public struct EnhancedDeviceDiscoveryView: View {
                     .stroke(themeConfiguration.borderColor, lineWidth: 1)
             )
         }
-        
+
         private var deviceIcon: String {
             if device.name.lowercased().contains("ipad") {
                 return "ipad"
@@ -874,7 +1076,7 @@ public struct EnhancedDeviceDiscoveryView: View {
                 return "network"
             }
         }
-        
+
         private func connectionTypeColor(for type: DeviceConnectionType) -> Color {
             switch type {
             case .wifi: return Color.blue.opacity(0.8)
@@ -886,7 +1088,7 @@ public struct EnhancedDeviceDiscoveryView: View {
             }
         }
     }
-    
+
  /// iCloud设备卡片
     private func iCloudDeviceCard(device: iCloudDevice) -> some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -900,43 +1102,43 @@ public struct EnhancedDeviceDiscoveryView: View {
                         Circle()
                             .fill(Color.blue.opacity(0.1))
                     )
-                
+
                 VStack(alignment: .leading, spacing: 4) {
                     Text(device.name)
                         .font(.headline)
                         .foregroundColor(.primary)
-                    
+
                     Text(device.model)
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
-                
+
                 Spacer()
-                
+
  // 在线状态指示器
                 HStack(spacing: 4) {
                     Circle()
                         .fill(device.isOnline ? Color.green : Color.gray)
                         .frame(width: 8, height: 8)
-                    
+
                     Text(device.isOnline ? LocalizationManager.shared.localizedString("discovery.device.status.online") : LocalizationManager.shared.localizedString("discovery.device.status.offline"))
                         .font(.caption2)
                         .foregroundColor(device.isOnline ? .green : .gray)
                 }
             }
-            
+
             Divider()
-            
+
  // 设备详细信息
             VStack(alignment: .leading, spacing: 6) {
                 infoRow(icon: "network", text: device.networkType.displayName)
-                
+
                 if let ip = device.ipAddress {
                     infoRow(icon: "wifi", text: ip)
                 }
-                
+
                 infoRow(icon: "desktopcomputer", text: "macOS \(device.osVersion)")
-                
+
                 infoRow(
                     icon: "clock",
                     text: String(format: LocalizationManager.shared.localizedString("discovery.device.lastActive"), formatLastSeen(device.lastSeen))
@@ -944,14 +1146,14 @@ public struct EnhancedDeviceDiscoveryView: View {
             }
             .font(.caption)
             .foregroundColor(.secondary)
-            
+
  // 设备能力
             HStack(spacing: 6) {
                 ForEach(device.capabilities, id: \.self) { capability in
                     capabilityBadge(capability)
                 }
             }
-            
+
  // 连接按钮
             Button(action: {
                 Task {
@@ -999,7 +1201,7 @@ public struct EnhancedDeviceDiscoveryView: View {
         } else {
             type = .mac
         }
-        
+
  // 能力映射，仅保留跨网络连接管理器定义的能力集合。
         let mappedCapabilities: [CloudDevice.DeviceCapability] = device.capabilities.compactMap { cap in
             switch cap {
@@ -1012,7 +1214,7 @@ public struct EnhancedDeviceDiscoveryView: View {
                 return nil
             }
         }
-        
+
         return CloudDevice(
             id: device.id,
             name: device.name,
@@ -1021,7 +1223,7 @@ public struct EnhancedDeviceDiscoveryView: View {
             capabilities: mappedCapabilities.isEmpty ? [.remoteDesktop] : mappedCapabilities
         )
     }
-    
+
  /// 信息行
     private func infoRow(icon: String, text: String) -> some View {
         HStack(spacing: 6) {
@@ -1030,11 +1232,11 @@ public struct EnhancedDeviceDiscoveryView: View {
             Text(text)
         }
     }
-    
+
  /// 能力标签
     private func capabilityBadge(_ capability: DeviceCapability) -> some View {
         let (icon, color) = capabilityInfo(capability)
-        
+
         return HStack(spacing: 4) {
             Image(systemName: icon)
                 .font(.system(size: 10))
@@ -1047,7 +1249,7 @@ public struct EnhancedDeviceDiscoveryView: View {
         .background(color.opacity(0.8))
         .clipShape(RoundedRectangle(cornerRadius: 6))
     }
-    
+
  /// 获取能力信息
     private func capabilityInfo(_ capability: DeviceCapability) -> (String, Color) {
         switch capability {
@@ -1065,7 +1267,7 @@ public struct EnhancedDeviceDiscoveryView: View {
             return ("message", .pink)
         }
     }
-    
+
  /// 获取能力名称
     private func capabilityName(_ capability: DeviceCapability) -> String {
         switch capability {
@@ -1077,11 +1279,11 @@ public struct EnhancedDeviceDiscoveryView: View {
         case .messages: return LocalizationManager.shared.localizedString("discovery.capability.messages")
         }
     }
-    
+
  /// 格式化最后活跃时间
     private func formatLastSeen(_ date: Date) -> String {
         let interval = Date().timeIntervalSince(date)
-        
+
         if interval < 60 {
             return LocalizationManager.shared.localizedString("discovery.time.justNow")
         } else if interval < 3600 {
@@ -1092,9 +1294,9 @@ public struct EnhancedDeviceDiscoveryView: View {
             return String(format: LocalizationManager.shared.localizedString("discovery.time.daysAgo"), Int(interval / 86400))
         }
     }
-    
+
  // MARK: - 4️⃣ 智能连接码
-    
+
     private var connectionCodeSection: some View {
         VStack(spacing: 20) {
             InfoBanner(
@@ -1103,14 +1305,14 @@ public struct EnhancedDeviceDiscoveryView: View {
                 description: LocalizationManager.shared.localizedString("discovery.smartCode.description"),
                 color: .orange
             )
-            
+
             HStack(spacing: 32) {
  // 左侧：生成连接码
                 VStack(spacing: 16) {
                     Text(LocalizationManager.shared.localizedString("discovery.smartCode.onThisDevice"))
                         .font(.title3)
                         .fontWeight(.semibold)
-                    
+
                     if let code = crossNetworkManager.connectionCode {
                         VStack(spacing: 12) {
                             Text(code)
@@ -1120,11 +1322,11 @@ public struct EnhancedDeviceDiscoveryView: View {
                                 .padding(20)
                                 .background(Color.orange.opacity(0.1))
                                 .cornerRadius(12)
-                            
+
                             Text(LocalizationManager.shared.localizedString("discovery.smartCode.shareInstruction"))
                                 .font(.caption)
                                 .foregroundColor(.secondary)
-                            
+
                             HStack(spacing: 12) {
                                 Button(action: {
                                     NSPasteboard.general.clearContents()
@@ -1133,7 +1335,7 @@ public struct EnhancedDeviceDiscoveryView: View {
                                     Label(LocalizationManager.shared.localizedString("discovery.smartCode.copy"), systemImage: "doc.on.doc")
                                 }
                                 .buttonStyle(.bordered)
-                                
+
                                 Button(action: {
                                     Task {
                                         try? await crossNetworkManager.generateConnectionCode()
@@ -1143,7 +1345,7 @@ public struct EnhancedDeviceDiscoveryView: View {
                                 }
                                 .buttonStyle(.bordered)
                             }
-                            
+
                             if case .waiting = crossNetworkManager.connectionStatus {
                                 HStack(spacing: 8) {
                                     ProgressView()
@@ -1174,15 +1376,15 @@ public struct EnhancedDeviceDiscoveryView: View {
                         .buttonStyle(.plain)
                     }
                 }
-                
+
                 Divider()
-                
+
  // 右侧：输入连接码
                 VStack(spacing: 16) {
                     Text(LocalizationManager.shared.localizedString("discovery.smartCode.onOtherDevice"))
                         .font(.title3)
                         .fontWeight(.semibold)
-                    
+
                     VStack(spacing: 12) {
                         TextField(LocalizationManager.shared.localizedString("discovery.code.enterPrompt"), text: $searchText)
                             .font(.system(size: 28, weight: .semibold, design: .rounded))
@@ -1196,7 +1398,7 @@ public struct EnhancedDeviceDiscoveryView: View {
                             .onChange(of: searchText) { _, newValue in
                                 searchText = String(newValue.prefix(6).uppercased().filter { $0.isLetter || $0.isNumber })
                             }
-                        
+
                         Button(action: {
                             Task {
                                 try? await crossNetworkManager.connectWithCode(searchText)
@@ -1220,9 +1422,9 @@ public struct EnhancedDeviceDiscoveryView: View {
             .padding(.vertical, 20)
         }
     }
-    
+
  // MARK: - 辅助方法
-    
+
  /// 🆕 连接到在线设备
     private func connectToOnlineDevice(_ device: OnlineDevice) {
         Task {
@@ -1231,7 +1433,7 @@ public struct EnhancedDeviceDiscoveryView: View {
             logger.info("✅ 在线设备连接成功: \(device.name)")
         }
     }
-    
+
     private func connectToLocalDevice(_ device: DiscoveredDevice) {
  // 触发本地设备连接。使用异步任务避免阻塞主线程，遵循严格并发控制。
         Task {
@@ -1239,16 +1441,16 @@ public struct EnhancedDeviceDiscoveryView: View {
             logger.info("✅ 本地设备连接成功: \(device.name)")
         }
     }
-    
+
     private func emptyStateView(icon: String, title: String, message: String) -> some View {
         VStack(spacing: 12) {
             Image(systemName: icon)
                 .font(.system(size: 48))
                 .foregroundColor(.secondary)
-            
+
             Text(title)
                 .font(.headline)
-            
+
             Text(message)
                 .font(.caption)
                 .foregroundColor(.secondary)
@@ -1266,9 +1468,9 @@ enum DiscoveryMode: String, CaseIterable, Identifiable {
     case qrCode = "qr"
     case cloudLink = "cloud"
     case connectionCode = "code"
-    
+
     var id: String { rawValue }
-    
+
     @MainActor
     var title: String {
         switch self {
@@ -1278,7 +1480,7 @@ enum DiscoveryMode: String, CaseIterable, Identifiable {
         case .connectionCode: return LocalizationManager.shared.localizedString("discovery.mode.connectionCode")
         }
     }
-    
+
     @MainActor
     var subtitle: String {
         switch self {
@@ -1288,7 +1490,7 @@ enum DiscoveryMode: String, CaseIterable, Identifiable {
         case .connectionCode: return LocalizationManager.shared.localizedString("discovery.mode.subtitle.connectionCode")
         }
     }
-    
+
     var iconName: String {
         switch self {
         case .localScan: return "wifi.router"
@@ -1315,22 +1517,22 @@ struct InfoBanner: View {
     let description: String
     let color: Color
     @EnvironmentObject var themeConfiguration: ThemeConfiguration
-    
+
     var body: some View {
         HStack(spacing: 12) {
             Image(systemName: icon)
                 .font(.system(size: 28))
                 .foregroundColor(color)
-            
+
             VStack(alignment: .leading, spacing: 4) {
                 Text(title)
                     .font(.headline)
-                
+
                 Text(description)
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
-            
+
             Spacer()
         }
         .padding(16)
@@ -1345,7 +1547,7 @@ struct InfoBanner: View {
 struct LocalDeviceCard: View {
     let device: DiscoveredDevice
     let onConnect: () -> Void
-    
+
     var body: some View {
         HStack(spacing: 16) {
             Image(systemName: deviceIcon)
@@ -1354,17 +1556,17 @@ struct LocalDeviceCard: View {
                 .frame(width: 50, height: 50)
                 .background(Color.blue.opacity(0.1))
                 .cornerRadius(10)
-            
+
             VStack(alignment: .leading, spacing: 6) {
                 Text(device.name)
                     .font(.headline)
-                
+
                 if let ipv4 = device.ipv4 {
                     Text("IPv4: \(ipv4)")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
-                
+
  // 连接方式标签
                 HStack(spacing: 6) {
                     ForEach(Array(device.connectionTypes), id: \.self) { connectionType in
@@ -1381,7 +1583,7 @@ struct LocalDeviceCard: View {
                         .cornerRadius(4)
                     }
                 }
-                
+
  // 服务标签
                 if !device.services.isEmpty {
                     HStack(spacing: 6) {
@@ -1396,9 +1598,9 @@ struct LocalDeviceCard: View {
                     }
                 }
             }
-            
+
             Spacer()
-            
+
             Button(LocalizationManager.shared.localizedString("discovery.action.connect")) {
                 onConnect()
             }
@@ -1409,7 +1611,7 @@ struct LocalDeviceCard: View {
         .background(Color(NSColor.controlBackgroundColor))
         .cornerRadius(12)
     }
-    
+
     private var deviceIcon: String {
         if device.name.lowercased().contains("iphone") {
             return "iphone"
@@ -1421,7 +1623,7 @@ struct LocalDeviceCard: View {
             return "server.rack"
         }
     }
-    
+
     private func connectionTypeColor(_ type: DeviceConnectionType) -> Color {
         switch type {
         case .wifi: return .blue
@@ -1438,7 +1640,7 @@ struct CloudDeviceCardEnhanced: View {
     let device: CloudDevice
     let onConnect: () -> Void
     @EnvironmentObject var themeConfiguration: ThemeConfiguration
-    
+
     var body: some View {
         HStack(spacing: 16) {
             Image(systemName: deviceIcon)
@@ -1447,15 +1649,15 @@ struct CloudDeviceCardEnhanced: View {
                 .frame(width: 50, height: 50)
                 .background(Color.purple.opacity(0.1))
                 .cornerRadius(10)
-            
+
             VStack(alignment: .leading, spacing: 4) {
                 Text(device.name)
                     .font(.headline)
-                
+
                 Text(deviceTypeText)
                     .font(.caption)
                     .foregroundColor(.secondary)
-                
+
                 HStack(spacing: 6) {
                     ForEach(device.deviceCapabilities, id: \.self) { capability in
                         Text(capability.rawValue)
@@ -1467,14 +1669,14 @@ struct CloudDeviceCardEnhanced: View {
                     }
                 }
             }
-            
+
             Spacer()
-            
+
             VStack(alignment: .trailing, spacing: 4) {
                 Text(timeAgoText)
                     .font(.caption2)
                     .foregroundColor(.secondary)
-                
+
                 Button(LocalizationManager.shared.localizedString("discovery.action.connect")) {
                     onConnect()
                 }
@@ -1489,7 +1691,7 @@ struct CloudDeviceCardEnhanced: View {
                 .stroke(themeConfiguration.borderColor, lineWidth: 1)
         )
     }
-    
+
     private var deviceIcon: String {
         switch device.type {
         case .mac: return "desktopcomputer"
@@ -1497,7 +1699,7 @@ struct CloudDeviceCardEnhanced: View {
         case .iPad: return "ipad"
         }
     }
-    
+
     private var deviceTypeText: String {
         switch device.type {
         case .mac: return "Mac"
@@ -1505,7 +1707,7 @@ struct CloudDeviceCardEnhanced: View {
         case .iPad: return "iPad"
         }
     }
-    
+
     private var timeAgoText: String {
         let interval = Date().timeIntervalSince(device.lastSeen)
         if interval < 60 {

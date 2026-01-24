@@ -46,7 +46,9 @@ final class HandshakeDriverOfferedSuitesRegressionTests: XCTestCase {
             return
         }
 
-        let messageA = try HandshakeMessageA.decode(from: captured)
+        // HandshakeDriver applies SBP1 handshake padding by default; unwrap before decoding.
+        let unwrapped = HandshakePadding.unwrapIfNeeded(captured, label: "test/MessageA")
+        let messageA = try HandshakeMessageA.decode(from: unwrapped)
         XCTAssertEqual(messageA.supportedSuites, offeredSuites)
         XCTAssertTrue(messageA.supportedSuites.allSatisfy { $0.isPQCGroup })
     }

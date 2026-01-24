@@ -29,13 +29,13 @@ import Security
 public enum SignatureAlgorithm: String, Codable, Sendable, Equatable {
  /// Ed25519（Classic suite）
     case ed25519 = "Ed25519"
-    
+
  /// ML-DSA-65（PQC suite）
     case mlDSA65 = "ML-DSA-65"
-    
+
  /// P-256 ECDSA（Legacy / SE PoP）
     case p256ECDSA = "P-256-ECDSA"
-    
+
  /// 根据 CryptoSuite 获取签名算法
  /// - Parameter suite: 加密套件
  /// - Returns: 对应的签名算法
@@ -47,7 +47,7 @@ public enum SignatureAlgorithm: String, Codable, Sendable, Equatable {
             return .ed25519
         }
     }
-    
+
  /// Wire code for canonical transcript encoding
     public var wireCode: UInt16 {
         switch self {
@@ -71,10 +71,10 @@ public enum SignatureAlgorithm: String, Codable, Sendable, Equatable {
 public enum ProtocolSigningAlgorithm: String, Codable, Sendable, Hashable {
  /// Ed25519（Classic suite）
     case ed25519 = "Ed25519"
-    
+
  /// ML-DSA-65（PQC suite）
     case mlDSA65 = "ML-DSA-65"
-    
+
  /// 转换为通用 SignatureAlgorithm（用于 wire 层）
     public var wire: SignatureAlgorithm {
         switch self {
@@ -82,7 +82,7 @@ public enum ProtocolSigningAlgorithm: String, Codable, Sendable, Hashable {
         case .mlDSA65: return .mlDSA65
         }
     }
-    
+
  /// 从通用 SignatureAlgorithm 转换（可能失败）
  /// - Returns: nil if algorithm is .p256ECDSA
     public init?(from wire: SignatureAlgorithm) {
@@ -92,7 +92,7 @@ public enum ProtocolSigningAlgorithm: String, Codable, Sendable, Hashable {
         case .p256ECDSA: return nil  // P-256 不允许用于协议签名
         }
     }
-    
+
  /// Wire code for canonical transcript encoding
     public var wireCode: UInt16 {
         switch self {
@@ -100,7 +100,7 @@ public enum ProtocolSigningAlgorithm: String, Codable, Sendable, Hashable {
         case .mlDSA65: return 0x0002
         }
     }
-    
+
  /// 根据 CryptoSuite 获取协议签名算法
  /// - Parameter suite: 加密套件
  /// - Returns: 对应的协议签名算法
@@ -128,7 +128,7 @@ public enum ProtocolSigningAlgorithm: String, Codable, Sendable, Hashable {
 public protocol ProtocolSignatureProvider: Sendable {
  /// 签名算法（只能是 ed25519 或 mlDSA65，类型层面排除 P-256）
     var signatureAlgorithm: ProtocolSigningAlgorithm { get }
-    
+
  /// 签名数据
  /// - Parameters:
  /// - data: 待签名数据
@@ -136,7 +136,7 @@ public protocol ProtocolSignatureProvider: Sendable {
  /// - Returns: 签名
  /// - Throws: 签名失败时抛出错误
     func sign(_ data: Data, key: SigningKeyHandle) async throws -> Data
-    
+
  /// 验证签名
  /// - Parameters:
  /// - data: 原始数据
@@ -153,28 +153,28 @@ public protocol ProtocolSignatureProvider: Sendable {
 public enum SignatureProviderError: Error, LocalizedError, Sendable {
  /// 无效的密钥类型
     case invalidKeyType(expected: String, actual: String)
-    
+
  /// 签名失败
     case signatureFailed(String)
-    
+
  /// 验证失败
     case verificationFailed(String)
-    
+
  /// 无效的公钥格式
     case invalidPublicKeyFormat(String)
-    
+
  /// 无效的签名格式
     case invalidSignatureFormat(String)
-    
+
  /// 不支持的密钥句柄类型
     case unsupportedKeyHandle(String)
-    
+
  /// PQC 后端不可用
     case pqcBackendUnavailable(String)
 
  /// 内部不变量被破坏（不应导致崩溃）
     case internalInvariantViolated(String)
-    
+
     public var errorDescription: String? {
         switch self {
         case .invalidKeyType(let expected, let actual):
@@ -206,9 +206,9 @@ public enum SignatureProviderError: Error, LocalizedError, Sendable {
 /// **Requirements: 1.1**
 public struct ClassicSignatureProvider: ProtocolSignatureProvider {
     public let signatureAlgorithm: ProtocolSigningAlgorithm = .ed25519
-    
+
     public init() {}
-    
+
     public func sign(_ data: Data, key: SigningKeyHandle) async throws -> Data {
         switch key {
         case .softwareKey(let privateKeyData):
@@ -225,11 +225,11 @@ public struct ClassicSignatureProvider: ProtocolSignatureProvider {
                     actual: "\(privateKeyData.count) bytes"
                 )
             }
-            
+
             let privateKey = try Curve25519.Signing.PrivateKey(rawRepresentation: keyData)
             let signature = try privateKey.signature(for: data)
             return signature
-            
+
         #if canImport(Security)
         case .secureEnclaveRef:
  // Ed25519 不支持 Secure Enclave（SE 只支持 P-256）
@@ -237,13 +237,13 @@ public struct ClassicSignatureProvider: ProtocolSignatureProvider {
                 "Secure Enclave does not support Ed25519; use P256SignatureProvider for SE keys"
             )
         #endif
-            
+
         case .callback(let signingCallback):
  // 使用回调签名（可能是远程签名服务）
             return try await signingCallback.sign(data: data)
         }
     }
-    
+
     public func verify(_ data: Data, signature: Data, publicKey: Data) async throws -> Bool {
  // Ed25519 公钥长度：32 bytes
         guard publicKey.count == 32 else {
@@ -251,14 +251,14 @@ public struct ClassicSignatureProvider: ProtocolSignatureProvider {
                 "Ed25519 public key must be 32 bytes, got \(publicKey.count)"
             )
         }
-        
+
  // Ed25519 签名长度：64 bytes
         guard signature.count == 64 else {
             throw SignatureProviderError.invalidSignatureFormat(
                 "Ed25519 signature must be 64 bytes, got \(signature.count)"
             )
         }
-        
+
         let pubKey = try Curve25519.Signing.PublicKey(rawRepresentation: publicKey)
         return pubKey.isValidSignature(signature, for: data)
     }
@@ -271,10 +271,10 @@ public struct ClassicSignatureProvider: ProtocolSignatureProvider {
 public enum PQCSignatureBackend: Sendable {
  /// Apple PQC (CryptoKit ML-DSA, macOS 26+/iOS 26+)
     case applePQC
-    
+
  /// liboqs ML-DSA
     case oqs
-    
+
  /// 自动选择（优先 Apple PQC，回退 OQS）
     case auto
 }
@@ -288,68 +288,85 @@ public enum PQCSignatureBackend: Sendable {
 /// **Requirements: 1.2, 7.1, 7.2, 7.3**
 public struct PQCSignatureProvider: ProtocolSignatureProvider {
     public let signatureAlgorithm: ProtocolSigningAlgorithm = .mlDSA65
-    
+
  /// 底层实现后端
     private let backend: PQCSignatureBackend
-    
+
     public init(backend: PQCSignatureBackend = .auto) {
         self.backend = backend
     }
-    
+
     public func sign(_ data: Data, key: SigningKeyHandle) async throws -> Data {
-        let resolvedBackend = try resolveBackend()
-        
-        switch resolvedBackend {
+        switch backend {
         case .applePQC:
             return try await signWithApplePQC(data, key: key)
         case .oqs:
             return try await signWithOQS(data, key: key)
         case .auto:
-            throw SignatureProviderError.internalInvariantViolated("Backend should be resolved before sign()")
+            // 优先 Apple PQC，但必须允许回退到 OQS：
+            // - ML-DSA-65 的私钥可能来自 OQS（4032 bytes）或 Apple（64 bytes seed / 其它格式）
+            // - 在 macOS 26+/iOS 26+ 上如果直接强制 Apple，会导致 OQS 私钥出现 incorrectParameterSize
+            #if HAS_APPLE_PQC_SDK
+            if #available(macOS 26.0, iOS 26.0, *) {
+                do {
+                    return try await signWithApplePQC(data, key: key)
+                } catch let appleError {
+                    // Apple PQC 失败（常见：参数长度/格式不匹配），尝试 OQS 以保证互操作性
+                    do {
+                        return try await signWithOQS(data, key: key)
+                    } catch {
+                        // 两者都失败：保留 Apple 的原始错误，更利于定位
+                        throw appleError
+                    }
+                }
+            }
+            #endif
+            return try await signWithOQS(data, key: key)
         }
     }
-    
+
     public func verify(_ data: Data, signature: Data, publicKey: Data) async throws -> Bool {
-        let resolvedBackend = try resolveBackend()
-        
-        switch resolvedBackend {
+        switch backend {
         case .applePQC:
             return try await verifyWithApplePQC(data, signature: signature, publicKey: publicKey)
         case .oqs:
             return try await verifyWithOQS(data, signature: signature, publicKey: publicKey)
         case .auto:
-            throw SignatureProviderError.internalInvariantViolated("Backend should be resolved before verify()")
+            // 验证同样允许 Apple↔OQS 互操作：先尝试 Apple（若可用），再回退 OQS。
+            #if HAS_APPLE_PQC_SDK
+            if #available(macOS 26.0, iOS 26.0, *) {
+                do {
+                    let ok = try await verifyWithApplePQC(data, signature: signature, publicKey: publicKey)
+                    if ok { return true }
+                } catch {
+                    // ignore and fall back to OQS
+                }
+            }
+            #endif
+            return try await verifyWithOQS(data, signature: signature, publicKey: publicKey)
         }
     }
-    
+
  // MARK: - Private Methods
-    
+
     private func resolveBackend() throws -> PQCSignatureBackend {
+        // 仍保留给“强制后端”的场景使用；`.auto` 不再在这里做强制解析，
+        // 由 sign/verify 内部执行“先 Apple 后 OQS”的回退逻辑。
         switch backend {
         case .applePQC:
             #if HAS_APPLE_PQC_SDK
-            if #available(macOS 26.0, iOS 26.0, *) {
-                return .applePQC
-            }
+            if #available(macOS 26.0, iOS 26.0, *) { return .applePQC }
             #endif
             throw SignatureProviderError.pqcBackendUnavailable("Apple PQC SDK not available")
-            
         case .oqs:
- // OQS 总是可用（编译时链接）
             return .oqs
-            
         case .auto:
-            #if HAS_APPLE_PQC_SDK
-            if #available(macOS 26.0, iOS 26.0, *) {
-                return .applePQC
-            }
-            #endif
-            return .oqs
+            return .auto
         }
     }
-    
+
  // MARK: - Apple PQC Implementation
-    
+
     private func signWithApplePQC(_ data: Data, key: SigningKeyHandle) async throws -> Data {
         #if HAS_APPLE_PQC_SDK
         if #available(macOS 26.0, iOS 26.0, *) {
@@ -359,14 +376,14 @@ public struct PQCSignatureProvider: ProtocolSignatureProvider {
                 let privateKey = try MLDSA65.PrivateKey(integrityCheckedRepresentation: privateKeyData)
                 let signature = try privateKey.signature(for: data)
                 return signature
-                
+
             #if canImport(Security)
             case .secureEnclaveRef:
                 throw SignatureProviderError.unsupportedKeyHandle(
                     "Secure Enclave does not support ML-DSA-65"
                 )
             #endif
-                
+
             case .callback(let signingCallback):
                 return try await signingCallback.sign(data: data)
             }
@@ -374,7 +391,7 @@ public struct PQCSignatureProvider: ProtocolSignatureProvider {
         #endif
         throw SignatureProviderError.pqcBackendUnavailable("Apple PQC SDK not available")
     }
-    
+
     private func verifyWithApplePQC(
         _ data: Data,
         signature: Data,
@@ -388,35 +405,35 @@ public struct PQCSignatureProvider: ProtocolSignatureProvider {
                     "ML-DSA-65 public key must be 1952 bytes, got \(publicKey.count)"
                 )
             }
-            
+
             let pubKey = try MLDSA65.PublicKey(rawRepresentation: publicKey)
             return pubKey.isValidSignature(signature, for: data)
         }
         #endif
         throw SignatureProviderError.pqcBackendUnavailable("Apple PQC SDK not available")
     }
-    
+
  // MARK: - OQS Implementation
-    
+
     private func signWithOQS(_ data: Data, key: SigningKeyHandle) async throws -> Data {
         switch key {
         case .softwareKey(let privateKeyData):
  // 使用 OQS ML-DSA-65 签名
  // OQS 私钥格式：4032 bytes (full private key)
             return try await OQSMLDSAHelper.sign(data: data, privateKey: privateKeyData)
-            
+
         #if canImport(Security)
         case .secureEnclaveRef:
             throw SignatureProviderError.unsupportedKeyHandle(
                 "Secure Enclave does not support ML-DSA-65"
             )
         #endif
-            
+
         case .callback(let signingCallback):
             return try await signingCallback.sign(data: data)
         }
     }
-    
+
     private func verifyWithOQS(
         _ data: Data,
         signature: Data,
@@ -428,7 +445,7 @@ public struct PQCSignatureProvider: ProtocolSignatureProvider {
                 "ML-DSA-65 public key must be 1952 bytes, got \(publicKey.count)"
             )
         }
-        
+
         return try await OQSMLDSAHelper.verify(data: data, signature: signature, publicKey: publicKey)
     }
 }
@@ -451,7 +468,7 @@ internal enum OQSMLDSAHelper {
         let keyHandle = SigningKeyHandle.softwareKey(privateKey)
         return try await provider.sign(data: data, using: keyHandle)
     }
-    
+
  /// ML-DSA-65 验证
  /// - Parameters:
  /// - data: 原始数据
@@ -478,7 +495,7 @@ internal enum OQSMLDSAHelper {
 public protocol SePoPSignatureProvider: Sendable {
  /// 签名数据
     func sign(_ data: Data, key: SigningKeyHandle) async throws -> Data
-    
+
  /// 验证签名
     func verify(_ data: Data, signature: Data, publicKey: Data) async throws -> Bool
 }
@@ -507,9 +524,9 @@ public protocol LegacySignatureVerifier: Sendable {
 ///
 /// **Requirements: 3.3, 5.1**
 public struct P256SePoPProvider: SePoPSignatureProvider {
-    
+
     public init() {}
-    
+
     public func sign(_ data: Data, key: SigningKeyHandle) async throws -> Data {
         switch key {
         case .softwareKey(let privateKeyData):
@@ -520,11 +537,11 @@ public struct P256SePoPProvider: SePoPSignatureProvider {
                     actual: "\(privateKeyData.count) bytes"
                 )
             }
-            
+
             let privateKey = try P256.Signing.PrivateKey(rawRepresentation: privateKeyData)
             let signature = try privateKey.signature(for: data)
             return signature.derRepresentation
-            
+
         #if canImport(Security)
         case .secureEnclaveRef(let secKey):
  // 使用 Secure Enclave 签名
@@ -540,12 +557,12 @@ public struct P256SePoPProvider: SePoPSignatureProvider {
             }
             return signature as Data
         #endif
-            
+
         case .callback(let signingCallback):
             return try await signingCallback.sign(data: data)
         }
     }
-    
+
     public func verify(_ data: Data, signature: Data, publicKey: Data) async throws -> Bool {
  // P-256 公钥：65 bytes (uncompressed) 或 33 bytes (compressed)
         guard publicKey.count == 65 || publicKey.count == 33 else {
@@ -553,7 +570,7 @@ public struct P256SePoPProvider: SePoPSignatureProvider {
                 "P-256 public key must be 65 (uncompressed) or 33 (compressed) bytes, got \(publicKey.count)"
             )
         }
-        
+
         do {
             let pubKey: P256.Signing.PublicKey
             if publicKey.count == 65 {
@@ -561,18 +578,18 @@ public struct P256SePoPProvider: SePoPSignatureProvider {
             } else {
                 pubKey = try P256.Signing.PublicKey(compressedRepresentation: publicKey)
             }
-            
+
  // 尝试 DER 格式签名
             if let derSignature = try? P256.Signing.ECDSASignature(derRepresentation: signature) {
                 return pubKey.isValidSignature(derSignature, for: SHA256.hash(data: data))
             }
-            
+
  // 尝试 raw 格式签名 (r || s, 64 bytes)
             if signature.count == 64,
                let rawSignature = try? P256.Signing.ECDSASignature(rawRepresentation: signature) {
                 return pubKey.isValidSignature(rawSignature, for: SHA256.hash(data: data))
             }
-            
+
             throw SignatureProviderError.invalidSignatureFormat(
                 "P-256 signature must be DER or raw (64 bytes) format"
             )
@@ -593,9 +610,9 @@ public struct P256SePoPProvider: SePoPSignatureProvider {
 ///
 /// **Requirements: 3.3, 11.1, 11.2**
 public struct P256LegacyVerifier: LegacySignatureVerifier {
-    
+
     public init() {}
-    
+
     public func verify(_ data: Data, signature: Data, publicKey: Data) async throws -> Bool {
  // P-256 公钥：65 bytes (uncompressed) 或 33 bytes (compressed)
         guard publicKey.count == 65 || publicKey.count == 33 else {
@@ -603,7 +620,7 @@ public struct P256LegacyVerifier: LegacySignatureVerifier {
                 "P-256 public key must be 65 (uncompressed) or 33 (compressed) bytes, got \(publicKey.count)"
             )
         }
-        
+
         do {
             let pubKey: P256.Signing.PublicKey
             if publicKey.count == 65 {
@@ -611,18 +628,18 @@ public struct P256LegacyVerifier: LegacySignatureVerifier {
             } else {
                 pubKey = try P256.Signing.PublicKey(compressedRepresentation: publicKey)
             }
-            
+
  // 尝试 DER 格式签名
             if let derSignature = try? P256.Signing.ECDSASignature(derRepresentation: signature) {
                 return pubKey.isValidSignature(derSignature, for: SHA256.hash(data: data))
             }
-            
+
  // 尝试 raw 格式签名 (r || s, 64 bytes)
             if signature.count == 64,
                let rawSignature = try? P256.Signing.ECDSASignature(rawRepresentation: signature) {
                 return pubKey.isValidSignature(rawSignature, for: SHA256.hash(data: data))
             }
-            
+
             throw SignatureProviderError.invalidSignatureFormat(
                 "P-256 signature must be DER or raw (64 bytes) format"
             )
@@ -648,9 +665,9 @@ public struct P256LegacyVerifier: LegacySignatureVerifier {
 @available(*, deprecated, message: "Use P256SePoPProvider for SE PoP or P256LegacyVerifier for legacy verification")
 public struct P256ProtocolSignatureProvider {
     public let signatureAlgorithm: SignatureAlgorithm = .p256ECDSA
-    
+
     public init() {}
-    
+
     public func sign(_ data: Data, key: SigningKeyHandle) async throws -> Data {
         switch key {
         case .softwareKey(let privateKeyData):
@@ -661,12 +678,12 @@ public struct P256ProtocolSignatureProvider {
                     actual: "\(privateKeyData.count) bytes"
                 )
             }
-            
+
             let privateKey = try P256.Signing.PrivateKey(rawRepresentation: privateKeyData)
             let signature = try privateKey.signature(for: data)
  // 返回 DER 编码的签名
             return signature.derRepresentation
-            
+
         #if canImport(Security)
         case .secureEnclaveRef(let secKey):
  // 使用 Secure Enclave 签名
@@ -682,12 +699,12 @@ public struct P256ProtocolSignatureProvider {
             }
             return signature as Data
         #endif
-            
+
         case .callback(let signingCallback):
             return try await signingCallback.sign(data: data)
         }
     }
-    
+
     public func verify(_ data: Data, signature: Data, publicKey: Data) async throws -> Bool {
  // P-256 公钥：65 bytes (uncompressed) 或 33 bytes (compressed)
         guard publicKey.count == 65 || publicKey.count == 33 else {
@@ -695,7 +712,7 @@ public struct P256ProtocolSignatureProvider {
                 "P-256 public key must be 65 (uncompressed) or 33 (compressed) bytes, got \(publicKey.count)"
             )
         }
-        
+
  // 尝试使用 CryptoKit 验证
         do {
             let pubKey: P256.Signing.PublicKey
@@ -704,18 +721,18 @@ public struct P256ProtocolSignatureProvider {
             } else {
                 pubKey = try P256.Signing.PublicKey(compressedRepresentation: publicKey)
             }
-            
+
  // 尝试 DER 格式签名
             if let derSignature = try? P256.Signing.ECDSASignature(derRepresentation: signature) {
                 return pubKey.isValidSignature(derSignature, for: SHA256.hash(data: data))
             }
-            
+
  // 尝试 raw 格式签名 (r || s, 64 bytes)
             if signature.count == 64,
                let rawSignature = try? P256.Signing.ECDSASignature(rawRepresentation: signature) {
                 return pubKey.isValidSignature(rawSignature, for: SHA256.hash(data: data))
             }
-            
+
             throw SignatureProviderError.invalidSignatureFormat(
                 "P-256 signature must be DER or raw (64 bytes) format"
             )
@@ -730,7 +747,7 @@ public struct P256ProtocolSignatureProvider {
             #endif
         }
     }
-    
+
     #if canImport(Security)
     private func verifyWithSecurityFramework(
         data: Data,
@@ -742,7 +759,7 @@ public struct P256ProtocolSignatureProvider {
             kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
             kSecAttrKeyClass as String: kSecAttrKeyClassPublic
         ]
-        
+
         var error: Unmanaged<CFError>?
         guard let publicKeyRef = SecKeyCreateWithData(
             publicKey as CFData,
@@ -752,7 +769,7 @@ public struct P256ProtocolSignatureProvider {
             let errorDesc = error?.takeRetainedValue().localizedDescription ?? "Invalid key data"
             throw SignatureProviderError.invalidPublicKeyFormat(errorDesc)
         }
-        
+
  // 验证签名
         let isValid = SecKeyVerifySignature(
             publicKeyRef,
@@ -761,7 +778,7 @@ public struct P256ProtocolSignatureProvider {
             signature as CFData,
             &error
         )
-        
+
         return isValid
     }
     #endif
@@ -775,7 +792,7 @@ public struct P256ProtocolSignatureProvider {
 ///
 /// **Requirements: 3.1, 3.2, 3.3**
 public struct ProtocolSignatureProviderSelector {
-    
+
  /// 根据 CryptoProvider tier 选择签名 Provider
  /// - Parameter tier: CryptoProvider tier
  /// - Returns: 用于 sigA/sigB 的签名 Provider
@@ -789,7 +806,7 @@ public struct ProtocolSignatureProviderSelector {
             return ClassicSignatureProvider()
         }
     }
-    
+
  /// 根据协议签名算法选择签名 Provider
  /// - Parameter algorithm: 协议签名算法（类型层面排除 P-256）
  /// - Returns: 签名 Provider
@@ -802,7 +819,7 @@ public struct ProtocolSignatureProviderSelector {
             return PQCSignatureProvider(backend: .auto)
         }
     }
-    
+
  /// 根据通用签名算法选择签名 Provider（兼容旧代码）
  /// - Parameter algorithm: 签名算法
  /// - Returns: 签名 Provider（P-256 返回 nil）

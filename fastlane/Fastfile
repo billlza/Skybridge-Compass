@@ -32,7 +32,7 @@ platform :mac do
     
     UI.message("使用签名身份: #{signing_identity}")
     
-    # 运行构建脚本
+    # 运行构建脚本（脚本内部会自动检测 macOS SDK 26+ 并启用 Apple PQC 编译条件）
     sh("cd .. && ./Scripts/build_with_widgets.sh")
     
     # 重新签名应用

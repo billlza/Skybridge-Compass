@@ -39,10 +39,15 @@ public protocol HandshakeTrustProvider: Sendable {
 struct DefaultHandshakeTrustProvider: HandshakeTrustProvider, Sendable {
     func trustedFingerprint(for deviceId: String) async -> String? {
         await MainActor.run {
-            TrustSyncService.shared.getTrustRecord(deviceId: deviceId)?.pubKeyFP
+            guard let fp = TrustSyncService.shared.getTrustRecord(deviceId: deviceId)?.pubKeyFP,
+                  !fp.isEmpty else {
+                // Bootstrap records may intentionally omit pinning until a stronger identity is available.
+                return nil
+            }
+            return fp
         }
     }
-    
+
     func trustedKEMPublicKeys(for deviceId: String) async -> [CryptoSuite: Data] {
         await MainActor.run {
             guard let record = TrustSyncService.shared.getTrustRecord(deviceId: deviceId),
@@ -56,7 +61,7 @@ struct DefaultHandshakeTrustProvider: HandshakeTrustProvider, Sendable {
             return result
         }
     }
-    
+
     func trustedSecureEnclavePublicKey(for deviceId: String) async -> Data? {
         await MainActor.run {
             guard let record = TrustSyncService.shared.getTrustRecord(deviceId: deviceId) else {
@@ -86,89 +91,89 @@ struct DefaultHandshakeTrustProvider: HandshakeTrustProvider, Sendable {
 /// - 调用方取消时必须 zeroize + emit event
 @available(macOS 14.0, iOS 17.0, *)
 public actor HandshakeDriver {
-    
+
  // MARK: - Properties
-    
+
  /// 当前状态
     private var state: HandshakeState = .idle
-    
+
  /// 传输层
     private let transport: any DiscoveryTransport
-    
+
  /// 加密 Provider
     private let cryptoProvider: any CryptoProvider
-    
+
  /// 签名 Provider（可选，旧版本使用）
     private let signatureProvider: (any CryptoProvider)?
-    
+
  /// 协议签名 Provider（ 5.3: sigA/sigB 专用）
  /// **Requirements: 7.2, 7.3**
     private let protocolSignatureProvider: (any ProtocolSignatureProvider)?
-    
+
  /// SE PoP 签名 Provider（ 5.3: seSigA/seSigB 专用）
  /// **Requirements: 7.2, 7.3**
     private let sePoPSignatureProvider: (any SePoPSignatureProvider)?
-    
+
  /// 超时时间
     private let timeout: Duration
-    
+
  /// 握手上下文
     private var context: HandshakeContext?
-    
+
  /// 等待中的 continuation（用于异步等待结果）
  /// P0: 双 resume 防护 - finishOnce 中 guard 后立刻置 nil
     private var pendingContinuation: CheckedContinuation<SessionKeys, Error>?
-    
+
  /// 超时任务
  /// P0: 双 resume 防护 - 成功/失败时取消
     private var timeoutTask: Task<Void, Never>?
-    
+
  /// 早到的结果（处理 MessageB 早到）
  /// P0: MessageB 早到防护 - continuation 建立前暂存结果
     private var pendingResult: Result<SessionKeys, Error>?
 
  /// MessageB 处理 epoch（防重入）
     private var messageBEpoch: UInt64 = 0
-    
+
  /// 身份密钥句柄（用于签名）
     private let identityKeyHandle: SigningKeyHandle?
 
  /// Secure Enclave PoP 签名句柄（可选）
     private let secureEnclaveKeyHandle: SigningKeyHandle?
-    
+
  /// 身份公钥
     private let identityPublicKey: Data
-    
+
  /// 对端标识（用于日志）
     private var currentPeer: PeerIdentifier?
-    
+
  /// 指标收集器 ( 13.2)
  /// Requirement 6.1, 6.2
     private let metricsCollector: HandshakeMetricsCollector
-    
+
  /// 最近一次握手的指标
     private var lastMetrics: HandshakeMetrics?
-    
+
  /// 信任提供方（用于 identity pinning）
     private let trustProvider: any HandshakeTrustProvider
-    
+
  /// 握手策略
     private let policy: HandshakePolicy
-    
+
     private let cryptoPolicy: CryptoPolicy
 
     private let offeredSuites: [CryptoSuite]?
-    
+
  /// sigA 使用的签名算法（ 9.1）
  ///
  /// 用于验证 selectedSuite 与 sigA 算法的兼容性。
  /// 如果为 nil，跳过兼容性验证（向后兼容旧版本）。
     private let sigAAlgorithm: SignatureAlgorithm?
-    
+
     private var pendingFinished: HandshakeFinished?
-    
+
  // MARK: - Initialization
-    
+
  /// 初始化握手驱动器（ 2 新版本）
  ///
  /// - Parameters:
@@ -212,15 +217,15 @@ public actor HandshakeDriver {
         trustProvider: (any HandshakeTrustProvider)? = nil
     ) throws {
  // 5.1: 初始化时 throw 校验
-        
+
  // 1. offeredSuites 非空
         guard !offeredSuites.isEmpty else {
             throw HandshakeError.emptyOfferedSuites
         }
-        
+
  // 2. offeredSuites 同质性验证
         try Self.validateSuiteHomogeneity(offeredSuites: offeredSuites, sigAAlgorithm: sigAAlgorithm)
-        
+
  // 3. provider.signatureAlgorithm == sigAAlgorithm
         guard protocolSignatureProvider.signatureAlgorithm == sigAAlgorithm else {
             throw HandshakeError.providerAlgorithmMismatch(
@@ -228,14 +233,14 @@ public actor HandshakeDriver {
                 algorithm: sigAAlgorithm.rawValue
             )
         }
-        
+
  // 4. keyHandle 类型与 algorithm 匹配验证
         try Self.validateKeyHandleCompatibility(keyHandle: protocolSigningKeyHandle, algorithm: sigAAlgorithm)
-        
+
  // 5. 5.2: 防止 CryptoProvider 被当签名 provider（编译期已保证，这是运行时双保险）
  // 注意：由于 ProtocolSignatureProvider 和 CryptoProvider 是不同协议，
  // 编译期已经阻止了这种情况，但我们仍然添加运行时检查作为防御性编程
-        
+
         self.transport = transport
         self.cryptoProvider = cryptoProvider
         self.identityKeyHandle = protocolSigningKeyHandle
@@ -253,7 +258,7 @@ public actor HandshakeDriver {
         self.metricsCollector = metricsCollector ?? HandshakeMetricsCollector()
         self.trustProvider = trustProvider ?? DefaultHandshakeTrustProvider()
     }
-    
+
  /// 验证 offeredSuites 同质性
  ///
  /// **Property 2: offeredSuites-sigAAlgorithm Homogeneity**
@@ -284,7 +289,7 @@ public actor HandshakeDriver {
             }
         }
     }
-    
+
  /// 验证 keyHandle 与 algorithm 的兼容性
  ///
  /// **Requirements: 7.4, 7.5**
@@ -326,7 +331,7 @@ public actor HandshakeDriver {
             break
         }
     }
-    
+
  /// 初始化握手驱动器（旧版本，已废弃）
  ///
  /// - Parameters:
@@ -370,9 +375,9 @@ public actor HandshakeDriver {
         self.metricsCollector = metricsCollector ?? HandshakeMetricsCollector()
         self.trustProvider = trustProvider ?? DefaultHandshakeTrustProvider()
     }
-    
+
  // MARK: - Public API
-    
+
  /// 发起握手（发起方调用）
  /// - Parameter peer: 对端标识
  /// - Returns: 会话密钥
@@ -381,12 +386,12 @@ public actor HandshakeDriver {
         guard case .idle = state else {
             throw HandshakeError.alreadyInProgress
         }
-        
+
         currentPeer = peer
-        
+
  // 13.2: 记录握手开始 (Requirement 6.1)
         metricsCollector.recordStart()
-        
+
  // 创建握手上下文
  // 5.3: 传递分流的签名 provider
         let peerKEMPublicKeys = await trustProvider.trustedKEMPublicKeys(for: peer.deviceId)
@@ -400,13 +405,13 @@ public actor HandshakeDriver {
             peerKEMPublicKeys: peerKEMPublicKeys
         )
         context = ctx
-        
+
         if policy.requireSecureEnclavePoP, secureEnclaveKeyHandle == nil {
             await ctx.zeroize()
             context = nil
             throw HandshakeError.failed(.secureEnclavePoPRequired)
         }
-        
+
  // 构建 MessageA
         let messageA: HandshakeMessageA
         do {
@@ -426,14 +431,16 @@ public actor HandshakeDriver {
             context = nil
             throw error
         }
-        
+
  // 更新状态
         state = .sendingMessageA
-        
+
  // 发送 MessageA（失败时必须 zeroize - 11.5）
         do {
             let padded = HandshakePadding.wrapIfEnabled(messageA.encoded, label: "MessageA")
-            try await transport.send(to: peer, data: TrafficPadding.wrapIfEnabled(padded, label: "HS/MessageA"))
+            // Handshake frames use HandshakePadding (SBP1). Do not apply TrafficPadding (SBP2) here.
+            // Receiver unwraps SBP1 only.
+            try await transport.send(to: peer, data: padded)
  // 13.2: 记录 MessageA 发送时间 (Requirement 6.1)
             metricsCollector.recordMessageASent()
         } catch {
@@ -442,12 +449,12 @@ public actor HandshakeDriver {
             await transitionToFailed(.transportError(error.localizedDescription))
             throw HandshakeError.failed(.transportError(error.localizedDescription))
         }
-        
+
  // 等待 MessageB（带超时 - 11.4）
         let clock = ContinuousClock()
         let deadline = clock.now + timeout
         state = .waitingMessageB(deadline: deadline)
-        
+
         return try await withCheckedThrowingContinuation { continuation in
  // P0 11.3: 检查是否有早到的结果
             if let result = self.pendingResult {
@@ -460,9 +467,9 @@ public actor HandshakeDriver {
                 }
                 return
             }
-            
+
             self.pendingContinuation = continuation
-            
+
  // P0 11.2 & 11.4: 设置可取消的超时任务
  // 使用 .sleep(until:tolerance:clock:) 实现超时
  // tolerance 设为 100ms，SLA < 1s（非实时系统）
@@ -481,7 +488,7 @@ public actor HandshakeDriver {
             }
         }
     }
-    
+
  /// 处理收到的消息
  /// - Parameters:
  /// - data: 消息数据
@@ -496,14 +503,22 @@ public actor HandshakeDriver {
                 return
             }
         }
+
+        // Rekey hardening:
+        // During in-band rekey (Classic -> PQC), ciphertext from the previous session can arrive interleaved
+        // with handshake frames. Those bytes must not fail the handshake parser (e.g. versionMismatch 1 vs 139).
+        let isHandshakeControl = (unwrapped.first == HandshakeConstants.protocolVersion)
+
         switch state {
         case .sendingMessageA:
+            if !isHandshakeControl { return }
             await handleMessageB(unwrapped)
         case .waitingMessageB:
+            if !isHandshakeControl { return }
             await handleMessageB(unwrapped)
         case .processingMessageB:
             SkyBridgeLogger.p2p.warning("Ignored handshake message during processingMessageB")
-            
+
         case .waitingFinished:
             if let finished = try? HandshakeFinished.decode(from: unwrapped) {
                 await handleFinished(finished, from: peer)
@@ -513,13 +528,13 @@ public actor HandshakeDriver {
         case .idle:
  // 作为响应方处理 MessageA
             await handleMessageA(unwrapped, from: peer)
-            
+
         default:
  // 忽略非预期消息
             SkyBridgeLogger.p2p.warning("Unexpected handshake message in state")
         }
     }
-    
+
  /// 取消握手 (P0 - 11.6)
  ///
  /// **关键**：
@@ -538,11 +553,11 @@ public actor HandshakeDriver {
                 await ctx.zeroize()
                 context = nil
             }
-            
+
  // 取消超时任务
             timeoutTask?.cancel()
             timeoutTask = nil
-            
+
  // 发射取消事件 ( 11.6)
             SecurityEventEmitter.emitDetached(SecurityEvent(
                 type: .handshakeFailed,
@@ -550,7 +565,15 @@ public actor HandshakeDriver {
                 message: "Handshake cancelled by caller",
                 context: [
                     "reason": "cancelled",
-                    "peer": peerId
+                    "peer": peerId,
+                    // Paper terminology alignment (see Docs + TranscriptBuilder):
+                    "policyInTranscript": "1",
+                    "transcriptBinding": "1",
+                    "downgradeResistance": "policy_gate+no_timeout_fallback+rate_limited",
+                    "policyRequirePQC": policy.requirePQC ? "1" : "0",
+                    "policyAllowClassicFallback": policy.allowClassicFallback ? "1" : "0",
+                    "policyMinimumTier": policy.minimumTier.rawValue,
+                    "policyRequireSecureEnclavePoP": policy.requireSecureEnclavePoP ? "1" : "0"
                 ]
             ))
 
@@ -561,36 +584,36 @@ public actor HandshakeDriver {
                 isFallback: isFallback,
                 failureReason: .cancelled
             )
-            
+
  // 使用 finishOnce 统一收敛 (P0 - 11.2)
             finishOnce(with: .failure(HandshakeError.failed(.cancelled)))
-            
+
             state = .failed(reason: .cancelled)
             return
         }
     }
-    
+
  /// 获取当前状态（用于测试）
     public func getCurrentState() -> HandshakeState {
         return state
     }
-    
+
  /// 获取最近一次握手的指标 ( 13.2)
  /// Requirement 6.1, 6.2
     public func getLastMetrics() -> HandshakeMetrics? {
         return lastMetrics
     }
-    
+
  // MARK: - Private Methods
-    
+
  /// 处理 MessageA（响应方）
     private func handleMessageA(_ data: Data, from peer: PeerIdentifier) async {
         currentPeer = peer
         metricsCollector.recordStart()
-        
+
         do {
             let messageA = try HandshakeMessageA.decode(from: data)
-            
+
  // 创建响应方上下文
  // 5.3: 传递分流的签名 provider
             let peerKEMPublicKeys = await trustProvider.trustedKEMPublicKeys(for: peer.deviceId)
@@ -604,9 +627,9 @@ public actor HandshakeDriver {
                 peerKEMPublicKeys: peerKEMPublicKeys
             )
             context = ctx
-            
+
             state = .processingMessageA
-            
+
  // 处理 MessageA
             do {
                 if policy.requireSecureEnclavePoP, secureEnclaveKeyHandle == nil {
@@ -628,7 +651,7 @@ public actor HandshakeDriver {
                 await handleHandshakeError(error, context: ctx)
                 return
             }
-            
+
  // 构建 MessageB
             state = .sendingMessageB
             let messageB: HandshakeMessageB
@@ -647,16 +670,16 @@ public actor HandshakeDriver {
                 await handleHandshakeError(error, context: ctx)
                 return
             }
-            
+
  // 发送 MessageB（失败时必须 zeroize - 11.5）
             do {
                 let padded = HandshakePadding.wrapIfEnabled(messageB.encoded, label: "MessageB")
-                try await transport.send(to: peer, data: TrafficPadding.wrapIfEnabled(padded, label: "HS/MessageB"))
+                try await transport.send(to: peer, data: padded)
             } catch {
                 await handleHandshakeError(HandshakeError.failed(.transportError(error.localizedDescription)), context: ctx)
                 return
             }
-            
+
  // 响应方在发送 MessageB 后完成
             let sessionKeys: SessionKeys
             do {
@@ -665,15 +688,15 @@ public actor HandshakeDriver {
                 await handleHandshakeError(error, context: ctx)
                 return
             }
-            
+
  // 清理敏感数据
             await ctx.zeroize()
             context = nil
-            
+
             let clock = ContinuousClock()
             let deadline = clock.now + timeout
             state = .waitingFinished(deadline: deadline, sessionKeys: sessionKeys, expectingFrom: .initiator)
-            
+
             timeoutTask?.cancel()
             timeoutTask = Task {
                 do {
@@ -686,34 +709,34 @@ public actor HandshakeDriver {
                 } catch {
                 }
             }
-            
+
             do {
                 let finished = try makeFinished(
                     direction: .responderToInitiator,
                     sessionKeys: sessionKeys
                 )
                 let padded = HandshakePadding.wrapIfEnabled(finished.encoded, label: "Finished")
-                try await transport.send(to: peer, data: TrafficPadding.wrapIfEnabled(padded, label: "HS/Finished"))
+                try await transport.send(to: peer, data: padded)
             } catch {
                 await transitionToFailed(.transportError(error.localizedDescription), negotiatedSuite: sessionKeys.negotiatedSuite)
                 return
             }
-            
+
             if let pending = pendingFinished {
                 pendingFinished = nil
                 await handleFinished(pending, from: peer)
             }
-            
+
         } catch {
             await transitionToFailed(.invalidMessageFormat(error.localizedDescription))
         }
     }
-    
+
  /// 处理 MessageB（发起方）
     private func handleMessageB(_ data: Data) async {
  // 13.2: 记录 MessageB 接收时间 (Requirement 6.1)
         metricsCollector.recordMessageBReceived()
-        
+
         guard let ctx = context else {
             await transitionToFailed(.invalidMessageFormat("No context available"))
             return
@@ -722,10 +745,10 @@ public actor HandshakeDriver {
         let epoch = messageBEpoch &+ 1
         messageBEpoch = epoch
         state = .processingMessageB(epoch: epoch)
-        
+
         do {
             let messageB = try HandshakeMessageB.decode(from: data)
-            
+
  // 9.1: 验证 selectedSuite 与 sigA 算法的兼容性
  // Requirements: 1.1, 1.2
             if let sigAAlg = sigAAlgorithm {
@@ -751,7 +774,7 @@ public actor HandshakeDriver {
                     return
                 }
             }
-            
+
             let pinnedDeviceId = currentPeer?.deviceId
             let postSignatureValidation: (@Sendable (Data) async throws -> Void)?
             if let pinnedDeviceId {
@@ -764,14 +787,14 @@ public actor HandshakeDriver {
             } else {
                 postSignatureValidation = nil
             }
-            
+
             let pinnedSEPublicKey: Data?
             if let pinnedDeviceId {
                 pinnedSEPublicKey = await trustProvider.trustedSecureEnclavePublicKey(for: pinnedDeviceId)
             } else {
                 pinnedSEPublicKey = nil
             }
-            
+
             let sessionKeys = try await ctx.processMessageB(
                 messageB,
                 policy: policy,
@@ -786,14 +809,14 @@ public actor HandshakeDriver {
                 SkyBridgeLogger.p2p.warning("Handshake state changed during MessageB processing")
                 return
             }
-            
+
             await ctx.zeroize()
             context = nil
-            
+
             let clock = ContinuousClock()
             let deadline = clock.now + timeout
             state = .waitingFinished(deadline: deadline, sessionKeys: sessionKeys, expectingFrom: .responder)
-            
+
             timeoutTask?.cancel()
             timeoutTask = Task {
                 do {
@@ -806,17 +829,17 @@ public actor HandshakeDriver {
                 } catch {
                 }
             }
-            
+
             if let pending = pendingFinished {
                 pendingFinished = nil
                 await handleFinished(pending, from: currentPeer ?? PeerIdentifier(deviceId: "unknown"))
             }
-            
+
         } catch {
             await handleHandshakeError(error, context: ctx)
         }
     }
-    
+
  /// 处理超时 ( 11.4)
  ///
  /// **关键**：
@@ -832,16 +855,16 @@ public actor HandshakeDriver {
         default:
             return
         }
-        
+
  // 13.2: 记录超时 (Requirement 6.2)
         metricsCollector.recordTimeout()
-        
+
  // 超时后必须 zeroize ( 11.4)
         if let ctx = context {
             await ctx.zeroize()
             context = nil
         }
-        
+
         await transitionToFailed(.timeout, negotiatedSuite: suite)
     }
 
@@ -864,7 +887,7 @@ public actor HandshakeDriver {
             baseKey = sessionKeys.sendKey
             label = "I2R"
         }
-        
+
         let macKey = HKDF<SHA256>.deriveKey(
             inputKeyMaterial: SymmetricKey(data: baseKey),
             salt: Data(),
@@ -874,7 +897,7 @@ public actor HandshakeDriver {
         let mac = HMAC<SHA256>.authenticationCode(for: sessionKeys.transcriptHash, using: macKey)
         return HandshakeFinished(direction: direction, mac: Data(mac))
     }
-    
+
     private func verifyFinished(
         _ finished: HandshakeFinished,
         sessionKeys: SessionKeys,
@@ -883,7 +906,7 @@ public actor HandshakeDriver {
         let expectedDirection: HandshakeFinished.Direction
         let baseKey: Data
         let label: String
-        
+
         switch expectingFrom {
         case .initiator:
             expectedDirection = .initiatorToResponder
@@ -894,10 +917,10 @@ public actor HandshakeDriver {
             baseKey = sessionKeys.receiveKey
             label = "R2I"
         }
-        
+
         guard finished.direction == expectedDirection else { return false }
         guard finished.mac.count == 32 else { return false }
-        
+
         let macKey = HKDF<SHA256>.deriveKey(
             inputKeyMaterial: SymmetricKey(data: baseKey),
             salt: Data(),
@@ -907,7 +930,7 @@ public actor HandshakeDriver {
         let expectedMac = Data(HMAC<SHA256>.authenticationCode(for: sessionKeys.transcriptHash, using: macKey))
         return constantTimeEqual(expectedMac, finished.mac)
     }
-    
+
     private nonisolated func constantTimeEqual(_ a: Data, _ b: Data) -> Bool {
         if a.count != b.count { return false }
         var diff: UInt8 = 0
@@ -927,20 +950,20 @@ public actor HandshakeDriver {
                 await transitionToFailed(.keyConfirmationFailed, negotiatedSuite: sessionKeys.negotiatedSuite)
                 return
             }
-            
+
             if expectingFrom == .responder {
                 do {
                     let clientFinished = try makeFinished(direction: .initiatorToResponder, sessionKeys: sessionKeys)
                     let padded = HandshakePadding.wrapIfEnabled(clientFinished.encoded, label: "Finished")
-                    try await transport.send(to: peer, data: TrafficPadding.wrapIfEnabled(padded, label: "HS/Finished"))
+                    try await transport.send(to: peer, data: padded)
                 } catch {
                     await transitionToFailed(.transportError(error.localizedDescription), negotiatedSuite: sessionKeys.negotiatedSuite)
                     return
                 }
             }
-            
+
             state = .established(sessionKeys: sessionKeys)
-            
+
             let negotiatedSuite = sessionKeys.negotiatedSuite
             let isFallback = cryptoProvider.activeSuite.isPQC && !negotiatedSuite.isPQC
             metricsCollector.recordFinish()
@@ -961,23 +984,35 @@ public actor HandshakeDriver {
                     "sessionId": sessionKeys.sessionId,
                     "peer": peer.deviceId,
                     "suite": negotiatedSuite.rawValue,
-                    "transcriptHash": sessionKeys.transcriptHash.map { String(format: "%02x", $0) }.joined()
+                    "transcriptHash": sessionKeys.transcriptHash.map { String(format: "%02x", $0) }.joined(),
+                    // Paper terminology alignment:
+                    // - policy-in-transcript: HandshakePolicy is deterministically encoded into transcriptHash
+                    // - transcript binding: sigB/Finished authenticate transcriptHash (covers selectedSuite + policy)
+                    // - downgrade resistance: policy gate + no timeout-triggered fallback + per-peer rate limiting
+                    "policyInTranscript": "1",
+                    "transcriptBinding": "1",
+                    "downgradeResistance": "policy_gate+no_timeout_fallback+rate_limited",
+                    "policyRequirePQC": policy.requirePQC ? "1" : "0",
+                    "policyAllowClassicFallback": policy.allowClassicFallback ? "1" : "0",
+                    "policyMinimumTier": policy.minimumTier.rawValue,
+                    "policyRequireSecureEnclavePoP": policy.requireSecureEnclavePoP ? "1" : "0"
                 ]
             ))
-            
+
             finishOnce(with: .success(sessionKeys))
-            
+
         default:
             SkyBridgeLogger.p2p.warning("Unexpected FINISHED in state")
         }
     }
-    
+
  /// 转换到失败状态 ( 11.5)
  ///
  /// **关键**：
  /// - 转换到 failed 状态
  /// - 发射 SecurityEvent
  /// - 使用 finishOnce 统一收敛
+ /// - 记录到 DiscoveryDiagnosticsService 以便用户可见
     private func transitionToFailed(_ reason: HandshakeFailureReason, negotiatedSuite: CryptoSuite? = nil) async {
         state = .failed(reason: reason)
 
@@ -995,10 +1030,19 @@ public actor HandshakeDriver {
             isFallback: isFallback,
             failureReason: reason
         )
-        
+
  // 使用 finishOnce 统一收敛 (P0 - 11.2)
         finishOnce(with: .failure(HandshakeError.failed(reason)))
-        
+
+ // 记录到诊断服务，以便在 UI 中展示用户可读的错误信息
+        let deviceId = currentPeer?.deviceId ?? "unknown"
+        Task { @MainActor in
+            DiscoveryDiagnosticsService.shared.recordHandshakeFailure(
+                deviceId: deviceId,
+                reason: reason
+            )
+        }
+
  // 发射事件 ( 11.5)
         SecurityEventEmitter.emitDetached(SecurityEvent(
             type: .handshakeFailed,
@@ -1006,11 +1050,19 @@ public actor HandshakeDriver {
             message: "Handshake failed: \(reason)",
             context: [
                 "reason": String(describing: reason),
-                "peer": currentPeer?.deviceId ?? "unknown"
+                "peer": currentPeer?.deviceId ?? "unknown",
+                // Paper terminology alignment (see Docs + TranscriptBuilder):
+                "policyInTranscript": "1",
+                "transcriptBinding": "1",
+                "downgradeResistance": "policy_gate+no_timeout_fallback+rate_limited",
+                "policyRequirePQC": policy.requirePQC ? "1" : "0",
+                "policyAllowClassicFallback": policy.allowClassicFallback ? "1" : "0",
+                "policyMinimumTier": policy.minimumTier.rawValue,
+                "policyRequireSecureEnclavePoP": policy.requireSecureEnclavePoP ? "1" : "0"
             ]
         ))
     }
-    
+
  /// 统一收敛成功/失败（防止双 resume）(P0 - 11.2)
  ///
  /// **关键设计**：
@@ -1022,7 +1074,7 @@ public actor HandshakeDriver {
  // 取消超时任务 (P0 - 11.2)
         timeoutTask?.cancel()
         timeoutTask = nil
-        
+
  // P0 - 11.2: 防止双 resume
         guard let continuation = pendingContinuation else {
  // P0 - 11.3: continuation 尚未建立，暂存结果
@@ -1031,7 +1083,7 @@ public actor HandshakeDriver {
         }
  // 立刻置 nil 防止双 resume
         pendingContinuation = nil
-        
+
         switch result {
         case .success(let keys):
             continuation.resume(returning: keys)
@@ -1039,7 +1091,7 @@ public actor HandshakeDriver {
             continuation.resume(throwing: error)
         }
     }
-    
+
  /// 签名数据
  ///
  /// **Requirements: 2.1, 2.2, 6.1**
@@ -1057,11 +1109,11 @@ public actor HandshakeDriver {
             let provider = await selectSignatureProvider()
             return try await provider.sign(data: data, using: identityKeyHandle)
         }
-        
+
  // 无签名能力
         throw HandshakeError.noSigningCapability
     }
-    
+
  /// 根据协商的 suite 选择签名 provider
  ///
  /// **Requirements: 6.1**
@@ -1083,11 +1135,11 @@ public actor HandshakeDriver {
                 return cryptoProvider
             }
         }
-        
+
  // Classic suite 或 fallback 使用经典签名
         return signatureProvider ?? cryptoProvider
     }
-    
+
  /// 检查当前是否使用 PQC 签名
  ///
  /// **Requirements: 6.1, 6.3**
@@ -1099,21 +1151,21 @@ public actor HandshakeDriver {
               suite.isPQC else {
             return false
         }
-        
+
  // 检查是否有可用的 PQC 签名 provider
         if let pqcProvider = signatureProvider,
            pqcProvider.tier == .liboqsPQC || pqcProvider.tier == .nativePQC {
             return true
         }
-        
+
         return cryptoProvider.tier == .liboqsPQC || cryptoProvider.tier == .nativePQC
     }
-    
+
     private func enforceIdentityPinning(deviceId: String, identityPublicKey: Data) async throws {
         guard let expectedFingerprint = await trustProvider.trustedFingerprint(for: deviceId) else {
             return
         }
-        
+
         let actualFingerprint = computeFingerprint(identityPublicKey)
         guard expectedFingerprint == actualFingerprint else {
             throw HandshakeError.failed(.identityMismatch(
@@ -1122,19 +1174,19 @@ public actor HandshakeDriver {
             ))
         }
     }
-    
+
     private func computeFingerprint(_ publicKey: Data) -> String {
         let digest = SHA256.hash(data: publicKey)
         return digest.map { String(format: "%02x", $0) }.joined()
     }
-    
+
     private func handleHandshakeError(_ error: Error, context: HandshakeContext? = nil) async {
         let negotiatedSuite = await context?.negotiatedSuite
         if let ctx = context {
             await ctx.zeroize()
             self.context = nil
         }
-        
+
         if let handshakeError = error as? HandshakeError {
             switch handshakeError {
             case .failed(let reason):
@@ -1144,7 +1196,7 @@ public actor HandshakeDriver {
             }
             return
         }
-        
+
         await transitionToFailed(.cryptoError(error.localizedDescription), negotiatedSuite: negotiatedSuite)
     }
 }

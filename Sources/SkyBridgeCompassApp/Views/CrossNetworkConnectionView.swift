@@ -6,19 +6,19 @@ import CoreImage.CIFilterBuiltins
 /// 2025年创新设计 - 比传统连接码更优雅
 @MainActor
 struct CrossNetworkConnectionView: View {
-    @StateObject private var connectionManager = CrossNetworkConnectionManager()
+    @StateObject private var connectionManager = CrossNetworkConnectionManager.shared
     @State private var selectedMethod: ConnectionMethod = .qrCode
     @State private var inputCode: String = ""
     @State private var showingScanner = false
     @State private var hoveredMethod: ConnectionMethod? = nil
-    
+
     var body: some View {
         VStack(spacing: 0) {
  // 顶部：连接方式选择器
             connectionMethodPicker
-            
+
             Divider()
-            
+
  // 主体：根据选择显示不同内容
             ScrollView {
                 VStack(spacing: 24) {
@@ -33,9 +33,9 @@ struct CrossNetworkConnectionView: View {
                 }
                 .padding(24)
             }
-            
+
             Divider()
-            
+
  // 底部：状态栏
             statusBar
         }
@@ -46,9 +46,9 @@ struct CrossNetworkConnectionView: View {
             try? await connectionManager.discoverCloudDevices()
         }
     }
-    
+
  // MARK: - 连接方式选择器
-    
+
     private var connectionMethodPicker: some View {
         HStack(spacing: 0) {
             ForEach(ConnectionMethod.allCases) { method in
@@ -118,9 +118,9 @@ struct CrossNetworkConnectionView: View {
             .accessibilityLabel(Text(method.title))
         }
     }
-    
+
  // MARK: - 1️⃣ 动态二维码模式
-    
+
     private var qrCodeSection: some View {
         VStack(spacing: 24) {
  // 说明卡片
@@ -130,25 +130,25 @@ struct CrossNetworkConnectionView: View {
                 description: LocalizationManager.shared.localizedString("connection.qrcode.longDescription"),
                 highlight: LocalizationManager.shared.localizedString("connection.qrcode.highlight")
             )
-            
+
             HStack(spacing: 32) {
  // 左侧：生成二维码
                 VStack(spacing: 16) {
                     Text("在此设备上")
                         .font(.title3)
                         .fontWeight(.semibold)
-                    
+
                     if let qrData = connectionManager.qrCodeData {
                         QRCodeView(data: qrData)
                             .frame(width: 250, height: 250)
                             .background(Color.white)
                             .cornerRadius(12)
                             .shadow(radius: 4)
-                        
+
                         Text(LocalizationManager.shared.localizedString("connection.qrcode.scanInstruction"))
                             .font(.caption)
                             .foregroundColor(.secondary)
-                        
+
                         if case .waiting(_) = connectionManager.connectionStatus {
                             HStack(spacing: 8) {
                                 ProgressView()
@@ -177,15 +177,15 @@ struct CrossNetworkConnectionView: View {
                         .buttonStyle(.plain)
                     }
                 }
-                
+
                 Divider()
-                
+
  // 右侧：扫描二维码
                 VStack(spacing: 16) {
                     Text(LocalizationManager.shared.localizedString("connection.device.other"))
                         .font(.title3)
                         .fontWeight(.semibold)
-                    
+
                     Button(action: {
                         showingScanner = true
                     }) {
@@ -193,10 +193,10 @@ struct CrossNetworkConnectionView: View {
                             Image(systemName: "camera.viewfinder")
                                 .font(.system(size: 60))
                                 .foregroundColor(.blue)
-                            
+
                             Text(LocalizationManager.shared.localizedString("connection.scanQR"))
                                 .font(.headline)
-                            
+
                             Text(LocalizationManager.shared.localizedString("connection.scanQR.description"))
                                 .font(.caption)
                                 .foregroundColor(.secondary)
@@ -209,7 +209,7 @@ struct CrossNetworkConnectionView: View {
                     .buttonStyle(.plain)
                 }
             }
-            
+
  // 特性说明
             HStack(spacing: 16) {
                 FeatureTag(icon: "lock.shield", text: LocalizationManager.shared.localizedString("connection.security.encrypted"))
@@ -219,16 +219,16 @@ struct CrossNetworkConnectionView: View {
             }
         }
     }
-    
+
  // 🆕 iCloud 设备链视图模型
     @StateObject private var deviceChainViewModel: CloudDeviceListViewModel
-    
+
     init(deviceChainViewModel: CloudDeviceListViewModel = CloudDeviceListViewModel()) {
         _deviceChainViewModel = StateObject(wrappedValue: deviceChainViewModel)
     }
-    
+
  // MARK: - 2️⃣ iCloud 设备链模式
-    
+
     private var cloudLinkSection: some View {
         VStack(spacing: 24) {
             InfoCard(
@@ -237,21 +237,21 @@ struct CrossNetworkConnectionView: View {
                 description: LocalizationManager.shared.localizedString("connection.icloud.description"),
                 highlight: LocalizationManager.shared.localizedString("connection.icloud.highlight")
             )
-            
+
             if deviceChainViewModel.authorizedDevices.isEmpty {
                 VStack(spacing: 16) {
                     Image(systemName: "icloud.slash")
                         .font(.system(size: 60))
                         .foregroundColor(.secondary)
-                    
+
                     Text(LocalizationManager.shared.localizedString("connection.icloud.noDevices"))
                         .font(.headline)
-                    
+
                     Text(LocalizationManager.shared.localizedString("connection.icloud.instruction"))
                         .font(.caption)
                         .foregroundColor(.secondary)
                         .multilineTextAlignment(.center)
-                    
+
                     Button(LocalizationManager.shared.localizedString("action.refresh")) {
                         Task {
                             await deviceChainViewModel.refreshDevices()
@@ -266,9 +266,9 @@ struct CrossNetworkConnectionView: View {
                     HStack {
                         Text(String(format: LocalizationManager.shared.localizedString("connection.availableDevices"), deviceChainViewModel.authorizedDevices.count))
                             .font(.headline)
-                        
+
                         Spacer()
-                        
+
                         if deviceChainViewModel.isLoading {
                             ProgressView()
                                 .controlSize(.small)
@@ -283,7 +283,7 @@ struct CrossNetworkConnectionView: View {
                             .buttonStyle(.borderless)
                         }
                     }
-                    
+
                     ForEach(deviceChainViewModel.authorizedDevices) { device in
                         CloudDeviceCard(device: mapToCloudDevice(device)) {
                             deviceChainViewModel.connectToDevice(device)
@@ -291,7 +291,7 @@ struct CrossNetworkConnectionView: View {
                     }
                 }
             }
-            
+
             HStack(spacing: 16) {
                 FeatureTag(icon: "icloud.fill", text: LocalizationManager.shared.localizedString("connection.icloud.sync"))
                 FeatureTag(icon: "applelogo", text: LocalizationManager.shared.localizedString("connection.apple.ecosystem"))
@@ -300,7 +300,7 @@ struct CrossNetworkConnectionView: View {
             }
         }
     }
-    
+
     private func mapToCloudDevice(_ device: iCloudDevice) -> CloudDevice {
         let type: CloudDevice.DeviceType
         if device.model.contains("iPhone") {
@@ -310,7 +310,7 @@ struct CrossNetworkConnectionView: View {
         } else {
             type = .mac
         }
-        
+
         let mappedCapabilities: [CloudDevice.DeviceCapability] = device.capabilities.compactMap { cap in
             switch cap {
             case .remoteDesktop: return .remoteDesktop
@@ -318,7 +318,7 @@ struct CrossNetworkConnectionView: View {
             default: return nil
             }
         }
-        
+
         return CloudDevice(
             id: device.id,
             name: device.name,
@@ -327,9 +327,9 @@ struct CrossNetworkConnectionView: View {
             capabilities: mappedCapabilities.isEmpty ? [.remoteDesktop] : mappedCapabilities
         )
     }
-    
+
  // MARK: - 3️⃣ 智能连接码模式
-    
+
     private var connectionCodeSection: some View {
         VStack(spacing: 24) {
             InfoCard(
@@ -338,14 +338,14 @@ struct CrossNetworkConnectionView: View {
                 description: LocalizationManager.shared.localizedString("connection.smartCode.fullDescription"),
                 highlight: LocalizationManager.shared.localizedString("connection.smartCode.highlight")
             )
-            
+
             HStack(spacing: 32) {
  // 左侧：生成连接码
                 VStack(spacing: 16) {
                     Text(LocalizationManager.shared.localizedString("connection.device.this"))
                         .font(.title3)
                         .fontWeight(.semibold)
-                    
+
                     if let code = connectionManager.connectionCode {
                         VStack(spacing: 12) {
                             Text(code)
@@ -356,11 +356,11 @@ struct CrossNetworkConnectionView: View {
                                 .padding(.vertical, 24)
                                 .background(Color.blue.opacity(0.1))
                                 .cornerRadius(16)
-                            
+
                             Text(LocalizationManager.shared.localizedString("connection.smartCode.shareInstruction"))
                                 .font(.caption)
                                 .foregroundColor(.secondary)
-                            
+
                             HStack(spacing: 16) {
                                 Button(action: {
                                     NSPasteboard.general.clearContents()
@@ -369,7 +369,7 @@ struct CrossNetworkConnectionView: View {
                                     Label(LocalizationManager.shared.localizedString("connection.copy"), systemImage: "doc.on.doc")
                                 }
                                 .buttonStyle(.bordered)
-                                
+
                                 Button(action: {
                                     Task {
                                         try? await connectionManager.generateConnectionCode()
@@ -379,7 +379,7 @@ struct CrossNetworkConnectionView: View {
                                 }
                                 .buttonStyle(.bordered)
                             }
-                            
+
                             if case .waiting = connectionManager.connectionStatus {
                                 HStack(spacing: 8) {
                                     ProgressView()
@@ -401,7 +401,7 @@ struct CrossNetworkConnectionView: View {
                                 Image(systemName: "number.square")
                                     .font(.system(size: 60))
                                     .foregroundColor(.blue)
-                                
+
                                 Text(LocalizationManager.shared.localizedString("connection.smartCode.generate"))
                                     .font(.headline)
                             }
@@ -412,15 +412,15 @@ struct CrossNetworkConnectionView: View {
                         .buttonStyle(.plain)
                     }
                 }
-                
+
                 Divider()
-                
+
  // 右侧：输入连接码
                 VStack(spacing: 16) {
                     Text(LocalizationManager.shared.localizedString("connection.device.other"))
                         .font(.title3)
                         .fontWeight(.semibold)
-                    
+
                     VStack(spacing: 12) {
                         TextField(LocalizationManager.shared.localizedString("connection.smartCode.placeholder"), text: $inputCode)
                             .font(.system(size: 32, weight: .semibold, design: .rounded))
@@ -435,7 +435,7 @@ struct CrossNetworkConnectionView: View {
  // 限制输入长度和字符
                                 inputCode = String(newValue.prefix(6).uppercased().filter { $0.isLetter || $0.isNumber })
                             }
-                        
+
                         Button(action: {
                             Task {
                                 try? await connectionManager.connectWithCode(inputCode)
@@ -456,7 +456,7 @@ struct CrossNetworkConnectionView: View {
                     .frame(height: 200)
                 }
             }
-            
+
             HStack(spacing: 16) {
                 FeatureTag(icon: "speedometer", text: LocalizationManager.shared.localizedString("connection.fast"))
                 FeatureTag(icon: "p.circle.fill", text: LocalizationManager.shared.localizedString("connection.p2p.priority"))
@@ -465,9 +465,9 @@ struct CrossNetworkConnectionView: View {
             }
         }
     }
-    
+
  // MARK: - 状态栏
-    
+
     private var statusBar: some View {
         HStack(spacing: 16) {
  // 状态指示
@@ -475,14 +475,14 @@ struct CrossNetworkConnectionView: View {
                 Circle()
                     .fill(statusColor)
                     .frame(width: 8, height: 8)
-                
+
                 Text(statusText)
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
-            
+
             Spacer()
-            
+
  // 操作按钮
             if case .connected = connectionManager.connectionStatus {
                 Button(LocalizationManager.shared.localizedString("action.disconnect")) {
@@ -495,7 +495,7 @@ struct CrossNetworkConnectionView: View {
         .padding(.vertical, 16)
         .background(Color(NSColor.controlBackgroundColor))
     }
-    
+
     private var statusColor: Color {
         switch connectionManager.connectionStatus {
         case .idle: return .gray
@@ -505,7 +505,7 @@ struct CrossNetworkConnectionView: View {
         case .failed: return .red
         }
     }
-    
+
     private var statusText: String {
         switch connectionManager.connectionStatus {
         case .idle: return LocalizationManager.shared.localizedString("status.ready")
@@ -533,26 +533,26 @@ struct InfoCard: View {
     let title: String
     let description: String
     let highlight: String
-    
+
     var body: some View {
         HStack(spacing: 16) {
             Image(systemName: icon)
                 .font(.system(size: 40))
                 .foregroundColor(.blue)
-            
+
             VStack(alignment: .leading, spacing: 6) {
                 Text(title)
                     .font(.headline)
-                
+
                 Text(description)
                     .font(.caption)
                     .foregroundColor(.secondary)
-                
+
                 Text(highlight)
                     .font(.caption)
                     .foregroundColor(.blue)
             }
-            
+
             Spacer()
         }
         .padding(16)
@@ -565,7 +565,7 @@ struct InfoCard: View {
 @MainActor
 struct QRCodeView: View {
     let data: Data
-    
+
     var body: some View {
         if let qrImage = generateQRCode(from: data) {
             Image(nsImage: qrImage)
@@ -578,20 +578,20 @@ struct QRCodeView: View {
                 .foregroundColor(.red)
         }
     }
-    
+
     private func generateQRCode(from data: Data) -> NSImage? {
         let context = CIContext()
         let filter = CIFilter.qrCodeGenerator()
         filter.setValue(data, forKey: "inputMessage")
         filter.setValue("H", forKey: "inputCorrectionLevel")
-        
+
         guard let ciImage = filter.outputImage else { return nil }
-        
+
         let transform = CGAffineTransform(scaleX: 10, y: 10)
         let scaledImage = ciImage.transformed(by: transform)
-        
+
         guard let cgImage = context.createCGImage(scaledImage, from: scaledImage.extent) else { return nil }
-        
+
         return NSImage(cgImage: cgImage, size: NSSize(width: 250, height: 250))
     }
 }
@@ -601,7 +601,7 @@ struct QRCodeView: View {
 struct FeatureTag: View {
     let icon: String
     let text: String
-    
+
     var body: some View {
         HStack(spacing: 6) {
             Image(systemName: icon)
@@ -621,7 +621,7 @@ struct FeatureTag: View {
 struct CloudDeviceCard: View {
     let device: CloudDevice
     let onConnect: () -> Void
-    
+
     var body: some View {
         HStack(spacing: 16) {
             Image(systemName: deviceIcon)
@@ -630,15 +630,15 @@ struct CloudDeviceCard: View {
                 .frame(width: 50, height: 50)
                 .background(Color.blue.opacity(0.1))
                 .cornerRadius(10)
-            
+
             VStack(alignment: .leading, spacing: 4) {
                 Text(device.name)
                     .font(.headline)
-                
+
                 Text(deviceTypeText)
                     .font(.caption)
                     .foregroundColor(.secondary)
-                
+
                 HStack(spacing: 8) {
                     ForEach(device.deviceCapabilities, id: \.self) { capability in
                         Text(capability.rawValue)
@@ -650,14 +650,14 @@ struct CloudDeviceCard: View {
                     }
                 }
             }
-            
+
             Spacer()
-            
+
             VStack(alignment: .trailing, spacing: 4) {
                 Text(timeAgoText)
                     .font(.caption2)
                     .foregroundColor(.secondary)
-                
+
                 Button(LocalizationManager.shared.localizedString("device.action.connect")) {
                     onConnect()
                 }
@@ -669,7 +669,7 @@ struct CloudDeviceCard: View {
         .background(Color(NSColor.controlBackgroundColor))
         .cornerRadius(12)
     }
-    
+
     private var deviceIcon: String {
         switch device.type {
         case .mac: return "desktopcomputer"
@@ -677,7 +677,7 @@ struct CloudDeviceCard: View {
         case .iPad: return "ipad"
         }
     }
-    
+
     private var deviceTypeText: String {
         switch device.type {
         case .mac: return LocalizationManager.shared.localizedString("connection.device.mac")
@@ -685,7 +685,7 @@ struct CloudDeviceCard: View {
         case .iPad: return LocalizationManager.shared.localizedString("connection.device.ipad")
         }
     }
-    
+
     private var timeAgoText: String {
         let interval = Date().timeIntervalSince(device.lastSeen)
         if interval < 60 {
@@ -703,9 +703,9 @@ enum ConnectionMethod: String, CaseIterable, Identifiable {
     case qrCode = "qrCode"
     case cloudLink = "cloudLink"
     case connectionCode = "connectionCode"
-    
+
     var id: String { rawValue }
-    
+
     @MainActor
     var title: String {
         switch self {
@@ -714,7 +714,7 @@ enum ConnectionMethod: String, CaseIterable, Identifiable {
         case .connectionCode: return LocalizationManager.shared.localizedString("connection.method.connectionCode.title")
         }
     }
-    
+
     @MainActor
     var subtitle: String {
         switch self {
@@ -723,7 +723,7 @@ enum ConnectionMethod: String, CaseIterable, Identifiable {
         case .connectionCode: return LocalizationManager.shared.localizedString("connection.method.connectionCode.subtitle")
         }
     }
-    
+
     var iconName: String {
         switch self {
         case .qrCode: return "qrcode.viewfinder"

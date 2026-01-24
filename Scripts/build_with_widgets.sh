@@ -56,6 +56,17 @@ cd "$PROJECT_ROOT"
 log_info "清理旧构建..."
 swift package clean 2>/dev/null || true
 
+log_info "检测 Apple PQC SDK 可用性（用于编译期开关 HAS_APPLE_PQC_SDK）..."
+SDK_VER="$(xcrun --sdk macosx --show-sdk-version 2>/dev/null || echo "")"
+SDK_MAJOR="$(echo "$SDK_VER" | awk -F. '{print $1}')"
+if [ -n "$SDK_MAJOR" ] && [ "$SDK_MAJOR" -ge 26 ]; then
+    export SKYBRIDGE_ENABLE_APPLE_PQC_SDK=1
+    log_info "✅ 检测到 macOS SDK ${SDK_VER}（>=26），启用 Apple PQC 编译条件"
+else
+    unset SKYBRIDGE_ENABLE_APPLE_PQC_SDK
+    log_info "ℹ️ 未检测到 macOS SDK 26+（当前: ${SDK_VER:-unknown}），禁用 Apple PQC 编译条件（运行仍可使用 classic/liboqs）"
+fi
+
 log_info "构建 Release 版本..."
 swift build -c release
 
@@ -183,11 +194,11 @@ if [ -z "$XCODE_PROJECT" ]; then
 else
     log_info "尝试构建 Widget Extension..."
     log_info "使用项目: $XCODE_PROJECT"
-    
+
     # 尝试构建 Widget Extension
     WIDGET_BUILD_DIR="$PROJECT_ROOT/.build/widget-release"
     mkdir -p "$WIDGET_BUILD_DIR"
-    
+
     # 使用 xcodebuild 构建 Widget Extension
     xcodebuild -project "$XCODE_PROJECT" \
         -target SkyBridgeCompassWidgetsExtension \
@@ -202,7 +213,7 @@ else
             log_info "Widget Extension 构建失败，跳过嵌入"
             log_info "Widget 功能将不可用，但主应用仍可正常使用"
         }
-    
+
     # 如果构建成功，嵌入 Widget Extension
     WIDGET_APPEX="$WIDGET_BUILD_DIR/$WIDGET_EXT_NAME.appex"
     if [ -d "$WIDGET_APPEX" ]; then

@@ -3,6 +3,8 @@ import Foundation
 import VideoToolbox
 import CoreVideo
 import OSLog
+import ImageIO
+import UniformTypeIdentifiers
 
 /// 使用 ScreenCaptureKit 捕获屏幕并通过 VideoToolbox 编码为 HEVC/H.264 的数据流
 /// - 中文说明：该组件专注于本地屏幕采集与硬件加速编码，外部通过回调接收压缩后的视频帧数据。
@@ -19,6 +21,7 @@ final class ScreenCaptureKitStreamer: NSObject {
     private var configuredKeyInterval: Int = 60
     private var preferredProfile: EncodingProfile = .auto
     private var lowLatencyEnabled: Bool = false
+    private var jpegMode: Bool = false
 
  /// 编码后视频帧的回调
  /// - 参数说明：data 为压缩后比特流；w/h 为视频维度；type 为帧类型（h264/hevc）
@@ -45,8 +48,12 @@ final class ScreenCaptureKitStreamer: NSObject {
         width = Int(preferredSize?.width ?? CGFloat(display.width))
         height = Int(preferredSize?.height ?? CGFloat(display.height))
 
- // 映射编码类型
-        codecType = (preferredCodec == .h264) ? kCMVideoCodecType_H264 : kCMVideoCodecType_HEVC
+        // iOS 端为简化解码：允许用 BGRA 模式输出 JPEG（避免 H.264/HEVC NAL 兼容问题）
+        jpegMode = (preferredCodec == .bgra)
+        if !jpegMode {
+            // 映射编码类型
+            codecType = (preferredCodec == .h264) ? kCMVideoCodecType_H264 : kCMVideoCodecType_HEVC
+        }
 
  // 创建输出对象与流配置
         let configuration = SCStreamConfiguration()
@@ -59,7 +66,9 @@ final class ScreenCaptureKitStreamer: NSObject {
         output = StreamOutput(owner: self)
         let filter = SCContentFilter(display: display, including: [], exceptingWindows: [])
         stream = SCStream(filter: filter, configuration: configuration, delegate: nil)
-        try setupCompressionSession(width: width, height: height, codec: codecType)
+        if !jpegMode {
+            try setupCompressionSession(width: width, height: height, codec: codecType)
+        }
 
  // 18.2: guard let 处理 stream output (Requirements 8.2, 8.3)
         guard let streamOutput = output else {
@@ -68,7 +77,11 @@ final class ScreenCaptureKitStreamer: NSObject {
         }
         try stream?.addStreamOutput(streamOutput, type: .screen, sampleHandlerQueue: .main)
         try await stream?.startCapture()
-        logger.info("🎥 ScreenCaptureKit 采集启动：\(self.width)x\(self.height), codec=\(preferredCodec == .h264 ? "H.264" : "HEVC")")
+        if jpegMode {
+            logger.info("🎥 ScreenCaptureKit 采集启动：\(self.width)x\(self.height), codec=JPEG(BGRA)")
+        } else {
+            logger.info("🎥 ScreenCaptureKit 采集启动：\(self.width)x\(self.height), codec=\(preferredCodec == .h264 ? "H.264" : "HEVC")")
+        }
     }
 
  /// 停止采集与编码
@@ -100,12 +113,12 @@ final class ScreenCaptureKitStreamer: NSObject {
             outputCallback: { refcon, sourceFrameRefCon, status, infoFlags, sampleBuffer in
  // 18.2: guard let 处理 refcon 回调 (Requirements 8.2, 8.3)
                 guard status == noErr, let sampleBuffer, let refcon else { return }
-                
+
  // 19.2: Type C defensive check for Unmanaged pointer (Requirements 9.1, 9.2)
  // The Unmanaged.fromOpaque conversion is inherently unsafe - we add defensive validation
  // Note: fromOpaque doesn't throw, so we rely on the guard above and validation below
                 let streamer = Unmanaged<ScreenCaptureKitStreamer>.fromOpaque(refcon).takeUnretainedValue()
-                
+
  // Validation: verify the object is still valid by reading its state
  // This is a best-effort check - if the object was deallocated, this will crash
  // in DEBUG (which is desired for early detection) rather than silently corrupting data
@@ -114,7 +127,7 @@ final class ScreenCaptureKitStreamer: NSObject {
  // In DEBUG, we want to crash early if the pointer is invalid
                 _ = streamer.started  // Force read to validate object
                 #endif
-                
+
                 streamer.handleCompressedSample(sampleBuffer)
             },
             refcon: UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque()),
@@ -135,15 +148,15 @@ final class ScreenCaptureKitStreamer: NSObject {
                 outputCallback: { refcon, sourceFrameRefCon, status, infoFlags, sampleBuffer in
  // 18.2: guard let 处理 refcon 回调 (Requirements 8.2, 8.3)
                     guard status == noErr, let sampleBuffer, let refcon else { return }
-                    
+
  // 19.2: Type C defensive check for Unmanaged pointer (Requirements 9.1, 9.2)
                     let streamer = Unmanaged<ScreenCaptureKitStreamer>.fromOpaque(refcon).takeUnretainedValue()
-                    
+
                     #if DEBUG
  // In DEBUG, force read to validate object
                     _ = streamer.started
                     #endif
-                    
+
                     streamer.handleCompressedSample(sampleBuffer)
                 },
                 refcon: UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque()),
@@ -178,11 +191,11 @@ final class ScreenCaptureKitStreamer: NSObject {
  // 低延迟模式：缩短关键帧间隔
         let keyInterval = lowLatencyEnabled ? max(10, min(configuredKeyInterval, 30)) : configuredKeyInterval
         VTSessionSetProperty(cs, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: NSNumber(value: keyInterval))
-        
+
  // 自适应码率控制（如果启用）
  // 注意：自适应码率将在启动后异步应用，避免在同步上下文中访问 MainActor 隔离的属性
  // 可以通过 NetworkQualityAdaptiveBitrateController 的回调在运行时动态调整码率
-        
+
         VTCompressionSessionPrepareToEncodeFrames(cs)
     }
 
@@ -198,6 +211,23 @@ final class ScreenCaptureKitStreamer: NSObject {
         onEncodedFrame?(data, width, height, type)
     }
 
+    private func handleJPEGPixelBuffer(_ pixelBuffer: CVPixelBuffer) {
+        var cgImage: CGImage?
+        let status = VTCreateCGImageFromCVPixelBuffer(pixelBuffer, options: nil, imageOut: &cgImage)
+        guard status == noErr, let cgImage else { return }
+
+        let mutable = NSMutableData()
+        guard let dest = CGImageDestinationCreateWithData(mutable, UTType.jpeg.identifier as CFString, 1, nil) else { return }
+        let props: [CFString: Any] = [
+            kCGImageDestinationLossyCompressionQuality: 0.65
+        ]
+        CGImageDestinationAddImage(dest, cgImage, props as CFDictionary)
+        guard CGImageDestinationFinalize(dest) else { return }
+
+        // 复用 onEncodedFrame：frameType 用 .bgra 标记“非 H26x”，上层可按 magic 判断是否 JPEG
+        onEncodedFrame?(mutable as Data, CVPixelBufferGetWidth(pixelBuffer), CVPixelBufferGetHeight(pixelBuffer), .bgra)
+    }
+
  /// SCStream 输出桥接
  /// 18.2: guard let 处理 stream output (Requirements 8.2, 8.3)
     private final class StreamOutput: NSObject, SCStreamOutput {
@@ -207,9 +237,16 @@ final class ScreenCaptureKitStreamer: NSObject {
         func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of outputType: SCStreamOutputType) {
  // guard let 处理 owner 和 compressionSession
             guard let owner = owner else { return }
-            guard let cs = owner.compressionSession else { return }
  // guard let 处理 pixelBuffer (外部输入)
             guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+
+            // JPEG 模式：直接把 pixelBuffer 转成 JPEG，回调出去
+            if owner.jpegMode {
+                owner.handleJPEGPixelBuffer(pixelBuffer)
+                return
+            }
+
+            guard let cs = owner.compressionSession else { return }
             var flags = VTEncodeInfoFlags()
             let pts = CMTime(value: CMTimeValue(Date().timeIntervalSince1970 * 1000), timescale: 1000)
             VTCompressionSessionEncodeFrame(cs, imageBuffer: pixelBuffer, presentationTimeStamp: pts, duration: CMTime.zero, frameProperties: nil, sourceFrameRefcon: nil, infoFlagsOut: &flags)

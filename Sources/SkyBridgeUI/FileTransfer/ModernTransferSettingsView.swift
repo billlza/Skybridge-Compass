@@ -6,7 +6,7 @@ import SkyBridgeCore
 struct ModernTransferSettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var transferManager: FileTransferManager
-    
+
     @State private var maxConcurrentTransfers = 3
     @State private var chunkSize = 1024 * 1024 // 1MB
     @State private var enableCompression = true
@@ -20,7 +20,7 @@ struct ModernTransferSettingsView: View {
     @State private var enableAutoDiscovery = true
     @State private var discoveryPort = 8080
     @State private var enableQRCodeSharing = true
-    
+
     var body: some View {
         NavigationView {
             Form {
@@ -31,7 +31,7 @@ struct ModernTransferSettingsView: View {
                         Text("\(maxConcurrentTransfers)")
                             .foregroundColor(.secondary)
                     }
-                    
+
                     HStack {
                         Text("数据块大小")
                         Spacer()
@@ -39,11 +39,11 @@ struct ModernTransferSettingsView: View {
                             .foregroundColor(.secondary)
                     }
                 }
-                
+
                 Section("网络设置") {
                     Toggle("启用数据压缩", isOn: $enableCompression)
                     Toggle("端到端加密", isOn: $enableEncryption)
-                    
+
                     HStack {
                         Text("网络超时")
                         Spacer()
@@ -51,13 +51,13 @@ struct ModernTransferSettingsView: View {
                             .foregroundColor(.secondary)
                     }
                 }
-                
+
                 Section("操作") {
                     Button("重置为默认设置") {
                         resetToDefaults()
                     }
                     .foregroundColor(.orange)
-                    
+
                     Button("清除传输历史") {
                         clearTransferHistory()
                     }
@@ -79,9 +79,9 @@ struct ModernTransferSettingsView: View {
             loadCurrentSettings()
         }
     }
-    
+
  // MARK: - 私有方法
-    
+
  /// 加载当前设置
     private func loadCurrentSettings() {
  // 从UserDefaults加载设置
@@ -92,7 +92,7 @@ struct ModernTransferSettingsView: View {
         enableEncryption = defaults.bool(forKey: "enableEncryption")
         networkTimeout = defaults.double(forKey: "networkTimeout") > 0 ? defaults.double(forKey: "networkTimeout") : 30
     }
-    
+
  /// 保存设置
     private func saveSettings() {
  // 保存设置到UserDefaults
@@ -102,7 +102,7 @@ struct ModernTransferSettingsView: View {
         defaults.set(enableCompression, forKey: "enableCompression")
         defaults.set(enableEncryption, forKey: "enableEncryption")
         defaults.set(networkTimeout, forKey: "networkTimeout")
-        
+
  // 同步到运行时传输管理器
         transferManager.updateSettings(
             maxConcurrentTransfers: maxConcurrentTransfers,
@@ -111,7 +111,7 @@ struct ModernTransferSettingsView: View {
             enableEncryption: enableEncryption
         )
     }
-    
+
  /// 重置为默认设置
     private func resetToDefaults() {
         maxConcurrentTransfers = 3
@@ -128,7 +128,7 @@ struct ModernTransferSettingsView: View {
         discoveryPort = 8080
         enableQRCodeSharing = true
     }
-    
+
  /// 导出设置
     private func exportSettings() {
  // 使用 NSSavePanel 导出设置为 JSON 文件
@@ -166,7 +166,7 @@ struct ModernTransferSettingsView: View {
             }
         }
     }
-    
+
  /// 导入设置
     private func importSettings() {
  // 使用 NSOpenPanel 导入 JSON 设置文件
@@ -205,12 +205,12 @@ struct ModernTransferSettingsView: View {
             }
         }
     }
-    
+
  /// 清除传输历史
     private func clearTransferHistory() {
         transferManager.clearHistory()
     }
-    
+
  /// 格式化字节数
     private func formatBytes(_ bytes: Int) -> String {
         let formatter = ByteCountFormatter()
@@ -226,7 +226,7 @@ enum TransferQuality: String, CaseIterable, Codable {
     case fast = "fast"
     case balanced = "balanced"
     case reliable = "reliable"
-    
+
     var displayName: String {
         switch self {
         case .fast:
@@ -237,7 +237,7 @@ enum TransferQuality: String, CaseIterable, Codable {
             return "可靠"
         }
     }
-    
+
     var description: String {
         switch self {
         case .fast:
@@ -269,6 +269,6 @@ private struct SettingsPayload: Codable {
 
 struct ModernTransferSettingsView_Previews: PreviewProvider {
     static var previews: some View {
-        ModernTransferSettingsView(transferManager: FileTransferManager())
+        ModernTransferSettingsView(transferManager: FileTransferManager.shared)
     }
 }

@@ -9,71 +9,71 @@ import Foundation
 public enum SecurityEventType: String, Sendable, CaseIterable {
  /// Batch scan exceeded file count/bytes/time limits
     case limitExceeded = "limit_exceeded"
-    
+
  /// Agent connection closed due to rate limiting
     case rateLimitDisconnect = "rate_limit_disconnect"
-    
+
  /// Signature database using non-production key
     case signatureDBKeyInvalid = "signature_db_key_invalid"
-    
+
  /// Pairing SAS confirmation failed
     case pairingSASMismatch = "pairing_sas_mismatch"
-    
+
  /// Authentication token format invalid or empty
     case authTokenInvalid = "auth_token_invalid"
-    
+
  /// Regex pattern rejected due to security rules
     case regexPatternRejected = "regex_pattern_rejected"
-    
+
  /// Symbolic link resolution failed
     case symlinkResolutionFailed = "symlink_resolution_failed"
-    
+
  /// Archive extraction aborted due to limits
     case archiveExtractionAborted = "archive_extraction_aborted"
-    
+
  /// File read operation timed out
     case fileReadTimeout = "file_read_timeout"
-    
+
  /// Scan detail file corrupted or mismatched
     case detailFileCorrupted = "detail_file_corrupted"
-    
+
  /// Crypto provider selected (PQC architecture)
     case cryptoProviderSelected = "crypto_provider_selected"
-    
+
  /// P2P handshake failed
     case handshakeFailed = "handshake_failed"
-    
+
  /// P2P handshake established (explicit key confirmation complete)
     case handshakeEstablished = "handshake_established"
-    
+
  /// Crypto downgrade occurred ( 14.3)
  /// Requirement 14.3: classic fallback 时发射此事件
     case cryptoDowngrade = "crypto_downgrade"
-    
+
  /// Secure Enclave 签名验证失败
     case secureEnclaveSignatureInvalid = "secure_enclave_signature_invalid"
-    
+
  // MARK: - Signature Mechanism Alignment Events ( 3.1)
  // Requirements: 1.3
-    
+
  /// 签名 Provider 已选择（记录选择的签名算法）
     case signatureProviderSelected = "signature_provider_selected"
-    
+
  /// Legacy 签名已接受（向后兼容期间接受 P-256 ECDSA）
     case legacySignatureAccepted = "legacy_signature_accepted"
-    
+
  /// 签名算法不匹配（selectedSuite 与 sigA 算法不兼容）
     case signatureAlgorithmMismatch = "signature_algorithm_mismatch"
-    
+
  /// 握手回退（PQC 失败后回退到 Classic）
     case handshakeFallback = "handshake_fallback"
-    
+
  /// 密钥迁移完成（P-256 身份密钥迁移到 SE PoP 角色）
     case keyMigrationCompleted = "key_migration_completed"
-    
+
  /// 签名验证失败（ 7.1）
     case signatureVerificationFailed = "signature_verification_failed"
-    
+
  /// SE PoP 不一致状态检测（iOS Handshake Entry Alignment）
  /// handle 和 publicKey 不成对时发射
     case sePoPInconsistentStateDetected = "se_pop_inconsistent_state_detected"
@@ -85,7 +85,7 @@ public enum SecurityEventSeverity: String, Sendable, Comparable {
     case warning
     case high
     case critical
-    
+
  /// Numeric value for comparison (higher = more severe)
     private var numericValue: Int {
         switch self {
@@ -95,7 +95,7 @@ public enum SecurityEventSeverity: String, Sendable, Comparable {
         case .critical: return 3
         }
     }
-    
+
     public static func < (lhs: SecurityEventSeverity, rhs: SecurityEventSeverity) -> Bool {
         lhs.numericValue < rhs.numericValue
     }
@@ -105,26 +105,26 @@ public enum SecurityEventSeverity: String, Sendable, Comparable {
 public struct SecurityEvent: Sendable {
  /// The type of security event
     public let type: SecurityEventType
-    
+
  /// Severity level of the event
     public let severity: SecurityEventSeverity
-    
+
  /// Human-readable message describing the event
     public let message: String
-    
+
  /// Additional context as key-value pairs
     public let context: [String: String]
-    
+
  /// When the event occurred
     public let timestamp: Date
-    
+
  /// Unique identifier for this event instance
     public let id: UUID
-    
+
  /// Whether this is a meta-event (e.g., queue overflow notification)
  /// Meta-events bypass the normal queue to prevent recursion
     internal let isMetaEvent: Bool
-    
+
     public init(
         type: SecurityEventType,
         severity: SecurityEventSeverity,
@@ -193,7 +193,7 @@ extension SecurityEvent {
             context: context
         )
     }
-    
+
  /// Create a limit exceeded event
     public static func limitExceeded(
         limitType: String,
@@ -212,7 +212,7 @@ extension SecurityEvent {
             context: ctx
         )
     }
-    
+
  /// Create a rate limit disconnect event
     public static func rateLimitDisconnect(
         connectionId: String,
@@ -230,7 +230,7 @@ extension SecurityEvent {
             ]
         )
     }
-    
+
  /// Create a regex pattern rejected event
     public static func regexPatternRejected(
         patternId: String,
@@ -246,7 +246,7 @@ extension SecurityEvent {
             ]
         )
     }
-    
+
  /// Create an auth token invalid event
     public static func authTokenInvalid(
         reason: String,
@@ -263,7 +263,7 @@ extension SecurityEvent {
             context: ctx
         )
     }
-    
+
  /// Create a symlink resolution failed event
     public static func symlinkResolutionFailed(
         path: String,
@@ -279,7 +279,7 @@ extension SecurityEvent {
             ]
         )
     }
-    
+
  /// Create an archive extraction aborted event
     public static func archiveExtractionAborted(
         archivePath: String,
@@ -295,7 +295,7 @@ extension SecurityEvent {
             ]
         )
     }
-    
+
  /// Create a file read timeout event
     public static func fileReadTimeout(
         path: String,
@@ -311,7 +311,7 @@ extension SecurityEvent {
             ]
         )
     }
-    
+
  /// Create a detail file corrupted event
     public static func detailFileCorrupted(
         id: UUID,
@@ -327,7 +327,7 @@ extension SecurityEvent {
             ]
         )
     }
-    
+
  /// Create a signature DB key invalid event
     public static func signatureDBKeyInvalid(
         reason: String
@@ -339,7 +339,7 @@ extension SecurityEvent {
             context: ["reason": reason]
         )
     }
-    
+
  /// Create a pairing SAS mismatch event
     public static func pairingSASMismatch(
         deviceId: String? = nil
@@ -355,7 +355,7 @@ extension SecurityEvent {
             context: ctx
         )
     }
-    
+
  /// Create a meta-event for queue overflow (internal use)
     internal static func queueOverflow(
         queueType: String,
@@ -372,9 +372,9 @@ extension SecurityEvent {
             isMetaEvent: true
         )
     }
-    
+
  // MARK: - Signature Mechanism Alignment Events ( 3.1)
-    
+
  /// Create a signature provider selected event
  /// - Parameters:
  /// - algorithm: The selected signature algorithm
@@ -402,7 +402,7 @@ extension SecurityEvent {
             context: ctx
         )
     }
-    
+
  /// Create a legacy signature accepted event
  /// - Parameters:
  /// - expectedAlgorithm: The expected signature algorithm
@@ -424,7 +424,7 @@ extension SecurityEvent {
             ]
         )
     }
-    
+
  /// Create a legacy signature accepted event with precondition context
  /// - Parameters:
  /// - preconditionType: The type of precondition that was satisfied
@@ -452,7 +452,7 @@ extension SecurityEvent {
             context: ctx
         )
     }
-    
+
  /// Create a signature algorithm mismatch event
  /// - Parameters:
  /// - selectedSuite: The suite selected by responder
@@ -477,7 +477,7 @@ extension SecurityEvent {
             context: ctx
         )
     }
-    
+
  /// Create a crypto downgrade event
  /// - Parameters:
  /// - fromSuite: The original suite attempted
@@ -515,7 +515,7 @@ extension SecurityEvent {
     ) -> SecurityEvent {
         cryptoDowngrade(fromSuite: fromSuite, toSuite: toSuite, reason: reason, deviceId: deviceId)
     }
-    
+
  /// Create a crypto downgrade event with full context
  /// - Parameters:
  /// - reason: Reason for fallback
@@ -537,6 +537,12 @@ extension SecurityEvent {
             severity: .warning,
             message: "Crypto downgrade: \(reason)",
             context: [
+                // Paper terminology alignment:
+                // - downgrade resistance: policy gate + no timeout-triggered fallback + per-peer rate limiting
+                // - policy-in-transcript / transcript binding are enforced by TranscriptBuilder+HandshakeDriver
+                "downgradeResistance": "policy_gate+no_timeout_fallback+rate_limited",
+                "policyInTranscript": "1",
+                "transcriptBinding": "1",
                 "reason": reason,
                 "deviceId": deviceId,
                 "cooldownSeconds": String(cooldownSeconds),
@@ -562,7 +568,7 @@ extension SecurityEvent {
             toStrategy: toStrategy
         )
     }
-    
+
  /// Create a key migration completed event
  /// - Parameters:
  /// - fromTag: The original key tag
@@ -596,7 +602,7 @@ internal struct StoredSecurityEvent: Codable, Sendable {
     let message: String
     let context: [String: String]
     let timestamp: Date
-    
+
     init(from event: SecurityEvent) {
         self.id = event.id.uuidString
         self.type = event.type.rawValue
@@ -605,7 +611,7 @@ internal struct StoredSecurityEvent: Codable, Sendable {
         self.context = event.context
         self.timestamp = event.timestamp
     }
-    
+
     func toSecurityEvent() -> SecurityEvent? {
         guard let type = SecurityEventType(rawValue: type),
               let severity = SecurityEventSeverity(rawValue: severity),
@@ -627,7 +633,7 @@ internal struct StoredSecurityEvent: Codable, Sendable {
 internal struct SecurityEventLog: Codable, Sendable {
     var events: [StoredSecurityEvent]
     var lastPurge: Date
-    
+
     init(events: [StoredSecurityEvent] = [], lastPurge: Date = Date()) {
         self.events = events
         self.lastPurge = lastPurge

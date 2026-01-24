@@ -1,5 +1,70 @@
-// swift-tools-version: 6.2.1
+// swift-tools-version: 6.2
+import Foundation
 import PackageDescription
+
+// Build-time gate for Apple CryptoKit PQC types (iOS 26+/macOS 26+).
+//
+// Why: Swift does not provide a compile-time "SDK has PQC types" check for structs like MLKEM/MLDSA.
+// If we define HAS_APPLE_PQC_SDK while compiling against an older SDK, the build will fail.
+//
+// Therefore we enable it only when the build environment explicitly opts in (release pipeline / Xcode 26).
+func shouldEnableApplePQCSDK() -> Bool {
+    if ProcessInfo.processInfo.environment["SKYBRIDGE_ENABLE_APPLE_PQC_SDK"] == "1" { return true }
+    // Auto-enable when building with a 26.x SDK (Xcode 26 / iOS 26 / macOS 26).
+    //
+    // Notes:
+    // - In Xcode builds, SDKROOT is sometimes an unversioned path like ".../MacOSX.sdk".
+    // - But the build environment often exposes a target triple / SDK name that includes "26.0".
+    //
+    // We therefore look at multiple hints, and enable when ANY suggests a 26.x SDK.
+    let hints: [String] = [
+        ProcessInfo.processInfo.environment["SDKROOT"] ?? "",
+        ProcessInfo.processInfo.environment["SDK_NAME"] ?? "",
+        ProcessInfo.processInfo.environment["PLATFORM_NAME"] ?? "",
+        ProcessInfo.processInfo.environment["TARGET_TRIPLE"] ?? "",
+        ProcessInfo.processInfo.environment["SWIFT_TARGET_TRIPLE"] ?? "",
+        ProcessInfo.processInfo.environment["LLVM_TARGET_TRIPLE"] ?? ""
+    ]
+    let joined = hints.joined(separator: " ").lowercased()
+    if joined.contains("macosx26") { return true }
+    if joined.contains("iphoneos26") { return true }
+    if joined.contains("iphonesimulator26") { return true }
+
+    // Final fallback: ask Xcode which SDKs are installed.
+    // This works even when SDKROOT/SDK_NAME are not exported (common in some SwiftPM/Xcode invocation paths).
+    //
+    // Safety: defining HAS_APPLE_PQC_SDK is safe as long as the SDK *has* the PQC types; runtime gating is
+    // still done via `#available(iOS 26, macOS 26, *)`.
+    func sdkMajorVersion(_ sdk: String) -> Int? {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+        proc.arguments = ["--sdk", sdk, "--show-sdk-version"]
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = Pipe()
+        do {
+            try proc.run()
+        } catch {
+            return nil
+        }
+        proc.waitUntilExit()
+        guard proc.terminationStatus == 0 else { return nil }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        guard let raw = String(data: data, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              let first = raw.split(separator: ".").first,
+              let major = Int(first) else { return nil }
+        return major
+    }
+
+    if let major = sdkMajorVersion("macosx"), major >= 26 { return true }
+    if let major = sdkMajorVersion("iphoneos"), major >= 26 { return true }
+    if let major = sdkMajorVersion("iphonesimulator"), major >= 26 { return true }
+
+    return false
+}
+
+let enableApplePQCSDK: Bool = shouldEnableApplePQCSDK()
 
 let package = Package(
     name: "SkyBridgeCompassApp",
@@ -23,10 +88,12 @@ let package = Package(
         .library(name: "SkyBridgeWidgetShared", targets: ["SkyBridgeWidgetShared"])
     ],
     dependencies: [
-        .package(url: "https://github.com/apple/swift-collections", from: "1.0.5"),
-        .package(url: "https://github.com/apple/swift-nio-ssh", from: "0.5.0"),
+        .package(url: "https://github.com/apple/swift-collections", from: "1.3.0"),
+        .package(url: "https://github.com/apple/swift-nio-ssh", from: "0.12.0"),
         // ASN.1/DER 解析库：用于 PEM/PKCS#8 私钥解析（Ed25519）
-        .package(url: "https://github.com/apple/swift-asn1", from: "0.9.0")
+        .package(url: "https://github.com/apple/swift-asn1", from: "1.5.1"),
+        // WebRTC (ICE / DataChannel) - 跨网连接基础设施（走 STUN/TURN）
+        .package(url: "https://github.com/stasel/WebRTC", from: "114.0.0")
     ],
     targets: [
         .binaryTarget(
@@ -52,7 +119,7 @@ let package = Package(
             publicHeadersPath: "include",
             cxxSettings: [
                 // 中文注释：启用 C++17 支持，确保 RAII 与标准库特性可用
-                .unsafeFlags(["-std=c++17"])
+                .unsafeFlags(["-std=c++20"])
             ]
         ),
         .target(
@@ -84,6 +151,7 @@ let package = Package(
                 .product(name: "OrderedCollections", package: "swift-collections"),
                 .product(name: "NIOSSH", package: "swift-nio-ssh"),
                 .product(name: "SwiftASN1", package: "swift-asn1"),
+                .product(name: "WebRTC", package: "WebRTC"),
                 "liboqs",
                 "OQSRAII",
                 "SkyBridgeWidgetShared"
@@ -104,16 +172,17 @@ let package = Package(
                 .process("Weather/HazeParticleShaders.metal")
                 // 注意：PerformanceOptimization.md 已在 exclude 中，不需要在 resources 中处理
             ],
-            swiftSettings: [
+            swiftSettings: ([
                 // Apple Silicon特定优化
                 .define("APPLE_SILICON_OPTIMIZED"),
                 .define("ARM64_NATIVE"),
                 // Swift 6.2 严格并发控制
                 .enableUpcomingFeature("StrictConcurrency"),
+                // Suppress deprecated declarations coming from imported Objective‑C headers inside WebRTC.xcframework
+                // (e.g., RTCNSGLVideoView uses NSOpenGLView/NSOpenGLPixelFormat which are deprecated on macOS).
+                .unsafeFlags(["-Xcc", "-Wno-deprecated-declarations"], .when(platforms: [.macOS])),
                 .define("OQS_ENABLED"),
-                // Apple PQC SDK 编译标志由 Xcode Build Settings / xcconfig / scheme 注入：
-                // OTHER_SWIFT_FLAGS = -DHAS_APPLE_PQC_SDK
-            ],
+            ] + (enableApplePQCSDK ? [.define("HAS_APPLE_PQC_SDK")] : [])),
             linkerSettings: [
                 .linkedFramework("Metal"),
                 .linkedFramework("MetalKit"),
@@ -153,7 +222,10 @@ let package = Package(
                 .define("APPLE_SILICON_OPTIMIZED"),
                 .define("ARM64_NATIVE"),
                 // Swift 6.2 严格并发控制
-                .enableUpcomingFeature("StrictConcurrency")
+                .enableUpcomingFeature("StrictConcurrency"),
+                // Suppress deprecated declarations coming from imported Objective‑C headers inside WebRTC.xcframework
+                // (e.g., RTCNSGLVideoView uses NSOpenGLView/NSOpenGLPixelFormat which are deprecated on macOS).
+                .unsafeFlags(["-Xcc", "-Wno-deprecated-declarations"], .when(platforms: [.macOS])),
             ],
             linkerSettings: [
                 .linkedFramework("SwiftUI")
@@ -169,7 +241,10 @@ let package = Package(
             path: "Tests/SkyBridgeCoreTests",
             exclude: [
             ],
-            swiftSettings: []
+            swiftSettings: (enableApplePQCSDK ? [
+                // 与 SkyBridgeCore 保持一致：否则测试中的 `#if HAS_APPLE_PQC_SDK` 分支会与被测模块不一致
+                .define("HAS_APPLE_PQC_SDK")
+            ] : [])
         ),
         .testTarget(
             name: "SkyBridgeBenchTests",
@@ -179,7 +254,9 @@ let package = Package(
                 "NoiseKit"
             ],
             path: "Tests/SkyBridgeBenchTests",
-            swiftSettings: []
+            swiftSettings: (enableApplePQCSDK ? [
+                .define("HAS_APPLE_PQC_SDK")
+            ] : [])
         ),
         // 小组件共享模型测试
         .testTarget(
@@ -211,7 +288,10 @@ let package = Package(
             swiftSettings: [
                 // Apple Silicon特定优化
                 .enableUpcomingFeature("StrictConcurrency"),
-                .define("APPLE_SILICON_OPTIMIZED")
+                .define("APPLE_SILICON_OPTIMIZED"),
+                // Suppress deprecated declarations coming from imported Objective‑C headers inside WebRTC.xcframework
+                // (e.g., RTCNSGLVideoView uses NSOpenGLView/NSOpenGLPixelFormat which are deprecated on macOS).
+                .unsafeFlags(["-Xcc", "-Wno-deprecated-declarations"], .when(platforms: [.macOS])),
             ],
             linkerSettings: [
                 .linkedFramework("AppIntents"),

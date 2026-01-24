@@ -118,6 +118,29 @@
 "discovery.searchPlaceholder" = "搜索设备...";
 "discovery.noMatch" = "未找到匹配设备";
 "discovery.adjustSearch" = "尝试调整搜索关键词";
+"discovery.diagnostics.title" = "发现诊断";
+"discovery.diagnostics.permission" = "权限与配置";
+"discovery.diagnostics.network" = "网络状态";
+"discovery.diagnostics.scanning" = "扫描状态";
+"discovery.diagnostics.failures" = "最近失败记录";
+"discovery.diagnostics.localNetwork" = "本地网络";
+"discovery.diagnostics.bonjourWhitelist" = "Bonjour 白名单";
+"discovery.diagnostics.connection" = "连接";
+"discovery.diagnostics.localDiscovery" = "本地发现";
+"discovery.diagnostics.localIP" = "本地 IP";
+"discovery.diagnostics.discoveredDevices" = "已发现设备";
+"discovery.diagnostics.scanningServices" = "扫描服务";
+"discovery.diagnostics.lastScan" = "上次扫描";
+"discovery.diagnostics.clear" = "清除";
+"discovery.diagnostics.configured" = "已配置";
+"discovery.diagnostics.incomplete" = "不完整";
+"discovery.diagnostics.available" = "可用";
+"discovery.diagnostics.unavailable" = "不可用";
+"discovery.diagnostics.missingServices" = "缺失的 Bonjour 服务声明：";
+"discovery.diagnostics.justNow" = "刚刚";
+"discovery.diagnostics.minutesAgo" = "%d分钟前";
+"discovery.diagnostics.hoursAgo" = "%d小时前";
+"discovery.diagnostics.daysAgo" = "%d天前";
 "dashboard.noDevicesFound" = "未发现设备";
 "dashboard.checkNetwork" = "请检查网络连接";
 
@@ -647,7 +670,7 @@
 "remote.newConnection" = "新建连接";
 "remote.overlay.connectingTo" = "正在连接到 %@...";
 "remote.empty.title" = "选择一个会话开始远程桌面";
-"remote.empty.subtitle" = "从左侧列表选择活跃会话，或创建新的远程连接";
+"remote.empty.subtitle" = "推荐先到「设备发现」一键连接你的设备。手动 RDP/VNC/SSH 属于高级功能，可作为备选方案。";
 "remote.toolbar.newConnection.help" = "新建远程连接";
 "remote.toolbar.refresh.help" = "刷新会话列表";
 "remote.performance.monitor" = "Metal 4 性能监控";
@@ -746,6 +769,14 @@
 "auth.username" = "用户名";
 "remote.form.connect" = "连接";
 "remote.form.connectFailed" = "连接失败";
+
+// 新增：推荐入口 + 高级折叠
+"remote.connect.recommended" = "从设备发现连接（推荐）";
+"remote.connect.advanced" = "高级：手动连接（RDP/VNC/SSH）";
+"remote.form.recommended.section" = "推荐";
+"remote.form.recommended.body" = "大多数情况下无需手动填写 IP/端口。建议先到「设备发现」选择设备进行连接。";
+"remote.form.openDeviceDiscovery" = "打开设备发现";
+"remote.form.advanced.section" = "高级：手动配置（RDP/VNC/SSH）";
 "monitor.title" = "系统监控";
 "monitor.status.monitoring" = "监控中";
 "monitor.status.initializing" = "初始化中...";

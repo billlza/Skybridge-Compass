@@ -7,17 +7,18 @@ import os.log
 public struct DeviceDiscoveryPanelView: View {
     @EnvironmentObject var appModel: DashboardViewModel
     @EnvironmentObject var themeConfiguration: ThemeConfiguration
-    
+
     @Binding var deviceSearchText: String
     @Binding var filteredDevices: [DiscoveredDevice]
     @Binding var isSearching: Bool
     @Binding var showManualConnectSheet: Bool
     @Binding var extendedSearchCountdown: Int
-    
+
     @State private var searchTask: Task<Void, Never>?
-    
+    @State private var showDiagnosticsPanel = false
+
     private let logger = Logger(subsystem: "com.skybridge.SkyBridgeCompassApp", category: "DeviceDiscoveryPanel")
-    
+
     public init(
         deviceSearchText: Binding<String>,
         filteredDevices: Binding<[DiscoveredDevice]>,
@@ -31,7 +32,7 @@ public struct DeviceDiscoveryPanelView: View {
         self._showManualConnectSheet = showManualConnectSheet
         self._extendedSearchCountdown = extendedSearchCountdown
     }
-    
+
     public var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
@@ -39,7 +40,7 @@ public struct DeviceDiscoveryPanelView: View {
                     .font(.headline)
                     .foregroundStyle(themeConfiguration.primaryTextColor)
                 Spacer()
-                
+
  // 添加扫描状态指示器
                 if appModel.isScanning || UnifiedOnlineDeviceManager.shared.isScanning {
                     HStack(spacing: 6) {
@@ -50,8 +51,20 @@ public struct DeviceDiscoveryPanelView: View {
                             .foregroundColor(.secondary)
                     }
                 }
+
+                // 诊断按钮
+                Button(action: { showDiagnosticsPanel.toggle() }) {
+                    Image(systemName: "stethoscope")
+                        .font(.system(size: 14))
+                }
+                .buttonStyle(.borderless)
+                .help(LocalizationManager.shared.localizedString("discovery.diagnostics.title"))
+                .popover(isPresented: $showDiagnosticsPanel, arrowEdge: .bottom) {
+                    DiscoveryDiagnosticsView()
+                        .frame(width: 450, height: 500)
+                }
             }
-            
+
             VStack(spacing: 16) {
  // 搜索栏和刷新按钮 - 优化版本
                 HStack {
@@ -103,7 +116,7 @@ public struct DeviceDiscoveryPanelView: View {
                     .padding(.vertical, 8)
                     .background(Color.white.opacity(0.05))
                     .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                    
+
                     Button(action: {
  // 异步刷新，避免阻塞UI
                         Task { @MainActor in
@@ -113,19 +126,19 @@ public struct DeviceDiscoveryPanelView: View {
                         Image(systemName: (appModel.isScanning || UnifiedOnlineDeviceManager.shared.isScanning) ? "stop.circle" : "arrow.clockwise")
                             .font(.system(size: 14, weight: .medium))
                             .rotationEffect(.degrees((appModel.isScanning || UnifiedOnlineDeviceManager.shared.isScanning) ? 0 : 360))
-                            .animation(.linear(duration: 1).repeatForever(autoreverses: false), 
+                            .animation(.linear(duration: 1).repeatForever(autoreverses: false),
                                      value: (appModel.isScanning || UnifiedOnlineDeviceManager.shared.isScanning))
                     }
                     .buttonStyle(.bordered)
                     .disabled(appModel.isScanning || UnifiedOnlineDeviceManager.shared.isScanning)
                 }
-                
+
  // 设备列表 - 虚拟化优化
                 if filteredDevices.isEmpty {
                     EmptyStateView(
                         title: deviceSearchText.isEmpty ? LocalizationManager.shared.localizedString("dashboard.noDevicesFound") : LocalizationManager.shared.localizedString("discovery.noMatch"),
-                        subtitle: deviceSearchText.isEmpty ? 
-                            LocalizationManager.shared.localizedString("dashboard.checkNetwork") : 
+                        subtitle: deviceSearchText.isEmpty ?
+                            LocalizationManager.shared.localizedString("dashboard.checkNetwork") :
                             LocalizationManager.shared.localizedString("discovery.adjustSearch")
                     )
                 } else {
@@ -156,17 +169,17 @@ public struct DeviceDiscoveryPanelView: View {
                 .stroke(themeConfiguration.borderColor, lineWidth: 1)
         )
     }
-    
+
  /// 异步过滤设备列表，支持名称、IP和服务搜索
     @MainActor
     private func filterDevices(with searchText: String) async {
         isSearching = true
-        
+
         let filtered = await withTaskGroup(of: [DiscoveredDevice].self) { group in
             group.addTask { @MainActor in
                 self.mapOnlineToDiscovered(self.appModel.onlineDevices)
             }
-            
+
             var result: [DiscoveredDevice] = []
             for await devices in group {
                 if searchText.isEmpty {
@@ -185,11 +198,11 @@ public struct DeviceDiscoveryPanelView: View {
             }
             return result
         }
-        
+
         filteredDevices = sortDevicesBySignalStrength(filtered)
         isSearching = false
     }
-    
+
     @MainActor
     private func mapOnlineToDiscovered(_ online: [OnlineDevice]) -> [DiscoveredDevice] {
         online.map { od in
@@ -225,7 +238,7 @@ public struct DeviceDiscoveryPanelView: View {
             return a.name.localizedCompare(b.name) == .orderedAscending
         }
     }
-    
+
     @MainActor
     private func connectToDevice(_ device: DiscoveredDevice) async {
         logger.info("正在连接到设备: \(device.name)")

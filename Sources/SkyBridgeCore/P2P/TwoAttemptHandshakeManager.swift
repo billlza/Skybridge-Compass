@@ -8,7 +8,9 @@
 // 两次尝试握手管理器：
 // - 解决 "preferPQC 但允许回退 classic" 的互操作问题
 // - 第一次尝试 PQC-only，失败后回退到 Classic-only
-// - 超时不触发自动 fallback（防止攻击者用丢包强制降级）
+// - downgrade resistance：超时不触发自动 fallback（防止攻击者用丢包强制降级）
+//   + policy gate（HandshakePolicy 控制是否允许 classic fallback）
+//   + per-peer rate limiting（FallbackRateLimiter 冷却时间抑制重复降级）
 //
 
 import Foundation
@@ -17,7 +19,7 @@ import Foundation
 public enum HandshakeAttemptStrategy: String, Sendable {
  /// 仅 PQC (offeredSuites 只包含 PQC/Hybrid)
     case pqcOnly = "pqc_only"
-    
+
  /// 仅 Classic (offeredSuites 只包含 Classic)
     case classicOnly = "classic_only"
 }
@@ -30,7 +32,7 @@ public struct AttemptPreparation: Sendable {
     public let offeredSuites: [CryptoSuite]
     public let sigAAlgorithm: ProtocolSigningAlgorithm
     public let signatureProvider: any ProtocolSignatureProvider
-    
+
     public init(
         strategy: HandshakeAttemptStrategy,
         offeredSuites: [CryptoSuite],
@@ -48,10 +50,10 @@ public struct AttemptPreparation: Sendable {
 public enum AttemptPreparationError: Error, Sendable {
  /// PQC Provider 不可用（pqcOnly 策略但没有 PQC suites）
     case pqcProviderUnavailable
-    
+
  /// Classic Provider 不可用（classicOnly 策略但没有 classic suites）
     case classicProviderUnavailable
-    
+
  /// Fallback 被限流
     case fallbackRateLimited(deviceId: String, cooldownSeconds: Int)
 }
@@ -71,18 +73,18 @@ public enum AttemptPreparationError: Error, Sendable {
 /// **Requirements: 1.4, 5.1, 9.1, 9.2, 9.3, 9.4, 9.5, 9.6**
 @available(macOS 14.0, iOS 17.0, *)
 public struct TwoAttemptHandshakeManager: Sendable {
-    
+
  // MARK: - Fallback Rate Limiting ( 9.3)
 
     private static let fallbackCooldownSeconds: Int = 300
-    
+
  /// Per-peer fallback 限流 actor
     private actor FallbackRateLimiter {
         private let clock = ContinuousClock()
 
  /// 上次 fallback 时间记录（使用单调时钟，避免系统时间回拨影响限流）
         private var lastFallbackTimes: [String: ContinuousClock.Instant] = [:]
-        
+
  /// 检查是否允许 fallback
         func canFallback(deviceId: String) -> Bool {
             guard let lastTime = lastFallbackTimes[deviceId] else {
@@ -91,12 +93,12 @@ public struct TwoAttemptHandshakeManager: Sendable {
             let elapsed = lastTime.duration(to: clock.now)
             return elapsed >= .seconds(TwoAttemptHandshakeManager.fallbackCooldownSeconds)
         }
-        
+
  /// 记录 fallback
         func recordFallback(deviceId: String) {
             lastFallbackTimes[deviceId] = clock.now
         }
-        
+
  /// 获取剩余冷却时间
         func remainingCooldown(deviceId: String) -> Int {
             guard let lastTime = lastFallbackTimes[deviceId] else {
@@ -108,15 +110,15 @@ public struct TwoAttemptHandshakeManager: Sendable {
             return max(0, remaining)
         }
     }
-    
+
  /// 全局限流器实例
     private static let rateLimiter = FallbackRateLimiter()
-    
+
  // MARK: - Fallback Whitelist/Blacklist ( 9.2)
-    
+
  /// 判断是否允许 fallback
  ///
- /// ** 9.2**: 实现 fallback 条件白名单/黑名单
+/// ** 9.2**: 实现 fallback 条件白名单/黑名单（downgrade resistance）
  /// - 允许原因白名单：pqcProviderUnavailable, suiteNotSupported, suiteNegotiationFailed
  /// - 禁止原因黑名单：timeout, suiteSignatureMismatch, signatureVerificationFailed, 认证失败
     private static func shouldAllowFallback(_ reason: HandshakeFailureReason) -> Bool {
@@ -139,9 +141,9 @@ public struct TwoAttemptHandshakeManager: Sendable {
             return false
         }
     }
-    
+
  // MARK: - Attempt Preparation ( 9.1)
-    
+
  /// 准备 Attempt（先 build suites，再选算法，再取 provider）
  ///
  /// - Parameters:
@@ -169,7 +171,7 @@ public struct TwoAttemptHandshakeManager: Sendable {
             }
             buildResult = HandshakeOfferedSuites.build(strategy: strategy, availableSuites: availableSuites)
         }
-        
+
  // 2. 检查是否为空
         let offeredSuites: [CryptoSuite]
         switch buildResult {
@@ -183,7 +185,7 @@ public struct TwoAttemptHandshakeManager: Sendable {
                 throw AttemptPreparationError.classicProviderUnavailable
             }
         }
-        
+
  // 3. 选算法
         let selectionResult = PreNegotiationSignatureSelector.selectForMessageAResult(offeredSuites: offeredSuites)
         let sigAAlgorithm: ProtocolSigningAlgorithm
@@ -199,10 +201,10 @@ public struct TwoAttemptHandshakeManager: Sendable {
                 throw AttemptPreparationError.classicProviderUnavailable
             }
         }
-        
+
  // 4. 取 provider
         let signatureProvider = PreNegotiationSignatureSelector.selectProvider(for: sigAAlgorithm)
-        
+
         return AttemptPreparation(
             strategy: strategy,
             offeredSuites: offeredSuites,
@@ -210,18 +212,18 @@ public struct TwoAttemptHandshakeManager: Sendable {
             signatureProvider: signatureProvider
         )
     }
-    
+
  /// 握手执行器类型
     public typealias HandshakeExecutor = @Sendable (
         _ strategy: HandshakeAttemptStrategy,
         _ sigAAlgorithm: SignatureAlgorithm
     ) async throws -> SessionKeys
-    
+
  /// 握手执行器类型（使用 AttemptPreparation）
     public typealias PreparedHandshakeExecutor = @Sendable (
         _ preparation: AttemptPreparation
     ) async throws -> SessionKeys
-    
+
  /// 执行握手（带自动回退，使用 AttemptPreparation）
  ///
  /// - Parameters:
@@ -288,7 +290,7 @@ public struct TwoAttemptHandshakeManager: Sendable {
             return try await executor(preparation)
         }
     }
-    
+
  /// 尝试 fallback（带限流和事件发射）
     private static func attemptFallback(
         deviceId: String,
@@ -306,10 +308,10 @@ public struct TwoAttemptHandshakeManager: Sendable {
             let cooldown = await rateLimiter.remainingCooldown(deviceId: deviceId)
             throw AttemptPreparationError.fallbackRateLimited(deviceId: deviceId, cooldownSeconds: cooldown)
         }
-        
+
  // 记录 fallback
         await rateLimiter.recordFallback(deviceId: deviceId)
-        
+
  // 9.4: 发射 fallback 事件
         let cooldownSeconds = TwoAttemptHandshakeManager.fallbackCooldownSeconds
         SecurityEventEmitter.emitDetached(SecurityEvent(
@@ -317,6 +319,13 @@ public struct TwoAttemptHandshakeManager: Sendable {
             severity: .warning,
             message: "PQC handshake failed, falling back to Classic",
             context: [
+                // Paper terminology alignment:
+                // - downgrade resistance: no timeout-triggered fallback + policy gate + rate limiting
+                // - policy-in-transcript / transcript binding are enforced by HandshakeDriver+TranscriptBuilder,
+                //   and logged here to keep audit trails consistent across layers.
+                "downgradeResistance": "policy_gate+no_timeout_fallback+rate_limited",
+                "policyInTranscript": "1",
+                "transcriptBinding": "1",
                 "reason": String(describing: reason),
                 "deviceId": deviceId,
                 "cooldownSeconds": String(cooldownSeconds),
@@ -330,12 +339,12 @@ public struct TwoAttemptHandshakeManager: Sendable {
                 "strategy": HandshakeAttemptStrategy.classicOnly.rawValue
             ]
         ))
-        
+
  // 第二次尝试: Classic-only
         let preparation = try prepareAttempt(strategy: .classicOnly, cryptoProvider: cryptoProvider)
         return try await executor(preparation)
     }
-    
+
  /// 执行握手（带自动回退）- 向后兼容版本
  ///
  /// - Parameters:
@@ -373,6 +382,9 @@ public struct TwoAttemptHandshakeManager: Sendable {
                         severity: .warning,
                         message: "PQC handshake failed, falling back to Classic",
                         context: [
+                            "downgradeResistance": "policy_gate+no_timeout_fallback+rate_limited",
+                            "policyInTranscript": "1",
+                            "transcriptBinding": "1",
                             "reason": String(describing: reason),
                             "deviceId": deviceId,
                             "cooldownSeconds": String(TwoAttemptHandshakeManager.fallbackCooldownSeconds),
@@ -387,7 +399,7 @@ public struct TwoAttemptHandshakeManager: Sendable {
                         ]
                     ))
 
-                    
+
  // 第二次尝试: Classic-only
                     let sigAAlgorithm = SignatureAlgorithm.ed25519
                     return try await executor(.classicOnly, sigAAlgorithm)
@@ -400,7 +412,7 @@ public struct TwoAttemptHandshakeManager: Sendable {
             return try await executor(.classicOnly, sigAAlgorithm)
         }
     }
-    
+
  /// 判断是否是 PQC 不可用错误
  ///
  /// **安全设计**: 不把 .timeout 当成"PQC 不支持"
@@ -424,7 +436,7 @@ public struct TwoAttemptHandshakeManager: Sendable {
             return false
         }
     }
-    
+
  /// 根据策略获取 offeredSuites（使用 CryptoProvider）
  ///
  /// - Parameters:
@@ -449,7 +461,7 @@ public struct TwoAttemptHandshakeManager: Sendable {
             return HandshakeOfferedSuites.build(strategy: strategy, availableSuites: availableSuites)
         }
     }
-    
+
  /// 根据策略获取 offeredSuites（向后兼容，使用静态列表）
  ///
  /// - Parameter strategy: 握手尝试策略

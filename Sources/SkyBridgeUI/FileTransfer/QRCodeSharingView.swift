@@ -13,23 +13,23 @@ struct QRCodeSharingView: View {
     @State private var connectionCode: String = ""
     @StateObject private var server = HTTPFileTransferServer()
     @State private var accessToken: String = ""
-    
+
     let selectedFiles: [URL]
-    
+
     var body: some View {
         VStack(spacing: 0) {
  // macOS风格的标题栏区域
             macOSTitleBar
-            
+
  // 主内容区域 - 使用macOS标准布局
             ScrollView {
                 VStack(spacing: 24) {
  // 二维码展示区域 - macOS风格卡片
                     qrCodeCard
-                    
+
  // 连接信息卡片
                     connectionInfoCard
-                    
+
  // 文件列表卡片
                     if !selectedFiles.isEmpty {
                         fileListCard
@@ -37,7 +37,7 @@ struct QRCodeSharingView: View {
                 }
                 .padding(20)
             }
-            
+
  // macOS风格的底部操作栏
             macOSBottomBar
         }
@@ -47,9 +47,9 @@ struct QRCodeSharingView: View {
             generateConnectionInfo()
         }
     }
-    
+
  // MARK: - macOS风格组件
-    
+
  /// macOS风格标题栏
     private var macOSTitleBar: some View {
         HStack {
@@ -58,20 +58,20 @@ struct QRCodeSharingView: View {
                 Image(systemName: "qrcode.viewfinder")
                     .font(.title2)
                     .foregroundColor(.accentColor)
-                
+
                 VStack(alignment: .leading, spacing: 2) {
                     Text(LocalizationManager.shared.localizedString("qrcode.title"))
                         .font(.headline)
                         .fontWeight(.semibold)
-                    
+
                     Text(LocalizationManager.shared.localizedString("qrcode.subtitle"))
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
             }
-            
+
             Spacer()
-            
+
  // 右侧关闭按钮 - macOS风格
             Button(action: { dismiss() }) {
                 Image(systemName: "xmark.circle.fill")
@@ -88,7 +88,7 @@ struct QRCodeSharingView: View {
             Divider()
         }
     }
-    
+
  /// 二维码卡片 - macOS风格
     private var qrCodeCard: some View {
         VStack(spacing: 20) {
@@ -99,7 +99,7 @@ struct QRCodeSharingView: View {
                     .fill(.ultraThickMaterial)
                     .frame(width: 280, height: 280)
                     .shadow(color: .black.opacity(0.08), radius: 12, x: 0, y: 4)
-                
+
                 if let qrImage = qrCodeImage {
                     VStack(spacing: 16) {
  // 二维码图像
@@ -111,13 +111,13 @@ struct QRCodeSharingView: View {
                             .background(Color.white)
                             .clipShape(RoundedRectangle(cornerRadius: 12))
                             .shadow(color: .black.opacity(0.1), radius: 4, x: 0, y: 2)
-                        
+
  // 状态指示器
                         HStack(spacing: 8) {
                             Circle()
                                 .fill(isServerRunning ? .green : .orange)
                                 .frame(width: 8, height: 8)
-                            
+
                             Text(isServerRunning ? LocalizationManager.shared.localizedString("qrcode.status.running") : LocalizationManager.shared.localizedString("qrcode.status.ready"))
                                 .font(.caption)
                                 .foregroundColor(.secondary)
@@ -128,20 +128,20 @@ struct QRCodeSharingView: View {
                     VStack(spacing: 16) {
                         ProgressView()
                             .controlSize(.large)
-                        
+
                         Text(LocalizationManager.shared.localizedString("qrcode.generating"))
                             .font(.subheadline)
                             .foregroundColor(.secondary)
                     }
                 }
             }
-            
+
  // 使用说明 - macOS风格
             VStack(spacing: 8) {
                 Text(LocalizationManager.shared.localizedString("qrcode.instruction.title"))
                     .font(.subheadline)
                     .fontWeight(.medium)
-                
+
                 Text(LocalizationManager.shared.localizedString("qrcode.instruction.subtitle"))
                     .font(.caption)
                     .foregroundColor(.secondary)
@@ -155,7 +155,7 @@ struct QRCodeSharingView: View {
                 .stroke(.separator.opacity(0.5), lineWidth: 1)
         )
     }
-    
+
  /// 连接信息卡片 - macOS风格
     private var connectionInfoCard: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -164,12 +164,12 @@ struct QRCodeSharingView: View {
                 Image(systemName: "network")
                     .foregroundColor(.blue)
                     .font(.title3)
-                
+
                 Text(LocalizationManager.shared.localizedString("qrcode.connectionInfo"))
                     .font(.headline)
                     .fontWeight(.semibold)
             }
-            
+
             VStack(spacing: 12) {
  // 服务器地址
                 if !serverURL.isEmpty {
@@ -180,7 +180,7 @@ struct QRCodeSharingView: View {
                         isMonospaced: true
                     )
                 }
-                
+
  // 连接码
                 if !connectionCode.isEmpty {
                     macOSInfoRow(
@@ -191,7 +191,7 @@ struct QRCodeSharingView: View {
                         isHighlighted: true
                     )
                 }
-                
+
  // 服务状态
                 macOSInfoRow(
                     title: LocalizationManager.shared.localizedString("qrcode.serviceStatus"),
@@ -208,7 +208,7 @@ struct QRCodeSharingView: View {
                 .stroke(.separator.opacity(0.5), lineWidth: 1)
         )
     }
-    
+
  /// 文件列表卡片 - macOS风格
     private var fileListCard: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -217,18 +217,18 @@ struct QRCodeSharingView: View {
                 Image(systemName: "doc.on.doc")
                     .foregroundColor(.orange)
                     .font(.title3)
-                
+
                 Text(LocalizationManager.shared.localizedString("qrcode.pendingFiles"))
                     .font(.headline)
                     .fontWeight(.semibold)
-                
+
                 Spacer()
-                
+
                 Text(String(format: LocalizationManager.shared.localizedString("common.files.count"), selectedFiles.count))
                     .font(.subheadline)
                     .foregroundColor(.secondary)
             }
-            
+
  // 文件列表
             ScrollView {
                 LazyVStack(spacing: 8) {
@@ -246,7 +246,7 @@ struct QRCodeSharingView: View {
                 .stroke(.separator.opacity(0.5), lineWidth: 1)
         )
     }
-    
+
  /// macOS风格底部操作栏
     private var macOSBottomBar: some View {
         HStack {
@@ -254,14 +254,14 @@ struct QRCodeSharingView: View {
             HStack(spacing: 8) {
                 Image(systemName: "info.circle")
                     .foregroundColor(.blue)
-                
+
                 Text(LocalizationManager.shared.localizedString("qrcode.networkHint"))
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
-            
+
             Spacer()
-            
+
  // 右侧操作按钮
             HStack(spacing: 12) {
                 Button(LocalizationManager.shared.localizedString("action.cancel")) {
@@ -270,7 +270,7 @@ struct QRCodeSharingView: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.large)
-                
+
                 Button(isServerRunning ? LocalizationManager.shared.localizedString("action.stopServer") : LocalizationManager.shared.localizedString("action.startServer")) {
                     if isServerRunning {
                         stopServer()
@@ -289,9 +289,9 @@ struct QRCodeSharingView: View {
             Divider()
         }
     }
-    
+
  // MARK: - 辅助视图组件
-    
+
  /// macOS风格信息行
     private func macOSInfoRow(
         title: String,
@@ -305,20 +305,20 @@ struct QRCodeSharingView: View {
             Image(systemName: icon)
                 .foregroundColor(statusColor ?? .accentColor)
                 .frame(width: 20)
-            
+
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
                     .font(.caption)
                     .foregroundColor(.secondary)
-                
+
                 Text(value)
                     .font(isMonospaced ? .system(.subheadline, design: .monospaced) : .subheadline)
                     .fontWeight(isHighlighted ? .semibold : .regular)
                     .foregroundColor(isHighlighted ? .accentColor : .primary)
             }
-            
+
             Spacer()
-            
+
  // 复制按钮
             Button(action: {
                 NSPasteboard.general.clearContents()
@@ -334,45 +334,45 @@ struct QRCodeSharingView: View {
         .padding(.vertical, 8)
         .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
     }
-    
+
  /// macOS风格文件行
     private func macOSFileRow(file: URL) -> some View {
         HStack(spacing: 12) {
             Image(systemName: iconForFile(file))
                 .foregroundColor(.accentColor)
                 .frame(width: 20)
-            
+
             VStack(alignment: .leading, spacing: 2) {
                 Text(file.lastPathComponent)
                     .font(.subheadline)
                     .fontWeight(.medium)
                     .lineLimit(1)
-                
+
                 Text(formatFileSize(file))
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
-            
+
             Spacer()
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 8))
     }
-    
+
  // MARK: - 私有方法
-    
+
  /// 生成连接信息和二维码
     private func generateConnectionInfo() {
  // 生成连接码 - 6位随机数字
         connectionCode = String(format: "%06d", Int.random(in: 100000...999999))
  // 生成一次性令牌
         accessToken = UUID().uuidString.replacingOccurrences(of: "-", with: "")
-        
+
  // 获取本机IP地址
         let ipAddress = getLocalIPAddress()
         serverURL = "http://\(ipAddress):8080"
-        
+
  // 生成二维码内容
         let qrContent = """
         {
@@ -383,32 +383,32 @@ struct QRCodeSharingView: View {
             "files": \(selectedFiles.count)
         }
         """
-        
+
  // 生成二维码图像
         generateQRCode(from: qrContent)
     }
-    
+
  /// 生成二维码图像
     private func generateQRCode(from string: String) {
         let context = CIContext()
         let filter = CIFilter.qrCodeGenerator()
-        
+
         guard let data = string.data(using: .utf8) else { return }
-        
+
         filter.message = data
         filter.correctionLevel = "M"
-        
+
         if let outputImage = filter.outputImage {
  // 放大二维码以提高清晰度
             let transform = CGAffineTransform(scaleX: 10, y: 10)
             let scaledImage = outputImage.transformed(by: transform)
-            
+
             if let cgImage = context.createCGImage(scaledImage, from: scaledImage.extent) {
                 qrCodeImage = NSImage(cgImage: cgImage, size: NSSize(width: 220, height: 220))
             }
         }
     }
-    
+
  /// 启动文件传输服务器
     private func startServer() {
         guard !isServerRunning else { return }
@@ -419,7 +419,7 @@ struct QRCodeSharingView: View {
         isServerRunning = true
         Logger(subsystem: Bundle.main.bundleIdentifier ?? "SkyBridgeCompassApp", category: "ui").debug("文件传输服务器已启动: \(serverURL)")
     }
-    
+
  /// 停止文件传输服务器
     private func stopServer() {
         guard isServerRunning else { return }
@@ -427,28 +427,28 @@ struct QRCodeSharingView: View {
         isServerRunning = false
         Logger(subsystem: Bundle.main.bundleIdentifier ?? "SkyBridgeCompassApp", category: "ui").debug("文件传输服务器已停止")
     }
-    
+
  /// 获取本机IP地址
     private func getLocalIPAddress() -> String {
         var address = "127.0.0.1"
-        
+
  // 获取所有网络接口
         var ifaddr: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&ifaddr) == 0 else { return address }
         guard let firstAddr = ifaddr else { return address }
-        
+
  // 遍历网络接口
         for ifptr in sequence(first: firstAddr, next: { $0.pointee.ifa_next }) {
             let interface = ifptr.pointee
-            
+
  // 检查接口族
             let addrFamily = interface.ifa_addr.pointee.sa_family
             if addrFamily == UInt8(AF_INET) {
-                
+
  // 检查接口名称（使用统一 UTF8 解码，替代已弃用的 String(cString:)）
                 let name = decodeCString(interface.ifa_name)
                 if name == "en0" || name == "en1" || name.hasPrefix("wlan") {
-                    
+
  // 获取IP地址
                     var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
                     getnameinfo(interface.ifa_addr, socklen_t(interface.ifa_addr.pointee.sa_len),
@@ -461,15 +461,15 @@ struct QRCodeSharingView: View {
                 }
             }
         }
-        
+
         freeifaddrs(ifaddr)
         return address
     }
-    
+
  /// 获取文件图标
     private func iconForFile(_ file: URL) -> String {
         let pathExtension = file.pathExtension.lowercased()
-        
+
         switch pathExtension {
         case "jpg", "jpeg", "png", "gif", "bmp", "tiff", "svg":
             return "photo"
@@ -493,7 +493,7 @@ struct QRCodeSharingView: View {
             return "doc"
         }
     }
-    
+
  /// 格式化文件大小
     private func formatFileSize(_ file: URL) -> String {
         do {
@@ -517,13 +517,22 @@ final class HTTPFileTransferServer: ObservableObject, @unchecked Sendable {
     private var code: String = ""
     private var token: String = ""
     private var logs: [String] = []
-    
+
+    private struct HTTPResponse {
+        enum Body {
+            case data(Data)
+            case file(url: URL, offset: Int64, length: Int64, cleanupURL: URL?)
+        }
+        let header: Data
+        let body: Body
+    }
+
     func start(host: String, port: UInt16, files: [URL], code: String, token: String) {
         self.files = files
         self.code = code
         self.token = token
         do {
-            let nwPort = NWEndpoint.Port(rawValue: port)!
+            let nwPort = try NWEndpoint.Port.validated(port)
             let parameters = NWParameters.tcp
             let listener = try NWListener(using: parameters, on: nwPort)
             self.listener = listener
@@ -537,14 +546,14 @@ final class HTTPFileTransferServer: ObservableObject, @unchecked Sendable {
             log("Start failed: \(error.localizedDescription)")
         }
     }
-    
+
     func stop() {
         activeConnections.forEach { $0.cancel() }
         activeConnections.removeAll()
         listener?.cancel()
         listener = nil
     }
-    
+
     private func handleConnection(_ connection: NWConnection) {
         activeConnections.append(connection)
         connection.stateUpdateHandler = { state in
@@ -553,27 +562,75 @@ final class HTTPFileTransferServer: ObservableObject, @unchecked Sendable {
         connection.start(queue: .global(qos: .userInitiated))
         receiveRequest(on: connection)
     }
-    
+
     private func receiveRequest(on connection: NWConnection) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] data, _, isComplete, error in
             guard let self else { return }
             if let data, error == nil {
                 let request = String(decoding: data, as: UTF8.self)
                 let response = self.route(request: request)
-                self.send(response: response, on: connection)
+                Task { [weak self] in
+                    guard let self else { return }
+                    await self.send(response: response, on: connection)
+                }
             } else {
                 connection.cancel()
             }
         }
     }
-    
-    private func send(response: Data, on connection: NWConnection) {
-        connection.send(content: response, completion: .contentProcessed { _ in
+
+    private func send(response: HTTPResponse, on connection: NWConnection) async {
+        do {
+            try await sendData(response.header, on: connection)
+            switch response.body {
+            case .data(let body):
+                if !body.isEmpty {
+                    try await sendData(body, on: connection)
+                }
+                connection.cancel()
+            case .file(let url, let offset, let length, let cleanupURL):
+                defer {
+                    if let cleanupURL {
+                        try? FileManager.default.removeItem(at: cleanupURL)
+                    }
+                    connection.cancel()
+                }
+                try await streamFile(url: url, offset: offset, length: length, on: connection)
+            }
+        } catch {
+            SkyBridgeLogger.ui.error("HTTP server send failed: \(error.localizedDescription, privacy: .private)")
             connection.cancel()
-        })
+        }
     }
-    
-    private func route(request: String) -> Data {
+
+    private func sendData(_ data: Data, on connection: NWConnection) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            connection.send(content: data, completion: .contentProcessed { error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume(returning: ())
+                }
+            })
+        }
+    }
+
+    private func streamFile(url: URL, offset: Int64, length: Int64, on connection: NWConnection) async throws {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        try handle.seek(toOffset: UInt64(max(0, offset)))
+
+        let chunkSize = 64 * 1024
+        var remaining = length
+        while remaining > 0 {
+            let readCount = Int(min(Int64(chunkSize), remaining))
+            guard let chunk = try handle.read(upToCount: readCount), !chunk.isEmpty else { break }
+            remaining -= Int64(chunk.count)
+            try await sendData(chunk, on: connection)
+        }
+    }
+
+    private func route(request: String) -> HTTPResponse {
         let lines = request.components(separatedBy: "\r\n")
         guard let firstLine = lines.first else {
             return httpResponse(400, body: "Bad Request")
@@ -600,11 +657,11 @@ final class HTTPFileTransferServer: ObservableObject, @unchecked Sendable {
             }
             guard queryItems["token"] == token else { return httpResponse(403, body: "Forbidden") }
         }
-        
+
  // 解析 Range 头
         let rangeHeader = lines.first { $0.lowercased().hasPrefix("range:") }
         let rangeValue = rangeHeader?.split(separator: " ", maxSplits: 1).dropFirst().joined(separator: " ")
-        
+
         if path == "/" { return indexHTML() }
         if path == "/download" {
  // 简单的连接码校验（可选）
@@ -620,8 +677,8 @@ final class HTTPFileTransferServer: ObservableObject, @unchecked Sendable {
         }
         return httpResponse(404, body: "Not Found")
     }
-    
-    private func indexHTML() -> Data {
+
+    private func indexHTML() -> HTTPResponse {
         let list = files.enumerated().map { (i, url) in
             "<li><a href=\"/download?i=\(i)&code=\(code)&token=\(token)\">\(url.lastPathComponent)</a></li>"
         }.joined(separator: "\n")
@@ -635,24 +692,43 @@ final class HTTPFileTransferServer: ObservableObject, @unchecked Sendable {
         """
         return httpResponse(200, body: html, contentType: "text/html; charset=utf-8")
     }
-    
-    private func serveFile(_ url: URL, range: String?) -> Data {
-        guard let fileData = try? Data(contentsOf: url) else {
-            return httpResponse(500, body: "Failed to read file")
+
+    private func serveFile(_ url: URL, range: String?) -> HTTPResponse {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let fileSizeNum = attrs[.size] as? NSNumber else {
+            return httpResponse(500, body: "Failed to stat file")
         }
+        let total = fileSizeNum.int64Value
+        guard total >= 0 else { return httpResponse(500, body: "Invalid file size") }
         let mime = mimeType(for: url)
- // 处理 Range：bytes=start-
-        if let range, range.lowercased().hasPrefix("bytes=") {
-            let spec = range.replacingOccurrences(of: "bytes=", with: "")
-            if let startStr = spec.split(separator: "-").first, let start = Int(startStr), start < fileData.count {
-                let slice = fileData[start...]
-                return httpResponse(206, bodyData: Data(slice), contentType: mime, totalLength: fileData.count, rangeStart: start)
-            }
+
+        // Default: full file (streamed)
+        var offset: Int64 = 0
+        var length: Int64 = total
+        var statusCode: Int = 200
+        var contentRange: String? = nil
+
+        // 处理 Range：bytes=start-end / bytes=start-
+        if let range, let parsed = parseByteRange(range, totalLength: total) {
+            offset = parsed.offset
+            length = parsed.length
+            statusCode = 206
+            contentRange = parsed.contentRangeHeader
         }
-        return httpResponse(200, bodyData: fileData, contentType: mime)
+
+        return httpFileResponse(
+            statusCode: statusCode,
+            url: url,
+            mime: mime,
+            totalLength: total,
+            offset: offset,
+            length: length,
+            contentRange: contentRange,
+            cleanupURL: nil
+        )
     }
-    
-    private func serveZip(files: [URL]) -> Data {
+
+    private func serveZip(files: [URL]) -> HTTPResponse {
  // 使用系统zip创建临时包
         let temp = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("bundle_\(UUID().uuidString).zip")
         let process = Process()
@@ -664,39 +740,103 @@ final class HTTPFileTransferServer: ObservableObject, @unchecked Sendable {
         do {
             try process.run()
             process.waitUntilExit()
-            if process.terminationStatus == 0, let data = try? Data(contentsOf: temp) {
-                return httpResponse(200, bodyData: data, contentType: "application/zip")
+            if process.terminationStatus == 0,
+               let attrs = try? FileManager.default.attributesOfItem(atPath: temp.path),
+               let fileSizeNum = attrs[.size] as? NSNumber {
+                let total = fileSizeNum.int64Value
+                return httpFileResponse(
+                    statusCode: 200,
+                    url: temp,
+                    mime: "application/zip",
+                    totalLength: total,
+                    offset: 0,
+                    length: total,
+                    contentRange: nil,
+                    cleanupURL: temp
+                )
             } else {
                 let err = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? "zip failed"
                 log("zip error: \(err)")
+                try? FileManager.default.removeItem(at: temp)
                 return httpResponse(500, body: "Zip failed")
             }
         } catch {
             log("zip exception: \(error.localizedDescription)")
+            try? FileManager.default.removeItem(at: temp)
             return httpResponse(500, body: "Zip exception")
         }
     }
-    
-    private func httpResponse(_ code: Int, body: String, contentType: String = "text/plain; charset=utf-8") -> Data {
+
+    private func httpResponse(_ code: Int, body: String, contentType: String = "text/plain; charset=utf-8") -> HTTPResponse {
         let bodyData = Data(body.utf8)
         return httpResponse(code, bodyData: bodyData, contentType: contentType)
     }
-    
-    private func httpResponse(_ code: Int, bodyData: Data, contentType: String, totalLength: Int? = nil, rangeStart: Int? = nil) -> Data {
+
+    private func httpResponse(_ code: Int, bodyData: Data, contentType: String) -> HTTPResponse {
         let status = (code == 200) ? "OK" : (code == 404 ? "Not Found" : (code == 403 ? "Forbidden" : "Error"))
         var headers = "HTTP/1.1 \(code) \(status)\r\n"
         headers += "Content-Type: \(contentType)\r\n"
         headers += "Content-Length: \(bodyData.count)\r\n"
         headers += "Accept-Ranges: bytes\r\n"
-        if code == 206, let totalLength, let rangeStart {
-            headers += "Content-Range: bytes \(rangeStart)-\(rangeStart + bodyData.count - 1)/\(totalLength)\r\n"
+        headers += "Connection: close\r\n\r\n"
+        return HTTPResponse(header: Data(headers.utf8), body: .data(bodyData))
+    }
+
+    private func httpFileResponse(
+        statusCode: Int,
+        url: URL,
+        mime: String,
+        totalLength: Int64,
+        offset: Int64,
+        length: Int64,
+        contentRange: String?,
+        cleanupURL: URL?
+    ) -> HTTPResponse {
+        let status = (statusCode == 200) ? "OK" : (statusCode == 206 ? "Partial Content" : "Error")
+        var headers = "HTTP/1.1 \(statusCode) \(status)\r\n"
+        headers += "Content-Type: \(mime)\r\n"
+        headers += "Content-Length: \(max(0, length))\r\n"
+        headers += "Accept-Ranges: bytes\r\n"
+        if let contentRange {
+            headers += "Content-Range: \(contentRange)\r\n"
         }
         headers += "Connection: close\r\n\r\n"
-        var data = Data(headers.utf8)
-        data.append(bodyData)
-        return data
+        return HTTPResponse(
+            header: Data(headers.utf8),
+            body: .file(url: url, offset: offset, length: length, cleanupURL: cleanupURL)
+        )
     }
-    
+
+    private struct ParsedRange {
+        let offset: Int64
+        let length: Int64
+        let contentRangeHeader: String
+    }
+
+    /// Parses `Range:` header value for "bytes=start-end" or "bytes=start-".
+    /// Returns `nil` if header is absent/invalid; caller may fall back to full-file response.
+    private func parseByteRange(_ range: String, totalLength: Int64) -> ParsedRange? {
+        let trimmed = range.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.lowercased().hasPrefix("bytes=") else { return nil }
+        let spec = trimmed.dropFirst("bytes=".count)
+        let parts = spec.split(separator: "-", maxSplits: 1, omittingEmptySubsequences: false)
+        guard let startPart = parts.first, !startPart.isEmpty, let start = Int64(startPart) else { return nil }
+        guard start >= 0, start < totalLength else { return nil }
+        let end: Int64
+        if parts.count == 2, let endPart = parts.last, !endPart.isEmpty, let parsedEnd = Int64(endPart) {
+            end = min(parsedEnd, totalLength - 1)
+        } else {
+            end = totalLength - 1
+        }
+        guard end >= start else { return nil }
+        let length = end - start + 1
+        return ParsedRange(
+            offset: start,
+            length: length,
+            contentRangeHeader: "bytes \(start)-\(end)/\(totalLength)"
+        )
+    }
+
     private static func parseQuery(_ q: String) -> [String: String] {
         var dict: [String: String] = [:]
         for part in q.split(separator: "&") {
@@ -707,7 +847,7 @@ final class HTTPFileTransferServer: ObservableObject, @unchecked Sendable {
         }
         return dict
     }
-    
+
     private func mimeType(for url: URL) -> String {
         switch url.pathExtension.lowercased() {
         case "jpg", "jpeg": return "image/jpeg"
@@ -720,7 +860,7 @@ final class HTTPFileTransferServer: ObservableObject, @unchecked Sendable {
         default: return "application/octet-stream"
         }
     }
-    
+
     private func log(_ msg: String) {
         let ts = ISO8601DateFormatter().string(from: Date())
         logs.append("[\(ts)] \(msg)")

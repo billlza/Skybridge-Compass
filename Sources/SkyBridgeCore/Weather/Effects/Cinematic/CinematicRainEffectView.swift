@@ -7,7 +7,6 @@
 //
 
 import SwiftUI
-import SkyBridgeCore
 import Combine
 
 /// 物理真实雨滴粒子
@@ -39,7 +38,7 @@ struct DynamicGlassDrop: Identifiable {
 }
 
 /// 水面涟漪
-struct WaterRipple: Identifiable {
+struct CinematicRainWaterRipple: Identifiable {
     let id = UUID()
     let x: CGFloat
     let y: CGFloat
@@ -88,10 +87,10 @@ struct WallWaterDrop: Identifiable {
 }
 
 /// 🌟 底部积水系统
-struct WaterPuddle {
+struct CinematicRainWaterPuddle {
     var waterLevel: CGFloat = 0  // 水位高度（0-1，相对于屏幕底部）
     var maxWaterLevel: CGFloat = 0.08  // 最大水位（屏幕高度的8%）
-    var ripples: [WaterRipple] = []  // 积水表面的涟漪
+    var ripples: [CinematicRainWaterRipple] = []  // 积水表面的涟漪
     var waveOffset: CGFloat = 0  // 水波动画偏移
     var reflectionOpacity: Double = 0.3  // 反射透明度
     
@@ -109,13 +108,13 @@ public struct CinematicRainEffectView: View {
  // 物理粒子状态
     @State private var raindrops: [PhysicsRaindrop] = []
     @State private var glassDrops: [DynamicGlassDrop] = []
-    @State private var ripples: [WaterRipple] = []
+    @State private var ripples: [CinematicRainWaterRipple] = []
     
  // 🌟 OPPO风格：挂壁水珠系统
     @State private var wallWaterDrops: [WallWaterDrop] = []
     
  // 🌟 底部积水系统
-    @State private var waterPuddle = WaterPuddle()
+    @State private var waterPuddle = CinematicRainWaterPuddle()
     
  // 天气状态
     @State private var windSpeed: CGFloat = 0
@@ -131,8 +130,8 @@ public struct CinematicRainEffectView: View {
  // 连接断开后自动恢复，避免与远程桌面高密度图形任务产生资源竞争。
     @State private var isRemoteDesktopActive: Bool = false
     
- // 交互式驱散管理器
-    @StateObject private var clearManager = InteractiveClearManager()
+ // 交互式驱散管理器（由统一入口 WeatherEffectView 注入；避免重复创建/重复监听）
+    @ObservedObject private var clearManager: InteractiveClearManager
     
  // UI组件边界检测（液态玻璃组件位置）
     @State private var glassComponentRects: [CGRect] = []
@@ -204,7 +203,9 @@ public struct CinematicRainEffectView: View {
         }
     }
     
-    public init() {}
+    public init(clearManager: InteractiveClearManager) {
+        self.clearManager = clearManager
+    }
     
     public var body: some View {
         GeometryReader { geometry in
@@ -282,19 +283,6 @@ public struct CinematicRainEffectView: View {
         .onDisappear {
  // 🛑 视图消失时，统一暂停所有特效系统并释放计时器，避免资源泄漏
             pauseAllEffectSystems()
- // 🔥 停止交互式清空管理器
-            Task {
- // stop() 为同步方法，直接调用；移除不必要的 await。
-            clearManager.stop()
-            }
-        }
- // 🔥 使用 onReceive 自动管理监听器生命周期
-        .onReceive(NotificationCenter.default.publisher(for: GlobalMouseTracker.mouseMovedNotification)) { notification in
-            if let locationValue = notification.userInfo?["location"] as? NSValue {
-                let nsPoint = locationValue.pointValue
-                let location = CGPoint(x: nsPoint.x, y: nsPoint.y)
-                clearManager.handleMouseMove(location)
-            }
         }
  // 🔌 订阅远程桌面指标：有活跃会话即暂停天气效果渲染；断开后自动恢复
         .onReceive(RemoteDesktopManager.shared.metrics) { snapshot in
@@ -799,7 +787,7 @@ public struct CinematicRainEffectView: View {
                 
  // 只有在底部且不在玻璃上时才生成涟漪
                 if !isOnGlass && ripples.count < 20 {
-                    ripples.append(WaterRipple(
+                    ripples.append(CinematicRainWaterRipple(
                         x: x,
                         y: screenSize.height * 0.95,
                         radius: 0,
@@ -1708,7 +1696,7 @@ public struct CinematicRainEffectView: View {
  // 落入积水中，生成涟漪
                     if waterPuddle.ripples.count < 30 {
                         let rippleX = drop.x * screenSize.width
-                        waterPuddle.ripples.append(WaterRipple(
+                        waterPuddle.ripples.append(CinematicRainWaterRipple(
                             x: rippleX,
                             y: waterLevel,
                             radius: 0,
@@ -1806,7 +1794,7 @@ public struct CinematicRainEffectView: View {
             if waterPuddle.ripples.count < 30 {
                 for _ in 0..<min(hitCount, 3) {
                     let rippleX = CGFloat.random(in: 0...screenSize.width)
-                    waterPuddle.ripples.append(WaterRipple(
+                    waterPuddle.ripples.append(CinematicRainWaterRipple(
                         x: rippleX,
                         y: groundLevel,
                         radius: 0,

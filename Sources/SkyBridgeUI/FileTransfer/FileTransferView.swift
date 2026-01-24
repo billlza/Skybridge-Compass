@@ -6,9 +6,10 @@ import AVKit
 
 /// 文件传输界面 - 符合Apple官方设计的现代化文件传输体验
 public struct FileTransferView: View {
-    
+
  // MARK: - 状态管理
-    @StateObject private var fileTransferManager = FileTransferManager()
+    @StateObject private var fileTransferManager = FileTransferManager.shared
+    @StateObject private var crossNetworkManager = CrossNetworkConnectionManager.shared
     @State private var selectedTab = 0
     @State private var selectedFiles: [URL] = []
     @State private var allowMultipleFiles = true
@@ -21,19 +22,19 @@ public struct FileTransferView: View {
     @State private var lastHmacTagHex: String = ""
     @State private var lastSignatureOk: Bool = false
     @State private var lastSigTransferId: String = ""
-    
+
  // 威胁警报状态 - Requirements: 4.3
     @State private var showingThreatAlert = false
     @State private var threatAlertResult: FileScanResult?
-    
-    
+
+
     public init() {}
-    
+
     public var body: some View {
         HStack(spacing: 0) {
  // 侧边栏 - 设备和连接
             sidebarContent
-            
+
  // 主内容区域
             mainContent
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -83,7 +84,7 @@ public struct FileTransferView: View {
             }
         }
     }
-    
+
  // MARK: - 侧边栏内容
     private var sidebarContent: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -97,25 +98,25 @@ public struct FileTransferView: View {
         .tahoeLiquidGlassCard()
         .frame(width: 240)
     }
-    
+
  // MARK: - 主内容区域
     private var mainContent: some View {
         VStack(spacing: 0) {
  // 现代化标签栏
             modernTabBar
-            
+
  // 主要内容
             TabView(selection: $selectedTab) {
                 modernFileTransferTab
                     .tag(0)
-                
+
                 enhancedTransferHistoryTab
                     .tag(1)
             }
             .tabViewStyle(.automatic)
         }
     }
-    
+
  // MARK: - 连接状态卡片
     private var connectionStatusCard: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -127,20 +128,20 @@ public struct FileTransferView: View {
                     .font(.headline)
                     .fontWeight(.semibold)
             }
-            
+
             HStack {
                 Circle()
                     .fill(fileTransferManager.isTransferring ? Color.green : Color.gray)
                     .frame(width: 10, height: 10)
                     .scaleEffect(fileTransferManager.isTransferring ? 1.2 : 1.0)
                     .animation(.easeInOut(duration: 1.0).repeatForever(autoreverses: true), value: fileTransferManager.isTransferring)
-                
+
                 Text(LocalizationManager.shared.localizedString(fileTransferManager.isTransferring ? "status.transferring" : "status.idle"))
                     .font(.subheadline)
                     .foregroundColor(.secondary)
                     .animation(.easeInOut(duration: 0.3), value: fileTransferManager.isTransferring)
             }
-            
+
             if fileTransferManager.isTransferring {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack {
@@ -154,7 +155,7 @@ public struct FileTransferView: View {
                             .contentTransition(.numericText())
                             .animation(.easeInOut(duration: 0.3), value: fileTransferManager.totalProgress)
                     }
-                    
+
                     ProgressView(value: fileTransferManager.totalProgress)
                         .tint(.blue)
                         .animation(.easeInOut(duration: 0.5), value: fileTransferManager.totalProgress)
@@ -164,14 +165,14 @@ public struct FileTransferView: View {
         }
         .animation(.easeInOut(duration: 0.3), value: fileTransferManager.isTransferring)
     }
-    
+
  // MARK: - 快速操作卡片
     private var quickActionsCard: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(LocalizationManager.shared.localizedString("fileTransfer.quickActions"))
                 .font(.headline)
                 .fontWeight(.semibold)
-            
+
             VStack(spacing: 8) {
                 Button(action: selectFiles) {
                     HStack {
@@ -187,9 +188,9 @@ public struct FileTransferView: View {
                     .padding(.vertical, 8)
                 }
                 .buttonStyle(.plain)
-                
+
                 Divider()
-                
+
                 Button(action: selectFolder) {
                     HStack {
                         Image(systemName: "folder.badge.plus")
@@ -204,12 +205,12 @@ public struct FileTransferView: View {
                     .padding(.vertical, 8)
                 }
                 .buttonStyle(.plain)
-                
+
                 Divider()
-                
-                Button(action: { 
+
+                Button(action: {
                     generateQRCode()
-                    showingQRCode = true 
+                    showingQRCode = true
                 }) {
                     HStack {
                         Image(systemName: "qrcode")
@@ -227,14 +228,14 @@ public struct FileTransferView: View {
             }
         }
     }
-    
+
  // MARK: - 最近传输卡片
     private var recentTransfersCard: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(LocalizationManager.shared.localizedString("fileTransfer.recentTransfers"))
                 .font(.headline)
                 .fontWeight(.semibold)
-            
+
             let recentTransfers = Array(fileTransferManager.transferHistory.prefix(3))
             if recentTransfers.isEmpty {
                 VStack(spacing: 8) {
@@ -256,7 +257,7 @@ public struct FileTransferView: View {
             }
         }
     }
-    
+
  // MARK: - 现代化标签栏
     private var modernTabBar: some View {
         HStack(spacing: 0) {
@@ -267,7 +268,7 @@ public struct FileTransferView: View {
             ) {
                 selectedTab = 0
             }
-            
+
             ModernTabButton(
                 title: LocalizationManager.shared.localizedString("fileTransfer.tab.history"),
                 icon: "clock.arrow.circlepath",
@@ -283,27 +284,27 @@ public struct FileTransferView: View {
                 .stroke(Color.white.opacity(0.1), lineWidth: 1)
         )
     }
-    
+
  // MARK: - 现代化文件传输标签页
     private var modernFileTransferTab: some View {
         ScrollView {
             VStack(spacing: 24) {
  // 拖拽区域
                 modernDropZone
-                
+
  // 选中的文件
                 if !selectedFiles.isEmpty {
                     selectedFilesSection
                         .tahoeLiquidGlassCard()
                 }
-                
+
  // 活跃传输
                 activeTransfersSection
             }
             .padding()
         }
     }
-    
+
  // MARK: - 现代化拖拽区域
     private var modernDropZone: some View {
         VStack(spacing: 20) {
@@ -311,24 +312,24 @@ public struct FileTransferView: View {
                 .font(.system(size: 64))
                 .foregroundColor(dragOver ? .blue : .gray)
                 .animation(.easeInOut(duration: 0.2), value: dragOver)
-            
+
             VStack(spacing: 8) {
                 Text(LocalizationManager.shared.localizedString("fileTransfer.drop.title"))
                     .font(.title2)
                     .fontWeight(.semibold)
-                
+
                 Text(LocalizationManager.shared.localizedString("fileTransfer.drop.subtitle"))
                     .font(.subheadline)
                     .foregroundColor(.secondary)
             }
-            
+
             HStack(spacing: 16) {
                 Button(LocalizationManager.shared.localizedString("action.selectFiles")) {
                     selectFiles()
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
-                
+
                 Button(LocalizationManager.shared.localizedString("action.selectFolder")) {
                     selectFolder()
                 }
@@ -344,7 +345,7 @@ public struct FileTransferView: View {
             handleFileDrop(providers: providers)
         }
     }
-    
+
  // MARK: - 选中文件区域
     private var selectedFilesSection: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -352,25 +353,25 @@ public struct FileTransferView: View {
                 Text(LocalizationManager.shared.localizedString("fileTransfer.selectedFiles"))
                     .font(.title3)
                     .fontWeight(.semibold)
-                
+
                 Text("(\(selectedFiles.count))")
                     .font(.title3)
                     .foregroundColor(.secondary)
-                
+
                 Spacer()
-                
+
                 Button(LocalizationManager.shared.localizedString("action.sendAll")) {
                     sendSelectedFiles()
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(selectedFiles.isEmpty)
-                
+
                 Button(LocalizationManager.shared.localizedString("action.clear")) {
                     selectedFiles.removeAll()
                 }
                 .buttonStyle(.bordered)
             }
-            
+
             LazyVGrid(columns: [
                 GridItem(.adaptive(minimum: 300), spacing: 16)
             ], spacing: 16) {
@@ -386,14 +387,14 @@ public struct FileTransferView: View {
         }
         .padding()
     }
-    
+
  // MARK: - 活跃传输区域
     private var activeTransfersSection: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text(LocalizationManager.shared.localizedString("fileTransfer.activeTransfers"))
                 .font(.title3)
                 .fontWeight(.semibold)
-            
+
             if fileTransferManager.activeTransfers.isEmpty {
                 EmptyStateView(
                     title: LocalizationManager.shared.localizedString("fileTransfer.active.emptyTitle"),
@@ -413,7 +414,7 @@ public struct FileTransferView: View {
         }
         .tahoeLiquidGlassCard()
     }
-    
+
  // MARK: - 增强的传输历史标签页
     private var enhancedTransferHistoryTab: some View {
         VStack(alignment: .leading, spacing: 20) {
@@ -421,9 +422,9 @@ public struct FileTransferView: View {
                 Text(LocalizationManager.shared.localizedString("fileTransfer.history.title"))
                     .font(.title2)
                     .fontWeight(.bold)
-                
+
                 Spacer()
-                
+
                 Button(LocalizationManager.shared.localizedString("fileTransfer.history.clear")) {
                     fileTransferManager.clearHistory()
                 }
@@ -431,7 +432,7 @@ public struct FileTransferView: View {
                 .disabled(fileTransferManager.transferHistory.isEmpty)
             }
             .padding(.horizontal)
-            
+
             if fileTransferManager.transferHistory.isEmpty {
                 EmptyStateView(
                     title: LocalizationManager.shared.localizedString("fileTransfer.history.emptyTitle"),
@@ -484,24 +485,24 @@ public struct FileTransferView: View {
                     .padding(.horizontal)
                 }
             }
-            
+
             Spacer()
         }
     }
-    
+
  // MARK: - 威胁处理
-    
+
  /// 威胁处理操作类型
     private enum ThreatAction {
         case delete
         case quarantine
         case ignore
     }
-    
+
  /// 处理威胁操作 - Requirements: 4.3
     private func handleThreatAction(_ action: ThreatAction, for result: FileScanResult) {
         let fileURL = result.fileURL
-        
+
         switch action {
         case .delete:
  // 删除文件
@@ -511,31 +512,32 @@ public struct FileTransferView: View {
             } catch {
                 SkyBridgeLogger.ui.error("❌ 删除文件失败: \(error.localizedDescription)")
             }
-            
+
         case .quarantine:
  // 移动到隔离区
-            let quarantineDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-                .appendingPathComponent("SkyBridge/Quarantine")
-            
+            let fm = FileManager.default
+            let quarantineBase = (try? fm.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)) ?? fm.temporaryDirectory
+            let quarantineDir = quarantineBase.appendingPathComponent("SkyBridge/Quarantine")
+
             do {
-                try FileManager.default.createDirectory(at: quarantineDir, withIntermediateDirectories: true)
+                try fm.createDirectory(at: quarantineDir, withIntermediateDirectories: true)
                 let quarantinePath = quarantineDir.appendingPathComponent(fileURL.lastPathComponent)
-                try FileManager.default.moveItem(at: fileURL, to: quarantinePath)
+                try fm.moveItem(at: fileURL, to: quarantinePath)
                 SkyBridgeLogger.ui.info("🔒 已隔离威胁文件: \(fileURL.lastPathComponent)")
             } catch {
                 SkyBridgeLogger.ui.error("❌ 隔离文件失败: \(error.localizedDescription)")
             }
-            
+
         case .ignore:
  // 忽略风险，仅记录日志
             SkyBridgeLogger.ui.warning("⚠️ 用户选择忽略威胁: \(fileURL.lastPathComponent)")
         }
-        
+
  // 关闭警报
         showingThreatAlert = false
         threatAlertResult = nil
     }
-    
+
  // MARK: - 辅助方法
     private func generateQRCode() {
  // 生成包含传输信息的二维码
@@ -544,13 +546,13 @@ public struct FileTransferView: View {
             "device_id": UUID().uuidString,
             "timestamp": Date().timeIntervalSince1970
         ]
-        
+
         if let jsonData = try? JSONSerialization.data(withJSONObject: transferInfo),
            let jsonString = String(data: jsonData, encoding: .utf8) {
             qrCodeString = jsonString
         }
     }
-    
+
     private func handleFileDrop(providers: [NSItemProvider]) -> Bool {
         for provider in providers {
             if provider.canLoadObject(ofClass: URL.self) {
@@ -569,40 +571,47 @@ public struct FileTransferView: View {
         }
         return true
     }
-    
+
     private func selectFiles() {
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = allowMultipleFiles
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
-        
+
         if panel.runModal() == .OK {
             selectedFiles.append(contentsOf: panel.urls)
         }
     }
-    
+
     private func selectFolder() {
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
-        
+
         if panel.runModal() == .OK, let url = panel.url {
             selectedFiles.append(url)
         }
     }
-    
+
     private func sendSelectedFiles() {
         Task {
             for fileURL in selectedFiles {
                 do {
- // 使用实际的sendFile方法
-                    try await fileTransferManager.sendFile(
-                        at: fileURL,
-                        to: "default-device",
-                        deviceName: "默认设备",
-                        ipAddress: "192.168.1.100"
-                    )
+                    // Prefer cross-network (WebRTC DataChannel) when available.
+                    if case .connected = crossNetworkManager.connectionStatus,
+                       let conn = crossNetworkManager.currentConnection,
+                       case .webrtc = conn.transport {
+                        try await crossNetworkManager.sendFileToConnectedPeer(fileURL)
+                    } else {
+                        // Fallback: legacy placeholder LAN path (requires real device selection in future).
+                        try await fileTransferManager.sendFile(
+                            at: fileURL,
+                            to: "default-device",
+                            deviceName: "默认设备",
+                            ipAddress: "192.168.1.100"
+                        )
+                    }
                 } catch {
                     SkyBridgeLogger.ui.error("传输失败: \(error.localizedDescription, privacy: .private)")
                 }
@@ -610,10 +619,10 @@ public struct FileTransferView: View {
             selectedFiles.removeAll()
         }
     }
-    
+
     private func fileIcon(for url: URL) -> String {
         let pathExtension = url.pathExtension.lowercased()
-        
+
         switch pathExtension {
         case "jpg", "jpeg", "png", "gif", "bmp", "tiff", "heic":
             return "photo"
@@ -635,7 +644,7 @@ public struct FileTransferView: View {
             return "doc"
         }
     }
-    
+
     private func formatFileSize(_ bytes: Int64) -> String {
         let formatter = ByteCountFormatter()
         formatter.allowedUnits = [.useKB, .useMB, .useGB]
@@ -651,7 +660,7 @@ private struct ModernTabButton: View {
     let icon: String
     let isSelected: Bool
     let action: () -> Void
-    
+
     var body: some View {
         Button(action: action) {
             VStack(spacing: 4) {
@@ -684,7 +693,7 @@ private struct ModernFileCard: View {
     let fileURL: URL
     let onRemove: () -> Void
     let onPreview: () -> Void
-    
+
     var body: some View {
         HStack(spacing: 12) {
  // 文件图标
@@ -694,23 +703,23 @@ private struct ModernFileCard: View {
                 .frame(width: 40, height: 40)
                 .background(Color.blue.opacity(0.1))
                 .clipShape(RoundedRectangle(cornerRadius: 8))
-            
+
  // 文件信息
             VStack(alignment: .leading, spacing: 4) {
                 Text(fileURL.lastPathComponent)
                     .font(.subheadline)
                     .fontWeight(.medium)
                     .lineLimit(1)
-                
+
                 if let fileSize = try? fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize {
                     Text(formatFileSize(Int64(fileSize)))
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
             }
-            
+
             Spacer()
-            
+
  // 操作按钮
             HStack(spacing: 8) {
                 if isMediaFile(fileURL) {
@@ -723,7 +732,7 @@ private struct ModernFileCard: View {
                     }
                     .buttonStyle(.bordered)
                 }
-                
+
                 Button(action: onRemove) {
                     Image(systemName: "xmark.circle.fill")
                         .foregroundColor(.red)
@@ -733,10 +742,10 @@ private struct ModernFileCard: View {
         }
         .padding()
     }
-    
+
     private func fileIcon(for url: URL) -> String {
         let pathExtension = url.pathExtension.lowercased()
-        
+
         switch pathExtension {
         case "jpg", "jpeg", "png", "gif", "bmp", "tiff", "heic":
             return "photo"
@@ -750,13 +759,13 @@ private struct ModernFileCard: View {
             return "doc"
         }
     }
-    
+
     private func isMediaFile(_ url: URL) -> Bool {
         let pathExtension = url.pathExtension.lowercased()
         let mediaExtensions = ["jpg", "jpeg", "png", "gif", "bmp", "tiff", "heic", "mp4", "mov", "avi", "mkv", "wmv", "mp3", "wav", "aac", "flac", "m4a"]
         return mediaExtensions.contains(pathExtension)
     }
-    
+
     private func formatFileSize(_ bytes: Int64) -> String {
         let formatter = ByteCountFormatter()
         formatter.allowedUnits = [.useKB, .useMB, .useGB]
@@ -769,7 +778,7 @@ private struct ModernTransferRowView: View {
     let transfer: FileTransfer
     let onCancel: () -> Void
     @State private var isAnimating = false
-    
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
@@ -779,33 +788,33 @@ private struct ModernTransferRowView: View {
                     .font(.title2)
                     .scaleEffect(isAnimating && transfer.status == .transferring ? 1.1 : 1.0)
                     .animation(.easeInOut(duration: 1.0).repeatForever(autoreverses: true), value: isAnimating)
-                
+
  // 文件信息
                 VStack(alignment: .leading, spacing: 2) {
                     Text(transfer.fileName)
                         .font(.subheadline)
                         .fontWeight(.medium)
                         .lineLimit(1)
-                    
+
                     Text(formatFileSize(transfer.fileSize))
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
-                
+
                 Spacer()
-                
+
  // 状态和进度
                 VStack(alignment: .trailing, spacing: 2) {
                     Text("\(Int(transfer.progress * 100))%")
                         .font(.caption)
                         .fontWeight(.medium)
                         .contentTransition(.numericText())
-                    
+
                     Text(transfer.status.displayName)
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
-                
+
  // 取消按钮
                 Button(action: onCancel) {
                     Image(systemName: "xmark.circle.fill")
@@ -813,7 +822,7 @@ private struct ModernTransferRowView: View {
                 }
                 .buttonStyle(.borderless)
             }
-            
+
  // 进度条 - 优化动画和响应性
             ProgressView(value: transfer.progress)
                 .tint(.blue)
@@ -831,7 +840,7 @@ private struct ModernTransferRowView: View {
             }
         }
     }
-    
+
     private func formatFileSize(_ bytes: Int64) -> String {
         let formatter = ByteCountFormatter()
         formatter.allowedUnits = [.useKB, .useMB, .useGB]
@@ -842,31 +851,31 @@ private struct ModernTransferRowView: View {
 
 private struct CompactTransferRowView: View {
     let transfer: FileTransfer
-    
+
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: transfer.status == .completed ? "checkmark.circle.fill" : "xmark.circle.fill")
                 .foregroundColor(transfer.status == .completed ? .green : .red)
                 .font(.caption)
-            
+
             VStack(alignment: .leading, spacing: 2) {
                 Text(transfer.fileName)
                     .font(.caption)
                     .fontWeight(.medium)
                     .lineLimit(1)
-                
+
                 if let completedAt = transfer.completedAt {
                     Text(formatDate(completedAt))
                         .font(.caption2)
                         .foregroundColor(.secondary)
                 }
             }
-            
+
             Spacer()
         }
         .padding(.vertical, 4)
     }
-    
+
     private func formatDate(_ date: Date) -> String {
         let formatter = DateFormatter()
         formatter.dateStyle = .none
@@ -878,40 +887,51 @@ private struct CompactTransferRowView: View {
 private struct EnhancedHistoryRowView: View {
     let transfer: FileTransfer
     @State private var showingScanDetails = false
-    
+
     var body: some View {
         HStack(spacing: 12) {
  // 状态图标
             Image(systemName: transfer.status == .completed ? "checkmark.circle.fill" : "xmark.circle.fill")
                 .foregroundColor(transfer.status == .completed ? .green : .red)
                 .font(.title2)
-            
+
  // 文件信息
             VStack(alignment: .leading, spacing: 4) {
                 Text(transfer.fileName)
                     .font(.subheadline)
                     .fontWeight(.medium)
                     .lineLimit(1)
-                
+
                 HStack {
                     Text(formatFileSize(transfer.fileSize))
                         .font(.caption)
                         .foregroundColor(.secondary)
-                    
+
                     if let completedAt = transfer.completedAt {
                         Text("•")
                             .font(.caption)
                             .foregroundColor(.secondary)
-                        
+
                         Text(formatDate(completedAt))
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
                 }
+
+                // Show saved path for inbound completed transfers so the user can locate the file easily.
+                if transfer.direction == .incoming,
+                   transfer.status == .completed,
+                   let url = transfer.localPath {
+                    Text(url.path)
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
             }
-            
+
             Spacer()
-            
+
  // 扫描结果摘要 - Requirements: 4.2, 7.2
             if let scanResult = transfer.scanResult {
                 Button {
@@ -920,13 +940,13 @@ private struct EnhancedHistoryRowView: View {
                     HStack(spacing: 4) {
                         scanVerdictIcon(scanResult.verdict)
                             .font(.caption)
-                        
+
                         if !scanResult.warnings.isEmpty {
                             Text("(\(scanResult.warnings.count))")
                                 .font(.caption2)
                                 .foregroundColor(.orange)
                         }
-                        
+
  // 扫描时长
                         Text(formatScanDuration(scanResult.scanDuration))
                             .font(.caption2)
@@ -938,7 +958,23 @@ private struct EnhancedHistoryRowView: View {
                 }
                 .buttonStyle(.plain)
             }
-            
+
+            // Reveal received file in Finder (macOS only).
+            #if os(macOS)
+            if transfer.direction == .incoming,
+               transfer.status == .completed,
+               let url = transfer.localPath {
+                Button {
+                    NSWorkspace.shared.activateFileViewerSelecting([url])
+                } label: {
+                    Image(systemName: "folder")
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("在 Finder 中显示")
+            }
+            #endif
+
  // 传输方向
             Image(systemName: transfer.direction == .outgoing ? "arrow.up" : "arrow.down")
                 .foregroundColor(.secondary)
@@ -956,7 +992,7 @@ private struct EnhancedHistoryRowView: View {
             }
         }
     }
-    
+
     private func scanVerdictIcon(_ verdict: ScanVerdict) -> some View {
         Group {
             switch verdict {
@@ -975,7 +1011,7 @@ private struct EnhancedHistoryRowView: View {
             }
         }
     }
-    
+
     private func scanVerdictBackground(_ verdict: ScanVerdict) -> Color {
         switch verdict {
         case .safe:
@@ -988,7 +1024,7 @@ private struct EnhancedHistoryRowView: View {
             return .gray.opacity(0.15)
         }
     }
-    
+
     private func formatScanDuration(_ duration: TimeInterval) -> String {
         if duration < 1 {
             return String(format: "%.0fms", duration * 1000)
@@ -996,14 +1032,14 @@ private struct EnhancedHistoryRowView: View {
             return String(format: "%.1fs", duration)
         }
     }
-    
+
     private func formatFileSize(_ bytes: Int64) -> String {
         let formatter = ByteCountFormatter()
         formatter.allowedUnits = [.useKB, .useMB, .useGB]
         formatter.countStyle = .file
         return formatter.string(fromByteCount: bytes)
     }
-    
+
     private func formatDate(_ date: Date) -> String {
         let formatter = DateFormatter()
         formatter.dateStyle = .short
@@ -1016,13 +1052,13 @@ private struct ModernSettingCard<Content: View>: View {
     let title: String
     let icon: String
     let content: Content
-    
+
     init(title: String, icon: String, @ViewBuilder content: () -> Content) {
         self.title = title
         self.icon = icon
         self.content = content()
     }
-    
+
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
@@ -1033,7 +1069,7 @@ private struct ModernSettingCard<Content: View>: View {
                     .font(.headline)
                     .fontWeight(.semibold)
             }
-            
+
             content
         }
         .padding()
@@ -1049,21 +1085,21 @@ private struct ModernToggleRow: View {
     let title: String
     let description: String
     @Binding var isOn: Bool
-    
+
     var body: some View {
         HStack {
             VStack(alignment: .leading, spacing: 4) {
                 Text(title)
                     .font(.subheadline)
                     .fontWeight(.medium)
-                
+
                 Text(description)
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
-            
+
             Spacer()
-            
+
             Toggle("", isOn: $isOn)
         }
     }
@@ -1073,18 +1109,18 @@ private struct EmptyStateView: View {
     let title: String
     let subtitle: String
     let systemImage: String
-    
+
     var body: some View {
         VStack(spacing: 16) {
             Image(systemName: systemImage)
                 .font(.system(size: 48))
                 .foregroundColor(.gray)
-            
+
             VStack(spacing: 4) {
                 Text(title)
                     .font(.headline)
                     .foregroundColor(.primary)
-                
+
                 Text(subtitle)
                     .font(.subheadline)
                     .foregroundColor(.secondary)
@@ -1103,7 +1139,7 @@ private struct EmptyStateView: View {
 @MainActor
 enum TransferSpeed: CaseIterable {
     case slow, normal, fast
-    
+
     var displayName: String {
         switch self {
         case .slow: return LocalizationManager.shared.localizedString("transferSpeed.slow")
