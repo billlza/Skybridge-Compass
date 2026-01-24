@@ -75,20 +75,20 @@ swift test
 论文中标注的 artifact 信息如下（供 reviewer/编辑核对）：
 
 - URL：`https://github.com/billlza/Skybridge-Compass`
-- Tag：`artifact-v1`
-- Commit：`8a68fa6e0fe78147d2b18d3287681f5d07c74afd`
+- Tag：`artifact-v3`
+- Commit：`c23a8b4a3d01acf71faf5615e184ee44594b7cae`
 
 Source archive checksums（immutability 辅助证据）：
 
-- `artifact-v1.zip`：`SHA256=354443f7cda3e25a51480a683da1712a8ea9588a2bc510f4f716bd553d6d72ac`
-- `artifact-v1.tar.gz`：`SHA256=90228458587f095e9cd403d3d449f885a2b8b002057a76e6f60c291e45071388`
+- `artifact-v3.zip`：`SHA256=c370f07da6fe825c2132f447db3287e0689d0344b26b4d97ff4f043d2cbac1e3`
+- `artifact-v3.tar.gz`：`SHA256=ff467cdc761a9a6528de871f0fd8663e788e0aa7a6af5b8883199a2be68642c9`
 
 最小复核流程（需要本机已安装 Xcode/Swift 与 TeXLive；PQC SDK 仅在 macOS 26+ 可用）：
 
 ```bash
 git clone https://github.com/billlza/Skybridge-Compass
 cd Skybridge-Compass
-git checkout artifact-v1
+git checkout artifact-v3
 
 git rev-parse HEAD
 git describe --tags --always
