@@ -26,6 +26,8 @@ Outputs:
 
 #### Notes
 
+- The exporter will **auto-use `trans_jour.docx`** (IEEE Transactions / **TDSC recommended Word template**) if it exists under `Docs/`.
+  - You can override explicitly via `--reference-doc trans_jour.docx` (or another template).
 - The exporter intentionally strips IEEEtran wrapper macros that Word doesn’t need (e.g., `\IEEEtitleabstractindextext`).
 - If you add new TikZ figures, pre-render a PNG into `Docs/figures/` and the exporter can be extended similarly.
 

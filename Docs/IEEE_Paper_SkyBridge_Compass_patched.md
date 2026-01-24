@@ -210,13 +210,13 @@ public protocol CryptoProvider: Sendable {
     var providerName: String { get }
     var tier: CryptoTier { get }
     var activeSuite: CryptoSuite { get }
-    
-    func kemDemSeal(plaintext: Data, recipientPublicKey: Data, 
+
+    func kemDemSeal(plaintext: Data, recipientPublicKey: Data,
                     info: Data) async throws -> KemDemSealedBox
-    func kemDemOpen(sealedBox: KemDemSealedBox, privateKey: Data, 
+    func kemDemOpen(sealedBox: KemDemSealedBox, privateKey: Data,
                     info: Data) async throws -> Data
     func sign(data: Data, using key: SigningKeyHandle) async throws -> Data
-    func verify(data: Data, signature: Data, 
+    func verify(data: Data, signature: Data,
                 publicKey: Data) async throws -> Bool
     func generateKeyPair(for usage: KeyUsage) async throws -> KeyPair
 }
@@ -259,7 +259,7 @@ public enum CryptoProviderFactory {
         case requirePQC     // Fail if PQC unavailable
         case classicOnly    // Force classic algorithms
     }
-    
+
     public static func make(
         policy: SelectionPolicy = .preferPQC,
         environment: any CryptoEnvironment = SystemCryptoEnvironment.system
@@ -371,8 +371,8 @@ public actor HandshakeDriver {
     private var pendingContinuation: CheckedContinuation<SessionKeys, Error>?
     private var timeoutTask: Task<Void, Never>?
     private var pendingResult: Result<SessionKeys, Error>?
-    
-    public func initiateHandshake(with peer: PeerIdentifier) 
+
+    public func initiateHandshake(with peer: PeerIdentifier)
         async throws -> SessionKeys
     public func handleMessage(_ data: Data, from peer: PeerIdentifier) async
     public func cancel() async
@@ -386,7 +386,7 @@ public actor HandshakeContext {
     private var ephemeralPrivateKey: SecureBytes?
     private var transcriptHash: SecureBytes?
     private var isZeroized: Bool = false
-    
+
     public func zeroize()
 }
 ```
@@ -425,7 +425,7 @@ private func finishOnce(with result: Result<SessionKeys, Error>) {
     // Cancel timeout
     timeoutTask?.cancel()
     timeoutTask = nil
-    
+
     // Guard against double resume
     guard let continuation = pendingContinuation else {
         // MessageB arrived before continuation established
@@ -433,7 +433,7 @@ private func finishOnce(with result: Result<SessionKeys, Error>) {
         return
     }
     pendingContinuation = nil  // Immediately nil to prevent reuse
-    
+
     switch result {
     case .success(let keys): continuation.resume(returning: keys)
     case .failure(let error): continuation.resume(throwing: error)
@@ -454,11 +454,11 @@ Swift's standard `Data` and `Array` types use copy-on-write (COW) semantics, whi
 public final class SecureBytes: @unchecked Sendable {
     private let pointer: UnsafeMutableRawPointer
     private let count: Int
-    
+
     /// Injectable wiping function for test verification
-    nonisolated(unsafe) public static var wipingFunction: 
+    nonisolated(unsafe) public static var wipingFunction:
         (UnsafeMutableRawPointer, Int) -> Void = secureZero
-    
+
     deinit {
         if count > 0 {
             Self.wipingFunction(pointer, count)
@@ -576,28 +576,28 @@ We assume an active network adversary with full control of the discovery channel
 
 We state the core properties as invariants and provide non-formal proof sketches tied to protocol mechanics:
 
-**Property G1 (Negotiation Integrity):** The selected suite must be among the Initiator’s offered suites and have a corresponding key share.  
+**Property G1 (Negotiation Integrity):** The selected suite must be among the Initiator’s offered suites and have a corresponding key share.
 *Proof sketch:* `MessageB` includes `selectedSuite`, and `sigB` covers `MessageA`; any modification to `supportedSuites[]` or `keyShares[]` breaks `sigB` verification. The Responder validates `selectedSuite in supportedSuites[]` and `keyShares[]` contains a matching entry.
 
-**Property G2 (Mutual Authentication for Paired Peers):** For previously paired devices, the peer identity is authenticated and bound to the handshake transcript.  
+**Property G2 (Mutual Authentication for Paired Peers):** For previously paired devices, the peer identity is authenticated and bound to the handshake transcript.
 *Proof sketch:* `identityPubKey` is pinned during OOB pairing. `MessageA`/`MessageB` signatures over transcript data must verify under the pinned key, otherwise `identityMismatch` aborts the handshake.
 
-**Property G3 (Session Key Secrecy):** The derived session keys remain secret under standard KEM/DH and signature security assumptions.  
+**Property G3 (Session Key Secrecy):** The derived session keys remain secret under standard KEM/DH and signature security assumptions.
 *Proof sketch:* The shared secret is derived from KEM decapsulation or DH, and keys are extracted via HKDF with transcript-bound salt; an attacker without the private key material cannot compute the shared secret or derive session keys.
 
-**Property G4 (Replay Resistance):** Replayed handshakes do not establish a session.  
+**Property G4 (Replay Resistance):** Replayed handshakes do not establish a session.
 *Proof sketch:* `handshakeId` derives from fresh nonces and suite identifiers; replay detection caches recent IDs and rejects duplicates within the window.
 
-**Property G5 (Downgrade Resistance under strictPQC):** No fallback to classic is allowed under strict policy.  
+**Property G5 (Downgrade Resistance under strictPQC):** No fallback to classic is allowed under strict policy.
 *Proof sketch:* `TwoAttemptHandshakeManager` enforces a policy gate before any fallback attempt; strictPQC forbids all fallback edges regardless of error type. This is validated by policy downgrade benchmarks (Fig. 6).
 
-**Property G6 (Safe Fallback under default policy):** Fallback can only occur for a whitelisted set of benign errors, and never due to timeout.  
+**Property G6 (Safe Fallback under default policy):** Fallback can only occur for a whitelisted set of benign errors, and never due to timeout.
 *Proof sketch:* A whitelist/blacklist of error causes controls fallback; `timeout` is explicitly blocked and per-peer cooldown limits repeated downgrades.
 
-**Property G7 (Legacy Acceptance Preconditions):** Legacy P-256 signatures are accepted only under authenticated pairing or an existing trust record.  
+**Property G7 (Legacy Acceptance Preconditions):** Legacy P-256 signatures are accepted only under authenticated pairing or an existing trust record.
 *Proof sketch:* Legacy acceptance is gated by `LegacyTrustPrecondition`; pure network stranger connections fail. This is validated by the precondition test matrix (Table VIII).
 
-**Property G8 (Auditability):** Cryptographic downgrades and exceptional states are observable.  
+**Property G8 (Auditability):** Cryptographic downgrades and exceptional states are observable.
 *Proof sketch:* The handshake emits `handshakeFallback`/`cryptoDowngrade` events with reason, deviceId, and cooldown context, enabling post-hoc verification of policy adherence.
 
 **TABLE XIII: Security Contract (Properties, Enforcement, Evidence)**
@@ -645,14 +645,14 @@ public struct ApplePQCCryptoProvider: CryptoProvider, Sendable {
         // KEM encapsulation
         let publicKey = try MLKEM768.PublicKey(rawRepresentation: recipientPublicKey)
         let encapsulationResult = try publicKey.encapsulate()
-        
+
         // Key derivation (HKDF-SHA256)
         let salt = SHA256(DS("SkyBridge-KDF-Salt-v1|") || info)
         let derivedKey = HKDF<SHA256>.deriveKey(
             inputKeyMaterial: encapsulationResult.sharedSecret,
             salt: salt, info: info, outputByteCount: 32
         )
-        
+
         // Authenticated encryption (AES-256-GCM)
         let sealedBox = try AES.GCM.seal(plaintext, using: derivedKey)
         return KemDemSealedBox(
@@ -789,13 +789,13 @@ public static func prepareAttempt(
 ) throws -> AttemptPreparation {
     // 1. Build homogeneous offeredSuites from provider's supported suites
     let buildResult = HandshakeOfferedSuites.build(strategy: strategy, cryptoProvider: cryptoProvider)
-    
+
     // 2. Select signature algorithm based on suites
     let sigAAlgorithm = PreNegotiationSignatureSelector.selectForMessageAResult(offeredSuites: suites)
-    
+
     // 3. Get matching signature provider
     let signatureProvider = PreNegotiationSignatureSelector.selectProvider(for: sigAAlgorithm)
-    
+
     return AttemptPreparation(strategy, suites, sigAAlgorithm, signatureProvider)
 }
 ```
@@ -1378,14 +1378,14 @@ As post-quantum cryptography transitions from standardization to deployment, sys
 We exclude X-Wing from the main tables because the benchmark harness currently exercises only `pqcOnly`/`classicOnly` paths. For a conservative wire-size estimate, we start from Table II (pure ML-KEM-768 + ML-DSA-65) and adjust only the KEM keyshare lengths:
 
 ```
-DeltaKEM = (X-Wing share 1216 B) - (ML-KEM-768 share 1088 B) = +128 B
+DeltaKEM = (X-Wing share 1120 B) - (ML-KEM-768 share 1088 B) = +32 B
 
-B_msgA(xwing) approx 6556 + 128 = 6684 B
-B_msgB(xwing) approx 5489 + 128 = 5617 B
-B_total(xwing) approx 6684 + 5617 + 76 = 12,377 B
+B_msgA(xwing) approx 6577 + 32 = 6609 B
+B_msgB(xwing) approx 5510 + 0  = 5510 B
+B_total(xwing) approx 6609 + 5510 + 76 = 12,195 B
 ```
 
-This yields an estimated total wire size of **approx12.4 KB** for the full handshake, assuming the same signature/identity sizes (ML-DSA-65) as the PQC-only suites. If X-Wing is integrated via native CryptoKit HPKE (removing the compatibility envelope header/nonce/tag overhead), the total is expected to drop slightly; we will report the measured figure once the hybrid path is benchmarked.
+This yields an estimated total wire size of **12,195 B (12.2 kB)** for the full handshake, assuming the same signature/identity sizes (ML-DSA-65) as the PQC-only suites. If X-Wing is integrated via native CryptoKit HPKE (removing the compatibility envelope header/nonce/tag overhead), the total is expected to drop slightly.
 
 ---
 

@@ -139,12 +139,13 @@
 \newcommand{\artifacttarurl}{\artifacturl/archive/refs/tags/\artifacttag.tar.gz}
 \newcommand{\artifacttarsha}{90228458587f095e9cd403d3d449f885a2b8b002057a76e6f60c291e45071388}
 
+\newcommand{\artifactdateSystemImpact}{2026-01-22}
 \newcommand{\artifactcsv}[1]{\texttt{#1_2026-01-16.csv}}
 \newcommand{\artifactpath}[1]{\texttt{Artifacts/#1_2026-01-16.csv}}
 \newcommand{\implref}[2]{Implementation reference: \href{\artifacturl}{\artifacturlshort} (tag=\texttt{\artifacttag}, commit=\texttt{\artifactsha}), file: \texttt{#1}, lines: #2.}
 
 
-\title{SkyBridge Compass: A Crypto-Agile Peer-to-Peer Remote Desktop and File Transfer System with Auditable Downgrade Policy and Post-Quantum Readiness}
+\title{SkyBridge Compass: A Crypto-Agile P2P Handshake Framework for Remote Desktop and File Transfer with Auditable Downgrade Policy and Post-Quantum Readiness}
 \author{Zi'ang Li\IEEEcompsocitemizethanks{\IEEEcompsocthanksitem Independent Researcher, Tianjin, China. E-mail: 2403871950@qq.com.}}
 
 \begin{document}
@@ -341,8 +342,8 @@ negotiation and failures explicit and auditable.
 \subsection{Peer-to-Peer Device
 Pairing}\label{a.-peer-to-peer-device-pairing}
 
-Pairing protocols such as Bluetooth SSP [2], Continuity [3],
-and PAKEs like SPAKE2+ [4] establish initial trust but stop short
+Pairing protocols such as Bluetooth SSP [1], Continuity [2],
+and PAKEs like SPAKE2+ [3] establish initial trust but stop short
 of post-pairing migration, downgrade policy, or auditability. SkyBridge
 Compass begins \emph{after} pairing and treats pinned identity keys as
 inputs rather than outcomes.
@@ -351,10 +352,10 @@ inputs rather than outcomes.
 Negotiation}\label{b.-cryptographic-agility-and-negotiation}
 
 TLS 1.3 and QUIC bind negotiated parameters into transcripts and
-transport parameters to prevent silent downgrade [6], [18],
+transport parameters to prevent silent downgrade [4], [5],
 but they do not define an auditable, system-level fallback policy across
 heterogeneous providers. We operationalize migration guidance
-[7, 38] with explicit policy gates and event emission that make
+[6, 7] with explicit policy gates and event emission that make
 downgrade decisions observable and testable.
 
 \subsection{Handshake Frameworks and Noise-Style
@@ -362,7 +363,7 @@ Patterns}\label{c.-handshake-frameworks-and-noise-style-patterns}
 
 Noise provides a compact framework for describing authenticated key
 exchange patterns with explicit transcript binding and identity key
-usage [19]. While SkyBridge Compass does not implement Noise
+usage [8]. While SkyBridge Compass does not implement Noise
 directly, our MessageA/MessageB/Finished exchange targets similar
 transcript-binding goals while adding explicit suite negotiation and
 auditable policy outcomes.
@@ -371,18 +372,18 @@ auditable policy outcomes.
 Deployment}\label{d.-post-quantum-cryptography-deployment}
 
 PQC standardization and early deployments highlight size and performance
-costs, along with pressure for hybrid deployments [8], [9],
-[10], [22], [23], [24], [25]. We
+costs, along with pressure for hybrid deployments [9], [10],
+[11], [12], [13], [14], [15]. We
 focus on making downgrade policy and auditability explicit across
-providers, treating Apple's CryptoKit PQC [34] as a deployment
+providers, treating Apple's CryptoKit PQC [16] as a deployment
 instance rather than a protocol dependency.
 
 \subsection{Secure State Machine
 Design}\label{e.-secure-state-machine-design}
 
 State machine vulnerabilities have been a persistent source of security
-bugs in protocol implementations [11], [30]. Actor-based concurrency
-models, as implemented in Swift's actor system [12], provide
+bugs in protocol implementations [17], [18]. Actor-based concurrency
+models, as implemented in Swift's actor system [19], provide
 compile-time guarantees against data races. We extend this model with
 deterministic completion, timeout handling, and audit events for
 cryptographic handshakes.
@@ -395,22 +396,10 @@ widely deployed handshake frameworks on explicit negotiation, downgrade
 auditability, and failure semantics, and reports message count, wire
 size, and latency where available.
 
-\begin{table*}[!t]
-\centering
-\scriptsize
-\noindent\textit{TABLE I. Baseline comparison with widely deployed handshakes. Message counts and negotiation semantics are summarized from the TLS/QUIC/DTLS RFCs and Noise specification [6, 18, 19, 39]. Loopback latencies and wire sizes are measured with BaselineBenchRunner (release), N=1000; wire sizes report loopback p50/p95 (KB) and are cert-dependent for TLS/QUIC/DTLS. Noise wire size is pattern-dependent and reflects the XX pattern used in this baseline.}\par
-\begin{tabular}{lllllll}
-\hline
-Protocol & Suite nego. explicit & Auditable downgrade policy & Failure semantics & Msgs & Wire size (p50/p95, KB) & p50/p95 latency \\
-\hline
-TLS 1.3 [6] & Yes (cipher suites, groups) & Downgrade prevention only; audit external & Alerts defined; audit external & 4 (1 RTT) & 8.6/8.7 & 8.53/14.01 ms \\
-QUIC [18] & Yes (TLS 1.3) & Same as TLS 1.3 & Same as TLS 1.3 & 4 (1 RTT) & 7.6/14.1 & 0.34/11.37 ms \\
-WebRTC DTLS [39] & Yes (DTLS 1.2 ciphers) & Downgrade prevention only; audit external & Alerts defined; audit external & 4 (1 RTT) & 3.0/3.1 & 8.18/11.79 ms \\
-Noise XX [19] & No (fixed pattern) & No policy layer & Pattern-defined; audit external & 3 & 2.5/2.6 & 0.44/0.58 ms \\
-SkyBridge Compass & Yes (suite + policy bound) & Yes (explicit policy + events) & Deterministic + evented & 4 & \shortstack[l]{4.8/4.9 (classic)\\36.9/43.6 (liboqs)\\18.6/18.8 (CryptoKit)} & \shortstack[l]{1.44/1.57 ms (classic)\\1.95/2.76 ms (liboqs)\\5.91/7.53 ms (CryptoKit)} \\[1pt]
-\hline
-\end{tabular}
-\end{table*}
+
+\noindent\textit{TABLE I. Baseline comparison with widely deployed handshakes. Message counts and negotiation semantics are summarized from the TLS/QUIC/DTLS RFCs and Noise specification [4, 5, 8, 20]. Loopback latencies and wire sizes are measured with BaselineBenchRunner (release), N=1000; wire sizes report loopback p50/p95 (kB) and are cert-dependent for TLS/QUIC/DTLS. Noise wire size is pattern-dependent and reflects the XX pattern used in this baseline.}\par
+\noindent DOCX_TABLE_PLACEHOLDER::tab:baseline-comparison::SPAN2\par
+
 
 Loopback SkyBridge p95 latency is 1.57/ 2.76/ 7.53~ms for
 classic/ liboqs/ CryptoKit, remaining below
@@ -420,10 +409,10 @@ crypto/state-machine overhead (p95
 classic/ liboqs/ CryptoKit) and is reported in
 Section~7 and Supplementary Tables~S1--S2.
 Loopback TLS/QUIC/DTLS p95 latency is 11.37--14.01~ms; wire-size baselines
-(p50/p95) are reported in Supplementary Table~S4 and are reproducible via
+(p50/p95) are reported in Supplementary Table~S6 and are reproducible via
 loopback pcap capture
 (\texttt{Scripts/run_baseline_bench.sh}).
-SkyBridge-CryptoKit loopback baselines are included in Supplementary Table~S4.
+SkyBridge-CryptoKit loopback baselines are included in Supplementary Table~S6.
 
 \section{System Architecture}\label{sec:system-architecture}
 
@@ -538,24 +527,10 @@ frames to avoid half-open state. Full wire-format definitions, field
 validation rules, and encoding rationale appear in the Supplementary
 Materials (Wire Format and Validation Rules).
 
-\begin{table*}[!t]
-\centering
+
 \noindent\textit{TABLE II. Suite negotiation scenarios under the two-attempt strategy (homogeneous per attempt).}\par
-\begin{tabular}{llll}
-\hline
-Initiator attempt(s)
-& Responder Capability
-& Outcome
-& Notes
-\\
-\hline
-Attempt 1: PQC-only & PQC available & PQC established & Best available selected \\
-Attempt 1: PQC-only; Attempt 2: classic-only & Classic only (no PQC material) & Classic established & Graceful fallback (evented) \\
-PQC-only (\texttt{strictPQC}) & Classic only & Handshake failed & Policy enforced (no fallback) \\
-Classic-only & PQC available & Classic established & Initiator policy respected \\
-\hline
-\end{tabular}
-\end{table*}
+\noindent DOCX_TABLE_PLACEHOLDER::tab:suite-negotiation-scenarios::SPAN2\par
+
 
 \textbf{Failure Semantics:}
 \begin{itemize}\tightlist
@@ -580,7 +555,7 @@ boundary (dashed) and policy guard (diamond).}
 Protocol}\label{b.-cryptoprovider-protocol}
 
 The CryptoProvider protocol defines a unified interface for all
-cryptographic operations required by the handshake and session layers [37].
+cryptographic operations required by the handshake and session layers [21].
 This abstraction enables transparent substitution of underlying
 implementations without modifying caller code.
 
@@ -603,7 +578,7 @@ Format}\label{c.-cryptosuite-wire-format}
 A \textbf{suite} defines the handshake tuple
 \texttt{(KEM,\ SIG,\ AEAD,\ KDF)} used for the KEM-DEM envelope and
 transcript binding. Data-plane AEAD is negotiated separately and is
-fixed to AES-256-GCM in v1 (Table~9). Suite identifiers use a compact
+fixed to AES-256-GCM in v1 (Table~10). Suite identifiers use a compact
 16-bit wire ID with reserved ranges for hybrid, PQC, classic, and
 experimental suites to enable forward compatibility. The full range
 table, encoding rules, and X-Wing notes appear in the Supplementary
@@ -841,7 +816,7 @@ Sketches}\label{b.-security-goals-and-proof-sketches}
 \end{itemize}
 
 We state the core properties as invariants and provide non-formal proof
-sketches tied to protocol mechanics. Formal verification using model checking or symbolic analysis [29] is planned for future work:
+sketches tied to protocol mechanics. Formal verification using model checking or symbolic analysis [22] is planned for future work:
 
 \textbf{Property G1 (Negotiation Integrity):} The selected suite must be
 among the Initiator's offered suites and have a corresponding key
@@ -929,27 +904,10 @@ adherence.
 \item \textbf{Tamper-evidence:} Events are emitted synchronously before state transitions complete; the resulting trace is checkable against expected state-machine templates (used in our audit-signal fidelity tests). Log collection relies on OS unified logging (\texttt{os_log}) for best-effort retention and is not a cryptographic tamper-proof store; privileged adversaries can alter or truncate logs.
 \end{itemize}
 
-\begin{table*}[!t]
-\centering
+
 \noindent\textit{TABLE III. Security Contract (Properties, Enforcement, Evidence).}\par
-\begin{tabular}{lll}
-\hline
-Property
-& Enforced at
-& Evidence
-\\
-\hline
-G1 Negotiation integrity & Suite/keyshare validation + transcript-bound \texttt{sigB} & Fig.~1, \mbox{HandshakeDriverTests} \\
-G2 Mutual authentication & Identity pinning + signature verification & Table~5 (wrong signature), Table~6 \\
-G3 Session key secrecy & KEM/DH + HKDF with transcript-bound salt & Property 1, Supplementary Materials (ML-DSA Key Sizes) \\
-G4 Replay resistance & \texttt{handshakeId} cache + nonce binding & Property-Oriented Testing (Section~7) \\
-G5 strictPQC no-downgrade & Policy gate in TwoAttemptHandshakeManager & Fig.~4, \mbox{PolicyDowngradeBenchTests} \\
-G6 Default safe fallback & Whitelist/blacklist + local capability gate + cooldown & Fig.~5, Table~5 \\
-G7 Legacy acceptance precondition & LegacyTrustPrecondition & Table~6 \\
-G8 Auditability & Security event emission & Fig.~6, Table~7 \\
-\hline
-\end{tabular}
-\end{table*}
+\noindent DOCX_TABLE_PLACEHOLDER::tab:security-contract::SPAN2\par
+
 
 
 
@@ -970,7 +928,7 @@ Materials (Platform Support Matrix).
 
 \subsection{Native PQC Integration}\label{b.-apple-pqc-integration}
 
-The native provider wraps CryptoKit ML-KEM/ML-DSA APIs [1] when the
+The native provider wraps CryptoKit ML-KEM/ML-DSA APIs [23] when the
 SDK exposes them, enabling platform-backed PQC suites and HPKE-based
 encapsulation. We treat this as a deployment instance rather than a
 protocol dependency; integration details are provided in the
@@ -1063,7 +1021,7 @@ provider selection overhead, and data-plane throughput).
 
 \textbf{Repeatability:} For each configuration, we run 3--5 independent
 batches by restarting the benchmark test process; Supplementary
-Tables~S5--S6
+Tables~S7--S8
 report mean and 95\% confidence intervals across batches.
 
 \textbf{Reproducibility:} We ship an opt-in benchmark suite under \texttt{Tests/SkyBridgeCoreTests/}. For a one-shot run, use \texttt{Scripts/run_paper_eval.sh}. The complete command reference and CSV artifact specifications are provided in the Supplementary Materials (Reproducibility).
@@ -1075,27 +1033,12 @@ exports JSON artifacts (timestamped) for Supplementary tables. This
 enables independent reproduction of KEM, signature, and KEM--DEM costs on
 commodity iOS 26+ hardware without modifying the protocol code paths.
 
-\begin{table*}[!t]
-\centering
-{\setlength{\tabcolsep}{3pt}\small
-\noindent\textit{TABLE IV. On-device micro-benchmark on iOS 26.2 (iPhone, N=50). Metrics are reported in milliseconds (ms) as mean and p99 over 50 iterations (no warmup). Artifacts are exported as JSON (schema v2) and include split suite labels (\texttt{kem_suite}, \texttt{sig_suite}) for academic clarity. Each ``encapsulate'' measurement includes the sender-side ephemeral generation and encapsulation work for the corresponding KEM/key-agreement.}\par
-\begin{tabular}{lllll}
-\hline
-Configuration &
-KEM encaps.\newline(mean/p99) &
-Sign\newline(mean/p99) &
-Verify\newline(mean/p99) &
-\shortstack[l]{KEM--DEM\\seal+open\\(mean/p99)} \\
-\hline
-Classic (X25519 + Ed25519) & 0.414 / 0.704 & 0.122 / 0.126 & 0.085 / 0.133 & 0.389 / 0.534 \\
-CryptoKit PQC (ML-KEM-768 + ML-DSA-65) & 0.149 / 0.190 & 1.072 / 2.108 & 0.048 / 0.055 & 0.245 / 0.272 \\
-CryptoKit Hybrid (X-Wing + ML-DSA-65) & 0.282 / 0.452 & 1.403 / 2.654 & 0.048 / 0.053 & 0.324 / 0.391 \\
-\hline
-\end{tabular}
-}
-\end{table*}
 
-\textbf{Interpretation:} The loopback microbench isolates cryptographic and state-machine overhead; it does not model OS network stacks, NAT traversal, or heterogeneous access networks. We report simulated impairments separately (Section~7.4) and list real-network end-to-end measurement as future work (Section~8).
+\noindent\textit{TABLE IV. On-device micro-benchmark on iOS 26.2 (iPhone, N=50). Metrics are reported in milliseconds (ms) as mean and p99 over 50 iterations (no warmup). Artifacts are exported as JSON (schema v2) and include split suite labels (kem_suite, sig_suite) for academic clarity. Each ``encapsulate'' measurement includes the sender-side ephemeral generation and encapsulation work for the corresponding KEM/key-agreement.}\par
+\noindent DOCX_TABLE_PLACEHOLDER::tab:ios-microbench::SPAN2\par
+
+
+\textbf{Interpretation:} The loopback microbench isolates cryptographic and state-machine overhead; it does not model OS network stacks, NAT traversal, or heterogeneous access networks. We report simulated impairments separately (Section~7.5) and list real-network end-to-end measurement as future work (Section~8).
 
 \subsection{Security Validation}\label{b.-security-centric-evaluation}
 
@@ -1113,40 +1056,10 @@ explicit \texttt{unknown(wireId)} value and reject them if they appear in
 ``unknown $\rightarrow$ classic'' coercions that would otherwise weaken
 downgrade guarantees.
 
-\begin{table*}[!t]
-\centering
-\noindent\textit{TABLE V. Failure-Mode Robustness and Observability. Runs = number of
-iterations per scenario and policy (n=1000). Table reports default
-policy; strictPQC counts are recorded separately in
-\texttt{fault_injection_2026-01-16.csv}. All
-metrics are binary (1 = pass) except event counts. Data from
-\texttt{Artifacts/fault_injection_2026-01-16.csv}
-produced by \mbox{HandshakeFaultInjectionBenchTests}; semantic checks from
-\mbox{HandshakeDriverTests}.}\par
-\begin{tabular}{lllllll}
-\hline
-Failure Mode
-& Runs
-& No\\Unexp.\\Error
-& No\\Double\\Resume
-& Zero\\Verified
-& $E_{\texttt{handshakeFailed}}$
-& $E_{\texttt{cryptoDowngrade}}$
-\\
-\hline
-Out-of-order & 1000 & 1 & 1 & 1 & 0 & 0 \\
-Duplicate & 1000 & 1 & 1 & 1 & 0 & 0 \\
-Drop & 1000 & 1 & 1 & 1 & 1000 & 0 \\
-Delay within timeout & 1000 & 1 & 1 & 1 & 0 & 0 \\
-Delay exceed timeout & 1000 & 1 & 1 & 1 & 1000 & 0 \\
-Corrupt header & 1000 & 1 & 1 & 1 & 1000 & 0 \\
-Corrupt payload & 1000 & 1 & 1 & 1 & 1000 & 0 \\
-Wrong signature & 1000 & 1 & 1 & 1 & 1000 & 0 \\
-Concurrent cancel & 1000 & 1 & 1 & 1 & 1000 & 0 \\
-Concurrent timeout & 1000 & 1 & 1 & 1 & 1000 & 0 \\
-\hline
-\end{tabular}
-\end{table*}
+
+\noindent\textit{TABLE V. Failure-Mode Robustness and Observability. Runs = number of iterations per scenario and policy (n=1000). Table reports default policy; strictPQC counts are recorded separately in fault_injection_2026-01-16.csv. All metrics are binary (1 = pass) except event counts. Data from Artifacts/fault_injection_2026-01-16.csv produced by HandshakeFaultInjectionBenchTests; semantic checks from HandshakeDriverTests.}\par
+\noindent DOCX_TABLE_PLACEHOLDER::tab:failure-mode-robustness::SPAN2\par
+
 
 The delay-within-timeout and delay-exceed-timeout scenarios approximate
 RTT jitter and loss-induced stalls, while drop and duplicate cases
@@ -1200,7 +1113,7 @@ Correctness properties are validated with property-based tests using reproducibl
 
 \textbf{ML-DSA Key Lifecycle.}
 ML-DSA-65 key generation, storage, and sign-verify operations are
-validated against FIPS 204 specifications [16]. Size compliance
+validated against FIPS 204 specifications [24]. Size compliance
 results are reported in the Supplementary Materials (ML-DSA Key Sizes);
 all property tests (round-trip, tampering detection, key independence)
 achieve 100\% pass rate. Keys are stored in Keychain with
@@ -1211,29 +1124,10 @@ device-local protection.
 \textbf{Legacy Fallback Security.}
 Legacy P-256 signatures are only accepted when a security precondition is satisfied: (1) authenticated out-of-band channel (QR code, PAKE/PIN), or (2) existing TrustRecord with \texttt{legacyP256PublicKey}. Pure network stranger connections are rejected to prevent downgrade attacks.
 
-\begin{table*}[!t]
-\centering
-\noindent\textit{TABLE VI. Legacy Fallback Precondition Test Results. All tests executed
-via \mbox{LegacyFallbackPreconditionTests}. Tests validate Property 7: Legacy
-Fallback Security Precondition.}\par
-\begin{tabular}{llll}
-\hline
-Scenario
-& Precondition
-& Expected Result
-& Actual Result
-\\
-\hline
-Pure network stranger & None & Reject & OK Reject \\
-QR code pairing (verified) & authenticatedChannel & Allow & OK Allow \\
-PAKE pairing (verified) & authenticatedChannel & Allow & OK Allow \\
-Existing TrustRecord with legacy key & existingTrustRecord & Allow & OK Allow \\
-Existing TrustRecord without legacy key & None & Reject & OK Reject \\
-Network discovery & None & Reject & OK Reject \\
-Unverified authenticated channel & None & Reject & OK Reject \\
-\hline
-\end{tabular}
-\end{table*}
+
+\noindent\textit{TABLE VI. Legacy Fallback Precondition Test Results. All tests executed via LegacyFallbackPreconditionTests. Tests validate Property 7: Legacy Fallback Security Precondition.}\par
+\noindent DOCX_TABLE_PLACEHOLDER::tab:legacy-fallback-preconditions::SPAN2\par
+
 
 \textbf{Property 7 (Legacy Fallback Security Precondition):} A legacy
 P-256 signature SHALL only be accepted when a security precondition is
@@ -1255,22 +1149,10 @@ showing attacker action, policy gate, and emitted event.}
 \label{fig:event-traces}
 \end{figure}
 
-\begin{table*}[!t]
-\centering
-\noindent\textit{TABLE VII. Audit-Signal Fidelity Summary. Match/spurious rates reflect \emph{deterministic} protocol event mapping (each scenario maps to exactly one expected trace template), not statistical classification. Perfect scores indicate regression consistency against the protocol specification.}\par
-\begin{tabular}{lllll}
-\hline
-Scenario Class & Expected Signal & N & Match (MR) & Spurious (SR) \\
-\hline
-Drop/Timeout (default) & handshakeFailed=1, cryptoDowngrade=0 & 3000 & 1.00 & 0.00 \\
-Drop/Timeout (strictPQC) & handshakeFailed=1, cryptoDowngrade=0 & 3000 & 1.00 & 0.00 \\
-Corrupt/Wrong Sig & handshakeFailed=1, cryptoDowngrade=0 & 6000 & 1.00 & 0.00 \\
-Ordering Benign & handshakeFailed=0, cryptoDowngrade=0 & 6000 & 1.00 & 0.00 \\
-PQC unavailable (default) & cryptoDowngrade=1 & 1000 & 1.00 & 0.00 \\
-PQC unavailable (strictPQC) & cryptoDowngrade=0 & 1000 & 1.00 & 0.00 \\
-\hline
-\end{tabular}
-\end{table*}
+
+\noindent\textit{TABLE VII. Audit-Signal Fidelity Summary. Match/spurious rates reflect deterministic protocol event mapping (each scenario maps to exactly one expected trace template), not statistical classification. Perfect scores indicate regression consistency against the protocol specification.}\par
+\noindent DOCX_TABLE_PLACEHOLDER::tab:audit-signal-fidelity::SPAN2\par
+
 
 Due to space constraints, the complete regression test matrix, TLV encoding validation, and implementation component details are provided in the Supplementary Materials (Regression Testing and Artifact Map).
 
@@ -1278,24 +1160,13 @@ Due to space constraints, the complete regression test matrix, TLV encoding vali
 
 Table~8 consolidates all performance metrics. We measure \mbox{end-to-end} handshake completion time using an in-memory loopback transport to isolate cryptographic and state-machine overhead. Each configuration reports distributional statistics over N=1000 iterations after 10 warmup runs.
 
-% Auto-generated by make_tables.py on 2026-01-16T17:12:20.762559
+% Auto-generated by make_tables.py on 2026-01-19T09:23:21.777933
 % DO NOT EDIT MANUALLY - regenerate from CSV artifacts
 
-\begin{table*}[!t]
-\centering
-\noindent\textit{TABLE VIII. Performance Summary. All benchmarks on Apple Silicon (M1/M3), macOS 26.x, N=1000 iterations after 10 warmup runs. Wire Size counts payload-only handshake bytes (MessageA + MessageB + 2×Finished); loopback wire sizes including transport overhead are reported separately in Table~1 and Supplementary Table~S4. Data-plane AEAD is fixed to AES-256-GCM in v1, so throughput is independent of the negotiated handshake suite; throughput measured post-handshake on 1~MiB payloads.}\par
-\begin{tabular}{lllllll}
-\hline
-Configuration & µlticolumn{2}{c}{Handshake Latency} & µlticolumn{2}{c}{RTT} & Wire Size & Throughput \\
-\cmidrule(lr){2-3} \cmidrule(lr){4-5}
- & mean (ms) & p95 (ms) & p50 (ms) & p95 (ms) & (bytes) & (GB/s) \\
-\hline
-Classic & 1.62 & 1.81 & 0.41 & 0.46 & 827 & 3.7 \\
-liboqs PQC & 2.29 & 3.01 & 0.80 & 1.35 & 12,163 & 3.7 \\
-CryptoKit PQC & 5.76 & 6.71 & 1.59 & 2.27 & 12,163 & 3.7 \\
-\hline
-\end{tabular}
-\end{table*}
+
+\noindent\textit{TABLE VIII. Performance Summary. All benchmarks on Apple Silicon (M1/M3), macOS 26.x, N=1000 iterations after 10 warmup runs. Wire Size counts payload-only handshake bytes (MessageA + MessageB + 2×Finished); loopback wire sizes including transport overhead are reported separately in Table~\reftab:baseline-comparison and Supplementary Table~S4. Data-plane AEAD is fixed to AES-256-GCM in v1, so throughput is independent of the negotiated handshake suite; throughput measured post-handshake on 1~MiB payloads.}\par
+\noindent DOCX_TABLE_PLACEHOLDER::tab:perf-summary::SPAN2\par
+
 
 \textbf{Latency Distribution.}
 Fig.~8 shows latency percentiles across
@@ -1312,7 +1183,7 @@ available in Supplementary Tables~S1--S2
 \end{figure}
 
 \textbf{Wire-Format Breakdown.}
-The 15× size increase from Classic (827~B) to PQC (12.2~KB) is dominated by ML-DSA signatures (3309~B) and ML-KEM ciphertexts (1088~B). Fig.~9 shows the per-field breakdown.
+The 15× size increase from Classic (827~B) to PQC (12.2~kB) is dominated by ML-DSA signatures (3309~B) and ML-KEM ciphertexts (1088~B). Fig.~9 shows the per-field breakdown.
 
 \begin{figure}
 {\centering\includegraphics[keepaspectratio,width=\columnwidth]{_docx_figs/fig_message_size_breakdown.png}\par}
@@ -1324,21 +1195,68 @@ identity fields, framing overhead) for MessageA/MessageB across Classic, PQC (li
 Note: X-Wing hybrid KEM adds 32~B to MessageA's keyshare (1120~B vs 1088~B for ML-KEM-768), yielding a measured total handshake size of 12,195~B; detailed field breakdowns are available in Supplementary Table~S3 (\texttt{MessageA.XWing}/\texttt{MessageB.XWing}).
 
 \textbf{Data-Plane and Provider Selection.}
-Post-handshake symmetric AEAD (AES-256-GCM) throughput reaches 3.7~GB/s for 1~MB payloads on Apple Silicon, with CPU cost of 0.25~ns/byte. In v1 the data-plane AEAD is fixed to AES-256-GCM and recorded separately from the handshake suite; thus throughput is independent of the negotiated KEM/signature suite. Provider selection overhead is sub-microsecond for cached paths (0.17~µs p50) and under 6~µs even for fallback scenarios. Detailed breakdowns are provided in the artifact CSV files.
+Post-handshake symmetric AEAD (AES-256-GCM) throughput reaches 3.7~GB/s for 1~MiB payloads on Apple Silicon, with CPU cost of 0.25~ns/byte. In v1 the data-plane AEAD is fixed to AES-256-GCM and recorded separately from the handshake suite; thus throughput is independent of the negotiated KEM/signature suite. Provider selection overhead is sub-microsecond for cached paths (0.17~µs p50) and under 6~µs even for fallback scenarios. Detailed breakdowns are provided in the artifact CSV files.
 
-\begin{table}[!t]
-\centering
-\footnotesize
-\noindent\textit{TABLE IX. Handshake vs data-plane AEAD selection (v1).}\par
-\begin{tabular}{lll}
-\hline
-Layer & AEAD & Negotiation source \\
-\hline
-Handshake payloads & AES-256-GCM & Suite tuple \\
-Data-plane traffic & AES-256-GCM & Fixed (v1) \\
-\hline
-\end{tabular}
-\end{table}
+\subsection{System-level Impact and Amortization}\label{sec:system-impact}
+The preceding microbenchmarks isolate handshake and cryptographic costs.
+To align evaluation with the \emph{remote desktop / file transfer} framing,
+we additionally measure user-visible, session-level metrics and quantify
+how one-time handshake cost amortizes over longer sessions and larger
+transfers.
+
+\textbf{Metrics:}
+(i) \texttt{T_connect} (connect start $\rightarrow$ handshake established, including explicit Finished key confirmation and event emission),
+(ii) \texttt{T_first_frame} (connect start $\rightarrow$ first decrypted remote-desktop frame processed by the rendering path), and
+(iii) \texttt{T_total} (connect start $\rightarrow$ completion of a bulk transfer over the negotiated session keys).
+
+\textbf{Method:}
+We reuse the production \texttt{HandshakeDriver} and negotiated
+\texttt{SessionKeys} and execute (a) one encrypted ``first frame''
+payload and (b) bulk encrypted transfer workloads of 1--100~MiB. Network
+conditions are emulated as deterministic RTT+jitter on a reliable stream;
+large data-plane payloads are bandwidth-limited (MiB/s) to avoid per-chunk
+RTT artifacts while remaining reproducible. Results are emitted to
+\texttt{Artifacts/system_impact_\artifactdateSystemImpact.csv} by
+\texttt{SystemImpactBenchTests}.
+
+% Auto-generated by make_tables.py on 2026-01-22T22:43:19.379163
+% DO NOT EDIT MANUALLY - regenerate from CSV artifacts
+% Source: system_impact_2026-01-22.csv
+
+
+\noindent\textit{TABLE IX. System-level impact and amortization (p50/p95, ms). T_connect is measured from connect start to handshake established (including Finished key confirmation and event emission). T_total is measured from connect start to completion of an encrypted bulk transfer. Network conditions emulate deterministic RTT+jitter on a reliable stream; large data-plane payloads are bandwidth-limited (MiB/s) to avoid per-chunk RTT artifacts. Runs: N_connect=1000; N_total (RTT 50±20 ms) = 1MiB:N=1000, 10MiB:N=500, 100MiB:N=100. Data from Artifacts/system_impact_<date>.csv.}\par
+\noindent DOCX_TABLE_PLACEHOLDER::tab:system-impact::SPAN2\par
+
+
+\begin{figure}
+{\centering\includegraphics[keepaspectratio,width=\columnwidth]{_docx_figs/fig_system_impact_amortization.png}\par}
+\caption{Fig. 10. System-level impact and amortization (p95). Top: \texttt{T_connect} across RTT+jitter conditions. Bottom: total session time (\texttt{T_total} = connect + transfer) versus file size under RTT 50$\pm$20~ms, showing that one-time handshake overhead is amortized by larger transfers. Data from \texttt{Artifacts/system_impact_\artifactdateSystemImpact.csv}.}
+\label{fig:system-impact-amortization}
+\end{figure}
+
+\textbf{Traffic Analysis Mitigation (SBP2 Padding).}
+To reduce attempt identifiability on the wire, SkyBridge optionally applies a constant-size framing layer (SBP2) that buckets framed payloads into powers-of-two-sized envelopes. Here, \textbf{SBP1} denotes \emph{handshake-frame padding} (MessageA/MessageB/Finished are padded to fixed buckets before transport), while \textbf{SBP2} denotes \emph{traffic framing and padding} applied to all framed payloads (control and encrypted data-plane) with a per-frame header and bucketed padding up to a configured cap.
+We measure SBP2 behavior on a real protocol trace: an end-to-end handshake (SBP1 + SBP2 enabled) on an in-memory loopback transport, followed by bidirectional AES-GCM--encrypted data-plane frames derived from the negotiated session keys. Supplementary Table~S4 reports the resulting quantization behavior and overhead; the full per-label bucket histograms are included in \texttt{Artifacts/traffic_padding_2026-01-16.csv}.
+
+\begin{figure}
+{\centering\includegraphics[keepaspectratio,width=\columnwidth]{_docx_figs/fig_traffic_padding_overhead.png}\par}
+\caption{Fig. 11. SBP2 padding overhead across representative handshake, control, and data-plane workloads (macOS 26.x). Overhead is computed as \((\texttt{paddedBytes}/\texttt{rawBytes}-1)×100\%\) aggregated per label over a deterministic trace (N=1000 handshake iterations; data-plane workload uses encrypted control messages and large-frame mixes). Generated from \texttt{Artifacts/traffic_padding_2026-01-16.csv}.}
+\label{fig:traffic-padding-overhead}
+\end{figure}
+
+\textbf{Sensitivity Study (Bucket Cap).}
+We vary the maximum bucket size for SBP2 (\emph{cap} = 64\,KiB, 128\,KiB, 256\,KiB) and re-run the same deterministic protocol trace. We report (i) padding overhead and (ii) \emph{over-cap rate} (fraction of frames whose framed payload exceeds the cap and thus cannot be further bucketed), and use \emph{bucket entropy} (Shannon entropy of padded bucket sizes per label) as a privacy proxy for size quantization strength. Supplementary Table~S5 summarizes the overhead--privacy tradeoff and distinguishes remote-desktop-like vs file-chunk-like large-frame distributions.
+
+\begin{figure}
+{\centering\includegraphics[keepaspectratio,width=\columnwidth]{_docx_figs/fig_traffic_padding_sensitivity.png}\par}
+\caption{Fig. 12. SBP2 bucket-cap sensitivity (macOS 26.x). Curves show padding overhead for representative large-frame distributions (remote-desktop mix vs file-chunk mix) as the cap increases from 64\,KiB to 256\,KiB; lower over-cap rate implies broader padding coverage. Generated from \texttt{Artifacts/traffic_padding_sensitivity_2026-01-16.csv}.}
+\label{fig:traffic-padding-sensitivity}
+\end{figure}
+
+
+\noindent\textit{TABLE X. Handshake vs data-plane AEAD selection (v1).}\par
+\noindent DOCX_TABLE_PLACEHOLDER::tab:aead-mapping::SPAN1\par
+
 
 \subsection{External Validity Under Network Impairments}\label{sec:network-conditions}
 
@@ -1347,7 +1265,7 @@ retries) to approximate loss, jitter, and reordering. The simulator is
 in-process (not kernel \texttt{netem}): loss is independent Bernoulli per
 packet; jitter is sampled uniformly from $\pm$J~ms around base RTT; and
 reordering is modeled as an added random delay (50--150~ms) applied to
-10\% of packets. Table~10
+10\% of packets. Table~11
 summarizes completion and p95 latency ranges across classic/liboqs/
 CryptoKit suites using \texttt{Artifacts/network_condition_2026-01-11.csv}
 generated by \texttt{Scripts/run_network_bench_retry.swift}. Even under severe loss, completion
@@ -1355,20 +1273,10 @@ remains above 99.8\%, and \texttt{handshakeFailed} events track the few
 failures; no downgrade events occur because fallback is only permitted
 for PQC-unavailability (Fig.~4).
 
-\begin{table*}[!t]
-\centering
-\noindent\textit{TABLE X. Simulated network impairment results (N=10{,}000 per condition, max retries=2). Completion and latency ranges span classic/liboqs/CryptoKit suites.}\par
-\begin{tabular}{llll}
-\hline
-Condition (loss, RTT, jitter/reorder) & Completion rate (min) & p95 latency (ms, range) & handshakeFailed events / 10k (max) \\
-\hline
-mild (1\%, 50 ms, $\pm$20 ms) & 1.0000 & 251--253 & 0 \\
-moderate (3\%, 100 ms, $\pm$50 ms) & 1.0000 & 529--532 & 0 \\
-severe (5\%, 200 ms, $\pm$100 ms) & 0.9989 & 1031--1033 & 11 \\
-reorder (10\% reorder, 50 ms, $\pm$20 ms) & 1.0000 & 368--370 & 0 \\
-\hline
-\end{tabular}
-\end{table*}
+
+\noindent\textit{TABLE XI. Simulated network impairment results (N=10,000 per condition, max retries=2). Completion and latency ranges span classic/liboqs/CryptoKit suites.}\par
+\noindent DOCX_TABLE_PLACEHOLDER::tab:network-conditions::SPAN2\par
+
 
 \section{Limitations and Future Work}\label{sec:limitations}
 
@@ -1407,7 +1315,7 @@ reorder (10\% reorder, 50 ms, $\pm$20 ms) & 1.0000 & 368--370 & 0 \\
   additional validation.
 \item
   \textbf{Network Condition Evaluation:} We provide simulated impairment
-  results in Section~7.4, but have not yet
+  results in Section~7.5, but have not yet
   measured full end-to-end behavior under real NAT traversal, mobility,
   and heterogeneous access networks.
 \end{enumerate}
@@ -1438,7 +1346,7 @@ reorder (10\% reorder, 50 ms, $\pm$20 ms) & 1.0000 & 368--370 & 0 \\
   \textbf{Real-Network End-to-End Evaluation:} Measure handshake
   distributions across diverse access networks (same Wi-Fi, different NAT
   paths, LTE hotspots) and compare TCP vs QUIC control channels for
-  12~KB-class handshakes, validating that observed loss/jitter/reorder
+  12~kB-class handshakes, validating that observed loss/jitter/reorder
   traces align with our fault taxonomy.
 \item
   \textbf{Formal Verification:} Apply model checking to the handshake
@@ -1520,82 +1428,82 @@ The author declares no competing interests.
 
 \section*{REFERENCES}
 
-[1] Apple Inc., ``CryptoKit Framework,'' Apple Developer Documentation, 2025. [Online]. Available: https://developer.apple.com/documentation/cryptokit. Accessed: Dec.~2025.
+[1] Bluetooth SIG, ``Bluetooth Core Specification v5.4,'' 2023.
 
-[2] Bluetooth SIG, ``Bluetooth Core Specification v5.4,'' 2023.
+[2] Apple Inc., ``Continuity,'' Apple Platform Security Guide, 2024.
 
-[3] Apple Inc., ``Continuity,'' Apple Platform Security Guide, 2024.
+[3] T. Taubert and C. A. Wood, ``SPAKE2+, an Augmented PAKE,'' RFC 9383, IETF, Sept.~2023. [Online]. Available: https://datatracker.ietf.org/doc/rfc9383/
 
-[4] T. Taubert and C. A. Wood, ``SPAKE2+, an Augmented PAKE,'' RFC 9383, IETF, Sept.~2023. [Online]. Available: https://datatracker.ietf.org/doc/rfc9383/
+[4] E. Rescorla, ``The Transport Layer Security (TLS) Protocol Version 1.3,'' RFC 8446, IETF, 2018.
 
-[5] D. McGrew, ``Achieving Crypto Agility,'' in Proc. RSA Conference, 2019.
+[5] J. Iyengar and M. Thomson, ``QUIC: A UDP-Based Multiplexed and Secure Transport,'' RFC 9000, IETF, 2021. [Online]. Available: https://datatracker.ietf.org/doc/rfc9000/
 
-[6] E. Rescorla, ``The Transport Layer Security (TLS) Protocol Version 1.3,'' RFC 8446, IETF, 2018.
+[6] E. Barker and A. Roginsky, ``Transitioning the Use of Cryptographic Algorithms and Key Lengths,'' NIST SP 800-131A Rev.~2, 2019.
 
-[7] E. Barker and A. Roginsky, ``Transitioning the Use of Cryptographic Algorithms and Key Lengths,'' NIST SP 800-131A Rev.~2, 2019.
+[7] E. Barker et al., ``Considerations for Achieving Cryptographic Agility: Strategies and Practices,'' NIST Cybersecurity White Paper (CSWP) 39, Dec.~2025, doi: 10.6028/NIST.CSWP.39.
 
-[8] NIST, ``Post-Quantum Cryptography Standardization,'' 2024. [Online]. Available: https://csrc.nist.gov/projects/post-quantum-cryptography. Accessed: Dec.~2025.
+[8] T. Perrin, ``The Noise Protocol Framework,'' 2018. [Online]. Available: https://noiseprotocol.org/noise.pdf
 
-[9] Signal Foundation, ``PQXDH Key Agreement Protocol,'' Signal Technical Documentation, 2023.
+[9] NIST, ``Post-Quantum Cryptography Standardization,'' 2024. [Online]. Available: https://csrc.nist.gov/projects/post-quantum-cryptography. Accessed: Dec.~2025.
 
-[10] Cloudflare, ``Post-Quantum Cryptography Goes GA,'' Cloudflare Blog, Sept.~29, 2023. [Online]. Available: https://blog.cloudflare.com/post-quantum-cryptography-ga/. Accessed: Dec.~2025.
+[10] Signal Foundation, ``PQXDH Key Agreement Protocol,'' Signal Technical Documentation, 2023.
 
-[11] D. Beyer et al., ``Software Model Checking,'' in Handbook of Model Checking, Springer, 2018.
+[11] Cloudflare, ``Post-Quantum Cryptography Goes GA,'' Cloudflare Blog, Sept.~29, 2023. [Online]. Available: https://blog.cloudflare.com/post-quantum-cryptography-ga/. Accessed: Dec.~2025.
 
-[12] Apple Inc., ``Swift Concurrency,'' The Swift Programming Language, 2024.
+[12] P. Schwabe, D. Stebila, and T. Wiggers, ``Post-Quantum TLS Without Handshake Signatures,'' in Proc. ACM CCS 2020, pp.~1461--1480.
 
-[13] R. Barnes, K. Bhargavan, B. Lipp, and C. Wood, ``Hybrid Public Key Encryption,'' RFC 9180, IETF, Feb.~2022. [Online]. Available: https://datatracker.ietf.org/doc/rfc9180/
+[13] E. Alkim, L. Ducas, T. P\"oppelmann, and P. Schwabe, ``Post-Quantum Key Exchange---A New Hope,'' in Proc. USENIX Security 2016, pp.~327--343.
 
-[14] Apple Inc., ``Get ahead with quantum-secure cryptography,'' WWDC 2025 Session 314, June 2025. [Online]. Available: https://developer.apple.com/videos/play/wwdc2025/314/. Accessed: Dec.~2025.
+[14] J. Bos et al., ``CRYSTALS---Kyber: A CCA-Secure Module-Lattice-Based KEM,'' in Proc. IEEE EuroS\&P 2018, pp.~353--367.
 
-[15] NIST, ``Module-Lattice-Based Key-Encapsulation Mechanism Standard,'' FIPS 203, Aug.~2024. [Online]. Available: https://csrc.nist.gov/pubs/fips/203/final
+[15] L. Ducas et al., ``CRYSTALS---Dilithium: A Lattice-Based Digital Signature Scheme,'' IACR Trans. CHES, vol.~2018, no.~1, pp.~238--268.
 
-[16] NIST, ``Module-Lattice-Based Digital Signature Standard,'' FIPS 204, Aug.~2024. [Online]. Available: https://csrc.nist.gov/pubs/fips/204/final
+[16] Apple Inc., ``Apple Platform Security,'' Apple Security Guide, May 2024. [Online]. Available: https://support.apple.com/guide/security/
 
-[17] M. Barbosa, D. Connolly, J. Duarte, A. Kaiser, P. Schwabe, K. Varber, and B. Westerbaan, ``X-Wing: The Hybrid KEM You've Been Looking For,'' IETF Internet-Draft, 2024. [Online]. Available: https://datatracker.ietf.org/doc/draft-connolly-cfrg-xwing-kem/
+[17] D. Beyer et al., ``Software Model Checking,'' in Handbook of Model Checking, Springer, 2018.
 
-[18] J. Iyengar and M. Thomson, ``QUIC: A UDP-Based Multiplexed and Secure Transport,'' RFC 9000, IETF, 2021. [Online]. Available: https://datatracker.ietf.org/doc/rfc9000/
+[18] B. Beurdouche et al., ``A Messy State of the Union: Taming the Composite State Machines of TLS,'' in Proc. IEEE S\&P 2015, pp.~535--552.
 
-[19] T. Perrin, ``The Noise Protocol Framework,'' 2018. [Online]. Available: https://noiseprotocol.org/noise.pdf
+[19] Apple Inc., ``Swift Concurrency,'' The Swift Programming Language, 2024.
 
-[20] D. J. Bernstein, ``Curve25519: New Diffie-Hellman Speed Records,'' in Proc. PKC 2006, LNCS 3958, Springer, 2006, pp.~207--228.
+[20] E. Rescorla and N. Modadugu, ``Datagram Transport Layer Security Version 1.2,'' RFC 6347, IETF, Jan.~2012.
 
-[21] D. J. Bernstein, N. Duif, T. Lange, P. Schwabe, and B.-Y. Yang, ``High-Speed High-Security Signatures,'' J. Cryptographic Engineering, vol.~2, no.~2, pp.~77--89, 2012.
+[21] M. Green and M. Smith, ``Developers Are Not the Enemy!: The Need for Usable Security APIs,'' IEEE Security \& Privacy, vol.~14, no.~5, pp.~40--46, Sept./Oct.~2016.
 
-[22] P. Schwabe, D. Stebila, and T. Wiggers, ``Post-Quantum TLS Without Handshake Signatures,'' in Proc. ACM CCS 2020, pp.~1461--1480.
+[22] K. Bhargavan, C. Fournet, M. Kohlweiss, A. Pironti, and P.-Y. Strub, ``Implementing TLS with Verified Cryptographic Security,'' in Proc. IEEE S\&P 2013, pp.~445--459.
 
-[23] E. Alkim, L. Ducas, T. P\"oppelmann, and P. Schwabe, ``Post-Quantum Key Exchange---A New Hope,'' in Proc. USENIX Security 2016, pp.~327--343.
+[23] Apple Inc., ``CryptoKit Framework,'' Apple Developer Documentation, 2025. [Online]. Available: https://developer.apple.com/documentation/cryptokit. Accessed: Dec.~2025.
 
-[24] J. Bos et al., ``CRYSTALS---Kyber: A CCA-Secure Module-Lattice-Based KEM,'' in Proc. IEEE EuroS\&P 2018, pp.~353--367.
+[24] NIST, ``Module-Lattice-Based Digital Signature Standard,'' FIPS 204, Aug.~2024. [Online]. Available: https://csrc.nist.gov/pubs/fips/204/final
 
-[25] L. Ducas et al., ``CRYSTALS---Dilithium: A Lattice-Based Digital Signature Scheme,'' IACR Trans. CHES, vol.~2018, no.~1, pp.~238--268.
+[25] D. McGrew, ``Achieving Crypto Agility,'' in Proc. RSA Conference, 2019.
 
-[26] H. Krawczyk, ``SIGMA: The `SIGn-and-MAc' Approach to Authenticated Diffie-Hellman and Its Use in the IKE Protocols,'' in Proc. CRYPTO 2003, LNCS 2729, pp.~400--425.
+[26] R. Barnes, K. Bhargavan, B. Lipp, and C. Wood, ``Hybrid Public Key Encryption,'' RFC 9180, IETF, Feb.~2022. [Online]. Available: https://datatracker.ietf.org/doc/rfc9180/
 
-[27] H. Krawczyk and P. Eronen, ``HMAC-based Extract-and-Expand Key Derivation Function (HKDF),'' RFC 5869, IETF, May 2010.
+[27] Apple Inc., ``Get ahead with quantum-secure cryptography,'' WWDC 2025 Session 314, June 2025. [Online]. Available: https://developer.apple.com/videos/play/wwdc2025/314/. Accessed: Dec.~2025.
 
-[28] M. Dworkin, ``Recommendation for Block Cipher Modes of Operation: Galois/Counter Mode (GCM) and GMAC,'' NIST SP 800-38D, Nov.~2007.
+[28] NIST, ``Module-Lattice-Based Key-Encapsulation Mechanism Standard,'' FIPS 203, Aug.~2024. [Online]. Available: https://csrc.nist.gov/pubs/fips/203/final
 
-[29] K. Bhargavan, C. Fournet, M. Kohlweiss, A. Pironti, and P.-Y. Strub, ``Implementing TLS with Verified Cryptographic Security,'' in Proc. IEEE S\&P 2013, pp.~445--459.
+[29] M. Barbosa, D. Connolly, J. Duarte, A. Kaiser, P. Schwabe, K. Varber, and B. Westerbaan, ``X-Wing: The Hybrid KEM You've Been Looking For,'' IETF Internet-Draft, 2024. [Online]. Available: https://datatracker.ietf.org/doc/draft-connolly-cfrg-xwing-kem/
 
-[30] B. Beurdouche et al., ``A Messy State of the Union: Taming the Composite State Machines of TLS,'' in Proc. IEEE S\&P 2015, pp.~535--552.
+[30] D. J. Bernstein, ``Curve25519: New Diffie-Hellman Speed Records,'' in Proc. PKC 2006, LNCS 3958, Springer, 2006, pp.~207--228.
 
-[31] N. Aviram et al., ``DROWN: Breaking TLS Using SSLv2,'' in Proc. USENIX Security 2016, pp.~689--706.
+[31] D. J. Bernstein, N. Duif, T. Lange, P. Schwabe, and B.-Y. Yang, ``High-Speed High-Security Signatures,'' J. Cryptographic Engineering, vol.~2, no.~2, pp.~77--89, 2012.
 
-[32] D. Adrian et al., ``Imperfect Forward Secrecy: How Diffie-Hellman Fails in Practice,'' in Proc. ACM CCS 2015, pp.~5--17.
+[32] H. Krawczyk, ``SIGMA: The `SIGn-and-MAc' Approach to Authenticated Diffie-Hellman and Its Use in the IKE Protocols,'' in Proc. CRYPTO 2003, LNCS 2729, pp.~400--425.
 
-[33] C. Meyer and J. Schwenk, ``Lessons Learned From Previous SSL/TLS Attacks---A Brief Chronology of Attacks and Weaknesses,'' IACR Cryptology ePrint Archive, Report 2013/049, 2013.
+[33] H. Krawczyk and P. Eronen, ``HMAC-based Extract-and-Expand Key Derivation Function (HKDF),'' RFC 5869, IETF, May 2010.
 
-[34] Apple Inc., ``Apple Platform Security,'' Apple Security Guide, May 2024. [Online]. Available: https://support.apple.com/guide/security/
+[34] M. Dworkin, ``Recommendation for Block Cipher Modes of Operation: Galois/Counter Mode (GCM) and GMAC,'' NIST SP 800-38D, Nov.~2007.
 
-[35] T. Tarman, R. Hutchinson, L. Pierson, P. Sholander, and E. Witzke, ``Algorithm-Agile Encryption in ATM Networks,'' IEEE Computer, vol.~31, no.~9, pp.~57--64, Sept.~1998.
+[35] N. Aviram et al., ``DROWN: Breaking TLS Using SSLv2,'' in Proc. USENIX Security 2016, pp.~689--706.
 
-[36] B. Sullivan and V. Liu, ``Web Application Security: A Beginner's Guide,'' McGraw-Hill, 2011, ch.~6 (Cryptographic Agility).
+[36] D. Adrian et al., ``Imperfect Forward Secrecy: How Diffie-Hellman Fails in Practice,'' in Proc. ACM CCS 2015, pp.~5--17.
 
-[37] M. Green and M. Smith, ``Developers Are Not the Enemy!: The Need for Usable Security APIs,'' IEEE Security \& Privacy, vol.~14, no.~5, pp.~40--46, Sept./Oct.~2016.
+[37] C. Meyer and J. Schwenk, ``Lessons Learned From Previous SSL/TLS Attacks---A Brief Chronology of Attacks and Weaknesses,'' IACR Cryptology ePrint Archive, Report 2013/049, 2013.
 
-[38] E. Barker et al., ``Considerations for Achieving Cryptographic Agility: Strategies and Practices,'' NIST Cybersecurity White Paper (CSWP) 39, Dec.~2025, doi: 10.6028/NIST.CSWP.39.
+[38] T. Tarman, R. Hutchinson, L. Pierson, P. Sholander, and E. Witzke, ``Algorithm-Agile Encryption in ATM Networks,'' IEEE Computer, vol.~31, no.~9, pp.~57--64, Sept.~1998.
 
-[39] E. Rescorla and N. Modadugu, ``Datagram Transport Layer Security Version 1.2,'' RFC 6347, IETF, Jan.~2012.
+[39] B. Sullivan and V. Liu, ``Web Application Security: A Beginner's Guide,'' McGraw-Hill, 2011, ch.~6 (Cryptographic Agility).
 
 \end{document}

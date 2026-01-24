@@ -59,7 +59,7 @@
 \usetikzlibrary{arrows.meta,positioning}
 
 
-\title{SkyBridge Compass: A Crypto-Agile Peer-to-Peer Remote Desktop and File Transfer System with Post-Quantum Readiness on Apple Platforms}
+\title{SkyBridge Compass: A Crypto-Agile P2P Handshake Framework for Remote Desktop and File Transfer with Post-Quantum Readiness on Apple Platforms}
 \author{Zi'ang Li\thanks{Independent Researcher. E-mail: 2403871950@qq.com}}
 
 \begin{document}
@@ -72,7 +72,7 @@ networks, and long lifecycles in which cryptographic assumptions may
 expire faster than products. Yet ``post-quantum readiness'' is often
 treated as a one-off algorithm swap rather than a migration problem with
 downgrade resistance, auditability, and reproducibility requirements.
-This paper presents SkyBridge Compass, a crypto-agile P2P system that
+This paper presents SkyBridge Compass, a crypto-agile P2P handshake framework that
 explicitly separates (i) negotiated cryptographic suites, (ii)
 platform-specific provider backends, and (iii) a policy layer that
 governs when (and whether) classic fallback is permissible. We introduce
@@ -82,12 +82,11 @@ audit trails for downgrade, identity mismatch, and signature
 verification failures. We evaluate three configurations on macOS 26.x:
 classic (X25519 + Ed25519), PQC via liboqs (ML-KEM-768 + ML-DSA-65), and
 PQC via native CryptoKit (ML-KEM-768 + ML-DSA-65). End-to-end handshake
-completion latency (including event emission overhead) is 1.81 ms (p95
-2.09 ms) for classic, 6.32 ms (p95 8.15 ms) for liboqs PQC, and 11.02 ms
-(p95 16.15 ms) for CryptoKit PQC over N=1000 iterations. The wire-format
-size grows from 819 B (classic) to 12,155 B (PQC), and we provide a
-conservative projection for a hybrid X-Wing-style exchange of
-approximately 12.4 KB. Beyond performance, we validate security-centric
+completion latency (including event emission overhead) is 1.62 ms (p95
+1.81 ms) for classic, 2.29 ms (p95 3.01 ms) for liboqs PQC, and 5.76 ms
+(p95 6.71 ms) for CryptoKit PQC over N=1000 iterations. The wire-format
+size grows from 827 B (classic) to 12,163 B (PQC); X-Wing hybrid KEM measures
+12,195 B. Beyond performance, we validate security-centric
 properties under fault injection and downgrade workloads, and we provide
 scripts and tests that reproduce all primary figures and tables from
 released artifacts.
@@ -545,13 +544,13 @@ implementations without modifying caller code.
     \KeywordTok{var} \VariableTok{providerName}\OperatorTok{:}\NormalTok{ String }\OperatorTok{\{} \KeywordTok{get} \OperatorTok{\}}
     \KeywordTok{var} \VariableTok{tier}\OperatorTok{:}\NormalTok{ CryptoTier }\OperatorTok{\{} \KeywordTok{get} \OperatorTok{\}}
     \KeywordTok{var} \VariableTok{activeSuite}\OperatorTok{:}\NormalTok{ CryptoSuite }\OperatorTok{\{} \KeywordTok{get} \OperatorTok{\}}
-    
-    \KeywordTok{func} \FunctionTok{kemDemSeal}\OperatorTok{(}\VariableTok{plaintext}\OperatorTok{:} \DataTypeTok{Data}\OperatorTok{,} \VariableTok{recipientPublicKey}\OperatorTok{:} \DataTypeTok{Data}\OperatorTok{,} 
+
+    \KeywordTok{func} \FunctionTok{kemDemSeal}\OperatorTok{(}\VariableTok{plaintext}\OperatorTok{:} \DataTypeTok{Data}\OperatorTok{,} \VariableTok{recipientPublicKey}\OperatorTok{:} \DataTypeTok{Data}\OperatorTok{,}
                     \VariableTok{info}\OperatorTok{:} \DataTypeTok{Data}\OperatorTok{)} \FunctionTok{async} \KeywordTok{throws}\NormalTok{ {-}\textgreater{} }\FunctionTok{KemDemSealedBox}
-    \KeywordTok{func} \FunctionTok{kemDemOpen}\OperatorTok{(}\VariableTok{sealedBox}\OperatorTok{:} \DataTypeTok{KemDemSealedBox}\OperatorTok{,} \VariableTok{privateKey}\OperatorTok{:} \DataTypeTok{Data}\OperatorTok{,} 
+    \KeywordTok{func} \FunctionTok{kemDemOpen}\OperatorTok{(}\VariableTok{sealedBox}\OperatorTok{:} \DataTypeTok{KemDemSealedBox}\OperatorTok{,} \VariableTok{privateKey}\OperatorTok{:} \DataTypeTok{Data}\OperatorTok{,}
                     \VariableTok{info}\OperatorTok{:} \DataTypeTok{Data}\OperatorTok{)} \FunctionTok{async} \KeywordTok{throws}\NormalTok{ {-}\textgreater{} }\FunctionTok{Data}
     \KeywordTok{func} \FunctionTok{sign}\OperatorTok{(}\VariableTok{data}\OperatorTok{:} \DataTypeTok{Data}\OperatorTok{,} \VariableTok{using} \VariableTok{key}\OperatorTok{:} \DataTypeTok{SigningKeyHandle}\OperatorTok{)} \FunctionTok{async} \KeywordTok{throws}\NormalTok{ {-}\textgreater{} }\FunctionTok{Data}
-    \KeywordTok{func} \FunctionTok{verify}\OperatorTok{(}\VariableTok{data}\OperatorTok{:} \DataTypeTok{Data}\OperatorTok{,} \VariableTok{signature}\OperatorTok{:} \DataTypeTok{Data}\OperatorTok{,} 
+    \KeywordTok{func} \FunctionTok{verify}\OperatorTok{(}\VariableTok{data}\OperatorTok{:} \DataTypeTok{Data}\OperatorTok{,} \VariableTok{signature}\OperatorTok{:} \DataTypeTok{Data}\OperatorTok{,}
                 \VariableTok{publicKey}\OperatorTok{:} \DataTypeTok{Data}\OperatorTok{)} \FunctionTok{async} \KeywordTok{throws}\NormalTok{ {-}\textgreater{} }\FunctionTok{Bool}
     \KeywordTok{func} \FunctionTok{generateKeyPair}\OperatorTok{(}\VariableTok{for} \VariableTok{usage}\OperatorTok{:} \DataTypeTok{KeyUsage}\OperatorTok{)} \FunctionTok{async} \KeywordTok{throws}\NormalTok{ {-}\textgreater{} }\FunctionTok{KeyPair}
 \OperatorTok{\}}
@@ -642,7 +641,7 @@ configuration:
         \ControlFlowTok{case}\NormalTok{ requirePQC     }\CommentTok{// Fail if PQC unavailable}
         \ControlFlowTok{case}\NormalTok{ classicOnly    }\CommentTok{// Force classic algorithms}
     \OperatorTok{\}}
-    
+
     \KeywordTok{public} \KeywordTok{static} \KeywordTok{func} \FunctionTok{make}\OperatorTok{(}
         \VariableTok{policy}\OperatorTok{:} \DataTypeTok{SelectionPolicy} \OperatorTok{=} \OperatorTok{.}\NormalTok{preferPQC}\OperatorTok{,}
         \VariableTok{environment}\OperatorTok{:} \DataTypeTok{any} \VariableTok{CryptoEnvironment} \OperatorTok{=}\NormalTok{ SystemCryptoEnvironment}\OperatorTok{.}\NormalTok{system}
@@ -824,8 +823,8 @@ compile-time data race prevention:
     \KeywordTok{private} \KeywordTok{var} \VariableTok{pendingContinuation}\OperatorTok{:}\NormalTok{ CheckedContinuation}\OperatorTok{\textless{}}\NormalTok{SessionKeys}\OperatorTok{,}\NormalTok{ Error}\OperatorTok{\textgreater{}?}
     \KeywordTok{private} \KeywordTok{var} \VariableTok{timeoutTask}\OperatorTok{:}\NormalTok{ Task}\OperatorTok{\textless{}}\NormalTok{Void}\OperatorTok{,}\NormalTok{ Never}\OperatorTok{\textgreater{}?}
     \KeywordTok{private} \KeywordTok{var} \VariableTok{pendingResult}\OperatorTok{:}\NormalTok{ Result}\OperatorTok{\textless{}}\NormalTok{SessionKeys}\OperatorTok{,}\NormalTok{ Error}\OperatorTok{\textgreater{}?}
-    
-    \KeywordTok{public} \KeywordTok{func} \FunctionTok{initiateHandshake}\OperatorTok{(}\VariableTok{with} \VariableTok{peer}\OperatorTok{:} \DataTypeTok{PeerIdentifier}\OperatorTok{)} 
+
+    \KeywordTok{public} \KeywordTok{func} \FunctionTok{initiateHandshake}\OperatorTok{(}\VariableTok{with} \VariableTok{peer}\OperatorTok{:} \DataTypeTok{PeerIdentifier}\OperatorTok{)}
         \FunctionTok{async} \KeywordTok{throws}\NormalTok{ {-}\textgreater{} }\FunctionTok{SessionKeys}
     \KeywordTok{public} \KeywordTok{func} \FunctionTok{handleMessage}\OperatorTok{(}\VariableTok{\_} \VariableTok{data}\OperatorTok{:} \DataTypeTok{Data}\OperatorTok{,} \VariableTok{from} \VariableTok{peer}\OperatorTok{:} \DataTypeTok{PeerIdentifier}\OperatorTok{)} \FunctionTok{async}
     \KeywordTok{public} \KeywordTok{func} \FunctionTok{cancel}\OperatorTok{()} \FunctionTok{async}
@@ -842,7 +841,7 @@ material:
     \KeywordTok{private} \KeywordTok{var} \VariableTok{ephemeralPrivateKey}\OperatorTok{:}\NormalTok{ SecureBytes}\OperatorTok{?}
     \KeywordTok{private} \KeywordTok{var} \VariableTok{transcriptHash}\OperatorTok{:}\NormalTok{ SecureBytes}\OperatorTok{?}
     \KeywordTok{private} \KeywordTok{var} \VariableTok{isZeroized}\OperatorTok{:}\NormalTok{ Bool }\OperatorTok{=} \KeywordTok{false}
-    
+
     \KeywordTok{public} \KeywordTok{func} \FunctionTok{zeroize}\OperatorTok{()}
 \OperatorTok{\}}
 \end{Highlighting}
@@ -918,7 +917,7 @@ handshake completion:
     \CommentTok{// Cancel timeout}
 \NormalTok{    timeoutTask}\OperatorTok{?.}\NormalTok{cancel}\OperatorTok{()}
 \NormalTok{    timeoutTask }\OperatorTok{=} \KeywordTok{nil}
-    
+
     \CommentTok{// Guard against double resume}
     \ControlFlowTok{guard} \KeywordTok{let} \VariableTok{continuation} \OperatorTok{=}\NormalTok{ pendingContinuation }\ControlFlowTok{else} \OperatorTok{\{}
         \CommentTok{// MessageB arrived before continuation established}
@@ -926,7 +925,7 @@ handshake completion:
         \KeywordTok{return}
     \OperatorTok{\}}
 \NormalTok{    pendingContinuation }\OperatorTok{=} \KeywordTok{nil}  \CommentTok{// Immediately nil to prevent reuse}
-    
+
     \ControlFlowTok{switch}\NormalTok{ result }\OperatorTok{\{}
     \ControlFlowTok{case} \OperatorTok{.}\NormalTok{success}\OperatorTok{(}\KeywordTok{let} \VariableTok{keys}\OperatorTok{):}\NormalTok{ continuation}\OperatorTok{.}\NormalTok{resume}\OperatorTok{(}\NormalTok{returning}\OperatorTok{:}\NormalTok{ keys}\OperatorTok{)}
     \ControlFlowTok{case} \OperatorTok{.}\NormalTok{failure}\OperatorTok{(}\KeywordTok{let} \VariableTok{error}\OperatorTok{):}\NormalTok{ continuation}\OperatorTok{.}\NormalTok{resume}\OperatorTok{(}\NormalTok{throwing}\OperatorTok{:}\NormalTok{ error}\OperatorTok{)}
@@ -954,11 +953,11 @@ COW-induced secret proliferation.
 \KeywordTok{public} \KeywordTok{final} \KeywordTok{class}\NormalTok{ SecureBytes}\OperatorTok{:} \AttributeTok{@unchecked}\NormalTok{ Sendable }\OperatorTok{\{}
     \KeywordTok{private} \KeywordTok{let} \VariableTok{pointer}\OperatorTok{:}\NormalTok{ UnsafeMutableRawPointer}
     \KeywordTok{private} \KeywordTok{let} \VariableTok{count}\OperatorTok{:}\NormalTok{ Int}
-    
+
     \CommentTok{/// Injectable wiping function for test verification}
-\NormalTok{    nonisolated}\OperatorTok{(}\NormalTok{unsafe}\OperatorTok{)} \KeywordTok{public} \KeywordTok{static} \KeywordTok{var} \VariableTok{wipingFunction}\OperatorTok{:} 
+\NormalTok{    nonisolated}\OperatorTok{(}\NormalTok{unsafe}\OperatorTok{)} \KeywordTok{public} \KeywordTok{static} \KeywordTok{var} \VariableTok{wipingFunction}\OperatorTok{:}
         \OperatorTok{(}\NormalTok{UnsafeMutableRawPointer}\OperatorTok{,}\NormalTok{ Int}\OperatorTok{)} \OperatorTok{{-}\textgreater{}}\NormalTok{ Void }\OperatorTok{=}\NormalTok{ secureZero}
-    
+
     \KeywordTok{deinit} \OperatorTok{\{}
         \ControlFlowTok{if}\NormalTok{ count }\OperatorTok{\textgreater{}} \DecValTok{0} \OperatorTok{\{}
 \NormalTok{            Self}\OperatorTok{.}\NormalTok{wipingFunction}\OperatorTok{(}\NormalTok{pointer}\OperatorTok{,}\NormalTok{ count}\OperatorTok{)}
@@ -1295,14 +1294,14 @@ APIs with a KEM-based authenticated encryption construction:
         \CommentTok{// KEM encapsulation}
         \KeywordTok{let} \VariableTok{publicKey} \OperatorTok{=} \ControlFlowTok{try}\NormalTok{ MLKEM768}\OperatorTok{.}\NormalTok{PublicKey}\OperatorTok{(}\NormalTok{rawRepresentation}\OperatorTok{:}\NormalTok{ recipientPublicKey}\OperatorTok{)}
         \KeywordTok{let} \VariableTok{encapsulationResult} \OperatorTok{=} \ControlFlowTok{try}\NormalTok{ publicKey}\OperatorTok{.}\NormalTok{encapsulate}\OperatorTok{()}
-        
+
         \CommentTok{// Key derivation (HKDF{-}SHA256)}
         \KeywordTok{let} \VariableTok{salt} \OperatorTok{=}\NormalTok{ SHA256}\OperatorTok{(}\NormalTok{DS}\OperatorTok{(}\StringTok{"SkyBridge{-}KDF{-}Salt{-}v1|"}\OperatorTok{)} \OperatorTok{||}\NormalTok{ info}\OperatorTok{)}
         \KeywordTok{let} \VariableTok{derivedKey} \OperatorTok{=}\NormalTok{ HKDF}\OperatorTok{\textless{}}\NormalTok{SHA256}\OperatorTok{\textgreater{}.}\NormalTok{deriveKey}\OperatorTok{(}
 \NormalTok{            inputKeyMaterial}\OperatorTok{:}\NormalTok{ encapsulationResult}\OperatorTok{.}\NormalTok{sharedSecret}\OperatorTok{,}
 \NormalTok{            salt}\OperatorTok{:}\NormalTok{ salt}\OperatorTok{,}\NormalTok{ info}\OperatorTok{:}\NormalTok{ info}\OperatorTok{,}\NormalTok{ outputByteCount}\OperatorTok{:} \DecValTok{32}
         \OperatorTok{)}
-        
+
         \CommentTok{// Authenticated encryption (AES{-}256{-}GCM)}
         \KeywordTok{let} \VariableTok{sealedBox} \OperatorTok{=} \ControlFlowTok{try}\NormalTok{ AES}\OperatorTok{.}\NormalTok{GCM}\OperatorTok{.}\NormalTok{seal}\OperatorTok{(}\NormalTok{plaintext}\OperatorTok{,}\NormalTok{ using}\OperatorTok{:}\NormalTok{ derivedKey}\OperatorTok{)}
         \KeywordTok{return}\NormalTok{ KemDemSealedBox}\OperatorTok{(}
@@ -1539,13 +1538,13 @@ strategy:
 \OperatorTok{)} \KeywordTok{throws}\NormalTok{ {-}\textgreater{} }\FunctionTok{AttemptPreparation} \OperatorTok{\{}
     \CommentTok{// 1. Build homogeneous offeredSuites from provider\textquotesingle{}s supported suites}
     \KeywordTok{let} \VariableTok{buildResult} \OperatorTok{=}\NormalTok{ HandshakeOfferedSuites}\OperatorTok{.}\NormalTok{build}\OperatorTok{(}\NormalTok{strategy}\OperatorTok{:}\NormalTok{ strategy}\OperatorTok{,}\NormalTok{ cryptoProvider}\OperatorTok{:}\NormalTok{ cryptoProvider}\OperatorTok{)}
-    
+
     \CommentTok{// 2. Select signature algorithm based on suites}
     \KeywordTok{let} \VariableTok{sigAAlgorithm} \OperatorTok{=}\NormalTok{ PreNegotiationSignatureSelector}\OperatorTok{.}\NormalTok{selectForMessageAResult}\OperatorTok{(}\NormalTok{offeredSuites}\OperatorTok{:}\NormalTok{ suites}\OperatorTok{)}
-    
+
     \CommentTok{// 3. Get matching signature provider}
     \KeywordTok{let} \VariableTok{signatureProvider} \OperatorTok{=}\NormalTok{ PreNegotiationSignatureSelector}\OperatorTok{.}\NormalTok{selectProvider}\OperatorTok{(}\ControlFlowTok{for}\OperatorTok{:}\NormalTok{ sigAAlgorithm}\OperatorTok{)}
-    
+
     \KeywordTok{return}\NormalTok{ AttemptPreparation}\OperatorTok{(}\NormalTok{strategy}\OperatorTok{,}\NormalTok{ suites}\OperatorTok{,}\NormalTok{ sigAAlgorithm}\OperatorTok{,}\NormalTok{ signatureProvider}\OperatorTok{)}
 \OperatorTok{\}}
 \end{Highlighting}
@@ -2469,12 +2468,12 @@ p99 (ms)
 
 \bottomrule\noalign{}
 
-Classic (X25519 + Ed25519) & macOS 26.x & 1000 & 1.648 & 0.083 & 1.644 &
-1.794 & 1.962 \\
-liboqs PQC (ML-KEM-768 + ML-DSA-65) & macOS 26.x & 1000 & 2.526 & 0.366
-& 2.443 & 3.241 & 3.636 \\
-CryptoKit PQC (ML-KEM-768 + ML-DSA-65) & macOS 26.x & 1000 & 10.104 &
-2.672 & 9.423 & 15.418 & 18.940 \\
+Classic (X25519 + Ed25519) & macOS 26.x & 1000 & 1.617 & 0.297 & 1.582 &
+1.807 & 1.945 \\
+liboqs PQC (ML-KEM-768 + ML-DSA-65) & macOS 26.x & 1000 & 2.290 & 0.397
+& 2.209 & 3.015 & 3.486 \\
+CryptoKit PQC (ML-KEM-768 + ML-DSA-65) & macOS 26.x & 1000 & 5.763 &
+0.549 & 5.651 & 6.708 & 7.343 \\
 \end{tabular}
 \end{table*}
 
@@ -2515,12 +2514,12 @@ p99 (ms)
 
 \bottomrule\noalign{}
 
-Classic (X25519 + Ed25519) & macOS 26.x & 1000 & 0.624 & 0.073 & 0.610 &
-0.710 & 0.966 \\
-liboqs PQC (ML-KEM-768 + ML-DSA-65) & macOS 26.x & 1000 & 1.090 & 0.262
-& 1.014 & 1.598 & 1.974 \\
-CryptoKit PQC (ML-KEM-768 + ML-DSA-65) & macOS 26.x & 1000 & 5.155 &
-1.358 & 4.925 & 7.304 & 9.676 \\
+Classic (X25519 + Ed25519) & macOS 26.x & 1000 & 0.414 & 0.062 & 0.407 &
+0.463 & 0.500 \\
+liboqs PQC (ML-KEM-768 + ML-DSA-65) & macOS 26.x & 1000 & 0.868 & 0.249
+& 0.805 & 1.353 & 1.652 \\
+CryptoKit PQC (ML-KEM-768 + ML-DSA-65) & macOS 26.x & 1000 & 1.658 &
+0.374 & 1.587 & 2.275 & 2.896 \\
 \end{tabular}
 \end{table*}
 
@@ -2559,8 +2558,8 @@ B\_total (bytes)
 
 \bottomrule\noalign{}
 
-Classic & 337 & 380 & 76 & 793 \\
-liboqs PQC & 6560 & 5493 & 76 & 12129 \\
+Classic & 354 & 397 & 76 & 827 \\
+liboqs PQC & 6577 & 5510 & 76 & 12163 \\
 CryptoKit PQC & 6577 & 5510 & 76 & 12163 \\
 \end{tabular}
 \end{table*}
@@ -2600,8 +2599,8 @@ a CPU proxy for the data plane.
 
 \textbf{Workloads:} - Symmetric AEAD encryption/decryption using session
 keys derived by the handshake (\texttt{SessionKeys.sendKey} /
-\texttt{SessionKeys.receiveKey}) - Payload sizes: 1 KiB, 16 KiB, 64 KiB,
-1 MiB
+\texttt{SessionKeys.receiveKey}) - Payload sizes: 1~KiB, 16~KiB, 64~KiB,
+1~MiB
 
 \textbf{Metrics:} - \texttt{Throughput\_MBps}: bytes processed / elapsed
 time for encrypt+decrypt - \texttt{CPU\_proxy\_ns\_per\_byte}: elapsed
@@ -2633,10 +2632,10 @@ CPU Proxy (ns/byte)
 
 \bottomrule\noalign{}
 
-Classic & 1 KiB & 404.1 & 2.36 \\
-Classic & 16 KiB & 2918.4 & 0.33 \\
-Classic & 64 KiB & 3000.0 & 0.32 \\
-Classic & 1 MiB & 3755.3 & 0.25 \\
+Classic & 1~KiB & 404.1 & 2.36 \\
+Classic & 16~KiB & 2918.4 & 0.33 \\
+Classic & 64~KiB & 3000.0 & 0.32 \\
+Classic & 1~MiB & 3755.3 & 0.25 \\
 \end{tabular}
 \end{table*}
 
@@ -2686,6 +2685,37 @@ Self-test failure recovery & 2.500 & 5.833 & Native PQC probe fails,
 fallback engages \\
 \end{tabular}
 \end{table*}
+
+\subsubsection{System-level Impact and Amortization}\label{c.4-system-level-impact-and-amortization}
+
+The preceding microbenchmarks isolate handshake and cryptographic costs.
+To align evaluation with the \emph{remote desktop / file transfer} framing,
+we additionally measure user-visible, session-level metrics and quantify
+how one-time handshake cost amortizes over longer sessions and larger
+transfers.
+
+\textbf{Metrics:}
+(i) \texttt{T\_connect} (connect start $\rightarrow$ handshake established, including explicit Finished key confirmation and event emission),
+(ii) \texttt{T\_first\_frame} (connect start $\rightarrow$ first decrypted remote-desktop frame processed by the rendering path), and
+(iii) \texttt{T\_total} (connect start $\rightarrow$ completion of a bulk transfer over the negotiated session keys).
+
+\textbf{Method:}
+We reuse the production \texttt{HandshakeDriver} and negotiated
+\texttt{SessionKeys} and execute (a) one encrypted ``first frame''
+payload and (b) bulk encrypted transfer workloads of 1--10~MiB. Network
+conditions are emulated as deterministic RTT+jitter on a reliable stream
+to approximate TCP/QUIC behavior while remaining reproducible.
+Results are emitted to \texttt{Artifacts/system\_impact\_<date>.csv} by
+\texttt{SystemImpactBenchTests}.
+
+\input{../tables/system_impact}
+
+\begin{figure}
+\centering
+\pandocbounded{\includegraphics[keepaspectratio,width=\columnwidth]{figures/fig_system_impact_amortization.pdf}}
+\caption{System-level impact and amortization (p95). Top: \texttt{T\_connect} across RTT+jitter conditions. Bottom: total session time (\texttt{T\_total} = connect + transfer) versus file size under RTT 50$\pm$20~ms, showing that one-time handshake overhead is amortized by larger transfers. Data from \texttt{Artifacts/system\_impact\_<date>.csv}.}
+\label{fig:system-impact-amortization}
+\end{figure}
 
 \section{Limitations and Future Work}\label{viii.-limitations-and-future-work}
 
@@ -2929,13 +2959,13 @@ Table~\ref{tab:handshake-sizes} (pure
 ML-KEM-768 + ML-DSA-65) and adjust only the KEM keyshare lengths:
 
 \begin{align*}
-\Delta_{KEM} &= (1216~\text{B}) - (1088~\text{B}) = 128~\text{B} \\
-B_{\text{msgA}}(\text{xwing}) &\approx 6556 + 128 = 6684~\text{B} \\
-B_{\text{msgB}}(\text{xwing}) &\approx 5489 + 128 = 5617~\text{B} \\
-B_{\text{total}}(\text{xwing}) &\approx 6684 + 5617 + 76 = 12{,}377~\text{B}
+\Delta_{KEM} &= (1120~\text{B}) - (1088~\text{B}) = 32~\text{B} \\
+B_{\text{msgA}}(\text{xwing}) &\approx 6577 + 32 = 6609~\text{B} \\
+B_{\text{msgB}}(\text{xwing}) &\approx 5510 + 0 = 5510~\text{B} \\
+B_{\text{total}}(\text{xwing}) &\approx 6609 + 5510 + 76 = 12{,}195~\text{B}
 \end{align*}
 
-This yields an estimated total wire size of \textbf{approx12.4 KB} for
+This yields an estimated total wire size of \textbf{12,195~B} (12.2~kB) for
 the full handshake, assuming the same signature/identity sizes
 (ML-DSA-65) as the PQC-only suites. If X-Wing is integrated via native
 CryptoKit HPKE (removing the compatibility envelope header/nonce/tag
