@@ -357,7 +357,7 @@ struct PQCSecuritySettingsView: View {
                 NavigationLink(destination: RealNetworkE2EBenchView()) {
                     Label("RealNet E2E Micro-Study", systemImage: "antenna.radiowaves.left.and.right")
                 }
-                Text("在 iPhone/iPad 上作为 client，连接到 Mac 上的测试 server，对比 classic(827B) 与 PQC(12,163B) 的端到端时延与失败类型，并导出 CSV 到 Artifacts 管线。")
+                Text("在 iPhone/iPad 上作为 client，连接到 Mac 上的测试 server，对比 classic(687B) 与 PQC(12,002B) 的端到端时延与失败类型，并导出 CSV 到 Artifacts 管线。")
                     .font(.footnote)
                     .foregroundColor(.secondary)
             }

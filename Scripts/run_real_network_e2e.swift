@@ -16,8 +16,8 @@
 //   swift Scripts/run_real_network_e2e.swift server --bind 0.0.0.0:44444
 //
 //   # Terminal B (client)
-//   ARTIFACT_DATE=2026-01-16 swift Scripts/run_real_network_e2e.swift client \\
-//     --label home_wifi --connect <server_ip>:44444 --samples 50 --bytes 12195
+//   ARTIFACT_DATE=2026-01-23 swift Scripts/run_real_network_e2e.swift client \\
+//     --label home_wifi --connect <server_ip>:44444 --samples 50 --bytes 12002
 //
 // Outputs:
 //   Artifacts/realnet_e2e_samples_<stamp>_<label>.csv
@@ -48,8 +48,8 @@ struct Config {
     var samples: Int = 50
     var timeoutMs: Int = 4000
     /// Payload sizes to test (bytes). For paper runs, we recommend two sizes:
-    /// - 827 B (Classic wire size)
-    /// - 12,163 B (PQC wire size)
+    /// - 687 B (Classic wire size)
+    /// - 12,002 B (PQC wire size)
     var payloadBytesList: [Int] = [12_195]
 }
 
@@ -95,7 +95,7 @@ func printUsageAndExit(_ msg: String? = nil) -> Never {
 
     Common options:
       --label <name>            Tag this run (default: run)
-      --artifact-date <date>    Pin output filename stamp (e.g., 2026-01-16). If omitted, uses ARTIFACT_DATE env or a timestamp.
+      --artifact-date <date>    Pin output filename stamp (e.g., 2026-01-23). If omitted, uses ARTIFACT_DATE env or a timestamp.
       --out-dir <dir>           Output directory (default: Artifacts)
 
     Client options:
@@ -107,7 +107,7 @@ func printUsageAndExit(_ msg: String? = nil) -> Never {
 
     Example (two-size paper run: classic + PQC):
       swift Scripts/run_real_network_e2e.swift server --bind 0.0.0.0:44444
-      ARTIFACT_DATE=2026-01-16 swift Scripts/run_real_network_e2e.swift client --label home_wifi --connect 10.0.0.8:44444 --samples 50 --bytes 827 --bytes 12163
+      ARTIFACT_DATE=2026-01-23 swift Scripts/run_real_network_e2e.swift client --label home_wifi --connect 10.0.0.8:44444 --samples 50 --bytes 687 --bytes 12002
     """)
     exit(2)
 }

@@ -523,7 +523,7 @@ def expand_simple_macros(tex: str) -> str:
     if m:
         date = m.group(1).strip()
         # Remove the macro definition itself to avoid producing invalid TeX like:
-        # \newcommand{2026-01-16}{2026-01-16}
+        # \newcommand{2026-01-23}{2026-01-23}
         tex = re.sub(r"^\\newcommand\{\\artifactdate\}\{[^}]*\}\s*$", "", tex, flags=re.MULTILINE)
         # Replace only the standalone macro \artifactdate, not prefixes of other macros
         # like \artifactdateSystemImpact.
@@ -947,7 +947,7 @@ def tables_to_images_for_word(
             "\\usepackage{multirow}\n"
             "\\usepackage{makecell}\n"
             "\\newcommand{\\real}[1]{#1}\n"
-            f"\\providecommand{{\\artifactdate}}{{{os.environ.get('ARTIFACT_DATE') or os.environ.get('SKYBRIDGE_ARTIFACT_DATE') or '2026-01-16'}}}\n"
+            f"\\providecommand{{\\artifactdate}}{{{os.environ.get('ARTIFACT_DATE') or os.environ.get('SKYBRIDGE_ARTIFACT_DATE') or '2026-01-23'}}}\n"
             "\\providecommand{\\tightlist}{}\n"
             "\\begin{document}\n"
             "\\begin{minipage}{\\linewidth}\\centering\n"
