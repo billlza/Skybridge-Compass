@@ -587,6 +587,95 @@ def fig_traffic_padding_sensitivity():
     _save_figure("fig_traffic_padding_sensitivity")
     plt.close()
 
+def fig_system_impact_amortization():
+    """Figure: System-level impact and amortization (p95)."""
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(COL_WIDTH, 3.2))
+
+    csv_path = _artifact_csv("system_impact")
+    rows = _read_csv_dicts(csv_path)
+
+    suites = [
+        ("classic", "Classic", COLORS["classic"]),
+        ("pqc_liboqs", "liboqs PQC", COLORS["liboqs"]),
+        ("pqc_cryptokit", "CryptoKit PQC", COLORS["cryptokit"]),
+    ]
+
+    cond_order = [
+        ("ideal", "Ideal"),
+        ("rtt50_j20", "RTT 50±20"),
+        ("rtt100_j50", "RTT 100±50"),
+    ]
+
+    def _floats(field: str, cond: str, suite: str) -> list[float]:
+        out: list[float] = []
+        for r in rows:
+            if r.get("condition") != cond or r.get("suite") != suite:
+                continue
+            v = r.get(field, "")
+            if not v or v == "nan":
+                continue
+            try:
+                out.append(float(v))
+            except Exception:
+                pass
+        return out
+
+    # Top panel: p95 connect time across network conditions.
+    x = np.arange(len(cond_order))
+    width = 0.22
+    for i, (suite_key, suite_label, color) in enumerate(suites):
+        ys = []
+        for cond_key, _ in cond_order:
+            vals = _floats("t_connect_ms", cond_key, suite_key)
+            ys.append(float(np.percentile(vals, 95)) if vals else np.nan)
+        ax1.bar(x + (i - 1) * width, ys, width, label=suite_label, color=color, edgecolor="black", linewidth=0.5)
+
+    ax1.set_xticks(x)
+    ax1.set_xticklabels([lbl for _, lbl in cond_order])
+    ax1.set_ylabel("T_connect p95 (ms)")
+    ax1.set_title("System-level impact (p95)")
+    ax1.grid(axis="y", linestyle="--", alpha=0.5)
+    ax1.spines["top"].set_visible(False)
+    ax1.spines["right"].set_visible(False)
+    ax1.legend(loc="upper left", framealpha=0.9, ncol=1)
+
+    # Bottom panel: total session time vs file size under RTT 50±20 ms.
+    file_sizes = sorted({int(r["file_bytes"]) for r in rows if r.get("file_bytes")})
+    xs_mib = [b / (1024 * 1024) for b in file_sizes]
+
+    for suite_key, suite_label, color in suites:
+        ys = []
+        for fb in file_sizes:
+            vals = []
+            for r in rows:
+                if r.get("condition") != "rtt50_j20" or r.get("suite") != suite_key:
+                    continue
+                if int(r.get("file_bytes", "0") or "0") != fb:
+                    continue
+                v = r.get("t_file_total_ms", "")
+                if not v or v == "nan":
+                    continue
+                try:
+                    vals.append(float(v))
+                except Exception:
+                    pass
+            ys.append(float(np.percentile(vals, 95)) if vals else np.nan)
+        ax2.plot(xs_mib, ys, "-o", label=suite_label, color=color, linewidth=1.0, markersize=4)
+
+    ax2.set_xlabel("File size (MiB) @ RTT 50±20 ms")
+    ax2.set_ylabel("T_total p95 (ms)")
+    ax2.set_xscale("log")
+    ax2.set_xticks(xs_mib)
+    ax2.get_xaxis().set_major_formatter(matplotlib.ticker.ScalarFormatter())
+    ax2.grid(axis="y", linestyle="--", alpha=0.5)
+    ax2.spines["top"].set_visible(False)
+    ax2.spines["right"].set_visible(False)
+    ax2.legend(loc="upper left", framealpha=0.9, fontsize=6)
+
+    plt.tight_layout()
+    _save_figure("fig_system_impact_amortization")
+    plt.close()
+
 def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -601,6 +690,7 @@ def main():
     fig_message_size_breakdown()
     fig_event_traces()
     fig_handshake_sequence()
+    fig_system_impact_amortization()
     fig_traffic_padding_overhead()
     fig_traffic_padding_sensitivity()
 

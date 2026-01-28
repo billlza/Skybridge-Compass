@@ -9,8 +9,8 @@ DOCS_DIR="$PROJECT_DIR/Docs"
 OUT_DIR="$PROJECT_DIR/out"
 TEX_FILE="IEEE_Paper_SkyBridge_Compass_patched.tex"
 PDF_FILE="IEEE_Paper_SkyBridge_Compass_patched.pdf"
-SUPP_TEX_FILE="supplementary.tex"
-SUPP_PDF_FILE="supplementary.pdf"
+SUPP_TEX_FILE="TDSC-2026-01-0318_supplementary.tex"
+SUPP_PDF_FILE="TDSC-2026-01-0318_supplementary.pdf"
 
 SKIP_FIGURES=0
 SKIP_CHECKS=0
@@ -92,7 +92,7 @@ if [[ "$SKIP_CHECKS" -eq 0 ]]; then
 fi
 
 if [[ -f "$SUPP_TEX_FILE" ]]; then
-    echo "=== 编译 supplementary ==="
+    echo "=== 编译 TDSC supplementary ==="
     pdflatex -interaction=nonstopmode "$SUPP_TEX_FILE"
     pdflatex -interaction=nonstopmode "$SUPP_TEX_FILE"
     if [[ "$SKIP_CHECKS" -eq 0 ]]; then

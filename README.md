@@ -67,7 +67,7 @@ swift test
 ## 论文与 PDF 源码位置
 
 - 主论文 LaTeX：`Docs/IEEE_Paper_SkyBridge_Compass_patched.tex`
-- Supplementary LaTeX：`Docs/supplementary.tex`
+- Supplementary LaTeX（投稿版本）：`Docs/TDSC-2026-01-0318_supplementary.tex`
 - 一键编译脚本：`./compile_paper.sh`（会自动生成 figures + 编译主论文和 Supplementary）
 
 ## 可复现实验（Artifact 复核）
@@ -83,7 +83,7 @@ Source archive checksums（immutability 辅助证据）：
 - `tdsc-2026-01-0318.zip`：`SHA256=c777f428672cec699fcf905c2e9902d8ce458e8d454d852d4fe0578038d97d2c`
 - `tdsc-2026-01-0318.tar.gz`：`SHA256=0ab8b649c937ca532d37764ebbdc07b692cfd738d649cfead80f87d4985f7d61`
 
-历史标签（非本次投稿基准，仅用于历史版本对照）：`artifact-v1` / `artifact-v2` / `artifact-v3`
+对外呈现的唯一投稿基准 tag：`tdsc-2026-01-0318`（README 与论文一致）
 
 最小复核流程（需要本机已安装 Xcode/Swift 与 TeXLive；PQC SDK 仅在 macOS 26+ 可用）：
 

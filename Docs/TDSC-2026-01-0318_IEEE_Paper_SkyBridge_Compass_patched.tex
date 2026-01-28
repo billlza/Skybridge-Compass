@@ -45,9 +45,9 @@
 }
 \usepackage{xr-hyper}
 % Allow main paper to reference Supplementary Table/Figure numbers via \ref{}.
-% Build supplementary.tex at least once so supplementary.aux exists.
+% Build TDSC-2026-01-0318_supplementary.tex at least once so its .aux exists.
 \makeatletter
-\IfFileExists{supplementary.aux}{\externaldocument{supplementary}}{}
+\IfFileExists{TDSC-2026-01-0318_supplementary.aux}{\externaldocument{TDSC-2026-01-0318_supplementary}}{}
 \makeatother
 \usepackage{xcolor}
 \usepackage{fvextra}
@@ -1464,7 +1464,7 @@ configurations. Classic handshakes remain near 2~ms (2.3~ms at p99); CryptoKit
 PQC stays under 6.7~ms at p99 with variance dominated by ML-DSA signature
 verification overhead. Extended statistics (mean/p50/p95/p99, std) are
 available in Supplementary Tables~\ref{tab:supp-latency}--\ref{tab:supp-rtt}
-(submitted as separate file \texttt{supplementary.pdf}).
+(submitted as separate file \texttt{TDSC-2026-01-0318\_supplementary.pdf}).
 
 \begin{figure}
 \pandocbounded{{\centering\includegraphics[keepaspectratio,width=\columnwidth]{figures/fig_handshake_latency.pdf}\par}}

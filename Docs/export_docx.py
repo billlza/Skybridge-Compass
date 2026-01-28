@@ -78,6 +78,12 @@ def strip_latex_softbreaks(tex: str) -> str:
 
 
 def expand_simple_macros(tex: str) -> str:
+    """
+    Expand a small set of simple macros that are safe to inline for DOCX conversion.
+
+    IMPORTANT: Never do a raw string replace on macro names, otherwise replacing
+    \artifactdate would corrupt \artifactdateSystemImpact (prefix match).
+    """
     # Expand \artifactdate from its \newcommand definition, if present.
     m = re.search(r"\\newcommand\{\\artifactdate\}\{([^}]*)\}", tex)
     if m:
@@ -85,7 +91,21 @@ def expand_simple_macros(tex: str) -> str:
         # Remove the macro definition itself to avoid producing invalid TeX like:
         # \newcommand{2026-01-16}{2026-01-16}
         tex = re.sub(r"^\\newcommand\{\\artifactdate\}\{[^}]*\}\s*$", "", tex, flags=re.MULTILINE)
-        tex = tex.replace("\\artifactdate", date)
+        # Replace only the standalone macro token, not prefixes of other commands.
+        tex = re.sub(r"\\artifactdate(?![A-Za-z])", date, tex)
+
+    # Expand \artifactdateSystemImpact too (prevents leaking macros into the DOCX).
+    m2 = re.search(r"\\newcommand\{\\artifactdateSystemImpact\}\{([^}]*)\}", tex)
+    if m2:
+        dsi = m2.group(1).strip()
+        tex = re.sub(
+            r"^\\newcommand\{\\artifactdateSystemImpact\}\{[^}]*\}\s*$",
+            "",
+            tex,
+            flags=re.MULTILINE,
+        )
+        tex = re.sub(r"\\artifactdateSystemImpact(?![A-Za-z])", dsi, tex)
+
     return tex
 
 
@@ -1326,7 +1346,7 @@ def main() -> int:
     ap.add_argument("--docs-dir", required=True, help="Docs directory containing .tex/.aux and figures/")
     ap.add_argument("--tex", default="IEEE_Paper_SkyBridge_Compass_patched.tex", help="Main LaTeX file name")
     ap.add_argument("--aux", default="IEEE_Paper_SkyBridge_Compass_patched.aux", help="Main AUX file name")
-    ap.add_argument("--supp-aux", default="supplementary.aux", help="Supplementary AUX file name (optional)")
+    ap.add_argument("--supp-aux", default="TDSC-2026-01-0318_supplementary.aux", help="Supplementary AUX file name (optional)")
     ap.add_argument("--out-docx", default="IEEE_Paper_SkyBridge_Compass_patched.docx", help="Output DOCX file name")
     ap.add_argument("--backup-existing", action="store_true", help="Backup existing output docx with timestamp suffix")
     ap.add_argument("--figure-dpi", type=int, default=450, help="Rasterization DPI for figures (recommended 300–600)")
@@ -1353,10 +1373,11 @@ def main() -> int:
 
     src = tex_path.read_text(encoding="utf-8", errors="ignore")
 
-    # Extract author affiliation/email lines from supplementary.tex (clean, simple author block).
+    # Extract author affiliation/email lines from the pinned supplementary TeX (clean, simple author block).
     author_lines: list[str] = []
     try:
-        supp_tex = (docs / "supplementary.tex").read_text(encoding="utf-8", errors="ignore")
+        # Use the pinned submission supplementary TeX as source of truth.
+        supp_tex = (docs / "TDSC-2026-01-0318_supplementary.tex").read_text(encoding="utf-8", errors="ignore")
         m = re.search(r"\\author\{([\s\S]*?)\}", supp_tex)
         if m:
             raw = m.group(1)

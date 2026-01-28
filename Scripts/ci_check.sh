@@ -37,7 +37,7 @@ echo "[3/5] Compiling PDF..."
 cd "$DOCS_DIR"
 pdflatex -interaction=nonstopmode IEEE_Paper_SkyBridge_Compass_patched.tex > /dev/null 2>&1
 pdflatex -interaction=nonstopmode IEEE_Paper_SkyBridge_Compass_patched.tex > /dev/null 2>&1
-pdflatex -interaction=nonstopmode supplementary.tex > /dev/null 2>&1
+pdflatex -interaction=nonstopmode TDSC-2026-01-0318_supplementary.tex > /dev/null 2>&1
 echo "  DONE: PDFs compiled"
 
 # 4. Check PDF text extraction for soft hyphens
