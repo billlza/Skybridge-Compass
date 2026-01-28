@@ -139,15 +139,19 @@
 \newcommand{\artifactzipsha}{c370f07d\allowbreak\hspace{0pt}a6fe825c\allowbreak\hspace{0pt}2132f447\allowbreak\hspace{0pt}db3287e0\allowbreak\hspace{0pt}689d0344\allowbreak\hspace{0pt}b26b4d97\allowbreak\hspace{0pt}ff4f043d\allowbreak\hspace{0pt}2cbac1e3}
 \newcommand{\artifacttarurl}{\artifacturl/archive/refs/tags/\artifacttag.tar.gz}
 \newcommand{\artifacttarsha}{ff467cdc\allowbreak\hspace{0pt}761a9a65\allowbreak\hspace{0pt}28de871f\allowbreak\hspace{0pt}0fd8663e\allowbreak\hspace{0pt}788e0aa7\allowbreak\hspace{0pt}a6af5b88\allowbreak\hspace{0pt}83199a2b\allowbreak\hspace{0pt}e68642c9}
-\newcommand{\artifactdate}{2026-01-16}
-\newcommand{\artifactdateSystemImpact}{2026-01-22}
+\newcommand{\artifactdate}{2026-01-23}
+\newcommand{\artifactdateSystemImpact}{2026-01-23}
 \newcommand{\artifactcsv}[1]{\texttt{#1\_\artifactdate.csv}}
 \newcommand{\artifactpath}[1]{\texttt{Artifacts/#1\_\artifactdate.csv}}
 \newcommand{\implref}[2]{Implementation reference: \href{\artifacturl}{\artifacturlshort} (tag=\texttt{\artifacttag}, commit=\texttt{\artifactsha}), file: \texttt{#1}, lines: #2.}
 
 
 \title{SkyBridge Compass: A Crypto-Agile P2P Handshake Framework for Remote Desktop and File Transfer with Auditable Downgrade Policy and Post-Quantum Readiness}
-\author{Zi'ang Li\IEEEcompsocitemizethanks{\IEEEcompsocthanksitem Independent Researcher, Tianjin, China. E-mail: 2403871950@qq.com.}}
+\author{Zi'ang Li, Peng Liu%
+\IEEEcompsocitemizethanks{%
+\IEEEcompsocthanksitem Zi'ang Li is with Independent Researcher, Tianjin, China. E-mail: 2403871950@qq.com.%
+\IEEEcompsocthanksitem Peng Liu is with Independent Researcher, Qiqihar, China.%
+}}
 
 \begin{document}
 
@@ -173,11 +177,10 @@ perfect forward secrecy for the KEM-based PQC suites in v1; post-quantum
 confidentiality holds only while long-term KEM private keys remain
 uncompromised. \mbox{End-to-end}
 handshake completion latency (including event emission overhead) is
-1.62 ms (p95 1.81 ms) for classic, 2.29 ms (p95 3.01 ms) for liboqs PQC,
-and 5.76 ms (p95 6.71 ms) for CryptoKit PQC over N=1000 iterations.
+1.89 ms (p95 2.18 ms) for classic, 3.47 ms (p95 4.18 ms) for liboqs PQC,
+and 5.20 ms (p95 6.16 ms) for CryptoKit PQC over N=1000 iterations.
 The handshake wire size (MessageA + MessageB + 2$\times$Finished) grows
-from 827 B (classic) to 12,163 B (PQC); X-Wing hybrid KEM measures
-12,195 B. Beyond
+from 687 B (classic) to 12,002 B (PQC). Beyond
 performance, we validate downgrade policies, failure semantics, and
 audit-signal fidelity under fault injection, and we release scripts and
 artifacts that reproduce all primary figures and tables.
@@ -428,7 +431,7 @@ numbers are not directly comparable to TLS/QUIC/DTLS handshakes in
 production deployments, but provide a reproducible baseline under a
 consistent measurement setup. The in-memory handshake microbench isolates
 crypto/state-machine overhead (p95
-1.45/\allowbreak 2.62/\allowbreak 5.45~ms for
+2.18/\allowbreak 4.18/\allowbreak 6.16~ms for
 classic/\allowbreak liboqs/\allowbreak CryptoKit) and is reported in
 Section~\ref{sec:evaluation} and Supplementary Tables~\ref{tab:supp-latency}--\ref{tab:supp-rtt}.
 Loopback TLS/QUIC/DTLS p95 latency is 11.37--14.01~ms; wire-size baselines
@@ -1457,8 +1460,8 @@ Table~\ref{tab:perf-summary} consolidates all performance metrics. We measure \m
 
 \textbf{Latency Distribution.}
 Fig.~\ref{fig:handshake-latency} shows latency percentiles across
-configurations. Classic handshakes remain under 2~ms at p99; CryptoKit
-PQC stays under 6.4~ms at p99 with variance dominated by ML-DSA signature
+configurations. Classic handshakes remain near 2~ms (2.3~ms at p99); CryptoKit
+PQC stays under 6.7~ms at p99 with variance dominated by ML-DSA signature
 verification overhead. Extended statistics (mean/p50/p95/p99, std) are
 available in Supplementary Tables~\ref{tab:supp-latency}--\ref{tab:supp-rtt}
 (submitted as separate file \texttt{supplementary.pdf}).
@@ -1470,12 +1473,12 @@ available in Supplementary Tables~\ref{tab:supp-latency}--\ref{tab:supp-rtt}
 \end{figure}
 
 \textbf{Wire-Format Breakdown.}
-The 15$\times$ size increase from Classic (827~B) to PQC (12.2~kB) is dominated by ML-DSA signatures (3309~B) and ML-KEM ciphertexts (1088~B). Fig.~\ref{fig:message-size-breakdown} shows the per-field breakdown.
+The $\approx$17$\times$ size increase from Classic (687~B) to PQC (12.0~kB) is dominated by ML-DSA signatures (3309~B) and ML-KEM ciphertexts (1088~B). Fig.~\ref{fig:message-size-breakdown} shows the per-field breakdown.
 
 \begin{figure}
 \pandocbounded{{\centering\includegraphics[keepaspectratio,width=\columnwidth]{figures/fig_message_size_breakdown.pdf}\par}}
 \caption{Handshake message size breakdown (signature, keyshare,
-identity fields, framing overhead) for MessageA/MessageB across Classic, PQC (liboqs), and PQC (CryptoKit) configurations. Counts reflect MessageA/B payloads only; the \emph{payload-only} handshake size adds two 38~B Finished frames (accounted for in Table~\ref{tab:perf-summary}), and detailed field sizes are reported in Supplementary Table~\ref{tab:supp-message-sizes}. Generated from \texttt{Artifacts/message\_sizes\_\artifactdate.csv}.}
+identity fields, framing overhead) for MessageA/MessageB across Classic and PQC configurations. Counts reflect MessageA/B payloads only; the \emph{payload-only} handshake size adds two 38~B Finished frames (accounted for in Table~\ref{tab:perf-summary}), and detailed field sizes are reported in Supplementary Table~\ref{tab:supp-message-sizes}. Generated from \texttt{Artifacts/message\_sizes\_\artifactdate.csv}.}
 \label{fig:message-size-breakdown}
 \end{figure}
 

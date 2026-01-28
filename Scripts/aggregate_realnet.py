@@ -211,7 +211,7 @@ def main() -> None:
     lines.append(r"\begin{table*}[!t]")
     lines.append(r"\centering")
     lines.append(r"\scriptsize")
-    lines.append(r"\caption{Supplementary Table \thetable: Real-network micro-study (STUN path + TCP payload). Each row is one network condition label. STUN metrics capture path RTT/loss and a conservative NAT classification. E2E metrics report success rate and p50 completion time for two payload sizes (classic 827~B vs PQC 12{,}163~B), along with the delta (PQC minus classic). Failure taxonomy is summarized for the PQC size as timeout rate and other failure rate.}")
+    lines.append(r"\caption{Supplementary Table \thetable: Real-network micro-study (STUN path + TCP payload). Each row is one network condition label. STUN metrics capture path RTT/loss and a conservative NAT classification. E2E metrics report success rate and p50 completion time for two payload sizes (classic 687~B vs PQC 12{,}002~B), along with the delta (PQC minus classic). Failure taxonomy is summarized for the PQC size as timeout rate and other failure rate.}")
     lines.append(r"\label{tab:supp-realnet-microstudy}")
     # Fit wide table within page bounds.
     lines.append(r"\setlength{\tabcolsep}{3pt}")

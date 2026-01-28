@@ -235,8 +235,23 @@ def inject_tables_into_docx(
     """
     Replace DOCX_TABLE_PLACEHOLDER::<tab:...> paragraphs with real Word tables (w:tbl).
     """
+    # IMPORTANT:
+    # Word is *surprisingly* sensitive to namespace prefix churn. If ElementTree serializes
+    # document.xml with arbitrary prefixes like `ns4:id` (instead of the conventional `r:id`),
+    # some Word builds will show "found unreadable content" even when XML is well-formed.
+    # We therefore pin the common OpenXML prefixes before serializing.
     ns_w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    ns_r = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    ns_wp = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+    ns_a = "http://schemas.openxmlformats.org/drawingml/2006/main"
+    ns_pic = "http://schemas.openxmlformats.org/drawingml/2006/picture"
+    ns_m = "http://schemas.openxmlformats.org/officeDocument/2006/math"
     ET.register_namespace("w", ns_w)
+    ET.register_namespace("r", ns_r)
+    ET.register_namespace("wp", ns_wp)
+    ET.register_namespace("a", ns_a)
+    ET.register_namespace("pic", ns_pic)
+    ET.register_namespace("m", ns_m)
 
     with zipfile.ZipFile(docx_path) as z:
         doc_xml = z.read("word/document.xml")
@@ -1307,25 +1322,70 @@ def postprocess_docx_ieee(docx_path: Path, author_lines: list[str] | None = None
         styles_xml_path = td_path / "word" / "styles.xml"
         numbering_xml_path = td_path / "word" / "numbering.xml"
 
+        def _normalize_numbering_xml_namespaces() -> None:
+            """
+            Normalize numbering.xml namespaces to avoid Word "Repaired: Lists X" dialogs.
+
+            We ensure:
+            - `mc:Ignorable="w14 wp14"` (not `ns1:Ignorable`)
+            - `xmlns:mc`, `xmlns:w14`, `xmlns:wp14` are present on <w:numbering ...>
+            """
+            if not numbering_xml_path.exists():
+                return
+            try:
+                txt = numbering_xml_path.read_text("utf-8", errors="ignore")
+                m = re.search(r"<w:numbering\b[^>]*>", txt)
+                if not m:
+                    return
+                open_tag = m.group(0)
+                open_tag2 = open_tag
+
+                # Prefer conventional prefixes.
+                open_tag2 = open_tag2.replace(
+                    'xmlns:ns1="http://schemas.openxmlformats.org/markup-compatibility/2006"',
+                    'xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"',
+                )
+                open_tag2 = open_tag2.replace("ns1:Ignorable", "mc:Ignorable")
+
+                if 'xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"' not in open_tag2:
+                    # Insert after xmlns:w if present, else before the closing '>'.
+                    if 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"' in open_tag2:
+                        open_tag2 = open_tag2.replace(
+                            'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"',
+                            'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+                            'xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"',
+                            1,
+                        )
+                    else:
+                        open_tag2 = open_tag2[:-1] + ' xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006">'
+
+                if 'xmlns:w14=' not in open_tag2:
+                    open_tag2 = open_tag2[:-1] + ' xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml">'
+                if 'xmlns:wp14=' not in open_tag2:
+                    open_tag2 = open_tag2[:-1] + ' xmlns:wp14="http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing">'
+
+                if "mc:Ignorable" not in open_tag2:
+                    open_tag2 = open_tag2[:-1] + ' mc:Ignorable="w14 wp14">'
+                else:
+                    ign_m = re.search(r'mc:Ignorable="([^"]*)"', open_tag2)
+                    if ign_m:
+                        parts = ign_m.group(1).split()
+                        for needed in ("w14", "wp14"):
+                            if needed not in parts:
+                                parts.append(needed)
+                        open_tag2 = re.sub(r'mc:Ignorable="[^"]*"', f'mc:Ignorable="{" ".join(parts)}"', open_tag2)
+
+                if open_tag2 != open_tag:
+                    txt = txt[: m.start()] + open_tag2 + txt[m.end() :]
+                    numbering_xml_path.write_text(txt, "utf-8")
+            except Exception:
+                return
+
         if doc_xml_path.exists():
             doc_xml = doc_xml_path.read_text("utf-8", errors="ignore")
-            # Insert pgSz/pgMar/cols into the *final* sectPr if missing.
-            def _sect_repl(m: re.Match) -> str:
-                sect = m.group(0)
-                insert = (
-                    '<w:pgSz w:w="12240" w:h="15840"/>'
-                    '<w:pgMar w:top="1080" w:right="1080" w:bottom="1080" w:left="1080" '
-                    'w:header="720" w:footer="720" w:gutter="0"/>'
-                    '<w:cols w:num="2" w:space="360"/>'
-                )
-                if "<w:cols" in sect:
-                    return sect
-                # Put before footnotePr if present, else right after sectPr open.
-                if "<w:footnotePr" in sect:
-                    return sect.replace("<w:footnotePr", insert + "<w:footnotePr", 1)
-                return sect.replace("<w:sectPr>", "<w:sectPr>" + insert, 1)
-
-            doc_xml = re.sub(r"<w:sectPr>[\s\S]*?</w:sectPr>", _sect_repl, doc_xml, count=1)
+            # NOTE: do NOT use a regex like `count=1` here: DOCX may contain many <w:sectPr>
+            # (continuous section breaks, full-width table* sections, etc.). We must ensure the
+            # **final body section** is two-column reliably by editing the XML structure.
 
             # Make front matter (Title/Author/Abstract/Keywords) single-column, then switch to 2-col at body.
             # We insert a continuous section break (1-col) at the Keywords paragraph (style FirstParagraph,
@@ -1337,10 +1397,140 @@ def postprocess_docx_ieee(docx_path: Path, author_lines: list[str] | None = None
             try:
                 import xml.etree.ElementTree as ET
 
+                # Pin common prefixes to avoid Word "unreadable content" errors caused by
+                # prefix renaming (e.g., ns4:id instead of r:id).
+                ET.register_namespace("w", ns_w)
+                ET.register_namespace("r", "http://schemas.openxmlformats.org/officeDocument/2006/relationships")
+                ET.register_namespace("wp", "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing")
+                ET.register_namespace("a", "http://schemas.openxmlformats.org/drawingml/2006/main")
+                ET.register_namespace("pic", "http://schemas.openxmlformats.org/drawingml/2006/picture")
+                ET.register_namespace("m", "http://schemas.openxmlformats.org/officeDocument/2006/math")
+
                 root = ET.fromstring(doc_xml)
                 body = root.find(f"{{{ns_w}}}body")
                 if body is not None:
                     paras = [p for p in body.findall(f"{{{ns_w}}}p")]
+
+                    def _ensure_child(parent: ET.Element, tag_local: str) -> ET.Element:
+                        el = parent.find(f"{{{ns_w}}}{tag_local}")
+                        if el is None:
+                            el = ET.SubElement(parent, f"{{{ns_w}}}{tag_local}")
+                        return el
+
+                    def _set_attr(el: ET.Element, local_attr: str, value: str) -> None:
+                        el.set(f"{{{ns_w}}}{local_attr}", value)
+
+                    def _ensure_final_body_section_two_columns() -> None:
+                        """
+                        Ensure the final section (body-level <w:sectPr>) is 2 columns with Letter page size
+                        and standard 1" margins. This is the anchor that makes the main body render as
+                        IEEE/TDSC two-column after the front-matter 1-column break.
+                        """
+                        # Word normally stores the last section as a direct child of <w:body>.
+                        sectPr = body.find(f"{{{ns_w}}}sectPr")
+                        if sectPr is None:
+                            sectPr = ET.SubElement(body, f"{{{ns_w}}}sectPr")
+
+                        # Page size: Letter (8.5x11) in twips.
+                        pgSz = _ensure_child(sectPr, "pgSz")
+                        _set_attr(pgSz, "w", "12240")
+                        _set_attr(pgSz, "h", "15840")
+
+                        # Margins: 1" all around (1080 twips) with standard header/footer.
+                        pgMar = _ensure_child(sectPr, "pgMar")
+                        _set_attr(pgMar, "top", "1080")
+                        _set_attr(pgMar, "right", "1080")
+                        _set_attr(pgMar, "bottom", "1080")
+                        _set_attr(pgMar, "left", "1080")
+                        _set_attr(pgMar, "header", "720")
+                        _set_attr(pgMar, "footer", "720")
+                        _set_attr(pgMar, "gutter", "0")
+
+                        cols = _ensure_child(sectPr, "cols")
+                        _set_attr(cols, "num", "2")
+                        _set_attr(cols, "space", "360")
+
+                    # Always anchor final body section to 2 columns.
+                    _ensure_final_body_section_two_columns()
+
+                    def _emu_from_twips(twips: int) -> int:
+                        # 1 inch = 1440 twips = 914400 EMU => 1 twip = 635 EMU.
+                        return int(twips) * 635
+
+                    def _get_cols_from_sectpr(sectPr_el: ET.Element) -> int | None:
+                        cols_el = sectPr_el.find(f"{{{ns_w}}}cols")
+                        if cols_el is None:
+                            return None
+                        v = cols_el.get(f"{{{ns_w}}}num")
+                        try:
+                            return int(v) if v is not None else None
+                        except Exception:
+                            return None
+
+                    def _scale_inline_images_to_fit_columns() -> None:
+                        """
+                        Pandoc's LaTeX->DOCX conversion does not understand IEEE two-column widths,
+                        so it can emit images whose cx exceeds the column width; Word then clips
+                        the right side at the column boundary (what you observed for Fig. 2).
+
+                        We walk the body in document order, track the current section's column count
+                        from any continuous section breaks, and cap inline image widths accordingly.
+                        """
+                        ns_wp = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+                        ns_a = "http://schemas.openxmlformats.org/drawingml/2006/main"
+
+                        # Heuristic widths (twips) consistent with our table widths:
+                        # - 2-col: one column ~4500 twips
+                        # - 1-col: full text width ~9360 twips
+                        max_twips_for_cols = {1: 9360, 2: 4500}
+
+                        current_cols = 1  # safe default for front-matter
+                        for child in list(body):
+                            # Section breaks can live inside paragraph properties.
+                            if child.tag == f"{{{ns_w}}}p":
+                                pPr = child.find(f"{{{ns_w}}}pPr")
+                                if pPr is not None:
+                                    sectPr = pPr.find(f"{{{ns_w}}}sectPr")
+                                    if sectPr is not None:
+                                        cols = _get_cols_from_sectpr(sectPr)
+                                        if cols in (1, 2):
+                                            current_cols = cols
+
+                            # Scale all inline drawings inside this element.
+                            for inline in child.findall(f".//{{{ns_wp}}}inline"):
+                                extent = inline.find(f"{{{ns_wp}}}extent")
+                                if extent is None:
+                                    continue
+                                cx = extent.get("cx")
+                                cy = extent.get("cy")
+                                try:
+                                    cx_i = int(cx) if cx is not None else None
+                                    cy_i = int(cy) if cy is not None else None
+                                except Exception:
+                                    continue
+                                if not cx_i or not cy_i:
+                                    continue
+
+                                max_twips = max_twips_for_cols.get(current_cols, 4500)
+                                max_emu = _emu_from_twips(max_twips)
+                                if cx_i <= max_emu:
+                                    continue
+
+                                scale = max_emu / float(cx_i)
+                                new_cx = int(round(cx_i * scale))
+                                new_cy = int(round(cy_i * scale))
+                                extent.set("cx", str(new_cx))
+                                extent.set("cy", str(new_cy))
+
+                                # Also update the picture transform extents if present.
+                                for a_ext in inline.findall(f".//{{{ns_a}}}xfrm/{{{ns_a}}}ext"):
+                                    a_ext.set("cx", str(new_cx))
+                                    a_ext.set("cy", str(new_cy))
+
+                        # Finally, also respect the body-level (final) section if no earlier break appeared.
+                        # (No-op in most cases.)
+
+                    _scale_inline_images_to_fit_columns()
 
                     def _p_style(p):
                         pPr = p.find(f"{{{ns_w}}}pPr")
@@ -1450,7 +1640,8 @@ def postprocess_docx_ieee(docx_path: Path, author_lines: list[str] | None = None
                             mar.set(f"{{{ns_w}}}footer", "720")
                             mar.set(f"{{{ns_w}}}gutter", "0")
                             cols = ET.SubElement(sectPr, f"{{{ns_w}}}cols")
-                            cols.set(f"{{{ns_w}}}num", "1")
+                            # Switch to IEEE/TDSC two-column layout for the main body (starting at Introduction).
+                            cols.set(f"{{{ns_w}}}num", "2")
                             cols.set(f"{{{ns_w}}}space", "360")
 
                     def _prepend_paragraph_text(p, prefix: str) -> None:
@@ -1468,25 +1659,60 @@ def postprocess_docx_ieee(docx_path: Path, author_lines: list[str] | None = None
                     # Figures are already prefixed in LaTeX as "Fig. N." (env-scoped),
                     # so we MUST NOT auto-prefix again here (it would create "Fig. 1. Fig. 1. ...").
 
-                    # Insert IEEE-like author block lines (affiliation/email) right after the first Author paragraph.
-                    if author_lines:
-                        for i, p in enumerate(paras):
-                            if _p_style(p) == "Author":
-                                insert_at = i + 1
-                                for line in author_lines:
-                                    line = line.strip()
-                                    if not line:
-                                        continue
-                                    np = ET.Element(f"{{{ns_w}}}p")
-                                    pPr = ET.SubElement(np, f"{{{ns_w}}}pPr")
-                                    ET.SubElement(pPr, f"{{{ns_w}}}pStyle").set(f"{{{ns_w}}}val", "Author")
-                                    r = ET.SubElement(np, f"{{{ns_w}}}r")
-                                    t = ET.SubElement(r, f"{{{ns_w}}}t")
-                                    t.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
-                                    t.text = line
-                                    body.insert(insert_at, np)
-                                    insert_at += 1
+                    # Rebuild IEEE-like author block lines (affiliation/email) right after the Authors name line.
+                    # If we previously inserted legacy lines (single-author), remove them to avoid duplication.
+                    if author_lines and body is not None:
+                        authors_style = _style_id("Authors", _style_id("Author", "Authors"))
+                        # Refresh paras list from body children to keep indices stable
+                        body_children = list(body)
+                        # Find first author paragraph (names line)
+                        first_auth_idx = None
+                        for idx, el in enumerate(body_children):
+                            if el.tag != f"{{{ns_w}}}p":
+                                continue
+                            if _p_style(el) in ("Author", "Authors", authors_style):
+                                first_auth_idx = idx
                                 break
+                        if first_auth_idx is not None:
+                            # Remove subsequent Authors paragraphs (affiliation/email lines) until the next non-Authors paragraph
+                            rm_indices = []
+                            for j in range(first_auth_idx + 1, len(body_children)):
+                                el = body_children[j]
+                                if el.tag != f"{{{ns_w}}}p":
+                                    continue
+                                if _p_style(el) in ("Author", "Authors", authors_style):
+                                    rm_indices.append(j)
+                                else:
+                                    break
+                            for j in reversed(rm_indices):
+                                body.remove(body_children[j])
+
+                            insert_at = first_auth_idx + 1
+                            for line in author_lines:
+                                line = line.strip()
+                                if not line:
+                                    continue
+                                np = ET.Element(f"{{{ns_w}}}p")
+                                pPr = ET.SubElement(np, f"{{{ns_w}}}pPr")
+                                ET.SubElement(pPr, f"{{{ns_w}}}pStyle").set(f"{{{ns_w}}}val", authors_style)
+                                r = ET.SubElement(np, f"{{{ns_w}}}r")
+                                t = ET.SubElement(r, f"{{{ns_w}}}t")
+                                t.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+                                t.text = line
+                                body.insert(insert_at, np)
+                                insert_at += 1
+
+                    # Normalize title/author paragraph styles to match the reference template.
+                    # Pandoc sometimes emits pStyle ids like "Author" which may not exist in localized templates
+                    # (e.g., trans_jour uses styleId="Authors" and "Ttulo" for the title).
+                    title_style = _style_id("Title", "Ttulo")
+                    authors_style = _style_id("Authors", _style_id("Author", "Authors"))
+                    for p in paras:
+                        st = _p_style(p)
+                        if st == "Author":
+                            _set_p_style(p, authors_style)
+                        elif st == "Title":
+                            _set_p_style(p, title_style)
 
                     # Reformat Abstract/Keywords to IEEE-style labels and remove the centered AbstractTitle line.
                     # AbstractTitle paragraph (style AbstractTitle) is removed; Abstract paragraph is prefixed with "Abstract—".
@@ -1698,8 +1924,17 @@ def postprocess_docx_ieee(docx_path: Path, author_lines: list[str] | None = None
                 new = patch_fn(old)
                 return styles_xml.replace(old, new, 1)
 
-            # Title: closer to IEEE (24pt Times, bold)
+            # Determine localized styleIds from style names.
+            # trans_jour uses styleId="Ttulo" for the style named "Title", and "Authors" for "Authors".
+            title_style_id = style_id_by_name(styles, "Title") or "Title"
+            authors_style_id = style_id_by_name(styles, "Authors") or style_id_by_name(styles, "Author") or "Author"
+
+            # Title: closer to IEEE (24pt Times, bold, centered)
             def _title_patch(block: str) -> str:
+                # Some IEEE Word templates position Title/Authors using paragraph frames (framePr).
+                # Pandoc output uses normal flow; keeping framePr causes overlap (absolute y=1).
+                block = re.sub(r"<w:framePr[^>]*/>", "", block)
+                block = re.sub(r"<w:framePr[\s\S]*?</w:framePr>", "", block)
                 block = re.sub(
                     r"<w:rFonts[^>]*/>",
                     '<w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:cs="Times New Roman" w:eastAsia="Times New Roman"/>',
@@ -1709,12 +1944,17 @@ def postprocess_docx_ieee(docx_path: Path, author_lines: list[str] | None = None
                 block = re.sub(r"<w:szCs\s+[^>]*w:val=\"\d+\"[^>]*/>", "<w:szCs w:val=\"48\"/>", block)
                 if "<w:b" not in block:
                     block = block.replace("<w:rPr>", "<w:rPr><w:b/>", 1)
+                if "<w:jc" not in block:
+                    block = block.replace("<w:pPr>", "<w:pPr><w:jc w:val=\"center\"/>", 1)
                 return block
 
-            styles = _patch_style(styles, "Title", _title_patch)
+            styles = _patch_style(styles, title_style_id, _title_patch)
 
-            # Author: 11pt Times, centered, not inheriting Title size.
-            def _author_patch(block: str) -> str:
+            # Authors: 11pt Times, centered.
+            def _authors_patch(block: str) -> str:
+                # Remove paragraph frames to avoid absolute positioning overlap with Title.
+                block = re.sub(r"<w:framePr[^>]*/>", "", block)
+                block = re.sub(r"<w:framePr[\s\S]*?</w:framePr>", "", block)
                 block = re.sub(r"<w:basedOn\s+w:val=\"[^\"]+\"\s*/>", "<w:basedOn w:val=\"Normal\"/>", block)
                 block = re.sub(r"<w:sz\s+[^>]*w:val=\"\d+\"[^>]*/>", "<w:sz w:val=\"22\"/>", block)
                 block = re.sub(r"<w:szCs\s+[^>]*w:val=\"\d+\"[^>]*/>", "<w:szCs w:val=\"22\"/>", block)
@@ -1738,7 +1978,7 @@ def postprocess_docx_ieee(docx_path: Path, author_lines: list[str] | None = None
                     block = block.replace("<w:pPr>", '<w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/>', 1)
                 return block
 
-            styles = _patch_style(styles, "Author", _author_patch)
+            styles = _patch_style(styles, authors_style_id, _authors_patch)
 
             # Abstract: 9pt Times, single spaced, no extra before/after.
             def _abstract_repl(m: re.Match) -> str:
@@ -1878,6 +2118,9 @@ def postprocess_docx_ieee(docx_path: Path, author_lines: list[str] | None = None
             except Exception:
                 pass
 
+        # After any modifications, normalize numbering.xml namespaces (ET may reintroduce ns1:* prefixes).
+        _normalize_numbering_xml_namespaces()
+
         # Repack DOCX
         tmp_out = docx_path.with_suffix(".tmp.docx")
         with zipfile.ZipFile(tmp_out, "w", compression=zipfile.ZIP_DEFLATED) as z:
@@ -1942,24 +2185,50 @@ def main() -> int:
 
     src = tex_path.read_text(encoding="utf-8", errors="ignore")
 
-    # Extract author affiliation/email lines from supplementary.tex (clean, simple author block).
+    # Extract author affiliation/email lines for DOCX front-matter.
+    # Prefer IEEEtran compsoc \IEEEcompsocthanksitem blocks from the main TeX (has multi-author info),
+    # fall back to supplementary.tex's simple \author{...\\...} if needed.
+    def _clean_tex_inline(s: str) -> str:
+        s = re.sub(r"%.*$", "", s, flags=re.MULTILINE)
+        # Simple inline macro stripping for display in Word (keep content)
+        s = re.sub(r"\\emph\{([^}]*)\}", r"\1", s)
+        s = re.sub(r"\\texttt\{([^}]*)\}", r"\1", s)
+        s = re.sub(r"\\href\{[^}]*\}\{([^}]*)\}", r"\1", s)
+        s = s.replace("~", " ")
+        s = re.sub(r"\s+", " ", s).strip()
+        return s
+
     author_lines: list[str] = []
     try:
-        supp_tex = (docs / "supplementary.tex").read_text(encoding="utf-8", errors="ignore")
-        m = re.search(r"\\author\{([\s\S]*?)\}", supp_tex)
+        m = re.search(r"\\author\{([\s\S]*?)\}\s*$", src, flags=re.MULTILINE)
         if m:
-            raw = m.group(1)
-            parts = [p.strip() for p in raw.split("\\\\") if p.strip()]
-            # Skip first part if it's just the author name (already present in DOCX).
-            if parts:
-                # Heuristic: first segment likely contains the name.
-                parts = parts[1:]
-            # Normalize common prefixes
-            for p in parts:
-                p = re.sub(r"\s+", " ", p).strip()
-                author_lines.append(p)
+            author_block = m.group(1)
+            items = re.findall(r"\\IEEEcompsocthanksitem\s+([\s\S]*?)(?=\\IEEEcompsocthanksitem|\}\s*\}|$)", author_block)
+            for it in items:
+                it = _clean_tex_inline(it)
+                # Remove any trailing braces that come from regex boundary matching.
+                it = re.sub(r"\s*\}+\s*$", "", it).strip()
+                it = it.rstrip().rstrip("%").strip()
+                if it:
+                    author_lines.append(it)
     except Exception:
         author_lines = []
+
+    if not author_lines:
+        try:
+            supp_tex = (docs / "supplementary.tex").read_text(encoding="utf-8", errors="ignore")
+            m = re.search(r"\\author\{([\s\S]*?)\}", supp_tex)
+            if m:
+                raw = m.group(1)
+                parts = [p.strip() for p in raw.split("\\\\") if p.strip()]
+                if parts:
+                    parts = parts[1:]
+                for p in parts:
+                    p = _clean_tex_inline(p)
+                    if p:
+                        author_lines.append(p)
+        except Exception:
+            author_lines = []
 
     # Expand \input{...} to avoid losing tables/figures during conversion.
     src = expand_inputs(src, docs)

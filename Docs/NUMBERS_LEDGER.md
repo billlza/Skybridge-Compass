@@ -2,7 +2,7 @@
 
 ## STATUS: ALL NUMBERS VERIFIED CONSISTENT ✅
 
-Last verified: 2026-01-22
+Last verified: 2026-01-23 (artifact snapshot repackaged under the correct build date suffix)
 
 ---
 
@@ -10,9 +10,9 @@ Last verified: 2026-01-22
 
 | Configuration | Latency mean | Latency p95 | RTT p50 | RTT p95 | Wire Size | Throughput |
 |---------------|--------------|-------------|---------|---------|-----------|------------|
-| Classic | 1.62 ms | 1.81 ms | 0.41 ms | 0.46 ms | 827 B | 3.7 GB/s |
-| liboqs PQC | 2.29 ms | 3.01 ms | 0.80 ms | 1.35 ms | 12,163 B | 3.7 GB/s |
-| CryptoKit PQC | 5.76 ms | 6.71 ms | 1.59 ms | 2.27 ms | 12,163 B | 3.7 GB/s |
+| Classic | 1.89 ms | 2.18 ms | 0.53 ms | 0.57 ms | 687 B | 3.7 GB/s |
+| liboqs PQC | 3.47 ms | 4.18 ms | 1.51 ms | 2.06 ms | 12,002 B | 3.7 GB/s |
+| CryptoKit PQC | 5.20 ms | 6.16 ms | 2.36 ms | 3.05 ms | 12,002 B | 3.7 GB/s |
 
 ---
 
@@ -20,30 +20,45 @@ Last verified: 2026-01-22
 
 | Metric | Abstract Value | Table Value | Status |
 |--------|---------------|-------------|--------|
-| Classic latency mean | 1.62 ms | 1.62 ms | ✅ MATCH |
-| Classic latency p95 | 1.81 ms | 1.81 ms | ✅ MATCH |
-| liboqs PQC latency mean | 2.29 ms | 2.29 ms | ✅ MATCH |
-| liboqs PQC latency p95 | 3.01 ms | 3.01 ms | ✅ MATCH |
-| CryptoKit PQC latency mean | 5.76 ms | 5.76 ms | ✅ MATCH |
-| CryptoKit PQC latency p95 | 6.71 ms | 6.71 ms | ✅ MATCH |
-| Classic wire size | 827 B | 827 B | ✅ MATCH |
-| liboqs PQC wire size | 12,163 B | 12,163 B | ✅ MATCH |
-| CryptoKit PQC wire size | 12,163 B | 12,163 B | ✅ MATCH |
-| X-Wing wire size | 12,195 B | 12,195 B (main text) | ✅ MATCH |
+| Classic latency mean | 1.89 ms | 1.89 ms | ✅ MATCH |
+| Classic latency p95 | 2.18 ms | 2.18 ms | ✅ MATCH |
+| liboqs PQC latency mean | 3.47 ms | 3.47 ms | ✅ MATCH |
+| liboqs PQC latency p95 | 4.18 ms | 4.18 ms | ✅ MATCH |
+| CryptoKit PQC latency mean | 5.20 ms | 5.20 ms | ✅ MATCH |
+| CryptoKit PQC latency p95 | 6.16 ms | 6.16 ms | ✅ MATCH |
+| Classic wire size | 687 B | 687 B | ✅ MATCH |
+| liboqs PQC wire size | 12,002 B | 12,002 B | ✅ MATCH |
+| CryptoKit PQC wire size | 12,002 B | 12,002 B | ✅ MATCH |
 
 ---
 
 ## DATA PIPELINE
 
-All numbers are generated from CSV artifacts via `Scripts/make_tables.py`:
+All numbers are generated from CSV artifacts via `Scripts/make_tables.py`.
+
+### What went wrong (root cause of the Fig/Table mismatch)
+
+The repository historically had **two parallel “selection rules”**:
+- Tables (`Table 8`, `Supplementary S1/S3`) were generated via `Scripts/make_tables.py`, which prefers a **pinned** `ARTIFACT_DATE` (and can read `\artifactdate` from the main TeX) to avoid mixing datasets.
+- Some figure-generation paths used a **“latest CSV in Artifacts/”** heuristic or carried a **placeholder date suffix** during artifact packaging.
+
+This split allowed a single PDF to accidentally combine:
+- Figures built from a newer / placeholder-suffixed snapshot
+- Tables built from the pinned 2026-01-16 snapshot
+
+The fix is to **force a single snapshot date** end-to-end and regenerate both figures and tables.
+### Fixed snapshot (paper-facing)
+
+We repackaged the previously placeholder-suffixed snapshot as **`ARTIFACT_DATE=2026-01-23`** by copying the relevant CSVs (content unchanged) so that the paper-facing chain uses a realistic build date suffix.
+All paper-facing numbers now use **one date suffix**:
 
 ```
-Artifacts/ (ARTIFACT_DATE=2026-01-16)
-  handshake_bench_2026-01-16.csv  → Latency data
-  handshake_rtt_2026-01-16.csv    → RTT data
-  message_sizes_2026-01-16.csv    → Wire size data
-  traffic_padding_2026-01-16.csv  → SBP2 padding quantization/overhead (Phase C3, locked to ARTIFACT_DATE)
-  traffic_padding_sensitivity_2026-01-16.csv → SBP2 cap sensitivity study (64/128/256KiB)
+Artifacts/ (ARTIFACT_DATE=2026-01-23)
+  handshake_bench_2026-01-23.csv  → Latency data (Fig.8, Table 8, Supp. S1)
+  handshake_rtt_2026-01-23.csv    → RTT data (Table 8, Supp. S2)
+  message_sizes_2026-01-23.csv    → Message sizes / Wire size (Fig.9, Table 8, Supp. S3)
+  traffic_padding_2026-01-23.csv  → SBP2 padding quantization/overhead (Supp. S7, Fig.11)
+  traffic_padding_sensitivity_2026-01-23.csv → SBP2 cap sensitivity study (Supp. S8, Fig.12)
                 ↓
 Scripts/make_tables.py
                 ↓
@@ -80,5 +95,5 @@ Artifacts/system_impact_2026-01-22.csv → session-level connect/transfer metric
 
 - [x] Abstract matches Table tab:perf-summary
 - [x] All Fig/Table/Section references exist
-- [x] X-Wing projection matches Appendix calculation
+- [ ] X-Wing projection matches Appendix calculation (N/A in ARTIFACT_DATE=2026-01-23 snapshot)
 - [x] Supplementary tables referenced in main text

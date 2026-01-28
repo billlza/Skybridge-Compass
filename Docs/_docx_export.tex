@@ -139,14 +139,18 @@
 \newcommand{\artifacttarurl}{\artifacturl/archive/refs/tags/\artifacttag.tar.gz}
 \newcommand{\artifacttarsha}{ff467cdc761a9a6528de871f0fd8663e788e0aa7a6af5b8883199a2be68642c9}
 
-\newcommand{\artifactdateSystemImpact}{2026-01-22}
+\newcommand{\artifactdateSystemImpact}{2026-01-23}
 \newcommand{\artifactcsv}[1]{\texttt{#1_2026-01-16.csv}}
 \newcommand{\artifactpath}[1]{\texttt{Artifacts/#1_2026-01-16.csv}}
 \newcommand{\implref}[2]{Implementation reference: \href{\artifacturl}{\artifacturlshort} (tag=\texttt{\artifacttag}, commit=\texttt{\artifactsha}), file: \texttt{#1}, lines: #2.}
 
 
 \title{SkyBridge Compass: A Crypto-Agile P2P Handshake Framework for Remote Desktop and File Transfer with Auditable Downgrade Policy and Post-Quantum Readiness}
-\author{Zi'ang Li\IEEEcompsocitemizethanks{\IEEEcompsocthanksitem Independent Researcher, Tianjin, China. E-mail: 2403871950@qq.com.}}
+\author{Zi'ang Li, Peng Liu%
+\IEEEcompsocitemizethanks{%
+\IEEEcompsocthanksitem Zi'ang Li is with Independent Researcher, Tianjin, China. E-mail: 2403871950@qq.com.%
+\IEEEcompsocthanksitem Peng Liu is with Independent Researcher, Qiqihar, China.%
+}}
 
 \begin{document}
 
@@ -402,17 +406,19 @@ size, and latency where available.
 
 
 Loopback SkyBridge p95 latency is 1.57/ 2.76/ 7.53~ms for
-classic/ liboqs/ CryptoKit, remaining below
-TLS/QUIC/DTLS in this setup. The in-memory handshake microbench isolates
+classic/ liboqs/ CryptoKit in our loopback harness; these
+numbers are not directly comparable to TLS/QUIC/DTLS handshakes in
+production deployments, but provide a reproducible baseline under a
+consistent measurement setup. The in-memory handshake microbench isolates
 crypto/state-machine overhead (p95
-1.45/ 2.62/ 5.45~ms for
+2.18/ 4.18/ 6.16~ms for
 classic/ liboqs/ CryptoKit) and is reported in
 Section~7 and Supplementary Tables~S1--S2.
 Loopback TLS/QUIC/DTLS p95 latency is 11.37--14.01~ms; wire-size baselines
-(p50/p95) are reported in Supplementary Table~S6 and are reproducible via
+(p50/p95) are reported in Supplementary Table~S7 and are reproducible via
 loopback pcap capture
 (\texttt{Scripts/run_baseline_bench.sh}).
-SkyBridge-CryptoKit loopback baselines are included in Supplementary Table~S6.
+SkyBridge-CryptoKit loopback baselines are included in Supplementary Table~S7.
 
 \section{System Architecture}\label{sec:system-architecture}
 
@@ -815,8 +821,14 @@ Sketches}\label{b.-security-goals-and-proof-sketches}
 \item \textbf{D3 (Audit evidence).} The minimal sufficient evidence set is the tuple \{event type, timestamp, deviceId, suiteId, failure reason code, policy mode, fallback flag, cooldown remaining\} (Property G8).
 \end{itemize}
 
-We state the core properties as invariants and provide non-formal proof
-sketches tied to protocol mechanics. Formal verification using model checking or symbolic analysis [22] is planned for future work:
+We state the core properties as invariants and provide proof sketches
+tied to protocol mechanics. To strengthen reviewer-facing claims, we
+additionally provide a minimal symbolic model artifact (Tamarin) that
+captures suite negotiation, transcript binding, explicit key confirmation,
+and the fallback gate; lemmas are machine-checkable from the released
+artifact (\texttt{formal/skybridge_minimal.spthy}). Full formalization of
+the entire Swift implementation (including concurrency and platform APIs)
+remains future work.
 
 \textbf{Property G1 (Negotiation Integrity):} The selected suite must be
 among the Initiator's offered suites and have a corresponding key
@@ -849,7 +861,9 @@ to the handshake transcript.\\
 
 \textbf{Property G3 (Session Key Secrecy):} The derived session keys
 remain secret under standard KEM/DH and signature security
-assumptions.\\
+assumptions. For KEM-based PQC suites in v1, we do not claim
+post-compromise forward secrecy: confidentiality holds only while
+long-term KEM private keys remain uncompromised.\\
 \emph{Proof sketch:}
 \begin{itemize}\tightlist
 \item
@@ -1019,10 +1033,12 @@ provider selection overhead, and data-plane throughput).
 
 \textbf{Environment:} All experiments are run on Apple Silicon (M1/M3 class) with macOS 26.x, where CryptoKit PQC is available when the SDK exposes ML-KEM/ML-DSA types. Build configuration uses Release (\texttt{-O}) with non-essential logging disabled. Timing uses a monotonic clock (\texttt{ContinuousClock}) with N=1000 iterations after 10 warmup runs; reported percentiles (p50/p95/p99) are computed directly from samples.
 
-\textbf{Repeatability:} For each configuration, we run 3--5 independent
-batches by restarting the benchmark test process; Supplementary
-Tables~S7--S8
-report mean and 95\% confidence intervals across batches.
+\textbf{Repeatability:} We support multi-batch repeatability by
+restarting the benchmark test process for each batch. Supplementary
+Tables~S8--S9
+report the number of observed batches ($B$) and (when $B \ge 2$) mean and
+95\% confidence intervals across batches. To reproduce multi-batch CIs,
+re-run the harness with \texttt{SKYBRIDGE_BENCH_BATCHES=3}--\texttt{5}.
 
 \textbf{Reproducibility:} We ship an opt-in benchmark suite under \texttt{Tests/SkyBridgeCoreTests/}. For a one-shot run, use \texttt{Scripts/run_paper_eval.sh}. The complete command reference and CSV artifact specifications are provided in the Supplementary Materials (Reproducibility).
 
@@ -1048,7 +1064,7 @@ key results; detailed test matrices and methodology are provided in the
 Supplementary Materials (Regression Testing).
 
 \textbf{Failure-Mode Robustness.}
-The actor-isolated handshake driver provides deterministic failure semantics without unhandled errors, double-resume, or sensitive-material leaks. We inject faults including timeout, malformed framing, invalid signatures, out-of-order delivery, and concurrent cancellation (n=1000 per scenario per policy).
+The actor-isolated handshake driver targets deterministic failure semantics; in our fault-injection tests we observed no unhandled errors, double-resume, or sensitive-material leaks. We inject faults including timeout, malformed framing, invalid signatures, out-of-order delivery, and concurrent cancellation (n=1000 per scenario per policy).
 
 \textbf{Unknown-suite handling:} We parse unknown suite identifiers as an
 explicit \texttt{unknown(wireId)} value and reject them if they appear in
@@ -1160,11 +1176,11 @@ Due to space constraints, the complete regression test matrix, TLV encoding vali
 
 Table~8 consolidates all performance metrics. We measure \mbox{end-to-end} handshake completion time using an in-memory loopback transport to isolate cryptographic and state-machine overhead. Each configuration reports distributional statistics over N=1000 iterations after 10 warmup runs.
 
-% Auto-generated by make_tables.py on 2026-01-19T09:23:21.777933
+% Auto-generated by make_tables.py on 2026-01-23T17:13:43.628015
 % DO NOT EDIT MANUALLY - regenerate from CSV artifacts
 
 
-\noindent\textit{TABLE VIII. Performance Summary. All benchmarks on Apple Silicon (M1/M3), macOS 26.x, N=1000 iterations after 10 warmup runs. Wire Size counts payload-only handshake bytes (MessageA + MessageB + 2×Finished); loopback wire sizes including transport overhead are reported separately in Table~\reftab:baseline-comparison and Supplementary Table~S4. Data-plane AEAD is fixed to AES-256-GCM in v1, so throughput is independent of the negotiated handshake suite; throughput measured post-handshake on 1~MiB payloads.}\par
+\noindent\textit{TABLE VIII. Performance Summary. All benchmarks on Apple Silicon (M1/M3), macOS 26.x, N=1000 iterations after 10 warmup runs. Wire Size counts payload-only handshake bytes (MessageA + MessageB + 2×Finished); loopback wire sizes including transport overhead are reported separately in Table~\reftab:baseline-comparison and Supplementary Table~\reftab:supp-loopback-wire. Data-plane AEAD is fixed to AES-256-GCM in v1, so throughput is independent of the negotiated handshake suite; throughput measured post-handshake on 1~MiB payloads.}\par
 \noindent DOCX_TABLE_PLACEHOLDER::tab:perf-summary::SPAN2\par
 
 
@@ -1224,7 +1240,7 @@ RTT artifacts while remaining reproducible. Results are emitted to
 % Source: system_impact_2026-01-22.csv
 
 
-\noindent\textit{TABLE IX. System-level impact and amortization (p50/p95, ms). T_connect is measured from connect start to handshake established (including Finished key confirmation and event emission). T_total is measured from connect start to completion of an encrypted bulk transfer. Network conditions emulate deterministic RTT+jitter on a reliable stream; large data-plane payloads are bandwidth-limited (MiB/s) to avoid per-chunk RTT artifacts. Runs: N_connect=1000; N_total (RTT 50±20 ms) = 1MiB:N=1000, 10MiB:N=500, 100MiB:N=100. Data from Artifacts/system_impact_<date>.csv.}\par
+\noindent\textit{TABLE IX. System-level impact and amortization (p50/p95, ms). T_connect is measured from connect start to handshake established (including Finished key confirmation and event emission). T_total is measured from connect start to completion of an encrypted bulk transfer. Network conditions emulate deterministic RTT+jitter on a reliable stream; large data-plane payloads are bandwidth-limited (MiB/s) to avoid per-chunk RTT artifacts. Runs: N_connect=1000; N_total (RTT 50±20 ms) = 1MiB:N=1000, 10MiB:N=500, 100MiB:N=100. Data from Artifacts/system_impact_2026-01-23.csv.}\par
 \noindent DOCX_TABLE_PLACEHOLDER::tab:system-impact::SPAN2\par
 
 
@@ -1398,7 +1414,8 @@ across heterogeneous device fleets.
 
 The limitations noted in Section~8 do not change the
 core contribution: an auditable migration contract with concurrency-safe
-handshake semantics that are reproducible from released artifacts.
+handshake semantics that are reproducible from released artifacts under
+our stated threat model and measurement setup.
 
 
 
