@@ -1,6 +1,7 @@
 import Foundation
 import Network
 import CryptoKit
+import ActivityKit
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -47,6 +48,9 @@ public class P2PConnectionManager: ObservableObject {
     
     /// Bootstrap rekey tasks (Classic -> PQC) keyed by peerId.
     private var bootstrapRekeyTasks: [String: Task<Void, Never>] = [:]
+    
+    /// In-band rekey flag (pause heartbeat / non-essential business sends to reduce ciphertext-handshake interleaving).
+    private var rekeyInProgress: Set<String> = []
     
     // MARK: - Pairing / Trust Prompt
     
@@ -401,6 +405,14 @@ public class P2PConnectionManager: ObservableObject {
         
         SkyBridgeLogger.shared.info("✅ 已连接到 \(device.name)")
         startHeartbeatIfNeeded(deviceId: device.id)
+
+        // 更新灵动岛状态
+        if #available(iOS 16.2, *) {
+            let suite = sessionKeys[device.id]?.negotiatedSuite.rawValue ?? "已连接"
+            Task {
+                await LiveActivityManager.shared.setConnected(deviceName: device.name, cryptoSuite: suite)
+            }
+        }
     }
     
     /// 断开连接
@@ -425,6 +437,13 @@ public class P2PConnectionManager: ObservableObject {
         activeConnections.removeAll { $0.device.id == device.id }
         connectionStatusByDeviceId[device.id] = .disconnected
         connectionErrorByDeviceId.removeValue(forKey: device.id)
+
+        // 更新灵动岛状态
+        if #available(iOS 16.2, *) {
+            Task {
+                await LiveActivityManager.shared.setDisconnected()
+            }
+        }
         
         SkyBridgeLogger.shared.info("🔌 已断开与 \(device.name) 的连接")
     }
@@ -765,6 +784,8 @@ public class P2PConnectionManager: ObservableObject {
 
     /// 向对端发送本机 KEM identity 公钥，用于 bootstrap PQC suite 协商（首次可用 classic，收到后即可 rekey 到 PQC）。
     public func sendPairingIdentityExchange(to deviceId: String) async throws {
+        // Avoid mixing business traffic during in-band rekey.
+        if rekeyInProgress.contains(deviceId) { return }
         guard let connection = connections[deviceId] else { throw P2PError.connectionFailed }
         guard sessionKeys[deviceId] != nil else { throw P2PError.noSessionKey }
 
@@ -808,6 +829,8 @@ public class P2PConnectionManager: ObservableObject {
 
     /// 发送剪贴板内容到指定设备（走已建立的会话密钥加密通道）
     public func sendClipboard(to deviceId: String, data: Data, mimeType: String) async throws {
+        // Avoid mixing business traffic during in-band rekey.
+        if rekeyInProgress.contains(deviceId) { return }
         guard let connection = connections[deviceId] else { throw P2PError.connectionFailed }
         guard sessionKeys[deviceId] != nil else { throw P2PError.noSessionKey }
 
@@ -890,6 +913,9 @@ public class P2PConnectionManager: ObservableObject {
                 try? await Task.sleep(for: .seconds(self?.heartbeatIntervalSeconds ?? 20))
                 guard let self else { return }
                 guard self.connections[deviceId] != nil, self.sessionKeys[deviceId] != nil else { return }
+                
+                // Pause heartbeat during in-band rekey to reduce ciphertext/handshake interleaving.
+                if self.rekeyInProgress.contains(deviceId) { continue }
 
                 let now = Date()
                 let last = self.lastActivityByDeviceId[deviceId] ?? .distantPast
@@ -1029,6 +1055,8 @@ public class P2PConnectionManager: ObservableObject {
 
     /// 强制用 preferPQC=true 重新握手（用于完成 KEM 公钥交换后的“立刻切换到 PQC suite”）
     public func rekeyToPreferPQC(deviceId: String) async throws {
+        rekeyInProgress.insert(deviceId)
+        defer { rekeyInProgress.remove(deviceId) }
         guard let connection = connections[deviceId] else { throw P2PError.connectionFailed }
         let device = discoveryManager.discoveredDevices.first(where: { $0.id == deviceId })
             ?? DiscoveredDevice(id: deviceId, name: deviceId, modelName: "", platform: .unknown, osVersion: "Unknown")

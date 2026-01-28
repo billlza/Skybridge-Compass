@@ -1220,8 +1220,17 @@ public actor DeviceIdentityKeyManager {
                 ] as [String: Any]
             ]
             
-            guard SecKeyCreateRandomKey(attributes as CFDictionary, &error) != nil else {
-                let errorDesc = error?.takeRetainedValue().localizedDescription ?? "Unknown error"
+            if SecKeyCreateRandomKey(attributes as CFDictionary, &error) == nil {
+                let cfErr: CFError? = error?.takeRetainedValue()
+                let domain = cfErr.map { CFErrorGetDomain($0) as String } ?? ""
+                let code = cfErr.map { CFErrorGetCode($0) } ?? 0
+                if domain == NSOSStatusErrorDomain,
+                   code == Int(errSecMissingEntitlement) || code == -34018 {
+                    // SE PoP is optional; if we're missing entitlements, skip migration without failing.
+                    SkyBridgeLogger.p2p.warning("⚠️ SE PoP key creation missing entitlement (-34018). Skipping SE PoP migration (optional).")
+                    return
+                }
+                let errorDesc = cfErr.map { (CFErrorCopyDescription($0) as String) } ?? "Unknown error"
                 throw DeviceIdentityKeyError.keyGenerationFailed(errorDesc)
             }
         } else {

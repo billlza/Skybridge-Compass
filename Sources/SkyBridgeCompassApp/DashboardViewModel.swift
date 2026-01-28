@@ -313,18 +313,25 @@ final class DashboardViewModel: ObservableObject {
             fileTransferService.$isTransferring
         )
 
-        Publishers.CombineLatest(
-            base,
-            ConnectionPresenceService.shared.$activeConnections
+        let presence = Publishers.CombineLatest(
+            ConnectionPresenceService.shared.$activeConnections,
+            ConnectionPresenceService.shared.$rekeyStatusByPeerId
         )
+        
+        Publishers.CombineLatest(base, presence)
             .receive(on: DispatchQueue.main)
-        .sink { [weak self] baseTuple, presenceConnections in
+        .sink { [weak self] baseTuple, presenceTuple in
                 guard let self else { return }
             let (baseStatus, p2pStatus, inboundCount, isTransferring) = baseTuple
+            let (presenceConnections, rekeyStatusByPeerId) = presenceTuple
 
             // Detail string for UX: show crypto + guard when present.
             if let newest = presenceConnections.sorted(by: { $0.connectedAt > $1.connectedAt }).first {
-                self.connectionDetail = "\(newest.cryptoKind) · \(newest.suite) · 守护中"
+                if let rekey = rekeyStatusByPeerId[newest.id] {
+                    self.connectionDetail = "Rekey 中 · \(rekey.fromKind)·\(rekey.fromSuite) → \(rekey.toKind)·\(rekey.toSuite)"
+                } else {
+                    self.connectionDetail = "\(newest.cryptoKind) · \(newest.suite) · 守护中"
+                }
             } else {
                 self.connectionDetail = nil
             }

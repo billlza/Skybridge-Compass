@@ -173,8 +173,11 @@ public class P2PNetworkManager: ObservableObject, Sendable {
     
  /// 刷新设备发现
     public func refreshDiscovery() async {
-        await discoveryService.performStop()
-        discoveryService.startScanning()
+        // Avoid hard stop/start:
+        // - It interrupts ongoing handshakes/transfers
+        // - It triggers NWBrowser cancelled/ready churn ("not in ready or waiting state")
+        // - It makes peers "disappear" briefly, causing UI flapping
+        await discoveryService.refreshDevices()
     }
     
  // MARK: - 连接管理
@@ -283,8 +286,11 @@ public class P2PNetworkManager: ObservableObject, Sendable {
     
     private func startDiscoveryTimer() {
         discoveryTimer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { [weak self] _ in
-            Task {
-                await self?.refreshDiscovery()
+            Task { @MainActor in
+                guard let self else { return }
+                // If we have any active secure session, do not refresh discovery (keeps presence stable).
+                if !self.activeConnections.isEmpty { return }
+                await self.refreshDiscovery()
             }
         }
     }

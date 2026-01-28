@@ -21,6 +21,7 @@ public final class SystemMetricsService: ObservableObject {
     @Published public private(set) var networkOutTimeline: [Date: Double] = [:]
     
     private let log = Logger(subsystem: "com.skybridge.compass", category: "SystemMetrics")
+    private var lastMetricsLogAt: Date?
     @MainActor private var monitoringTimer: Timer?
     private let maxTimelinePoints = 30
     
@@ -129,7 +130,12 @@ public final class SystemMetricsService: ObservableObject {
             for key in keysToRemove { networkOutTimeline.removeValue(forKey: key) }
         }
         
-        log.debug("系统指标已更新 - CPU: \(String(format: "%.1f", newCpuUsage * 100))%, 内存: \(String(format: "%.1f", newMemoryUsage * 100))%, 网络: \(String(format: "%.1f", newNetworkSpeed)) Mbps")
+        // Throttle noisy logs: metrics update frequently and can flood logs / waste CPU.
+        let now = Date()
+        if lastMetricsLogAt == nil || now.timeIntervalSince(lastMetricsLogAt!) >= 10 {
+            lastMetricsLogAt = now
+            log.debug("系统指标已更新 - CPU: \(String(format: "%.1f", newCpuUsage * 100))%, 内存: \(String(format: "%.1f", newMemoryUsage * 100))%, 网络: \(String(format: "%.1f", newNetworkSpeed)) Mbps")
+        }
     }
 
  /// 清除所有时间线历史数据。

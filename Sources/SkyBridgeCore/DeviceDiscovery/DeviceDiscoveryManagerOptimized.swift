@@ -1463,14 +1463,32 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             }
         }()
         let peer = PeerIdentifier(deviceId: peerDeviceId)
+        
+        // Precompute identity info for heartbeat without crossing actor boundaries inside GCD timer handlers.
+        let localIdForHeartbeat = await SelfIdentityProvider.shared.snapshot().deviceId
 
         // ⚠️ 关键修复：不要硬编码 classic-only。
         // iOS 26.2 会优先 PQC（ML-DSA-65 + ML-KEM-768）；如果 mac 端这里固定 Ed25519 会导致 suite 不一致，
         // 触发 iOS 端 fallback（再叠加 fallbackRateLimited 就会出现你截图里的循环失败）。
         var driver: HandshakeDriver? = nil
         var sessionKeys: SessionKeys? = nil
-        var heartbeatTask: Task<Void, Never>? = nil
         var didMarkConnected = false
+        
+        // Heartbeat: avoid Swift concurrency Tasks here (StrictConcurrency) because they would capture
+        // mutable locals like `sessionKeys` and non-Sendable types like `NWConnection`, causing build errors.
+        // Use an explicit GCD timer + async-safe critical state instead.
+        struct HeartbeatState {
+            var timer: DispatchSourceTimer?
+            var sessionKeys: SessionKeys?
+            var pausedForRekey: Bool
+            var stopped: Bool
+        }
+        let hbState = OSAllocatedUnfairLock(initialState: HeartbeatState(
+            timer: nil,
+            sessionKeys: nil,
+            pausedForRekey: false,
+            stopped: false
+        ))
 
         let peerIdForPresence = peer.deviceId
         let endpointDescriptionForPresence = connection.endpoint.debugDescription
@@ -1550,6 +1568,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                     cryptoKind: kind,
                     suite: suite.rawValue
                 )
+                ConnectionPresenceService.shared.clearRekeying(peerId: peerIdForPresence)
 
                 UnifiedOnlineDeviceManager.shared.markDeviceAsConnected(
                     peerId: peerIdForPresence,
@@ -1597,12 +1616,12 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
 
         do {
             while connection.state == .ready {
-                logger.info("📥 等待入站帧（读取 4B length header）… state=\(String(describing: connection.state), privacy: .public)")
+                logger.debug("📥 等待入站帧（读取 4B length header）… state=\(String(describing: connection.state), privacy: .public)")
                 let lenData = try await receiveExactly(4)
                 let totalLen = lenData.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
                 guard totalLen > 0 && totalLen < 1_048_576 else { break }
                 let payload = try await receiveExactly(Int(totalLen))
-                logger.info("📥 入站帧: \(payload.count, privacy: .public) bytes")
+                logger.debug("📥 入站帧: \(payload.count, privacy: .public) bytes")
                 // Phase C2: optional traffic padding (SBP2)
                 let trafficUnwrapped = TrafficPadding.unwrapIfNeeded(payload, label: "rx")
                 // Phase C1: handshake padding (SBP1) used by iOS for MessageA/MessageB framing
@@ -1612,12 +1631,26 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                 // iOS strictPQC bootstrap establishes a Classic session first, then initiates a new PQC handshake
                 // on the same transport. If we keep the old driver, it will treat the new MessageA as "unexpected"
                 // (e.g. "Unexpected message while waitingFinished") and iOS will fail with versionMismatch.
-                if let currentDriver = driver, isLikelyHandshakeControlPacket(frame),
-                   let _ = try? HandshakeMessageA.decode(from: frame) {
+                if let currentDriver = driver,
+                   let messageA = try? HandshakeMessageA.decode(from: frame) {
                     let st = await currentDriver.getCurrentState()
                     switch st {
                     case .waitingFinished, .established:
-                        logger.info("🔁 入站 rekey：在现有会话状态=\(String(describing: st), privacy: .public) 收到新的 MessageA，重置 HandshakeDriver 以进入新一轮协商")
+                        let fromSuite = sessionKeys?.negotiatedSuite.rawValue ?? "?"
+                        let fromKind = sessionKeys.map { cryptoKind(for: $0.negotiatedSuite) } ?? "?"
+                        let toSuite = messageA.supportedSuites.first?.rawValue ?? "?"
+                        let toKind = messageA.supportedSuites.first.map { cryptoKind(for: $0) } ?? "?"
+                        Task { @MainActor in
+                            ConnectionPresenceService.shared.markRekeying(.init(
+                                peerId: peerIdForPresence,
+                                fromKind: fromKind,
+                                fromSuite: fromSuite,
+                                toKind: toKind,
+                                toSuite: toSuite
+                            ))
+                        }
+                        hbState.withLock { $0.pausedForRekey = true }
+                        logger.info("🔁 入站 rekey：\(fromKind)·\(fromSuite) -> \(toKind)·\(toSuite) peer=\(peerIdForPresence, privacy: .public)")
                         driver = nil
                         sessionKeys = nil
                     default:
@@ -1875,48 +1908,74 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                 if let driver {
                 await driver.handleMessage(frame, from: peer)
                 let st = await driver.getCurrentState()
-                logger.info("🤝 HandshakeDriver state: \(String(describing: st), privacy: .public)")
+                logger.debug("🤝 HandshakeDriver state: \(String(describing: st), privacy: .public)")
 
                 switch st {
                 case .waitingFinished(_, let keys, _):
                     sessionKeys = keys
                     postConnectedUX(keys: keys)
+                    hbState.withLock {
+                        $0.sessionKeys = keys
+                        $0.pausedForRekey = false
+                    }
                 case .established(let keys):
                     sessionKeys = keys
                     postConnectedUX(keys: keys)
+                    hbState.withLock {
+                        $0.sessionKeys = keys
+                        $0.pausedForRekey = false
+                    }
                 default:
                     break
                 }
                 }
 
                 // Start heartbeat once we have session keys (only once).
-                if heartbeatTask == nil, let keys = sessionKeys {
-                    heartbeatTask = Task.detached(priority: .utility) {
-                        while !Task.isCancelled, connection.state == .ready {
-                            do {
-                                try await Task.sleep(for: .seconds(10))
-                                let localId = await SelfIdentityProvider.shared.snapshot().deviceId
-                                let localName = Host.current().localizedName
-                                let localPlatform = "macOS"
-                                let localOS = ProcessInfo.processInfo.operatingSystemVersionString
-                                let msg = AppMessage.heartbeat(.init(
-                                    sentAt: Date(),
-                                    deviceId: localId,
-                                    deviceName: localName,
-                                    modelName: "Mac",
-                                    platform: localPlatform,
-                                    osVersion: localOS,
-                                    chip: nil
-                                ))
-                                let plain = try JSONEncoder().encode(msg)
-                                let cipher = try encryptAppPayload(plain, with: keys)
-                                let padded = TrafficPadding.wrapIfEnabled(cipher, label: "tx/hb")
-                                try await transport.send(to: peer, data: padded)
-                            } catch {
-                                break
-                            }
+                if hbState.withLock({ $0.timer }) == nil, sessionKeys != nil {
+                    let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
+                    timer.schedule(deadline: .now() + 10, repeating: 10)
+                    timer.setEventHandler {
+                        // Fast exit if the connection is no longer ready.
+                        if connection.state != .ready { return }
+                        
+                        let snapshot = hbState.withLock { $0 }
+                        let stopped = snapshot.stopped
+                        let paused = snapshot.pausedForRekey
+                        let keysNow = snapshot.sessionKeys
+                        if stopped { return }
+                        if paused { return }
+                        guard let keysNow else { return }
+                        
+                        do {
+                            // Build and encrypt heartbeat (best-effort).
+                            let localName = Host.current().localizedName
+                            let localPlatform = "macOS"
+                            let localOS = ProcessInfo.processInfo.operatingSystemVersionString
+                            let msg = AppMessage.heartbeat(.init(
+                                sentAt: Date(),
+                                deviceId: localIdForHeartbeat,
+                                deviceName: localName,
+                                modelName: "Mac",
+                                platform: localPlatform,
+                                osVersion: localOS,
+                                chip: nil
+                            ))
+                            let plain = try JSONEncoder().encode(msg)
+                            let cipher = try encryptAppPayload(plain, with: keysNow)
+                            let padded = TrafficPadding.wrapIfEnabled(cipher, label: "tx/hb")
+                            
+                            // Frame length prefix (same as transport.send, but done inline to avoid async).
+                            var framed = Data()
+                            var length = UInt32(padded.count).bigEndian
+                            framed.append(Data(bytes: &length, count: 4))
+                            framed.append(padded)
+                            connection.send(content: framed, completion: .contentProcessed { _ in })
+                        } catch {
+                            // Ignore: heartbeat is best-effort.
                         }
-                }
+                    }
+                    timer.resume()
+                    hbState.withLock { $0.timer = timer }
                 }
             }
         } catch {
@@ -1929,9 +1988,11 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             }
         }
 
-        heartbeatTask?.cancel()
-        if didMarkConnected {
-            Task { @MainActor in
+        hbState.withLock { $0.stopped = true }
+        hbState.withLock { $0.timer?.cancel(); $0.timer = nil }
+        // If we ever marked connected, always emit a matching disconnected event on teardown.
+        Task { @MainActor in
+            if didMarkConnected {
                 ConnectionPresenceService.shared.markDisconnected(peerId: peerIdForPresence)
             }
         }

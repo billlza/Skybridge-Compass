@@ -25,7 +25,9 @@ const { v4: uuidv4 } = require('uuid');
 const PORT = Number(process.env.PORT || 8443);
 const HOST = process.env.HOST || '0.0.0.0';
 
-const TRUST_PROXY = /^(1|true|yes)$/i.test(process.env.TRUST_PROXY || 'true'); // behind CF/nginx usually true
+// SECURITY: default to false. If you expose Node directly with trust-proxy enabled, attackers can spoof X-Forwarded-For
+// and bypass per-IP rate limits. Only enable when you're definitely behind a trusted reverse proxy (CF/nginx).
+const TRUST_PROXY = /^(1|true|yes)$/i.test(process.env.TRUST_PROXY || 'false');
 const JSON_LIMIT = process.env.JSON_LIMIT || '1mb';
 
 // “人类码”长度：越长越不容易撞库（建议 >= 8）
@@ -37,10 +39,41 @@ const ICE_TTL_MS = Number(process.env.ICE_TTL_MS || 30 * 60_000); // 30 minutes
 const ICE_MAX_PER_SESSION = Number(process.env.ICE_MAX_PER_SESSION || 200);
 
 // 兼容旧客户端：允许 lookup/answer 不带 token（建议尽快关掉）
-const ALLOW_INSECURE = /^(1|true|yes)$/i.test(process.env.ALLOW_INSECURE || 'true');
+// SECURITY: default MUST be false in production. If you need legacy compatibility, explicitly set ALLOW_INSECURE=true.
+const ALLOW_INSECURE = /^(1|true|yes)$/i.test(process.env.ALLOW_INSECURE || 'false');
+
+// WebSocket envelope hardening (DoS / resource exhaustion protection)
+const WS_MAX_MSG_BYTES = Number(process.env.WS_MAX_MSG_BYTES || 64 * 1024); // 64KB
+const WS_MAX_MSGS_PER_10S = Number(process.env.WS_MAX_MSGS_PER_10S || 200);
+const WS_MAX_CLIENTS_PER_ROOM = Number(process.env.WS_MAX_CLIENTS_PER_ROOM || 4);
 
 // CORS（原生 App 一般无 Origin，Web 端才有）
-const CORS_ORIGIN = process.env.CORS_ORIGIN || '*'; // e.g. "https://app.example.com,https://admin.example.com"
+// SECURITY: default to deny-by-default (no CORS header). Set explicitly if you have a browser client.
+const CORS_ORIGIN = process.env.CORS_ORIGIN || ''; // e.g. "https://app.example.com,https://admin.example.com"
+
+// Brute-force mitigation for /api/lookup (code enumeration)
+const LOOKUP_INVALID_WINDOW_MS = Number(process.env.LOOKUP_INVALID_WINDOW_MS || 60_000);
+const LOOKUP_INVALID_MAX = Number(process.env.LOOKUP_INVALID_MAX || 20); // per IP per window
+const lookupInvalidHits = new Map(); // ip -> {count, resetAt}
+
+function recordInvalidLookup(ip) {
+  const t = now();
+  let ent = lookupInvalidHits.get(ip);
+  if (!ent || t > ent.resetAt) {
+    ent = { count: 0, resetAt: t + LOOKUP_INVALID_WINDOW_MS };
+    lookupInvalidHits.set(ip, ent);
+  }
+  ent.count++;
+  return ent.count;
+}
+
+function invalidLookupLimited(ip) {
+  const t = now();
+  const ent = lookupInvalidHits.get(ip);
+  if (!ent) return false;
+  if (t > ent.resetAt) return false;
+  return ent.count > LOOKUP_INVALID_MAX;
+}
 
 // Optional TLS for Node itself
 const TLS_CERT = process.env.TLS_CERT || '';
@@ -198,6 +231,10 @@ function handleWebRTCEnvelope(ws, msg) {
   wsMeta.set(ws, { ...legacyMeta, sessionId: sid, deviceId: from });
 
   if (msg.type === 'join') {
+    // Room size cap (prevents uncontrolled fan-out amplification).
+    if (!room.clients.has(ws) && room.clients.size >= WS_MAX_CLIENTS_PER_ROOM) {
+      return wsSendRaw(ws, { type: 'error', error: 'room_full' });
+    }
     room.clients.add(ws);
     room.clientsByDeviceId.set(from, ws);
     return; // no ack needed
@@ -205,6 +242,9 @@ function handleWebRTCEnvelope(ws, msg) {
 
   // For non-join messages, if the sender forgot to join, auto-join.
   if (!room.clients.has(ws)) {
+    if (room.clients.size >= WS_MAX_CLIENTS_PER_ROOM) {
+      return wsSendRaw(ws, { type: 'error', error: 'room_full' });
+    }
     room.clients.add(ws);
     room.clientsByDeviceId.set(from, ws);
   }
@@ -239,9 +279,7 @@ app.use(express.json({ limit: JSON_LIMIT }));
 app.use((req, res, next) => {
   // CORS
   const origin = req.headers.origin;
-  if (CORS_ORIGIN === '*') {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-  } else if (origin) {
+  if (origin && CORS_ORIGIN) {
     const allowList = CORS_ORIGIN.split(',').map(s => s.trim()).filter(Boolean);
     if (allowList.includes(origin)) res.setHeader('Access-Control-Allow-Origin', origin);
   }
@@ -279,7 +317,8 @@ app.get('/healthz', (req, res) => res.status(200).send('ok'));
 
 // -------------------- API rate limits --------------------
 const rlRegister = rateLimit({ windowMs: 60_000, max: 30 });
-const rlLookup   = rateLimit({ windowMs: 60_000, max: 60 });
+// Lower default for lookup to reduce code enumeration pressure.
+const rlLookup   = rateLimit({ windowMs: 60_000, max: 30 });
 const rlAnswer   = rateLimit({ windowMs: 60_000, max: 60 });
 const rlIce      = rateLimit({ windowMs: 60_000, max: 240 });
 
@@ -330,10 +369,15 @@ app.post('/api/register', rlRegister, (req, res) => {
 
 // -------------------- REST API: lookup --------------------
 app.get('/api/lookup/:code', rlLookup, (req, res) => {
+  const ip = (req.ip || req.connection.remoteAddress || 'unknown');
+  if (invalidLookupLimited(ip)) {
+    return res.status(429).json({ error: 'rate_limited' });
+  }
   const code = safeUpperCode(req.params.code);
   const item = connectionCodes.get(code);
   if (!item || now() > item.expiresAt) {
     if (item) connectionCodes.delete(code);
+    recordInvalidLookup(ip);
     return res.status(404).json({ found: false });
   }
 
@@ -435,6 +479,18 @@ app.get('/api/ice/:sessionId', rlIce, (req, res) => {
   const sessionId = safeUpperCode(req.params.sessionId);
   const since = req.query.since ? Number(req.query.since) : 0;
 
+  // SECURITY: if this sessionId corresponds to an active code, require a valid token in secure mode.
+  // This prevents anyone who guesses a sessionId from polling ICE candidates.
+  const item = connectionCodes.get(sessionId);
+  if (item) {
+    const token = (typeof req.query.token === 'string') ? req.query.token : null;
+    const okInitiator = token && sha256Hex(token) === item.initiatorTokenHash;
+    const okResponder = token && item.responderTokenHash && sha256Hex(token) === item.responderTokenHash;
+    if (!okInitiator && !okResponder && !ALLOW_INSECURE) {
+      return res.status(401).json({ success: false, error: 'unauthorized' });
+    }
+  }
+
   let candidates = iceCandidates.get(sessionId) || [];
   if (since && Number.isFinite(since)) {
     candidates = candidates.filter(c => c.timestamp > since);
@@ -499,11 +555,41 @@ function authWsBind(item, role, token) {
 wss.on('connection', (ws, req) => {
   const clientId = uuidv4();
   ws.isAlive = true;
-  wsMeta.set(ws, { code: null, role: null, clientId, sessionId: null, deviceId: null });
+  wsMeta.set(ws, { code: null, role: null, clientId, sessionId: null, deviceId: null, rate: { t0: now(), c: 0 } });
 
   ws.on('pong', () => { ws.isAlive = true; });
 
   ws.on('message', (raw) => {
+    // Basic WS message size cap (prevents memory spikes).
+    try {
+      const buf = Buffer.isBuffer(raw) ? raw : Buffer.from(raw);
+      if (buf.length > WS_MAX_MSG_BYTES) {
+        wsSend(ws, { type: 'error', error: 'msg_too_large' });
+        ws.close(1009, 'message_too_large');
+        return;
+      }
+    } catch (_) {
+      // If we cannot measure it, fail closed.
+      ws.close(1009, 'message_too_large');
+      return;
+    }
+
+    // Per-connection rate limiter (10s sliding-ish window).
+    const meta0 = wsMeta.get(ws) || { code: null, role: null, clientId };
+    const r = meta0.rate || { t0: now(), c: 0 };
+    const t = now();
+    if ((t - r.t0) > 10_000) {
+      r.t0 = t;
+      r.c = 0;
+    }
+    r.c++;
+    wsMeta.set(ws, { ...meta0, rate: r });
+    if (r.c > WS_MAX_MSGS_PER_10S) {
+      wsSend(ws, { type: 'error', error: 'ws_rate_limited' });
+      ws.close(1013, 'rate_limited');
+      return;
+    }
+
     let msg;
     try {
       msg = JSON.parse(raw.toString());
@@ -661,6 +747,7 @@ server.listen(PORT, HOST, () => {
   console.log(`Mode: ${USE_NODE_HTTPS ? 'HTTPS' : 'HTTP'}  listening on ${HOST}:${PORT}`);
   console.log(`WS:   ${USE_NODE_HTTPS ? 'wss' : 'ws'}://<host>:${PORT}/ws`);
   console.log(`TTL:  code=${Math.round(CODE_TTL_MS / 1000)}s  ice=${Math.round(ICE_TTL_MS / 1000)}s`);
+  console.log(`Security: ALLOW_INSECURE=${ALLOW_INSECURE} WS_MAX_MSG_BYTES=${WS_MAX_MSG_BYTES} WS_MAX_MSGS_PER_10S=${WS_MAX_MSGS_PER_10S} WS_MAX_CLIENTS_PER_ROOM=${WS_MAX_CLIENTS_PER_ROOM}`);
   console.log('========================================');
 });
 

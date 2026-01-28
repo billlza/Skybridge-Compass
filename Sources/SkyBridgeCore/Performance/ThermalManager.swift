@@ -15,6 +15,9 @@ public class ThermalManager: BaseManager {
  // MARK: - 私有属性
     
     private var temperatureTimer: Timer?
+    private var lastTemperatureLogAt: Date?
+    private var lastLoggedCPUTemp: Double?
+    private var lastLoggedGPUTemp: Double?
     private var thermalNotificationSource: IONotificationPortRef?
     
  // Apple Silicon专用配置
@@ -245,7 +248,24 @@ public class ThermalManager: BaseManager {
  // 触发回调
         temperatureChangeCallback?(cpuTemp, gpuTemp)
         
-        logger.debug("🌡️ Apple Silicon温度更新 - CPU: \(String(format: "%.1f", cpuTemp))°C, GPU: \(String(format: "%.1f", gpuTemp))°C")
+        // Logging is useful for diagnostics but too frequent logs waste CPU and pollute release telemetry.
+        // Throttle to at most once per 30s, or when temperature changes materially (>= 2°C).
+        let now = Date()
+        let shouldLogByTime: Bool = {
+            guard let last = lastTemperatureLogAt else { return true }
+            return now.timeIntervalSince(last) >= 30
+        }()
+        let shouldLogByDelta: Bool = {
+            let cpuDelta = abs((lastLoggedCPUTemp ?? cpuTemp) - cpuTemp)
+            let gpuDelta = abs((lastLoggedGPUTemp ?? gpuTemp) - gpuTemp)
+            return cpuDelta >= 2.0 || gpuDelta >= 2.0
+        }()
+        if shouldLogByTime || shouldLogByDelta {
+            lastTemperatureLogAt = now
+            lastLoggedCPUTemp = cpuTemp
+            lastLoggedGPUTemp = gpuTemp
+            logger.debug("🌡️ Apple Silicon温度更新 - CPU: \(String(format: "%.1f", cpuTemp))°C, GPU: \(String(format: "%.1f", gpuTemp))°C")
+        }
     }
     
  /// 读取Apple Silicon CPU温度

@@ -212,20 +212,15 @@ public struct DeviceListView: View {
     
  /// 刷新设备列表（避免 stop→start 风暴）
     private func refreshDevices() {
-        deviceDiscovery.stopScanningIfNeeded()
-        Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 500_000_000) // 0.5秒
-            deviceDiscovery.startScanningIfNeeded()
-            isScanning = deviceDiscovery.isScanning
-        }
+        // Soft refresh: clear transient list and let active browsers repopulate (no stop/start churn).
+        deviceDiscovery.discoveredDevices.removeAll()
+        isScanning = deviceDiscovery.isScanning
     }
     
  /// 异步刷新设备列表
     private func refreshDevicesAsync() async {
-        deviceDiscovery.stopScanning()
-        try? await Task.sleep(nanoseconds: 500_000_000) // 0.5秒
-        deviceDiscovery.startScanning()
         await MainActor.run {
+            deviceDiscovery.discoveredDevices.removeAll()
             isScanning = deviceDiscovery.isScanning
         }
     }

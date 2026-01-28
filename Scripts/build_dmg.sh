@@ -21,10 +21,12 @@ set -e
 # ============================================================================
 
 APP_NAME="SkyBridge Compass Pro"
-BUNDLE_ID="com.skybridge.compass"
+BUNDLE_ID="com.skybridge.compass.pro"
 DMG_NAME="SkyBridgeCompassPro"
 VOLUME_NAME="SkyBridge Compass Pro"
-VERSION="1.0.0"
+# 自动从 Info.plist 读取版本号，避免手动同步
+INFO_PLIST_PATH="$PROJECT_ROOT/Sources/SkyBridgeCompassApp/Info.plist"
+VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$INFO_PLIST_PATH" 2>/dev/null || echo "0.0.0")"
 
 # 目录
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -102,7 +104,8 @@ log_step() {
 
 cleanup() {
     log_info "清理临时文件..."
-    rm -f "$TEMP_DMG"
+    # NOTE: 不在 trap 里删除 TEMP_DMG，避免在 convert 失败时难以排查（也避免潜在竞态）。
+    # 成功结束时会在后续显式删除。
     # 卸载可能挂载的卷
     hdiutil detach "/Volumes/$VOLUME_NAME" 2>/dev/null || true
 }
@@ -142,6 +145,7 @@ mkdir -p "$DIST_DIR"
 rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_BUNDLE/Contents/MacOS"
 mkdir -p "$APP_BUNDLE/Contents/Resources"
+mkdir -p "$APP_BUNDLE/Contents/Frameworks"
 
 # 复制可执行文件
 EXECUTABLE="$BUILD_DIR/SkyBridgeCompassApp"
@@ -151,6 +155,25 @@ if [ ! -f "$EXECUTABLE" ]; then
 fi
 
 cp "$EXECUTABLE" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
+
+# 复制 WebRTC.framework（运行时依赖，DMG 背景渲染会启动 app；若缺失会 dyld crash）
+WEBRTC_SRC="$BUILD_DIR/WebRTC.framework"
+if [ -d "$WEBRTC_SRC" ]; then
+    log_info "拷贝 WebRTC.framework 到 .app/Contents/Frameworks/"
+    rm -rf "$APP_BUNDLE/Contents/Frameworks/WebRTC.framework"
+    cp -R "$WEBRTC_SRC" "$APP_BUNDLE/Contents/Frameworks/"
+else
+    log_info "未找到 WebRTC.framework（若 DMG 背景渲染崩溃，请检查构建产物是否包含 WebRTC.framework）"
+fi
+
+# 确保可执行文件包含 Frameworks rpath（用于加载 @rpath/WebRTC.framework）
+APP_BIN="$APP_BUNDLE/Contents/MacOS/$APP_NAME"
+if otool -l "$APP_BIN" 2>/dev/null | grep -q "@executable_path/../Frameworks"; then
+    log_info "已存在 rpath: @executable_path/../Frameworks"
+else
+    log_info "注入 rpath: @executable_path/../Frameworks"
+    install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP_BIN" 2>/dev/null || true
+fi
 
 # 创建 Info.plist
 cat > "$APP_BUNDLE/Contents/Info.plist" << EOF
@@ -361,6 +384,13 @@ hdiutil detach "$MOUNT_DIR"
 
 # 转换为压缩的只读 DMG
 log_info "压缩 DMG..."
+# hdiutil verify 依赖校验和；UDRW 临时映像默认无 checksum，会导致 verify 失败。
+# 这里仅检查文件存在，然后直接 convert。
+if [ ! -f "$TEMP_DMG" ]; then
+    log_error "找不到临时 DMG: $TEMP_DMG"
+    ls -lah "$DIST_DIR" || true
+    exit 1
+fi
 hdiutil convert "$TEMP_DMG" -format UDZO -imagekey zlib-level=9 -o "$DMG_PATH"
 
 # 清理临时文件

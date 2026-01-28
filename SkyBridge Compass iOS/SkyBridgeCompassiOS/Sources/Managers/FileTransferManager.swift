@@ -9,6 +9,7 @@
 import Foundation
 import Network
 import CryptoKit
+import ActivityKit
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -975,10 +976,15 @@ public class FileTransferManager: ObservableObject {
         let progress = Double(transferredBytes) / Double(totalBytes)
         let speed = calculateSpeed(transferId: transferId, transferredBytes: transferredBytes)
         
+        var fileName: String?
+        var direction: SkyBridgeActivityAttributes.TransferDirection = .none
+
         if let index = activeTransfers.firstIndex(where: { $0.id == transferId }) {
             activeTransfers[index].progress = progress
             activeTransfers[index].speed = speed
             activeTransfers[index].status = .transferring
+            fileName = activeTransfers[index].fileName
+            direction = activeTransfers[index].isIncoming ? .download : .upload
         }
         
         transferStates[transferId]?.transferredBytes = transferredBytes
@@ -986,6 +992,31 @@ public class FileTransferManager: ObservableObject {
         
         // 更新总进度
         updateTotalProgress()
+
+        // 更新灵动岛传输进度
+        if #available(iOS 16.2, *), let name = fileName {
+            let speedStr = formatSpeed(speed)
+            Task {
+                await LiveActivityManager.shared.updateTransferProgress(
+                    fileName: name,
+                    progress: progress,
+                    direction: direction,
+                    speed: speedStr
+                )
+            }
+        }
+    }
+
+    private func formatSpeed(_ bytesPerSecond: Double) -> String {
+        if bytesPerSecond >= 1_000_000_000 {
+            return String(format: "%.1f GB/s", bytesPerSecond / 1_000_000_000)
+        } else if bytesPerSecond >= 1_000_000 {
+            return String(format: "%.1f MB/s", bytesPerSecond / 1_000_000)
+        } else if bytesPerSecond >= 1_000 {
+            return String(format: "%.1f KB/s", bytesPerSecond / 1_000)
+        } else {
+            return String(format: "%.0f B/s", bytesPerSecond)
+        }
     }
     
     /// 计算传输速度
@@ -1023,6 +1054,13 @@ public class FileTransferManager: ObservableObject {
             activeTransfers.remove(at: index)
             transferHistory.insert(completedTransfer, at: 0)
             saveHistory()
+        }
+
+        // 更新灵动岛：传输完成
+        if #available(iOS 16.2, *) {
+            Task {
+                await LiveActivityManager.shared.transferCompleted()
+            }
         }
         
         // 清理状态

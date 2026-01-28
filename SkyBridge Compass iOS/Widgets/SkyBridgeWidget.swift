@@ -1,5 +1,19 @@
 import WidgetKit
 import SwiftUI
+import ActivityKit
+
+// MARK: - Widget Bundle
+
+@main
+@available(iOS 17.0, *)
+struct SkyBridgeWidgetBundle: WidgetBundle {
+    var body: some Widget {
+        SkyBridgeWidget()
+        if #available(iOS 16.2, *) {
+            SkyBridgeLiveActivity()
+        }
+    }
+}
 
 /// SkyBridge Compass Widget - 显示在线设备和连接状态
 @available(iOS 17.0, *)

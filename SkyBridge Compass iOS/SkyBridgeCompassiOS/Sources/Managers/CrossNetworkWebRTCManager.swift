@@ -1,5 +1,110 @@
 import Foundation
 import CryptoKit
+import OSLog
+
+// MARK: - iOS-local server config (file-local, to avoid target membership issues)
+
+@available(iOS 17.0, *)
+private enum CrossNetworkServerConfig {
+    static let signalingWebSocketURL = "wss://api.nebula-technologies.net/ws"
+    static let signalingServerURL = "https://api.nebula-technologies.net"
+    static let stunURL = "stun:54.92.79.99:3478"
+    static let turnURL = "turn:54.92.79.99:3478"
+
+    static var clientAPIKey: String {
+        ProcessInfo.processInfo.environment["SKYBRIDGE_CLIENT_API_KEY"] ?? "skybridge-client-v1"
+    }
+
+    static func dynamicICEConfig() async -> WebRTCSession.ICEConfig {
+        let creds = await CrossNetworkTURNCredentialService.shared.getCredentials()
+        return WebRTCSession.ICEConfig(
+            stunURL: stunURL,
+            turnURL: creds.uris.first ?? turnURL,
+            turnUsername: creds.username,
+            turnPassword: creds.password
+        )
+    }
+}
+
+@available(iOS 17.0, *)
+private actor CrossNetworkTURNCredentialService {
+    static let shared = CrossNetworkTURNCredentialService()
+
+    private let logger = Logger(subsystem: "com.skybridge.turn", category: "CrossNetwork-iOS")
+    private var cached: TURNCredentials?
+    private let buffer: TimeInterval = 300
+
+    struct TURNCredentials: Sendable, Codable {
+        let username: String
+        let password: String
+        let ttl: Int
+        let uris: [String]
+        let expiresAt: Date
+
+        func isValid(buffer: TimeInterval) -> Bool {
+            Date().addingTimeInterval(buffer) < expiresAt
+        }
+    }
+
+    private struct ServerResponse: Codable {
+        let username: String
+        let password: String
+        let ttl: Int
+        let uris: [String]?
+    }
+
+    func getCredentials() async -> TURNCredentials {
+        if let cached, cached.isValid(buffer: buffer) { return cached }
+        do {
+            let fresh = try await fetchFromServer()
+            self.cached = fresh
+            return fresh
+        } catch {
+            logger.warning("⚠️ TURN credentials fetch failed; falling back. err=\(error.localizedDescription, privacy: .public)")
+            return fallback()
+        }
+    }
+
+    private func fetchFromServer() async throws -> TURNCredentials {
+        guard let url = URL(string: "\(CrossNetworkServerConfig.signalingServerURL)/api/turn/credentials") else {
+            throw URLError(.badURL)
+        }
+        var req = URLRequest(url: url)
+        req.httpMethod = "GET"
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        req.setValue(CrossNetworkServerConfig.clientAPIKey, forHTTPHeaderField: "X-API-Key")
+        req.timeoutInterval = 10
+
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse else { throw URLError(.badServerResponse) }
+        guard (200...299).contains(http.statusCode) else {
+            let body = String(data: data, encoding: .utf8) ?? ""
+            throw NSError(domain: "TURN", code: http.statusCode, userInfo: ["body": body])
+        }
+        let decoded = try JSONDecoder().decode(ServerResponse.self, from: data)
+        let expiresAt = Date().addingTimeInterval(TimeInterval(decoded.ttl))
+        return TURNCredentials(
+            username: decoded.username,
+            password: decoded.password,
+            ttl: decoded.ttl,
+            uris: decoded.uris ?? [CrossNetworkServerConfig.turnURL],
+            expiresAt: expiresAt
+        )
+    }
+
+    private func fallback() -> TURNCredentials {
+        // Safe fallback: do not embed secrets in the app.
+        let username = ProcessInfo.processInfo.environment["SKYBRIDGE_TURN_USERNAME"] ?? "skybridge"
+        let password = ProcessInfo.processInfo.environment["SKYBRIDGE_TURN_PASSWORD"] ?? ""
+        return TURNCredentials(
+            username: username,
+            password: password,
+            ttl: 3600,
+            uris: [CrossNetworkServerConfig.turnURL],
+            expiresAt: Date().addingTimeInterval(3600)
+        )
+    }
+}
 
 /// iOS 跨网连接管理器（WebRTC DataChannel + ICE + WebSocket signaling）
 ///
@@ -201,7 +306,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         remoteDeviceId = remotePeerDeviceId
         
         // 1) WebSocket signaling
-        let wsURL = URL(string: "wss://api.nebula-technologies.net/ws")!
+        let wsURL = URL(string: CrossNetworkServerConfig.signalingWebSocketURL)!
         let signaling = WebSocketSignalingClient(url: wsURL)
         self.signaling = signaling
         
@@ -215,13 +320,10 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         
         // 2) WebRTC session (answerer)
         let localId = localDeviceId
-        
-        let ice = WebRTCSession.ICEConfig(
-            stunURL: "stun:54.92.79.99:3478",
-            turnURL: "turn:54.92.79.99:3478",
-            turnUsername: "skybridge",
-            turnPassword: "SkyBridge2026!"
-        )
+
+        // SECURITY: Never hardcode TURN credentials in the client app.
+        // Use short-lived TURN REST credentials fetched from backend (with safe fallback).
+        let ice = await CrossNetworkServerConfig.dynamicICEConfig()
         
         let s = WebRTCSession(sessionId: sessionId, localDeviceId: localId, role: .answerer, ice: ice)
         self.session = s
@@ -229,24 +331,26 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         s.onLocalAnswer = { [weak self] (sdp: String) in
             guard let self else { return }
             Task {
-                try? await self.signaling?.send(.init(
+                let env = WebRTCSignalingEnvelope(
                     sessionId: sessionId,
                     from: localId,
                     type: .answer,
-                    payload: .init(sdp: sdp)
-                ))
+                    payload: WebRTCSignalingEnvelope.Payload(sdp: sdp)
+                )
+                try? await self.signaling?.send(env)
             }
         }
         
         s.onLocalICECandidate = { [weak self] (payload: WebRTCSignalingEnvelope.Payload) in
             guard let self else { return }
             Task {
-                try? await self.signaling?.send(.init(
+                let env = WebRTCSignalingEnvelope(
                     sessionId: sessionId,
                     from: localId,
                     type: .iceCandidate,
                     payload: payload
-                ))
+                )
+                try? await self.signaling?.send(env)
             }
         }
         
@@ -266,7 +370,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         try s.start()
         
         // 3) Join room (best-effort)
-        try? await signaling.send(.init(sessionId: sessionId, from: localId, type: .join, payload: nil))
+        try? await signaling.send(WebRTCSignalingEnvelope(sessionId: sessionId, from: localId, type: .join, payload: nil))
         
         // 4) Kick off handshake as initiator (iOS initiates once DataChannel is up)
         Task {

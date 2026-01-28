@@ -221,9 +221,15 @@ public actor HandshakeDriver {
                 return
             }
         }
+
+        // Rekey hardening (Classic -> PQC):
+        // During in-band rekey, ciphertext from the previous session can arrive interleaved with handshake frames.
+        // Those bytes must NOT fail the handshake parser (e.g. versionMismatch 1 vs 135).
+        let isHandshakeControl = (unwrapped.first == HandshakeConstants.protocolVersion)
         
         switch state {
         case .sendingMessageA, .waitingMessageB:
+            if !isHandshakeControl { return }
             await handleMessageB(unwrapped)
         case .idle:
             // 作为响应方处理 MessageA

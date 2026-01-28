@@ -750,17 +750,12 @@ public final class SupabaseService: BaseManager {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Content-Profile")
         
- // 设置认证头
-        if let token = accessToken, token != "pending_verification" {
-            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        } else {
- // 如果没有有效的访问令牌，可能需要使用服务角色密钥
-            if let serviceKey = config.serviceRoleKey {
-                request.setValue("Bearer \(serviceKey)", forHTTPHeaderField: "Authorization")
-            } else {
-                request.setValue("Bearer \(config.anonKey)", forHTTPHeaderField: "Authorization")
-            }
+        // SECURITY: Never use service-role key from a client app, and avoid anon-key writes to PostgREST.
+        // Only allow authenticated user JWT.
+        guard let token = accessToken, token != "pending_verification", !token.isEmpty else {
+            return false
         }
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue(config.anonKey, forHTTPHeaderField: "apikey")
         
  // 设置 Prefer 头，只返回更新的行
@@ -804,12 +799,6 @@ public final class SupabaseService: BaseManager {
             } else {
                 SkyBridgeLogger.ui.error("❌ [SupabaseService] NebulaID 保存失败，状态码: \(httpResponse.statusCode)")
                 
- // 如果表不存在或字段不存在，尝试插入新记录
-                if httpResponse.statusCode == 404 || httpResponse.statusCode == 400 {
-                    SkyBridgeLogger.ui.debugOnly("⚠️ [SupabaseService] 尝试插入新记录到数据库")
-                    return try await insertNebulaIdToDatabase(userId: userId, nebulaId: nebulaId, accessToken: accessToken)
-                }
-                
                 let responseString = String(data: data, encoding: .utf8)
                 if let responseString, !responseString.isEmpty {
                     SkyBridgeLogger.ui.error("   错误响应: \(responseString, privacy: .private)")
@@ -822,64 +811,9 @@ public final class SupabaseService: BaseManager {
         }
     }
     
- /// 插入 nebulaid 到数据库用户表（如果用户记录不存在）
-    private func insertNebulaIdToDatabase(userId: String, nebulaId: String, accessToken: String? = nil) async throws -> Bool {
-        guard let config = configuration else {
-            throw SupabaseError.configurationMissing
-        }
-        
-        SkyBridgeLogger.ui.debugOnly("💾 [SupabaseService] 尝试插入 NebulaID 到数据库")
-        
-        let endpoint = config.url.appendingPathComponent("rest/v1/users")
-        var request = URLRequest(url: endpoint)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Profile")
-        
- // 设置认证头
-        if let token = accessToken, token != "pending_verification" {
-            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        } else {
-            if let serviceKey = config.serviceRoleKey {
-                request.setValue("Bearer \(serviceKey)", forHTTPHeaderField: "Authorization")
-            } else {
-                request.setValue("Bearer \(config.anonKey)", forHTTPHeaderField: "Authorization")
-            }
-        }
-        request.setValue(config.anonKey, forHTTPHeaderField: "apikey")
-        request.setValue("return=representation", forHTTPHeaderField: "Prefer")
-        
- // 构建插入数据
-        let insertData: [String: Any] = [
-            "id": userId,
-            "nebula_id": nebulaId,
-            "created_at": ISO8601DateFormatter().string(from: Date()),
-            "updated_at": ISO8601DateFormatter().string(from: Date())
-        ]
-        
-        request.httpBody = try JSONSerialization.data(withJSONObject: insertData)
-        
-        do {
-            let (_, response) = try await urlSession.data(for: request)
-            
-            guard let httpResponse = response as? HTTPURLResponse else {
-                throw SupabaseError.networkError(URLError(.badServerResponse))
-            }
-            
-            if (200...299).contains(httpResponse.statusCode) {
-                SkyBridgeLogger.ui.debugOnly("✅ [SupabaseService] NebulaID 插入成功")
-                return true
-            } else {
-                SkyBridgeLogger.ui.debugOnly("⚠️ [SupabaseService] NebulaID 插入失败，状态码: \(httpResponse.statusCode)")
- // 如果插入失败（可能是记录已存在），不算错误，返回 true
-                return true
-            }
-        } catch {
-            SkyBridgeLogger.ui.debugOnly("⚠️ [SupabaseService] NebulaID 插入失败，但继续流程: \(error.localizedDescription)")
- // 插入失败不影响注册流程，返回 true
-            return true
-        }
-    }
+    // NOTE: We intentionally do NOT provide an insert fallback here.
+    // In production, the `users/profiles` row should be created by server-side logic (DB trigger / Edge Function),
+    // and client writes should be governed by RLS using the user's JWT.
     
  // MARK: - 私有方法
     

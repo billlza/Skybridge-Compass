@@ -19,6 +19,8 @@ targets:
         buildPhase: resources
     dependencies:
       - sdk: AppIntents.framework
+      - target: SkyBridgeCompass-Widgets
+        embed: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.skybridge.compass.ios
@@ -28,11 +30,31 @@ targets:
         SWIFT_STRICT_CONCURRENCY: targeted
         SWIFT_ACTIVE_COMPILATION_CONDITIONS: HAS_APPLE_PQC_SDK
 
+  SkyBridgeCompass-Widgets:
+    type: app-extension
+    platform: iOS
+    info:
+      path: "Widgets/Info.plist"
+    sources:
+      - path: Widgets
+      - path: SkyBridgeCompassiOS/Sources/LiveActivities/SkyBridgeActivityAttributes.swift
+    dependencies:
+      - sdk: WidgetKit.framework
+      - sdk: ActivityKit.framework
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.skybridge.compass.ios.widgets
+        DEVELOPMENT_TEAM: YKUPL7Z869
+        INFOPLIST_FILE: "Widgets/Info.plist"
+        SWIFT_STRICT_CONCURRENCY: targeted
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: HAS_APPLE_PQC_SDK
+
 schemes:
   SkyBridgeCompass-iOS:
     build:
       targets:
         SkyBridgeCompass-iOS: all
+        SkyBridgeCompass-Widgets: all
     run:
       config: Debug
     profile:

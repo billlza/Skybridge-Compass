@@ -887,7 +887,6 @@ struct SupabaseSettingsView: View {
     @EnvironmentObject private var authManager: AuthenticationManager
     @State private var supabaseURL: String = ""
     @State private var anonKey: String = ""
-    @State private var serviceRoleKey: String = ""
     @State private var showAlert = false
     @State private var alertMessage = ""
     @State private var isTesting = false
@@ -912,14 +911,10 @@ struct SupabaseSettingsView: View {
                 SecureField("SUPABASE_ANON_KEY", text: $anonKey)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
-
-                SecureField("SUPABASE_SERVICE_ROLE_KEY（可选）", text: $serviceRoleKey)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
             } header: {
                 Text("项目配置")
             } footer: {
-                Text("配置会存入 Keychain，并与 macOS 端读取方式保持一致。")
+                Text("配置会存入 Keychain。安全起见，iOS 客户端不支持 service-role key（仅服务端可用）。")
             }
 
             Section {
@@ -953,17 +948,12 @@ struct SupabaseSettingsView: View {
         if let cfg = try? KeychainManager.shared.retrieveSupabaseConfig() {
             supabaseURL = cfg.url
             anonKey = cfg.anonKey
-            serviceRoleKey = cfg.serviceRoleKey ?? ""
         }
     }
 
     private func save() {
         do {
-            try KeychainManager.shared.storeSupabaseConfig(
-                url: supabaseURL,
-                anonKey: anonKey,
-                serviceRoleKey: serviceRoleKey.isEmpty ? nil : serviceRoleKey
-            )
+            try KeychainManager.shared.storeSupabaseConfig(url: supabaseURL, anonKey: anonKey)
 
             guard let url = URL(string: supabaseURL) else {
                 alertMessage = "SUPABASE_URL 无效"
@@ -971,7 +961,7 @@ struct SupabaseSettingsView: View {
                 return
             }
             SupabaseService.shared.updateConfiguration(
-                .init(url: url, anonKey: anonKey, serviceRoleKey: serviceRoleKey.isEmpty ? nil : serviceRoleKey)
+                .init(url: url, anonKey: anonKey)
             )
 
             alertMessage = "已保存到 Keychain，并已更新运行时配置。"

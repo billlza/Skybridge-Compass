@@ -121,12 +121,12 @@ public final class SupabaseClient {
         }
         do {
             logger.info("➡️ POST \(url.absoluteString) bytes=\(req.httpBody?.count ?? 0)")
-            logger.info("➡️ POST \(url.absoluteString) bytes=\(req.httpBody?.count ?? 0)")
             let (data, resp) = try await perform(req, enableRetry: enableRetry)
             guard let http = resp as? HTTPURLResponse else { throw SupabaseError.badURL }
             guard (200...299).contains(http.statusCode) else {
+                // SECURITY: do not log response body here (may contain PII / tokens). Keep it in the thrown error only.
                 let bodyStr = String(data: data, encoding: .utf8)
-                logger.error("❌ POST \(url.absoluteString) status=\(http.statusCode) body=\(bodyStr ?? "<empty>")")
+                logger.error("❌ POST \(url.absoluteString, privacy: .private) status=\(http.statusCode) bodyBytes=\(data.count)")
                 throw SupabaseError.httpStatus(code: http.statusCode, body: bodyStr)
             }
             do {
@@ -159,7 +159,7 @@ public final class SupabaseClient {
             guard let http = resp as? HTTPURLResponse else { throw SupabaseError.badURL }
             guard (200...299).contains(http.statusCode) else {
                 let bodyStr = String(data: data, encoding: .utf8)
-                logger.error("❌ PUT \(url.absoluteString) status=\(http.statusCode) body=\(bodyStr ?? "<empty>")")
+                logger.error("❌ PUT \(url.absoluteString, privacy: .private) status=\(http.statusCode) bodyBytes=\(data.count)")
                 throw SupabaseError.httpStatus(code: http.statusCode, body: bodyStr)
             }
             do { return try decoder.decode(Response.self, from: data) } catch { throw SupabaseError.decodeFailed(error.localizedDescription) }
@@ -182,7 +182,7 @@ public final class SupabaseClient {
             guard let http = resp as? HTTPURLResponse else { throw SupabaseError.badURL }
             guard (200...299).contains(http.statusCode) else {
                 let bodyStr = String(data: data, encoding: .utf8)
-                logger.error("❌ DELETE \(url.absoluteString) status=\(http.statusCode) body=\(bodyStr ?? "<empty>")")
+                logger.error("❌ DELETE \(url.absoluteString, privacy: .private) status=\(http.statusCode) bodyBytes=\(data.count)")
                 throw SupabaseError.httpStatus(code: http.statusCode, body: bodyStr)
             }
             do { return try decoder.decode(Response.self, from: data) } catch { throw SupabaseError.decodeFailed(error.localizedDescription) }

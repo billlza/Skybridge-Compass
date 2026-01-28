@@ -541,23 +541,18 @@ public extension KeychainManager {
     struct SupabaseConfig: Codable, Sendable {
         public let url: String
         public let anonKey: String
-        public let serviceRoleKey: String?
         
-        public init(url: String, anonKey: String, serviceRoleKey: String?) {
+        public init(url: String, anonKey: String) {
             self.url = url
             self.anonKey = anonKey
-            self.serviceRoleKey = serviceRoleKey
         }
     }
     
-    nonisolated func storeSupabaseConfig(url: String, anonKey: String, serviceRoleKey: String?) throws {
+    nonisolated func storeSupabaseConfig(url: String, anonKey: String) throws {
         try saveGenericPasswordSync(account: "supabase.url", data: Data(url.utf8))
         try saveGenericPasswordSync(account: "supabase.anonKey", data: Data(anonKey.utf8))
-        if let serviceRoleKey {
-            try saveGenericPasswordSync(account: "supabase.serviceRoleKey", data: Data(serviceRoleKey.utf8))
-        } else {
-            deleteGenericPasswordSync(account: "supabase.serviceRoleKey")
-        }
+        // SECURITY: Never store a Supabase service-role key on client devices.
+        deleteGenericPasswordSync(account: "supabase.serviceRoleKey")
     }
     
     nonisolated func retrieveSupabaseConfig() throws -> SupabaseConfig {
@@ -567,9 +562,16 @@ public extension KeychainManager {
               let anon = String(data: anonData, encoding: .utf8) else {
             throw KeychainError.decodingError
         }
-        let service = (try? loadGenericPasswordSync(account: "supabase.serviceRoleKey"))
-            .flatMap { String(data: $0, encoding: .utf8) }
-        return SupabaseConfig(url: url, anonKey: anon, serviceRoleKey: service)
+        // Best-effort: clean up any legacy stored service role key.
+        deleteGenericPasswordSync(account: "supabase.serviceRoleKey")
+        return SupabaseConfig(url: url, anonKey: anon)
+    }
+
+    /// 清除 Supabase 配置（用于从占位符/错误配置恢复）
+    nonisolated func deleteSupabaseConfig() {
+        deleteGenericPasswordSync(account: "supabase.url")
+        deleteGenericPasswordSync(account: "supabase.anonKey")
+        deleteGenericPasswordSync(account: "supabase.serviceRoleKey")
     }
     
     nonisolated func storeAuthSession(_ session: AuthSession) throws {

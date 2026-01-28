@@ -97,3 +97,6 @@ iOSInjectionProject/
 .env
 .env.local
 credentials.json
+
+# Supabase (local-only; do NOT commit real project URL/keys)
+SkyBridgeCompassiOS/Resources/SupabaseConfig.plist

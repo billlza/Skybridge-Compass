@@ -93,6 +93,8 @@ public final class SkyBridgeWeatherService: ObservableObject {
     private let logger = Logger(subsystem: "com.skybridge.weather", category: "Service")
     private let cacheKey = "com.skybridge.lastKnownWeather"
     private let cacheValidityDuration: TimeInterval = 1800 // 30分钟缓存
+    private let wttrFailureCooldownSeconds: TimeInterval = 1800 // wttr.in 失败后冷却 30 分钟，避免反复超时刷屏
+    private let wttrCooldownUntilKey = "com.skybridge.weather.wttrCooldownUntil"
     
  // MARK: - Errors
     
@@ -125,7 +127,8 @@ public final class SkyBridgeWeatherService: ObservableObject {
         var weatherInfo: WeatherInfo?
         
  // 策略1: 优先使用 wttr.in (免费且功能强大)
-        if let weather = await fetchFromWttr(latitude: location.latitude, longitude: location.longitude, city: location.city) {
+        if shouldAttemptWttr(),
+           let weather = await fetchFromWttr(latitude: location.latitude, longitude: location.longitude, city: location.city) {
             weatherInfo = weather
         }
  // 策略2: 降级到 Open-Meteo (免费无API key)
@@ -215,9 +218,34 @@ public final class SkyBridgeWeatherService: ObservableObject {
             return weather
 
         } catch {
- // 请求失败时不阻塞主流程，记录简洁日志并返回nil以触发降级
+            // 请求失败时不阻塞主流程，记录简洁日志并返回nil以触发降级。
+            // 同时触发“失败冷却”，避免在代理/网络不通时反复触发系统级 NW/CFNetwork 报错刷屏。
+            markWttrFailedIfNeeded(error)
             logger.debug("❌ wttr.in 请求失败(超时或网络不可用): \(error.localizedDescription)")
             return nil
+        }
+    }
+    
+    // MARK: - wttr.in failure cooldown (避免反复超时导致系统刷屏)
+    
+    private func shouldAttemptWttr() -> Bool {
+        let until = UserDefaults.standard.double(forKey: wttrCooldownUntilKey)
+        if until <= 0 { return true }
+        return Date().timeIntervalSince1970 >= until
+    }
+    
+    private func markWttrFailedIfNeeded(_ error: Error) {
+        // 只对典型的“网络不可用/超时/连接丢失”触发冷却，避免把 4xx/JSON 解析等逻辑错误也当成网络问题。
+        let ns = error as NSError
+        if ns.domain == NSURLErrorDomain {
+            switch ns.code {
+            case NSURLErrorTimedOut, NSURLErrorCannotConnectToHost, NSURLErrorNetworkConnectionLost, NSURLErrorNotConnectedToInternet,
+                 NSURLErrorDNSLookupFailed, NSURLErrorCannotFindHost, NSURLErrorInternationalRoamingOff:
+                let until = Date().addingTimeInterval(wttrFailureCooldownSeconds).timeIntervalSince1970
+                UserDefaults.standard.set(until, forKey: wttrCooldownUntilKey)
+            default:
+                break
+            }
         }
     }
 

@@ -1,4 +1,5 @@
 import SwiftUI
+import ActivityKit
 #if os(iOS)
 import UserNotifications
 #endif
@@ -62,6 +63,10 @@ struct SkyBridgeCompassApp: App {
     
     /// 设置应用初始化
     private func setupApplication() {
+        // BUILD FINGERPRINT (must be unmistakable in device logs)
+        SkyBridgeLogger.shared.info("🧪 BUILD_FINGERPRINT 2026-01-25 iOS Supabase-config-fix v2")
+        print("🧪 BUILD_FINGERPRINT 2026-01-25 iOS Supabase-config-fix v2")
+
         // 配置日志系统
         SkyBridgeLogger.shared.configure(level: .debug)
         
@@ -78,6 +83,16 @@ struct SkyBridgeCompassApp: App {
         SkyBridgeLogger.shared.info("🔧 Settings: enforcePQC=\(PQCCryptoManager.instance.enforcePQCHandshake ? "1" : "0"), allowClassicFallback=\(PQCCryptoManager.instance.allowClassicFallbackForCompatibility ? "1" : "0")")
         SkyBridgeLogger.shared.info("📱 iOS 版本: \(UIDevice.current.systemVersion)")
         SkyBridgeLogger.shared.info("📲 设备类型: \(UIDevice.current.userInterfaceIdiom == .pad ? "iPad" : "iPhone")")
+
+        // Supabase config quick sanity (prints in device logs even if user profile refresh hasn't run yet)
+        if let cfg = SupabaseService.Configuration.fromEnvironment() {
+            let host = cfg.url.host ?? "unknown"
+            SkyBridgeLogger.shared.info("🔐 Supabase resolved host=\(host)")
+            print("🔐 Supabase resolved host=\(host)")
+        } else {
+            SkyBridgeLogger.shared.warning("⚠️ Supabase 未配置（启动时未解析到有效配置）")
+            print("⚠️ Supabase 未配置（启动时未解析到有效配置）")
+        }
     }
     
     /// 初始化核心服务
@@ -125,6 +140,27 @@ struct SkyBridgeCompassApp: App {
 
         // 7. 启动文件传输监听（iOS 作为接收端：macOS -> iOS）
         await FileTransferRuntime.shared.startIfNeeded()
+
+        // 8. 启动灵动岛 Live Activity（显示天气或连接状态）
+        if #available(iOS 16.2, *) {
+            await initializeLiveActivity()
+        }
+    }
+
+    /// 初始化灵动岛 Live Activity
+    ///
+    /// Note: App entrypoint is iOS 17+, so this must not be annotated as available on a wider range.
+    private func initializeLiveActivity() async {
+        let liveActivity = LiveActivityManager.shared
+
+        // 获取初始天气数据（best-effort：优先使用 WeatherService 的缓存/currentWeather）
+        if let weather = WeatherService.shared.currentWeather {
+            await liveActivity.updateWeather(from: weather)
+        }
+
+        // 启动 Live Activity
+        await liveActivity.startActivity()
+        SkyBridgeLogger.shared.info("✅ 灵动岛 Live Activity 已启动")
     }
 
     private func applyDiscoverySettings() {

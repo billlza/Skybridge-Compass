@@ -6,29 +6,53 @@ public final class SupabaseService: ObservableObject {
     public struct Configuration: Sendable {
         public let url: URL
         public let anonKey: String
-        public let serviceRoleKey: String?
 
-        public init(url: URL, anonKey: String, serviceRoleKey: String? = nil) {
+        public init(url: URL, anonKey: String) {
             self.url = url
             self.anonKey = anonKey
-            self.serviceRoleKey = serviceRoleKey
+        }
+
+        static func isPlaceholderConfig(urlString: String, anonKey: String) -> Bool {
+            let u = urlString.lowercased()
+            let k = anonKey.lowercased()
+            if u.contains("your-project.supabase.co") { return true }
+            if k == "your-anon-key" { return true }
+            if k.hasPrefix("sb_publishable_") { return false } // publishable keys are ok
+            return false
+        }
+        
+        static func isValidSupabaseURL(_ url: URL) -> Bool {
+            guard let scheme = url.scheme?.lowercased(), scheme == "https" else { return false }
+            guard let host = url.host?.lowercased(), host.contains("supabase.co") else { return false }
+            return true
         }
 
         /// iOS 端优先 Keychain，其次 Info.plist
         public static func fromEnvironment() -> Configuration? {
             // 1) Keychain
-            if let keychainConfig = try? KeychainManager.shared.retrieveSupabaseConfig(),
-               let url = URL(string: keychainConfig.url) {
-                return Configuration(url: url, anonKey: keychainConfig.anonKey, serviceRoleKey: keychainConfig.serviceRoleKey)
+            if let keychainConfig = try? KeychainManager.shared.retrieveSupabaseConfig() {
+                // If Keychain contains a placeholder config from earlier dev runs, delete it so it won't override bundle config.
+                if isPlaceholderConfig(urlString: keychainConfig.url, anonKey: keychainConfig.anonKey) {
+                    SkyBridgeLogger.shared.warning("⚠️ Supabase Keychain 配置为占位符，已自动清理（将回退到 Bundle 配置/Info.plist）。")
+                    KeychainManager.shared.deleteSupabaseConfig()
+                } else if let url = URL(string: keychainConfig.url),
+                          isValidSupabaseURL(url),
+                          !keychainConfig.anonKey.isEmpty {
+                    SkyBridgeLogger.shared.info("🔐 Supabase 配置来源=Keychain host=\(url.host ?? "unknown")")
+                    return Configuration(url: url, anonKey: keychainConfig.anonKey)
+                }
             }
 
             // 2) Info.plist（Xcode 工程 / App target）
             let dict = Bundle.main.infoDictionary ?? [:]
             if let urlString = dict["SUPABASE_URL"] as? String,
                let url = URL(string: urlString),
-               let anonKey = dict["SUPABASE_ANON_KEY"] as? String {
-                let serviceRoleKey = dict["SUPABASE_SERVICE_ROLE_KEY"] as? String
-                return Configuration(url: url, anonKey: anonKey, serviceRoleKey: serviceRoleKey)
+               let anonKey = dict["SUPABASE_ANON_KEY"] as? String,
+               isValidSupabaseURL(url),
+               !anonKey.isEmpty,
+               !isPlaceholderConfig(urlString: urlString, anonKey: anonKey) {
+                SkyBridgeLogger.shared.info("🔐 Supabase 配置来源=Info.plist host=\(url.host ?? "unknown")")
+                return Configuration(url: url, anonKey: anonKey)
             }
 
             // 3) App Bundle Resources：SupabaseConfig.plist（与 macOS 端一致的资源配置方式）
@@ -36,9 +60,12 @@ public final class SupabaseService: ObservableObject {
                let dict = NSDictionary(contentsOf: url) as? [String: Any],
                let urlString = dict["SUPABASE_URL"] as? String,
                let baseURL = URL(string: urlString),
-               let anonKey = dict["SUPABASE_ANON_KEY"] as? String {
-                let serviceRoleKey = dict["SUPABASE_SERVICE_ROLE_KEY"] as? String
-                return Configuration(url: baseURL, anonKey: anonKey, serviceRoleKey: serviceRoleKey)
+               let anonKey = dict["SUPABASE_ANON_KEY"] as? String,
+               isValidSupabaseURL(baseURL),
+               !anonKey.isEmpty,
+               !isPlaceholderConfig(urlString: urlString, anonKey: anonKey) {
+                SkyBridgeLogger.shared.info("🔐 Supabase 配置来源=SupabaseConfig.plist(host=\(baseURL.host ?? "unknown"))")
+                return Configuration(url: baseURL, anonKey: anonKey)
             }
 
             // 3) Swift Package Resources（打开 Package.swift 运行时的兜底）
@@ -47,12 +74,16 @@ public final class SupabaseService: ObservableObject {
                let dict = NSDictionary(contentsOf: url) as? [String: Any],
                let urlString = dict["SUPABASE_URL"] as? String,
                let baseURL = URL(string: urlString),
-               let anonKey = dict["SUPABASE_ANON_KEY"] as? String {
-                let serviceRoleKey = dict["SUPABASE_SERVICE_ROLE_KEY"] as? String
-                return Configuration(url: baseURL, anonKey: anonKey, serviceRoleKey: serviceRoleKey)
+               let anonKey = dict["SUPABASE_ANON_KEY"] as? String,
+               isValidSupabaseURL(baseURL),
+               !anonKey.isEmpty,
+               !isPlaceholderConfig(urlString: urlString, anonKey: anonKey) {
+                SkyBridgeLogger.shared.info("🔐 Supabase 配置来源=Bundle.module(host=\(baseURL.host ?? "unknown"))")
+                return Configuration(url: baseURL, anonKey: anonKey)
             }
 #endif
 
+            SkyBridgeLogger.shared.warning("⚠️ Supabase 未配置（Keychain/Info.plist/Bundle 都未找到有效配置）")
             return nil
         }
     }
@@ -86,6 +117,29 @@ public final class SupabaseService: ObservableObject {
         self.configuration = Configuration.fromEnvironment()
     }
 
+    private func requireConfiguration() throws -> Configuration {
+        // If we have a cached config, validate it; otherwise re-load.
+        if let cfg = configuration {
+            let host = (cfg.url.host ?? "").lowercased()
+            if host == "your-project.supabase.co" || Configuration.isPlaceholderConfig(urlString: cfg.url.absoluteString, anonKey: cfg.anonKey) {
+                // Extra-hardening: if an old build ever persisted a placeholder in Keychain, wipe it and reload.
+                SkyBridgeLogger.shared.warning("⚠️ Supabase 当前配置为占位符(host=\(host))，将清理并重新加载。")
+                KeychainManager.shared.deleteSupabaseConfig()
+                configuration = nil
+            } else if Configuration.isValidSupabaseURL(cfg.url), !cfg.anonKey.isEmpty {
+                return cfg
+            }
+        }
+        configuration = Configuration.fromEnvironment()
+        guard let cfg = configuration else { throw SupabaseError.configurationMissing }
+        // Final safety: never allow placeholder host to leak into requests.
+        if (cfg.url.host ?? "").lowercased() == "your-project.supabase.co" {
+            SkyBridgeLogger.shared.error("❌ Supabase 仍为占位符(host=your-project.supabase.co)，已拒绝发起请求。请在设置页填写或提供 SupabaseConfig.plist。")
+            throw SupabaseError.configurationMissing
+        }
+        return cfg
+    }
+
     public func updateConfiguration(_ configuration: Configuration) {
         self.configuration = configuration
     }
@@ -97,7 +151,7 @@ public final class SupabaseService: ObservableObject {
     // MARK: - Auth
 
     public func signInWithEmail(email: String, password: String) async throws -> AuthSession {
-        guard let config = configuration else { throw SupabaseError.configurationMissing }
+        let config = try requireConfiguration()
 
         guard var comps = URLComponents(url: config.url.appendingPathComponent("auth/v1/token"), resolvingAgainstBaseURL: false) else {
             throw SupabaseError.invalidResponse
@@ -117,7 +171,7 @@ public final class SupabaseService: ObservableObject {
 
     /// 刷新 access token（当 JWT 过期 / bad_jwt 时使用）
     public func refreshSession(refreshToken: String) async throws -> AuthSession {
-        guard let config = configuration else { throw SupabaseError.configurationMissing }
+        let config = try requireConfiguration()
 
         guard var comps = URLComponents(url: config.url.appendingPathComponent("auth/v1/token"), resolvingAgainstBaseURL: false) else {
             throw SupabaseError.invalidResponse
@@ -137,7 +191,7 @@ public final class SupabaseService: ObservableObject {
 
     /// 与 macOS 端一致：注册时把 nebula_id 写入 metadata（data）
     public func signUp(email: String, password: String, metadata: [String: Any]? = nil) async throws -> AuthSession {
-        guard let config = configuration else { throw SupabaseError.configurationMissing }
+        let config = try requireConfiguration()
 
         let endpoint = config.url.appendingPathComponent("auth/v1/signup")
         var request = URLRequest(url: endpoint)
@@ -184,7 +238,7 @@ public final class SupabaseService: ObservableObject {
     }
 
     public func resetPassword(email: String) async throws {
-        guard let config = configuration else { throw SupabaseError.configurationMissing }
+        let config = try requireConfiguration()
         let endpoint = config.url.appendingPathComponent("auth/v1/recover")
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
@@ -202,7 +256,7 @@ public final class SupabaseService: ObservableObject {
     // MARK: - Database (Nebula ID)
 
     public func saveNebulaIdToDatabase(userId: String, nebulaId: String, accessToken: String?) async throws -> Bool {
-        guard let config = configuration else { throw SupabaseError.configurationMissing }
+        let config = try requireConfiguration()
 
         let endpoint = config.url.appendingPathComponent("rest/v1/users")
         var comps = URLComponents(url: endpoint, resolvingAgainstBaseURL: false)
@@ -215,13 +269,12 @@ public final class SupabaseService: ObservableObject {
         request.setValue(config.anonKey, forHTTPHeaderField: "apikey")
         request.setValue("return=representation", forHTTPHeaderField: "Prefer")
 
-        if let token = accessToken, token != "pending_verification" {
-            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        } else if let serviceKey = config.serviceRoleKey {
-            request.setValue("Bearer \(serviceKey)", forHTTPHeaderField: "Authorization")
-        } else {
-            request.setValue("Bearer \(config.anonKey)", forHTTPHeaderField: "Authorization")
+        // SECURITY: Never use service-role key from a client app. Also avoid anon-key writes to PostgREST.
+        // Only allow authenticated user JWT.
+        guard let token = accessToken, token != "pending_verification", !token.isEmpty else {
+            return false
         }
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
 
         let updateData: [String: Any] = [
             "nebula_id": nebulaId,
@@ -259,7 +312,7 @@ public final class SupabaseService: ObservableObject {
 
     /// 获取当前用户资料（优先走 Auth API，结构与 metadata 最一致）
     public func fetchCurrentUserProfile(accessToken: String) async throws -> RemoteUserProfile {
-        guard let config = configuration else { throw SupabaseError.configurationMissing }
+        let config = try requireConfiguration()
 
         let endpoint = config.url.appendingPathComponent("auth/v1/user")
         var request = URLRequest(url: endpoint)
@@ -286,7 +339,7 @@ public final class SupabaseService: ObservableObject {
 
     /// 用于设置页的“连接测试”：验证 URL/Key 是否可用（不依赖已登录）
     public func testConnection() async throws {
-        guard let config = configuration else { throw SupabaseError.configurationMissing }
+        let config = try requireConfiguration()
 
         // Supabase GoTrue 健康检查端点
         let endpoint = config.url.appendingPathComponent("auth/v1/health")
