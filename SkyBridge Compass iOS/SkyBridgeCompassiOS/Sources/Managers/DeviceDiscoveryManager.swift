@@ -970,17 +970,27 @@ public class DeviceDiscoveryManager: ObservableObject {
     }
     
     private func extractPeerId(from connection: NWConnection) -> String {
+        // Prefer mapping back to an already-discovered stable device id if possible.
+        // This is critical for UI refresh: the device list is keyed by `DiscoveredDevice.id` (stableDeviceId),
+        // while inbound NWConnection endpoints often arrive as hostPort (IP) and would otherwise mismatch.
+        let endpointKey = connection.endpoint.debugDescription
+        if let mapped = endpointToDeviceId[endpointKey] {
+            return mapped
+        }
+
+        // Fall back to a stable host-based id (matches stableDeviceId(from:) for hostPort endpoints).
         if case .hostPort(let host, _) = connection.endpoint {
             switch host {
             case .ipv4(let addr):
-                return "\(addr)"
+                return "host:\(addr)"
             case .ipv6(let addr):
-                return "\(addr)"
+                return "host:\(addr)"
             default:
                 break
             }
         }
-        return connection.endpoint.debugDescription
+
+        return endpointKey
     }
     
     // MARK: - Private Methods - TXT Record
