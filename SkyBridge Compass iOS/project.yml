@@ -5,6 +5,11 @@ options:
   deploymentTarget:
     iOS: "17.0"
 
+packages:
+  WebRTC:
+    url: https://github.com/stasel/WebRTC
+    from: 114.0.0
+
 targets:
   SkyBridgeCompass-iOS:
     type: application
@@ -19,6 +24,8 @@ targets:
         buildPhase: resources
     dependencies:
       - sdk: AppIntents.framework
+      - package: WebRTC
+        product: WebRTC
       - target: SkyBridgeCompass-Widgets
         embed: true
     settings:
@@ -28,7 +35,9 @@ targets:
         TARGETED_DEVICE_FAMILY: "1,2"
         INFOPLIST_FILE: "SkyBridgeCompassiOS/Supporting Files/Info.plist"
         SWIFT_STRICT_CONCURRENCY: targeted
-        SWIFT_ACTIVE_COMPILATION_CONDITIONS: HAS_APPLE_PQC_SDK
+        # Important: do NOT define HAS_APPLE_PQC_SDK by default.
+        # If you have an SDK that actually contains CryptoKit PQC types (MLKEM/MLDSA),
+        # add `HAS_APPLE_PQC_SDK` in Target Build Settings -> Swift Compiler - Custom Flags.
 
   SkyBridgeCompass-Widgets:
     type: app-extension
@@ -47,7 +56,7 @@ targets:
         DEVELOPMENT_TEAM: YKUPL7Z869
         INFOPLIST_FILE: "Widgets/Info.plist"
         SWIFT_STRICT_CONCURRENCY: targeted
-        SWIFT_ACTIVE_COMPILATION_CONDITIONS: HAS_APPLE_PQC_SDK
+        # Widgets do not need HAS_APPLE_PQC_SDK; keep build conditions minimal for portability.
 
 schemes:
   SkyBridgeCompass-iOS:

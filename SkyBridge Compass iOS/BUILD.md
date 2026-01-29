@@ -10,54 +10,21 @@
 - Apple 开发者账号（用于真机测试）
 
 ### 依赖项
-- macOS 版 SkyBridge Compass (位于同级目录)
-- liboqs (后量子加密库，可选)
+- WebRTC Swift Package（Xcode 会自动解析）
+- liboqs（可选：若你要在 iOS 17-25 上实现 PQC-only，需要提供 iOS 架构的 liboqs XCFramework）
 
 ## 🚀 快速开始
 
 ### 1. 克隆项目
 
 ```bash
-cd ~/Desktop
-# 确保 macOS 版本在相同位置
-ls "SkyBridge Compass Pro release"  # 应该存在
-cd "SkyBridge Compass iOS"
-```
-
-### 2. 链接共享模块
-
-运行以下脚本创建到 macOS 项目的符号链接：
-
-```bash
-chmod +x setup_symlinks.sh
-./setup_symlinks.sh
-```
-
-或手动创建：
-
-```bash
-mkdir -p Shared
-ln -s "../../SkyBridge Compass Pro release/Sources/SkyBridgeCore" "./Shared/SkyBridgeCore"
+cd "/path/to/SkyBridge Compass iOS"
 ```
 
 ### 3. 使用 Xcode 打开
 
-#### 方式 A: 使用 Swift Package
-
 ```bash
-open Package.swift
-```
-
-Xcode 会自动识别并配置项目。
-
-#### 方式 B: 创建 Xcode 项目
-
-如果需要完整的 .xcodeproj：
-
-```bash
-# 使用 Swift Package Manager 生成
-swift package generate-xcodeproj
-open SkyBridgeCompassiOS.xcodeproj
+open SkyBridgeCompass-iOS.xcodeproj
 ```
 
 ### 4. 配置签名
@@ -102,16 +69,7 @@ open SkyBridgeCompassiOS.xcodeproj
 
 ### 问题 1: 找不到 SkyBridgeCore 模块
 
-**解决方案：**
-```bash
-# 检查符号链接
-ls -la Shared/
-# 应该看到 SkyBridgeCore -> ...
-
-# 重新创建链接
-rm -f Shared/SkyBridgeCore
-ln -s "../../SkyBridge Compass Pro release/Sources/SkyBridgeCore" "./Shared/SkyBridgeCore"
-```
+**说明**：Standalone 版本不再依赖 `SkyBridgeCore` 模块（也不需要任何符号链接）。
 
 ### 问题 2: 编译错误 - Swift 版本不匹配
 
