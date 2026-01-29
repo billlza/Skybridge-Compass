@@ -8,19 +8,43 @@ public class SkyBridgeLogger {
     private let logger: Logger
     private let category: String
     private let echoToXcodeConsole: Bool
+    private let consoleMinLevel: LogLevel
     
     public init(subsystem: String = "com.skybridge.compass", category: String = "General") {
         self.logger = Logger(subsystem: subsystem, category: category)
         self.category = category
+
+        // Xcode debug console doesn't reliably show OSLog output; we optionally echo to stdout.
+        // Defaults:
+        // - Debug: enabled + minLevel=debug
+        // - Release: enabled + minLevel=warning (to avoid spam)
+        let envOn = ProcessInfo.processInfo.environment["SKYBRIDGE_CONSOLE_LOG"]
+        let envLevel = (ProcessInfo.processInfo.environment["SKYBRIDGE_CONSOLE_LOG_LEVEL"] ?? "").lowercased()
+
         #if DEBUG
-        // Xcode debug console doesn't reliably show OSLog output; echo a concise line for developer builds.
-        // Can also be forced in Release via env var (useful for TestFlight repros).
-        let env = ProcessInfo.processInfo.environment["SKYBRIDGE_CONSOLE_LOG"] ?? "1"
-        self.echoToXcodeConsole = (env == "1" || env.lowercased() == "true" || env.lowercased() == "yes")
+        let defaultOn = true
+        let defaultMin = LogLevel.debug
         #else
-        let env = ProcessInfo.processInfo.environment["SKYBRIDGE_CONSOLE_LOG"] ?? "0"
-        self.echoToXcodeConsole = (env == "1" || env.lowercased() == "true" || env.lowercased() == "yes")
+        let defaultOn = true
+        let defaultMin = LogLevel.warning
         #endif
+
+        if let envOn {
+            let v = envOn.lowercased()
+            self.echoToXcodeConsole = (v == "1" || v == "true" || v == "yes")
+        } else {
+            self.echoToXcodeConsole = defaultOn
+        }
+
+        self.consoleMinLevel = {
+            switch envLevel {
+            case "debug": return .debug
+            case "info": return .info
+            case "warning", "warn": return .warning
+            case "error": return .error
+            default: return defaultMin
+            }
+        }()
     }
     
     public func configure(level: LogLevel) {
@@ -53,6 +77,7 @@ public class SkyBridgeLogger {
 
     private func echo(level: LogLevel, message: String) {
         guard echoToXcodeConsole else { return }
+        guard level.rank >= consoleMinLevel.rank else { return }
         let df = DateFormatter()
         df.dateFormat = "HH:mm:ss.SSS"
         let ts = df.string(from: Date())
