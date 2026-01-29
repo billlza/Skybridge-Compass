@@ -65,6 +65,19 @@ open SkyBridgeCompass-iOS.xcodeproj
 3. 选择设备作为运行目标
 4. 点击运行
 
+## 🔐 Apple CryptoKit PQC（iOS 26+，论文 strictPQC 路径）
+
+### 需要在哪里声明？
+
+- **必须在 Xcode 工程的 Target Build Settings 里声明（编译期宏）**：`SWIFT_ACTIVE_COMPILATION_CONDITIONS` 添加 `HAS_APPLE_PQC_SDK`
+- **不需要、也不应该在 Info.plist 里声明**：Info.plist 只负责权限/能力（如相机、本地网络、定位、Live Activities），不影响编译期是否包含 `MLKEM768/MLDSA65` 类型
+
+### 何时需要打开？
+
+- 你使用的 Xcode 必须包含 **iOS 26.x SDK**（否则编译会报找不到 `MLKEM768/MLDSA65`）
+- 运行时必须满足 `#available(iOS 26.0, *)`
+- 并且需要完成一次配对/信任同步，让双方保存对端 **KEM 身份公钥（Trust Store）**；否则会触发 classic bootstrap 或降级
+
 ## 🔧 故障排除
 
 ### 问题 1: 找不到 SkyBridgeCore 模块
