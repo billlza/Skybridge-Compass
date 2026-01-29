@@ -248,23 +248,29 @@ public class ThermalManager: BaseManager {
  // 触发回调
         temperatureChangeCallback?(cpuTemp, gpuTemp)
         
-        // Logging is useful for diagnostics but too frequent logs waste CPU and pollute release telemetry.
-        // Throttle to at most once per 30s, or when temperature changes materially (>= 2°C).
-        let now = Date()
-        let shouldLogByTime: Bool = {
-            guard let last = lastTemperatureLogAt else { return true }
-            return now.timeIntervalSince(last) >= 30
-        }()
-        let shouldLogByDelta: Bool = {
-            let cpuDelta = abs((lastLoggedCPUTemp ?? cpuTemp) - cpuTemp)
-            let gpuDelta = abs((lastLoggedGPUTemp ?? gpuTemp) - gpuTemp)
-            return cpuDelta >= 2.0 || gpuDelta >= 2.0
-        }()
-        if shouldLogByTime || shouldLogByDelta {
-            lastTemperatureLogAt = now
-            lastLoggedCPUTemp = cpuTemp
-            lastLoggedGPUTemp = gpuTemp
-            logger.debug("🌡️ Apple Silicon温度更新 - CPU: \(String(format: "%.1f", cpuTemp))°C, GPU: \(String(format: "%.1f", gpuTemp))°C")
+        // Temperature logs are extremely noisy and make it hard to spot security/connection events.
+        // Default: OFF in all builds. Enable explicitly via env:
+        //   SKYBRIDGE_LOG_TEMPERATURE=1
+        let env = ProcessInfo.processInfo.environment["SKYBRIDGE_LOG_TEMPERATURE"] ?? "0"
+        let temperatureLogsEnabled = (env == "1" || env.lowercased() == "true" || env.lowercased() == "yes")
+        if temperatureLogsEnabled {
+            // Throttle to at most once per 30s, or when temperature changes materially (>= 2°C).
+            let now = Date()
+            let shouldLogByTime: Bool = {
+                guard let last = lastTemperatureLogAt else { return true }
+                return now.timeIntervalSince(last) >= 30
+            }()
+            let shouldLogByDelta: Bool = {
+                let cpuDelta = abs((lastLoggedCPUTemp ?? cpuTemp) - cpuTemp)
+                let gpuDelta = abs((lastLoggedGPUTemp ?? gpuTemp) - gpuTemp)
+                return cpuDelta >= 2.0 || gpuDelta >= 2.0
+            }()
+            if shouldLogByTime || shouldLogByDelta {
+                lastTemperatureLogAt = now
+                lastLoggedCPUTemp = cpuTemp
+                lastLoggedGPUTemp = gpuTemp
+                logger.debug("🌡️ Apple Silicon温度更新 - CPU: \(String(format: "%.1f", cpuTemp))°C, GPU: \(String(format: "%.1f", gpuTemp))°C")
+            }
         }
     }
     

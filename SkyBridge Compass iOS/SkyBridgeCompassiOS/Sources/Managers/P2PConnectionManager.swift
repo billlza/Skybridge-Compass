@@ -326,7 +326,7 @@ public class P2PConnectionManager: ObservableObject {
         // 等待连接 ready 再握手（避免在 .preparing/.setup 时握手导致失败）
         try await readyGate.waitReady(timeoutSeconds: 10)
         
-        // 执行握手（可能 PQC-only 或 classic fallback，取决于 trust store 是否已有 peer KEM keys）
+        // 执行握手（可能 PQC-only 或 classic bootstrap，取决于 trust store 是否已有 peer KEM keys）
         do {
             try await performPQCHandshake(connection: connection, device: device, preferPQC: pqcManager.enforcePQCHandshake)
         } catch {
@@ -400,6 +400,26 @@ public class P2PConnectionManager: ObservableObject {
                     scheduleReconnectIfNeeded(deviceId: device.id)
                 }
                 throw error
+            }
+        }
+
+        // If strictPQC is enabled but we negotiated a Classic suite, it almost always means we do NOT yet
+        // have the peer's long-term KEM identity public key in the trust store (bootstrap phase).
+        // Proactively kick off the KEM identity exchange and schedule a single rekey to PQC.
+        if pqcManager.enforcePQCHandshake,
+           let negotiated = sessionKeys[device.id]?.negotiatedSuite,
+           !negotiated.isPQCGroup {
+            do {
+                let provider = CryptoProviderFactory.make(policy: .preferPQC)
+                if let preferred = provider.supportedSuites.first(where: { $0.isPQCGroup }) {
+                    SkyBridgeLogger.shared.warning("🧩 strictPQC bootstrap: negotiated Classic (\(negotiated.rawValue)). Exchanging KEM identity keys then rekeying to \(preferred.rawValue)… peer=\(device.id)")
+                    try await sendPairingIdentityExchange(to: device.id)
+                    scheduleBootstrapRekeyIfNeeded(peerId: device.id, suiteRaw: preferred.rawValue)
+                } else {
+                    SkyBridgeLogger.shared.warning("⚠️ strictPQC enabled but no PQC suites are available on this build/device; staying on Classic. peer=\(device.id)")
+                }
+            } catch {
+                SkyBridgeLogger.shared.warning("⚠️ strictPQC bootstrap: failed to send pairing identity exchange (ignored): \(error.localizedDescription)")
             }
         }
         
