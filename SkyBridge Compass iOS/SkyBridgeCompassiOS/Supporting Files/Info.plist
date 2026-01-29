@@ -17,6 +17,50 @@
 	<key>CFBundleShortVersionString</key>
 	<string>1.0</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>2</string>
+	<key>UILaunchStoryboardName</key>
+	<string>LaunchScreen</string>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>UISupportedInterfaceOrientations~ipad</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationPortraitUpsideDown</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>需要访问本地网络以发现附近的 SkyBridge 设备并建立连接。</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_skybridge._tcp</string>
+		<string>_skybridge._udp</string>
+		<string>_skybridge-transfer._tcp</string>
+		<string>_skybridge-remote._tcp</string>
+		<string>_companion-link._tcp</string>
+		<string>_services._dns-sd._udp</string>
+		<string>_airplay._tcp</string>
+		<string>_rdlink._tcp</string>
+		<string>_sftp-ssh._tcp</string>
+		<string>_http._tcp</string>
+		<string>_https._tcp</string>
+		<string>_ssh._tcp</string>
+		<string>_smb._tcp</string>
+		<string>_afpovertcp._tcp</string>
+		<string>_printer._tcp</string>
+		<string>_ipp._tcp</string>
+		<string>_scanner._tcp</string>
+		<string>_workstation._tcp</string>
+	</array>
+	<key>NSSupportsLiveActivities</key>
+	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>需要使用相机扫描二维码以建立 SkyBridge 跨网连接与配对。</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>需要使用位置信息以提供更准确的天气服务（仅在使用时）。</string>
 </dict>
 </plist>
