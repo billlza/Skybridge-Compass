@@ -24,6 +24,9 @@ public class P2PConnectionManager: ObservableObject {
     @Published public private(set) var connectionStatusByDeviceId: [String: ConnectionStatus] = [:]
     /// 每个设备最近一次连接错误（用于定位“莫名其妙断开”原因）
     @Published public private(set) var connectionErrorByDeviceId: [String: String] = [:]
+    /// 每个设备当前协商的加密套件（用于 UI/LiveActivity 在 rekey 后正确刷新）
+    /// 注意：`sessionKeys` 不是 @Published，因此仅更新 `sessionKeys` 不会触发 SwiftUI 刷新。
+    @Published public private(set) var negotiatedSuiteByDeviceId: [String: CryptoSuite] = [:]
     
     // MARK: - Private Properties
     
@@ -450,6 +453,7 @@ public class P2PConnectionManager: ObservableObject {
         connections.removeValue(forKey: device.id)
         sharedSecrets.removeValue(forKey: device.id)
         sessionKeys.removeValue(forKey: device.id)
+        negotiatedSuiteByDeviceId.removeValue(forKey: device.id)
         handshakeDrivers.removeValue(forKey: device.id)
         await transport?.removeConnection(for: device.id)
         
@@ -591,7 +595,7 @@ public class P2PConnectionManager: ObservableObject {
             switch state {
             case .established(let keys):
                 // 握手成功
-                sessionKeys[peerId] = keys
+                setSessionKeys(keys, for: peerId)
                 handshakeDrivers.removeValue(forKey: peerId)
                 currentHandshakeState = "握手成功 (Suite: \(keys.negotiatedSuite.rawValue))"
                 SkyBridgeLogger.shared.info("✅ 握手完成: \(peerId) (Suite: \(keys.negotiatedSuite.rawValue))")
@@ -1015,6 +1019,23 @@ public class P2PConnectionManager: ObservableObject {
         }
         activeConnections.append(Connection(device: device, status: status))
     }
+
+    private func setSessionKeys(_ keys: SessionKeys, for deviceId: String, deviceNameHint: String? = nil) {
+        sessionKeys[deviceId] = keys
+        negotiatedSuiteByDeviceId[deviceId] = keys.negotiatedSuite
+
+        // Keep Live Activity in sync with the latest negotiated suite (e.g., after Classic -> PQC rekey).
+        if #available(iOS 16.2, *) {
+            let name =
+                deviceNameHint
+                ?? lastKnownDevices[deviceId]?.name
+                ?? discoveryManager.discoveredDevices.first(where: { $0.id == deviceId })?.name
+                ?? deviceId
+            Task {
+                await LiveActivityManager.shared.setConnected(deviceName: name, cryptoSuite: keys.negotiatedSuite.rawValue)
+            }
+        }
+    }
     
     /// 执行 PQC 握手（使用完整的 HandshakeDriver 协议）
     private func performPQCHandshake(
@@ -1058,7 +1079,7 @@ public class P2PConnectionManager: ObservableObject {
             )
             
             // 保存会话密钥 + 清理握手 driver
-            sessionKeys[device.id] = keys
+            setSessionKeys(keys, for: device.id, deviceNameHint: device.name)
             handshakeDrivers.removeValue(forKey: device.id)
             
             currentHandshakeState = "握手成功 (Suite: \(keys.negotiatedSuite.rawValue))"
