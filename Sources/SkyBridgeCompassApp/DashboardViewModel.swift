@@ -305,7 +305,7 @@ final class DashboardViewModel: ObservableObject {
             .sink { [weak self] _ in self?.updateDashboardCounts() }
             .store(in: &cancellables)
 
-        // 监听连接状态（聚合：ConnectionManager + P2P（主动/被动） + 文件传输活动）
+        // 监听连接状态（聚合：ConnectionManager + P2P（主动/被动） + 文件传输活动 + 统一在线设备连接态）
         let base = Publishers.CombineLatest4(
             connectionManager.$connectionStatus,
             p2pDiscoveryService.$connectionStatus,
@@ -318,12 +318,16 @@ final class DashboardViewModel: ObservableObject {
             ConnectionPresenceService.shared.$rekeyStatusByPeerId
         )
         
-        Publishers.CombineLatest(base, presence)
+        let unified = unifiedDeviceManager.$onlineDevices
+        
+        Publishers.CombineLatest3(base, presence, unified)
             .receive(on: DispatchQueue.main)
-        .sink { [weak self] baseTuple, presenceTuple in
+        .sink { [weak self] baseTuple, presenceTuple, unifiedDevices in
                 guard let self else { return }
             let (baseStatus, p2pStatus, inboundCount, isTransferring) = baseTuple
             let (presenceConnections, rekeyStatusByPeerId) = presenceTuple
+
+            let unifiedConnected = unifiedDevices.filter { $0.connectionStatus == .connected && !$0.isLocalDevice }
 
             // Detail string for UX: show crypto + guard when present.
             if let newest = presenceConnections.sorted(by: { $0.connectedAt > $1.connectedAt }).first {
@@ -332,6 +336,11 @@ final class DashboardViewModel: ObservableObject {
                 } else {
                     self.connectionDetail = "\(newest.cryptoKind) · \(newest.suite) · 守护中"
                 }
+            } else if let newestUnified = unifiedConnected.sorted(by: { ($0.lastConnectedAt ?? .distantPast) > ($1.lastConnectedAt ?? .distantPast) }).first {
+                let kind = newestUnified.lastCryptoKind ?? "Classic"
+                let suite = newestUnified.lastCryptoSuite ?? "X25519"
+                let guardStatus = newestUnified.guardStatus ?? "守护中"
+                self.connectionDetail = "\(kind) · \(suite) · \(guardStatus)"
             } else {
                 self.connectionDetail = nil
             }
@@ -342,6 +351,10 @@ final class DashboardViewModel: ObservableObject {
                     return
                 }
             if !presenceConnections.isEmpty {
+                self.connectionStatus = .connected
+                return
+            }
+            if !unifiedConnected.isEmpty {
                 self.connectionStatus = .connected
                 return
             }
