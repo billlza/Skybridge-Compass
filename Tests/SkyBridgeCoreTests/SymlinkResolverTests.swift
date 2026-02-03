@@ -229,7 +229,7 @@ final class SymlinkResolverSecurityTests: XCTestCase {
  // Property 2: Error should be depthExceeded
         XCTAssertEqual(
             result.error,
-            .depthExceeded,
+            SymlinkResolutionResult.ResolutionError.depthExceeded,
             "Iteration \(iteration): Error should be depthExceeded"
         )
         
@@ -448,7 +448,7 @@ final class SymlinkResolverSecurityTests: XCTestCase {
         let overLimitResult = resolver.resolve(url: chainOverLimit, scanRoot: overLimitDir)
         
         XCTAssertFalse(overLimitResult.isSuccess, "Resolution over depth limit should fail")
-        XCTAssertEqual(overLimitResult.error, .depthExceeded, "Error should be depthExceeded")
+        XCTAssertEqual(overLimitResult.error, SymlinkResolutionResult.ResolutionError.depthExceeded, "Error should be depthExceeded")
     }
     
  // MARK: - Scan Root Tests

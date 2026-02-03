@@ -70,6 +70,56 @@ public struct SymlinkResolver: Sendable {
     public init(limits: SecurityLimits = .default) {
         self.limits = limits
     }
+
+    // MARK: - Test Helpers
+
+    /// Create a resolver with custom limits for unit tests.
+    ///
+    /// Note: kept `internal` so production app targets importing `SkyBridgeCore` cannot call it.
+    internal static func createForTesting(maxSymlinkDepth: Int) -> SymlinkResolver {
+        let d = SecurityLimits.default
+        let limits = SecurityLimits(
+            maxTotalFiles: d.maxTotalFiles,
+            maxTotalBytes: d.maxTotalBytes,
+            globalTimeout: d.globalTimeout,
+            maxRegexPatternLength: d.maxRegexPatternLength,
+            maxRegexPatternCount: d.maxRegexPatternCount,
+            maxRegexGroups: d.maxRegexGroups,
+            maxRegexQuantifiers: d.maxRegexQuantifiers,
+            maxRegexAlternations: d.maxRegexAlternations,
+            maxRegexLookaheads: d.maxRegexLookaheads,
+            perPatternTimeout: d.perPatternTimeout,
+            perPatternInputLimit: d.perPatternInputLimit,
+            maxTotalHistoryBytes: d.maxTotalHistoryBytes,
+            tokenBucketRate: d.tokenBucketRate,
+            tokenBucketBurst: d.tokenBucketBurst,
+            maxMessageBytes: d.maxMessageBytes,
+            decodeDepthLimit: d.decodeDepthLimit,
+            decodeArrayLengthLimit: d.decodeArrayLengthLimit,
+            decodeStringLengthLimit: d.decodeStringLengthLimit,
+            droppedMessagesThreshold: d.droppedMessagesThreshold,
+            droppedMessagesWindow: d.droppedMessagesWindow,
+            pakeRecordTTL: d.pakeRecordTTL,
+            pakeMaxRecords: d.pakeMaxRecords,
+            pakeCleanupInterval: d.pakeCleanupInterval,
+            maxSymlinkDepth: maxSymlinkDepth,
+            maxRetryCount: d.maxRetryCount,
+            maxRetryDelay: d.maxRetryDelay,
+            maxExtractedFiles: d.maxExtractedFiles,
+            maxTotalExtractedBytes: d.maxTotalExtractedBytes,
+            maxNestingDepth: d.maxNestingDepth,
+            maxCompressionRatio: d.maxCompressionRatio,
+            maxExtractionTime: d.maxExtractionTime,
+            maxBytesPerFile: d.maxBytesPerFile,
+            largeFileThreshold: d.largeFileThreshold,
+            hashTimeoutQuick: d.hashTimeoutQuick,
+            hashTimeoutStandard: d.hashTimeoutStandard,
+            hashTimeoutDeep: d.hashTimeoutDeep,
+            maxEventQueueSize: d.maxEventQueueSize,
+            maxPendingPerSubscriber: d.maxPendingPerSubscriber
+        )
+        return SymlinkResolver(limits: limits)
+    }
     
  /// Resolve a symbolic link with security checks.
  ///
@@ -242,16 +292,3 @@ public struct SymlinkResolver: Sendable {
         return resolvedPath == rootPath || resolvedPath.hasPrefix(normalizedRoot)
     }
 }
-
-// MARK: - Testing Support
-
-#if DEBUG
-extension SymlinkResolver {
- /// Create a resolver with custom limits for testing
-    public static func createForTesting(maxSymlinkDepth: Int) -> SymlinkResolver {
-        var config = SecurityLimitsConfig()
-        config.maxSymlinkDepth = maxSymlinkDepth
-        return SymlinkResolver(limits: config.toSecurityLimits())
-    }
-}
-#endif

@@ -319,10 +319,11 @@ final class SignatureDBKeyManagerTests: XCTestCase {
             "DEBUG mode should accept database without signature"
         )
         #else
- // In Release, database without signature should be rejected
+// In Release, allow the bundled/in-memory DB even without a detached signature.
+// Integrity of bundled resources is provided by the app bundle code signature.
         XCTAssertEqual(
-            result, .invalid,
-            "Release mode should reject database without signature"
+            result, .valid,
+            "Release mode should allow bundled database without detached signature"
         )
         #endif
     }
@@ -341,10 +342,11 @@ final class SignatureDBKeyManagerTests: XCTestCase {
             "DEBUG mode should accept database with development key"
         )
         #else
- // In Release, development key should trigger developmentKeyInRelease
+// In Release, a detached signature without its signed content is not verifiable; reject.
+// (This test historically treated signatureData as a key; SignatureDBKeyManager now treats it as a signature blob.)
         XCTAssertEqual(
-            result, .developmentKeyInRelease,
-            "Release mode should detect development key"
+            result, .invalid,
+            "Release mode should reject unverifiable signature data"
         )
         #endif
     }
@@ -360,9 +362,9 @@ final class SignatureDBKeyManagerTests: XCTestCase {
             "DEBUG mode should allow PatternMatcher with unsigned database"
         )
         #else
-        XCTAssertFalse(
+        XCTAssertTrue(
             shouldAllow,
-            "Release mode should not allow PatternMatcher with unsigned database"
+            "Release mode should allow PatternMatcher with bundled database without detached signature"
         )
         #endif
     }

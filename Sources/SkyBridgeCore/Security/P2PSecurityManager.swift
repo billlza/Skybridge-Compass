@@ -287,6 +287,8 @@ public class P2PSecurityManager: ObservableObject, Sendable {
     }
     
  /// 建立会话密钥
+    #if DEBUG
+    @available(*, deprecated, message: "Legacy pre-paper handshake API. Use `HandshakeDriver` / `TwoAttemptHandshakeManager` to establish `SessionKeys` instead.")
     public func establishSessionKey(with deviceId: String, publicKey: P256.KeyAgreement.PublicKey) async throws {
  // 优先使用 PQC 会话协商（旧系统通过 oqs-provider），失败时回退到经典 P256/HKDF
         if let provider = PQCProviderFactory.makeProvider() {
@@ -311,26 +313,48 @@ public class P2PSecurityManager: ObservableObject, Sendable {
         )
         sessionKeys[deviceId] = sessionKey
     }
+    #else
+    @available(*, unavailable, message: "Legacy handshake API is not available in Release builds. Use `HandshakeDriver` / `TwoAttemptHandshakeManager`.")
+    public func establishSessionKey(with deviceId: String, publicKey: P256.KeyAgreement.PublicKey) async throws {
+        fatalError("unavailable")
+    }
+    #endif
 
+    #if DEBUG
+    @available(*, deprecated, message: "Legacy pre-paper KEM API. Use `CryptoProvider` KEM APIs via the protocol handshake layer.")
     public func kemEncapsulate(deviceId: String, kemVariant: String = "ML-KEM-768") async throws -> (sharedSecret: Data, encapsulated: Data) {
         guard let provider = PQCProviderFactory.makeProvider() else { throw P2PSecurityError.authenticationFailed }
         return try await provider.kemEncapsulate(peerId: deviceId, kemVariant: kemVariant)
     }
 
+    @available(*, deprecated, message: "Legacy pre-paper KEM API. Use `CryptoProvider` KEM APIs via the protocol handshake layer.")
     public func kemDecapsulate(deviceId: String, encapsulated: Data, kemVariant: String = "ML-KEM-768") async throws -> Data {
         guard let provider = PQCProviderFactory.makeProvider() else { throw P2PSecurityError.authenticationFailed }
         return try await provider.kemDecapsulate(peerId: deviceId, encapsulated: encapsulated, kemVariant: kemVariant)
     }
 
+    @available(*, deprecated, message: "Legacy pre-paper session-key store. Use `SessionKeys` produced by the protocol handshake.")
     public func deriveAndStoreSessionKey(sharedSecret: Data, deviceId: String) {
         let info = Data("session:\(deviceId)".utf8)
         let sk = SessionTokenKit.deriveSessionKey(sharedSecret: sharedSecret, salt: Data(), info: info)
         sessionKeys[deviceId] = sk
     }
 
+    @available(*, deprecated, message: "Legacy pre-paper session-key store. Use `SessionKeys` produced by the protocol handshake.")
     public func hasSessionKey(for deviceId: String) -> Bool {
         return sessionKeys[deviceId] != nil
     }
+    #else
+    @available(*, unavailable, message: "Legacy handshake/KEM APIs are not available in Release builds. Use `HandshakeDriver` / `CryptoProvider`.")
+    public func kemEncapsulate(deviceId: String, kemVariant: String = "ML-KEM-768") async throws -> (sharedSecret: Data, encapsulated: Data) { fatalError("unavailable") }
+    @available(*, unavailable, message: "Legacy handshake/KEM APIs are not available in Release builds. Use `HandshakeDriver` / `CryptoProvider`.")
+    public func kemDecapsulate(deviceId: String, encapsulated: Data, kemVariant: String = "ML-KEM-768") async throws -> Data { fatalError("unavailable") }
+    @available(*, unavailable, message: "Legacy handshake/KEM APIs are not available in Release builds. Use `HandshakeDriver`.")
+    public func deriveAndStoreSessionKey(sharedSecret: Data, deviceId: String) { fatalError("unavailable") }
+    @available(*, unavailable, message: "Legacy handshake/KEM APIs are not available in Release builds. Use `HandshakeDriver`.")
+    public func hasSessionKey(for deviceId: String) -> Bool { fatalError("unavailable") }
+    #endif
+
 
     
     

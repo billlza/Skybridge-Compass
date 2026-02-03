@@ -499,16 +499,31 @@ public class FileTransferManager: ObservableObject {
                 transferId: transfer.id,
                 chunkIndex: chunkIndex,
                 chunkData: chunkData,
+                // Avoid cross-target helper type drift: compute SHA-256 locally.
+                chunkSha256: Data(SHA256.hash(data: chunkData)),
                 rawSize: rawSize
             )
             try await crossNetwork.sendFileTransferMessage(msg)
             
-            let ack = try await crossNetwork.waitForFileTransferAck(
-                transferId: transfer.id,
-                op: .chunkAck,
-                chunkIndex: chunkIndex,
-                timeoutSeconds: 20
-            )
+            let ack: CrossNetworkFileTransferMessage = try await { () async throws -> CrossNetworkFileTransferMessage in
+                var lastError: Error?
+                for _ in 0..<3 {
+                    do {
+                        return try await crossNetwork.waitForFileTransferAck(
+                            transferId: transfer.id,
+                            op: .chunkAck,
+                            chunkIndex: chunkIndex,
+                            timeoutSeconds: 20
+                        )
+                    } catch {
+                        lastError = error
+                        // Best-effort resend: safe because receiver writes at fixed offset.
+                        try? await crossNetwork.sendFileTransferMessage(msg)
+                    }
+                }
+                if let lastError { throw lastError }
+                throw FileTransferError.networkError("chunk ack retries exhausted")
+            }()
             
             // Use receiver-reported progress if present (more accurate than "sent").
             if let rb = ack.receivedBytes {

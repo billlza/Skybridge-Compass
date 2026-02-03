@@ -16,6 +16,7 @@ import ApplicationServices
 import ImageIO
 import ScreenCaptureKit
 import VideoToolbox
+import CryptoKit
 
 // MARK: - 基础模型：消息/事件/屏幕帧
 
@@ -119,6 +120,15 @@ private final class PeerConnection {
  /// 专用收包队列，避免和 UI/MainActor 混在一起
     let queue: DispatchQueue
 
+    // Optional: P2P v1 handshake over this TCP connection to derive SessionKeys, then AES-GCM app payload.
+    // Backward compatible: if peer never speaks handshake frames, we keep plaintext RemoteMessage JSON.
+    @available(macOS 14.0, *)
+    var handshakeDriver: HandshakeDriver?
+    @available(macOS 14.0, *)
+    var handshakePeer: PeerIdentifier?
+    @available(macOS 14.0, *)
+    var sessionKeys: SessionKeys?
+
     init(id: String, connection: NWConnection) {
         self.id = id
         self.connection = connection
@@ -126,6 +136,32 @@ private final class PeerConnection {
             label: "com.skybridge.remote.\(id)",
             qos: .userInitiated
         )
+    }
+}
+
+@available(macOS 14.0, *)
+private final class RemoteControlHandshakeTransport: DiscoveryTransport, @unchecked Sendable {
+    private let connection: NWConnection
+
+    init(connection: NWConnection) {
+        self.connection = connection
+    }
+
+    func send(to peer: PeerIdentifier, data: Data) async throws {
+        _ = peer
+        var length = UInt32(data.count).bigEndian
+        var frame = Data(bytes: &length, count: 4)
+        frame.append(data)
+
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            connection.send(content: frame, completion: .contentProcessed { error in
+                if let error {
+                    cont.resume(throwing: error)
+                } else {
+                    cont.resume()
+                }
+            })
+        }
     }
 }
 
@@ -230,6 +266,34 @@ public final class RemoteControlManager: BaseManager {
         let peer = PeerConnection(id: deviceId, connection: connection)
         peers[deviceId] = peer
 
+        // Optional: enable P2P handshake over this TCP channel (best-effort).
+        if #available(macOS 14.0, *) {
+            Task { [weak self, weak peer] in
+                guard let self, let peer else { return }
+                do {
+                    let identity = try await DeviceIdentityKeyManager.shared.getOrCreateProtocolSigningKey()
+                    let offeredSuites = ClassicCryptoProvider().supportedSuites
+                    let transport = RemoteControlHandshakeTransport(connection: peer.connection)
+                    let driver = try HandshakeDriver(
+                        transport: transport,
+                        cryptoProvider: ClassicCryptoProvider(),
+                        protocolSignatureProvider: ClassicSignatureProvider(),
+                        protocolSigningKeyHandle: identity.keyHandle,
+                        sigAAlgorithm: .ed25519,
+                        identityPublicKey: identity.publicKey,
+                        offeredSuites: offeredSuites,
+                        policy: .default,
+                        cryptoPolicy: .default
+                    )
+                    peer.handshakeDriver = driver
+                    peer.handshakePeer = PeerIdentifier(deviceId: deviceId, displayName: nil, address: nil)
+                    self.logger.info("🔐 RemoteControl P2P handshake enabled for \(deviceId, privacy: .public)")
+                } catch {
+                    self.logger.info("🔐 RemoteControl P2P handshake disabled (best-effort init failed): \(error.localizedDescription, privacy: .public)")
+                }
+            }
+        }
+
         if !connectedDevices.contains(deviceId) {
             connectedDevices.append(deviceId)
         }
@@ -267,7 +331,7 @@ public final class RemoteControlManager: BaseManager {
         let eventData = try JSONEncoder().encode(event)
         let message = RemoteMessage(type: .mouseEvent, payload: eventData)
         let payload = try JSONEncoder().encode(message)
-        try await sendFramed(payload, over: peer.connection)
+        try await sendRemoteFrame(payload, to: peer)
         logger.debug("🖱️ 发送鼠标事件 \(event.type.rawValue, privacy: .public) -> \(deviceId, privacy: .public)")
     }
 
@@ -278,7 +342,7 @@ public final class RemoteControlManager: BaseManager {
         let eventData = try JSONEncoder().encode(event)
         let message = RemoteMessage(type: .keyboardEvent, payload: eventData)
         let payload = try JSONEncoder().encode(message)
-        try await sendFramed(payload, over: peer.connection)
+        try await sendRemoteFrame(payload, to: peer)
         logger.debug("⌨️ 发送键盘事件 keyCode=\(event.keyCode) -> \(deviceId, privacy: .public)")
     }
 
@@ -321,7 +385,7 @@ public final class RemoteControlManager: BaseManager {
                     let message = RemoteMessage(type: .screenData, payload: encodedScreen)
                     let payload = try JSONEncoder().encode(message)
 
-                    try await self.sendFramed(payload, over: peer.connection)
+                    try await self.sendRemoteFrame(payload, to: peer)
                 } catch {
                     self.logger.error("❌ 发送屏幕数据失败: \(error.localizedDescription, privacy: .public)")
                 }
@@ -381,7 +445,13 @@ public final class RemoteControlManager: BaseManager {
                         let messageData = buffer.subdata(in: 4 ..< 4 + length)
                         buffer.removeFirst(4 + length)
 
-                        try await self.handleScreenMessagePayload(messageData)
+                        let plain: Data
+                        if #available(macOS 14.0, *), let keys = peer.sessionKeys {
+                            plain = try self.decryptRemotePayload(messageData, with: keys)
+                        } else {
+                            plain = messageData
+                        }
+                        try await self.handleScreenMessagePayload(plain)
                     }
                 } catch {
                     await self.handleConnectionClosed(peerId: peer.id, error: error)
@@ -481,13 +551,39 @@ public final class RemoteControlManager: BaseManager {
                         let messageData = buffer.subdata(in: 4 ..< 4 + length)
                         buffer.removeFirst(4 + length)
 
-                        try await self.handleControlMessagePayload(messageData)
+                        try await self.handleInboundRemoteFrame(from: peer, frame: messageData)
                     }
                 } catch {
                     await self.handleConnectionClosed(peerId: peer.id, error: error)
                     break
                 }
             }
+        }
+    }
+
+    private func handleInboundRemoteFrame(from peer: PeerConnection, frame: Data) async throws {
+        // If handshake established, frames become AES-GCM ciphertext of RemoteMessage JSON.
+        if #available(macOS 14.0, *), let keys = peer.sessionKeys {
+            let plain = try decryptRemotePayload(frame, with: keys)
+            try await handleControlMessagePayload(plain)
+            return
+        }
+
+        // Best-effort: try JSON first (legacy), otherwise treat as handshake bytes if enabled.
+        if let _ = try? JSONDecoder().decode(RemoteMessage.self, from: frame) {
+            try await handleControlMessagePayload(frame)
+            return
+        }
+
+        if #available(macOS 14.0, *), let driver = peer.handshakeDriver, let hPeer = peer.handshakePeer {
+            await driver.handleMessage(frame, from: hPeer)
+            let st = await driver.getCurrentState()
+            if case .established(let keys) = st {
+                peer.sessionKeys = keys
+                peer.handshakeDriver = nil
+                self.logger.info("🔐 RemoteControl handshake established for \(peer.id, privacy: .public)")
+            }
+            return
         }
     }
 
@@ -505,6 +601,27 @@ public final class RemoteControlManager: BaseManager {
  // 正常情况下，被控制端不会收到 screenData；有就丢掉
             logger.debug("🎮 被控制端收到 screenData，忽略")
         }
+    }
+
+    private func sendRemoteFrame(_ plaintext: Data, to peer: PeerConnection) async throws {
+        if #available(macOS 14.0, *), let keys = peer.sessionKeys {
+            let enc = try encryptRemotePayload(plaintext, with: keys)
+            try await sendFramed(enc, over: peer.connection)
+        } else {
+            try await sendFramed(plaintext, over: peer.connection)
+        }
+    }
+
+    private func encryptRemotePayload(_ plaintext: Data, with keys: SessionKeys) throws -> Data {
+        let key = SymmetricKey(data: keys.sendKey)
+        let sealed = try AES.GCM.seal(plaintext, using: key)
+        return sealed.combined ?? Data()
+    }
+
+    private func decryptRemotePayload(_ ciphertext: Data, with keys: SessionKeys) throws -> Data {
+        let key = SymmetricKey(data: keys.receiveKey)
+        let box = try AES.GCM.SealedBox(combined: ciphertext)
+        return try AES.GCM.open(box, using: key)
     }
 
     private func handleRemoteMouseEvent(_ event: RemoteMouseEvent) async {

@@ -6,53 +6,23 @@ import PackageDescription
 import Foundation
 
 // Build-time gate for Apple CryptoKit PQC types (iOS 26+).
-// See root Package.swift for rationale.
-func shouldEnableApplePQCSDK() -> Bool {
-    if ProcessInfo.processInfo.environment["SKYBRIDGE_ENABLE_APPLE_PQC_SDK"] == "1" { return true }
-    let hints: [String] = [
-        ProcessInfo.processInfo.environment["SDKROOT"] ?? "",
-        ProcessInfo.processInfo.environment["SDK_NAME"] ?? "",
-        ProcessInfo.processInfo.environment["PLATFORM_NAME"] ?? "",
-        ProcessInfo.processInfo.environment["TARGET_TRIPLE"] ?? "",
-        ProcessInfo.processInfo.environment["SWIFT_TARGET_TRIPLE"] ?? "",
-        ProcessInfo.processInfo.environment["LLVM_TARGET_TRIPLE"] ?? ""
-    ]
-    let joined = hints.joined(separator: " ").lowercased()
-    if joined.contains("iphoneos26") { return true }
-    if joined.contains("iphonesimulator26") { return true }
-    if joined.contains("macosx26") { return true } // for shared builds
-    
-    // Fallback: query installed SDK versions via xcrun.
-    func sdkMajorVersion(_ sdk: String) -> Int? {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
-        proc.arguments = ["--sdk", sdk, "--show-sdk-version"]
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        proc.standardError = Pipe()
-        do {
-            try proc.run()
-        } catch {
-            return nil
-        }
-        proc.waitUntilExit()
-        guard proc.terminationStatus == 0 else { return nil }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        guard let raw = String(data: data, encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-              let first = raw.split(separator: ".").first,
-              let major = Int(first) else { return nil }
-        return major
-    }
-    
-    if let major = sdkMajorVersion("iphoneos"), major >= 26 { return true }
-    if let major = sdkMajorVersion("iphonesimulator"), major >= 26 { return true }
-    if let major = sdkMajorVersion("macosx"), major >= 26 { return true } // shared builds
-    
+//
+// Important: SwiftPM manifests are commonly evaluated in a restricted sandbox under Xcode,
+// where executing external processes (e.g. `xcrun`) and relying on build env vars can be unreliable.
+//
+// Instead, we gate PQC compilation on the toolchain Swift version:
+// - Xcode 26.x ships Swift 6.2+ and the iOS 26 SDK with CryptoKit PQC types (MLKEM/MLDSA).
+// - Older Xcode versions won't satisfy this and will compile without PQC support.
+//
+// Manual override (rare): set SKYBRIDGE_FORCE_DISABLE_APPLE_PQC_SDK=1 to force classic-only compilation.
+let enableApplePQCSDK: Bool = {
+    if ProcessInfo.processInfo.environment["SKYBRIDGE_FORCE_DISABLE_APPLE_PQC_SDK"] == "1" { return false }
+    #if swift(>=6.2)
+    return true
+    #else
     return false
-}
-
-let enableApplePQCSDK: Bool = shouldEnableApplePQCSDK()
+    #endif
+}()
 
 let package = Package(
     name: "SkyBridgeCompassiOS",

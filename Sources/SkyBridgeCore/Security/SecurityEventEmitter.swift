@@ -64,6 +64,18 @@ public actor SecurityEventEmitter {
         self.maxQueueSize = maxQueueSize
         self.maxPendingPerSubscriber = maxPendingPerSubscriber
     }
+
+    // MARK: - Test Helpers
+
+    /// Create an emitter instance for unit tests with custom queue limits.
+    ///
+    /// Note: kept `internal` so production app targets importing `SkyBridgeCore` cannot call it.
+    nonisolated internal static func createForTesting(
+        maxQueueSize: Int = SecurityLimits.default.maxEventQueueSize,
+        maxPendingPerSubscriber: Int = SecurityLimits.default.maxPendingPerSubscriber
+    ) -> SecurityEventEmitter {
+        SecurityEventEmitter(maxQueueSize: maxQueueSize, maxPendingPerSubscriber: maxPendingPerSubscriber)
+    }
     
  // MARK: - Public API
     
@@ -167,6 +179,15 @@ public actor SecurityEventEmitter {
  /// Get subscriber count (for monitoring/testing)
     public var subscriberCount: Int {
         subscribers.count
+    }
+
+    /// Reset emitter state for unit tests (clears queue, subscribers, and overflow counters).
+    internal func resetForTesting() {
+        queuedEvents.removeAll()
+        subscribers.removeAll()
+        droppedSinceLastMetaEvent = 0
+        lastOverflowMetaEventTime = nil
+        Self.hasSubscribersFlag.store(false, ordering: .relaxed)
     }
 
     
@@ -355,17 +376,6 @@ internal actor SubscriberActor {
 
 #if DEBUG
 extension SecurityEventEmitter {
- /// Create a test instance with custom limits
-    public static func createForTesting(
-        maxQueueSize: Int = 100,
-        maxPendingPerSubscriber: Int = 50
-    ) -> SecurityEventEmitter {
-        SecurityEventEmitter(
-            maxQueueSize: maxQueueSize,
-            maxPendingPerSubscriber: maxPendingPerSubscriber
-        )
-    }
-    
  /// Reset the shared instance state (for testing)
     public func resetForTesting() async {
         clearQueue()

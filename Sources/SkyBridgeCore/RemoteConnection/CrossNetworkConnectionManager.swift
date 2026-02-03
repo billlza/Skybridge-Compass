@@ -687,6 +687,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 
             var sentBytes: Int64 = 0
             var chunkIndex = 0
+            var fileHasher = SHA256()
 
             while sentBytes < fileSize {
                 let remaining = Int(fileSize - sentBytes)
@@ -697,22 +698,37 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 let data = handle.readData(ofLength: readLen)
                 if data.isEmpty { break }
 
+                fileHasher.update(data: data)
                 let msg = CrossNetworkFileTransferMessage(
                     op: .chunk,
                     transferId: transferId,
                     chunkIndex: chunkIndex,
                     chunkData: data,
+                    chunkSha256: CrossNetworkCrypto.sha256(data),
                     rawSize: data.count
                 )
                 try sendFileTransferMessage(sessionID: sessionID, session: session, keys: keys, message: msg)
 
-                let ack = try await waitForFileTransferMessage(
-                    sessionID: sessionID,
-                    transferId: transferId,
-                    op: .chunkAck,
-                    chunkIndex: chunkIndex,
-                    timeoutSeconds: 30
-                )
+                let ack: CrossNetworkFileTransferMessage = try await {
+                    () async throws -> CrossNetworkFileTransferMessage in
+                    var lastError: Error?
+                    for _ in 0..<3 {
+                        do {
+                            return try await waitForFileTransferMessage(
+                                sessionID: sessionID,
+                                transferId: transferId,
+                                op: .chunkAck,
+                                chunkIndex: chunkIndex,
+                                timeoutSeconds: 30
+                            )
+                        } catch {
+                            lastError = error
+                            // Best-effort resend: safe because receiver writes at fixed offset.
+                            try? sendFileTransferMessage(sessionID: sessionID, session: session, keys: keys, message: msg)
+                        }
+                    }
+                    throw lastError ?? WebRTCFileTransferWaitError.timeout
+                }()
 
                 if ack.op == .error {
                     throw WebRTCFileTransferWaitError.failed(ack.message ?? "remote error")
@@ -728,7 +744,13 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 )
             }
 
-            let done = CrossNetworkFileTransferMessage(op: .complete, transferId: transferId)
+            let fileSha = Data(fileHasher.finalize())
+            let done = CrossNetworkFileTransferMessage(
+                op: .complete,
+                transferId: transferId,
+                receivedBytes: fileSize,
+                fileSha256: fileSha
+            )
             try sendFileTransferMessage(sessionID: sessionID, session: session, keys: keys, message: done)
             _ = try await waitForFileTransferMessage(sessionID: sessionID, transferId: transferId, op: .completeAck, timeoutSeconds: 30)
 
@@ -903,8 +925,15 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             let finalURL: URL
             let handle: FileHandle
             var receivedBytes: Int64
+            var completeRequestedAt: Date? = nil
+            var expectedFileSha256: Data? = nil
+            var expectedMerkleRoot: Data? = nil
+            var expectedMerkleSig: Data? = nil
+            var expectedMerkleSigAlg: String? = nil
+            var chunkHashes: [Int: Data] = [:]
         }
         var inboundFileTransfers: [String: InboundFileTransferState] = [:]
+        var inboundFileTransferCompleteTimers: [String: Task<Void, Never>] = [:]
 
         func sanitizeFileName(_ name: String) -> String {
             let last = (name as NSString).lastPathComponent
@@ -931,6 +960,20 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 idx += 1
             }
             return candidate
+        }
+
+        func sha256File(at url: URL) -> Data? {
+            guard #available(macOS 10.15, iOS 13.0, *) else { return nil }
+            guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+            defer { try? handle.close() }
+
+            var hasher = SHA256()
+            while true {
+                let chunk = handle.readData(ofLength: 256 * 1024)
+                if chunk.isEmpty { break }
+                hasher.update(data: chunk)
+            }
+            return Data(hasher.finalize())
         }
 
         func ensureAccessibilityPermission() -> Bool {
@@ -1067,6 +1110,16 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                         } else if let ft = try? JSONDecoder().decode(CrossNetworkFileTransferMessage.self, from: plaintext), ft.version == 1 {
                             switch ft.op {
                             case .metadata:
+                                // Idempotent: allow re-sending metadata for the same transferId (resume).
+                                if inboundFileTransfers[ft.transferId] != nil {
+                                    let ack = CrossNetworkFileTransferMessage(op: .metadataAck, transferId: ft.transferId)
+                                    let outPlain = try JSONEncoder().encode(ack)
+                                    let outCipher = try encryptAppPayload(outPlain, with: keys)
+                                    let outPadded = TrafficPadding.wrapIfEnabled(outCipher, label: "tx/webrtc-ft-metaAck")
+                                    try await sendFramed(outPadded)
+                                    break
+                                }
+
                                 guard
                                     let fileName = ft.fileName,
                                     let fileSize = ft.fileSize,
@@ -1146,12 +1199,167 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                                     break
                                 }
 
+                                if let expected = ft.chunkSha256, let actual = CrossNetworkCrypto.sha256(data), actual != expected {
+                                    // Backward compatible: only enforce if hash provided.
+                                    // Don't ACK corrupted chunk; sender will timeout/retry as appropriate.
+                                    let err = CrossNetworkFileTransferMessage(
+                                        op: .error,
+                                        transferId: ft.transferId,
+                                        chunkIndex: idx,
+                                        message: "chunk hash mismatch"
+                                    )
+                                    let outPlain = try JSONEncoder().encode(err)
+                                    let outCipher = try encryptAppPayload(outPlain, with: keys)
+                                    let outPadded = TrafficPadding.wrapIfEnabled(outCipher, label: "tx/webrtc-ft-error")
+                                    try await sendFramed(outPadded)
+                                    break
+                                }
+
+                                // Track actual chunk hashes for optional Merkle verification.
+                                st.chunkHashes[idx] = CrossNetworkCrypto.sha256(data)
+
                                 let rawSize = ft.rawSize ?? data.count
                                 let offset = Int64(idx) * Int64(st.chunkSize)
                                 try st.handle.seek(toOffset: UInt64(max(0, offset)))
                                 try st.handle.write(contentsOf: data)
 
                                 st.receivedBytes = min(st.fileSize, max(st.receivedBytes, offset + Int64(rawSize)))
+                                // If complete was already requested earlier, finalize once we have enough.
+                                if st.completeRequestedAt != nil && st.receivedBytes >= st.fileSize {
+                                    // Close + move temp -> final + ACK complete, matching old behavior but delayed.
+                                    do { try st.handle.close() } catch {}
+                                    do {
+                                        if let expectedMerkle = st.expectedMerkleRoot {
+                                            let leaves: [Data] = (0..<st.totalChunks).compactMap { st.chunkHashes[$0] }
+                                            if leaves.count != st.totalChunks || CrossNetworkMerkle.root(leaves: leaves) != expectedMerkle {
+                                                await MainActor.run {
+                                                    FileTransferManager.shared.failExternalTransfer(
+                                                        transferId: st.transferId,
+                                                        errorMessage: "merkle root mismatch"
+                                                    )
+                                                }
+                                                inboundFileTransfers.removeValue(forKey: st.transferId)
+                                                inboundFileTransferCompleteTimers[st.transferId]?.cancel()
+                                                inboundFileTransferCompleteTimers.removeValue(forKey: st.transferId)
+                                                try? FileManager.default.removeItem(at: st.tempURL)
+                                                let err = CrossNetworkFileTransferMessage(
+                                                    op: .error,
+                                                    transferId: st.transferId,
+                                                    message: "merkle root mismatch"
+                                                )
+                                                let outPlain = try JSONEncoder().encode(err)
+                                                let outCipher = try encryptAppPayload(outPlain, with: keys)
+                                                let outPadded = TrafficPadding.wrapIfEnabled(outCipher, label: "tx/webrtc-ft-error")
+                                                try await sendFramed(outPadded)
+                                                break
+                                            }
+
+                                            if let sig = st.expectedMerkleSig {
+                                                if st.expectedMerkleSigAlg != CrossNetworkMerkleAuth.signatureAlgV1 {
+                                                    await MainActor.run {
+                                                        FileTransferManager.shared.failExternalTransfer(
+                                                            transferId: st.transferId,
+                                                            errorMessage: "unknown merkle sig alg"
+                                                        )
+                                                    }
+                                                    inboundFileTransfers.removeValue(forKey: st.transferId)
+                                                    inboundFileTransferCompleteTimers[st.transferId]?.cancel()
+                                                    inboundFileTransferCompleteTimers.removeValue(forKey: st.transferId)
+                                                    try? FileManager.default.removeItem(at: st.tempURL)
+                                                    let err = CrossNetworkFileTransferMessage(
+                                                        op: .error,
+                                                        transferId: st.transferId,
+                                                        message: "unknown merkle sig alg"
+                                                    )
+                                                    let outPlain = try JSONEncoder().encode(err)
+                                                    let outCipher = try encryptAppPayload(outPlain, with: keys)
+                                                    let outPadded = TrafficPadding.wrapIfEnabled(outCipher, label: "tx/webrtc-ft-error")
+                                                    try await sendFramed(outPadded)
+                                                    break
+                                                }
+                                                let pre = CrossNetworkMerkleAuth.preimage(
+                                                    transferId: st.transferId,
+                                                    merkleRoot: expectedMerkle,
+                                                    fileSha256: st.expectedFileSha256
+                                                )
+                                                let expectSig = CrossNetworkMerkleAuth.hmacSha256(key: keys.receiveKey, data: pre)
+                                                if sig != expectSig {
+                                                    await MainActor.run {
+                                                        FileTransferManager.shared.failExternalTransfer(
+                                                            transferId: st.transferId,
+                                                            errorMessage: "merkle signature mismatch"
+                                                        )
+                                                    }
+                                                    inboundFileTransfers.removeValue(forKey: st.transferId)
+                                                    inboundFileTransferCompleteTimers[st.transferId]?.cancel()
+                                                    inboundFileTransferCompleteTimers.removeValue(forKey: st.transferId)
+                                                    try? FileManager.default.removeItem(at: st.tempURL)
+                                                    let err = CrossNetworkFileTransferMessage(
+                                                        op: .error,
+                                                        transferId: st.transferId,
+                                                        message: "merkle signature mismatch"
+                                                    )
+                                                    let outPlain = try JSONEncoder().encode(err)
+                                                    let outCipher = try encryptAppPayload(outPlain, with: keys)
+                                                    let outPadded = TrafficPadding.wrapIfEnabled(outCipher, label: "tx/webrtc-ft-error")
+                                                    try await sendFramed(outPadded)
+                                                    break
+                                                }
+                                            }
+                                        }
+
+                                        if let expected = st.expectedFileSha256, let actual = sha256File(at: st.tempURL), actual != expected {
+                                            await MainActor.run {
+                                                FileTransferManager.shared.failExternalTransfer(
+                                                    transferId: st.transferId,
+                                                    errorMessage: "file sha256 mismatch"
+                                                )
+                                            }
+                                            inboundFileTransfers.removeValue(forKey: st.transferId)
+                                            inboundFileTransferCompleteTimers[st.transferId]?.cancel()
+                                            inboundFileTransferCompleteTimers.removeValue(forKey: st.transferId)
+                                            try? FileManager.default.removeItem(at: st.tempURL)
+
+                                            let err = CrossNetworkFileTransferMessage(
+                                                op: .error,
+                                                transferId: st.transferId,
+                                                message: "file sha256 mismatch"
+                                            )
+                                            let outPlain = try JSONEncoder().encode(err)
+                                            let outCipher = try encryptAppPayload(outPlain, with: keys)
+                                            let outPadded = TrafficPadding.wrapIfEnabled(outCipher, label: "tx/webrtc-ft-error")
+                                            try await sendFramed(outPadded)
+                                            break
+                                        }
+                                        if FileManager.default.fileExists(atPath: st.finalURL.path) {
+                                            try? FileManager.default.removeItem(at: st.finalURL)
+                                        }
+                                        try FileManager.default.moveItem(at: st.tempURL, to: st.finalURL)
+                                        await MainActor.run {
+                                            FileTransferManager.shared.completeExternalInboundTransfer(
+                                                transferId: st.transferId,
+                                                savedTo: st.finalURL
+                                            )
+                                        }
+                                        inboundFileTransfers.removeValue(forKey: st.transferId)
+                                        inboundFileTransferCompleteTimers[st.transferId]?.cancel()
+                                        inboundFileTransferCompleteTimers.removeValue(forKey: st.transferId)
+                                        let ack = CrossNetworkFileTransferMessage(op: .completeAck, transferId: st.transferId)
+                                        let outPlain = try JSONEncoder().encode(ack)
+                                        let outCipher = try encryptAppPayload(outPlain, with: keys)
+                                        let outPadded = TrafficPadding.wrapIfEnabled(outCipher, label: "tx/webrtc-ft-completeAck")
+                                        try await sendFramed(outPadded)
+                                        break
+                                    } catch {
+                                        await MainActor.run {
+                                            FileTransferManager.shared.failExternalTransfer(
+                                                transferId: st.transferId,
+                                                errorMessage: "Save failed: \(error.localizedDescription)"
+                                            )
+                                        }
+                                        inboundFileTransfers.removeValue(forKey: st.transferId)
+                                    }
+                                }
                                 inboundFileTransfers[ft.transferId] = st
 
                                 await MainActor.run {
@@ -1173,36 +1381,160 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                                 try await sendFramed(outPadded)
 
                             case .complete:
-                                guard let st = inboundFileTransfers[ft.transferId] else { break }
+                                guard var st = inboundFileTransfers[ft.transferId] else { break }
 
-                                do {
-                                    try st.handle.close()
-                                } catch {
-                                    // ignore close error
-                                }
+                                // Capture expected full-file hash (optional, backward compatible).
+                                if st.expectedFileSha256 == nil { st.expectedFileSha256 = ft.fileSha256 }
+                                if st.expectedMerkleRoot == nil { st.expectedMerkleRoot = ft.merkleRoot }
+                                if st.expectedMerkleSig == nil { st.expectedMerkleSig = ft.merkleRootSignature }
+                                if st.expectedMerkleSigAlg == nil { st.expectedMerkleSigAlg = ft.merkleRootSignatureAlg }
 
                                 if st.receivedBytes < st.fileSize {
-                                    await MainActor.run {
-                                        FileTransferManager.shared.failExternalTransfer(
+                                    // Optional NACK: request missing chunks (backward compatible).
+                                    let missing = (0..<st.totalChunks).filter { st.chunkHashes[$0] == nil }
+                                    if !missing.isEmpty {
+                                        let nack = CrossNetworkFileTransferMessage(
+                                            op: .chunkAck,
                                             transferId: st.transferId,
-                                            errorMessage: "Incomplete file: \(st.receivedBytes)/\(st.fileSize)"
+                                            missingChunks: missing.prefix(512).map { Int($0) },
+                                            message: "missingChunks"
                                         )
+                                        let outPlain = try JSONEncoder().encode(nack)
+                                        let outCipher = try encryptAppPayload(outPlain, with: keys)
+                                        let outPadded = TrafficPadding.wrapIfEnabled(outCipher, label: "tx/webrtc-ft-missingChunks")
+                                        try await sendFramed(outPadded)
                                     }
-                                    inboundFileTransfers.removeValue(forKey: st.transferId)
-                                    let err = CrossNetworkFileTransferMessage(
-                                        op: .error,
-                                        transferId: st.transferId,
-                                        message: "Incomplete file"
-                                    )
-                                    let outPlain = try JSONEncoder().encode(err)
-                                    let outCipher = try encryptAppPayload(outPlain, with: keys)
-                                    let outPadded = TrafficPadding.wrapIfEnabled(outCipher, label: "tx/webrtc-ft-error")
-                                    try await sendFramed(outPadded)
+
+                                    // Don't fail immediately; mark complete requested and wait for retransmits.
+                                    if st.completeRequestedAt == nil { st.completeRequestedAt = Date() }
+                                    inboundFileTransfers[st.transferId] = st
+                                    if inboundFileTransferCompleteTimers[st.transferId] == nil {
+                                        inboundFileTransferCompleteTimers[st.transferId] = Task {
+                                            try? await Task.sleep(nanoseconds: 10_000_000_000)
+                                            if let cur = inboundFileTransfers[st.transferId], cur.receivedBytes < cur.fileSize {
+                                                do { try cur.handle.close() } catch {}
+                                                try? FileManager.default.removeItem(at: cur.tempURL)
+                                                await MainActor.run {
+                                                    FileTransferManager.shared.failExternalTransfer(
+                                                        transferId: cur.transferId,
+                                                        errorMessage: "Incomplete file (timeout): \(cur.receivedBytes)/\(cur.fileSize)"
+                                                    )
+                                                }
+                                                inboundFileTransfers.removeValue(forKey: cur.transferId)
+                                                inboundFileTransferCompleteTimers[cur.transferId]?.cancel()
+                                                inboundFileTransferCompleteTimers.removeValue(forKey: cur.transferId)
+                                            }
+                                        }
+                                    }
                                     break
                                 }
 
+                                do { try st.handle.close() } catch {}
+
                                 // Move temp -> final
                                 do {
+                                    if let expectedMerkle = st.expectedMerkleRoot {
+                                        let leaves: [Data] = (0..<st.totalChunks).compactMap { st.chunkHashes[$0] }
+                                        if leaves.count != st.totalChunks || CrossNetworkMerkle.root(leaves: leaves) != expectedMerkle {
+                                            await MainActor.run {
+                                                FileTransferManager.shared.failExternalTransfer(
+                                                    transferId: st.transferId,
+                                                    errorMessage: "merkle root mismatch"
+                                                )
+                                            }
+                                            inboundFileTransfers.removeValue(forKey: st.transferId)
+                                            inboundFileTransferCompleteTimers[st.transferId]?.cancel()
+                                            inboundFileTransferCompleteTimers.removeValue(forKey: st.transferId)
+                                            try? FileManager.default.removeItem(at: st.tempURL)
+                                            let err = CrossNetworkFileTransferMessage(
+                                                op: .error,
+                                                transferId: st.transferId,
+                                                message: "merkle root mismatch"
+                                            )
+                                            let outPlain = try JSONEncoder().encode(err)
+                                            let outCipher = try encryptAppPayload(outPlain, with: keys)
+                                            let outPadded = TrafficPadding.wrapIfEnabled(outCipher, label: "tx/webrtc-ft-error")
+                                            try await sendFramed(outPadded)
+                                            break
+                                        }
+
+                                        if let sig = st.expectedMerkleSig {
+                                            if st.expectedMerkleSigAlg != CrossNetworkMerkleAuth.signatureAlgV1 {
+                                                await MainActor.run {
+                                                    FileTransferManager.shared.failExternalTransfer(
+                                                        transferId: st.transferId,
+                                                        errorMessage: "unknown merkle sig alg"
+                                                    )
+                                                }
+                                                inboundFileTransfers.removeValue(forKey: st.transferId)
+                                                inboundFileTransferCompleteTimers[st.transferId]?.cancel()
+                                                inboundFileTransferCompleteTimers.removeValue(forKey: st.transferId)
+                                                try? FileManager.default.removeItem(at: st.tempURL)
+                                                let err = CrossNetworkFileTransferMessage(
+                                                    op: .error,
+                                                    transferId: st.transferId,
+                                                    message: "unknown merkle sig alg"
+                                                )
+                                                let outPlain = try JSONEncoder().encode(err)
+                                                let outCipher = try encryptAppPayload(outPlain, with: keys)
+                                                let outPadded = TrafficPadding.wrapIfEnabled(outCipher, label: "tx/webrtc-ft-error")
+                                                try await sendFramed(outPadded)
+                                                break
+                                            }
+                                            let pre = CrossNetworkMerkleAuth.preimage(
+                                                transferId: st.transferId,
+                                                merkleRoot: expectedMerkle,
+                                                fileSha256: st.expectedFileSha256
+                                            )
+                                            let expectSig = CrossNetworkMerkleAuth.hmacSha256(key: keys.receiveKey, data: pre)
+                                            if sig != expectSig {
+                                                await MainActor.run {
+                                                    FileTransferManager.shared.failExternalTransfer(
+                                                        transferId: st.transferId,
+                                                        errorMessage: "merkle signature mismatch"
+                                                    )
+                                                }
+                                                inboundFileTransfers.removeValue(forKey: st.transferId)
+                                                inboundFileTransferCompleteTimers[st.transferId]?.cancel()
+                                                inboundFileTransferCompleteTimers.removeValue(forKey: st.transferId)
+                                                try? FileManager.default.removeItem(at: st.tempURL)
+                                                let err = CrossNetworkFileTransferMessage(
+                                                    op: .error,
+                                                    transferId: st.transferId,
+                                                    message: "merkle signature mismatch"
+                                                )
+                                                let outPlain = try JSONEncoder().encode(err)
+                                                let outCipher = try encryptAppPayload(outPlain, with: keys)
+                                                let outPadded = TrafficPadding.wrapIfEnabled(outCipher, label: "tx/webrtc-ft-error")
+                                                try await sendFramed(outPadded)
+                                                break
+                                            }
+                                        }
+                                    }
+
+                                    if let expected = st.expectedFileSha256, let actual = sha256File(at: st.tempURL), actual != expected {
+                                        await MainActor.run {
+                                            FileTransferManager.shared.failExternalTransfer(
+                                                transferId: st.transferId,
+                                                errorMessage: "file sha256 mismatch"
+                                            )
+                                        }
+                                        inboundFileTransfers.removeValue(forKey: st.transferId)
+                                        inboundFileTransferCompleteTimers[st.transferId]?.cancel()
+                                        inboundFileTransferCompleteTimers.removeValue(forKey: st.transferId)
+                                        try? FileManager.default.removeItem(at: st.tempURL)
+
+                                        let err = CrossNetworkFileTransferMessage(
+                                            op: .error,
+                                            transferId: st.transferId,
+                                            message: "file sha256 mismatch"
+                                        )
+                                        let outPlain = try JSONEncoder().encode(err)
+                                        let outCipher = try encryptAppPayload(outPlain, with: keys)
+                                        let outPadded = TrafficPadding.wrapIfEnabled(outCipher, label: "tx/webrtc-ft-error")
+                                        try await sendFramed(outPadded)
+                                        break
+                                    }
                                     if FileManager.default.fileExists(atPath: st.finalURL.path) {
                                         try? FileManager.default.removeItem(at: st.finalURL)
                                     }
@@ -1234,6 +1566,8 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                                     )
                                 }
                                 inboundFileTransfers.removeValue(forKey: st.transferId)
+                                inboundFileTransferCompleteTimers[st.transferId]?.cancel()
+                                inboundFileTransferCompleteTimers.removeValue(forKey: st.transferId)
 
                                 let ack = CrossNetworkFileTransferMessage(op: .completeAck, transferId: st.transferId)
                                 let outPlain = try JSONEncoder().encode(ack)

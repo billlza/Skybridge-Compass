@@ -10,6 +10,18 @@ import os
 
 
 /// 量子安全P2P网络管理器 - 使用Apple 2025年最佳实践
+///
+/// ⚠️ Legacy prototype / experimental path (pre-paper alignment).
+/// This implementation does NOT implement the paper's handshake contract
+/// (TwoAttemptHandshakeManager + transcript binding + Finished frames + downgrade audit).
+///
+/// To prevent accidental drift, this type is made unavailable in Release builds.
+#if !DEBUG
+@available(*, unavailable, message: "Legacy/experimental prototype is not available in Release builds. Use the paper-aligned `HandshakeDriver` + `TwoAttemptHandshakeManager` stack.")
+@MainActor
+public class QuantumSecureP2PNetwork: BaseManager {
+}
+#else
 @MainActor
 public class QuantumSecureP2PNetwork: BaseManager {
 
@@ -688,6 +700,7 @@ public class QuantumSecureP2PNetwork: BaseManager {
         }
     }
 }
+#endif
 
 // MARK: - 数据模型
 

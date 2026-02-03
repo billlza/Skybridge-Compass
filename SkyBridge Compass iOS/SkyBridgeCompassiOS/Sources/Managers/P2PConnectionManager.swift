@@ -156,7 +156,11 @@ public class P2PConnectionManager: ObservableObject {
         if cap.hasApplePQC || cap.hasLiboqs {
             return .requirePQC
         }
-        SkyBridgeLogger.shared.warning("⚠️ 本机/编译不具备 PQC Provider（hasApplePQC=\(cap.hasApplePQC), hasLiboqs=\(cap.hasLiboqs)）。无法满足 strictPQC(requirePQC)，将回退到 preferPQC（classic）以保持可连接性。若需严格 PQC，请使用 iOS 26+ 且启用 HAS_APPLE_PQC_SDK 编译条件。")
+        SkyBridgeLogger.shared.warning(
+            "⚠️ 本机运行在 iOS 26+ 也可能出现 Classic：当前构建未启用 Apple PQC 编译开关或自检失败（hasApplePQC=\(cap.hasApplePQC), hasLiboqs=\(cap.hasLiboqs)）。" +
+            "无法满足 strictPQC(requirePQC)，将回退到 preferPQC（classic）以保持可连接性。" +
+            "要启用原生 PQC：请使用 Xcode 26+ / iOS 26 SDK 编译，并确保 Package.swift 开启 HAS_APPLE_PQC_SDK。"
+        )
         return .preferPQC
     }
     
@@ -343,7 +347,21 @@ public class P2PConnectionManager: ObservableObject {
                TrustedDeviceStore.shared.isTrusted(deviceId: device.id) {
                 
                 SkyBridgeLogger.shared.warning("🧩 strictPQC bootstrap: trusted peer but missing KEM key (suite=\(suite)). Performing one-time Classic bootstrap to provision trust, then rekey to PQC.")
-                print("[SecurityEvent] legacyBootstrap: reason=missingPeerKEMPublicKey suite=\(suite) peer=\(device.id)")
+                SecurityEventEmitter.emitDetached(SecurityEvent(
+                    type: .legacyBootstrap,
+                    severity: .warning,
+                    message: "strictPQC bootstrap: missing peer KEM public key; establishing one-time Classic channel to provision KEM keys then rekey to PQC",
+                    context: [
+                        "reason": "missingPeerKEMPublicKey",
+                        "suite": suite,
+                        "peer": device.id,
+                        // Paper terminology alignment:
+                        "downgradeResistance": "policy_gate+no_timeout_fallback+rate_limited",
+                        "policyInTranscript": "1",
+                        "transcriptBinding": "1",
+                        "policyRequirePQC": "1"
+                    ]
+                ))
                 
                 do {
                     // 1) Establish a Classic session (authenticated by protocol signatures) solely for provisioning.
