@@ -24,18 +24,21 @@ APP_NAME="SkyBridge Compass Pro"
 BUNDLE_ID="com.skybridge.compass.pro"
 DMG_NAME="SkyBridgeCompassPro"
 VOLUME_NAME="SkyBridge Compass Pro"
-# 自动从 Info.plist 读取版本号，避免手动同步
-INFO_PLIST_PATH="$PROJECT_ROOT/Sources/SkyBridgeCompassApp/Info.plist"
-VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$INFO_PLIST_PATH" 2>/dev/null || echo "0.0.0")"
 
 # 目录
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+# 自动从 Info.plist 读取版本号，避免手动同步
+INFO_PLIST_PATH="$PROJECT_ROOT/Sources/SkyBridgeCompassApp/Info.plist"
+VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$INFO_PLIST_PATH" 2>/dev/null || echo "0.0.0")"
 BUILD_DIR="$PROJECT_ROOT/.build/release"
 DIST_DIR="$PROJECT_ROOT/dist"
 APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
 DMG_PATH="$DIST_DIR/${DMG_NAME}-${VERSION}.dmg"
 TEMP_DMG="$DIST_DIR/temp_${DMG_NAME}.dmg"
+STAGE_DIR="$DIST_DIR/dmg_stage"
+BG_SRC_PNG="$PROJECT_ROOT/Sources/SkyBridgeCompassApp/Resources/AppIcon.png"
+BG_NAME="background.png"
 
 # 签名身份（可通过参数覆盖）
 SIGNING_IDENTITY="${SIGNING_IDENTITY:-}"
@@ -43,6 +46,7 @@ SIGNING_IDENTITY="${SIGNING_IDENTITY:-}"
 # 选项
 SKIP_BUILD=false
 SKIP_SIGN=false
+USE_EXISTING_APP=false
 
 # ============================================================================
 # 参数解析
@@ -58,6 +62,10 @@ while [[ $# -gt 0 ]]; do
             SKIP_SIGN=true
             shift
             ;;
+        --use-existing-app|--use-packaged-app)
+            USE_EXISTING_APP=true
+            shift
+            ;;
         --identity)
             SIGNING_IDENTITY="$2"
             shift 2
@@ -68,6 +76,7 @@ while [[ $# -gt 0 ]]; do
             echo "选项:"
             echo "  --skip-build    跳过构建步骤"
             echo "  --skip-sign     跳过代码签名"
+            echo "  --use-existing-app  复用 dist/ 下已存在的 .app（推荐：先运行 Scripts/package_app.sh）"
             echo "  --identity ID   指定签名身份"
             echo "  --help, -h      显示帮助信息"
             exit 0
@@ -140,12 +149,30 @@ fi
 
 log_step "步骤 2: 创建 App Bundle"
 
-# 创建目录结构
 mkdir -p "$DIST_DIR"
-rm -rf "$APP_BUNDLE"
-mkdir -p "$APP_BUNDLE/Contents/MacOS"
-mkdir -p "$APP_BUNDLE/Contents/Resources"
-mkdir -p "$APP_BUNDLE/Contents/Frameworks"
+
+if [ "$USE_EXISTING_APP" = true ]; then
+    if [ -d "$APP_BUNDLE" ] && [ -f "$APP_BUNDLE/Contents/Info.plist" ] && [ -d "$APP_BUNDLE/Contents/MacOS" ]; then
+        log_info "复用已存在的 App Bundle: $APP_BUNDLE"
+        # 不在这里重新构建 bundle，避免覆盖 package_app.sh 已打包的图标/Frameworks/Swift dylib
+        goto_step2_done=true
+    else
+        log_error "指定了 --use-existing-app，但未找到可用的 App Bundle: $APP_BUNDLE"
+        log_error "请先运行：Scripts/package_app.sh"
+        exit 1
+    fi
+else
+    goto_step2_done=false
+fi
+
+if [ "${goto_step2_done:-false}" = true ]; then
+    log_success "App Bundle 已就绪: $APP_BUNDLE"
+else
+    # 创建目录结构
+    rm -rf "$APP_BUNDLE"
+    mkdir -p "$APP_BUNDLE/Contents/MacOS"
+    mkdir -p "$APP_BUNDLE/Contents/Resources"
+    mkdir -p "$APP_BUNDLE/Contents/Frameworks"
 
 # 复制可执行文件
 EXECUTABLE="$BUILD_DIR/SkyBridgeCompassApp"
@@ -249,6 +276,7 @@ for bundle in "$BUILD_DIR"/*.bundle; do
 done
 
 log_success "App Bundle 创建完成: $APP_BUNDLE"
+fi
 
 # ============================================================================
 # 步骤 3: 代码签名
@@ -294,18 +322,37 @@ log_step "步骤 4: 创建 DMG"
 
 # 删除旧的 DMG
 rm -f "$DMG_PATH" "$TEMP_DMG"
+rm -rf "$STAGE_DIR"
+
+# 准备 staging 目录（推荐实践：DMG root 包含 .app + Applications 快捷方式 + .background）
+log_info "准备 DMG staging 目录..."
+mkdir -p "$STAGE_DIR"
+cp -R "$APP_BUNDLE" "$STAGE_DIR/"
+ln -sf /Applications "$STAGE_DIR/Applications"
+mkdir -p "$STAGE_DIR/.background"
+
+# 准备背景图（2026 常见最佳实践：静态背景图 + Finder 图标布局；避免跑 app 渲染，减少不确定性）
+if [ -f "$BG_SRC_PNG" ]; then
+    log_info "生成 DMG 背景图（基于 AppIcon.png）..."
+    cp "$BG_SRC_PNG" "$STAGE_DIR/.background/$BG_NAME"
+    # 轻量 resize（保持兼容，不依赖 ImageMagick）
+    sips -Z 1600 "$STAGE_DIR/.background/$BG_NAME" >/dev/null 2>&1 || true
+    # 隐藏背景目录（Finder 仍可用作 background picture）
+    chflags hidden "$STAGE_DIR/.background" 2>/dev/null || true
+else
+    log_info "未找到背景源图：$BG_SRC_PNG（将使用默认白底）"
+fi
 
 # 计算所需大小（应用大小 + 50MB 余量）
-APP_SIZE=$(du -sm "$APP_BUNDLE" | cut -f1)
+APP_SIZE=$(du -sm "$STAGE_DIR" | cut -f1)
 DMG_SIZE=$((APP_SIZE + 50))
 
 log_info "创建临时 DMG (${DMG_SIZE}MB)..."
 
 # 创建临时 DMG
-hdiutil create -srcfolder "$APP_BUNDLE" \
+hdiutil create -srcfolder "$STAGE_DIR" \
     -volname "$VOLUME_NAME" \
-    -fs HFS+ \
-    -fsargs "-c c=64,a=16,e=16" \
+    -fs APFS \
     -format UDRW \
     -size ${DMG_SIZE}m \
     "$TEMP_DMG"
@@ -326,24 +373,7 @@ fi
 
 log_info "DMG 已挂载到: $MOUNT_DIR"
 
-# 创建 Applications 快捷方式
-# Requirements: 5.2, 5.3
-ln -sf /Applications "$MOUNT_DIR/Applications"
-
-# 创建背景目录
-mkdir -p "$MOUNT_DIR/.background"
-
-log_info "创建 DMG 背景..."
-export BG_PNG="$MOUNT_DIR/.background/background.png"
-SKYBRIDGE_DMG_BG_PATH="$BG_PNG" \
-SKYBRIDGE_DMG_BG_SIZE="2000x1200" \
-SKYBRIDGE_DMG_BG_DELAY="2.2" \
-"$APP_BUNDLE/Contents/MacOS/$APP_NAME"
-
-if [ ! -f "$BG_PNG" ]; then
-    log_error "DMG 背景渲染失败: $BG_PNG"
-    exit 1
-fi
+# staging 已包含 Applications 与 .background，这里不再动态渲染背景，避免启动 app 导致卡住/依赖缺失
 
 # 设置 DMG 窗口属性
 log_info "配置 DMG 窗口..."
@@ -357,10 +387,11 @@ tell application "Finder"
         set current view of container window to icon view
         set toolbar visible of container window to false
         set statusbar visible of container window to false
-        set bounds of container window to {100, 100, 980, 680}
+        set bounds of container window to {140, 120, 940, 620}
         set theViewOptions to the icon view options of container window
         set arrangement of theViewOptions to not arranged
-        set icon size of theViewOptions to 120
+        set icon size of theViewOptions to 128
+        set text size of theViewOptions to 12
         
         -- 设置图标位置
         set position of item "$APP_NAME.app" of container window to {240, 300}
@@ -368,7 +399,7 @@ tell application "Finder"
         
         -- 设置背景（如果存在）
         try
-            set background picture of theViewOptions to file ".background:background.png"
+            set background picture of theViewOptions to file ".background:$BG_NAME"
         end try
         
         update without registering applications

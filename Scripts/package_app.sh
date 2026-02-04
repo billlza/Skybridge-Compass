@@ -28,6 +28,7 @@ APP_DIR="${ROOT_DIR}/dist/${APP_NAME}"
 CONTENTS_DIR="${APP_DIR}/Contents"
 MACOS_DIR="${CONTENTS_DIR}/MacOS"
 RES_DIR="${CONTENTS_DIR}/Resources"
+FW_DIR="${CONTENTS_DIR}/Frameworks"
 
 # 中文注释：可执行文件与资源 bundle 名称（来自 Xcode 构建输出）
 EXECUTABLE="SkyBridgeCompassApp"
@@ -44,7 +45,7 @@ fi
 
 log "清理旧的 dist 目录并创建 .app 结构"
 rm -rf "${APP_DIR}"
-mkdir -p "${MACOS_DIR}" "${RES_DIR}"
+mkdir -p "${MACOS_DIR}" "${RES_DIR}" "${FW_DIR}"
 
 log "拷贝 Info.plist 到 .app/Contents/"
 INFO_PLIST_SRC="${ROOT_DIR}/Sources/SkyBridgeCompassApp/Info.plist"
@@ -54,6 +55,37 @@ cp "${INFO_PLIST_SRC}" "${INFO_PLIST_DST}"
 log "拷贝可执行文件到 .app/Contents/MacOS/"
 cp "${BUILD_DIR}/${EXECUTABLE}" "${MACOS_DIR}/${EXECUTABLE}"
 chmod +x "${MACOS_DIR}/${EXECUTABLE}"
+
+log "拷贝运行时 Frameworks（例如 WebRTC.framework）到 .app/Contents/Frameworks/"
+if [[ -d "${BUILD_DIR}/WebRTC.framework" ]]; then
+  rm -rf "${FW_DIR}/WebRTC.framework"
+  cp -R "${BUILD_DIR}/WebRTC.framework" "${FW_DIR}/"
+else
+  log "未找到 WebRTC.framework（若运行时报 dyld 缺失，请检查构建产物）"
+fi
+
+# 确保可执行文件包含 Frameworks rpath（用于加载 @rpath/*.framework）
+APP_BIN="${MACOS_DIR}/${EXECUTABLE}"
+if otool -l "${APP_BIN}" 2>/dev/null | grep -q "@executable_path/../Frameworks"; then
+  log "已存在 rpath: @executable_path/../Frameworks"
+else
+  log "注入 rpath: @executable_path/../Frameworks"
+  install_name_tool -add_rpath "@executable_path/../Frameworks" "${APP_BIN}" 2>/dev/null || true
+fi
+
+log "拷贝 Swift 运行时 dylib 到 .app/Contents/Frameworks/（Xcode 26+/Swift 6.2 工具链）"
+# 说明：在部分 Xcode/toolchain 下 --unsigned-destination 行为异常，这里使用 --destination。
+if xcrun -f swift-stdlib-tool >/dev/null 2>&1; then
+  xcrun swift-stdlib-tool --copy --verbose \
+    --platform macosx \
+    --scan-executable "${APP_BIN}" \
+    --destination "${FW_DIR}" \
+    >/dev/null 2>&1 || {
+      log "swift-stdlib-tool 执行失败（开发阶段可忽略，但发布包可能缺 Swift dylib）"
+    }
+else
+  log "未找到 swift-stdlib-tool，跳过 Swift dylib 拷贝"
+fi
 
 log "拷贝 SwiftPM 资源 bundle 到 .app/Contents/Resources/"
 for bundle in "${SPM_RES_APP_BUNDLE}" "${SPM_RES_CORE_BUNDLE}" "${CRYPTO_BUNDLE}" "${NIOPOSIX_BUNDLE}"; do

@@ -700,6 +700,12 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
 
             if let index = mergeIndex, discoveredDevices.indices.contains(index) {
                 let existingDevice = discoveredDevices[index]
+                // ⚠️ 重要：不要在 `await` 之后继续使用旧的 index 写回数组。
+                // 由于本类是 @MainActor，`await` 会让出执行权，期间其他任务可能会移除/重排 `discoveredDevices`，
+                // 从而导致 index 过期（Release 下会触发 Swift runtime "Index out of range"）。
+                let existingRecordId = existingDevice.id
+                let existingStableDeviceId = existingDevice.deviceId
+                let existingPubKeyFP = existingDevice.pubKeyFP
 
  // 判定现有设备是否为本机
                 let existingIsLocal = await identityResolver.resolveIsLocal(existingDevice, selfId: selfId)
@@ -781,7 +787,21 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
  // 4️⃣ 重新应用本机标志（统一写入点）
                 applyLocalFlag(&merged, selfId: selfId)
 
-                discoveredDevices[index] = merged
+                // 重新定位：优先按 record UUID，其次按强身份字段，最后回退追加（避免崩溃 & 避免写错槽位）
+                let targetIndex =
+                    discoveredDevices.firstIndex(where: { $0.id == existingRecordId }) ??
+                    (existingStableDeviceId.flatMap { sid in
+                        sid.isEmpty ? nil : discoveredDevices.firstIndex(where: { $0.deviceId == sid })
+                    }) ??
+                    (existingPubKeyFP.flatMap { fp in
+                        fp.isEmpty ? nil : discoveredDevices.firstIndex(where: { $0.pubKeyFP == fp })
+                    })
+
+                if let targetIndex {
+                    discoveredDevices[targetIndex] = merged
+                } else {
+                    discoveredDevices.append(merged)
+                }
                 logger.debug("🔄 合并设备: \(merged.name) - 本机: \(merged.isLocalDevice)")
             } else {
  // 新设备，添加到列表
@@ -863,11 +883,14 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         }
         #endif
 
- // 重新计算所有设备的 isLocal 状态
-        for i in self.discoveredDevices.indices {
-            let device = self.discoveredDevices[i]
+        // 重新计算所有设备的 isLocal 状态
+        // ⚠️ 重要：不要在 `await` 之后继续使用旧的 index 写回数组（同上，避免 index 过期崩溃）。
+        let snapshot = self.discoveredDevices
+        for device in snapshot {
             let isLocal = await identityResolver.resolveIsLocal(device, selfId: selfId)
-            self.discoveredDevices[i].setIsLocalDeviceByDiscovery(isLocal)
+            if let idx = self.discoveredDevices.firstIndex(where: { $0.id == device.id }) {
+                self.discoveredDevices[idx].setIsLocalDeviceByDiscovery(isLocal)
+            }
         }
 
  // 再次检查是否仍有多个本机标记（极端情况：脏数据）

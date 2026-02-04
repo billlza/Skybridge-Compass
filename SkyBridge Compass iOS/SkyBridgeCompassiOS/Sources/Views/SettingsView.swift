@@ -953,16 +953,27 @@ struct SupabaseSettingsView: View {
 
     private func save() {
         do {
-            try KeychainManager.shared.storeSupabaseConfig(url: supabaseURL, anonKey: anonKey)
-
-            guard let url = URL(string: supabaseURL) else {
-                alertMessage = "SUPABASE_URL 无效"
+            let urlString = supabaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+            let keyString = anonKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            
+            guard !keyString.isEmpty else {
+                alertMessage = "SUPABASE_ANON_KEY 不能为空"
                 showAlert = true
                 return
             }
+            guard let url = URL(string: urlString), SupabaseService.Configuration.isValidSupabaseURL(url) else {
+                alertMessage = "SUPABASE_URL 无效（需 https 且 host 非空）"
+                showAlert = true
+                return
+            }
+            
+            try KeychainManager.shared.storeSupabaseConfig(url: urlString, anonKey: keyString)
             SupabaseService.shared.updateConfiguration(
-                .init(url: url, anonKey: anonKey)
+                .init(url: url, anonKey: keyString)
             )
+            
+            supabaseURL = urlString
+            anonKey = keyString
 
             alertMessage = "已保存到 Keychain，并已更新运行时配置。"
             showAlert = true
