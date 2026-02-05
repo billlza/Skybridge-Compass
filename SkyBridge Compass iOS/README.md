@@ -20,7 +20,7 @@ SkyBridge Compass 的 iOS 版本 - 跨平台设备管理与远程控制应用
 - **iOS 17.0+**（运行目标）  
 - **iOS 26 SDK +**（仅当你要启用 Apple CryptoKit PQC：ML‑KEM/ML‑DSA）
 - **iPadOS 17.0+**
-- **Xcode 15.0+**
+- **Xcode 26.2+**
 - **Swift 6.2+**
 
 ## 技术栈

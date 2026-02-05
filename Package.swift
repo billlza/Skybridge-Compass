@@ -93,7 +93,7 @@ let package = Package(
         // ASN.1/DER 解析库：用于 PEM/PKCS#8 私钥解析（Ed25519）
         .package(url: "https://github.com/apple/swift-asn1", from: "1.5.1"),
         // WebRTC (ICE / DataChannel) - 跨网连接基础设施（走 STUN/TURN）
-        .package(url: "https://github.com/stasel/WebRTC", from: "114.0.0")
+        .package(url: "https://github.com/stasel/WebRTC", from: "141.0.0")
     ],
     targets: [
         .binaryTarget(
@@ -181,6 +181,8 @@ let package = Package(
                 // Suppress deprecated declarations coming from imported Objective‑C headers inside WebRTC.xcframework
                 // (e.g., RTCNSGLVideoView uses NSOpenGLView/NSOpenGLPixelFormat which are deprecated on macOS).
                 .unsafeFlags(["-Xcc", "-Wno-deprecated-declarations"], .when(platforms: [.macOS])),
+                // WebRTC binary header overlay (SwiftPM): provide missing public/internal include paths on macOS.
+                .unsafeFlags(["-Xcc", "-I", "-Xcc", "Sources/Vendor/WebRTCHeaders"], .when(platforms: [.macOS])),
                 .define("OQS_ENABLED"),
             ] + (enableApplePQCSDK ? [.define("HAS_APPLE_PQC_SDK")] : [])),
             linkerSettings: [

@@ -1,4 +1,4 @@
-// swift-tools-version: 5.9
+// swift-tools-version: 6.2
 // SkyBridge Compass iOS - Swift Package Configuration
 // 与 macOS 版本共享核心模块，支持 iOS 17 - iOS 26
 
@@ -42,7 +42,7 @@ let package = Package(
         // 可以添加第三方依赖
         // .package(url: "https://github.com/pointfreeco/swift-perception", from: "2.0.0"),
         // WebRTC (ICE / DataChannel) - 跨网连接基础设施（走 STUN/TURN）
-        .package(url: "https://github.com/stasel/WebRTC", from: "114.0.0"),
+        .package(url: "https://github.com/stasel/WebRTC", from: "141.0.0"),
     ],
     targets: [
         // MARK: - iOS 主应用目标
@@ -57,8 +57,13 @@ let package = Package(
                 .process("Resources")
             ],
             swiftSettings: ([
-                .enableExperimentalFeature("StrictConcurrency")
+                .enableUpcomingFeature("StrictConcurrency"),
+                // WebRTC binary header overlay (SwiftPM): macOS slice is missing headers in some distributions.
+                .unsafeFlags(["-Xcc", "-I", "-Xcc", "../Sources/Vendor/WebRTCHeaders"], .when(platforms: [.macOS])),
             ] + (enableApplePQCSDK ? [.define("HAS_APPLE_PQC_SDK")] : []))
         )
+    ],
+    swiftLanguageModes: [
+        .v6
     ]
 )

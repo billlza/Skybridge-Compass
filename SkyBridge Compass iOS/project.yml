@@ -4,11 +4,12 @@ options:
   bundleIdPrefix: com.skybridge
   deploymentTarget:
     iOS: "17.0"
+  xcodeVersion: "26.2"
 
 packages:
   WebRTC:
     url: https://github.com/stasel/WebRTC
-    from: 114.0.0
+    from: 141.0.0
 
 targets:
   SkyBridgeCompass-iOS:
