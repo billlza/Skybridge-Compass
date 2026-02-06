@@ -175,7 +175,7 @@ func printUsageAndExit() -> Never {
 
     Options:
       --label <name>           Tag this run (default: run)
-      --artifact-date <date>   Pin output filename stamp (e.g., 2026-01-23). If omitted, uses ARTIFACT_DATE env or a timestamp.
+      --artifact-date <date>   Pin output filename stamp (e.g., 2026-01-16). If omitted, uses ARTIFACT_DATE env or a timestamp.
       --server <host:port>     Add STUN server (repeatable)
       --samples <n>            Samples per server (default: 50)
       --timeout-ms <ms>        Per-sample recv timeout (default: 1500)

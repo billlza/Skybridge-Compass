@@ -76,22 +76,20 @@ swift test
 论文中标注的 artifact 信息如下（供 reviewer/编辑核对）：
 
 - URL：`https://github.com/billlza/Skybridge-Compass`
-- Submission truth tag：`tdsc-2026-01-0318`
-- Commit：`805c83a85d2279c3913745fdbabf4157ed3e332c`
+- Tag：`artifact-v3`
+- Commit：`c23a8b4a3d01acf71faf5615e184ee44594b7cae`
 
 Source archive checksums（immutability 辅助证据）：
 
-- `tdsc-2026-01-0318.zip`：`SHA256=c777f428672cec699fcf905c2e9902d8ce458e8d454d852d4fe0578038d97d2c`
-- `tdsc-2026-01-0318.tar.gz`：`SHA256=0ab8b649c937ca532d37764ebbdc07b692cfd738d649cfead80f87d4985f7d61`
-
-历史标签（非本次投稿基准，仅用于历史版本对照）：`artifact-v1` / `artifact-v2` / `artifact-v3`
+- `artifact-v3.zip`：`SHA256=c370f07da6fe825c2132f447db3287e0689d0344b26b4d97ff4f043d2cbac1e3`
+- `artifact-v3.tar.gz`：`SHA256=ff467cdc761a9a6528de871f0fd8663e788e0aa7a6af5b8883199a2be68642c9`
 
 最小复核流程（需要本机已安装 Xcode/Swift 与 TeXLive；PQC SDK 仅在 macOS 26+ 可用）：
 
 ```bash
 git clone https://github.com/billlza/Skybridge-Compass
 cd Skybridge-Compass
-git checkout tdsc-2026-01-0318
+git checkout artifact-v3
 
 git rev-parse HEAD
 git describe --tags --always
@@ -112,7 +110,7 @@ bash Scripts/run_paper_eval.sh
 
 ```bash
 # 推荐：固定 ARTIFACT_DATE，确保所有 CSV 前缀落在同一天，避免 make_tables 混用不同实验日的数据
-ARTIFACT_DATE=2026-01-23 SKYBRIDGE_BENCH_BATCHES=5 bash Scripts/run_paper_eval.sh
+ARTIFACT_DATE=2026-01-16 SKYBRIDGE_BENCH_BATCHES=5 bash Scripts/run_paper_eval.sh
 ```
 
 说明：
@@ -142,11 +140,11 @@ swift Scripts/run_real_network_probe.swift --label phone_hotspot --samples 50
 swift Scripts/run_real_network_e2e.swift server --bind 0.0.0.0:44444
 
 # 机器 B（client），固定 ARTIFACT_DATE 方便生成论文表格
-ARTIFACT_DATE=2026-01-23 swift Scripts/run_real_network_e2e.swift client \
-  --label home_wifi --connect <server_ip>:44444 --samples 50 --bytes 687 --bytes 12002
+ARTIFACT_DATE=2026-01-16 swift Scripts/run_real_network_e2e.swift client \
+  --label home_wifi --connect <server_ip>:44444 --samples 50 --bytes 827 --bytes 12163
 
 # 汇总生成 Supplementary 表（可选）
-ARTIFACT_DATE=2026-01-23 python3 Scripts/aggregate_realnet.py
+ARTIFACT_DATE=2026-01-16 python3 Scripts/aggregate_realnet.py
 ```
 
 关于 cross-NAT / 入站限制（重要）：
@@ -162,9 +160,9 @@ ARTIFACT_DATE=2026-01-23 python3 Scripts/aggregate_realnet.py
 
 预期输出（关键点）：
 
-- `git rev-parse HEAD` 应为 `805c83a85d2279c3913745fdbabf4157ed3e332c`
-- `git describe --tags --always` 应输出 `tdsc-2026-01-0318`（或等价形式）
-- 生成的 PDF（对外分发版本）：`TDSC-2026-01-0318_IEEE_Paper_SkyBridge_Compass_patched.pdf` 与 `Docs/TDSC-2026-01-0318_supplementary.pdf`
+- `git rev-parse HEAD` 应为 `8a68fa6e0fe78147d2b18d3287681f5d07c74afd`
+- `git describe --tags --always` 应输出 `artifact-v1`（或等价形式如 `artifact-v1-0-g8a68fa6`）
+- 生成的 PDF：`Docs/IEEE_Paper_SkyBridge_Compass_patched.pdf` 与 `Docs/supplementary.pdf`
 - CSV 输出目录：`Artifacts/`
 
 ## Release 校验

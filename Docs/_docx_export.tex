@@ -131,17 +131,17 @@
 
 \newcommand{\artifacturl}{https://github.com/billlza/Skybridge-Compass}
 \newcommand{\artifacturlshort}{https://github.com/billlza/Skybridge-Compass}
-\newcommand{\artifacttag}{tdsc-2026-01-0318}
-\newcommand{\artifactsha}{805c83a85d22}
-\newcommand{\artifactshafull}{805c83a85d2279c3913745fdbabf4157ed3e332c}
+\newcommand{\artifacttag}{artifact-v3}
+\newcommand{\artifactsha}{c23a8b4a3d01}
+\newcommand{\artifactshafull}{c23a8b4a3d01acf71faf5615e184ee44594b7cae}
 \newcommand{\artifactzipurl}{\artifacturl/archive/refs/tags/\artifacttag.zip}
-\newcommand{\artifactzipsha}{c777f428672cec699fcf905c2e9902d8ce458e8d454d852d4fe0578038d97d2c}
+\newcommand{\artifactzipsha}{c370f07da6fe825c2132f447db3287e0689d0344b26b4d97ff4f043d2cbac1e3}
 \newcommand{\artifacttarurl}{\artifacturl/archive/refs/tags/\artifacttag.tar.gz}
-\newcommand{\artifacttarsha}{0ab8b649c937ca532d37764ebbdc07b692cfd738d649cfead80f87d4985f7d61}
+\newcommand{\artifacttarsha}{ff467cdc761a9a6528de871f0fd8663e788e0aa7a6af5b8883199a2be68642c9}
 
 \newcommand{\artifactdateSystemImpact}{2026-01-23}
-\newcommand{\artifactcsv}[1]{\texttt{#1_2026-01-23.csv}}
-\newcommand{\artifactpath}[1]{\texttt{Artifacts/#1_2026-01-23.csv}}
+\newcommand{\artifactcsv}[1]{\texttt{#1_2026-01-16.csv}}
+\newcommand{\artifactpath}[1]{\texttt{Artifacts/#1_2026-01-16.csv}}
 \newcommand{\implref}[2]{Implementation reference: \href{\artifacturl}{\artifacturlshort} (tag=\texttt{\artifacttag}, commit=\texttt{\artifactsha}), file: \texttt{#1}, lines: #2.}
 
 
@@ -176,10 +176,11 @@ perfect forward secrecy for the KEM-based PQC suites in v1; post-quantum
 confidentiality holds only while long-term KEM private keys remain
 uncompromised. \mbox{End-to-end}
 handshake completion latency (including event emission overhead) is
-1.89 ms (p95 2.18 ms) for classic, 3.47 ms (p95 4.18 ms) for liboqs PQC,
-and 5.20 ms (p95 6.16 ms) for CryptoKit PQC over N=1000 iterations.
+1.62 ms (p95 1.81 ms) for classic, 2.29 ms (p95 3.01 ms) for liboqs PQC,
+and 5.76 ms (p95 6.71 ms) for CryptoKit PQC over N=1000 iterations.
 The handshake wire size (MessageA + MessageB + 2×Finished) grows
-from 687 B (classic) to 12,002 B (PQC). Beyond
+from 827 B (classic) to 12,163 B (PQC); X-Wing hybrid KEM measures
+12,195 B. Beyond
 performance, we validate downgrade policies, failure semantics, and
 audit-signal fidelity under fault injection, and we release scripts and
 artifacts that reproduce all primary figures and tables.
@@ -1072,14 +1073,14 @@ explicit \texttt{unknown(wireId)} value and reject them if they appear in
 downgrade guarantees.
 
 
-\noindent\textit{TABLE V. Failure-Mode Robustness and Observability. Runs = number of iterations per scenario and policy (n=1000). Table reports default policy; strictPQC counts are recorded separately in fault_injection_2026-01-23.csv. All metrics are binary (1 = pass) except event counts. Data from Artifacts/fault_injection_2026-01-23.csv produced by HandshakeFaultInjectionBenchTests; semantic checks from HandshakeDriverTests.}\par
+\noindent\textit{TABLE V. Failure-Mode Robustness and Observability. Runs = number of iterations per scenario and policy (n=1000). Table reports default policy; strictPQC counts are recorded separately in fault_injection_2026-01-16.csv. All metrics are binary (1 = pass) except event counts. Data from Artifacts/fault_injection_2026-01-16.csv produced by HandshakeFaultInjectionBenchTests; semantic checks from HandshakeDriverTests.}\par
 \noindent DOCX_TABLE_PLACEHOLDER::tab:failure-mode-robustness::SPAN2\par
 
 
 The delay-within-timeout and delay-exceed-timeout scenarios approximate
 RTT jitter and loss-induced stalls, while drop and duplicate cases
 approximate packet loss and reordering. The per-scenario event
-distributions are recorded in \texttt{Artifacts/fault_injection_2026-01-23.csv}.
+distributions are recorded in \texttt{Artifacts/fault_injection_2026-01-16.csv}.
 
 Downgrade events are quantified separately in the policy bench (Fig.~4)
 to avoid conflating fallback behavior with transport corruption
@@ -1094,7 +1095,7 @@ scenarios.
 \end{figure}
 
 The plot in Fig.~4 uses the policy-downgrade
-dataset. File: \texttt{policy_downgrade_2026-01-23.csv}. It
+dataset. File: \texttt{policy_downgrade_2026-01-16.csv}. It
 demonstrates that strictPQC never emits fallback events even under
 forced PQC-unavailable errors; default policy shows non-zero downgrade
 events.
@@ -1185,30 +1186,29 @@ Table~8 consolidates all performance metrics. We measure \mbox{end-to-end} hands
 
 \textbf{Latency Distribution.}
 Fig.~8 shows latency percentiles across
-configurations. Classic handshakes remain near 2~ms (2.3~ms at p99); CryptoKit
-PQC stays under 6.7~ms at p99 with variance dominated by ML-DSA signature
+configurations. Classic handshakes remain under 2~ms at p99; CryptoKit
+PQC stays under 6.4~ms at p99 with variance dominated by ML-DSA signature
 verification overhead. Extended statistics (mean/p50/p95/p99, std) are
 available in Supplementary Tables~S1--S2
 (submitted as separate file \texttt{supplementary.pdf}).
 
 \begin{figure}
 {\centering\includegraphics[keepaspectratio,width=\columnwidth]{_docx_figs/fig_handshake_latency.png}\par}
-\caption{Fig. 8. Handshake latency percentiles for Classic vs liboqs PQC vs CryptoKit PQC (N=1000). Generated from \texttt{Artifacts/handshake_bench_2026-01-23.csv}; values match the Performance Summary (Table~8) and Supplementary Table~S1.}
+\caption{Fig. 8. Handshake latency percentiles for Classic vs liboqs PQC vs CryptoKit PQC (N=1000). Generated from \texttt{Artifacts/handshake_bench_2026-01-16.csv}; values match the Performance Summary (Table~8) and Supplementary Table~S1.}
 \label{fig:handshake-latency}
 \end{figure}
 
 \textbf{Wire-Format Breakdown.}
-The ≈17× size increase from Classic (687~B) to PQC (12.0~kB) is dominated by ML-DSA signatures (3309~B) and ML-KEM ciphertexts (1088~B). Fig.~9 shows the per-field breakdown.
+The 15× size increase from Classic (827~B) to PQC (12.2~kB) is dominated by ML-DSA signatures (3309~B) and ML-KEM ciphertexts (1088~B). Fig.~9 shows the per-field breakdown.
 
 \begin{figure}
 {\centering\includegraphics[keepaspectratio,width=\columnwidth]{_docx_figs/fig_message_size_breakdown.png}\par}
 \caption{Fig. 9. Handshake message size breakdown (signature, keyshare,
-identity fields, framing overhead) for MessageA/MessageB across Classic and PQC configurations. Counts reflect MessageA/B payloads only; the \emph{payload-only} handshake size adds two 38~B Finished frames (accounted for in Table~8), and detailed field sizes are reported in Supplementary Table~S3. Generated from \texttt{Artifacts/message_sizes_2026-01-23.csv}.}
+identity fields, framing overhead) for MessageA/MessageB across Classic, PQC (liboqs), and PQC (CryptoKit) configurations. Counts reflect MessageA/B payloads only; the \emph{payload-only} handshake size adds two 38~B Finished frames (accounted for in Table~8), and detailed field sizes are reported in Supplementary Table~S3. Generated from \texttt{Artifacts/message_sizes_2026-01-16.csv}.}
 \label{fig:message-size-breakdown}
 \end{figure}
 
-% Note: X-Wing hybrid KEM discussion is retained in the TeX submission; the DOCX export omits
-% per-field X-Wing breakdown to avoid referencing non-submission artifact rows.
+Note: X-Wing hybrid KEM adds 32~B to MessageA's keyshare (1120~B vs 1088~B for ML-KEM-768), yielding a measured total handshake size of 12,195~B; detailed field breakdowns are available in Supplementary Table~S3 (\texttt{MessageA.XWing}/\texttt{MessageB.XWing}).
 
 \textbf{Data-Plane and Provider Selection.}
 Post-handshake symmetric AEAD (AES-256-GCM) throughput reaches 3.7~GB/s for 1~MiB payloads on Apple Silicon, with CPU cost of 0.25~ns/byte. In v1 the data-plane AEAD is fixed to AES-256-GCM and recorded separately from the handshake suite; thus throughput is independent of the negotiated KEM/signature suite. Provider selection overhead is sub-microsecond for cached paths (0.17~µs p50) and under 6~µs even for fallback scenarios. Detailed breakdowns are provided in the artifact CSV files.
@@ -1252,11 +1252,11 @@ RTT artifacts while remaining reproducible. Results are emitted to
 
 \textbf{Traffic Analysis Mitigation (SBP2 Padding).}
 To reduce attempt identifiability on the wire, SkyBridge optionally applies a constant-size framing layer (SBP2) that buckets framed payloads into powers-of-two-sized envelopes. Here, \textbf{SBP1} denotes \emph{handshake-frame padding} (MessageA/MessageB/Finished are padded to fixed buckets before transport), while \textbf{SBP2} denotes \emph{traffic framing and padding} applied to all framed payloads (control and encrypted data-plane) with a per-frame header and bucketed padding up to a configured cap.
-We measure SBP2 behavior on a real protocol trace: an end-to-end handshake (SBP1 + SBP2 enabled) on an in-memory loopback transport, followed by bidirectional AES-GCM--encrypted data-plane frames derived from the negotiated session keys. Supplementary Table~S4 reports the resulting quantization behavior and overhead; the full per-label bucket histograms are included in \texttt{Artifacts/traffic_padding_2026-01-23.csv}.
+We measure SBP2 behavior on a real protocol trace: an end-to-end handshake (SBP1 + SBP2 enabled) on an in-memory loopback transport, followed by bidirectional AES-GCM--encrypted data-plane frames derived from the negotiated session keys. Supplementary Table~S4 reports the resulting quantization behavior and overhead; the full per-label bucket histograms are included in \texttt{Artifacts/traffic_padding_2026-01-16.csv}.
 
 \begin{figure}
 {\centering\includegraphics[keepaspectratio,width=\columnwidth]{_docx_figs/fig_traffic_padding_overhead.png}\par}
-\caption{Fig. 11. SBP2 padding overhead across representative handshake, control, and data-plane workloads (macOS 26.x). Overhead is computed as \((\texttt{paddedBytes}/\texttt{rawBytes}-1)×100\%\) aggregated per label over a deterministic trace (N=1000 handshake iterations; data-plane workload uses encrypted control messages and large-frame mixes). Generated from \texttt{Artifacts/traffic_padding_2026-01-23.csv}.}
+\caption{Fig. 11. SBP2 padding overhead across representative handshake, control, and data-plane workloads (macOS 26.x). Overhead is computed as \((\texttt{paddedBytes}/\texttt{rawBytes}-1)×100\%\) aggregated per label over a deterministic trace (N=1000 handshake iterations; data-plane workload uses encrypted control messages and large-frame mixes). Generated from \texttt{Artifacts/traffic_padding_2026-01-16.csv}.}
 \label{fig:traffic-padding-overhead}
 \end{figure}
 
@@ -1265,7 +1265,7 @@ We vary the maximum bucket size for SBP2 (\emph{cap} = 64\,KiB, 128\,KiB, 256\,K
 
 \begin{figure}
 {\centering\includegraphics[keepaspectratio,width=\columnwidth]{_docx_figs/fig_traffic_padding_sensitivity.png}\par}
-\caption{Fig. 12. SBP2 bucket-cap sensitivity (macOS 26.x). Curves show padding overhead for representative large-frame distributions (remote-desktop mix vs file-chunk mix) as the cap increases from 64\,KiB to 256\,KiB; lower over-cap rate implies broader padding coverage. Generated from \texttt{Artifacts/traffic_padding_sensitivity_2026-01-23.csv}.}
+\caption{Fig. 12. SBP2 bucket-cap sensitivity (macOS 26.x). Curves show padding overhead for representative large-frame distributions (remote-desktop mix vs file-chunk mix) as the cap increases from 64\,KiB to 256\,KiB; lower over-cap rate implies broader padding coverage. Generated from \texttt{Artifacts/traffic_padding_sensitivity_2026-01-16.csv}.}
 \label{fig:traffic-padding-sensitivity}
 \end{figure}
 

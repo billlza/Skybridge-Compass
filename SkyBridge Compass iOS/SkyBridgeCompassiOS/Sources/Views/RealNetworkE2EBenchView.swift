@@ -212,7 +212,7 @@ fileprivate func realnetOneClientSample(host: String, port: UInt16, payloadBytes
 
 /// Real-network end-to-end micro-study client (iOS/iPadOS).
 /// Connects to a macOS server and measures connect/first-byte/total time for
-/// two payload sizes: Classic (687 B) vs PQC (12,002 B).
+/// two payload sizes: Classic (827 B) vs PQC (12,163 B).
 @available(iOS 17.0, *)
 struct RealNetworkE2EBenchView: View {
     @State private var label: String = "home_wifi"
@@ -235,7 +235,7 @@ struct RealNetworkE2EBenchView: View {
     @State private var summaryFileURL: URL? = nil
 
     // Fixed payload sizes (paper-aligned)
-    private let payloads: [Int] = [687, 12_002]
+    private let payloads: [Int] = [827, 12_163]
 
     var body: some View {
         List {
@@ -264,7 +264,7 @@ struct RealNetworkE2EBenchView: View {
                 HStack {
                     Text("Payload sizes")
                     Spacer()
-                    Text("687 B / 12,002 B")
+                    Text("827 B / 12,163 B")
                         .font(.system(.body, design: .monospaced))
                         .foregroundColor(.secondary)
                 }

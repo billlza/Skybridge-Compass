@@ -14,7 +14,7 @@ Notes:
   - This script is conservative: it only merges rows where STUN summary exists and at least
     one E2E summary row exists for the same <stamp> and <label>.
   - For paper-style comparisons, we prefer two payload sizes:
-      classic_bytes=687, pqc_bytes=12002
+      classic_bytes=827, pqc_bytes=12163
   - Use ARTIFACT_DATE=YYYY-MM-DD to keep output stable for paper builds.
 """
 
@@ -111,8 +111,8 @@ def main() -> None:
     out_date = _env_artifact_date() or pairs[-1][2]  # prefer pinned, else latest stamp
     rows: list[MicroRow] = []
 
-    classic_bytes = 687
-    pqc_bytes = 12002
+    classic_bytes = 827
+    pqc_bytes = 12163
 
     for stun_path, e2e_path, stamp, label in pairs:
         stun = _read_single_row_csv(stun_path)
