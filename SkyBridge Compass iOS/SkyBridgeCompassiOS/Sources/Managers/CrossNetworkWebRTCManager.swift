@@ -279,6 +279,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             await signaling.close()
         }
         signaling = nil
+        session?.close()
         session = nil
         currentSessionId = nil
         handshakeDriver = nil

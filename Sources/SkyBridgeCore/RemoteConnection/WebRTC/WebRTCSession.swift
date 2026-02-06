@@ -5,6 +5,36 @@ import OSLog
 @preconcurrency import WebRTC
 #endif
 
+#if canImport(WebRTC)
+/// Global SSL lifecycle guard for WebRTC.
+///
+/// `RTCInitializeSSL()` / `RTCCleanupSSL()` manage process-wide OpenSSL state. Calling cleanup per-session can
+/// break other live sessions. We therefore retain/release with reference counting and only cleanup when the
+/// last session is closed.
+private enum WebRTCSSL {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var refCount: Int = 0
+
+    static func retain() {
+        lock.lock()
+        defer { lock.unlock() }
+        if refCount == 0 {
+            RTCInitializeSSL()
+        }
+        refCount += 1
+    }
+
+    static func release() {
+        lock.lock()
+        defer { lock.unlock() }
+        refCount = max(0, refCount - 1)
+        if refCount == 0 {
+            RTCCleanupSSL()
+        }
+    }
+}
+#endif
+
 /// WebRTC 会话：负责 PeerConnection + DataChannel + ICE 收发
 ///
 /// 注意：
@@ -30,11 +60,12 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         }
     }
     
-    public enum WebRTCError: Error, LocalizedError {
+    public enum WebRTCError: Error, LocalizedError, Sendable {
         case webRTCNotAvailable
         case peerConnectionCreationFailed
         case dataChannelNotReady
         case sdpFailed(String)
+        case alreadyClosed
         
         public var errorDescription: String? {
             switch self {
@@ -42,6 +73,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             case .peerConnectionCreationFailed: return "创建 RTCPeerConnection 失败"
             case .dataChannelNotReady: return "DataChannel 未就绪"
             case .sdpFailed(let msg): return "SDP 处理失败：\(msg)"
+            case .alreadyClosed: return "WebRTCSession 已关闭"
             }
         }
     }
@@ -64,6 +96,9 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     private var dataChannel: RTCDataChannel?
 #endif
     
+    private var isClosed = false
+    private var sslHeld = false
+    
     public init(sessionId: String, localDeviceId: String, role: Role, ice: ICEConfig) {
         self.sessionId = sessionId
         self.localDeviceId = localDeviceId
@@ -72,10 +107,43 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         super.init()
     }
     
+    /// 关闭 WebRTC 会话并释放所有资源（PeerConnection / DataChannel / SSL）。
+    ///
+    /// 符合 IEEE TDSC 安全生命周期管理要求：
+    /// - 主动关闭 DataChannel 防止数据残留
+    /// - 关闭 PeerConnection 终止 ICE / DTLS-SRTP 会话
+    /// - 调用 RTCCleanupSSL() 释放 OpenSSL 上下文
+    public func close() {
+        guard !isClosed else { return }
+        isClosed = true
+#if canImport(WebRTC)
+        dataChannel?.close()
+        dataChannel = nil
+        peerConnection?.close()
+        peerConnection = nil
+        if sslHeld {
+            sslHeld = false
+            WebRTCSSL.release()
+        }
+#endif
+        onLocalOffer = nil
+        onLocalAnswer = nil
+        onLocalICECandidate = nil
+        onData = nil
+        onReady = nil
+        logger.info("⏹️ WebRTCSession closed sessionId=\(self.sessionId, privacy: .public)")
+    }
+    
+    deinit {
+        close()
+    }
+    
     public func start() throws {
+        guard !isClosed else { throw WebRTCError.alreadyClosed }
 #if canImport(WebRTC)
         // WebRTC factory is not Sendable; keep it as a local instance (avoid global/shared state under Swift 6 checks).
-        RTCInitializeSSL()
+        WebRTCSSL.retain()
+        sslHeld = true
         let factory = RTCPeerConnectionFactory()
         
         let config = RTCConfiguration()
@@ -93,6 +161,8 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         )
         
         guard let pc = factory.peerConnection(with: config, constraints: constraints, delegate: self) else {
+            sslHeld = false
+            WebRTCSSL.release()
             throw WebRTCError.peerConnectionCreationFailed
         }
         self.peerConnection = pc
@@ -155,6 +225,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     }
     
     public func send(_ data: Data) throws {
+        guard !isClosed else { throw WebRTCError.alreadyClosed }
 #if canImport(WebRTC)
         guard let dc = dataChannel else { throw WebRTCError.dataChannelNotReady }
         let buffer = RTCDataBuffer(data: data, isBinary: true)
@@ -250,5 +321,3 @@ extension WebRTCSession: RTCDataChannelDelegate {
     }
 }
 #endif
-
-
