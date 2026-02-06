@@ -598,14 +598,13 @@ private extension CrossNetworkWebRTCManager {
     }
     
     func handleInboundFileTransferFromMac(_ msg: CrossNetworkFileTransferMessage) async {
-        guard let keys = sessionKeys else { return }
+	        guard let keys = sessionKeys else { return }
 
-        func sha256File(_ url: URL) -> Data? {
-            guard #available(iOS 13.0, *) else { return nil }
-            guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
-            defer { try? handle.close() }
-            var hasher = SHA256()
-            while true {
+	        func sha256File(_ url: URL) -> Data? {
+	            guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+	            defer { try? handle.close() }
+	            var hasher = SHA256()
+	            while true {
                 let chunk = handle.readData(ofLength: 256 * 1024)
                 if chunk.isEmpty { break }
                 hasher.update(data: chunk)
@@ -671,7 +670,8 @@ private extension CrossNetworkWebRTCManager {
                     transferId: msg.transferId,
                     fileName: fileName,
                     fileSize: fileSize,
-                    fromPeerName: senderName
+                    fromPeerName: senderName,
+                    destinationURL: finalURL
                 )
                 
                 await sendAck(.init(op: .metadataAck, transferId: msg.transferId), label: "metaAck")
@@ -786,7 +786,8 @@ private extension CrossNetworkWebRTCManager {
                         try FileManager.default.moveItem(at: st.tempURL, to: st.finalURL)
                         FileTransferManager.instance.completeExternalInboundTransfer(
                             transferId: st.transferId,
-                            success: true
+                            success: true,
+                            destinationURL: st.finalURL
                         )
                         inboundFileTransfers.removeValue(forKey: st.transferId)
                         inboundFileTransferCompleteTimers[st.transferId]?.cancel()
@@ -940,7 +941,8 @@ private extension CrossNetworkWebRTCManager {
                 
                 FileTransferManager.instance.completeExternalInboundTransfer(
                     transferId: st.transferId,
-                    success: true
+                    success: true,
+                    destinationURL: st.finalURL
                 )
                 inboundFileTransfers.removeValue(forKey: st.transferId)
                 inboundFileTransferCompleteTimers[st.transferId]?.cancel()
@@ -1186,6 +1188,4 @@ private extension CrossNetworkWebRTCManager {
         return try AES.GCM.open(box, using: key)
     }
 }
-
-
 

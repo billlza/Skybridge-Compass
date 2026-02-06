@@ -7,6 +7,7 @@ import os.log
 public struct TopNavigationBarView: View {
     @EnvironmentObject var appModel: DashboardViewModel
     @EnvironmentObject var themeConfiguration: ThemeConfiguration
+    @ObservedObject private var unifiedDeviceManager = UnifiedOnlineDeviceManager.shared
 
     @Binding var showManualConnectSheet: Bool
     @Binding var manualIP: String
@@ -104,16 +105,16 @@ public struct TopNavigationBarView: View {
     private var connectionStatusIndicator: some View {
         HStack(spacing: 8) {
             Circle()
-                .fill(appModel.connectionStatus == .connected ? Color.green : Color.red)
+                .fill(isActuallyConnected ? Color.green : Color.red)
                 .frame(width: 8, height: 8)
-                .animation(themeConfiguration.easeAnimation, value: appModel.connectionStatus)
+                .animation(themeConfiguration.easeAnimation, value: isActuallyConnected)
 
-            if appModel.connectionStatus == .connected, let detail = appModel.connectionDetail, !detail.isEmpty {
+            if isActuallyConnected, let detail = connectionDetailText, !detail.isEmpty {
                 Text(LocalizationManager.shared.localizedString("device.status.connected") + " · " + detail)
                     .font(.caption)
                     .foregroundColor(themeConfiguration.secondaryTextColor)
             } else {
-            Text(appModel.connectionStatus == .connected ? LocalizationManager.shared.localizedString("device.status.connected") : LocalizationManager.shared.localizedString("status.disconnected"))
+            Text(isActuallyConnected ? LocalizationManager.shared.localizedString("device.status.connected") : LocalizationManager.shared.localizedString("status.disconnected"))
                 .font(.caption)
                 .foregroundColor(themeConfiguration.secondaryTextColor)
             }
@@ -125,6 +126,32 @@ public struct TopNavigationBarView: View {
             Capsule()
                 .stroke(themeConfiguration.borderColor, lineWidth: 1)
         )
+    }
+
+    private var isActuallyConnected: Bool {
+        if appModel.connectionStatus == .connected {
+            return true
+        }
+        return unifiedDeviceManager.onlineDevices.contains { device in
+            !device.isLocalDevice && device.connectionStatus == .connected
+        }
+    }
+
+    private var connectionDetailText: String? {
+        if let detail = appModel.connectionDetail, !detail.isEmpty {
+            return detail
+        }
+        let connectedPeer = unifiedDeviceManager.onlineDevices
+            .filter { !$0.isLocalDevice && $0.connectionStatus == .connected }
+            .sorted { ($0.lastConnectedAt ?? .distantPast) > ($1.lastConnectedAt ?? .distantPast) }
+            .first
+        guard let connectedPeer else {
+            return nil
+        }
+        if let kind = connectedPeer.lastCryptoKind, let suite = connectedPeer.lastCryptoSuite {
+            return "\(kind) · \(suite) · \(connectedPeer.guardStatus ?? "守护中")"
+        }
+        return connectedPeer.name
     }
 
  // 实时FPS展示小控件（位于顶部导航栏中间）

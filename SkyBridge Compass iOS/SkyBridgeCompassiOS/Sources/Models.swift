@@ -262,6 +262,8 @@ public struct FileTransfer: Identifiable, Codable, Sendable {
     public var isIncoming: Bool
     public var remotePeer: String
     public var timestamp: Date
+    /// 本地文件路径（接收时用于展示“保存位置”）
+    public var localPath: String?
     
     public init(
         id: String = UUID().uuidString,
@@ -273,7 +275,8 @@ public struct FileTransfer: Identifiable, Codable, Sendable {
         status: TransferStatus = .pending,
         isIncoming: Bool,
         remotePeer: String,
-        timestamp: Date = Date()
+        timestamp: Date = Date(),
+        localPath: String? = nil
     ) {
         self.id = id
         self.fileName = fileName
@@ -285,6 +288,7 @@ public struct FileTransfer: Identifiable, Codable, Sendable {
         self.isIncoming = isIncoming
         self.remotePeer = remotePeer
         self.timestamp = timestamp
+        self.localPath = localPath
     }
 }
 

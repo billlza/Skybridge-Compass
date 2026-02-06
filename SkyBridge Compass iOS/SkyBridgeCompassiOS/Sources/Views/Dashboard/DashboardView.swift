@@ -161,6 +161,11 @@ public struct DashboardView: View {
                     
                     // 快捷操作
                     quickActionsSection
+
+                    // 文件传输概览（进行中/最近完成）
+                    if !fileTransferManager.activeTransfers.isEmpty || !viewModel.recentTransfers.isEmpty {
+                        transferOverviewSection
+                    }
                     
                     // 最近设备
                     recentDevicesSection
@@ -394,6 +399,71 @@ public struct DashboardView: View {
                 ) {
                     showingQRScanner = true
                 }
+            }
+        }
+        .padding()
+        .background(Color.white.opacity(0.05))
+        .clipShape(RoundedRectangle(cornerRadius: 16))
+    }
+
+    // MARK: - Transfer Overview
+
+    private var transferOverviewSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("文件传输")
+                    .font(.headline)
+                    .foregroundColor(.white)
+                Spacer()
+                Button("查看全部") { selectedTab = .files }
+                    .font(.subheadline)
+                    .foregroundColor(.cyan)
+            }
+
+            if !fileTransferManager.activeTransfers.isEmpty {
+                ForEach(fileTransferManager.activeTransfers.prefix(3)) { transfer in
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text(transfer.fileName)
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundColor(.white)
+                                .lineLimit(1)
+                            Spacer()
+                            Text("\(Int(transfer.progress * 100))%")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        ProgressView(value: transfer.progress)
+                            .tint(transfer.isIncoming ? .green : .blue)
+                    }
+                    .padding(10)
+                    .background(Color.white.opacity(0.04))
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                }
+            } else if let latest = viewModel.recentTransfers.first {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Image(systemName: latest.isIncoming ? "arrow.down.circle.fill" : "arrow.up.circle.fill")
+                            .foregroundColor(latest.isIncoming ? .green : .blue)
+                        Text(latest.fileName)
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundColor(.white)
+                            .lineLimit(1)
+                        Spacer()
+                        Text(latest.status == .completed ? "已完成" : "失败")
+                            .font(.caption)
+                            .foregroundColor(latest.status == .completed ? .green : .red)
+                    }
+                    if latest.isIncoming, let localPath = latest.localPath {
+                        Text("保存位置：Downloads/\(URL(fileURLWithPath: localPath).lastPathComponent)")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+                .padding(10)
+                .background(Color.white.opacity(0.04))
+                .clipShape(RoundedRectangle(cornerRadius: 10))
             }
         }
         .padding()
@@ -920,33 +990,35 @@ private enum LocalIP {
             // 优先 Wi‑Fi (en0)，其次蜂窝/热点 (pdp_ip0)
             if interface == "en0" || interface.hasPrefix("pdp_ip") {
                 var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-                getnameinfo(
-                    ptr.pointee.ifa_addr,
-                    socklen_t(ptr.pointee.ifa_addr.pointee.sa_len),
-                    &hostname,
-                    socklen_t(hostname.count),
-                    nil,
-                    0,
-                    NI_NUMERICHOST
-                )
-                address = String(cString: hostname)
-                break
-            }
-        }
-        return address
-    }
-}
+	                getnameinfo(
+	                    ptr.pointee.ifa_addr,
+	                    socklen_t(ptr.pointee.ifa_addr.pointee.sa_len),
+	                    &hostname,
+	                    socklen_t(hostname.count),
+	                    nil,
+	                    0,
+	                    NI_NUMERICHOST
+	                )
+	                hostname.withUnsafeBufferPointer { buffer in
+	                    guard let base = buffer.baseAddress else { return }
+	                    address = String(cString: base)
+	                }
+	                break
+	            }
+	        }
+	        return address
+	    }
+	}
 
 // MARK: - Weather Effects (iOS)
 
-@available(iOS 17.0, *)
-private enum WeatherEffectsFrameRatePolicy {
-    static func targetFPS() -> Double {
-        let lowPower = ProcessInfo.processInfo.isLowPowerModeEnabled
-        if lowPower { return 30 }
-
-        return min(60, Double(UIScreen.main.maximumFramesPerSecond))
-    }
+	@available(iOS 17.0, *)
+	private enum WeatherEffectsFrameRatePolicy {
+	    static func targetFPS() -> Double {
+	        let lowPower = ProcessInfo.processInfo.isLowPowerModeEnabled
+	        if lowPower { return 30 }
+	        return 60
+	    }
 
     static func minimumInterval() -> TimeInterval {
         let fps = max(10, targetFPS())

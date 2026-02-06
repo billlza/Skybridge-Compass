@@ -142,9 +142,7 @@ struct SkyBridgeCompassApp: App {
         await FileTransferRuntime.shared.startIfNeeded()
 
         // 8. 启动灵动岛 Live Activity（显示天气或连接状态）
-        if #available(iOS 16.2, *) {
-            await initializeLiveActivity()
-        }
+        await initializeLiveActivity()
     }
 
     /// 初始化灵动岛 Live Activity
@@ -289,6 +287,12 @@ struct SkyBridgeCompassApp: App {
                 ],
                 intentIdentifiers: [],
                 options: []
+            ),
+            UNNotificationCategory(
+                identifier: "FILE_TRANSFER",
+                actions: [],
+                intentIdentifiers: [],
+                options: []
             )
         ]
         
@@ -336,7 +340,7 @@ class AppStateManager: ObservableObject {
 
 /// 通知代理
 #if os(iOS)
-class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
+final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate, @unchecked Sendable {
     static let shared = NotificationDelegate()
     
     private override init() {
@@ -358,26 +362,28 @@ class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
         let userInfo = response.notification.request.content.userInfo
-        
-        // 处理通知响应
-        Task { @MainActor in
-            await handleNotificationResponse(response.actionIdentifier, userInfo: userInfo)
+        let actionIdentifier = response.actionIdentifier
+        let deviceID = userInfo["deviceID"] as? String
+
+        // 处理通知响应（仅捕获 Sendable 数据，避免 Swift 6.2 并发发送检查报错）
+        Task { @MainActor [actionIdentifier, deviceID] in
+            await handleNotificationResponse(actionIdentifier, deviceID: deviceID)
         }
         
         completionHandler()
     }
     
-    private func handleNotificationResponse(_ actionIdentifier: String, userInfo: [AnyHashable: Any]) async {
+    private func handleNotificationResponse(_ actionIdentifier: String, deviceID: String?) async {
         switch actionIdentifier {
         case "ACCEPT":
             // 处理连接请求接受
-            if let deviceID = userInfo["deviceID"] as? String {
+            if let deviceID {
                 await P2PConnectionManager.instance.acceptConnection(from: deviceID)
             }
             
         case "REJECT":
             // 处理连接请求拒绝
-            if let deviceID = userInfo["deviceID"] as? String {
+            if let deviceID {
                 await P2PConnectionManager.instance.rejectConnection(from: deviceID)
             }
             

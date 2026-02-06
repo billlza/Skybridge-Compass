@@ -10,8 +10,6 @@ struct FileTransferView: View {
     @StateObject private var crossNetwork = CrossNetworkWebRTCManager.instance
     
     @State private var showFilePicker = false
-    @State private var showShareSheet = false
-    @State private var selectedFiles: [URL] = []
     @State private var targetDevice: DiscoveredDevice?
     
     var body: some View {
@@ -87,6 +85,11 @@ struct FileTransferView: View {
             Text("快速发送")
                 .font(.headline)
                 .foregroundColor(.white)
+
+            Text("接收目录：\(fileTransferManager.getDownloadsDirectory().path)")
+                .font(.caption)
+                .foregroundColor(.gray)
+                .lineLimit(1)
             
             // 在线设备列表
             let hasCrossNetwork: Bool = {
@@ -220,7 +223,6 @@ struct FileTransferView: View {
     private func handleFileSelection(_ result: Result<[URL], Error>) {
         switch result {
         case .success(let urls):
-            selectedFiles = urls
             sendFiles(urls)
             
         case .failure(let error):
@@ -339,6 +341,13 @@ struct FileTransferCard: View {
                     }
                 }
             }
+
+            if transfer.isIncoming, let locationText {
+                Text("保存位置：\(locationText)")
+                    .font(.caption2)
+                    .foregroundColor(.gray)
+                    .lineLimit(1)
+            }
         }
         .padding()
         .background(Color(white: 0.1))
@@ -388,12 +397,19 @@ struct FileTransferCard: View {
         formatter.countStyle = .file
         return "\(formatter.string(fromByteCount: Int64(bytesPerSecond)))/s"
     }
+
+    private var locationText: String? {
+        guard let localPath = transfer.localPath else { return nil }
+        let url = URL(fileURLWithPath: localPath)
+        return "Downloads/\(url.lastPathComponent)"
+    }
 }
 
 // MARK: - File Transfer History Card
 
 struct FileTransferHistoryCard: View {
     let transfer: FileTransfer
+    @Environment(\.openURL) private var openURL
 
     private var relativeTimestampText: String {
         let formatter = RelativeDateTimeFormatter()
@@ -402,44 +418,66 @@ struct FileTransferHistoryCard: View {
     }
     
     var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: transfer.isIncoming ? "arrow.down.circle.fill" : "arrow.up.circle.fill")
-                .font(.title2)
-                .foregroundColor(transfer.isIncoming ? .green : .blue)
-            
-            VStack(alignment: .leading, spacing: 4) {
-                Text(transfer.fileName)
-                    .font(.subheadline)
-                    .foregroundColor(.white)
-                    .lineLimit(1)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 12) {
+                Image(systemName: transfer.isIncoming ? "arrow.down.circle.fill" : "arrow.up.circle.fill")
+                    .font(.title2)
+                    .foregroundColor(transfer.isIncoming ? .green : .blue)
                 
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(transfer.fileName)
+                        .font(.subheadline)
+                        .foregroundColor(.white)
+                        .lineLimit(1)
+                    
+                    HStack(spacing: 8) {
+                        Text(transfer.isIncoming ? "来自" : "发送至")
+                            .font(.caption)
+                            .foregroundColor(.gray)
+                        
+                        Text(transfer.remotePeer)
+                            .font(.caption)
+                            .foregroundColor(.gray)
+                        
+                        Text("•")
+                            .foregroundColor(.gray)
+                        
+                        Text(relativeTimestampText)
+                            .font(.caption)
+                            .foregroundColor(.gray)
+                    }
+                }
+                
+                Spacer()
+                
+                Text(ByteCountFormatter.string(fromByteCount: transfer.fileSize, countStyle: .file))
+                    .font(.caption)
+                    .foregroundColor(.gray)
+            }
+
+            if transfer.isIncoming, let localPath = transfer.localPath {
                 HStack(spacing: 8) {
-                    Text(transfer.isIncoming ? "来自" : "发送至")
-                        .font(.caption)
+                    Text("保存位置：\(displayLocation(path: localPath))")
+                        .font(.caption2)
                         .foregroundColor(.gray)
-                    
-                    Text(transfer.remotePeer)
-                        .font(.caption)
-                        .foregroundColor(.gray)
-                    
-                    Text("•")
-                        .foregroundColor(.gray)
-                    
-                    Text(relativeTimestampText)
-                        .font(.caption)
-                        .foregroundColor(.gray)
+                        .lineLimit(1)
+                    Spacer()
+                    Button("打开") {
+                        openURL(URL(fileURLWithPath: localPath))
+                    }
+                    .font(.caption2)
+                    .buttonStyle(.borderless)
                 }
             }
-            
-            Spacer()
-            
-            Text(ByteCountFormatter.string(fromByteCount: transfer.fileSize, countStyle: .file))
-                .font(.caption)
-                .foregroundColor(.gray)
         }
         .padding()
         .background(Color(white: 0.1))
         .cornerRadius(12)
+    }
+
+    private func displayLocation(path: String) -> String {
+        let url = URL(fileURLWithPath: path)
+        return "Downloads/\(url.lastPathComponent)"
     }
 }
 

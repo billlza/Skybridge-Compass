@@ -154,14 +154,19 @@ public class DashboardViewModel: ObservableObject {
             }
             .store(in: &cancellables)
         
-        // 监听文件传输变化
-        FileTransferManager.instance.$activeTransfers
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] transfers in
-                self?.recentTransfers = Array(transfers.prefix(5))
-                self?.updateMetrics()
-            }
-            .store(in: &cancellables)
+        // 监听文件传输变化（活跃 + 历史），确保首页能看到“进行中/已完成”
+        Publishers.CombineLatest(
+            FileTransferManager.instance.$activeTransfers,
+            FileTransferManager.instance.$transferHistory
+        )
+        .receive(on: DispatchQueue.main)
+        .sink { [weak self] active, history in
+            let merged = (active + history)
+                .sorted { $0.timestamp > $1.timestamp }
+            self?.recentTransfers = Array(merged.prefix(5))
+            self?.updateMetrics()
+        }
+        .store(in: &cancellables)
         
         // 监听离线消息
         OfflineMessageQueue.shared.$totalCount
@@ -175,7 +180,7 @@ public class DashboardViewModel: ObservableObject {
     private func updateMetrics() {
         metrics.onlineDevices = discoveredDevices.count
         metrics.activeSessions = activeConnections.count
-        metrics.fileTransfers = recentTransfers.count
+        metrics.fileTransfers = FileTransferManager.instance.activeTransfers.count
     }
     
     private func startAutoRefresh() {
@@ -265,4 +270,3 @@ public enum PerformanceStatus: String, Sendable {
         }
     }
 }
-
