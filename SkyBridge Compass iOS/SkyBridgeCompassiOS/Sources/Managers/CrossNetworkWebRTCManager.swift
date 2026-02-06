@@ -211,6 +211,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     private var receiveTask: Task<Void, Never>?
     private var currentRole: WebRTCSession.Role?
     private var handshakeStartedSessionIds: Set<String> = []
+    private var connectionCodeBootstrapTask: Task<Void, Never>?
     
     // File transfer waiters (transferId|op|chunkIndex -> continuation)
     private var fileTransferWaiters: [String: CheckedContinuation<CrossNetworkFileTransferMessage, Error>] = [:]
@@ -297,17 +298,34 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             return existing
         }
 
-        do {
-            let code = Self.generateShortCode()
-            try await connect(sessionId: code, remoteName: nil, remotePeerDeviceId: nil, role: .offerer)
-            localConnectionCode = code
-            return code
-        } catch {
-            let msg = error.localizedDescription
-            lastError = msg
-            state = .failed(msg)
-            return nil
+        let code = Self.generateShortCode()
+        localConnectionCode = code
+        currentRole = .offerer
+        state = .connecting(sessionId: code)
+        lastError = nil
+
+        connectionCodeBootstrapTask?.cancel()
+        connectionCodeBootstrapTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            // Ignore stale bootstrap tasks when user regenerated/disconnected.
+            guard self.localConnectionCode == code, self.currentRole == .offerer else { return }
+            do {
+                try await self.connect(sessionId: code, remoteName: nil, remotePeerDeviceId: nil, role: .offerer)
+                self.localConnectionCode = code
+            } catch is CancellationError {
+                // Cancellation is expected during regenerate/disconnect.
+            } catch {
+                guard self.localConnectionCode == code else { return }
+                let msg = error.localizedDescription
+                self.lastError = msg
+                self.state = .failed(msg)
+            }
+            if self.connectionCodeBootstrapTask?.isCancelled == false {
+                self.connectionCodeBootstrapTask = nil
+            }
         }
+
+        return code
     }
     
     public func disconnect() async {
@@ -325,6 +343,8 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         remoteDeviceId = nil
         localConnectionCode = nil
         currentRole = nil
+        connectionCodeBootstrapTask?.cancel()
+        connectionCodeBootstrapTask = nil
         handshakeStartedSessionIds.removeAll()
         failAllFileTransferWaiters(FileTransferWaitError.cancelled)
         cleanupInboundFileTransfers()

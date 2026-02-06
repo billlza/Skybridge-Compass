@@ -629,6 +629,48 @@ public class DeviceDiscoveryManager: BaseManager {
 
     // MARK: - Inbound control channel (HandshakeDriver compatibility)
 
+    nonisolated private static func stablePeerIdentifier(for endpoint: NWEndpoint) -> String {
+        switch endpoint {
+        case .service(let name, _, let domain, _):
+            let resolvedDomain = domain.isEmpty ? "local." : domain.lowercased()
+            return "bonjour:\(name)@\(resolvedDomain)"
+        case .hostPort(let host, _):
+            return "peer:\(normalizePeerHostToken(String(describing: host)))"
+        default:
+            return "peer:\(normalizePeerHostToken(endpoint.debugDescription))"
+        }
+    }
+
+    nonisolated private static func stableEndpointLabel(for endpoint: NWEndpoint) -> String {
+        stablePeerIdentifier(for: endpoint)
+    }
+
+    nonisolated private static func normalizePeerHostToken(_ raw: String) -> String {
+        var token = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if token.hasPrefix("[") && token.hasSuffix("]") {
+            token = String(token.dropFirst().dropLast())
+        }
+        if let pct = token.firstIndex(of: "%") {
+            token = String(token[..<pct])
+        }
+
+        if token.contains(":"),
+           let dot = token.lastIndex(of: "."),
+           token[token.index(after: dot)...].allSatisfy({ $0.isNumber }) {
+            token = String(token[..<dot])
+        } else {
+            let parts = token.split(separator: ".")
+            if parts.count == 5,
+               parts.dropLast().allSatisfy({ Int($0) != nil }),
+               let port = Int(parts.last ?? ""), (0...65535).contains(port) {
+                token = parts.dropLast().map(String.init).joined(separator: ".")
+            }
+        }
+
+        return token.lowercased()
+    }
+
     nonisolated private static func consumeInboundHandshakeOrControlChannel(_ connection: NWConnection) async {
         let logger = Logger(subsystem: "com.skybridge.Compass", category: "InboundHandshake")
 
@@ -639,7 +681,7 @@ public class DeviceDiscoveryManager: BaseManager {
             logger.info("⏳ 入站连接等待结束: ready=\(becameReady, privacy: .public) state=\(String(describing: connection.state), privacy: .public)")
         }
 
-        let endpointDescription = connection.endpoint.debugDescription
+        let endpointDescription = stableEndpointLabel(for: connection.endpoint)
 
         struct DirectHandshakeTransport: DiscoveryTransport {
             let sendRaw: @Sendable (Data) async throws -> Void
@@ -690,15 +732,7 @@ public class DeviceDiscoveryManager: BaseManager {
 
         // Use a stable peer id string aligned with iOS discovery (bonjour:<name>@<domain>) when possible.
         // This improves trust/pairing UX and ensures trust lookups don't churn across reconnects.
-        let peerDeviceId: String = {
-            switch connection.endpoint {
-            case .service(let name, _, let domain, _):
-                let d = domain.isEmpty ? "local." : domain
-                return "bonjour:\(name)@\(d)"
-            default:
-                return "peer:\(endpointDescription)"
-            }
-        }()
+        let peerDeviceId = stablePeerIdentifier(for: connection.endpoint)
         let peer = PeerIdentifier(deviceId: peerDeviceId)
 
         // 关键：入站 responder 不能硬编码 Classic。

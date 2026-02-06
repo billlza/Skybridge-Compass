@@ -1418,7 +1418,51 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         connection.start(queue: .global(qos: .utility))
     }
 
-    // MARK: - Inbound control channel (HandshakeDriver compatibility)
+ // MARK: - Inbound control channel (HandshakeDriver compatibility)
+
+    nonisolated private static func stablePeerIdentifier(for endpoint: NWEndpoint) -> String {
+        switch endpoint {
+        case .service(let name, _, let domain, _):
+            let resolvedDomain = domain.isEmpty ? "local." : domain.lowercased()
+            return "bonjour:\(name)@\(resolvedDomain)"
+        case .hostPort(let host, _):
+            return "peer:\(normalizePeerHostToken(String(describing: host)))"
+        default:
+            return "peer:\(normalizePeerHostToken(endpoint.debugDescription))"
+        }
+    }
+
+    nonisolated private static func stableEndpointLabel(for endpoint: NWEndpoint) -> String {
+        stablePeerIdentifier(for: endpoint)
+    }
+
+    nonisolated private static func normalizePeerHostToken(_ raw: String) -> String {
+        var token = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if token.hasPrefix("[") && token.hasSuffix("]") {
+            token = String(token.dropFirst().dropLast())
+        }
+        if let pct = token.firstIndex(of: "%") {
+            token = String(token[..<pct])
+        }
+
+        // IPv6 debug strings often append ".<ephemeralPort>".
+        if token.contains(":"),
+           let dot = token.lastIndex(of: "."),
+           token[token.index(after: dot)...].allSatisfy({ $0.isNumber }) {
+            token = String(token[..<dot])
+        } else {
+            // IPv4 debug string may appear as "a.b.c.d.<port>" (5 components).
+            let parts = token.split(separator: ".")
+            if parts.count == 5,
+               parts.dropLast().allSatisfy({ Int($0) != nil }),
+               let port = Int(parts.last ?? ""), (0...65535).contains(port) {
+                token = parts.dropLast().map(String.init).joined(separator: ".")
+            }
+        }
+
+        return token.lowercased()
+    }
 
     nonisolated private static func consumeInboundHandshakeOrControlChannel(_ connection: NWConnection) async {
         let logger = Logger(subsystem: "com.skybridge.discovery.optimized", category: "InboundHandshake")
@@ -1476,15 +1520,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
 
         // Use a stable peer id aligned with iOS discovery (bonjour:<name>@<domain>) when possible.
         // This avoids churn across reconnects and improves trust/pairing semantics.
-        let peerDeviceId: String = {
-            switch connection.endpoint {
-            case .service(let name, _, let domain, _):
-                let d = domain.isEmpty ? "local." : domain
-                return "bonjour:\(name)@\(d)"
-            default:
-                return "peer:\(connection.endpoint.debugDescription)"
-            }
-        }()
+        let peerDeviceId = stablePeerIdentifier(for: connection.endpoint)
         let peer = PeerIdentifier(deviceId: peerDeviceId)
         
         // Precompute identity info for heartbeat without crossing actor boundaries inside GCD timer handlers.
@@ -1515,7 +1551,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         ))
 
         let peerIdForPresence = peer.deviceId
-        let endpointDescriptionForPresence = connection.endpoint.debugDescription
+        let endpointDescriptionForPresence = stableEndpointLabel(for: connection.endpoint)
 
         func cryptoKind(for suite: CryptoSuite) -> String {
             if suite.isHybrid { return "Hybrid" }
@@ -1715,7 +1751,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                                     }
                                 }
                             case .pairingIdentityExchange(let payload):
-                                let endpoint = connection.endpoint.debugDescription
+                                let endpoint = stableEndpointLabel(for: connection.endpoint)
                                 let displayName: String = {
                                     if let dn = payload.deviceName, !dn.isEmpty { return dn }
                                     if case .service(let name, _, _, _) = connection.endpoint { return name }

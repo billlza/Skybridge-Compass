@@ -175,22 +175,69 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         suite: String,
         guardStatus: String = "守护中"
     ) {
-        if let idx = onlineDevices.firstIndex(where: { $0.name == displayName }) {
-            var device = onlineDevices[idx]
+        let normalizedPeerId = Self.normalizedPeerIdentifier(peerId)
+        let normalizedRecentIdentifier = "recent:\(normalizedPeerId)"
+
+        func applyConnectedStatus(to device: inout OnlineDevice) {
             device.connectionStatus = .connected
             device.lastConnectedAt = Date()
             device.lastCryptoKind = cryptoKind
             device.lastCryptoSuite = suite
             device.guardStatus = guardStatus
+            device.lastSeen = Date()
+        }
+
+        if let idx = onlineDevices.firstIndex(where: { $0.name == displayName }) {
+            var device = onlineDevices[idx]
+            applyConnectedStatus(to: &device)
             onlineDevices[idx] = device
             deviceMap[device.uniqueIdentifier] = device
+            pruneRecentDuplicates(matching: normalizedRecentIdentifier, keep: device.id)
             storage.saveDevice(device)
             updateDevicesList()
             logger.info("✅ 设备标记为已连接(匹配name): \(device.name)")
             return
         }
 
-        // Fallback: create a lightweight record so it shows up immediately in UI.
+        if let idx = indexOfDeviceMatchingPeerIP(normalizedPeerId) {
+            var device = onlineDevices[idx]
+            applyConnectedStatus(to: &device)
+            onlineDevices[idx] = device
+            deviceMap[device.uniqueIdentifier] = device
+            pruneRecentDuplicates(matching: normalizedRecentIdentifier, keep: device.id)
+            storage.saveDevice(device)
+            updateDevicesList()
+            logger.info("✅ 设备标记为已连接(IP匹配): \(device.name)")
+            return
+        }
+
+        if let idx = onlineDevices.firstIndex(where: {
+            Self.normalizedRecentIdentifier(from: $0.uniqueIdentifier) == normalizedRecentIdentifier
+        }) {
+            var device = onlineDevices[idx]
+            let oldIdentifier = device.uniqueIdentifier
+            applyConnectedStatus(to: &device)
+            if oldIdentifier.hasPrefix("recent:") && oldIdentifier != normalizedRecentIdentifier {
+                device = Self.copyDevice(device, uniqueIdentifier: normalizedRecentIdentifier)
+            }
+            onlineDevices[idx] = device
+            if oldIdentifier != device.uniqueIdentifier {
+                deviceMap.removeValue(forKey: oldIdentifier)
+            }
+            deviceMap[device.uniqueIdentifier] = device
+            pruneRecentDuplicates(matching: normalizedRecentIdentifier, keep: device.id)
+            storage.saveDevice(device)
+            updateDevicesList()
+            logger.info("✅ 设备标记为已连接(匹配recent): \(device.name)")
+            return
+        }
+
+        // Synthetic names like "peer:fe80::..." are unstable and create duplicate noise.
+        guard !Self.isSyntheticPeerDisplayName(displayName) else {
+            logger.debug("↪️ 跳过创建recent记录（displayName为临时peer）: \(displayName, privacy: .public)")
+            return
+        }
+
         let now = Date()
         let new = OnlineDevice(
             id: UUID(),
@@ -203,7 +250,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
             connectionTypes: [.wifi],
             services: ["_skybridge._tcp"],
             portMap: [:],
-            uniqueIdentifier: "recent:\(peerId)",
+            uniqueIdentifier: normalizedRecentIdentifier,
             sources: [.skybridgeBonjour],
             discoveredAt: now,
             lastSeen: now,
@@ -217,6 +264,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         )
         deviceMap[new.uniqueIdentifier] = new
         onlineDevices.append(new)
+        pruneRecentDuplicates(matching: normalizedRecentIdentifier, keep: new.id)
         storage.saveDevice(new)
         updateDevicesList()
         logger.info("✅ 设备标记为已连接(新增recent): \(displayName, privacy: .public)")
@@ -237,6 +285,37 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         storage.saveDevice(device)
 
         logger.info("✅ 设备标记为已授权: \(device.name)")
+    }
+
+    private func pruneRecentDuplicates(matching normalizedRecentIdentifier: String, keep keepId: UUID) {
+        let duplicateIds = Set(
+            onlineDevices.compactMap { device -> UUID? in
+                guard device.id != keepId else { return nil }
+                guard let normalized = Self.normalizedRecentIdentifier(from: device.uniqueIdentifier) else { return nil }
+                return normalized == normalizedRecentIdentifier ? device.id : nil
+            }
+        )
+        guard !duplicateIds.isEmpty else { return }
+
+        onlineDevices.removeAll { duplicateIds.contains($0.id) }
+        deviceMap = deviceMap.filter { _, device in !duplicateIds.contains(device.id) }
+    }
+
+    private func indexOfDeviceMatchingPeerIP(_ normalizedPeerId: String) -> Int? {
+        let extracted = Self.extractIPComponents(fromNormalizedPeerId: normalizedPeerId)
+        if let v6 = extracted.ipv6 {
+            return onlineDevices.firstIndex { device in
+                guard let existing = device.ipv6 else { return false }
+                return Self.normalizeIPAddress(existing) == v6
+            }
+        }
+        if let v4 = extracted.ipv4 {
+            return onlineDevices.firstIndex { device in
+                guard let existing = device.ipv4 else { return false }
+                return Self.normalizeIPAddress(existing) == v4
+            }
+        }
+        return nil
     }
 
  // MARK: - 私有方法
@@ -643,6 +722,123 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         return merged
     }
 
+    private static func copyDevice(_ device: OnlineDevice, uniqueIdentifier: String) -> OnlineDevice {
+        OnlineDevice(
+            id: device.id,
+            name: device.name,
+            deviceType: device.deviceType,
+            ipv4: device.ipv4,
+            ipv6: device.ipv6,
+            macAddress: device.macAddress,
+            serialNumber: device.serialNumber,
+            connectionTypes: device.connectionTypes,
+            services: device.services,
+            portMap: device.portMap,
+            uniqueIdentifier: uniqueIdentifier,
+            sources: device.sources,
+            discoveredAt: device.discoveredAt,
+            lastSeen: device.lastSeen,
+            connectionStatus: device.connectionStatus,
+            lastConnectedAt: device.lastConnectedAt,
+            lastCryptoKind: device.lastCryptoKind,
+            lastCryptoSuite: device.lastCryptoSuite,
+            guardStatus: device.guardStatus,
+            isLocalDevice: device.isLocalDevice,
+            isAuthorized: device.isAuthorized
+        )
+    }
+
+    private static func normalizedRecentIdentifier(from uniqueIdentifier: String) -> String? {
+        guard uniqueIdentifier.hasPrefix("recent:") else { return nil }
+        let peerId = String(uniqueIdentifier.dropFirst("recent:".count))
+        return "recent:\(normalizedPeerIdentifier(peerId))"
+    }
+
+    private static func normalizedPeerIdentifier(_ peerId: String) -> String {
+        let trimmed = peerId.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix("bonjour:") {
+            let payload = String(trimmed.dropFirst("bonjour:".count))
+            let parts = payload.split(separator: "@", maxSplits: 1).map(String.init)
+            let name = parts.first ?? payload
+            let domain = parts.count > 1 ? parts[1].lowercased() : "local."
+            return "bonjour:\(name)@\(domain)"
+        }
+
+        let raw: String
+        if trimmed.hasPrefix("peer:") {
+            raw = String(trimmed.dropFirst("peer:".count))
+        } else {
+            raw = trimmed
+        }
+
+        return "peer:\(normalizePeerHostToken(raw))"
+    }
+
+    private static func normalizePeerHostToken(_ raw: String) -> String {
+        var token = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if token.hasPrefix("[") && token.hasSuffix("]") {
+            token = String(token.dropFirst().dropLast())
+        }
+        if let pct = token.firstIndex(of: "%") {
+            token = String(token[..<pct])
+        }
+
+        if token.contains(":"),
+           let dot = token.lastIndex(of: "."),
+           token[token.index(after: dot)...].allSatisfy({ $0.isNumber }) {
+            token = String(token[..<dot])
+        } else {
+            let parts = token.split(separator: ".")
+            if parts.count == 5,
+               parts.dropLast().allSatisfy({ Int($0) != nil }),
+               let port = Int(parts.last ?? ""), (0...65535).contains(port) {
+                token = parts.dropLast().map(String.init).joined(separator: ".")
+            }
+        }
+        return token.lowercased()
+    }
+
+    private static func normalizeIPAddress(_ raw: String) -> String {
+        var token = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if token.hasPrefix("[") && token.hasSuffix("]") {
+            token = String(token.dropFirst().dropLast())
+        }
+        if let pct = token.firstIndex(of: "%") {
+            token = String(token[..<pct])
+        }
+        return token.lowercased()
+    }
+
+    private static func extractIPComponents(fromNormalizedPeerId peerId: String) -> (ipv4: String?, ipv6: String?) {
+        guard peerId.hasPrefix("peer:") else { return (nil, nil) }
+        let host = String(peerId.dropFirst("peer:".count))
+        if host.contains(":") {
+            return (nil, host)
+        }
+        let segments = host.split(separator: ".")
+        if segments.count == 4, segments.allSatisfy({ Int($0) != nil }) {
+            return (host, nil)
+        }
+        return (nil, nil)
+    }
+
+    private static func isSyntheticPeerDisplayName(_ displayName: String) -> Bool {
+        let normalized = displayName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return normalized.hasPrefix("peer:")
+    }
+
+    private static func preferredRecentDevice(_ lhs: OnlineDevice, _ rhs: OnlineDevice) -> OnlineDevice {
+        if lhs.connectionStatus.priority != rhs.connectionStatus.priority {
+            return lhs.connectionStatus.priority > rhs.connectionStatus.priority ? lhs : rhs
+        }
+        let lhsConnected = lhs.lastConnectedAt ?? .distantPast
+        let rhsConnected = rhs.lastConnectedAt ?? .distantPast
+        if lhsConnected != rhsConnected {
+            return lhsConnected > rhsConnected ? lhs : rhs
+        }
+        return lhs.lastSeen >= rhs.lastSeen ? lhs : rhs
+    }
+
  /// 更新设备列表
     private func updateDevicesList() {
         let now = Date()
@@ -658,6 +854,26 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
             }
         }
 
+        // Collapse noisy "recent:<peer>" duplicates produced by ephemeral endpoint forms.
+        var normalDevices: [OnlineDevice] = []
+        var recentByNormalizedId: [String: OnlineDevice] = [:]
+        for device in uniqueDevices {
+            if let normalizedRecentId = Self.normalizedRecentIdentifier(from: device.uniqueIdentifier) {
+                if let existing = recentByNormalizedId[normalizedRecentId] {
+                    recentByNormalizedId[normalizedRecentId] = Self.preferredRecentDevice(existing, device)
+                } else {
+                    recentByNormalizedId[normalizedRecentId] = device
+                }
+            } else {
+                normalDevices.append(device)
+            }
+        }
+        uniqueDevices = normalDevices + Array(recentByNormalizedId.values)
+
+        // Remove deduped-out duplicates from the map so they don't keep resurfacing.
+        let retainedIds = Set(uniqueDevices.map(\.id))
+        deviceMap = deviceMap.filter { _, device in retainedIds.contains(device.id) }
+
         // Update device status:
         // - Preserve "connected" for active secure sessions (ConnectionPresenceService)
         // - Otherwise fall back to lastSeen heuristics
@@ -667,12 +883,13 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
             }
             return []
         }()
+        let normalizedActivePeerIds = Set(activePeerIds.map(Self.normalizedPeerIdentifier))
 
         func isActivelyConnected(_ device: OnlineDevice) -> Bool {
             // Our inbound "recently connected" records use uniqueIdentifier: "recent:<peerId>"
-            if device.uniqueIdentifier.hasPrefix("recent:") {
-                let peerId = String(device.uniqueIdentifier.dropFirst("recent:".count))
-                return activePeerIds.contains(peerId)
+            if let normalizedRecent = Self.normalizedRecentIdentifier(from: device.uniqueIdentifier) {
+                let peerId = String(normalizedRecent.dropFirst("recent:".count))
+                return normalizedActivePeerIds.contains(peerId)
             }
             return false
         }

@@ -220,28 +220,61 @@ public class P2PDiscoveryService: BaseManager {
         stopAdvertising()
     }
 
- /// 连接到指定设备（基于 IPv4 + 主服务端口）
+    /// 连接到指定设备（基于 IPv4 + 主服务端口）
     public func connectToDevice(_ device: DiscoveredDevice) async throws {
         logger.info("尝试连接到设备: \(device.name)")
 
- // 从设备信息中获取连接地址
-        guard let ipv4 = device.ipv4 else {
-            throw P2PDiscoveryError.deviceNotConnected
-        }
-        if isLocalIPAddress(ipv4) {
-            logger.debug("忽略本机地址，跳过连接尝试: \(ipv4)")
-            throw P2PDiscoveryError.connectionCancelled
-        }
+        let primaryServiceType = "_skybridge._tcp"
+        let fallbackServiceType = device.services.first
+        let serviceName = sanitizedBonjourServiceName(device.name)
 
- // 选取发现的端口（不得回落默认值）
-        let preferredKey = device.services.first ?? "_skybridge._tcp"
-        let portValue = device.portMap[preferredKey] ?? device.portMap.values.first ?? 0
-        guard portValue > 0, let port = NWEndpoint.Port(rawValue: UInt16(portValue)) else {
-            throw P2PDiscoveryError.scanningFailed
+        let endpoint: NWEndpoint
+        if device.services.contains(primaryServiceType), !serviceName.isEmpty {
+            // Prefer Bonjour service endpoint: it works even when IP/port are not yet resolved.
+            endpoint = .service(
+                name: serviceName,
+                type: primaryServiceType,
+                domain: serviceDomain,
+                interface: nil
+            )
+            logger.info("使用 Bonjour 主服务连接: \(serviceName, privacy: .public) [\(primaryServiceType, privacy: .public)]")
+        } else {
+            // Fallback to host/port path when service endpoint is unavailable.
+            let preferredKey = fallbackServiceType ?? primaryServiceType
+            let portValue = device.portMap[preferredKey] ?? device.portMap[primaryServiceType] ?? device.portMap.values.first ?? 0
+            if portValue > 0, let port = NWEndpoint.Port(rawValue: UInt16(portValue)) {
+                if let ipv4 = device.ipv4, !ipv4.isEmpty {
+                    if isLocalIPAddress(ipv4) {
+                        logger.debug("忽略本机地址，跳过连接尝试: \(ipv4)")
+                        throw P2PDiscoveryError.connectionCancelled
+                    }
+                    endpoint = .hostPort(host: NWEndpoint.Host(ipv4), port: port)
+                } else if let ipv6 = device.ipv6, !ipv6.isEmpty {
+                    let normalizedIPv6 = ipv6.split(separator: "%", maxSplits: 1).first.map(String.init) ?? ipv6
+                    endpoint = .hostPort(host: NWEndpoint.Host(normalizedIPv6), port: port)
+                } else if let fallbackServiceType, !serviceName.isEmpty {
+                    endpoint = .service(
+                        name: serviceName,
+                        type: fallbackServiceType,
+                        domain: serviceDomain,
+                        interface: nil
+                    )
+                    logger.info("使用 Bonjour 备用服务连接: \(serviceName, privacy: .public) [\(fallbackServiceType, privacy: .public)]")
+                } else {
+                    throw P2PDiscoveryError.deviceNotConnected
+                }
+            } else if let fallbackServiceType, !serviceName.isEmpty {
+                endpoint = .service(
+                    name: serviceName,
+                    type: fallbackServiceType,
+                    domain: serviceDomain,
+                    interface: nil
+                )
+                logger.info("使用 Bonjour 备用服务连接: \(serviceName, privacy: .public) [\(fallbackServiceType, privacy: .public)]")
+            } else {
+                throw P2PDiscoveryError.scanningFailed
+            }
         }
-
-        let host = NWEndpoint.Host(ipv4)
-        let endpoint = NWEndpoint.hostPort(host: host, port: port)
 
  // 应用统一 TLS 策略（近距连接）
         let net = RemoteDesktopSettingsManager.shared.settings.networkSettings
@@ -282,6 +315,14 @@ public class P2PDiscoveryService: BaseManager {
         try await waitForConnection(connection, deviceId: device.id.uuidString)
 
         logger.info("✅ 成功连接到设备: \(device.name)")
+    }
+
+    private func sanitizedBonjourServiceName(_ raw: String) -> String {
+        var name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        for suffix in [" 📱", " 🍎"] where name.hasSuffix(suffix) {
+            name = String(name.dropLast(suffix.count))
+        }
+        return name.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
  /// 断开与指定设备的连接
