@@ -12,6 +12,7 @@
 //
 
 import Foundation
+import Darwin
 import Network
 import Combine
 #if canImport(UIKit)
@@ -587,6 +588,8 @@ public class DeviceDiscoveryManager: ObservableObject {
             portMap[serviceType.rawValue] = p
         }
 
+        let signalStrength = resolveSignalStrength(from: txtRecord, endpoint: endpoint)
+
         return DiscoveredDevice(
             id: id,
             name: displayName,
@@ -599,7 +602,7 @@ public class DeviceDiscoveryManager: ObservableObject {
             bonjourServiceDomain: bonjourDomain,
             services: [serviceType.rawValue],
             portMap: portMap,
-            signalStrength: -50, // TODO: 实际 RSSI 值
+            signalStrength: signalStrength,
             lastSeen: Date(),
             isConnected: false,
             isTrusted: isTrusted,
@@ -691,6 +694,9 @@ public class DeviceDiscoveryManager: ObservableObject {
         for s in update.services where !merged.services.contains(s) { merged.services.append(s) }
         for (k, v) in update.portMap { merged.portMap[k] = v }
 
+        // 信号强度：Bonjour 不一定能拿到“真实 RSSI”，但如果 TXT/启发式有新值，优先采用最新值
+        merged.signalStrength = update.signalStrength
+
         // 合并 advertisedCapabilities（TXT）
         let txtUnion = Set(merged.advertisedCapabilities).union(update.advertisedCapabilities)
         merged.advertisedCapabilities = Array(txtUnion).sorted()
@@ -761,6 +767,55 @@ public class DeviceDiscoveryManager: ObservableObject {
         default:
             return nil
         }
+    }
+
+    // MARK: - Signal strength (RSSI)
+
+    /// 尝试从 TXT 记录提取 RSSI；若不存在，则根据网络接口类型给出一个稳定的启发式默认值。
+    ///
+    /// 说明：
+    /// - Bonjour/mDNS 本身不携带 RSSI；若需要“真实 RSSI”，需由发布方把 `rssi` 写入 TXT 记录，
+    ///   或使用更底层的无线扫描 API（iOS 上通常不可行/受限）。
+    private func resolveSignalStrength(from txtRecord: [String: String], endpoint: NWEndpoint) -> Int {
+        if let raw = txtValue(txtRecord, "rssi", "signalStrength", "signal_strength", "signal"),
+           let parsed = parseRSSI(raw) {
+            return parsed
+        }
+        return defaultSignalStrength(for: endpoint)
+    }
+
+    private func parseRSSI(_ raw: String) -> Int? {
+        let trimmed = raw.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        // 常见形式："-65" / "-65.2" / "-65 dBm"
+        let cleaned = trimmed
+            .replacingOccurrences(of: "dbm", with: "", options: [.caseInsensitive])
+            .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+
+        if let v = Int(cleaned) { return v }
+        if let d = Double(cleaned) { return Int(d.rounded()) }
+
+        // 兜底：提取数字部分
+        let numeric = cleaned.filter { "-0123456789.".contains($0) }
+        if let d = Double(numeric) { return Int(d.rounded()) }
+        return nil
+    }
+
+    private func defaultSignalStrength(for endpoint: NWEndpoint) -> Int {
+        if case .service(_, _, _, let interface) = endpoint, let interface {
+            // AWDL（AirDrop/点对点）一般信号更好一些
+            if interface.name == "awdl0" { return -45 }
+            switch interface.type {
+            case .wifi: return -50
+            case .wiredEthernet: return -35
+            case .cellular: return -85
+            case .loopback: return -10
+            case .other: return -65
+            @unknown default: return -60
+            }
+        }
+        return -60
     }
     
     /// 检测平台
@@ -970,17 +1025,27 @@ public class DeviceDiscoveryManager: ObservableObject {
     }
     
     private func extractPeerId(from connection: NWConnection) -> String {
+        // Prefer mapping back to an already-discovered stable device id if possible.
+        // This is critical for UI refresh: the device list is keyed by `DiscoveredDevice.id` (stableDeviceId),
+        // while inbound NWConnection endpoints often arrive as hostPort (IP) and would otherwise mismatch.
+        let endpointKey = connection.endpoint.debugDescription
+        if let mapped = endpointToDeviceId[endpointKey] {
+            return mapped
+        }
+
+        // Fall back to a stable host-based id (matches stableDeviceId(from:) for hostPort endpoints).
         if case .hostPort(let host, _) = connection.endpoint {
             switch host {
             case .ipv4(let addr):
-                return "\(addr)"
+                return "host:\(addr)"
             case .ipv6(let addr):
-                return "\(addr)"
+                return "host:\(addr)"
             default:
                 break
             }
         }
-        return connection.endpoint.debugDescription
+
+        return endpointKey
     }
     
     // MARK: - Private Methods - TXT Record
@@ -1101,9 +1166,44 @@ public class DeviceDiscoveryManager: ObservableObject {
         if let ip = device.ipAddress {
             return ip
         }
-        
-        // TODO: 使用 NWConnection 解析服务端点
-        return nil
+
+        guard let name = device.bonjourServiceName,
+              let type = device.bonjourServiceType,
+              let domain = device.bonjourServiceDomain else {
+            return nil
+        }
+
+        // Bonjour service -> IP：优先用 NetService 做 DNS-SD 解析（不需要真的建立 TCP 连接）
+        let resolved = await resolveBonjourServiceIPAddress(
+            name: name,
+            type: type,
+            domain: domain,
+            timeout: 2.0
+        )
+
+        if let resolved, var cached = deviceCache[device.id] {
+            cached.ipAddress = resolved
+            cached.lastSeen = Date()
+            deviceCache[device.id] = cached
+            updateDiscoveredDevices()
+        }
+
+        return resolved
+    }
+
+    private func resolveBonjourServiceIPAddress(
+        name: String,
+        type: String,
+        domain: String,
+        timeout: TimeInterval
+    ) async -> String? {
+        let normalizedType = type.hasSuffix(".") ? type : (type + ".")
+        let d = domain.isEmpty ? "local." : domain
+        let normalizedDomain = d.hasSuffix(".") ? d : (d + ".")
+
+        let service = NetService(domain: normalizedDomain, type: normalizedType, name: name)
+        let resolver = BonjourNetServiceResolver(service: service, timeout: timeout)
+        return await resolver.resolve()
     }
 }
 
@@ -1124,6 +1224,8 @@ extension NWTXTRecord {
             "model", "hardwareModel", "hwModel", "name",
             // features
             "capabilities", "pqc", "version",
+            // signal
+            "rssi", "signalStrength", "signal_strength", "signal",
             // ports (for UI)
             "transferPort", "fileTransferPort", "file_transfer_port",
             "remotePort", "remoteControlPort", "remote_port",
@@ -1140,3 +1242,106 @@ extension NWTXTRecord {
         return result.isEmpty ? nil : result
     }
 }
+
+// MARK: - Bonjour resolver (NetService)
+
+/// 将 Bonjour service (name/type/domain) 解析为一个可展示/可连接的 IP 字符串。
+///
+/// Swift 6 严格并发说明：
+/// - `NetService` 不是 Sendable，delegate 回调可能发生在任意线程；因此 delegate 方法标记为 `nonisolated`
+/// - 回调中只提取 `Data`（Sendable）后切回 `@MainActor` 完成收尾与 continuation
+@MainActor
+private final class BonjourNetServiceResolver: NSObject, NetServiceDelegate {
+    private let service: NetService
+    private let timeout: TimeInterval
+    private var continuation: CheckedContinuation<String?, Never>?
+    private var timeoutTask: Task<Void, Never>?
+    private var finished = false
+
+    init(service: NetService, timeout: TimeInterval) {
+        self.service = service
+        self.timeout = timeout
+        super.init()
+    }
+
+    func resolve() async -> String? {
+        await withCheckedContinuation { (cont: CheckedContinuation<String?, Never>) in
+            self.continuation = cont
+            service.delegate = self
+            service.resolve(withTimeout: timeout)
+
+            // 兜底超时：确保 continuation 一定会被 resume
+            timeoutTask?.cancel()
+            timeoutTask = Task { @MainActor [weak self] in
+                guard let self else { return }
+                let nanos = UInt64((timeout + 0.2) * 1_000_000_000)
+                try? await Task.sleep(nanoseconds: nanos)
+                self.finish(nil)
+            }
+        }
+    }
+
+    nonisolated func netServiceDidResolveAddress(_ sender: NetService) {
+        let ip = preferredIPAddress(from: sender.addresses)
+        Task { @MainActor in
+            self.finish(ip)
+        }
+    }
+
+    nonisolated func netService(_ sender: NetService, didNotResolve errorDict: [String : NSNumber]) {
+        _ = errorDict
+        Task { @MainActor in
+            self.finish(nil)
+        }
+    }
+
+    private func finish(_ ip: String?) {
+        guard !finished else { return }
+        finished = true
+
+        timeoutTask?.cancel()
+        timeoutTask = nil
+
+        service.stop()
+        service.delegate = nil
+
+        continuation?.resume(returning: ip)
+        continuation = nil
+    }
+}
+
+private func preferredIPAddress(from addresses: [Data]?) -> String? {
+    guard let addresses, !addresses.isEmpty else { return nil }
+
+    var ipv6Candidate: String?
+    for data in addresses {
+        guard let ip = ipString(from: data) else { continue }
+        // 优先返回 IPv4（更易用于 UI 展示与后续连接）
+        if ip.contains(".") { return ip }
+        if ipv6Candidate == nil { ipv6Candidate = ip }
+    }
+    return ipv6Candidate
+}
+
+private func ipString(from addressData: Data) -> String? {
+    addressData.withUnsafeBytes { rawBuffer -> String? in
+        guard let base = rawBuffer.baseAddress else { return nil }
+        let sockaddrPtr = base.assumingMemoryBound(to: sockaddr.self)
+
+        var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+        let result = getnameinfo(
+            sockaddrPtr,
+            socklen_t(addressData.count),
+            &host,
+            socklen_t(host.count),
+            nil,
+            0,
+            NI_NUMERICHOST
+	        )
+	        guard result == 0 else { return nil }
+	        return host.withUnsafeBufferPointer { buffer in
+	            guard let base = buffer.baseAddress else { return nil }
+	            return String(cString: base)
+	        }
+	    }
+	}

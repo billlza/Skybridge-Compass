@@ -112,6 +112,56 @@ public final class TrustGraphManager: ObservableObject {
         
         logger.info("✅ 设备信任已撤销: \(deviceId)")
     }
+
+    /// 应用设备“身份密钥轮换”（将旧 deviceId 撤销，并信任新证书对应的 deviceId）
+    ///
+    /// 设计约束（安全默认）：
+    /// - 不接受仅 self-signed 的新证书（无法证明与旧身份的连续性）
+    /// - 允许：
+    ///   - `pairing-confirmed` 且 signerId == oldDeviceId（旧身份对新证书背书）
+    ///   - `user-domain-signed`（域 CA 背书；若未配置 CA，验证将失败）
+    public func applyKeyRotation(oldDeviceId: String, newCertificate: P2PIdentityCertificate) async throws {
+        guard trustedDevices.contains(where: { $0.deviceId == oldDeviceId }) else {
+            throw TrustGraphError.deviceNotFound
+        }
+
+        guard newCertificate.deviceId != oldDeviceId else {
+            throw TrustKeyRotationError.newDeviceIdUnchanged
+        }
+
+        switch newCertificate.signerType {
+        case .selfSigned:
+            throw TrustKeyRotationError.selfSignedNotAllowed
+        case .pairingConfirmed:
+            guard let signerId = newCertificate.signerId else {
+                throw TrustKeyRotationError.missingSignerId
+            }
+            guard signerId == oldDeviceId else {
+                throw TrustKeyRotationError.signerMismatch(expected: oldDeviceId, actual: signerId)
+            }
+        case .userDomainSigned:
+            // 验证时会检查 CA 是否已配置
+            break
+        }
+
+        // 证书签名/过期/指纹一致性验证
+        _ = try await P2PIdentityCertificateIssuer.shared.verifyCertificate(newCertificate)
+
+        let oldName = trustedDevices.first(where: { $0.deviceId == oldDeviceId })?.displayName
+
+        // 更新 Keychain/iCloud Keychain 同步记录（tombstone + add）
+        try await trustSyncService.handleKeyRotation(
+            oldDeviceId: oldDeviceId,
+            newDeviceId: newCertificate.deviceId,
+            newCertificate: newCertificate
+        )
+
+        await loadTrustGraphDevices()
+
+        // 事件：用已有事件类型表达“旧撤销 + 新信任”
+        addEvent(.deviceRevoked(deviceId: oldDeviceId, deviceName: oldName))
+        addEvent(.deviceTrusted(deviceId: newCertificate.deviceId, deviceName: oldName))
+    }
     
     /// 更新设备信息
     public func updateDevice(_ deviceId: String, name: String?) async throws {
@@ -252,6 +302,28 @@ public final class TrustGraphManager: ObservableObject {
         recentEvents.insert(event, at: 0)
         if recentEvents.count > 100 {
             recentEvents.removeLast()
+        }
+    }
+}
+
+// MARK: - Key rotation errors
+
+enum TrustKeyRotationError: Error, LocalizedError, Sendable {
+    case newDeviceIdUnchanged
+    case selfSignedNotAllowed
+    case missingSignerId
+    case signerMismatch(expected: String, actual: String)
+
+    var errorDescription: String? {
+        switch self {
+        case .newDeviceIdUnchanged:
+            return "新证书的 deviceId 与旧 deviceId 相同，无法执行轮换。"
+        case .selfSignedNotAllowed:
+            return "出于安全原因，不接受仅 self-signed 的新证书。请使用 pairing-confirmed（由旧身份签名）或 user-domain-signed。"
+        case .missingSignerId:
+            return "证书缺少 signerId（无法验证 pairing-confirmed 证书的签名者）。"
+        case .signerMismatch(let expected, let actual):
+            return "证书 signerId 不匹配：期望 \(expected)，实际 \(actual)。"
         }
     }
 }

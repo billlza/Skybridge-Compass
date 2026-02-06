@@ -591,7 +591,11 @@ private struct RootContainerView: View {
                     .zIndex(0) // 避免遮挡右上角工具按钮
             }
         }
-        .sheet(item: Binding(get: { pairingTrustApproval.pendingRequest }, set: { _ in })) { req in
+        .sheet(item: Binding(get: { pairingTrustApproval.pendingRequest }, set: { newValue in
+            if newValue == nil {
+                pairingTrustApproval.userDismissedCurrentPrompt()
+            }
+        })) { req in
             PairingTrustApprovalSheet(
                 request: req,
                 onDecision: { decision in

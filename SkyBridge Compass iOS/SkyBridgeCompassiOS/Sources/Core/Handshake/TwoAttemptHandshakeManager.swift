@@ -118,8 +118,13 @@ public struct TwoAttemptHandshakeManager: Sendable {
     /// 判断是否允许 fallback
     private static func shouldAllowFallback(_ reason: HandshakeFailureReason) -> Bool {
         switch reason {
-        case .pqcProviderUnavailable, .missingPeerKEMPublicKey, .suiteNotSupported, .suiteNegotiationFailed:
+        // Paper whitelist (Fig. downgrade-matrix / Sec.G):
+        // Only provider unavailability or suite negotiation errors may fallback.
+        case .pqcProviderUnavailable, .suiteNotSupported, .suiteNegotiationFailed:
             return true
+        case .missingPeerKEMPublicKey:
+            // Not a downgrade edge in the paper whitelist. Treat as provisioning/bootstrap signal.
+            return false
         case .timeout, .signatureVerificationFailed,
              .replayDetected, .keyConfirmationFailed,
              .suiteSignatureMismatch, .identityMismatch,
@@ -257,6 +262,29 @@ public struct TwoAttemptHandshakeManager: Sendable {
         guard policy.allowClassicFallback else {
             throw HandshakeError.failed(reason)
         }
+
+        // Paper D2 / "identity-verified peer" gate:
+        // Only allow downgrade fallback if the peer already has a local trust record.
+        guard isPeerTrusted(deviceId: deviceId) else {
+            SecurityEventEmitter.emitDetached(SecurityEvent(
+                type: .handshakeFailed,
+                severity: .warning,
+                message: "Fallback blocked: peer not trusted (identity gate)",
+                context: [
+                    "reason": "untrusted_peer_fallback_blocked",
+                    "deviceId": deviceId,
+                    "originalFailure": String(describing: reason),
+                    "downgradeResistance": "policy_gate+no_timeout_fallback+rate_limited",
+                    "policyInTranscript": "1",
+                    "transcriptBinding": "1",
+                    "policyRequirePQC": policy.requirePQC ? "1" : "0",
+                    "policyAllowClassicFallback": policy.allowClassicFallback ? "1" : "0",
+                    "policyMinimumTier": policy.minimumTier.rawValue,
+                    "policyRequireSecureEnclavePoP": policy.requireSecureEnclavePoP ? "1" : "0"
+                ]
+            ))
+            throw HandshakeError.failed(reason)
+        }
         
         // 检查限流
         let canFallback = await rateLimiter.canFallback(deviceId: deviceId)
@@ -268,8 +296,29 @@ public struct TwoAttemptHandshakeManager: Sendable {
         // 记录 fallback
         await rateLimiter.recordFallback(deviceId: deviceId)
         
-        // 发射 fallback 事件
-        print("[SecurityEvent] cryptoDowngrade: PQC handshake failed, falling back to Classic. reason=\(reason), deviceId=\(deviceId)")
+        // 发射 fallback 事件（结构化字段与 macOS core 对齐）
+        let cooldownSeconds = TwoAttemptHandshakeManager.fallbackCooldownSeconds
+        SecurityEventEmitter.emitDetached(SecurityEvent(
+            type: .cryptoDowngrade,
+            severity: .warning,
+            message: "PQC handshake failed, falling back to Classic",
+            context: [
+                "downgradeResistance": "policy_gate+no_timeout_fallback+rate_limited",
+                "policyInTranscript": "1",
+                "transcriptBinding": "1",
+                "reason": String(describing: reason),
+                "deviceId": deviceId,
+                "cooldownSeconds": String(cooldownSeconds),
+                "cooldownRemainingSeconds": String(cooldownSeconds),
+                "policyRequirePQC": policy.requirePQC ? "1" : "0",
+                "policyAllowClassicFallback": policy.allowClassicFallback ? "1" : "0",
+                "policyMinimumTier": policy.minimumTier.rawValue,
+                "policyRequireSecureEnclavePoP": policy.requireSecureEnclavePoP ? "1" : "0",
+                "fromStrategy": HandshakeAttemptStrategy.pqcOnly.rawValue,
+                "toStrategy": HandshakeAttemptStrategy.classicOnly.rawValue,
+                "strategy": HandshakeAttemptStrategy.classicOnly.rawValue
+            ]
+        ))
         
         // 第二次尝试: Classic-only
         let preparation = try prepareAttempt(strategy: .classicOnly, cryptoProvider: cryptoProvider)
@@ -279,14 +328,33 @@ public struct TwoAttemptHandshakeManager: Sendable {
     /// 判断是否是 PQC 不可用错误
     public static func isPQCUnavailableError(_ reason: HandshakeFailureReason) -> Bool {
         switch reason {
-        case .pqcProviderUnavailable, .missingPeerKEMPublicKey, .suiteNotSupported, .suiteNegotiationFailed:
+        // Paper whitelist (Sec.G): treat only these as local PQC-unavailability / negotiation failures.
+        case .pqcProviderUnavailable, .suiteNotSupported, .suiteNegotiationFailed:
             return true
+        case .missingPeerKEMPublicKey:
+            // Distinguish from "pqc unavailable": it's "missing peer provisioning".
+            return false
         case .timeout, .cancelled, .peerRejected, .cryptoError, .transportError,
              .versionMismatch, .signatureVerificationFailed, .invalidMessageFormat,
              .identityMismatch, .replayDetected, .secureEnclavePoPRequired,
              .secureEnclaveSignatureInvalid, .keyConfirmationFailed, .suiteSignatureMismatch:
             return false
         }
+    }
+
+    // MARK: - Trust Gate Helper
+
+    /// Non-actor trust check used by the fallback gate.
+    ///
+    /// We intentionally avoid calling `TrustedDeviceStore.shared` here, because it is `@MainActor`.
+    /// The underlying trust record is persisted in UserDefaults under `trusted_devices.v1`.
+    private static func isPeerTrusted(deviceId: String) -> Bool {
+        guard !deviceId.isEmpty else { return false }
+        let storageKey = "trusted_devices.v1"
+        guard let data = UserDefaults.standard.data(forKey: storageKey) else { return false }
+        struct Stored: Codable { let id: String }
+        let list = (try? JSONDecoder().decode([Stored].self, from: data)) ?? []
+        return list.contains(where: { $0.id == deviceId })
     }
 }
 

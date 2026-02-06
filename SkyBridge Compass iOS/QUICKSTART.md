@@ -4,29 +4,22 @@
 
 ## ⚡ 5 分钟快速启动
 
-### 步骤 1: 设置符号链接 (30秒)
+### 步骤 1: 打开项目（Standalone，无需符号链接）(30秒)
 
 ```bash
-cd "/Users/bill/Desktop/SkyBridge Compass iOS"
-chmod +x setup_symlinks.sh
-./setup_symlinks.sh
-```
-
-### 步骤 2: 打开项目 (1分钟)
-
-```bash
-open Package.swift
+cd "/path/to/SkyBridge Compass iOS"
+open SkyBridgeCompass-iOS.xcodeproj
 ```
 
 Xcode 会自动打开并配置项目。
 
-### 步骤 3: 选择目标设备 (30秒)
+### 步骤 2: 选择目标设备 (30秒)
 
 在 Xcode 顶部工具栏：
 - 点击设备选择器
 - 选择 "iPhone 15 Pro" 模拟器（或任何 iOS 17+ 模拟器）
 
-### 步骤 4: 运行！ (30秒)
+### 步骤 3: 运行！ (30秒)
 
 按 `⌘R` 或点击运行按钮 ▶️
 
@@ -133,8 +126,8 @@ Xcode 会自动打开并配置项目。
 
 ## 🐛 常见问题
 
-### Q: 编译错误 "找不到 SkyBridgeCore"
-**A:** 运行 `./setup_symlinks.sh` 创建符号链接
+### Q: 编译错误 “找不到 WebRTC”
+**A:** 本工程通过 SwiftPM 依赖 `WebRTC` 包；请在 Xcode 中等待 Package 解析完成（需要网络），或检查 `File -> Packages`。
 
 ### Q: 模拟器找不到设备
 **A:** 

@@ -75,13 +75,24 @@ public enum TrafficPadding {
     private nonisolated(unsafe) static var didPrintEnterWrap = false
     private nonisolated(unsafe) static var didPrintEnterUnwrap = false
 
+    private static func shouldEmitDiagnostics(cfg: TrafficPaddingConfig) -> Bool {
+        // Default OFF: this was too noisy for real runs.
+        // Enable explicitly via either:
+        // - SB_TRAFFIC_PADDING_DEBUG_LOG=1 (existing)
+        // - SKYBRIDGE_LOG_TRAFFIC_PADDING=1 (new umbrella switch)
+        let envDiag = (ProcessInfo.processInfo.environment["SKYBRIDGE_LOG_TRAFFIC_PADDING"] == "1")
+        return cfg.debugLog || envDiag
+    }
+
     private static func logConfigHintOnceIfNeeded(cfg: TrafficPaddingConfig) {
         configLogLock.lock()
         defer { configLogLock.unlock() }
         guard !didLogConfigHint else { return }
         didLogConfigHint = true
 
-        // Always print a single diagnostic line (stdout), to avoid chasing Xcode/OSLog filters.
+        // Only emit diagnostics when explicitly enabled.
+        guard shouldEmitDiagnostics(cfg: cfg) else { return }
+
         let bundleId = Bundle.main.bundleIdentifier ?? "unknown.bundle"
         let envEnabled = (ProcessInfo.processInfo.environment["SB_TRAFFIC_PADDING_ENABLED"] == "1")
         let envDebug = (ProcessInfo.processInfo.environment["SB_TRAFFIC_PADDING_DEBUG_LOG"] == "1")
@@ -106,14 +117,15 @@ public enum TrafficPadding {
     }
 
     public static func wrapIfEnabled(_ payload: Data, label: String? = nil) -> Data {
-        enterLogLock.lock()
-        if !didPrintEnterWrap {
-            didPrintEnterWrap = true
-            print("🧪 ENTER TrafficPadding.wrapIfEnabled label=\(label ?? "traffic") bytes=\(payload.count)")
-        }
-        enterLogLock.unlock()
-
         let cfg = TrafficPaddingConfig.fromUserDefaults()
+        if shouldEmitDiagnostics(cfg: cfg) {
+            enterLogLock.lock()
+            if !didPrintEnterWrap {
+                didPrintEnterWrap = true
+                print("🧪 ENTER TrafficPadding.wrapIfEnabled label=\(label ?? "traffic") bytes=\(payload.count)")
+            }
+            enterLogLock.unlock()
+        }
         logConfigHintOnceIfNeeded(cfg: cfg)
         guard cfg.enabled else { return payload }
 
@@ -128,7 +140,7 @@ public enum TrafficPadding {
 
         let out = wrap(payload: payload, totalLen: max(minLen, targetLen))
 
-        if cfg.debugLog {
+        if shouldEmitDiagnostics(cfg: cfg) {
             let name = label ?? "traffic"
             let msg = "🧪 TrafficPadding[\(name)]: raw=\(payload.count)B -> padded=\(out.count)B (mode=\(cfg.mode.rawValue))"
             SkyBridgeLogger.shared.info(msg)
@@ -145,14 +157,15 @@ public enum TrafficPadding {
         guard data.count >= headerLen else { return data }
         guard data.prefix(4).elementsEqual(magic) else { return data }
 
-        enterLogLock.lock()
-        if !didPrintEnterUnwrap {
-            didPrintEnterUnwrap = true
-            print("🧪 ENTER TrafficPadding.unwrapIfNeeded label=\(label ?? "traffic") bytes=\(data.count)")
-        }
-        enterLogLock.unlock()
-
         let cfg = TrafficPaddingConfig.fromUserDefaults()
+        if shouldEmitDiagnostics(cfg: cfg) {
+            enterLogLock.lock()
+            if !didPrintEnterUnwrap {
+                didPrintEnterUnwrap = true
+                print("🧪 ENTER TrafficPadding.unwrapIfNeeded label=\(label ?? "traffic") bytes=\(data.count)")
+            }
+            enterLogLock.unlock()
+        }
         logConfigHintOnceIfNeeded(cfg: cfg)
 
         let len = data.withUnsafeBytes { raw -> UInt32 in
@@ -164,7 +177,7 @@ public enum TrafficPadding {
         guard actualLen >= 0, actualLen <= data.count - headerLen else { return data }
         let payload = data.subdata(in: headerLen..<(headerLen + actualLen))
 
-        if cfg.debugLog {
+        if shouldEmitDiagnostics(cfg: cfg) {
             let name = label ?? "traffic"
             let msg = "🧪 TrafficUnwrap[\(name)]: total=\(data.count)B -> raw=\(payload.count)B"
             SkyBridgeLogger.shared.info(msg)

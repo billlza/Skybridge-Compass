@@ -4,60 +4,27 @@
 
 ### 系统要求
 - macOS 14.0+ (Sonoma 或更新版本)
-- Xcode 15.0+ 
+- Xcode 26.2+ 
 - iOS 17.0+ 模拟器或真机
 - Swift 6.2+
 - Apple 开发者账号（用于真机测试）
 
 ### 依赖项
-- macOS 版 SkyBridge Compass (位于同级目录)
-- liboqs (后量子加密库，可选)
+- WebRTC Swift Package（Xcode 会自动解析）
+- liboqs（可选：若你要在 iOS 17-25 上实现 PQC-only，需要提供 iOS 架构的 liboqs XCFramework）
 
 ## 🚀 快速开始
 
 ### 1. 克隆项目
 
 ```bash
-cd ~/Desktop
-# 确保 macOS 版本在相同位置
-ls "SkyBridge Compass Pro release"  # 应该存在
-cd "SkyBridge Compass iOS"
-```
-
-### 2. 链接共享模块
-
-运行以下脚本创建到 macOS 项目的符号链接：
-
-```bash
-chmod +x setup_symlinks.sh
-./setup_symlinks.sh
-```
-
-或手动创建：
-
-```bash
-mkdir -p Shared
-ln -s "../../SkyBridge Compass Pro release/Sources/SkyBridgeCore" "./Shared/SkyBridgeCore"
+cd "/path/to/SkyBridge Compass iOS"
 ```
 
 ### 3. 使用 Xcode 打开
 
-#### 方式 A: 使用 Swift Package
-
 ```bash
-open Package.swift
-```
-
-Xcode 会自动识别并配置项目。
-
-#### 方式 B: 创建 Xcode 项目
-
-如果需要完整的 .xcodeproj：
-
-```bash
-# 使用 Swift Package Manager 生成
-swift package generate-xcodeproj
-open SkyBridgeCompassiOS.xcodeproj
+open SkyBridgeCompass-iOS.xcodeproj
 ```
 
 ### 4. 配置签名
@@ -98,25 +65,29 @@ open SkyBridgeCompassiOS.xcodeproj
 3. 选择设备作为运行目标
 4. 点击运行
 
+## 🔐 Apple CryptoKit PQC（iOS 26+，论文 strictPQC 路径）
+
+### 需要在哪里声明？
+
+- **必须在 Xcode 工程的 Target Build Settings 里声明（编译期宏）**：`SWIFT_ACTIVE_COMPILATION_CONDITIONS` 添加 `HAS_APPLE_PQC_SDK`
+- **不需要、也不应该在 Info.plist 里声明**：Info.plist 只负责权限/能力（如相机、本地网络、定位、Live Activities），不影响编译期是否包含 `MLKEM768/MLDSA65` 类型
+
+### 何时需要打开？
+
+- 你使用的 Xcode 必须包含 **iOS 26.x SDK**（否则编译会报找不到 `MLKEM768/MLDSA65`）
+- 运行时必须满足 `#available(iOS 26.0, *)`
+- 并且需要完成一次配对/信任同步，让双方保存对端 **KEM 身份公钥（Trust Store）**；否则会触发 classic bootstrap 或降级
+
 ## 🔧 故障排除
 
 ### 问题 1: 找不到 SkyBridgeCore 模块
 
-**解决方案：**
-```bash
-# 检查符号链接
-ls -la Shared/
-# 应该看到 SkyBridgeCore -> ...
-
-# 重新创建链接
-rm -f Shared/SkyBridgeCore
-ln -s "../../SkyBridge Compass Pro release/Sources/SkyBridgeCore" "./Shared/SkyBridgeCore"
-```
+**说明**：Standalone 版本不再依赖 `SkyBridgeCore` 模块（也不需要任何符号链接）。
 
 ### 问题 2: 编译错误 - Swift 版本不匹配
 
 **解决方案：**
-- 确保使用 Xcode 15+ 和 Swift 6.2+
+- 确保使用 Xcode 26.2+ 和 Swift 6.2+
 - 更新到最新的 Xcode 版本
 
 ### 问题 3: 本地网络权限不起作用

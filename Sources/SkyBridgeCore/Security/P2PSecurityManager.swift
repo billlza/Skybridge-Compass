@@ -286,12 +286,16 @@ public class P2PSecurityManager: ObservableObject, Sendable {
         return try verifyCertificate(response.certificate)
     }
     
- /// 建立会话密钥
+    /// 建立会话密钥（Legacy / pre-paper）
+    ///
+    /// 仅保留给单元测试/调试辅助使用，Release 构建中不编译进产物，避免误用偏离论文协议栈。
+    #if DEBUG
+    @available(*, deprecated, message: "Legacy pre-paper handshake API. Use `HandshakeDriver` / `TwoAttemptHandshakeManager` to establish `SessionKeys` instead.")
     public func establishSessionKey(with deviceId: String, publicKey: P256.KeyAgreement.PublicKey) async throws {
- // 优先使用 PQC 会话协商（旧系统通过 oqs-provider），失败时回退到经典 P256/HKDF
+        // 优先使用 PQC 会话协商（旧系统通过 oqs-provider），失败时回退到经典 P256/HKDF
         if let provider = PQCProviderFactory.makeProvider() {
- // 使用 ML‑KEM‑768 完成共享密钥协商
- // 注意：此处为简化演示，真实场景需通过上层信令交换对端公钥标签
+            // 使用 ML‑KEM‑768 完成共享密钥协商
+            // 注意：此处为简化演示，真实场景需通过上层信令交换对端公钥标签
             let enc = try await provider.kemEncapsulate(peerId: deviceId, kemVariant: "ML-KEM-768")
             let ss2 = try await provider.kemDecapsulate(peerId: deviceId, encapsulated: enc.encapsulated, kemVariant: "ML-KEM-768")
             let info = Data("session:\(deviceId)".utf8)
@@ -301,7 +305,8 @@ public class P2PSecurityManager: ObservableObject, Sendable {
             mutableShared.secureErase()
             return
         }
- // 回退：经典算法 P256/HKDF
+
+        // 回退：经典算法 P256/HKDF
         let sharedSecret = try deviceKeyPair.sharedSecretFromKeyAgreement(with: publicKey)
         let sessionKey = sharedSecret.hkdfDerivedSymmetricKey(
             using: SHA256.self,
@@ -312,25 +317,31 @@ public class P2PSecurityManager: ObservableObject, Sendable {
         sessionKeys[deviceId] = sessionKey
     }
 
+    @available(*, deprecated, message: "Legacy pre-paper KEM API. Use `CryptoProvider` KEM APIs via the protocol handshake layer.")
     public func kemEncapsulate(deviceId: String, kemVariant: String = "ML-KEM-768") async throws -> (sharedSecret: Data, encapsulated: Data) {
         guard let provider = PQCProviderFactory.makeProvider() else { throw P2PSecurityError.authenticationFailed }
         return try await provider.kemEncapsulate(peerId: deviceId, kemVariant: kemVariant)
     }
 
+    @available(*, deprecated, message: "Legacy pre-paper KEM API. Use `CryptoProvider` KEM APIs via the protocol handshake layer.")
     public func kemDecapsulate(deviceId: String, encapsulated: Data, kemVariant: String = "ML-KEM-768") async throws -> Data {
         guard let provider = PQCProviderFactory.makeProvider() else { throw P2PSecurityError.authenticationFailed }
         return try await provider.kemDecapsulate(peerId: deviceId, encapsulated: encapsulated, kemVariant: kemVariant)
     }
 
+    @available(*, deprecated, message: "Legacy pre-paper session-key store. Use `SessionKeys` produced by the protocol handshake.")
     public func deriveAndStoreSessionKey(sharedSecret: Data, deviceId: String) {
         let info = Data("session:\(deviceId)".utf8)
         let sk = SessionTokenKit.deriveSessionKey(sharedSecret: sharedSecret, salt: Data(), info: info)
         sessionKeys[deviceId] = sk
     }
 
+    @available(*, deprecated, message: "Legacy pre-paper session-key store. Use `SessionKeys` produced by the protocol handshake.")
     public func hasSessionKey(for deviceId: String) -> Bool {
         return sessionKeys[deviceId] != nil
     }
+    #endif
+
 
     
     

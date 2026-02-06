@@ -183,14 +183,15 @@ public struct P2PDeviceInfo: Codable, Identifiable, Sendable {
         self.osVersion = osVersion
         self.capabilities = capabilities
         self.publicKeyFingerprint = publicKeyFingerprint
-    }
-    
-    /// 获取当前设备信息
-    public static func current() -> P2PDeviceInfo {
-        return P2PDeviceInfo(
-            id: getOrCreateDeviceId(),
-            name: getDeviceName(),
-            type: getCurrentDeviceType(),
+	    }
+	    
+	    /// 获取当前设备信息
+	    @MainActor
+	    public static func current() -> P2PDeviceInfo {
+	        return P2PDeviceInfo(
+	            id: getOrCreateDeviceId(),
+	            name: getDeviceName(),
+	            type: getCurrentDeviceType(),
             address: "0.0.0.0",
             port: 8080,
             osVersion: getOSVersion(),
@@ -208,21 +209,23 @@ public struct P2PDeviceInfo: Codable, Identifiable, Sendable {
             let newId = UUID().uuidString
             UserDefaults.standard.set(newId, forKey: key)
             return newId
-        }
-    }
-    
-    private static func getDeviceName() -> String {
-        #if canImport(UIKit)
-        return UIDevice.current.name
-        #else
-        return "Unknown Device"
-        #endif
-    }
-    
-    private static func getCurrentDeviceType() -> P2PDeviceType {
-        #if canImport(UIKit)
-        if UIDevice.current.userInterfaceIdiom == .pad {
-            return .iPadOS
+	        }
+	    }
+	    
+	    @MainActor
+	    private static func getDeviceName() -> String {
+	        #if canImport(UIKit)
+	        return UIDevice.current.name
+	        #else
+	        return "Unknown Device"
+	        #endif
+	    }
+	    
+	    @MainActor
+	    private static func getCurrentDeviceType() -> P2PDeviceType {
+	        #if canImport(UIKit)
+	        if UIDevice.current.userInterfaceIdiom == .pad {
+	            return .iPadOS
         } else {
             return .iOS
         }
@@ -654,11 +657,12 @@ public struct P2PConnectionQuality: Codable, Sendable {
     }
     
     public var qualityLevel: QualityLevel {
-        if stabilityScore >= 80 && latency < 50 && packetLoss < 0.01 {
+        // latency is in seconds (TimeInterval semantics), consistent with macOS.
+        if stabilityScore >= 80 && latency < 0.05 && packetLoss < 0.01 {
             return .excellent
-        } else if stabilityScore >= 60 && latency < 100 && packetLoss < 0.05 {
+        } else if stabilityScore >= 60 && latency < 0.10 && packetLoss < 0.05 {
             return .good
-        } else if stabilityScore >= 40 && latency < 200 && packetLoss < 0.1 {
+        } else if stabilityScore >= 40 && latency < 0.20 && packetLoss < 0.1 {
             return .fair
         } else {
             return .poor
@@ -703,4 +707,3 @@ public struct P2PNetworkStatistics: Sendable {
     
     public init() {}
 }
-

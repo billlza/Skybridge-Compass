@@ -2,7 +2,7 @@
 // SecureEnclaveSigningCallback.swift
 // SkyBridgeCore
 //
-// P2P TODO Completion - 4: Secure Enclave Signing Callback
+// P2P Completion - 4: Secure Enclave Signing Callback
 // Requirements: 2.3, 2.4
 //
 // Secure Enclave 签名回调实现：
@@ -103,8 +103,10 @@ public struct SecureEnclaveSigningCallback: SigningCallback, Sendable {
         let query: [String: Any] = [
             kSecClass as String: kSecClassKey,
             kSecAttrApplicationTag as String: keyTag.utf8Data,
+            kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
             kSecAttrKeyClass as String: kSecAttrKeyClassPrivate,
-            kSecReturnRef as String: true
+            kSecReturnRef as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
         ]
         
         var item: CFTypeRef?
@@ -173,6 +175,13 @@ public enum SecureEnclaveError: Error, LocalizedError, Sendable {
 /// 提供密钥生成、检查和删除功能。
 @available(macOS 14.0, iOS 17.0, *)
 public enum SecureEnclaveKeyManager {
+
+    private static var useInMemoryKeychain: Bool {
+        let env = ProcessInfo.processInfo.environment
+        if env["SKYBRIDGE_KEYCHAIN_IN_MEMORY"] == "1" { return true }
+        if env["XCTestConfigurationFilePath"] != nil { return true }
+        return NSClassFromString("XCTestCase") != nil
+    }
     
  /// 检查 Secure Enclave 是否可用
  ///
@@ -206,11 +215,14 @@ public enum SecureEnclaveKeyManager {
  /// - Parameter tag: 密钥标签
  /// - Returns: true 如果密钥存在
     public static func keyExists(tag: String) -> Bool {
+        if useInMemoryKeychain { return false }
         let query: [String: Any] = [
             kSecClass as String: kSecClassKey,
             kSecAttrApplicationTag as String: tag.utf8Data,
+            kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
             kSecAttrKeyClass as String: kSecAttrKeyClassPrivate,
-            kSecReturnRef as String: false
+            kSecReturnRef as String: false,
+            kSecMatchLimit as String: kSecMatchLimitOne
         ]
         
         let status = SecItemCopyMatching(query as CFDictionary, nil)
@@ -291,9 +303,12 @@ public enum SecureEnclaveKeyManager {
  /// - Returns: true 如果删除成功或密钥不存在
     @discardableResult
     public static func deleteKey(tag: String) -> Bool {
+        if useInMemoryKeychain { return true }
         let query: [String: Any] = [
             kSecClass as String: kSecClassKey,
-            kSecAttrApplicationTag as String: tag.utf8Data
+            kSecAttrApplicationTag as String: tag.utf8Data,
+            kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
+            kSecAttrKeyClass as String: kSecAttrKeyClassPrivate
         ]
         
         let status = SecItemDelete(query as CFDictionary)
@@ -309,8 +324,10 @@ public enum SecureEnclaveKeyManager {
         let query: [String: Any] = [
             kSecClass as String: kSecClassKey,
             kSecAttrApplicationTag as String: tag.utf8Data,
+            kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
             kSecAttrKeyClass as String: kSecAttrKeyClassPrivate,
-            kSecReturnRef as String: true
+            kSecReturnRef as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
         ]
         
         var item: CFTypeRef?

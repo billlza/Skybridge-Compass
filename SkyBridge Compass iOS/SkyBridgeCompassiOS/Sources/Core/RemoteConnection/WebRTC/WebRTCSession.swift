@@ -2,7 +2,38 @@ import Foundation
 import OSLog
 
 #if canImport(WebRTC)
-import WebRTC
+@preconcurrency import WebRTC
+#endif
+
+#if canImport(WebRTC)
+/// Global SSL lifecycle guard for WebRTC.
+///
+/// `RTCInitializeSSL()` / `RTCCleanupSSL()` manage process-wide OpenSSL state. Calling cleanup per-session can
+/// break other live sessions. We therefore retain/release with reference counting and only cleanup when the
+/// last session is closed.
+@available(iOS 17.0, *)
+private enum WebRTCSSL {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var refCount: Int = 0
+
+    static func retain() {
+        lock.lock()
+        defer { lock.unlock() }
+        if refCount == 0 {
+            RTCInitializeSSL()
+        }
+        refCount += 1
+    }
+
+    static func release() {
+        lock.lock()
+        defer { lock.unlock() }
+        refCount = max(0, refCount - 1)
+        if refCount == 0 {
+            RTCCleanupSSL()
+        }
+    }
+}
 #endif
 
 @available(iOS 17.0, *)
@@ -23,14 +54,18 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         }
     }
     
-    public enum WebRTCError: Error, LocalizedError {
+    public enum WebRTCError: Error, LocalizedError, Sendable {
         case webRTCNotAvailable
+        case peerConnectionCreationFailed
         case dataChannelNotReady
+        case alreadyClosed
         
         public var errorDescription: String? {
             switch self {
             case .webRTCNotAvailable: return "WebRTC 模块不可用（请确认已添加 WebRTC 依赖）"
+            case .peerConnectionCreationFailed: return "创建 RTCPeerConnection 失败"
             case .dataChannelNotReady: return "DataChannel 未就绪"
+            case .alreadyClosed: return "WebRTCSession 已关闭"
             }
         }
     }
@@ -53,6 +88,9 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     private var dataChannel: RTCDataChannel?
 #endif
     
+    private var isClosed = false
+    private var sslHeld = false
+    
     public init(sessionId: String, localDeviceId: String, role: Role, ice: ICEConfig) {
         self.sessionId = sessionId
         self.localDeviceId = localDeviceId
@@ -61,9 +99,42 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         super.init()
     }
     
-    public func start() throws {
+    /// 关闭 WebRTC 会话并释放所有资源（PeerConnection / DataChannel / SSL）。
+    ///
+    /// 符合 IEEE TDSC 安全生命周期管理要求：
+    /// - 主动关闭 DataChannel 防止数据残留
+    /// - 关闭 PeerConnection 终止 ICE / DTLS-SRTP 会话
+    /// - 调用 RTCCleanupSSL() 释放 OpenSSL 上下文
+    public func close() {
+        guard !isClosed else { return }
+        isClosed = true
 #if canImport(WebRTC)
-        RTCInitializeSSL()
+        dataChannel?.close()
+        dataChannel = nil
+        peerConnection?.close()
+        peerConnection = nil
+        if sslHeld {
+            sslHeld = false
+            WebRTCSSL.release()
+        }
+#endif
+        onLocalOffer = nil
+        onLocalAnswer = nil
+        onLocalICECandidate = nil
+        onData = nil
+        onReady = nil
+        logger.info("⏹️ WebRTCSession closed sessionId=\(self.sessionId, privacy: .public)")
+    }
+    
+    deinit {
+        close()
+    }
+    
+    public func start() throws {
+        guard !isClosed else { throw WebRTCError.alreadyClosed }
+#if canImport(WebRTC)
+        WebRTCSSL.retain()
+        sslHeld = true
         let factory = RTCPeerConnectionFactory()
         
         let config = RTCConfiguration()
@@ -76,7 +147,9 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         
         let constraints = RTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: ["DtlsSrtpKeyAgreement": "true"])
         guard let pc = factory.peerConnection(with: config, constraints: constraints, delegate: self) else {
-            throw WebRTCError.webRTCNotAvailable
+            sslHeld = false
+            WebRTCSSL.release()
+            throw WebRTCError.peerConnectionCreationFailed
         }
         self.peerConnection = pc
         
@@ -128,11 +201,17 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
 #if canImport(WebRTC)
         guard let pc = peerConnection else { return }
         let cand = RTCIceCandidate(sdp: candidate, sdpMLineIndex: sdpMLineIndex ?? 0, sdpMid: sdpMid)
-        pc.add(cand)
+        pc.add(cand) { [weak self] error in
+            guard let self else { return }
+            if let error {
+                self.logger.error("⚠️ addIceCandidate failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
 #endif
     }
     
     public func send(_ data: Data) throws {
+        guard !isClosed else { throw WebRTCError.alreadyClosed }
 #if canImport(WebRTC)
         guard let dc = dataChannel else { throw WebRTCError.dataChannelNotReady }
         _ = dc.sendData(RTCDataBuffer(data: data, isBinary: true))
@@ -152,13 +231,14 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
                 return
             }
             guard let sdp else { return }
+            let sdpString = sdp.sdp
             pc.setLocalDescription(sdp) { [weak self] err in
                 guard let self else { return }
                 if let err {
                     self.logger.error("❌ setLocalDescription(offer) failed: \(err.localizedDescription, privacy: .public)")
                     return
                 }
-                self.onLocalOffer?(sdp.sdp)
+                self.onLocalOffer?(sdpString)
             }
         }
     }
@@ -173,13 +253,14 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
                 return
             }
             guard let sdp else { return }
+            let sdpString = sdp.sdp
             pc.setLocalDescription(sdp) { [weak self] err in
                 guard let self else { return }
                 if let err {
                     self.logger.error("❌ setLocalDescription(answer) failed: \(err.localizedDescription, privacy: .public)")
                     return
                 }
-                self.onLocalAnswer?(sdp.sdp)
+                self.onLocalAnswer?(sdpString)
             }
         }
     }
@@ -216,5 +297,3 @@ extension WebRTCSession: RTCDataChannelDelegate {
     }
 }
 #endif
-
-

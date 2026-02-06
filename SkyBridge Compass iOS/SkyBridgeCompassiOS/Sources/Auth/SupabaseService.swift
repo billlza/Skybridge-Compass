@@ -22,8 +22,11 @@ public final class SupabaseService: ObservableObject {
         }
         
         static func isValidSupabaseURL(_ url: URL) -> Bool {
+            // iOS 端不强制要求 host 包含 supabase.co（支持 Supabase 自定义域名/代理域名）。
+            // 仅要求使用 https 且 host 非空。
             guard let scheme = url.scheme?.lowercased(), scheme == "https" else { return false }
-            guard let host = url.host?.lowercased(), host.contains("supabase.co") else { return false }
+            guard let host = url.host?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !host.isEmpty else { return false }
             return true
         }
 
@@ -35,11 +38,17 @@ public final class SupabaseService: ObservableObject {
                 if isPlaceholderConfig(urlString: keychainConfig.url, anonKey: keychainConfig.anonKey) {
                     SkyBridgeLogger.shared.warning("⚠️ Supabase Keychain 配置为占位符，已自动清理（将回退到 Bundle 配置/Info.plist）。")
                     KeychainManager.shared.deleteSupabaseConfig()
-                } else if let url = URL(string: keychainConfig.url),
-                          isValidSupabaseURL(url),
-                          !keychainConfig.anonKey.isEmpty {
-                    SkyBridgeLogger.shared.info("🔐 Supabase 配置来源=Keychain host=\(url.host ?? "unknown")")
-                    return Configuration(url: url, anonKey: keychainConfig.anonKey)
+                } else if let url = URL(string: keychainConfig.url) {
+                    if isValidSupabaseURL(url), !keychainConfig.anonKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        SkyBridgeLogger.shared.info("🔐 Supabase 配置来源=Keychain host=\(url.host ?? "unknown")")
+                        return Configuration(url: url, anonKey: keychainConfig.anonKey)
+                    } else {
+                        let host = url.host ?? "unknown"
+                        let anonEmpty = keychainConfig.anonKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "1" : "0"
+                        SkyBridgeLogger.shared.warning("⚠️ Supabase Keychain 配置无效（host=\(host), anonKeyEmpty=\(anonEmpty)），将回退到 Info.plist/Bundle。")
+                    }
+                } else {
+                    SkyBridgeLogger.shared.warning("⚠️ Supabase Keychain 配置无效（URL 无法解析），将回退到 Info.plist/Bundle。")
                 }
             }
 

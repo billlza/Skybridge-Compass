@@ -185,8 +185,22 @@ public actor DeviceIdentityKeyManager {
         if env["XCTestConfigurationFilePath"] != nil { return true }
         return NSClassFromString("XCTestCase") != nil
     }
+    private nonisolated(unsafe) static var inMemoryStore: [String: Data] = [:]
+    private nonisolated static let inMemoryLock = NSLock()
     private nonisolated(unsafe) static var inMemoryKEMStore: [String: Data] = [:]
     private nonisolated static let inMemoryKEMLock = NSLock()
+
+    private nonisolated static func inMemoryGet(_ key: String) -> Data? {
+        inMemoryLock.lock()
+        defer { inMemoryLock.unlock() }
+        return inMemoryStore[key]
+    }
+
+    private nonisolated static func inMemorySet(_ data: Data, for key: String) {
+        inMemoryLock.lock()
+        inMemoryStore[key] = data
+        inMemoryLock.unlock()
+    }
     
  // MARK: - Properties
     
@@ -434,6 +448,10 @@ public actor DeviceIdentityKeyManager {
  ///
  /// **Requirements: 5.4**
     public func migrateExistingIdentityKey() async throws {
+        // Tests run with SKYBRIDGE_KEYCHAIN_IN_MEMORY=1 to avoid touching the system Keychain.
+        // In this mode, identity-key migration is a no-op by design.
+        if Self.useInMemoryKeychain { return }
+
  // 1. 检查是否已迁移（sePoPKeyTag 已存在）
         if (try? getSEPoPKeyReference()) != nil {
             SkyBridgeLogger.p2p.debug("SE PoP key already exists, skipping migration")
@@ -679,12 +697,21 @@ public actor DeviceIdentityKeyManager {
     
  /// 加载现有密钥
     private func loadExistingKey() async throws -> DeviceIdentityKeyInfo? {
+        if Self.useInMemoryKeychain {
+            let key = KeychainConstants.service + "|" + "keyInfo"
+            let data = Self.inMemoryGet(key)
+            guard let data else { return nil }
+            // Decode best-effort; the in-memory mode may not persist SecKey references across runs.
+            return try? JSONDecoder().decode(DeviceIdentityKeyInfo.self, from: data)
+        }
+
  // 查询 Keychain 中的密钥信息
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: KeychainConstants.service,
             kSecAttrAccount as String: "keyInfo",
-            kSecReturnData as String: true
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
         ]
         
         var result: AnyObject?
@@ -707,11 +734,15 @@ public actor DeviceIdentityKeyManager {
     
  /// 获取私钥引用
     private func getPrivateKeyReference() throws -> SecKey? {
+        if Self.useInMemoryKeychain { return nil }
+
         let query: [String: Any] = [
             kSecClass as String: kSecClassKey,
             kSecAttrApplicationTag as String: KeychainConstants.signingKeyTag.utf8Data,
             kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
-            kSecReturnRef as String: true
+            kSecAttrKeyClass as String: kSecAttrKeyClassPrivate,
+            kSecReturnRef as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
         ]
         
         var result: AnyObject?
@@ -738,6 +769,14 @@ public actor DeviceIdentityKeyManager {
  /// 保存密钥信息
     private func saveKeyInfo(_ keyInfo: DeviceIdentityKeyInfo) throws {
         let data = try JSONEncoder().encode(keyInfo)
+
+        if Self.useInMemoryKeychain {
+            let key = KeychainConstants.service + "|" + "keyInfo"
+            Self.inMemoryLock.lock()
+            Self.inMemoryStore[key] = data
+            Self.inMemoryLock.unlock()
+            return
+        }
         
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -831,7 +870,8 @@ public actor DeviceIdentityKeyManager {
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: KeychainConstants.kemService,
             kSecAttrAccount as String: account,
-            kSecReturnData as String: true
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
         ]
         
         var result: AnyObject?
@@ -903,11 +943,21 @@ public actor DeviceIdentityKeyManager {
     
  /// 加载存储的设备 ID
     private func loadStoredDeviceId() -> String? {
+        if Self.useInMemoryKeychain {
+            let key = KeychainConstants.service + "|" + KeychainConstants.deviceIdKey
+            Self.inMemoryLock.lock()
+            let data = Self.inMemoryStore[key]
+            Self.inMemoryLock.unlock()
+            guard let data else { return nil }
+            return String(data: data, encoding: .utf8)
+        }
+
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: KeychainConstants.service,
             kSecAttrAccount as String: KeychainConstants.deviceIdKey,
-            kSecReturnData as String: true
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
         ]
         
         var result: AnyObject?
@@ -923,11 +973,20 @@ public actor DeviceIdentityKeyManager {
  /// 保存设备 ID
     private func saveDeviceId(_ deviceId: String) {
         guard let data = deviceId.data(using: .utf8) else { return }
+
+        if Self.useInMemoryKeychain {
+            let key = KeychainConstants.service + "|" + KeychainConstants.deviceIdKey
+            Self.inMemoryLock.lock()
+            Self.inMemoryStore[key] = data
+            Self.inMemoryLock.unlock()
+            return
+        }
         
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: KeychainConstants.service,
             kSecAttrAccount as String: KeychainConstants.deviceIdKey,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
             kSecValueData as String: data
         ]
         
@@ -949,10 +1008,20 @@ public actor DeviceIdentityKeyManager {
         let privateKeyData = privateKey.rawRepresentation
         let publicKeyData = publicKey.rawRepresentation
         
+        if Self.useInMemoryKeychain {
+            let key = KeychainConstants.service + "|" + KeychainConstants.protocolSigningKeyTag
+            Self.inMemoryLock.lock()
+            Self.inMemoryStore[key] = privateKeyData
+            Self.inMemoryLock.unlock()
+            SkyBridgeLogger.p2p.info("Created new Ed25519 protocol signing key (in-memory)")
+            return (publicKey: publicKeyData, privateKey: privateKeyData)
+        }
+
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: KeychainConstants.service,
             kSecAttrAccount as String: KeychainConstants.protocolSigningKeyTag,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
             kSecValueData as String: privateKeyData
         ]
         
@@ -971,11 +1040,22 @@ public actor DeviceIdentityKeyManager {
     
  /// 加载 Ed25519 协议签名密钥
     private func loadProtocolSigningKey() throws -> (publicKey: Data, privateKey: Data)? {
+        if Self.useInMemoryKeychain {
+            let key = KeychainConstants.service + "|" + KeychainConstants.protocolSigningKeyTag
+            Self.inMemoryLock.lock()
+            let privateKeyData = Self.inMemoryStore[key]
+            Self.inMemoryLock.unlock()
+            guard let privateKeyData else { return nil }
+            let privateKey = try Curve25519.Signing.PrivateKey(rawRepresentation: privateKeyData)
+            return (publicKey: privateKey.publicKey.rawRepresentation, privateKey: privateKeyData)
+        }
+
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: KeychainConstants.service,
             kSecAttrAccount as String: KeychainConstants.protocolSigningKeyTag,
-            kSecReturnData as String: true
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
         ]
         
         var result: AnyObject?
@@ -1062,12 +1142,24 @@ public actor DeviceIdentityKeyManager {
  ///
  /// ** 11.2**: 从 Keychain 加载 ML-DSA-65 密钥对
     private func loadMLDSASigningKey() throws -> (publicKey: Data, privateKey: Data)? {
+        if Self.useInMemoryKeychain {
+            let pubKey = KeychainConstants.mldsaService + "|" + KeychainConstants.mldsaPublicKeyAccount
+            let privKey = KeychainConstants.mldsaService + "|" + KeychainConstants.mldsaSecretKeyAccount
+            Self.inMemoryLock.lock()
+            let publicKeyData = Self.inMemoryStore[pubKey]
+            let privateKeyData = Self.inMemoryStore[privKey]
+            Self.inMemoryLock.unlock()
+            guard let publicKeyData, let privateKeyData else { return nil }
+            return (publicKey: publicKeyData, privateKey: privateKeyData)
+        }
+
  // 加载公钥
         let publicKeyQuery: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: KeychainConstants.mldsaService,
             kSecAttrAccount as String: KeychainConstants.mldsaPublicKeyAccount,
-            kSecReturnData as String: true
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
         ]
         
         var publicKeyResult: AnyObject?
@@ -1086,7 +1178,8 @@ public actor DeviceIdentityKeyManager {
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: KeychainConstants.mldsaService,
             kSecAttrAccount as String: KeychainConstants.mldsaSecretKeyAccount,
-            kSecReturnData as String: true
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
         ]
         
         var privateKeyResult: AnyObject?
@@ -1107,6 +1200,16 @@ public actor DeviceIdentityKeyManager {
  ///
  /// **Requirements: 8.4, 8.5**
     private func saveMLDSASigningKey(publicKey: Data, privateKey: Data) throws {
+        if Self.useInMemoryKeychain {
+            let pubKey = KeychainConstants.mldsaService + "|" + KeychainConstants.mldsaPublicKeyAccount
+            let privKey = KeychainConstants.mldsaService + "|" + KeychainConstants.mldsaSecretKeyAccount
+            Self.inMemoryLock.lock()
+            Self.inMemoryStore[pubKey] = publicKey
+            Self.inMemoryStore[privKey] = privateKey
+            Self.inMemoryLock.unlock()
+            return
+        }
+
  // 保存公钥
         let publicKeyQuery: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -1150,11 +1253,15 @@ public actor DeviceIdentityKeyManager {
     
  /// 获取 SE PoP 密钥引用
     private func getSEPoPKeyReference() throws -> SecKey? {
+        if Self.useInMemoryKeychain { return nil }
+
         let query: [String: Any] = [
             kSecClass as String: kSecClassKey,
             kSecAttrApplicationTag as String: KeychainConstants.sePoPKeyTag.utf8Data,
             kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
-            kSecReturnRef as String: true
+            kSecAttrKeyClass as String: kSecAttrKeyClassPrivate,
+            kSecReturnRef as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
         ]
         
         var result: AnyObject?

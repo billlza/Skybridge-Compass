@@ -200,7 +200,7 @@ public final class BluetoothManager: NSObject, ObservableObject, Sendable {
  // 延迟初始化蓝牙管理器，避免阻塞主线程
         DispatchQueue.global(qos: .background).asyncAfter(deadline: .now() + 0.5) { [weak self] in
             DispatchQueue.main.async {
-                self?.setupCentralManager()
+                self?.setupCentralManagerIfNeeded()
             }
         }
     }
@@ -209,6 +209,7 @@ public final class BluetoothManager: NSObject, ObservableObject, Sendable {
     
  /// 启动蓝牙管理器
     public func start() async throws {
+        setupCentralManagerIfNeeded()
         checkPermissions()
         logger.info("📱 蓝牙管理器已启动")
     }
@@ -230,6 +231,8 @@ public final class BluetoothManager: NSObject, ObservableObject, Sendable {
     
  /// 开始扫描蓝牙设备
     public func startScanning() {
+        setupCentralManagerIfNeeded()
+
         guard let manager = centralManager else {
             logger.warning("蓝牙管理器未初始化，无法扫描设备")
             return
@@ -353,6 +356,18 @@ public final class BluetoothManager: NSObject, ObservableObject, Sendable {
     
  /// 检查蓝牙权限
     public func checkPermissions() {
+        guard !isRunningUnderUnitTests else {
+            hasPermission = false
+            logger.info("单元测试环境：跳过蓝牙权限探测")
+            return
+        }
+
+        guard hasBluetoothUsageDescription else {
+            hasPermission = false
+            logger.warning("Info.plist 缺少蓝牙用途描述，无法发起蓝牙权限请求")
+            return
+        }
+
         switch CBManager.authorization {
         case .allowedAlways:
             hasPermission = true
@@ -372,8 +387,38 @@ public final class BluetoothManager: NSObject, ObservableObject, Sendable {
  // MARK: - 私有方法
     
  /// 设置中央管理器
-    private func setupCentralManager() {
+    private func setupCentralManagerIfNeeded() {
+        guard centralManager == nil else { return }
+        guard !isRunningUnderUnitTests else {
+            logger.info("单元测试环境：跳过蓝牙中央管理器初始化")
+            return
+        }
+        guard hasBluetoothUsageDescription else {
+            logger.warning("跳过蓝牙中央管理器初始化：Info.plist 缺少 NSBluetoothAlwaysUsageDescription")
+            return
+        }
+
         centralManager = CBCentralManager(delegate: self, queue: nil)
+    }
+
+    private var hasBluetoothUsageDescription: Bool {
+        let candidateKeys = [
+            "NSBluetoothAlwaysUsageDescription",
+            "NSBluetoothPeripheralUsageDescription"
+        ]
+
+        return candidateKeys.contains { key in
+            guard let value = Bundle.main.object(forInfoDictionaryKey: key) as? String else {
+                return false
+            }
+            return !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+    }
+
+    private var isRunningUnderUnitTests: Bool {
+        ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+            || NSClassFromString("XCTestCase") != nil
+            || NSClassFromString("XCTest") != nil
     }
     
  /// 查找外围设备

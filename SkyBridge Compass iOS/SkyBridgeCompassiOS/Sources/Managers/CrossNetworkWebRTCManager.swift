@@ -4,6 +4,79 @@ import OSLog
 
 // MARK: - iOS-local server config (file-local, to avoid target membership issues)
 
+// MARK: - iOS-local crypto helpers (file-local, to avoid target membership issues)
+
+/// Minimal SHA-256 helper used by WebRTC chunking / integrity checks.
+@available(iOS 17.0, *)
+private enum CrossNetworkCryptoCompat {
+    static func sha256(_ data: Data) -> Data {
+        Data(SHA256.hash(data: data))
+    }
+}
+
+/// Deterministic SHA-256 Merkle tree helper for chunk root computation.
+@available(iOS 17.0, *)
+private enum CrossNetworkMerkleCompat {
+    /// Deterministic SHA-256 Merkle root:
+    /// - Leaves are per-chunk SHA-256 digests (32B), ordered by chunkIndex.
+    /// - Parent = SHA256(left || right)
+    /// - Odd count: duplicate last.
+    static func root(leaves: [Data]) -> Data? {
+        guard !leaves.isEmpty else { return nil }
+        guard leaves.allSatisfy({ $0.count == 32 }) else { return nil }
+
+        var level = leaves
+        while level.count > 1 {
+            var next: [Data] = []
+            next.reserveCapacity((level.count + 1) / 2)
+            var i = 0
+            while i < level.count {
+                let left = level[i]
+                let right = (i + 1 < level.count) ? level[i + 1] : left
+                next.append(CrossNetworkCryptoCompat.sha256(left + right))
+                i += 2
+            }
+            level = next
+        }
+        return level.first
+    }
+}
+
+/// Auth helper for Merkle root verification (HMAC over deterministic preimage).
+@available(iOS 17.0, *)
+private enum CrossNetworkMerkleAuthCompat {
+    static let signatureAlgV1 = "hmac-sha256-session-v1"
+
+    // Must match Android MerkleRootAuthV1.preimage
+    static func preimage(transferId: String, merkleRoot: Data, fileSha256: Data?) -> Data {
+        var out = Data()
+        out.append("SkyBridge-MerkleRoot|v1|".data(using: .utf8)!)
+
+        let tid = transferId.data(using: .utf8) ?? Data()
+        out.append(u16le(tid.count))
+        out.append(tid)
+
+        out.append(u16le(merkleRoot.count))
+        out.append(merkleRoot)
+
+        let f = fileSha256 ?? Data()
+        out.append(u16le(f.count))
+        out.append(f)
+        return out
+    }
+
+    static func hmacSha256(key: Data, data: Data) -> Data {
+        let k = SymmetricKey(data: key)
+        let mac = HMAC<SHA256>.authenticationCode(for: data, using: k)
+        return Data(mac)
+    }
+
+    private static func u16le(_ v: Int) -> Data {
+        var x = UInt16(max(0, min(65535, v))).littleEndian
+        return Data(bytes: &x, count: 2)
+    }
+}
+
 @available(iOS 17.0, *)
 private enum CrossNetworkServerConfig {
     static let signalingWebSocketURL = "wss://api.nebula-technologies.net/ws"
@@ -151,8 +224,15 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         let finalURL: URL
         let handle: FileHandle
         var receivedBytes: Int64
+        var completeRequestedAt: Date? = nil
+        var expectedFileSha256: Data? = nil
+        var expectedMerkleRoot: Data? = nil
+        var expectedMerkleSig: Data? = nil
+        var expectedMerkleSigAlg: String? = nil
+        var chunkHashes: [Int: Data] = [:]
     }
     private var inboundFileTransfers: [String: InboundFileTransferState] = [:]
+    private var inboundFileTransferCompleteTimers: [String: Task<Void, Never>] = [:]
     
     private enum FileTransferWaitError: LocalizedError {
         case timeout
@@ -199,6 +279,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             await signaling.close()
         }
         signaling = nil
+        session?.close()
         session = nil
         currentSessionId = nil
         handshakeDriver = nil
@@ -518,7 +599,19 @@ private extension CrossNetworkWebRTCManager {
     }
     
     func handleInboundFileTransferFromMac(_ msg: CrossNetworkFileTransferMessage) async {
-        guard let keys = sessionKeys else { return }
+	        guard let keys = sessionKeys else { return }
+
+	        func sha256File(_ url: URL) -> Data? {
+	            guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+	            defer { try? handle.close() }
+	            var hasher = SHA256()
+	            while true {
+                let chunk = handle.readData(ofLength: 256 * 1024)
+                if chunk.isEmpty { break }
+                hasher.update(data: chunk)
+            }
+            return Data(hasher.finalize())
+        }
         
         func sendAck(_ ack: CrossNetworkFileTransferMessage, label: String) async {
             do {
@@ -532,6 +625,12 @@ private extension CrossNetworkWebRTCManager {
         
         switch msg.op {
         case .metadata:
+            // Idempotent: allow re-sending metadata for the same transferId (resume).
+            if inboundFileTransfers[msg.transferId] != nil {
+                await sendAck(.init(op: .metadataAck, transferId: msg.transferId), label: "metaAck")
+                return
+            }
+
             guard
                 let fileName = msg.fileName,
                 let fileSize = msg.fileSize,
@@ -572,7 +671,8 @@ private extension CrossNetworkWebRTCManager {
                     transferId: msg.transferId,
                     fileName: fileName,
                     fileSize: fileSize,
-                    fromPeerName: senderName
+                    fromPeerName: senderName,
+                    destinationURL: finalURL
                 )
                 
                 await sendAck(.init(op: .metadataAck, transferId: msg.transferId), label: "metaAck")
@@ -588,6 +688,16 @@ private extension CrossNetworkWebRTCManager {
             }
             
             do {
+                let actualHash = CrossNetworkCryptoCompat.sha256(data)
+                if let expected = msg.chunkSha256, actualHash != expected {
+                    // Backward compatible: only enforce if hash provided.
+                    // Don't ACK corrupted chunk; sender will timeout/retry as appropriate.
+                    await sendAck(.init(op: .error, transferId: msg.transferId, chunkIndex: idx, message: "chunk hash mismatch"), label: "chunkHashMismatch")
+                    return
+                }
+
+                st.chunkHashes[idx] = actualHash
+
                 let rawSize = msg.rawSize ?? data.count
                 let offset = Int64(idx) * Int64(st.chunkSize)
                 try st.handle.seek(toOffset: UInt64(max(0, offset)))
@@ -601,6 +711,104 @@ private extension CrossNetworkWebRTCManager {
                     transferredBytes: st.receivedBytes,
                     totalBytes: st.fileSize
                 )
+                
+                // If complete was already requested earlier, finalize once we have enough.
+                if st.completeRequestedAt != nil && st.receivedBytes >= st.fileSize {
+                    do { try st.handle.close() } catch {}
+                    do {
+                        if let expectedMerkle = st.expectedMerkleRoot {
+                            let leaves: [Data] = (0..<st.totalChunks).compactMap { st.chunkHashes[$0] }
+                            if leaves.count != st.totalChunks || CrossNetworkMerkleCompat.root(leaves: leaves) != expectedMerkle {
+                                FileTransferManager.instance.completeExternalInboundTransfer(
+                                    transferId: st.transferId,
+                                    success: false,
+                                    error: "merkle root mismatch"
+                                )
+                                try? FileManager.default.removeItem(at: st.tempURL)
+                                inboundFileTransfers.removeValue(forKey: st.transferId)
+                                inboundFileTransferCompleteTimers[st.transferId]?.cancel()
+                                inboundFileTransferCompleteTimers.removeValue(forKey: st.transferId)
+                                await sendAck(.init(op: .error, transferId: st.transferId, message: "merkle root mismatch"), label: "completeError")
+                                return
+                            }
+
+                            if let sig = st.expectedMerkleSig {
+                                if st.expectedMerkleSigAlg != CrossNetworkMerkleAuthCompat.signatureAlgV1 {
+                                    FileTransferManager.instance.completeExternalInboundTransfer(
+                                        transferId: st.transferId,
+                                        success: false,
+                                        error: "unknown merkle sig alg"
+                                    )
+                                    try? FileManager.default.removeItem(at: st.tempURL)
+                                    inboundFileTransfers.removeValue(forKey: st.transferId)
+                                    inboundFileTransferCompleteTimers[st.transferId]?.cancel()
+                                    inboundFileTransferCompleteTimers.removeValue(forKey: st.transferId)
+                                    await sendAck(.init(op: .error, transferId: st.transferId, message: "unknown merkle sig alg"), label: "completeError")
+                                    return
+                                }
+                                let pre = CrossNetworkMerkleAuthCompat.preimage(
+                                    transferId: st.transferId,
+                                    merkleRoot: expectedMerkle,
+                                    fileSha256: st.expectedFileSha256
+                                )
+                                let expectSig = CrossNetworkMerkleAuthCompat.hmacSha256(key: keys.receiveKey, data: pre)
+                                if sig != expectSig {
+                                    FileTransferManager.instance.completeExternalInboundTransfer(
+                                        transferId: st.transferId,
+                                        success: false,
+                                        error: "merkle signature mismatch"
+                                    )
+                                    try? FileManager.default.removeItem(at: st.tempURL)
+                                    inboundFileTransfers.removeValue(forKey: st.transferId)
+                                    inboundFileTransferCompleteTimers[st.transferId]?.cancel()
+                                    inboundFileTransferCompleteTimers.removeValue(forKey: st.transferId)
+                                    await sendAck(.init(op: .error, transferId: st.transferId, message: "merkle signature mismatch"), label: "completeError")
+                                    return
+                                }
+                            }
+                        }
+
+                        if let expected = st.expectedFileSha256, let actual = sha256File(st.tempURL), actual != expected {
+                            FileTransferManager.instance.completeExternalInboundTransfer(
+                                transferId: st.transferId,
+                                success: false,
+                                error: "file sha256 mismatch"
+                            )
+                            try? FileManager.default.removeItem(at: st.tempURL)
+                            inboundFileTransfers.removeValue(forKey: st.transferId)
+                            inboundFileTransferCompleteTimers[st.transferId]?.cancel()
+                            inboundFileTransferCompleteTimers.removeValue(forKey: st.transferId)
+                            await sendAck(.init(op: .error, transferId: st.transferId, message: "file sha256 mismatch"), label: "completeError")
+                            return
+                        }
+                        if FileManager.default.fileExists(atPath: st.finalURL.path) {
+                            try? FileManager.default.removeItem(at: st.finalURL)
+                        }
+                        try FileManager.default.moveItem(at: st.tempURL, to: st.finalURL)
+                        FileTransferManager.instance.completeExternalInboundTransfer(
+                            transferId: st.transferId,
+                            success: true,
+                            destinationURL: st.finalURL
+                        )
+                        inboundFileTransfers.removeValue(forKey: st.transferId)
+                        inboundFileTransferCompleteTimers[st.transferId]?.cancel()
+                        inboundFileTransferCompleteTimers.removeValue(forKey: st.transferId)
+                        await sendAck(.init(op: .completeAck, transferId: st.transferId), label: "completeAck")
+                        return
+                    } catch {
+                        FileTransferManager.instance.completeExternalInboundTransfer(
+                            transferId: st.transferId,
+                            success: false,
+                            error: "Save failed"
+                        )
+                        try? FileManager.default.removeItem(at: st.tempURL)
+                        inboundFileTransfers.removeValue(forKey: st.transferId)
+                        inboundFileTransferCompleteTimers[st.transferId]?.cancel()
+                        inboundFileTransferCompleteTimers.removeValue(forKey: st.transferId)
+                        await sendAck(.init(op: .error, transferId: st.transferId, message: "Save failed"), label: "completeError")
+                        return
+                    }
+                }
                 
                 await sendAck(
                     .init(op: .chunkAck, transferId: st.transferId, chunkIndex: idx, receivedBytes: st.receivedBytes),
@@ -619,23 +827,114 @@ private extension CrossNetworkWebRTCManager {
             }
             
         case .complete:
-            guard let st = inboundFileTransfers[msg.transferId] else { return }
-            
-            do { try st.handle.close() } catch {}
+            guard var st = inboundFileTransfers[msg.transferId] else { return }
+
+            // Capture expected full-file hash (optional, backward compatible).
+            if st.expectedFileSha256 == nil { st.expectedFileSha256 = msg.fileSha256 }
+            if st.expectedMerkleRoot == nil { st.expectedMerkleRoot = msg.merkleRoot }
+            if st.expectedMerkleSig == nil { st.expectedMerkleSig = msg.merkleRootSignature }
+            if st.expectedMerkleSigAlg == nil { st.expectedMerkleSigAlg = msg.merkleRootSignatureAlg }
             
             if st.receivedBytes < st.fileSize {
-                FileTransferManager.instance.completeExternalInboundTransfer(
-                    transferId: st.transferId,
-                    success: false,
-                    error: "Incomplete file"
-                )
-                try? FileManager.default.removeItem(at: st.tempURL)
-                inboundFileTransfers.removeValue(forKey: st.transferId)
-                await sendAck(.init(op: .error, transferId: st.transferId, message: "Incomplete file"), label: "completeError")
+                // Optional NACK: request missing chunks (backward compatible).
+                let missing = (0..<st.totalChunks).filter { st.chunkHashes[$0] == nil }
+                if !missing.isEmpty {
+                    await sendAck(.init(op: .chunkAck, transferId: st.transferId, missingChunks: Array(missing.prefix(512)), message: "missingChunks"), label: "missingChunks")
+                }
+
+                // Don't fail immediately; mark complete requested and wait for retransmits.
+                if st.completeRequestedAt == nil { st.completeRequestedAt = Date() }
+                inboundFileTransfers[st.transferId] = st
+                
+                if inboundFileTransferCompleteTimers[st.transferId] == nil {
+                    inboundFileTransferCompleteTimers[st.transferId] = Task { [weak self] in
+                        try? await Task.sleep(for: .seconds(10))
+                        guard let self else { return }
+                        if let cur = self.inboundFileTransfers[st.transferId], cur.receivedBytes < cur.fileSize {
+                            do { try cur.handle.close() } catch {}
+                            try? FileManager.default.removeItem(at: cur.tempURL)
+                            self.inboundFileTransfers.removeValue(forKey: cur.transferId)
+                            self.inboundFileTransferCompleteTimers[cur.transferId]?.cancel()
+                            self.inboundFileTransferCompleteTimers.removeValue(forKey: cur.transferId)
+                            FileTransferManager.instance.completeExternalInboundTransfer(
+                                transferId: cur.transferId,
+                                success: false,
+                                error: "Incomplete file (timeout)"
+                            )
+                        }
+                    }
+                }
                 return
             }
             
+            do { try st.handle.close() } catch {}
+            
             do {
+                if let expectedMerkle = st.expectedMerkleRoot {
+                    let leaves: [Data] = (0..<st.totalChunks).compactMap { st.chunkHashes[$0] }
+                    if leaves.count != st.totalChunks || CrossNetworkMerkleCompat.root(leaves: leaves) != expectedMerkle {
+                        FileTransferManager.instance.completeExternalInboundTransfer(
+                            transferId: st.transferId,
+                            success: false,
+                            error: "merkle root mismatch"
+                        )
+                        try? FileManager.default.removeItem(at: st.tempURL)
+                        inboundFileTransfers.removeValue(forKey: st.transferId)
+                        inboundFileTransferCompleteTimers[st.transferId]?.cancel()
+                        inboundFileTransferCompleteTimers.removeValue(forKey: st.transferId)
+                        await sendAck(.init(op: .error, transferId: st.transferId, message: "merkle root mismatch"), label: "completeError")
+                        return
+                    }
+
+                    if let sig = st.expectedMerkleSig {
+                        if st.expectedMerkleSigAlg != CrossNetworkMerkleAuthCompat.signatureAlgV1 {
+                            FileTransferManager.instance.completeExternalInboundTransfer(
+                                transferId: st.transferId,
+                                success: false,
+                                error: "unknown merkle sig alg"
+                            )
+                            try? FileManager.default.removeItem(at: st.tempURL)
+                            inboundFileTransfers.removeValue(forKey: st.transferId)
+                            inboundFileTransferCompleteTimers[st.transferId]?.cancel()
+                            inboundFileTransferCompleteTimers.removeValue(forKey: st.transferId)
+                            await sendAck(.init(op: .error, transferId: st.transferId, message: "unknown merkle sig alg"), label: "completeError")
+                            return
+                        }
+                        let pre = CrossNetworkMerkleAuthCompat.preimage(
+                            transferId: st.transferId,
+                            merkleRoot: expectedMerkle,
+                            fileSha256: st.expectedFileSha256
+                        )
+                        let expectSig = CrossNetworkMerkleAuthCompat.hmacSha256(key: keys.receiveKey, data: pre)
+                        if sig != expectSig {
+                            FileTransferManager.instance.completeExternalInboundTransfer(
+                                transferId: st.transferId,
+                                success: false,
+                                error: "merkle signature mismatch"
+                            )
+                            try? FileManager.default.removeItem(at: st.tempURL)
+                            inboundFileTransfers.removeValue(forKey: st.transferId)
+                            inboundFileTransferCompleteTimers[st.transferId]?.cancel()
+                            inboundFileTransferCompleteTimers.removeValue(forKey: st.transferId)
+                            await sendAck(.init(op: .error, transferId: st.transferId, message: "merkle signature mismatch"), label: "completeError")
+                            return
+                        }
+                    }
+                }
+
+                if let expected = st.expectedFileSha256, let actual = sha256File(st.tempURL), actual != expected {
+                    FileTransferManager.instance.completeExternalInboundTransfer(
+                        transferId: st.transferId,
+                        success: false,
+                        error: "file sha256 mismatch"
+                    )
+                    try? FileManager.default.removeItem(at: st.tempURL)
+                    inboundFileTransfers.removeValue(forKey: st.transferId)
+                    inboundFileTransferCompleteTimers[st.transferId]?.cancel()
+                    inboundFileTransferCompleteTimers.removeValue(forKey: st.transferId)
+                    await sendAck(.init(op: .error, transferId: st.transferId, message: "file sha256 mismatch"), label: "completeError")
+                    return
+                }
                 if FileManager.default.fileExists(atPath: st.finalURL.path) {
                     try? FileManager.default.removeItem(at: st.finalURL)
                 }
@@ -643,9 +942,12 @@ private extension CrossNetworkWebRTCManager {
                 
                 FileTransferManager.instance.completeExternalInboundTransfer(
                     transferId: st.transferId,
-                    success: true
+                    success: true,
+                    destinationURL: st.finalURL
                 )
                 inboundFileTransfers.removeValue(forKey: st.transferId)
+                inboundFileTransferCompleteTimers[st.transferId]?.cancel()
+                inboundFileTransferCompleteTimers.removeValue(forKey: st.transferId)
                 
                 await sendAck(.init(op: .completeAck, transferId: st.transferId), label: "completeAck")
             } catch {
@@ -656,6 +958,8 @@ private extension CrossNetworkWebRTCManager {
                 )
                 try? FileManager.default.removeItem(at: st.tempURL)
                 inboundFileTransfers.removeValue(forKey: st.transferId)
+                inboundFileTransferCompleteTimers[st.transferId]?.cancel()
+                inboundFileTransferCompleteTimers.removeValue(forKey: st.transferId)
                 await sendAck(.init(op: .error, transferId: st.transferId, message: "Save failed"), label: "completeError")
             }
             
@@ -885,6 +1189,4 @@ private extension CrossNetworkWebRTCManager {
         return try AES.GCM.open(box, using: key)
     }
 }
-
-
 

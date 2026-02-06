@@ -97,9 +97,6 @@ public protocol CryptoProvider: Sendable {
     
     /// 生成密钥对
     func generateKeyPair(for usage: KeyUsage) async throws -> KeyPair
-    
-    /// 简化的封装方法
-    func seal(plaintext: Data, using usage: KeyUsage, suite: CryptoSuite) async throws -> HPKESealedBox
 }
 
 // MARK: - Default Implementations
@@ -119,12 +116,6 @@ public extension CryptoProvider {
     
     func kemDemOpen(sealedBox: HPKESealedBox, privateKey: SecureBytes, info: Data) async throws -> Data {
         try await hpkeOpen(sealedBox: sealedBox, privateKey: privateKey, info: info)
-    }
-    
-    func seal(plaintext: Data, using usage: KeyUsage, suite: CryptoSuite) async throws -> HPKESealedBox {
-        // 默认实现：生成临时密钥并封装
-        let keyPair = try await generateKeyPair(for: .ephemeral)
-        return try await hpkeSeal(plaintext: plaintext, recipientPublicKey: keyPair.publicKey.bytes, info: Data())
     }
 }
 

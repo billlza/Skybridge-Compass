@@ -90,7 +90,8 @@ public struct QRCodeData: Codable, Sendable {
 
 /// 二维码生成器
 @available(iOS 17.0, *)
-public class QRCodeGenerator {
+@MainActor
+public final class QRCodeGenerator {
     
     public static let shared = QRCodeGenerator()
     
@@ -234,6 +235,7 @@ public class QRCodeGenerator {
 #if canImport(UIKit)
 /// 二维码扫描器代理
 @available(iOS 17.0, *)
+@MainActor
 public protocol QRCodeScannerDelegate: AnyObject {
     func scanner(_ scanner: QRCodeScanner, didScanCode code: String)
     func scanner(_ scanner: QRCodeScanner, didScanQRData data: QRCodeData)
@@ -242,7 +244,13 @@ public protocol QRCodeScannerDelegate: AnyObject {
 
 /// 二维码扫描器
 @available(iOS 17.0, *)
-public class QRCodeScanner: NSObject {
+@MainActor
+public final class QRCodeScanner: NSObject {
+
+    private final class CaptureSessionBox: @unchecked Sendable {
+        let session: AVCaptureSession
+        init(_ session: AVCaptureSession) { self.session = session }
+    }
     
     public weak var delegate: QRCodeScannerDelegate?
     
@@ -270,6 +278,7 @@ public class QRCodeScanner: NSObject {
     
     /// 设置扫描器
     /// - Parameter previewView: 预览视图
+    @MainActor
     public func setup(in previewView: UIView) throws {
         guard let device = AVCaptureDevice.default(for: .video) else {
             throw QRCodeScannerError.cameraNotAvailable
@@ -305,21 +314,25 @@ public class QRCodeScanner: NSObject {
     /// 开始扫描
     public func startScanning() {
         guard !isScanning else { return }
-        
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            self?.captureSession?.startRunning()
-            DispatchQueue.main.async {
-                self?.isScanning = true
-            }
+        guard let session = captureSession else { return }
+
+        isScanning = true
+        let box = CaptureSessionBox(session)
+        DispatchQueue.global(qos: .userInitiated).async {
+            box.session.startRunning()
         }
     }
     
     /// 停止扫描
     public func stopScanning() {
         guard isScanning else { return }
-        
-        captureSession?.stopRunning()
+
         isScanning = false
+        guard let session = captureSession else { return }
+        let box = CaptureSessionBox(session)
+        DispatchQueue.global(qos: .userInitiated).async {
+            box.session.stopRunning()
+        }
     }
     
     /// 更新预览层大小
@@ -355,15 +368,15 @@ public class QRCodeScanner: NSObject {
         if let pairing = QRCodeData.fromSkybridgePairURLString(string) {
             if pairing.isExpired {
                 delegate?.scanner(self, didFailWithError: QRCodeScannerError.qrCodeExpired)
-        } else {
+            } else {
                 delegate?.scanner(self, didScanQRData: pairing)
             }
             return
         }
 
-            // 作为普通字符串返回
-            delegate?.scanner(self, didScanCode: string)
-        }
+        // 作为普通字符串返回
+        delegate?.scanner(self, didScanCode: string)
+    }
 }
 
 // MARK: - Interop: skybridge://pair (macOS 旧/兼容格式)
@@ -410,7 +423,7 @@ public extension QRCodeData {
 // MARK: - AVCaptureMetadataOutputObjectsDelegate
 
 @available(iOS 17.0, *)
-extension QRCodeScanner: AVCaptureMetadataOutputObjectsDelegate {
+extension QRCodeScanner: @preconcurrency AVCaptureMetadataOutputObjectsDelegate {
     public func metadataOutput(
         _ output: AVCaptureMetadataOutput,
         didOutput metadataObjects: [AVMetadataObject],
@@ -553,17 +566,12 @@ public class QRCodeScannerViewController: UIViewController {
         scanner.updatePreviewFrame(previewView.bounds)
     }
 
-    deinit {
-        startTask?.cancel()
-        scanner.stopScanning()
-    }
-
     private func startIfNeeded() {
         guard !didStart else { return }
         didStart = true
 
         startTask?.cancel()
-        startTask = Task { [weak self] in
+        startTask = Task { @MainActor [weak self] in
             guard let self else { return }
             let hasPermission = await self.scanner.checkCameraPermission()
             guard !Task.isCancelled else { return }
@@ -596,4 +604,3 @@ extension QRCodeScannerViewController: QRCodeScannerDelegate {
     }
 }
 #endif
-

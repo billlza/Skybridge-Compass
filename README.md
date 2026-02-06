@@ -23,7 +23,8 @@ SkyBridge Compass Pro 是一个以 **跨平台协议内核（SkyBridgeCore）** 
 ## 环境要求
 
 - macOS 14+
-- Xcode 15+
+- Apple Silicon（arm64）Mac（当前 vendored XCFramework 仅提供 arm64 slice，Intel x86_64 暂不支持）
+- Xcode 26.2+
 - Swift 6.2+（由 Xcode 版本提供）
 
 ## Apple PQC（iOS 26+/macOS 26+）在分发包中自动启用

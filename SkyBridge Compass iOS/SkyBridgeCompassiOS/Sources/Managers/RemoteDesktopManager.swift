@@ -15,6 +15,7 @@ import Foundation
 import Network
 import AVFoundation
 import VideoToolbox
+import ImageIO
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -182,28 +183,59 @@ public enum RemoteDesktopError: Error, LocalizedError, Sendable {
 /// 视频解码器
 @available(iOS 17.0, *)
 actor VideoDecoder {
+    private enum Codec: Sendable {
+        case h264
+        case hevc
+    }
+
+    private final class DecodeResultBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: CGImage?
+
+        func set(_ value: CGImage?) {
+            lock.lock()
+            self.value = value
+            lock.unlock()
+        }
+
+        func get() -> CGImage? {
+            lock.lock()
+            defer { lock.unlock() }
+            return value
+        }
+    }
+
     private var decompressionSession: VTDecompressionSession?
     private var formatDescription: CMVideoFormatDescription?
+    private var activeCodec: Codec?
+    private var h264SPS: Data?
+    private var h264PPS: Data?
+    private var hevcVPS: Data?
+    private var hevcSPS: Data?
+    private var hevcPPS: Data?
     private var lastDecodedFrame: CGImage?
     
     /// 解码 H.264/HEVC 帧
-    func decode(frameData: Data, format: String) async throws -> CGImage? {
-        // 对于 JPEG 格式，直接解码
-        if format == "jpeg" {
-            return decodeJPEG(frameData)
+    func decode(screenData: ScreenData) async throws -> CGImage? {
+        let format = (screenData.format ?? "").lowercased()
+        let payload = screenData.imageData
+
+        if format.isEmpty {
+            return decodeStaticImage(payload)
         }
-        
-        // 对于 H.264/HEVC，使用 VideoToolbox
-        if format == "h264" || format == "hevc" {
-            return try await decodeVideoFrame(frameData, isHEVC: format == "hevc")
+
+        switch format {
+        case "jpeg", "jpg":
+            return decodeJPEG(payload)
+        case "h264":
+            return try decodeVideoFrame(payload, codec: .h264)
+        case "hevc":
+            return try decodeVideoFrame(payload, codec: .hevc)
+        case "bgra":
+            return decodeBGRA(payload, width: screenData.width, height: screenData.height)
+        default:
+            return decodeStaticImage(payload)
         }
-        
-        // 对于 BGRA 原始数据
-        if format == "bgra" {
-            return decodeBGRA(frameData)
-        }
-        
-        return nil
     }
     
     private func decodeJPEG(_ data: Data) -> CGImage? {
@@ -219,25 +251,333 @@ actor VideoDecoder {
         return image
     }
     
-    private func decodeBGRA(_ data: Data) -> CGImage? {
-        // 需要知道宽高才能解码 BGRA
-        // 这里简化处理，实际使用时需要从 ScreenData 获取宽高
-        return nil
+    private func decodeStaticImage(_ data: Data) -> CGImage? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        return CGImageSourceCreateImageAtIndex(source, 0, nil)
     }
     
-    private func decodeVideoFrame(_ data: Data, isHEVC: Bool) async throws -> CGImage? {
-        // VideoToolbox 解码实现
-        // 这里是简化实现，实际需要完整的 NAL 单元解析和解码流程
-        return nil
+    private func decodeBGRA(_ data: Data, width: Int, height: Int) -> CGImage? {
+        guard width > 0, height > 0 else { return nil }
+        let expectedMinBytes = width * height * 4
+        guard data.count >= expectedMinBytes else { return nil }
+
+        guard let provider = CGDataProvider(data: data as CFData) else { return nil }
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGBitmapInfo.byteOrder32Little.union(
+            CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue)
+        )
+        return CGImage(
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bitsPerPixel: 32,
+            bytesPerRow: width * 4,
+            space: colorSpace,
+            bitmapInfo: bitmapInfo,
+            provider: provider,
+            decode: nil,
+            shouldInterpolate: true,
+            intent: .defaultIntent
+        )
     }
-    
-    func cleanup() {
+
+    private func decodeVideoFrame(_ data: Data, codec: Codec) throws -> CGImage? {
+        let requiresReset = updateParameterSetsIfPresent(from: data, codec: codec)
+        if activeCodec != codec || requiresReset {
+            resetDecoderState(keepLastFrame: true)
+            activeCodec = codec
+        }
+
+        if formatDescription == nil {
+            try buildFormatDescriptionIfPossible(codec: codec)
+        }
+        guard let formatDescription else { return lastDecodedFrame }
+
+        if decompressionSession == nil {
+            try createDecompressionSession(formatDescription: formatDescription)
+        }
+        guard let session = decompressionSession else { return lastDecodedFrame }
+
+        let sampleBuffer = try makeSampleBuffer(naluData: data, formatDescription: formatDescription)
+
+        let box = DecodeResultBox()
+        let status = VTDecompressionSessionDecodeFrame(session, sampleBuffer: sampleBuffer, flags: [], infoFlagsOut: nil) { status, _, imageBuffer, _, _ in
+            guard status == noErr, let imageBuffer else { return }
+            var out: CGImage?
+            if VTCreateCGImageFromCVPixelBuffer(imageBuffer, options: nil, imageOut: &out) == noErr {
+                box.set(out)
+            }
+        }
+
+        guard status == noErr else {
+            return lastDecodedFrame
+        }
+
+        let decodedImage = box.get()
+        if let decodedImage {
+            lastDecodedFrame = decodedImage
+        }
+        return decodedImage ?? lastDecodedFrame
+    }
+
+    private func resetDecoderState(keepLastFrame: Bool) {
         if let session = decompressionSession {
             VTDecompressionSessionInvalidate(session)
             decompressionSession = nil
         }
         formatDescription = nil
-        lastDecodedFrame = nil
+        if !keepLastFrame {
+            lastDecodedFrame = nil
+        }
+    }
+
+    private func updateParameterSetsIfPresent(from data: Data, codec: Codec) -> Bool {
+        var didChange = false
+
+        func update(_ current: inout Data?, new: Data) {
+            if current != new {
+                current = new
+                didChange = true
+            }
+        }
+
+        for nalu in parseNALUnits(from: data) {
+            guard let first = nalu.first else { continue }
+            switch codec {
+            case .h264:
+                let type = Int(first & 0x1F)
+                switch type {
+                case 7: update(&h264SPS, new: nalu)
+                case 8: update(&h264PPS, new: nalu)
+                default: break
+                }
+            case .hevc:
+                let type = Int((first >> 1) & 0x3F)
+                switch type {
+                case 32: update(&hevcVPS, new: nalu)
+                case 33: update(&hevcSPS, new: nalu)
+                case 34: update(&hevcPPS, new: nalu)
+                default: break
+                }
+            }
+        }
+
+        return didChange
+    }
+
+    private func buildFormatDescriptionIfPossible(codec: Codec) throws {
+        switch codec {
+        case .h264:
+            guard let sps = h264SPS, let pps = h264PPS else { return }
+            var out: CMFormatDescription?
+            let status = sps.withUnsafeBytes { spsRaw -> OSStatus in
+                guard let spsBase = spsRaw.baseAddress else { return -1 }
+                return pps.withUnsafeBytes { ppsRaw -> OSStatus in
+                    guard let ppsBase = ppsRaw.baseAddress else { return -1 }
+                    let pointers: [UnsafePointer<UInt8>] = [
+                        spsBase.assumingMemoryBound(to: UInt8.self),
+                        ppsBase.assumingMemoryBound(to: UInt8.self)
+                    ]
+                    let sizes: [Int] = [sps.count, pps.count]
+                    return pointers.withUnsafeBufferPointer { ptrs in
+                        sizes.withUnsafeBufferPointer { sz in
+                            CMVideoFormatDescriptionCreateFromH264ParameterSets(
+                                allocator: kCFAllocatorDefault,
+                                parameterSetCount: ptrs.count,
+                                parameterSetPointers: ptrs.baseAddress!,
+                                parameterSetSizes: sz.baseAddress!,
+                                nalUnitHeaderLength: 4,
+                                formatDescriptionOut: &out
+                            )
+                        }
+                    }
+                }
+            }
+            guard status == noErr, let desc = out else {
+                throw RemoteDesktopError.decodingFailed("Failed to build H.264 format description (status=\(status))")
+            }
+            formatDescription = desc
+
+        case .hevc:
+            guard let vps = hevcVPS, let sps = hevcSPS, let pps = hevcPPS else { return }
+            var out: CMFormatDescription?
+            let status = vps.withUnsafeBytes { vpsRaw -> OSStatus in
+                guard let vpsBase = vpsRaw.baseAddress else { return -1 }
+                return sps.withUnsafeBytes { spsRaw -> OSStatus in
+                    guard let spsBase = spsRaw.baseAddress else { return -1 }
+                    return pps.withUnsafeBytes { ppsRaw -> OSStatus in
+                        guard let ppsBase = ppsRaw.baseAddress else { return -1 }
+                        let pointers: [UnsafePointer<UInt8>] = [
+                            vpsBase.assumingMemoryBound(to: UInt8.self),
+                            spsBase.assumingMemoryBound(to: UInt8.self),
+                            ppsBase.assumingMemoryBound(to: UInt8.self)
+                        ]
+                        let sizes: [Int] = [vps.count, sps.count, pps.count]
+                        return pointers.withUnsafeBufferPointer { ptrs in
+                            sizes.withUnsafeBufferPointer { sz in
+                                CMVideoFormatDescriptionCreateFromHEVCParameterSets(
+                                    allocator: kCFAllocatorDefault,
+                                    parameterSetCount: ptrs.count,
+                                    parameterSetPointers: ptrs.baseAddress!,
+                                    parameterSetSizes: sz.baseAddress!,
+                                    nalUnitHeaderLength: 4,
+                                    extensions: nil,
+                                    formatDescriptionOut: &out
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+            guard status == noErr, let desc = out else {
+                throw RemoteDesktopError.decodingFailed("Failed to build HEVC format description (status=\(status))")
+            }
+            formatDescription = desc
+        }
+    }
+
+    private func createDecompressionSession(formatDescription: CMVideoFormatDescription) throws {
+        var newSession: VTDecompressionSession?
+        let attributes: [NSString: Any] = [
+            kCVPixelBufferPixelFormatTypeKey: Int(kCVPixelFormatType_32BGRA),
+            kCVPixelBufferCGImageCompatibilityKey: true,
+            kCVPixelBufferCGBitmapContextCompatibilityKey: true
+        ]
+
+        let status = VTDecompressionSessionCreate(
+            allocator: kCFAllocatorDefault,
+            formatDescription: formatDescription,
+            decoderSpecification: nil,
+            imageBufferAttributes: attributes as CFDictionary,
+            outputCallback: nil,
+            decompressionSessionOut: &newSession
+        )
+        guard status == noErr, let session = newSession else {
+            throw RemoteDesktopError.decodingFailed("VTDecompressionSessionCreate failed (status=\(status))")
+        }
+
+        _ = VTSessionSetProperty(session, key: kVTDecompressionPropertyKey_RealTime, value: kCFBooleanTrue)
+        decompressionSession = session
+    }
+
+    private func makeSampleBuffer(naluData: Data, formatDescription: CMVideoFormatDescription) throws -> CMSampleBuffer {
+        var blockBuffer: CMBlockBuffer?
+        let status = CMBlockBufferCreateWithMemoryBlock(
+            allocator: kCFAllocatorDefault,
+            memoryBlock: nil,
+            blockLength: naluData.count,
+            blockAllocator: kCFAllocatorDefault,
+            customBlockSource: nil,
+            offsetToData: 0,
+            dataLength: naluData.count,
+            flags: 0,
+            blockBufferOut: &blockBuffer
+        )
+        guard status == kCMBlockBufferNoErr, let blockBuffer else {
+            throw RemoteDesktopError.decodingFailed("CMBlockBufferCreateWithMemoryBlock failed (status=\(status))")
+        }
+
+        let replaceStatus = naluData.withUnsafeBytes { raw -> OSStatus in
+            guard let base = raw.baseAddress else { return -1 }
+            return CMBlockBufferReplaceDataBytes(with: base, blockBuffer: blockBuffer, offsetIntoDestination: 0, dataLength: naluData.count)
+        }
+        guard replaceStatus == kCMBlockBufferNoErr else {
+            throw RemoteDesktopError.decodingFailed("CMBlockBufferReplaceDataBytes failed (status=\(replaceStatus))")
+        }
+
+        var sampleBuffer: CMSampleBuffer?
+        var sampleSize = naluData.count
+        let sbStatus = CMSampleBufferCreateReady(
+            allocator: kCFAllocatorDefault,
+            dataBuffer: blockBuffer,
+            formatDescription: formatDescription,
+            sampleCount: 1,
+            sampleTimingEntryCount: 0,
+            sampleTimingArray: nil,
+            sampleSizeEntryCount: 1,
+            sampleSizeArray: &sampleSize,
+            sampleBufferOut: &sampleBuffer
+        )
+        guard sbStatus == noErr, let sampleBuffer else {
+            throw RemoteDesktopError.decodingFailed("CMSampleBufferCreateReady failed (status=\(sbStatus))")
+        }
+        return sampleBuffer
+    }
+
+    private func parseNALUnits(from data: Data) -> [Data] {
+        if data.count >= 4, data.starts(with: [0x00, 0x00, 0x00, 0x01]) || data.starts(with: [0x00, 0x00, 0x01]) {
+            return parseAnnexBNALUnits(from: data)
+        }
+        return parseLengthPrefixedNALUnits(from: data)
+    }
+
+    private func parseLengthPrefixedNALUnits(from data: Data) -> [Data] {
+        var nalus: [Data] = []
+        var offset = 0
+        while offset + 4 <= data.count {
+            let length = data.withUnsafeBytes { raw -> Int in
+                let v = raw.loadUnaligned(fromByteOffset: offset, as: UInt32.self)
+                return Int(UInt32(bigEndian: v))
+            }
+            offset += 4
+            guard length > 0, offset + length <= data.count else { break }
+            nalus.append(data.subdata(in: offset..<(offset + length)))
+            offset += length
+        }
+        return nalus
+    }
+
+    private func parseAnnexBNALUnits(from data: Data) -> [Data] {
+        func isStartCode(at i: Int) -> Int? {
+            guard i + 3 <= data.count else { return nil }
+            if i + 4 <= data.count,
+               data[i] == 0x00, data[i + 1] == 0x00, data[i + 2] == 0x00, data[i + 3] == 0x01 {
+                return 4
+            }
+            if data[i] == 0x00, data[i + 1] == 0x00, data[i + 2] == 0x01 {
+                return 3
+            }
+            return nil
+        }
+
+        var nalus: [Data] = []
+        var i = 0
+        var currentStart: Int?
+        var currentSkip = 0
+
+        while i < data.count {
+            if let skip = isStartCode(at: i) {
+                if let start = currentStart {
+                    let naluStart = start + currentSkip
+                    if naluStart < i {
+                        nalus.append(data.subdata(in: naluStart..<i))
+                    }
+                }
+                currentStart = i
+                currentSkip = skip
+                i += skip
+            } else {
+                i += 1
+            }
+        }
+
+        if let start = currentStart {
+            let naluStart = start + currentSkip
+            if naluStart < data.count {
+                nalus.append(data.subdata(in: naluStart..<data.count))
+            }
+        }
+        return nalus
+    }
+    
+    func cleanup() {
+        resetDecoderState(keepLastFrame: false)
+        activeCodec = nil
+        h264SPS = nil
+        h264PPS = nil
+        hevcVPS = nil
+        hevcSPS = nil
+        hevcPPS = nil
     }
 }
 
@@ -648,12 +988,11 @@ public class RemoteDesktopManager: ObservableObject {
         isDecodingFrame = true
 
         let decoder = self.decoder
-        let imageData = next.imageData
-        let format = (next.format ?? "jpeg").lowercased()
+        let screenData = next
 
         Task { [weak self] in
             guard let self else { return }
-            let frame = try? await decoder.decode(frameData: imageData, format: format)
+            let frame = try? await decoder.decode(screenData: screenData)
             if let frame {
                 self.currentFrame = frame
                 self.frameCount += 1

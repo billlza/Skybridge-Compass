@@ -1363,8 +1363,14 @@ public class P2PDiscoveryService: BaseManager {
         let address = d.ipv4 ?? d.ipv6 ?? ""
         let portInt = d.portMap["_skybridge._tcp"] ?? d.portMap.values.first ?? 0
         let endpoints: [String] = portInt > 0 ? ["\(address):\(portInt)"] : (address.isEmpty ? [] : [address])
+        let stableId: String = {
+            if let persistent = d.deviceId, !persistent.isEmpty {
+                return persistent
+            }
+            return d.id.uuidString
+        }()
         return P2PDevice(
-            id: d.id.uuidString,
+            id: stableId,
             name: d.name,
             type: .macOS,
             address: address,

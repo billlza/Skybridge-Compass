@@ -20,7 +20,7 @@ COLORS = {
 # Hatch patterns for grayscale/print accessibility
 HATCHES = {
     "signature": "hatch-diagonal",      # /// diagonal lines
-    "keyshare": "hatch-crosshatch",     # XXX cross-hatch
+    "keyshare": "hatch-crosshatch",     # Cross-hatch pattern
     "identity": "hatch-dots",           # dots
     "overhead": "hatch-horizontal",     # --- horizontal lines
 }

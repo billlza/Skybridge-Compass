@@ -245,12 +245,13 @@ extension WeatherManager: CLLocationManagerDelegate {
     }
     
     nonisolated public func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+        let status = manager.authorizationStatus
         Task { @MainActor in
-            self.locationAuthorizationStatus = manager.authorizationStatus
+            self.locationAuthorizationStatus = status
             
-            switch manager.authorizationStatus {
+            switch status {
             case .authorizedWhenInUse, .authorizedAlways:
-                manager.requestLocation()
+                self.locationManager.requestLocation()
             case .denied, .restricted:
                 self.error = "位置权限被拒绝"
             default:

@@ -207,7 +207,7 @@ var body: some View {
 ## 🔧 开发工具
 
 ### 必需
-- Xcode 15.0+
+- Xcode 26.2+
 - Swift 6.2+
 - iOS 17.0+ SDK
 

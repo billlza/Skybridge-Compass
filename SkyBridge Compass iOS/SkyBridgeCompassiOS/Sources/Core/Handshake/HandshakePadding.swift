@@ -8,6 +8,8 @@
 //
 
 import Foundation
+import Security
+import os
 
 @available(iOS 17.0, *)
 public enum HandshakePaddingMode: String, Sendable {
@@ -62,22 +64,22 @@ public enum HandshakePadding {
     // "SBP1"
     private static let magic: [UInt8] = [0x53, 0x42, 0x50, 0x31]
     private static let headerLen = 4 + 4 // magic + u32 actualLen
-    private static let configLogLock = NSLock()
-    private static var didLogConfigHint = false
+    private static let didLogConfigHint = OSAllocatedUnfairLock(initialState: false)
 
     private static func logConfigHintOnceIfNeeded(cfg: HandshakePaddingConfig) {
-        guard cfg.enabled else { return }
-        configLogLock.lock()
-        defer { configLogLock.unlock() }
-        guard !didLogConfigHint else { return }
-        didLogConfigHint = true
+        guard cfg.enabled, cfg.debugLog else { return }
 
-        if cfg.debugLog {
-            let bundleId = Bundle.main.bundleIdentifier ?? "unknown.bundle"
-            let msg = "🧪 HandshakePadding debug ON (bundle=\(bundleId), mode=\(cfg.mode.rawValue), fixed=\(cfg.fixedSizeBytes))"
-            SkyBridgeLogger.shared.info(msg)
-            print(msg)
+        let shouldLog = didLogConfigHint.withLock { didLog -> Bool in
+            if didLog { return false }
+            didLog = true
+            return true
         }
+        guard shouldLog else { return }
+
+        let bundleId = Bundle.main.bundleIdentifier ?? "unknown.bundle"
+        let msg = "🧪 HandshakePadding debug ON (bundle=\(bundleId), mode=\(cfg.mode.rawValue), fixed=\(cfg.fixedSizeBytes))"
+        SkyBridgeLogger.shared.info(msg)
+        print(msg)
     }
 
     public static func wrapIfEnabled(_ payload: Data, label: String? = nil) -> Data {
@@ -116,7 +118,7 @@ public enum HandshakePadding {
 
         let len = data.withUnsafeBytes { raw -> UInt32 in
             let base = raw.baseAddress!.advanced(by: 4)
-            return base.load(as: UInt32.self).bigEndian
+            return base.loadUnaligned(as: UInt32.self).bigEndian
         }
 
         let actualLen = Int(len)
@@ -151,11 +153,13 @@ public enum HandshakePadding {
 
     private static func randomBytes(count: Int) -> Data {
         var bytes = [UInt8](repeating: 0, count: count)
+        let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        if status == errSecSuccess {
+            return Data(bytes)
+        }
         for i in bytes.indices {
             bytes[i] = UInt8.random(in: 0...255)
         }
         return Data(bytes)
     }
 }
-
-

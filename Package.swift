@@ -2,6 +2,9 @@
 import Foundation
 import PackageDescription
 
+let packageRootPath = URL(fileURLWithPath: #filePath).deletingLastPathComponent().path
+let webRTCHeadersIncludePath = "\(packageRootPath)/Sources/Vendor/WebRTCHeaders"
+
 // Build-time gate for Apple CryptoKit PQC types (iOS 26+/macOS 26+).
 //
 // Why: Swift does not provide a compile-time "SDK has PQC types" check for structs like MLKEM/MLDSA.
@@ -93,7 +96,7 @@ let package = Package(
         // ASN.1/DER 解析库：用于 PEM/PKCS#8 私钥解析（Ed25519）
         .package(url: "https://github.com/apple/swift-asn1", from: "1.5.1"),
         // WebRTC (ICE / DataChannel) - 跨网连接基础设施（走 STUN/TURN）
-        .package(url: "https://github.com/stasel/WebRTC", from: "114.0.0")
+        .package(url: "https://github.com/stasel/WebRTC", from: "141.0.0")
     ],
     targets: [
         .binaryTarget(
@@ -128,8 +131,7 @@ let package = Package(
             path: "Sources/FreeRDPBridge",
             publicHeadersPath: "include",
             cSettings: [
-                // ARM64优化编译选项
-                .define("TARGET_CPU_ARM64", to: "1"),
+                // Apple Silicon 优化编译选项（不要手动定义 TARGET_CPU_*，由 SDK/编译器根据架构提供）
                 .define("APPLE_SILICON_OPTIMIZED", to: "1")
             ],
             linkerSettings: [
@@ -181,6 +183,8 @@ let package = Package(
                 // Suppress deprecated declarations coming from imported Objective‑C headers inside WebRTC.xcframework
                 // (e.g., RTCNSGLVideoView uses NSOpenGLView/NSOpenGLPixelFormat which are deprecated on macOS).
                 .unsafeFlags(["-Xcc", "-Wno-deprecated-declarations"], .when(platforms: [.macOS])),
+                // WebRTC binary header overlay (SwiftPM): provide missing public/internal include paths on macOS.
+                .unsafeFlags(["-Xcc", "-I", "-Xcc", webRTCHeadersIncludePath], .when(platforms: [.macOS])),
                 .define("OQS_ENABLED"),
             ] + (enableApplePQCSDK ? [.define("HAS_APPLE_PQC_SDK")] : [])),
             linkerSettings: [
@@ -226,6 +230,8 @@ let package = Package(
                 // Suppress deprecated declarations coming from imported Objective‑C headers inside WebRTC.xcframework
                 // (e.g., RTCNSGLVideoView uses NSOpenGLView/NSOpenGLPixelFormat which are deprecated on macOS).
                 .unsafeFlags(["-Xcc", "-Wno-deprecated-declarations"], .when(platforms: [.macOS])),
+                // SkyBridgeUI depends on SkyBridgeCore -> WebRTC; keep Clang scanner include paths aligned.
+                .unsafeFlags(["-Xcc", "-I", "-Xcc", webRTCHeadersIncludePath], .when(platforms: [.macOS])),
             ],
             linkerSettings: [
                 .linkedFramework("SwiftUI")
@@ -292,6 +298,8 @@ let package = Package(
                 // Suppress deprecated declarations coming from imported Objective‑C headers inside WebRTC.xcframework
                 // (e.g., RTCNSGLVideoView uses NSOpenGLView/NSOpenGLPixelFormat which are deprecated on macOS).
                 .unsafeFlags(["-Xcc", "-Wno-deprecated-declarations"], .when(platforms: [.macOS])),
+                // App target depends transitively on SkyBridgeCore -> WebRTC.
+                .unsafeFlags(["-Xcc", "-I", "-Xcc", webRTCHeadersIncludePath], .when(platforms: [.macOS])),
             ],
             linkerSettings: [
                 .linkedFramework("AppIntents"),

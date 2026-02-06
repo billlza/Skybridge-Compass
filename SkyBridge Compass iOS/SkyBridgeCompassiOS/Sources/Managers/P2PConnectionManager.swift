@@ -24,6 +24,9 @@ public class P2PConnectionManager: ObservableObject {
     @Published public private(set) var connectionStatusByDeviceId: [String: ConnectionStatus] = [:]
     /// 每个设备最近一次连接错误（用于定位“莫名其妙断开”原因）
     @Published public private(set) var connectionErrorByDeviceId: [String: String] = [:]
+    /// 每个设备当前协商的加密套件（用于 UI/LiveActivity 在 rekey 后正确刷新）
+    /// 注意：`sessionKeys` 不是 @Published，因此仅更新 `sessionKeys` 不会触发 SwiftUI 刷新。
+    @Published public private(set) var negotiatedSuiteByDeviceId: [String: CryptoSuite] = [:]
     
     // MARK: - Private Properties
     
@@ -153,7 +156,11 @@ public class P2PConnectionManager: ObservableObject {
         if cap.hasApplePQC || cap.hasLiboqs {
             return .requirePQC
         }
-        SkyBridgeLogger.shared.warning("⚠️ 本机/编译不具备 PQC Provider（hasApplePQC=\(cap.hasApplePQC), hasLiboqs=\(cap.hasLiboqs)）。无法满足 strictPQC(requirePQC)，将回退到 preferPQC（classic）以保持可连接性。若需严格 PQC，请使用 iOS 26+ 且启用 HAS_APPLE_PQC_SDK 编译条件。")
+        SkyBridgeLogger.shared.warning(
+            "⚠️ 本机运行在 iOS 26+ 也可能出现 Classic：当前构建未启用 Apple PQC 编译开关或自检失败（hasApplePQC=\(cap.hasApplePQC), hasLiboqs=\(cap.hasLiboqs)）。" +
+            "无法满足 strictPQC(requirePQC)，将回退到 preferPQC（classic）以保持可连接性。" +
+            "要启用原生 PQC：请使用 Xcode 26+ / iOS 26 SDK 编译，并确保 Package.swift 开启 HAS_APPLE_PQC_SDK。"
+        )
         return .preferPQC
     }
     
@@ -225,6 +232,24 @@ public class P2PConnectionManager: ObservableObject {
         isListening = false
         
         SkyBridgeLogger.shared.info("⏹️ P2P 监听器已停止")
+    }
+
+    /// 握手验证码（6 位数字）——用于“配对/信任”阶段的人工可视比对（论文中的 OOB pairing ceremony）。
+    ///
+    /// - Important: Code is deterministically derived from the *handshake transcript hash* to bind user verification
+    ///   to the negotiated suite + policy + key shares. Both peers compute the same value after a successful handshake.
+    public func pairingVerificationCode(for deviceId: String) -> String? {
+        guard let keys = sessionKeys[deviceId] else { return nil }
+
+        var material = Data("SkyBridge-Pairing-SAS|".utf8)
+        material.append(keys.transcriptHash)
+
+        let digest = SHA256.hash(data: material)
+        let raw = digest.withUnsafeBytes { ptr -> UInt32 in
+            ptr.loadUnaligned(as: UInt32.self).bigEndian
+        }
+        let code = Int(raw % 1_000_000)
+        return String(format: "%06d", code)
     }
     
     /// 连接到设备
@@ -326,7 +351,7 @@ public class P2PConnectionManager: ObservableObject {
         // 等待连接 ready 再握手（避免在 .preparing/.setup 时握手导致失败）
         try await readyGate.waitReady(timeoutSeconds: 10)
         
-        // 执行握手（可能 PQC-only 或 classic fallback，取决于 trust store 是否已有 peer KEM keys）
+        // 执行握手（可能 PQC-only 或 classic bootstrap，取决于 trust store 是否已有 peer KEM keys）
         do {
             try await performPQCHandshake(connection: connection, device: device, preferPQC: pqcManager.enforcePQCHandshake)
         } catch {
@@ -340,7 +365,21 @@ public class P2PConnectionManager: ObservableObject {
                TrustedDeviceStore.shared.isTrusted(deviceId: device.id) {
                 
                 SkyBridgeLogger.shared.warning("🧩 strictPQC bootstrap: trusted peer but missing KEM key (suite=\(suite)). Performing one-time Classic bootstrap to provision trust, then rekey to PQC.")
-                print("[SecurityEvent] legacyBootstrap: reason=missingPeerKEMPublicKey suite=\(suite) peer=\(device.id)")
+                SecurityEventEmitter.emitDetached(SecurityEvent(
+                    type: .legacyBootstrap,
+                    severity: .warning,
+                    message: "strictPQC bootstrap: missing peer KEM public key; establishing one-time Classic channel to provision KEM keys then rekey to PQC",
+                    context: [
+                        "reason": "missingPeerKEMPublicKey",
+                        "suite": suite,
+                        "peer": device.id,
+                        // Paper terminology alignment:
+                        "downgradeResistance": "policy_gate+no_timeout_fallback+rate_limited",
+                        "policyInTranscript": "1",
+                        "transcriptBinding": "1",
+                        "policyRequirePQC": "1"
+                    ]
+                ))
                 
                 do {
                     // 1) Establish a Classic session (authenticated by protocol signatures) solely for provisioning.
@@ -402,16 +441,34 @@ public class P2PConnectionManager: ObservableObject {
                 throw error
             }
         }
+
+        // If strictPQC is enabled but we negotiated a Classic suite, it almost always means we do NOT yet
+        // have the peer's long-term KEM identity public key in the trust store (bootstrap phase).
+        // Proactively kick off the KEM identity exchange and schedule a single rekey to PQC.
+        if pqcManager.enforcePQCHandshake,
+           let negotiated = sessionKeys[device.id]?.negotiatedSuite,
+           !negotiated.isPQCGroup {
+            do {
+                let provider = CryptoProviderFactory.make(policy: .preferPQC)
+                if let preferred = provider.supportedSuites.first(where: { $0.isPQCGroup }) {
+                    SkyBridgeLogger.shared.warning("🧩 strictPQC bootstrap: negotiated Classic (\(negotiated.rawValue)). Exchanging KEM identity keys then rekeying to \(preferred.rawValue)… peer=\(device.id)")
+                    try await sendPairingIdentityExchange(to: device.id)
+                    scheduleBootstrapRekeyIfNeeded(peerId: device.id, suiteRaw: preferred.rawValue)
+                } else {
+                    SkyBridgeLogger.shared.warning("⚠️ strictPQC enabled but no PQC suites are available on this build/device; staying on Classic. peer=\(device.id)")
+                }
+            } catch {
+                SkyBridgeLogger.shared.warning("⚠️ strictPQC bootstrap: failed to send pairing identity exchange (ignored): \(error.localizedDescription)")
+            }
+        }
         
         SkyBridgeLogger.shared.info("✅ 已连接到 \(device.name)")
         startHeartbeatIfNeeded(deviceId: device.id)
 
-        // 更新灵动岛状态
-        if #available(iOS 16.2, *) {
-            let suite = sessionKeys[device.id]?.negotiatedSuite.rawValue ?? "已连接"
-            Task {
-                await LiveActivityManager.shared.setConnected(deviceName: device.name, cryptoSuite: suite)
-            }
+        // 更新灵动岛状态（iOS 17+）
+        let suite = sessionKeys[device.id]?.negotiatedSuite.rawValue ?? "已连接"
+        Task {
+            await LiveActivityManager.shared.setConnected(deviceName: device.name, cryptoSuite: suite)
         }
     }
     
@@ -430,6 +487,7 @@ public class P2PConnectionManager: ObservableObject {
         connections.removeValue(forKey: device.id)
         sharedSecrets.removeValue(forKey: device.id)
         sessionKeys.removeValue(forKey: device.id)
+        negotiatedSuiteByDeviceId.removeValue(forKey: device.id)
         handshakeDrivers.removeValue(forKey: device.id)
         await transport?.removeConnection(for: device.id)
         
@@ -438,11 +496,9 @@ public class P2PConnectionManager: ObservableObject {
         connectionStatusByDeviceId[device.id] = .disconnected
         connectionErrorByDeviceId.removeValue(forKey: device.id)
 
-        // 更新灵动岛状态
-        if #available(iOS 16.2, *) {
-            Task {
-                await LiveActivityManager.shared.setDisconnected()
-            }
+        // 更新灵动岛状态（iOS 17+）
+        Task {
+            await LiveActivityManager.shared.setDisconnected()
         }
         
         SkyBridgeLogger.shared.info("🔌 已断开与 \(device.name) 的连接")
@@ -571,7 +627,7 @@ public class P2PConnectionManager: ObservableObject {
             switch state {
             case .established(let keys):
                 // 握手成功
-                sessionKeys[peerId] = keys
+                setSessionKeys(keys, for: peerId)
                 handshakeDrivers.removeValue(forKey: peerId)
                 currentHandshakeState = "握手成功 (Suite: \(keys.negotiatedSuite.rawValue))"
                 SkyBridgeLogger.shared.info("✅ 握手完成: \(peerId) (Suite: \(keys.negotiatedSuite.rawValue))")
@@ -651,6 +707,26 @@ public class P2PConnectionManager: ObservableObject {
             await handlePairingIdentityExchangeRequest(from: peerId, payload: payload)
         case .heartbeat:
             break
+        case .ping(let payload):
+            await replyPong(to: peerId, pingId: payload.id)
+        case .pong:
+            break
+        }
+    }
+
+    private func replyPong(to peerId: String, pingId: UInt64) async {
+        // Avoid mixing business traffic during in-band rekey.
+        if rekeyInProgress.contains(peerId) { return }
+        guard let connection = connections[peerId] else { return }
+        guard sessionKeys[peerId] != nil else { return }
+
+        do {
+            let message = AppMessage.pong(.init(id: pingId))
+            let payload = try JSONEncoder().encode(message)
+            let ciphertext = try encryptForDevice(payload, deviceId: peerId)
+            try await send(data: ciphertext, over: connection)
+        } catch {
+            SkyBridgeLogger.shared.debug("ℹ️ pong reply failed (ignored): \(error.localizedDescription)")
         }
     }
     
@@ -995,6 +1071,21 @@ public class P2PConnectionManager: ObservableObject {
         }
         activeConnections.append(Connection(device: device, status: status))
     }
+
+    private func setSessionKeys(_ keys: SessionKeys, for deviceId: String, deviceNameHint: String? = nil) {
+        sessionKeys[deviceId] = keys
+        negotiatedSuiteByDeviceId[deviceId] = keys.negotiatedSuite
+
+        // Keep Live Activity in sync with the latest negotiated suite (e.g., after Classic -> PQC rekey).
+        let name =
+            deviceNameHint
+            ?? lastKnownDevices[deviceId]?.name
+            ?? discoveryManager.discoveredDevices.first(where: { $0.id == deviceId })?.name
+            ?? deviceId
+        Task {
+            await LiveActivityManager.shared.setConnected(deviceName: name, cryptoSuite: keys.negotiatedSuite.rawValue)
+        }
+    }
     
     /// 执行 PQC 握手（使用完整的 HandshakeDriver 协议）
     private func performPQCHandshake(
@@ -1038,7 +1129,7 @@ public class P2PConnectionManager: ObservableObject {
             )
             
             // 保存会话密钥 + 清理握手 driver
-            sessionKeys[device.id] = keys
+            setSessionKeys(keys, for: device.id, deviceNameHint: device.name)
             handshakeDrivers.removeValue(forKey: device.id)
             
             currentHandshakeState = "握手成功 (Suite: \(keys.negotiatedSuite.rawValue))"

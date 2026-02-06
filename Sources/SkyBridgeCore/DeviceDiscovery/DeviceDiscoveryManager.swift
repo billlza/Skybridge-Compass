@@ -708,6 +708,7 @@ public class DeviceDiscoveryManager: BaseManager {
         // 并使用本机稳定的身份密钥（DeviceIdentityKeyManager），而不是每次随机生成。
         var driver: HandshakeDriver?
         var sessionKeys: SessionKeys?
+        var declaredDeviceIdForVerification: String?
 
         func isLikelyHandshakeControlPacket(_ data: Data) -> Bool {
             // Finished: 固定长度 38 bytes（magic 4 + version 1 + direction 1 + mac 32）
@@ -755,9 +756,17 @@ public class DeviceDiscoveryManager: BaseManager {
                             case .pairingIdentityExchange(let payload):
                                 // Pairing / trust UI prompt: Always allow / Allow once / Reject.
                                 // This gates the bootstrap KEM identity exchange used for strict-PQC onboarding.
+                                declaredDeviceIdForVerification = payload.deviceId
                                 let endpoint = endpointDescription
                                 let info = await MainActor.run { Self.bonjourInfoByDeviceId[payload.deviceId] }
                                 let displayName = info?.displayName ?? info?.hostname ?? endpoint
+
+                                await MainActor.run {
+                                    PairingTrustApprovalService.shared.updateVerificationCode(
+                                        declaredDeviceId: payload.deviceId,
+                                        sessionKeys: keys
+                                    )
+                                }
 
                                 let request = PairingTrustApprovalService.Request(
                                     peerEndpoint: endpoint,
@@ -820,6 +829,15 @@ public class DeviceDiscoveryManager: BaseManager {
                                 let outPadded = TrafficPadding.wrapIfEnabled(outCipher, label: "tx")
                                 try await sendFramed(outPadded)
                                 logger.info("🔑 已回传本机 KEM 公钥：count=\(kemKeys.count, privacy: .public) decision=\(decision.rawValue, privacy: .public)")
+                            case .ping(let payload):
+                                // RTT probe: respond as fast as possible with an echoed pong.
+                                let reply = AppMessage.pong(.init(id: payload.id))
+                                let outPlain = try JSONEncoder().encode(reply)
+                                let outCipher = try encryptAppPayload(outPlain, with: keys)
+                                let outPadded = TrafficPadding.wrapIfEnabled(outCipher, label: "tx")
+                                try await sendFramed(outPadded)
+                            case .pong:
+                                break
                             default:
                                 break
                             }
@@ -935,8 +953,24 @@ public class DeviceDiscoveryManager: BaseManager {
                 switch st {
                 case .waitingFinished(_, let keys, _):
                     sessionKeys = keys
+                    if let declaredDeviceIdForVerification {
+                        await MainActor.run {
+                            PairingTrustApprovalService.shared.updateVerificationCode(
+                                declaredDeviceId: declaredDeviceIdForVerification,
+                                sessionKeys: keys
+                            )
+                        }
+                    }
                 case .established(let keys):
                     sessionKeys = keys
+                    if let declaredDeviceIdForVerification {
+                        await MainActor.run {
+                            PairingTrustApprovalService.shared.updateVerificationCode(
+                                declaredDeviceId: declaredDeviceIdForVerification,
+                                sessionKeys: keys
+                            )
+                        }
+                    }
                 default:
                     break
                 }

@@ -12,6 +12,9 @@ public class CloudKitSyncManager: ObservableObject {
     private var container: CKContainer?
     private var database: CKDatabase?
     private var didLogEntitlementMissing = false
+
+    private let trustedDeviceRecordType = "SBTrustedDevice"
+    private let trustedDeviceResultsLimit = 200
     
     private init() {
         // 注意：未在 Xcode Signing 中启用 iCloud/CloudKit 能力时，
@@ -75,18 +78,134 @@ public class CloudKitSyncManager: ObservableObject {
     }
     
     public func sync() async throws {
-        guard container != nil, database != nil else {
+        guard container != nil, let database else {
             SkyBridgeLogger.shared.warning("⚠️ CloudKit 未初始化（可能未开启 iCloud 能力或被禁用）")
             return
         }
 
         isSyncing = true
         defer { isSyncing = false }
-        
-        // TODO: 实现 CloudKit 同步逻辑
-        try? await Task.sleep(for: .seconds(1))
-        
+
+        // 1) 拉取云端可信设备
+        let remoteTrusted = try await fetchRemoteTrustedDevices(database: database)
+
+        // 2) 合并到本地（只做并集；不自动删除，避免误删本地信任）
+        TrustedDeviceStore.shared.mergeFromCloud(remoteTrusted)
+
+        // 3) 将本地可信设备 upsert 到云端（以 deviceId 为 recordName）
+        let localTrusted = TrustedDeviceStore.shared.trustedDevices
+        try await upsertTrustedDevices(localTrusted, database: database)
+
         lastSyncDate = Date()
         SkyBridgeLogger.shared.info("✅ CloudKit 同步完成")
+    }
+
+    private func fetchRemoteTrustedDevices(database: CKDatabase) async throws -> [TrustedDeviceStore.TrustedDevice] {
+        let query = CKQuery(recordType: trustedDeviceRecordType, predicate: NSPredicate(value: true))
+        var cursor: CKQueryOperation.Cursor?
+        var results: [TrustedDeviceStore.TrustedDevice] = []
+
+        repeat {
+            let response: (matchResults: [(CKRecord.ID, Result<CKRecord, Error>)], queryCursor: CKQueryOperation.Cursor?)
+            if let cursor {
+                response = try await database.records(
+                    continuingMatchFrom: cursor,
+                    desiredKeys: nil,
+                    resultsLimit: trustedDeviceResultsLimit
+                )
+            } else {
+                response = try await database.records(
+                    matching: query,
+                    inZoneWith: nil,
+                    desiredKeys: nil,
+                    resultsLimit: trustedDeviceResultsLimit
+                )
+            }
+
+            for (recordID, recordResult) in response.matchResults {
+                switch recordResult {
+                case .success(let record):
+                    if let device = decodeTrustedDevice(record: record) {
+                        results.append(device)
+                    } else {
+                        SkyBridgeLogger.shared.warning("⚠️ CloudKit 可信设备记录无法解析: \(recordID.recordName)")
+                    }
+                case .failure(let error):
+                    SkyBridgeLogger.shared.warning("⚠️ CloudKit 可信设备记录读取失败: \(recordID.recordName) error=\(error.localizedDescription)")
+                }
+            }
+
+            cursor = response.queryCursor
+        } while cursor != nil
+
+        return results
+    }
+
+    private func decodeTrustedDevice(record: CKRecord) -> TrustedDeviceStore.TrustedDevice? {
+        let id = (record["deviceId"] as? String) ?? record.recordID.recordName
+        guard !id.isEmpty else { return nil }
+
+        let name = (record["name"] as? String) ?? "Unknown"
+        let platformRaw = (record["platform"] as? String) ?? DevicePlatform.unknown.rawValue
+        let platform = DevicePlatform(rawValue: platformRaw) ?? .unknown
+        let ipAddress = record["ipAddress"] as? String
+        let addedAt = (record["addedAt"] as? Date) ?? Date()
+
+        return TrustedDeviceStore.TrustedDevice(
+            id: id,
+            name: name,
+            platform: platform,
+            ipAddress: ipAddress,
+            addedAt: addedAt
+        )
+    }
+
+    private func upsertTrustedDevices(_ devices: [TrustedDeviceStore.TrustedDevice], database: CKDatabase) async throws {
+        guard !devices.isEmpty else { return }
+
+        let recordIDs = devices.map { CKRecord.ID(recordName: $0.id) }
+        let existing = try await database.records(for: recordIDs, desiredKeys: nil)
+
+        var recordsToSave: [CKRecord] = []
+        recordsToSave.reserveCapacity(devices.count)
+
+        let now = Date()
+
+        for device in devices {
+            let recordID = CKRecord.ID(recordName: device.id)
+            let record: CKRecord
+            if let found = existing[recordID], case .success(let existingRecord) = found {
+                record = existingRecord
+            } else {
+                record = CKRecord(recordType: trustedDeviceRecordType, recordID: recordID)
+            }
+
+            record["deviceId"] = device.id
+            record["name"] = device.name
+            record["platform"] = device.platform.rawValue
+            if let ip = device.ipAddress, !ip.isEmpty {
+                record["ipAddress"] = ip
+            } else {
+                record["ipAddress"] = nil
+            }
+            record["addedAt"] = device.addedAt
+            record["updatedAt"] = now
+
+            recordsToSave.append(record)
+        }
+
+        // best-effort：atomically=false 允许部分成功；逐条记录错误会在结果里体现
+        let (saveResults, _) = try await database.modifyRecords(
+            saving: recordsToSave,
+            deleting: [],
+            savePolicy: .changedKeys,
+            atomically: false
+        )
+
+        for (recordID, result) in saveResults {
+            if case .failure(let error) = result {
+                SkyBridgeLogger.shared.warning("⚠️ CloudKit 保存可信设备失败: \(recordID.recordName) error=\(error.localizedDescription)")
+            }
+        }
     }
 }

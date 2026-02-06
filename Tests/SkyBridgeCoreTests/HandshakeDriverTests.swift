@@ -979,12 +979,15 @@ final class HandshakeDriverTests: XCTestCase {
         var pqcUnavailableUs: [Double] = []
         var selfTestFailureUs: [Double] = []
 
-#if DEBUG
-        let pqcUnavailableEnv = MockCryptoEnvironment(hasApplePQC: false, hasLiboqs: false)
-        let selfTestFailureEnv = MockCryptoEnvironment(hasApplePQC: false, hasLiboqs: true)
-#else
-        throw XCTSkip("MockCryptoEnvironment only available in DEBUG")
-#endif
+        // Use a local environment stub so this benchmark compiles in Release test configuration as well.
+        struct TestCryptoEnvironment: CryptoEnvironment {
+            let hasApplePQC: Bool
+            let hasLiboqs: Bool
+            func checkApplePQCAvailable() -> Bool { hasApplePQC }
+            func checkLiboqsAvailable() -> Bool { hasLiboqs }
+        }
+        let pqcUnavailableEnv: any CryptoEnvironment = TestCryptoEnvironment(hasApplePQC: false, hasLiboqs: false)
+        let selfTestFailureEnv: any CryptoEnvironment = TestCryptoEnvironment(hasApplePQC: false, hasLiboqs: true)
 
         for i in 0..<(cfg.warmupIterations + cfg.measuredIterations) {
             await CryptoProviderSelector.shared.clearCache()

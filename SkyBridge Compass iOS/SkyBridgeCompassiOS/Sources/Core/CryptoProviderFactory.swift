@@ -74,11 +74,12 @@ public enum CryptoProviderFactory {
         let osVersion = ProcessInfo.processInfo.operatingSystemVersionString
         
         var hasApplePQC = false
-        if #available(iOS 26.0, *) {
+        if #available(iOS 26.0, macOS 26.0, *) {
             hasApplePQC = isApplePQCAvailable()
         }
         
-        // TODO: iOS 上的 liboqs 支持需要构建 iOS 架构的 XCFramework
+        // NOTE: 当前工作区的 `Sources/Vendor/liboqs.xcframework` 仅包含 macOS slice（见其 Info.plist）。
+        // iOS 侧暂不集成 liboqs，因此这里固定为 false。
         let hasLiboqs = false
         
         return Capability(
@@ -89,11 +90,13 @@ public enum CryptoProviderFactory {
     }
     
     /// 检查 Apple PQC API 是否可用
-    @available(iOS 26.0, *)
     private static func isApplePQCAvailable() -> Bool {
         #if HAS_APPLE_PQC_SDK
-        // 运行时 self-test：如果 CryptoKit PQC 类型可用且能生成密钥，则认为可用
-        return ApplePQCCryptoProvider.selfTest()
+        if #available(iOS 26.0, macOS 26.0, *) {
+            // 运行时 self-test：如果 CryptoKit PQC 类型可用且能生成密钥，则认为可用
+            return ApplePQCCryptoProvider.selfTest()
+        }
+        return false
         #else
         return false
         #endif
@@ -110,18 +113,18 @@ public enum CryptoProviderFactory {
         case .preferPQC:
             #if HAS_APPLE_PQC_SDK
             if capability.hasApplePQC {
-                if #available(iOS 26.0, *) {
+                if #available(iOS 26.0, macOS 26.0, *) {
                     return ApplePQCCryptoProvider()
                 }
             }
             #endif
-            // TODO: 当 iOS liboqs 可用时添加 OQSPQCProvider
+            // NOTE: 若未来为 iOS 构建并集成 liboqs / OQS Provider，可在此处加入 liboqs PQC 回退。
             return ClassicCryptoProvider()
             
         case .requirePQC:
             #if HAS_APPLE_PQC_SDK
             if capability.hasApplePQC {
-                if #available(iOS 26.0, *) {
+                if #available(iOS 26.0, macOS 26.0, *) {
                     return ApplePQCCryptoProvider()
                 }
             }

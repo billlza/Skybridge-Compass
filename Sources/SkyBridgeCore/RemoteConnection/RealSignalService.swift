@@ -5,7 +5,7 @@
 // 真正可用的信号服务实现
 // 使用 Bonjour + CloudKit 实现设备发现和连接码交换
 //
-// Swift 6.2.1 最佳实践
+// Swift 6.2.3 最佳实践
 //
 
 import Foundation
@@ -199,7 +199,7 @@ public actor LocalSignalService: SignalServiceProtocol {
         
  // 设置过期清理
         Task {
-            try? await Task.sleep(nanoseconds: UInt64(registration.expiresAt.timeIntervalSinceNow * 1_000_000_000))
+            try? await Task.sleep(for: .seconds(max(0, registration.expiresAt.timeIntervalSinceNow)))
             self.removeConnectionCode(registration.code)
         }
     }
@@ -251,7 +251,7 @@ public actor LocalSignalService: SignalServiceProtocol {
         
  // 设置过期清理
         Task {
-            try? await Task.sleep(nanoseconds: UInt64(session.expiresAt.timeIntervalSinceNow * 1_000_000_000))
+            try? await Task.sleep(for: .seconds(max(0, session.expiresAt.timeIntervalSinceNow)))
             self.removeQRSession(session.sessionID)
         }
     }
@@ -437,7 +437,7 @@ public actor STUNService {
             
  // 超时处理
             Task {
-                try? await Task.sleep(nanoseconds: 3_000_000_000) // 3秒超时
+                try? await Task.sleep(for: .seconds(3))
                 connection.cancel()
             }
         }

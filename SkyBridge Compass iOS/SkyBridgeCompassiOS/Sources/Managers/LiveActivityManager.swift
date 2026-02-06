@@ -9,7 +9,7 @@
 //
 
 import Foundation
-import ActivityKit
+@preconcurrency import ActivityKit
 
 /// 灵动岛活动管理器
 @available(iOS 16.2, *)
@@ -151,19 +151,24 @@ public final class LiveActivityManager: ObservableObject {
     
     // MARK: - Private Methods
     
-    private func updateActivity() async {
-        guard let activity = currentActivity else {
-            // 如果没有活动但需要显示，自动启动
-            if currentState.isConnected || !currentState.weatherCondition.isEmpty {
-                await startActivity()
-            }
-            return
-        }
-        
-        await activity.update(
-            ActivityContent(state: currentState, staleDate: nil)
-        )
-    }
+	    private func updateActivity() async {
+	        guard let activity = currentActivity else {
+	            // 如果没有活动但需要显示，自动启动
+	            if currentState.isConnected || !currentState.weatherCondition.isEmpty {
+	                await startActivity()
+	            }
+	            return
+	        }
+
+	        // ActivityKit's `ActivityContent` is not annotated `Sendable` in some SDKs, while `Activity.update`
+	        // is nonisolated. Avoid sending non-Sendable values across actor boundaries by performing the
+	        // update in a nonisolated task.
+	        let state = currentState
+	        let task = Task { [activity, state] in
+	            await activity.update(ActivityContent(state: state, staleDate: nil))
+	        }
+	        await task.value
+	    }
     
     private func checkExistingActivities() async {
         for activity in Activity<SkyBridgeActivityAttributes>.activities {
@@ -246,4 +251,3 @@ extension LiveActivityManager {
         //     .store(in: &cancellables)
     }
 }
-

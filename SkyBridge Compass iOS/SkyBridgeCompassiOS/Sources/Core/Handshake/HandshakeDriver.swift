@@ -165,7 +165,8 @@ public actor HandshakeDriver {
             let policyBytes = messageA.policy.deterministicEncode()
             SkyBridgeLogger.shared.info("📤 Handshake MessageA: total=\(messageA.encoded.count) bytes, cap=\(capBytes.count) bytes, policy=\(policyBytes.count) bytes")
             let padded = HandshakePadding.wrapIfEnabled(messageA.encoded, label: "MessageA")
-            try await transport.send(to: peer, data: TrafficPadding.wrapIfEnabled(padded, label: "HS/MessageA"))
+            // Handshake frames MUST NOT apply SBP2 (TrafficPadding). Keep parity with macOS core.
+            try await transport.send(to: peer, data: padded)
         } catch {
             await ctx.zeroize()
             context = nil
@@ -211,8 +212,11 @@ public actor HandshakeDriver {
     
     /// 处理收到的消息
     public func handleMessage(_ data: Data, from peer: PeerIdentifier) async {
-        // Phase C1: unwrap padded handshake frames (traffic-analysis mitigation).
-        let unwrapped = HandshakePadding.unwrapIfNeeded(data, label: "rx")
+        // Compatibility: older iOS builds mistakenly applied SBP2 (TrafficPadding) to handshake frames.
+        // Unwrap SBP2 first if present, then unwrap SBP1 (HandshakePadding).
+        let untraffic = TrafficPadding.unwrapIfNeeded(data, label: "HS/rx")
+        // Phase C1: unwrap padded handshake frames (SBP1).
+        let unwrapped = HandshakePadding.unwrapIfNeeded(untraffic, label: "rx")
 
         // 检查是否是 Finished 消息
         if isFinishedMessage(unwrapped) {
@@ -314,7 +318,8 @@ public actor HandshakeDriver {
             // 发送 MessageB
             do {
                 let padded = HandshakePadding.wrapIfEnabled(messageB.encoded, label: "MessageB")
-                try await transport.send(to: peer, data: TrafficPadding.wrapIfEnabled(padded, label: "HS/MessageB"))
+                // Handshake frames MUST NOT apply SBP2 (TrafficPadding). Keep parity with macOS core.
+                try await transport.send(to: peer, data: padded)
             } catch {
                 await handleHandshakeError(HandshakeError.failed(.transportError(error.localizedDescription)), context: ctx)
                 return
@@ -342,7 +347,8 @@ public actor HandshakeDriver {
             do {
                 let finished = try makeFinished(direction: .responderToInitiator, sessionKeys: sessionKeys)
                 let padded = HandshakePadding.wrapIfEnabled(finished.encoded, label: "Finished")
-                try await transport.send(to: peer, data: TrafficPadding.wrapIfEnabled(padded, label: "HS/Finished"))
+                // Handshake frames MUST NOT apply SBP2 (TrafficPadding). Keep parity with macOS core.
+                try await transport.send(to: peer, data: padded)
             } catch {
                 await transitionToFailed(.transportError(error.localizedDescription), negotiatedSuite: sessionKeys.negotiatedSuite)
                 return
@@ -511,7 +517,8 @@ public actor HandshakeDriver {
                 do {
                     let clientFinished = try makeFinished(direction: .initiatorToResponder, sessionKeys: sessionKeys)
                     let padded = HandshakePadding.wrapIfEnabled(clientFinished.encoded, label: "Finished")
-                    try await transport.send(to: peer, data: TrafficPadding.wrapIfEnabled(padded, label: "HS/Finished"))
+                    // Handshake frames MUST NOT apply SBP2 (TrafficPadding). Keep parity with macOS core.
+                    try await transport.send(to: peer, data: padded)
                 } catch {
                     await transitionToFailed(.transportError(error.localizedDescription), negotiatedSuite: sessionKeys.negotiatedSuite)
                     return
@@ -751,7 +758,7 @@ public actor HandshakeContext {
         peerNonce = messageA.clientNonce
         peerKeyShares = Dictionary(uniqueKeysWithValues: messageA.keyShares.map { ($0.suite, $0.shareBytes) })
         
-        // 选择套件（简化：选择第一个共同支持的）
+        // 选择套件：按发起方优先级，从 offered 列表中选择本端支持的首个套件
         var selectedSuite: CryptoSuite?
         for suite in messageA.supportedSuites {
             if cryptoProvider.supportsSuite(suite) {
@@ -1088,4 +1095,3 @@ public actor HandshakeContext {
         isZeroized = true
     }
 }
-

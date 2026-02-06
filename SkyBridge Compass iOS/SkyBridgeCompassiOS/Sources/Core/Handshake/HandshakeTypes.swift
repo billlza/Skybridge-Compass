@@ -62,6 +62,81 @@ public enum HandshakeFailureReason: Error, Sendable {
     case suiteNegotiationFailed
 }
 
+// MARK: - Paper-aligned Security Events (iOS target-local)
+
+/// Lightweight structured security events for the iOS app target.
+///
+/// Note: These are placed in an already-in-target file (`HandshakeTypes.swift`) to avoid
+/// Xcode target-membership drift during launch hardening.
+@available(iOS 17.0, *)
+public enum SecurityEventType: String, Codable, Sendable {
+    case cryptoDowngrade
+    case handshakeFailed
+    case legacyBootstrap
+}
+
+@available(iOS 17.0, *)
+public enum SecurityEventSeverity: String, Codable, Sendable {
+    case info
+    case warning
+    case high
+}
+
+@available(iOS 17.0, *)
+public struct SecurityEvent: Codable, Sendable, Equatable {
+    public let type: SecurityEventType
+    public let severity: SecurityEventSeverity
+    public let message: String
+    public let context: [String: String]
+    public let timestamp: Date
+
+    public init(
+        type: SecurityEventType,
+        severity: SecurityEventSeverity,
+        message: String,
+        context: [String: String] = [:],
+        timestamp: Date = Date()
+    ) {
+        self.type = type
+        self.severity = severity
+        self.message = message
+        self.context = context
+        self.timestamp = timestamp
+    }
+}
+
+/// Minimal bounded emitter: keeps a small in-memory ring and prints a single-line representation.
+@available(iOS 17.0, *)
+public actor SecurityEventEmitter {
+    public static let shared = SecurityEventEmitter()
+
+    private let maxEvents: Int = 256
+    private var ring: [SecurityEvent] = []
+
+    private init() {}
+
+    public func emit(_ event: SecurityEvent) {
+        ring.append(event)
+        if ring.count > maxEvents {
+            ring.removeFirst(ring.count - maxEvents)
+        }
+        print(Self.format(event))
+    }
+
+    public nonisolated static func emitDetached(_ event: SecurityEvent) {
+        Task { await SecurityEventEmitter.shared.emit(event) }
+    }
+
+    public func snapshot() -> [SecurityEvent] { ring }
+
+    private nonisolated static func format(_ e: SecurityEvent) -> String {
+        let keys = e.context.keys.sorted()
+        let ctx = keys.map { "\($0)=\(e.context[$0] ?? "")" }.joined(separator: ",")
+        let msg = e.message.replacingOccurrences(of: "\n", with: "\\n")
+        return "[SecurityEvent] type=\(e.type.rawValue) severity=\(e.severity.rawValue) message=\"\(msg)\" ctx={\(ctx)}"
+    }
+}
+
 // MARK: - HandshakeError
 
 /// 握手错误

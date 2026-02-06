@@ -164,11 +164,14 @@ final class TwoAttemptHandshakeManagerPropertyTests: XCTestCase {
     
     func testStrictPQCBlocksClassicFallbackOnPQCFailure() async throws {
         let tracker = AttemptTracker()
+        let deviceId = "test-device-strict-\(UUID().uuidString)"
         let noFallbackEvent = expectation(description: "No fallback event should be emitted")
         noFallbackEvent.isInverted = true
         
         let subscriptionId = await SecurityEventEmitter.shared.subscribe { event in
-            if event.type == .cryptoDowngrade {
+            // Filter strictly to this test's deviceId to avoid cross-test event interference
+            // from detached emissions in other suites.
+            if event.type == .cryptoDowngrade, event.context["deviceId"] == deviceId {
                 noFallbackEvent.fulfill()
             }
         }
@@ -179,7 +182,7 @@ final class TwoAttemptHandshakeManagerPropertyTests: XCTestCase {
         
         do {
             _ = try await TwoAttemptHandshakeManager.performHandshake(
-                deviceId: "test-device",
+                deviceId: deviceId,
                 preferPQC: true,
                 policy: .strictPQC
             ) { strategy, sigAAlgorithm in
@@ -199,10 +202,12 @@ final class TwoAttemptHandshakeManagerPropertyTests: XCTestCase {
     
     func testDefaultPolicyAllowsFallbackAndEmitsEvent() async throws {
         let tracker = AttemptTracker()
+        let deviceId = "test-device-default-\(UUID().uuidString)"
         let fallbackEvent = expectation(description: "Fallback event should be emitted")
         
         let subscriptionId = await SecurityEventEmitter.shared.subscribe { event in
-            if event.type == .cryptoDowngrade {
+            // Filter strictly to this test's deviceId to avoid cross-test event interference.
+            if event.type == .cryptoDowngrade, event.context["deviceId"] == deviceId {
                 fallbackEvent.fulfill()
             }
         }
@@ -212,7 +217,7 @@ final class TwoAttemptHandshakeManagerPropertyTests: XCTestCase {
         }
         
         _ = try await TwoAttemptHandshakeManager.performHandshake(
-            deviceId: "test-device",
+            deviceId: deviceId,
             preferPQC: true,
             policy: .default
         ) { strategy, sigAAlgorithm in

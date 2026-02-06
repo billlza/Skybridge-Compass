@@ -301,8 +301,10 @@ struct RemoteDesktopStreamView: View {
         showControls = true
         
         controlsTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: false) { _ in
-            withAnimation {
-                showControls = false
+            Task { @MainActor in
+                withAnimation {
+                    showControls = false
+                }
             }
         }
     }

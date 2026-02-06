@@ -549,22 +549,45 @@ public extension KeychainManager {
     }
     
     nonisolated func storeSupabaseConfig(url: String, anonKey: String) throws {
-        try saveGenericPasswordSync(account: "supabase.url", data: Data(url.utf8))
-        try saveGenericPasswordSync(account: "supabase.anonKey", data: Data(anonKey.utf8))
+        let urlTrimmed = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        let anonTrimmed = anonKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        try saveGenericPasswordSync(account: "supabase.url", data: Data(urlTrimmed.utf8))
+        try saveGenericPasswordSync(account: "supabase.anonKey", data: Data(anonTrimmed.utf8))
+        
+        // Compatibility: also store under the macOS-style service/account keys so iOS/macOS stay aligned conceptually.
+        // This also helps when users switch between older/newer builds that used different key naming.
+        _ = importKey(data: Data(urlTrimmed.utf8), service: "SkyBridge.Supabase", account: "URL")
+        _ = importKey(data: Data(anonTrimmed.utf8), service: "SkyBridge.Supabase", account: "AnonKey")
+        
         // SECURITY: Never store a Supabase service-role key on client devices.
         deleteGenericPasswordSync(account: "supabase.serviceRoleKey")
+        _ = deleteKey(service: "SkyBridge.Supabase", account: "ServiceRoleKey")
     }
     
     nonisolated func retrieveSupabaseConfig() throws -> SupabaseConfig {
-        let urlData = try loadGenericPasswordSync(account: "supabase.url")
-        let anonData = try loadGenericPasswordSync(account: "supabase.anonKey")
-        guard let url = String(data: urlData, encoding: .utf8),
-              let anon = String(data: anonData, encoding: .utf8) else {
-            throw KeychainError.decodingError
+        do {
+            let urlData = try loadGenericPasswordSync(account: "supabase.url")
+            let anonData = try loadGenericPasswordSync(account: "supabase.anonKey")
+            guard let url = String(data: urlData, encoding: .utf8),
+                  let anon = String(data: anonData, encoding: .utf8) else {
+                throw KeychainError.decodingError
+            }
+            // Best-effort: clean up any legacy stored service role key.
+            deleteGenericPasswordSync(account: "supabase.serviceRoleKey")
+            _ = deleteKey(service: "SkyBridge.Supabase", account: "ServiceRoleKey")
+            return SupabaseConfig(url: url, anonKey: anon)
+        } catch {
+            // Fallback: macOS-style keys (service-based)
+            if let urlData = exportKey(service: "SkyBridge.Supabase", account: "URL"),
+               let anonData = exportKey(service: "SkyBridge.Supabase", account: "AnonKey"),
+               let url = String(data: urlData, encoding: .utf8),
+               let anon = String(data: anonData, encoding: .utf8) {
+                // Migrate forward to the current iOS storage keys for next launch.
+                try? storeSupabaseConfig(url: url, anonKey: anon)
+                return SupabaseConfig(url: url, anonKey: anon)
+            }
+            throw error
         }
-        // Best-effort: clean up any legacy stored service role key.
-        deleteGenericPasswordSync(account: "supabase.serviceRoleKey")
-        return SupabaseConfig(url: url, anonKey: anon)
     }
 
     /// 清除 Supabase 配置（用于从占位符/错误配置恢复）
@@ -572,6 +595,9 @@ public extension KeychainManager {
         deleteGenericPasswordSync(account: "supabase.url")
         deleteGenericPasswordSync(account: "supabase.anonKey")
         deleteGenericPasswordSync(account: "supabase.serviceRoleKey")
+        _ = deleteKey(service: "SkyBridge.Supabase", account: "URL")
+        _ = deleteKey(service: "SkyBridge.Supabase", account: "AnonKey")
+        _ = deleteKey(service: "SkyBridge.Supabase", account: "ServiceRoleKey")
     }
     
     nonisolated func storeAuthSession(_ session: AuthSession) throws {

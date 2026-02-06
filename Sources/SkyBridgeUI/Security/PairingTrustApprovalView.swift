@@ -8,7 +8,7 @@ public struct PairingTrustApprovalSheet: View {
     public let onDecision: (PairingTrustApprovalService.Decision) -> Void
     
     @Environment(\.dismiss) private var dismiss
-    @State private var isResolving: Bool = false
+    @ObservedObject private var service = PairingTrustApprovalService.shared
     
     public init(
         request: PairingTrustApprovalService.Request,
@@ -46,6 +46,29 @@ public struct PairingTrustApprovalSheet: View {
                         }
                         .padding(.vertical, 4)
                     }
+
+                    if shouldShowVerificationStage {
+                        Section("验证码（用于 iOS PQC 身份验证）") {
+                            if let code = service.pendingVerificationCode, !code.isEmpty {
+                                LabeledContent("6 位验证码") {
+                                    Text(code)
+                                        .font(.system(size: 30, weight: .bold, design: .monospaced))
+                                        .textSelection(.enabled)
+                                }
+
+                                if let suite = service.pendingVerificationSuite, !suite.isEmpty {
+                                    LabeledContent("Suite", value: suite)
+                                }
+                            } else {
+                                HStack(spacing: 10) {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                    Text("等待完成重握手并生成验证码…")
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                    }
                     
                     Section("设备信息") {
                         LabeledContent("平台", value: (request.platform?.isEmpty == false ? request.platform! : "未知"))
@@ -67,39 +90,57 @@ public struct PairingTrustApprovalSheet: View {
                 Divider()
                 
                 VStack(alignment: .leading, spacing: 10) {
-                    Text("该申请用于建立/更新 PQC 引导所需的 KEM 身份公钥信任信息。选择“始终允许”会记住该设备。")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                    
-                    HStack(spacing: 10) {
-                        Button(role: .destructive) {
-                            resolve(.reject)
-                        } label: {
-                            Text("拒绝")
-                                .frame(minWidth: 76)
+                    if shouldShowVerificationStage {
+                        Text("请将上方 6 位验证码输入到 iPhone/iPad 的“PQC 身份验证”界面，以完成论文叙事中的 OOB pairing ceremony。")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+
+                        HStack(spacing: 10) {
+                            Spacer(minLength: 0)
+                            Button {
+                                service.userDismissedCurrentPrompt()
+                                dismiss()
+                            } label: {
+                                Text("完成")
+                                    .frame(minWidth: 90)
+                            }
+                            .buttonStyle(.borderedProminent)
                         }
-                        .disabled(isResolving)
+                    } else {
+                        Text("该申请用于建立/更新 PQC 引导所需的 KEM 身份公钥信任信息。选择“始终允许”会记住该设备。")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
                         
-                        Spacer(minLength: 0)
-                        
-                        Button {
-                            resolve(.allowOnce)
-                        } label: {
-                            Text("允许本次")
-                                .frame(minWidth: 90)
+                        HStack(spacing: 10) {
+                            Button(role: .destructive) {
+                                resolve(.reject)
+                            } label: {
+                                Text("拒绝")
+                                    .frame(minWidth: 76)
+                            }
+                            .disabled(service.pendingDecision != nil)
+                            
+                            Spacer(minLength: 0)
+                            
+                            Button {
+                                resolve(.allowOnce)
+                            } label: {
+                                Text("允许本次")
+                                    .frame(minWidth: 90)
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(service.pendingDecision != nil)
+                            
+                            Button {
+                                resolve(.alwaysAllow)
+                            } label: {
+                                Text("始终允许")
+                                    .frame(minWidth: 90)
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .tint(.green)
+                            .disabled(service.pendingDecision != nil)
                         }
-                        .buttonStyle(.bordered)
-                        .disabled(isResolving)
-                        
-                        Button {
-                            resolve(.alwaysAllow)
-                        } label: {
-                            Text("始终允许")
-                                .frame(minWidth: 90)
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .tint(.green)
-                        .disabled(isResolving)
                     }
                 }
                 .padding(16)
@@ -109,6 +150,7 @@ public struct PairingTrustApprovalSheet: View {
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
                     Button {
+                        service.userDismissedCurrentPrompt()
                         dismiss()
                     } label: {
                         Text("关闭")
@@ -120,13 +162,18 @@ public struct PairingTrustApprovalSheet: View {
         .frame(minWidth: 560, minHeight: 480)
     }
     
+    private var shouldShowVerificationStage: Bool {
+        guard service.pendingRequest?.id == request.id else { return false }
+        guard let decision = service.pendingDecision else { return false }
+        return decision != .reject
+    }
+
     private func resolve(_ decision: PairingTrustApprovalService.Decision) {
-        guard !isResolving else { return }
-        isResolving = true
+        guard service.pendingDecision == nil else { return }
         onDecision(decision)
-        dismiss()
+        // Sheet dismissal is driven by `pendingRequest`. For allow decisions we keep the sheet open
+        // to surface the transcript-bound SAS verification code.
     }
 }
-
 
 

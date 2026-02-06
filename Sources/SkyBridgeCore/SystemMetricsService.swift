@@ -130,11 +130,17 @@ public final class SystemMetricsService: ObservableObject {
             for key in keysToRemove { networkOutTimeline.removeValue(forKey: key) }
         }
         
-        // Throttle noisy logs: metrics update frequently and can flood logs / waste CPU.
-        let now = Date()
-        if lastMetricsLogAt == nil || now.timeIntervalSince(lastMetricsLogAt!) >= 10 {
-            lastMetricsLogAt = now
-            log.debug("系统指标已更新 - CPU: \(String(format: "%.1f", newCpuUsage * 100))%, 内存: \(String(format: "%.1f", newMemoryUsage * 100))%, 网络: \(String(format: "%.1f", newNetworkSpeed)) Mbps")
+        // Metrics logs are also noisy; default OFF. Enable explicitly via env:
+        //   SKYBRIDGE_LOG_METRICS=1
+        let env = ProcessInfo.processInfo.environment["SKYBRIDGE_LOG_METRICS"] ?? "0"
+        let metricsLogsEnabled = (env == "1" || env.lowercased() == "true" || env.lowercased() == "yes")
+        if metricsLogsEnabled {
+            // Throttle noisy logs: metrics update frequently and can flood logs / waste CPU.
+            let now = Date()
+            if lastMetricsLogAt == nil || now.timeIntervalSince(lastMetricsLogAt!) >= 10 {
+                lastMetricsLogAt = now
+                log.debug("系统指标已更新 - CPU: \(String(format: "%.1f", newCpuUsage * 100))%, 内存: \(String(format: "%.1f", newMemoryUsage * 100))%, 网络: \(String(format: "%.1f", newNetworkSpeed)) Mbps")
+            }
         }
     }
 

@@ -13,6 +13,18 @@ import ActivityKit
 #if canImport(UIKit)
 import UIKit
 #endif
+#if canImport(UserNotifications)
+import UserNotifications
+#endif
+
+public extension Notification.Name {
+    static let connectableDeviceDiscovered = Notification.Name("ConnectableDeviceDiscovered")
+    static let fileTransferStarted = Notification.Name("FileTransferStarted")
+    static let fileTransferProgress = Notification.Name("FileTransferProgress")
+    static let fileTransferCompleted = Notification.Name("FileTransferCompleted")
+    static let fileTransferFailed = Notification.Name("FileTransferFailed")
+    static let quantumCertValidationEvent = Notification.Name("QuantumCertValidationEvent")
+}
 
 // MARK: - File Transfer Constants
 
@@ -267,6 +279,10 @@ public class FileTransferManager: ObservableObject {
 
     private var inFlightTransferCount: Int = 0
     private var transferWaiters: [CheckedContinuation<Void, Never>] = []
+    private var lastProgressEventAtByTransferId: [String: Date] = [:]
+    private var lastProgressEventPercentByTransferId: [String: Int] = [:]
+    private let progressEventMinInterval: TimeInterval = 0.25
+    private let progressEventMinStepPercent: Int = 2
     
     /// P2P 连接管理器
     private var connectionManager: P2PConnectionManager { P2PConnectionManager.instance }
@@ -333,11 +349,13 @@ public class FileTransferManager: ObservableObject {
             fileSize: fileSize,
             fileType: fileType,
             isIncoming: false,
-            remotePeer: device.name
+            remotePeer: device.name,
+            localPath: url.path
         )
         
         activeTransfers.append(transfer)
         isTransferring = true
+        postInAppTransferEvent(name: "FileTransferStarted", transfer: transfer)
         
         // 创建传输状态
         var state = TransferState(transferId: transfer.id)
@@ -499,16 +517,31 @@ public class FileTransferManager: ObservableObject {
                 transferId: transfer.id,
                 chunkIndex: chunkIndex,
                 chunkData: chunkData,
+                // Avoid cross-target helper type drift: compute SHA-256 locally.
+                chunkSha256: Data(SHA256.hash(data: chunkData)),
                 rawSize: rawSize
             )
             try await crossNetwork.sendFileTransferMessage(msg)
             
-            let ack = try await crossNetwork.waitForFileTransferAck(
-                transferId: transfer.id,
-                op: .chunkAck,
-                chunkIndex: chunkIndex,
-                timeoutSeconds: 20
-            )
+            let ack: CrossNetworkFileTransferMessage = try await { () async throws -> CrossNetworkFileTransferMessage in
+                var lastError: Error?
+                for _ in 0..<3 {
+                    do {
+                        return try await crossNetwork.waitForFileTransferAck(
+                            transferId: transfer.id,
+                            op: .chunkAck,
+                            chunkIndex: chunkIndex,
+                            timeoutSeconds: 20
+                        )
+                    } catch {
+                        lastError = error
+                        // Best-effort resend: safe because receiver writes at fixed offset.
+                        try? await crossNetwork.sendFileTransferMessage(msg)
+                    }
+                }
+                if let lastError { throw lastError }
+                throw FileTransferError.networkError("chunk ack retries exhausted")
+            }()
             
             // Use receiver-reported progress if present (more accurate than "sent").
             if let rb = ack.receivedBytes {
@@ -542,6 +575,8 @@ public class FileTransferManager: ObservableObject {
         if metadata.chunkSize > maxChunkSizeBytes {
             throw FileTransferError.invalidMetadata
         }
+
+        let targetURL = makeUniqueDestinationURL(fileName: metadata.fileName)
         
         // 创建传输记录
         let transfer = FileTransfer(
@@ -549,11 +584,20 @@ public class FileTransferManager: ObservableObject {
             fileSize: metadata.fileSize,
             fileType: determineFileType(fromName: metadata.fileName),
             isIncoming: true,
-            remotePeer: peer
+            remotePeer: peer,
+            localPath: targetURL.path
         )
         
         activeTransfers.append(transfer)
         isTransferring = true
+        postInAppTransferEvent(name: "FileTransferStarted", transfer: transfer)
+        postLocalFileTransferNotification(
+            title: "正在接收文件",
+            body: "\(metadata.fileName) 来自 \(peer)",
+            transferId: transfer.id,
+            fileName: metadata.fileName,
+            localPath: targetURL.path
+        )
         
         // 创建传输状态
         var state = TransferState(transferId: transfer.id)
@@ -562,7 +606,6 @@ public class FileTransferManager: ObservableObject {
         state.startTime = Date()
         
         // 创建目标文件
-        let targetURL = downloadsDirectory.appendingPathComponent(metadata.fileName)
         state.localURL = targetURL
         transferStates[transfer.id] = state
         
@@ -601,6 +644,7 @@ public class FileTransferManager: ObservableObject {
             activeTransfers[index].status = .failed
             activeTransfers.remove(at: index)
         }
+        clearProgressEventState(for: transferId)
         
         updateTransferringState()
     }
@@ -614,6 +658,26 @@ public class FileTransferManager: ObservableObject {
     /// 获取下载目录
     public func getDownloadsDirectory() -> URL {
         downloadsDirectory
+    }
+
+    private func makeUniqueDestinationURL(fileName: String) -> URL {
+        let safeName = (fileName as NSString).lastPathComponent
+        let ext = (safeName as NSString).pathExtension
+        let stem = (safeName as NSString).deletingPathExtension
+
+        var candidate = downloadsDirectory.appendingPathComponent(safeName)
+        var index = 1
+        while fileManager.fileExists(atPath: candidate.path) {
+            let nextName: String
+            if ext.isEmpty {
+                nextName = "\(stem) (\(index))"
+            } else {
+                nextName = "\(stem) (\(index)).\(ext)"
+            }
+            candidate = downloadsDirectory.appendingPathComponent(nextName)
+            index += 1
+        }
+        return candidate
     }
     
     // MARK: - Private Methods - Sending
@@ -978,6 +1042,7 @@ public class FileTransferManager: ObservableObject {
         
         var fileName: String?
         var direction: SkyBridgeActivityAttributes.TransferDirection = .none
+        var transferSnapshot: FileTransfer?
 
         if let index = activeTransfers.firstIndex(where: { $0.id == transferId }) {
             activeTransfers[index].progress = progress
@@ -985,6 +1050,7 @@ public class FileTransferManager: ObservableObject {
             activeTransfers[index].status = .transferring
             fileName = activeTransfers[index].fileName
             direction = activeTransfers[index].isIncoming ? .download : .upload
+            transferSnapshot = activeTransfers[index]
         }
         
         transferStates[transferId]?.transferredBytes = transferredBytes
@@ -993,8 +1059,18 @@ public class FileTransferManager: ObservableObject {
         // 更新总进度
         updateTotalProgress()
 
-        // 更新灵动岛传输进度
-        if #available(iOS 16.2, *), let name = fileName {
+        if let transferSnapshot {
+            postInAppTransferProgressEventIfNeeded(
+                transfer: transferSnapshot,
+                transferredBytes: transferredBytes,
+                totalBytes: totalBytes,
+                progress: progress,
+                speed: speed
+            )
+        }
+
+        // 更新灵动岛传输进度（iOS 17+）
+        if let name = fileName {
             let speedStr = formatSpeed(speed)
             Task {
                 await LiveActivityManager.shared.updateTransferProgress(
@@ -1017,6 +1093,135 @@ public class FileTransferManager: ObservableObject {
         } else {
             return String(format: "%.0f B/s", bytesPerSecond)
         }
+    }
+
+    private func storageLocationHint(localPath: String?) -> String? {
+        guard let localPath else { return nil }
+        let url = URL(fileURLWithPath: localPath)
+        return "Downloads/\(url.lastPathComponent)"
+    }
+
+    private func upsertLocalPath(_ localPath: String?, for transferId: String) {
+        guard let localPath else { return }
+        if let idx = activeTransfers.firstIndex(where: { $0.id == transferId }) {
+            activeTransfers[idx].localPath = localPath
+        }
+        if let idx = transferHistory.firstIndex(where: { $0.id == transferId }) {
+            transferHistory[idx].localPath = localPath
+            saveHistory()
+        }
+    }
+
+    private func postLocalFileTransferNotification(
+        title: String,
+        body: String,
+        transferId: String,
+        fileName: String,
+        localPath: String? = nil
+    ) {
+        #if canImport(UserNotifications)
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+        content.categoryIdentifier = "FILE_TRANSFER"
+        var userInfo: [String: String] = [
+            "transferId": transferId,
+            "fileName": fileName
+        ]
+        if let localPath {
+            userInfo["localPath"] = localPath
+        }
+        content.userInfo = userInfo
+
+        let request = UNNotificationRequest(
+            identifier: "file-transfer-\(transferId)-\(UUID().uuidString)",
+            content: content,
+            trigger: nil
+        )
+        UNUserNotificationCenter.current().add(request) { error in
+            if let error {
+                SkyBridgeLogger.shared.debug("ℹ️ 文件通知发送失败: \(error.localizedDescription)")
+            }
+        }
+        #endif
+    }
+
+    private func postInAppTransferEvent(
+        name: String,
+        transfer: FileTransfer,
+        error: String? = nil
+    ) {
+        var userInfo: [String: Any] = [
+            "transferId": transfer.id,
+            "fileName": transfer.fileName,
+            "fileSize": transfer.fileSize,
+            "direction": transfer.isIncoming ? "incoming" : "outgoing",
+            "remotePeer": transfer.remotePeer
+        ]
+        if let localPath = transfer.localPath, !localPath.isEmpty {
+            userInfo["localPath"] = localPath
+        }
+        if let error, !error.isEmpty {
+            userInfo["error"] = error
+        }
+        NotificationCenter.default.post(
+            name: Notification.Name(name),
+            object: nil,
+            userInfo: userInfo
+        )
+    }
+
+    private func postInAppTransferProgressEventIfNeeded(
+        transfer: FileTransfer,
+        transferredBytes: Int64,
+        totalBytes: Int64,
+        progress: Double,
+        speed: Double
+    ) {
+        let transferId = transfer.id
+        let now = Date()
+        let clampedProgress = min(max(progress, 0), 1)
+        let percent = Int((clampedProgress * 100).rounded(.down))
+        let lastPercent = lastProgressEventPercentByTransferId[transferId] ?? -1
+        let lastEventAt = lastProgressEventAtByTransferId[transferId] ?? .distantPast
+        let intervalElapsed = now.timeIntervalSince(lastEventAt) >= progressEventMinInterval
+        let stepAdvanced = percent >= lastPercent + progressEventMinStepPercent
+        let isBoundary = percent == 0 || percent == 100
+
+        guard intervalElapsed || stepAdvanced || isBoundary else {
+            return
+        }
+
+        lastProgressEventAtByTransferId[transferId] = now
+        lastProgressEventPercentByTransferId[transferId] = percent
+
+        var userInfo: [String: Any] = [
+            "transferId": transfer.id,
+            "fileName": transfer.fileName,
+            "fileSize": transfer.fileSize,
+            "direction": transfer.isIncoming ? "incoming" : "outgoing",
+            "remotePeer": transfer.remotePeer,
+            "progress": clampedProgress,
+            "progressPercent": percent,
+            "transferredBytes": max(0, transferredBytes),
+            "totalBytes": max(0, totalBytes),
+            "speedBytesPerSecond": max(0, speed),
+            "speedDisplay": formatSpeed(speed)
+        ]
+        if let localPath = transfer.localPath, !localPath.isEmpty {
+            userInfo["localPath"] = localPath
+        }
+        NotificationCenter.default.post(
+            name: .fileTransferProgress,
+            object: nil,
+            userInfo: userInfo
+        )
+    }
+
+    private func clearProgressEventState(for transferId: String) {
+        lastProgressEventAtByTransferId.removeValue(forKey: transferId)
+        lastProgressEventPercentByTransferId.removeValue(forKey: transferId)
     }
     
     /// 计算传输速度
@@ -1045,27 +1250,67 @@ public class FileTransferManager: ObservableObject {
     
     /// 完成传输
     private func completeTransfer(_ transferId: String, success: Bool, error: Error? = nil) async {
+        let savedURL = transferStates[transferId]?.localURL
+        var finalizedTransfer: FileTransfer?
+
         if let index = activeTransfers.firstIndex(where: { $0.id == transferId }) {
             activeTransfers[index].status = success ? .completed : .failed
             activeTransfers[index].progress = success ? 1.0 : activeTransfers[index].progress
+            if let savedURL {
+                activeTransfers[index].localPath = savedURL.path
+            }
             
             // 移动到历史
             let completedTransfer = activeTransfers[index]
             activeTransfers.remove(at: index)
             transferHistory.insert(completedTransfer, at: 0)
             saveHistory()
+            finalizedTransfer = completedTransfer
         }
 
-        // 更新灵动岛：传输完成
-        if #available(iOS 16.2, *) {
-            Task {
-                await LiveActivityManager.shared.transferCompleted()
+        if let finalizedTransfer {
+            if success {
+                if finalizedTransfer.isIncoming {
+                    let location = storageLocationHint(localPath: finalizedTransfer.localPath) ?? "Downloads"
+                    postLocalFileTransferNotification(
+                        title: "文件接收完成",
+                        body: "\(finalizedTransfer.fileName) 已保存到 \(location)",
+                        transferId: finalizedTransfer.id,
+                        fileName: finalizedTransfer.fileName,
+                        localPath: finalizedTransfer.localPath
+                    )
+                    postInAppTransferEvent(name: "FileTransferCompleted", transfer: finalizedTransfer)
+                } else {
+                    postLocalFileTransferNotification(
+                        title: "文件发送完成",
+                        body: "\(finalizedTransfer.fileName) 已发送到 \(finalizedTransfer.remotePeer)",
+                        transferId: finalizedTransfer.id,
+                        fileName: finalizedTransfer.fileName
+                    )
+                    postInAppTransferEvent(name: "FileTransferCompleted", transfer: finalizedTransfer)
+                }
+            } else {
+                let reason = error?.localizedDescription ?? "未知错误"
+                postLocalFileTransferNotification(
+                    title: "文件传输失败",
+                    body: "\(finalizedTransfer.fileName) · \(reason)",
+                    transferId: finalizedTransfer.id,
+                    fileName: finalizedTransfer.fileName,
+                    localPath: finalizedTransfer.localPath
+                )
+                postInAppTransferEvent(name: "FileTransferFailed", transfer: finalizedTransfer, error: reason)
             }
+        }
+
+        // 更新灵动岛：传输完成（iOS 17+）
+        Task {
+            await LiveActivityManager.shared.transferCompleted()
         }
         
         // 清理状态
         transferStates[transferId]?.connection?.cancel()
         transferStates.removeValue(forKey: transferId)
+        clearProgressEventState(for: transferId)
         
         updateTransferringState()
     }
@@ -1083,7 +1328,8 @@ public class FileTransferManager: ObservableObject {
         transferId: String,
         fileName: String,
         fileSize: Int64,
-        fromPeerName: String
+        fromPeerName: String,
+        destinationURL: URL? = nil
     ) {
         if activeTransfers.contains(where: { $0.id == transferId }) { return }
         
@@ -1096,10 +1342,23 @@ public class FileTransferManager: ObservableObject {
             speed: 0.0,
             status: .pending,
             isIncoming: true,
-            remotePeer: fromPeerName
+            remotePeer: fromPeerName,
+            localPath: destinationURL?.path
         )
         activeTransfers.append(transfer)
         updateTransferringState()
+        postInAppTransferEvent(name: "FileTransferStarted", transfer: transfer)
+        postLocalFileTransferNotification(
+            title: "收到文件传输请求",
+            body: "\(fileName) 来自 \(fromPeerName)",
+            transferId: transferId,
+            fileName: fileName,
+            localPath: destinationURL?.path
+        )
+    }
+
+    public func markExternalInboundSavedLocation(transferId: String, destinationURL: URL) {
+        upsertLocalPath(destinationURL.path, for: transferId)
     }
     
     public func updateExternalInboundProgress(
@@ -1112,19 +1371,58 @@ public class FileTransferManager: ObservableObject {
         }
     }
     
-    public func completeExternalInboundTransfer(transferId: String, success: Bool, error: String? = nil) {
-        Task { @MainActor in
-            // Mark status and move to history similar to internal completeTransfer.
-            if let idx = self.activeTransfers.firstIndex(where: { $0.id == transferId }) {
-                self.activeTransfers[idx].status = success ? .completed : .failed
-                if success { self.activeTransfers[idx].progress = 1.0 }
-                let completed = self.activeTransfers[idx]
-                self.activeTransfers.remove(at: idx)
-                self.transferHistory.insert(completed, at: 0)
-                self.saveHistory()
-            }
-            self.updateTransferringState()
+    public func completeExternalInboundTransfer(
+        transferId: String,
+        success: Bool,
+        error: String? = nil,
+        destinationURL: URL? = nil
+    ) {
+        if let destinationURL {
+            upsertLocalPath(destinationURL.path, for: transferId)
         }
+
+        var completedTransfer: FileTransfer?
+        if let idx = activeTransfers.firstIndex(where: { $0.id == transferId }) {
+            activeTransfers[idx].status = success ? .completed : .failed
+            if success { activeTransfers[idx].progress = 1.0 }
+            if let destinationURL {
+                activeTransfers[idx].localPath = destinationURL.path
+            }
+            let finalized = activeTransfers[idx]
+            completedTransfer = finalized
+            activeTransfers.remove(at: idx)
+            transferHistory.insert(finalized, at: 0)
+            saveHistory()
+        }
+
+        if let completedTransfer {
+            if success {
+                let location = storageLocationHint(localPath: completedTransfer.localPath) ?? "Downloads"
+                postLocalFileTransferNotification(
+                    title: "文件接收完成",
+                    body: "\(completedTransfer.fileName) 已保存到 \(location)",
+                    transferId: completedTransfer.id,
+                    fileName: completedTransfer.fileName,
+                    localPath: completedTransfer.localPath
+                )
+                postInAppTransferEvent(name: "FileTransferCompleted", transfer: completedTransfer)
+            } else {
+                postLocalFileTransferNotification(
+                    title: "文件接收失败",
+                    body: "\(completedTransfer.fileName) · \(error ?? "未知错误")",
+                    transferId: completedTransfer.id,
+                    fileName: completedTransfer.fileName,
+                    localPath: completedTransfer.localPath
+                )
+                postInAppTransferEvent(name: "FileTransferFailed", transfer: completedTransfer, error: error ?? "未知错误")
+            }
+        }
+
+        Task {
+            await LiveActivityManager.shared.transferCompleted()
+        }
+        clearProgressEventState(for: transferId)
+        updateTransferringState()
     }
     
     /// 确定文件类型

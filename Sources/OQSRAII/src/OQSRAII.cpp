@@ -4,8 +4,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <string.h>
-#include <strings.h>
 
 #include <oqs/oqs.h>
 
@@ -23,6 +21,18 @@ static void secure_memzero(void* p, size_t n) {
     volatile unsigned char* vp = reinterpret_cast<volatile unsigned char*>(p);
     for (size_t i = 0; i < n; ++i) vp[i] = 0;
 #endif
+}
+
+static bool readonly_buffer_valid(const unsigned char* p, size_t n) {
+    return (p != nullptr) || (n == 0);
+}
+
+static bool writable_buffer_valid(unsigned char* p, size_t n) {
+    return (p != nullptr) || (n == 0);
+}
+
+static void secure_wipe_output(unsigned char* p, size_t n) {
+    secure_memzero(p, n);
 }
 
 // ========================= OQS 初始化守卫 =========================
@@ -61,24 +71,48 @@ public:
     size_t signature_length() const { return sig_ ? sig_->length_signature : 0; }
     int keypair(unsigned char* pk, size_t pk_len, unsigned char* sk, size_t sk_len) const {
         if (!sig_) return OQSRAII_FAIL;
-        if (pk_len < public_key_length() || sk_len < secret_key_length()) return OQSRAII_FAIL;
+        const size_t expected_pk_len = public_key_length();
+        const size_t expected_sk_len = secret_key_length();
+        if (!writable_buffer_valid(pk, pk_len) || !writable_buffer_valid(sk, sk_len)) return OQSRAII_FAIL;
+        if (pk_len < expected_pk_len || sk_len < expected_sk_len) return OQSRAII_FAIL;
         OQS_STATUS rc = OQS_SIG_keypair(sig_, pk, sk);
+        if (rc != OQS_SUCCESS) {
+            secure_wipe_output(pk, pk_len);
+            secure_wipe_output(sk, sk_len);
+        }
         return rc == OQS_SUCCESS ? OQSRAII_SUCCESS : OQSRAII_FAIL;
     }
     int sign(const unsigned char* msg, size_t msg_len,
              const unsigned char* sk, size_t sk_len,
              unsigned char* sig_out, size_t* sig_out_len) const {
         if (!sig_) return OQSRAII_FAIL;
-        if (sk_len < secret_key_length() || !sig_out_len) return OQSRAII_FAIL;
-        size_t max_sig = signature_length();
+        if (!sig_out_len) return OQSRAII_FAIL;
+        const size_t max_sig = signature_length();
         if (max_sig == 0) return OQSRAII_FAIL;
+        if (!readonly_buffer_valid(msg, msg_len) || !readonly_buffer_valid(sk, sk_len)) {
+            *sig_out_len = 0;
+            return OQSRAII_FAIL;
+        }
+        if (!writable_buffer_valid(sig_out, *sig_out_len)) {
+            *sig_out_len = 0;
+            return OQSRAII_FAIL;
+        }
+        if (sk_len < secret_key_length() || *sig_out_len < max_sig) {
+            *sig_out_len = 0;
+            return OQSRAII_FAIL;
+        }
         OQS_STATUS rc = OQS_SIG_sign(sig_, sig_out, sig_out_len, msg, msg_len, sk);
+        if (rc != OQS_SUCCESS) {
+            secure_wipe_output(sig_out, max_sig);
+            *sig_out_len = 0;
+        }
         return rc == OQS_SUCCESS ? OQSRAII_SUCCESS : OQSRAII_FAIL;
     }
     bool verify(const unsigned char* msg, size_t msg_len,
                 const unsigned char* sig, size_t sig_len,
                 const unsigned char* pk, size_t pk_len) const {
         if (!sig_) return false;
+        if (!readonly_buffer_valid(msg, msg_len) || !readonly_buffer_valid(sig, sig_len) || !readonly_buffer_valid(pk, pk_len)) return false;
         if (pk_len < public_key_length()) return false;
         OQS_STATUS rc = OQS_SIG_verify(sig_, msg, msg_len, sig, sig_len, pk);
         return rc == OQS_SUCCESS;
@@ -98,26 +132,42 @@ public:
     size_t shared_secret_length() const { return kem_ ? kem_->length_shared_secret : 0; }
     int keypair(unsigned char* pk, size_t pk_len, unsigned char* sk, size_t sk_len) const {
         if (!kem_) return OQSRAII_FAIL;
-        if (pk_len < public_key_length() || sk_len < secret_key_length()) return OQSRAII_FAIL;
+        const size_t expected_pk_len = public_key_length();
+        const size_t expected_sk_len = secret_key_length();
+        if (!writable_buffer_valid(pk, pk_len) || !writable_buffer_valid(sk, sk_len)) return OQSRAII_FAIL;
+        if (pk_len < expected_pk_len || sk_len < expected_sk_len) return OQSRAII_FAIL;
         OQS_STATUS rc = OQS_KEM_keypair(kem_, pk, sk);
+        if (rc != OQS_SUCCESS) {
+            secure_wipe_output(pk, pk_len);
+            secure_wipe_output(sk, sk_len);
+        }
         return rc == OQS_SUCCESS ? OQSRAII_SUCCESS : OQSRAII_FAIL;
     }
     int encaps(const unsigned char* pk, size_t pk_len,
                unsigned char* ct_out, size_t ct_len,
                unsigned char* ss_out, size_t ss_len) const {
         if (!kem_) return OQSRAII_FAIL;
+        if (!readonly_buffer_valid(pk, pk_len) || !writable_buffer_valid(ct_out, ct_len) || !writable_buffer_valid(ss_out, ss_len)) return OQSRAII_FAIL;
         if (pk_len < public_key_length()) return OQSRAII_FAIL;
         if (ct_len < ciphertext_length() || ss_len < shared_secret_length()) return OQSRAII_FAIL;
         OQS_STATUS rc = OQS_KEM_encaps(kem_, ct_out, ss_out, pk);
+        if (rc != OQS_SUCCESS) {
+            secure_wipe_output(ct_out, ct_len);
+            secure_wipe_output(ss_out, ss_len);
+        }
         return rc == OQS_SUCCESS ? OQSRAII_SUCCESS : OQSRAII_FAIL;
     }
     int decaps(const unsigned char* ct, size_t ct_len,
                const unsigned char* sk, size_t sk_len,
                unsigned char* ss_out, size_t ss_len) const {
         if (!kem_) return OQSRAII_FAIL;
+        if (!readonly_buffer_valid(ct, ct_len) || !readonly_buffer_valid(sk, sk_len) || !writable_buffer_valid(ss_out, ss_len)) return OQSRAII_FAIL;
         if (ct_len < ciphertext_length() || sk_len < secret_key_length()) return OQSRAII_FAIL;
         if (ss_len < shared_secret_length()) return OQSRAII_FAIL;
         OQS_STATUS rc = OQS_KEM_decaps(kem_, ss_out, ct, sk);
+        if (rc != OQS_SUCCESS) {
+            secure_wipe_output(ss_out, ss_len);
+        }
         return rc == OQS_SUCCESS ? OQSRAII_SUCCESS : OQSRAII_FAIL;
     }
 private:

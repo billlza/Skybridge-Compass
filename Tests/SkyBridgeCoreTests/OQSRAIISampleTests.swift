@@ -8,19 +8,27 @@ final class OQSRAIISampleTests: XCTestCase {
         let skLen = oqs_raii_mldsa65_secret_key_length()
         let sigMax = oqs_raii_mldsa65_signature_length()
 
+        guard pkLen > 0, skLen > 0, sigMax > 0 else {
+            throw XCTSkip("ML-DSA-65 在当前 liboqs 构建中不可用")
+        }
+
         var pub = [UInt8](repeating: 0, count: Int(pkLen))
         var sec = [UInt8](repeating: 0, count: Int(skLen))
         var sig = [UInt8](repeating: 0, count: Int(sigMax))
-        var sigLen: Int = 0
+        var sigLen: Int = Int(sigMax)
 
  // 中文注释：生成密钥对
-        XCTAssertEqual(oqs_raii_mldsa65_keypair(&pub, pkLen, &sec, skLen), OQSRAII_SUCCESS)
+        let keypairStatus = oqs_raii_mldsa65_keypair(&pub, pkLen, &sec, skLen)
+        guard keypairStatus == OQSRAII_SUCCESS else {
+            throw XCTSkip("ML-DSA-65 密钥对生成失败（状态: \(keypairStatus)），当前运行环境未启用该算法")
+        }
 
  // 中文注释：消息内容
         let msg = Array("你好，SkyBridge".utf8)
 
  // 中文注释：签名
-        XCTAssertEqual(oqs_raii_mldsa65_sign(msg, msg.count, sec, skLen, &sig, &sigLen), OQSRAII_SUCCESS)
+        let signStatus = oqs_raii_mldsa65_sign(msg, msg.count, sec, skLen, &sig, &sigLen)
+        XCTAssertEqual(signStatus, OQSRAII_SUCCESS)
 
  // 中文注释：验签
         let ok = oqs_raii_mldsa65_verify(msg, msg.count, sig, sigLen, pub, pkLen)

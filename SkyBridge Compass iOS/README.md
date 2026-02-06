@@ -20,7 +20,7 @@ SkyBridge Compass 的 iOS 版本 - 跨平台设备管理与远程控制应用
 - **iOS 17.0+**（运行目标）  
 - **iOS 26 SDK +**（仅当你要启用 Apple CryptoKit PQC：ML‑KEM/ML‑DSA）
 - **iPadOS 17.0+**
-- **Xcode 15.0+**
+- **Xcode 26.2+**
 - **Swift 6.2+**
 
 ## 技术栈
@@ -34,12 +34,8 @@ SkyBridge Compass 的 iOS 版本 - 跨平台设备管理与远程控制应用
 - WidgetKit (小组件)
 
 ### 共享模块
-- **SkyBridgeCore**: 与 macOS 共享的核心逻辑
-  - P2P 网络协议
-  - PQC 加密算法 (ML-KEM, ML-DSA, X-Wing)
-  - 设备发现服务
-  - 文件传输引擎
-  - 安全认证系统
+**注意**：iOS 版本已改为 **完全自包含（Standalone）**，不再通过符号链接/父目录 SwiftPM 引用去“复用 macOS 工程的 SkyBridgeCore”。
+核心逻辑已内置在 `SkyBridgeCompassiOS/Sources/Core`（并保持与论文协议/线格式兼容）。
 
 ### iOS 专属
 - **SkyBridgeUI_iOS**: iOS 优化的用户界面
@@ -61,8 +57,6 @@ SkyBridge Compass iOS/
 │   │   └── Services/              # iOS 专属服务
 │   ├── UI/                        # iOS UI 组件库
 │   └── Resources/                 # 资源文件
-├── Shared/                        # 共享模块
-│   └── SkyBridgeCore/            # 链接到 macOS 项目
 ├── Widgets/                       # iOS Widget Extension
 └── Tests/                         # 测试
 ```
@@ -105,16 +99,13 @@ macOS 端已经有 `TrustSyncService/TrustRecord`；iOS 端目前还没有完整
 ### 1. 克隆并初始化
 
 ```bash
-cd "/Users/bill/Desktop/SkyBridge Compass iOS"
-
-# 创建符号链接到 macOS 的 SkyBridgeCore
-ln -s "../SkyBridge Compass Pro release/Sources/SkyBridgeCore" "./Shared/SkyBridgeCore"
+cd "/path/to/SkyBridge Compass iOS"
 ```
 
 ### 2. 使用 Xcode 打开
 
 ```bash
-open SkyBridgeCompassiOS.xcodeproj
+open SkyBridgeCompass-iOS.xcodeproj
 ```
 
 ### 3. 选择目标设备

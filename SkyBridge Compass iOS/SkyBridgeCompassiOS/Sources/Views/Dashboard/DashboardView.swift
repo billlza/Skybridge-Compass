@@ -161,6 +161,11 @@ public struct DashboardView: View {
                     
                     // 快捷操作
                     quickActionsSection
+
+                    // 文件传输概览（进行中/最近完成）
+                    if !fileTransferManager.activeTransfers.isEmpty || !viewModel.recentTransfers.isEmpty {
+                        transferOverviewSection
+                    }
                     
                     // 最近设备
                     recentDevicesSection
@@ -178,16 +183,7 @@ public struct DashboardView: View {
                 ToolbarItem(placement: .navigationBarLeading) {
                     UserAvatarButton()
                 }
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button {
-                        showingQRScanner = true
-                    } label: {
-                        Image(systemName: "qrcode.viewfinder")
-                            .font(.title3)
-                    }
-                }
-                
-                ToolbarItem(placement: .navigationBarTrailing) {
+                ToolbarItemGroup(placement: .navigationBarTrailing) {
                     Button {
                         Task { await viewModel.refresh() }
                     } label: {
@@ -196,6 +192,15 @@ public struct DashboardView: View {
                         } else {
                             Image(systemName: "arrow.clockwise")
                         }
+                    }
+
+                    DashboardNotificationBellButton()
+
+                    Button {
+                        showingQRScanner = true
+                    } label: {
+                        Image(systemName: "qrcode.viewfinder")
+                            .font(.title3)
                     }
                 }
             }
@@ -394,6 +399,71 @@ public struct DashboardView: View {
                 ) {
                     showingQRScanner = true
                 }
+            }
+        }
+        .padding()
+        .background(Color.white.opacity(0.05))
+        .clipShape(RoundedRectangle(cornerRadius: 16))
+    }
+
+    // MARK: - Transfer Overview
+
+    private var transferOverviewSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("文件传输")
+                    .font(.headline)
+                    .foregroundColor(.white)
+                Spacer()
+                Button("查看全部") { selectedTab = .files }
+                    .font(.subheadline)
+                    .foregroundColor(.cyan)
+            }
+
+            if !fileTransferManager.activeTransfers.isEmpty {
+                ForEach(fileTransferManager.activeTransfers.prefix(3)) { transfer in
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text(transfer.fileName)
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundColor(.white)
+                                .lineLimit(1)
+                            Spacer()
+                            Text("\(Int(transfer.progress * 100))%")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        ProgressView(value: transfer.progress)
+                            .tint(transfer.isIncoming ? .green : .blue)
+                    }
+                    .padding(10)
+                    .background(Color.white.opacity(0.04))
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                }
+            } else if let latest = viewModel.recentTransfers.first {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Image(systemName: latest.isIncoming ? "arrow.down.circle.fill" : "arrow.up.circle.fill")
+                            .foregroundColor(latest.isIncoming ? .green : .blue)
+                        Text(latest.fileName)
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundColor(.white)
+                            .lineLimit(1)
+                        Spacer()
+                        Text(latest.status == .completed ? "已完成" : "失败")
+                            .font(.caption)
+                            .foregroundColor(latest.status == .completed ? .green : .red)
+                    }
+                    if latest.isIncoming, let localPath = latest.localPath {
+                        Text("保存位置：Downloads/\(URL(fileURLWithPath: localPath).lastPathComponent)")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+                .padding(10)
+                .background(Color.white.opacity(0.04))
+                .clipShape(RoundedRectangle(cornerRadius: 10))
             }
         }
         .padding()
@@ -920,33 +990,35 @@ private enum LocalIP {
             // 优先 Wi‑Fi (en0)，其次蜂窝/热点 (pdp_ip0)
             if interface == "en0" || interface.hasPrefix("pdp_ip") {
                 var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-                getnameinfo(
-                    ptr.pointee.ifa_addr,
-                    socklen_t(ptr.pointee.ifa_addr.pointee.sa_len),
-                    &hostname,
-                    socklen_t(hostname.count),
-                    nil,
-                    0,
-                    NI_NUMERICHOST
-                )
-                address = String(cString: hostname)
-                break
-            }
-        }
-        return address
-    }
-}
+	                getnameinfo(
+	                    ptr.pointee.ifa_addr,
+	                    socklen_t(ptr.pointee.ifa_addr.pointee.sa_len),
+	                    &hostname,
+	                    socklen_t(hostname.count),
+	                    nil,
+	                    0,
+	                    NI_NUMERICHOST
+	                )
+	                hostname.withUnsafeBufferPointer { buffer in
+	                    guard let base = buffer.baseAddress else { return }
+	                    address = String(cString: base)
+	                }
+	                break
+	            }
+	        }
+	        return address
+	    }
+	}
 
 // MARK: - Weather Effects (iOS)
 
-@available(iOS 17.0, *)
-private enum WeatherEffectsFrameRatePolicy {
-    static func targetFPS() -> Double {
-        let lowPower = ProcessInfo.processInfo.isLowPowerModeEnabled
-        if lowPower { return 30 }
-
-        return min(60, Double(UIScreen.main.maximumFramesPerSecond))
-    }
+	@available(iOS 17.0, *)
+	private enum WeatherEffectsFrameRatePolicy {
+	    static func targetFPS() -> Double {
+	        let lowPower = ProcessInfo.processInfo.isLowPowerModeEnabled
+	        if lowPower { return 30 }
+	        return 60
+	    }
 
     static func minimumInterval() -> TimeInterval {
         let fps = max(10, targetFPS())
@@ -1337,6 +1409,496 @@ private struct SeededGenerator: RandomNumberGenerator {
         z = (z ^ (z >> 27)) &* 0x94D049BB133111EB
         return z ^ (z >> 31)
     }
+}
+
+@available(iOS 17.0, *)
+private struct DashboardNotificationBellButton: View {
+    @EnvironmentObject private var authManager: AuthenticationManager
+    @State private var showCenter = false
+    @State private var unreadCount: Int = 0
+    @State private var events: [DashboardNotificationItem] = []
+    @State private var notifiedConnectableDevices: [String: Date] = [:]
+    @State private var inFlightTransfers: [String: DashboardTransferSnapshot] = [:]
+    @State private var welcomeShownForUserID: String?
+
+    private let maxEvents = 100
+
+    var body: some View {
+        Button {
+            showCenter = true
+            unreadCount = 0
+        } label: {
+            ZStack(alignment: .topTrailing) {
+                Image(systemName: unreadCount > 0 ? "bell.badge.fill" : "bell")
+                    .font(.title3)
+                    .foregroundStyle(.primary)
+                if unreadCount > 0 {
+                    Text("\(min(unreadCount, 99))")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2)
+                        .background(
+                            LinearGradient(
+                                colors: [.red, .pink],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            ),
+                            in: Capsule()
+                        )
+                        .offset(x: 8, y: -8)
+                }
+            }
+        }
+        .buttonStyle(.plain)
+        .sheet(isPresented: $showCenter) {
+            NavigationStack {
+                Group {
+                    if events.isEmpty && inFlightTransfers.isEmpty {
+                        ContentUnavailableView("暂无通知", systemImage: "bell.slash")
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else {
+                        ScrollView {
+                            VStack(alignment: .leading, spacing: 14) {
+                                if !inFlightTransfers.isEmpty {
+                                    VStack(alignment: .leading, spacing: 8) {
+                                        Text("进行中的传输")
+                                            .font(.caption.weight(.semibold))
+                                            .foregroundStyle(.secondary)
+
+                                        ForEach(sortedInFlightTransfers) { transfer in
+                                            VStack(alignment: .leading, spacing: 6) {
+                                                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                                    Image(systemName: transfer.isIncoming ? "arrow.down.circle.fill" : "arrow.up.circle.fill")
+                                                        .foregroundStyle(transfer.isIncoming ? .green : .blue)
+                                                    Text(transfer.fileName)
+                                                        .font(.subheadline.weight(.semibold))
+                                                        .lineLimit(1)
+                                                    Spacer(minLength: 0)
+                                                    Text("\(Int((min(max(transfer.progress, 0), 1) * 100).rounded(.down)))%")
+                                                        .font(.caption.monospacedDigit())
+                                                        .foregroundStyle(.secondary)
+                                                }
+
+                                                ProgressView(value: min(max(transfer.progress, 0), 1))
+                                                    .tint(transfer.isIncoming ? .green : .blue)
+
+                                                HStack(spacing: 6) {
+                                                    if !transfer.remotePeer.isEmpty {
+                                                        Text(transfer.remotePeer)
+                                                            .lineLimit(1)
+                                                    }
+                                                    Text("·")
+                                                    Text(speedDisplay(transfer.speedBytesPerSecond))
+                                                    Text("·")
+                                                    Text("\(byteCount(transfer.transferredBytes))/\(byteCount(transfer.totalBytes))")
+                                                }
+                                                .font(.caption2)
+                                                .foregroundStyle(.secondary)
+
+                                                if transfer.isIncoming, let location = localLocationHint(path: transfer.localPath) {
+                                                    Text("保存到 \(location)")
+                                                        .font(.caption2)
+                                                        .foregroundStyle(.secondary)
+                                                        .lineLimit(1)
+                                                }
+                                            }
+                                            .padding(10)
+                                            .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                        }
+                                    }
+                                }
+
+                                if !events.isEmpty {
+                                    VStack(alignment: .leading, spacing: 8) {
+                                        Text("事件记录")
+                                            .font(.caption.weight(.semibold))
+                                            .foregroundStyle(.secondary)
+
+                                        ForEach(events) { item in
+                                            HStack(alignment: .top, spacing: 10) {
+                                                Image(systemName: item.iconName)
+                                                    .foregroundColor(item.color)
+                                                    .frame(width: 16)
+                                                VStack(alignment: .leading, spacing: 3) {
+                                                    Text(item.title)
+                                                        .font(.subheadline.weight(.semibold))
+                                                    if let detail = item.detail, !detail.isEmpty {
+                                                        Text(detail)
+                                                            .font(.caption)
+                                                            .foregroundStyle(.secondary)
+                                                    }
+                                                    Text(item.timestampFormatted)
+                                                        .font(.caption2)
+                                                        .foregroundStyle(.secondary)
+                                                }
+                                                Spacer(minLength: 0)
+                                            }
+                                            .padding(10)
+                                            .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                        }
+                                    }
+                                }
+                            }
+                            .padding()
+                        }
+                    }
+                }
+                .navigationTitle("通知中心")
+                .toolbar {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button("清空") {
+                            events.removeAll()
+                            unreadCount = 0
+                        }
+                        .disabled(events.isEmpty)
+                    }
+                }
+            }
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .connectableDeviceDiscovered)) { note in
+            handleConnectableDeviceDiscovered(note)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .fileTransferStarted)) { note in
+            handleFileTransferStarted(note)
+            let fileName = (note.userInfo?["fileName"] as? String) ?? "未知文件"
+            let fileSize = (note.userInfo?["fileSize"] as? Int64) ?? 0
+            let direction = (note.userInfo?["direction"] as? String) ?? "unknown"
+            let remotePeer = (note.userInfo?["remotePeer"] as? String) ?? ""
+            var detail = "\(fileName) · \(byteCount(fileSize))"
+            if !remotePeer.isEmpty {
+                detail += " · \(remotePeer)"
+            }
+            if direction == "incoming", let localPath = note.userInfo?["localPath"] as? String, !localPath.isEmpty {
+                detail += " · 保存到 \(localPath)"
+            }
+            appendEvent(
+                title: direction == "incoming" ? "正在接收文件" : "正在发送文件",
+                detail: detail,
+                level: .info,
+                icon: "arrow.left.arrow.right.circle"
+            )
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .fileTransferProgress)) { note in
+            handleFileTransferProgress(note)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .fileTransferCompleted)) { note in
+            removeInFlightTransfer(note)
+            let fileName = (note.userInfo?["fileName"] as? String) ?? "未知文件"
+            let fileSize = (note.userInfo?["fileSize"] as? Int64) ?? 0
+            let direction = (note.userInfo?["direction"] as? String) ?? ""
+            let remotePeer = (note.userInfo?["remotePeer"] as? String) ?? ""
+            let localPath = (note.userInfo?["localPath"] as? String)
+            var detail = "\(fileName) · \(byteCount(fileSize))"
+            if let localPath, !localPath.isEmpty, direction == "incoming" {
+                detail += " · 已保存到 \(localPath)"
+            } else if !remotePeer.isEmpty, direction == "outgoing" {
+                detail += " · \(remotePeer)"
+            }
+            appendEvent(title: "文件传输完成", detail: detail, level: .success, icon: "checkmark.circle.fill")
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .fileTransferFailed)) { note in
+            removeInFlightTransfer(note)
+            let fileName = (note.userInfo?["fileName"] as? String) ?? "未知文件"
+            let error = (note.userInfo?["error"] as? String) ?? "未知错误"
+            appendEvent(title: "文件传输失败", detail: "\(fileName) · \(error)", level: .error, icon: "xmark.circle.fill")
+        }
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("fileChunkVerified"))) { note in
+            appendEvent(from: note, fallbackTitle: "分块校验通过", success: true, icon: "checkmark.seal")
+        }
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("fileChunkVerifyFailed"))) { note in
+            appendEvent(from: note, fallbackTitle: "分块校验失败", success: false, icon: "xmark.seal")
+        }
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("fileMerkleVerified"))) { note in
+            let ok = (note.userInfo?["ok"] as? Bool) ?? false
+            appendEvent(from: note, fallbackTitle: ok ? "Merkle 校验通过" : "Merkle 校验失败", success: ok, icon: ok ? "checkmark.seal" : "exclamationmark.triangle")
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .quantumCertValidationEvent)) { note in
+            let ok = (note.userInfo?["ok"] as? Bool) ?? false
+            let reason = (note.userInfo?["reason"] as? String) ?? ""
+            let elapsed = (note.userInfo?["elapsed"] as? TimeInterval) ?? 0
+            let title = ok ? "证书校验通过" : "证书校验失败"
+            let detail = reason.isEmpty ? String(format: "耗时 %.0fms", elapsed * 1000) : "\(reason) · " + String(format: "%.0fms", elapsed * 1000)
+            appendEvent(title: title, detail: detail, level: ok ? .success : .error, icon: ok ? "lock.shield" : "lock.slash")
+        }
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("fileMerkleTiming"))) { note in
+            let phase = (note.userInfo?["phase"] as? String) ?? "merkle"
+            let file = (note.userInfo?["fileName"] as? String) ?? ""
+            let size = (note.userInfo?["fileSize"] as? Int64) ?? 0
+            let chunk = (note.userInfo?["chunkSize"] as? Int) ?? 0
+            let elapsed = (note.userInfo?["elapsedMs"] as? Double) ?? 0
+            let metal = (note.userInfo?["metalAvailable"] as? Bool) ?? false
+            let title = phase == "verify" ? "Merkle 校验耗时" : "Merkle 计算耗时"
+            let detail = "\(file) · \(byteCount(size)) · chunk=\(byteCount(Int64(chunk))) · " + String(format: "%.0fms", elapsed) + (metal ? " · Metal" : "")
+            appendEvent(title: title, detail: detail, level: .info, icon: "timer")
+        }
+        .task {
+            appendWelcomeEventIfNeeded()
+        }
+        .onChange(of: authManager.currentUser?.id) { _, _ in
+            appendWelcomeEventIfNeeded()
+        }
+    }
+
+    private var sortedInFlightTransfers: [DashboardTransferSnapshot] {
+        inFlightTransfers.values.sorted(by: { $0.updatedAt > $1.updatedAt })
+    }
+
+    private func appendEvent(from note: Notification, fallbackTitle: String, success: Bool, icon: String) {
+        var detail: String? = nil
+        if let info = note.userInfo {
+            let transferId = info["transferId"] as? String
+            let chunkIndex = info["chunkIndex"] as? Int
+            let expected = info["expected"] as? String
+            let actual = info["actual"] as? String
+            let error = info["error"] as? String
+            var parts: [String] = []
+            if let transferId { parts.append("ID:\(transferId)") }
+            if let chunkIndex { parts.append("Chunk:\(chunkIndex)") }
+            if let expected, let actual {
+                parts.append("期望/实际: \(expected.prefix(8)) / \(actual.prefix(8))")
+            }
+            if let error { parts.append(error) }
+            if !parts.isEmpty { detail = parts.joined(separator: " · ") }
+        }
+        appendEvent(title: fallbackTitle, detail: detail, level: success ? .success : .error, icon: icon)
+    }
+
+    private func handleFileTransferStarted(_ note: Notification) {
+        guard let transferId = note.userInfo?["transferId"] as? String else { return }
+        let snapshot = DashboardTransferSnapshot(
+            transferId: transferId,
+            fileName: (note.userInfo?["fileName"] as? String) ?? "未知文件",
+            fileSize: anyInt64(note.userInfo?["fileSize"]) ?? 0,
+            transferredBytes: 0,
+            progress: 0,
+            speedBytesPerSecond: 0,
+            isIncoming: ((note.userInfo?["direction"] as? String) ?? "incoming") == "incoming",
+            remotePeer: (note.userInfo?["remotePeer"] as? String) ?? "",
+            localPath: note.userInfo?["localPath"] as? String,
+            updatedAt: Date()
+        )
+        inFlightTransfers[transferId] = snapshot
+    }
+
+    private func handleFileTransferProgress(_ note: Notification) {
+        guard let transferId = note.userInfo?["transferId"] as? String else { return }
+        let existing = inFlightTransfers[transferId]
+        var snapshot = existing ?? DashboardTransferSnapshot(
+            transferId: transferId,
+            fileName: (note.userInfo?["fileName"] as? String) ?? "未知文件",
+            fileSize: anyInt64(note.userInfo?["fileSize"]) ?? 0,
+            transferredBytes: 0,
+            progress: 0,
+            speedBytesPerSecond: 0,
+            isIncoming: ((note.userInfo?["direction"] as? String) ?? "incoming") == "incoming",
+            remotePeer: (note.userInfo?["remotePeer"] as? String) ?? "",
+            localPath: note.userInfo?["localPath"] as? String,
+            updatedAt: Date()
+        )
+
+        snapshot.fileName = (note.userInfo?["fileName"] as? String) ?? snapshot.fileName
+        snapshot.fileSize = max(snapshot.fileSize, anyInt64(note.userInfo?["fileSize"]) ?? snapshot.fileSize)
+        snapshot.transferredBytes = anyInt64(note.userInfo?["transferredBytes"]) ?? snapshot.transferredBytes
+        snapshot.progress = anyDouble(note.userInfo?["progress"]) ?? snapshot.progress
+        snapshot.speedBytesPerSecond = anyDouble(note.userInfo?["speedBytesPerSecond"]) ?? snapshot.speedBytesPerSecond
+        snapshot.isIncoming = ((note.userInfo?["direction"] as? String) ?? (snapshot.isIncoming ? "incoming" : "outgoing")) == "incoming"
+        snapshot.remotePeer = (note.userInfo?["remotePeer"] as? String) ?? snapshot.remotePeer
+        if let localPath = note.userInfo?["localPath"] as? String, !localPath.isEmpty {
+            snapshot.localPath = localPath
+        }
+        snapshot.updatedAt = Date()
+        inFlightTransfers[transferId] = snapshot
+    }
+
+    private func removeInFlightTransfer(_ note: Notification) {
+        guard let transferId = note.userInfo?["transferId"] as? String else { return }
+        inFlightTransfers.removeValue(forKey: transferId)
+    }
+
+    private func handleConnectableDeviceDiscovered(_ note: Notification) {
+        let now = Date()
+        notifiedConnectableDevices = notifiedConnectableDevices.filter { now.timeIntervalSince($0.value) < 3600 }
+
+        guard let deviceId = note.userInfo?["deviceId"] as? String,
+              let name = note.userInfo?["name"] as? String,
+              let address = note.userInfo?["address"] as? String,
+              let port = note.userInfo?["port"] as? UInt16,
+              let isVerified = note.userInfo?["isVerified"] as? Bool else {
+            return
+        }
+        guard notifiedConnectableDevices[deviceId] == nil else { return }
+
+        let trustText = isVerified ? "已验签" : "未验证"
+        var detail = "\(name) · \(address):\(port) · \(trustText)"
+        if let reason = note.userInfo?["verificationFailedReason"] as? String, !reason.isEmpty {
+            detail += " · 原因: \(reason)"
+        }
+        appendEvent(
+            title: isVerified ? "📡 发现可连接设备" : "📡 发现可连接设备（未验证）",
+            detail: detail,
+            level: isVerified ? .success : .warning,
+            icon: isVerified ? "antenna.radiowaves.left.and.right" : "exclamationmark.shield.fill"
+        )
+        notifiedConnectableDevices[deviceId] = now
+    }
+
+    private func appendEvent(title: String, detail: String?, level: DashboardNotificationItem.Level, icon: String) {
+        let item = DashboardNotificationItem(
+            title: title,
+            detail: detail,
+            level: level,
+            iconName: icon,
+            timestamp: Date()
+        )
+        events.insert(item, at: 0)
+        if events.count > maxEvents {
+            events.removeLast(events.count - maxEvents)
+        }
+        if !showCenter {
+            unreadCount += 1
+        }
+    }
+
+    private func appendWelcomeEventIfNeeded() {
+        guard authManager.isAuthenticated, let user = authManager.currentUser else { return }
+        let userID = user.id
+        guard welcomeShownForUserID != userID else { return }
+
+        let displayName = user.displayName.isEmpty ? "用户" : user.displayName
+        let greeting = timeGreeting()
+        appendEvent(
+            title: "\(displayName)，\(greeting)！",
+            detail: "欢迎使用 SkyBridge Compass",
+            level: .success,
+            icon: welcomeIconName()
+        )
+        welcomeShownForUserID = userID
+    }
+
+    private func timeGreeting() -> String {
+        let hour = Calendar.current.component(.hour, from: Date())
+        switch hour {
+        case 0..<5: return "夜深了"
+        case 5..<7: return "清晨好"
+        case 7..<12: return "早上好"
+        case 12..<14: return "中午好"
+        case 14..<18: return "下午好"
+        case 18..<21: return "晚上好"
+        case 21..<24: return "夜深了"
+        default: return "你好"
+        }
+    }
+
+    private func welcomeIconName() -> String {
+        let hour = Calendar.current.component(.hour, from: Date())
+        switch hour {
+        case 0..<7: return "moon.stars.fill"
+        case 7..<18: return "sun.max.fill"
+        case 18..<24: return "sunset.fill"
+        default: return "hand.wave.fill"
+        }
+    }
+
+    private func anyInt64(_ value: Any?) -> Int64? {
+        switch value {
+        case let value as Int64:
+            return value
+        case let value as Int:
+            return Int64(value)
+        case let value as UInt64:
+            return value > UInt64(Int64.max) ? Int64.max : Int64(value)
+        case let value as NSNumber:
+            return value.int64Value
+        default:
+            return nil
+        }
+    }
+
+    private func anyDouble(_ value: Any?) -> Double? {
+        switch value {
+        case let value as Double:
+            return value
+        case let value as Float:
+            return Double(value)
+        case let value as NSNumber:
+            return value.doubleValue
+        default:
+            return nil
+        }
+    }
+
+    private func byteCount(_ bytes: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: max(0, bytes), countStyle: .file)
+    }
+
+    private func speedDisplay(_ bytesPerSecond: Double) -> String {
+        let bytes = Int64(max(0, bytesPerSecond))
+        return "\(byteCount(bytes))/s"
+    }
+
+    private func localLocationHint(path: String?) -> String? {
+        guard let path, !path.isEmpty else { return nil }
+        let name = URL(fileURLWithPath: path).lastPathComponent
+        return "Downloads/\(name)"
+    }
+}
+
+private struct DashboardTransferSnapshot: Identifiable {
+    let transferId: String
+    var fileName: String
+    var fileSize: Int64
+    var transferredBytes: Int64
+    var progress: Double
+    var speedBytesPerSecond: Double
+    var isIncoming: Bool
+    var remotePeer: String
+    var localPath: String?
+    var updatedAt: Date
+
+    var id: String { transferId }
+
+    var totalBytes: Int64 {
+        max(fileSize, transferredBytes)
+    }
+}
+
+private struct DashboardNotificationItem: Identifiable {
+    enum Level {
+        case success
+        case warning
+        case error
+        case info
+    }
+
+    let id = UUID()
+    let title: String
+    let detail: String?
+    let level: Level
+    let iconName: String
+    let timestamp: Date
+
+    var color: Color {
+        switch level {
+        case .success: return .green
+        case .warning: return .orange
+        case .error: return .red
+        case .info: return .blue
+        }
+    }
+
+    var timestampFormatted: String {
+        DashboardNotificationItem.timeFormatter.string(from: timestamp)
+    }
+
+    private static let timeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.dateFormat = "HH:mm:ss"
+        return formatter
+    }()
 }
 
 // MARK: - Dashboard Tab

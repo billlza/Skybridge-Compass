@@ -543,22 +543,21 @@ struct RealNetworkE2EBenchView: View {
         return String(mapped.prefix(64))
     }
 
-    private static func fmt(_ x: Double?) -> String {
+    nonisolated private static func fmt(_ x: Double?) -> String {
         guard let x else { return "" }
         return String(format: "%.3f", x)
     }
 
-    private static func mean(_ xs: [Double]) -> Double? {
+    nonisolated private static func mean(_ xs: [Double]) -> Double? {
         guard !xs.isEmpty else { return nil }
         return xs.reduce(0, +) / Double(xs.count)
     }
 
-    private static func percentile(_ xs: [Double], _ p: Double) -> Double? {
+    nonisolated private static func percentile(_ xs: [Double], _ p: Double) -> Double? {
         guard !xs.isEmpty else { return nil }
         let s = xs.sorted()
         let idx = Int(Double(s.count - 1) * p)
         return s[max(0, min(idx, s.count - 1))]
     }
 }
-
 

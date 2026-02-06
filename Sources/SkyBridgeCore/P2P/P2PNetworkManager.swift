@@ -1,6 +1,7 @@
 import Foundation
 import Network
 import Combine
+import os
 
 /// P2P网络管理器 - 统一管理设备发现、连接建立和状态监控
 @MainActor
@@ -29,8 +30,6 @@ public class P2PNetworkManager: ObservableObject, Sendable {
  // MARK: - 私有属性
     
     private let discoveryService: P2PDiscoveryService
-    private let networkLayer: P2PNetworkLayer
-    private let securityManager: P2PSecurityManager
     private var p2pNetworkCancellables = Set<AnyCancellable>()
     private var discoveryTimer: Timer?
     private var qualityMonitorTimer: Timer?
@@ -39,10 +38,6 @@ public class P2PNetworkManager: ObservableObject, Sendable {
     
     private init() {
         self.discoveryService = P2PDiscoveryService()
-        self.networkLayer = P2PNetworkLayer()
-        self.securityManager = P2PSecurityManager()
-        
-        setupBindings()
         startQualityMonitoring()
     }
     
@@ -53,9 +48,6 @@ public class P2PNetworkManager: ObservableObject, Sendable {
         guard !isStarted else { return }
         
         isStarted = true
-        
- // 启动子组件
-        try await securityManager.start()
         
  // 开始设备发现
         await startDiscovery()
@@ -71,12 +63,9 @@ public class P2PNetworkManager: ObservableObject, Sendable {
         stopDiscovery()
         
  // 断开所有连接
-        for deviceId in activeConnections.keys {
+        for deviceId in Array(activeConnections.keys) {
             disconnectFromDevice(deviceId)
         }
-        
- // 停止子组件
-        await securityManager.stop()
     }
     
  /// 清理P2P网络管理器资源
@@ -114,13 +103,12 @@ public class P2PNetworkManager: ObservableObject, Sendable {
         discoveryService.startScanning()
         
  // 监听发现的设备
-        discoveryService.$discoveredDevices
+        discoveryService.$p2pDevices
             .receive(on: DispatchQueue.main)
             .sink { [weak self] devices in
                 guard let self = self else { return }
-                let mapped = devices.map { self.mapDiscovered($0) }
-                self.discoveredDevices = mapped
-                self.publishConnectableDeviceEvents(mapped)
+                self.discoveredDevices = devices
+                self.publishConnectableDeviceEvents(devices)
             }
             .store(in: &p2pNetworkCancellables)
         
@@ -190,49 +178,25 @@ public class P2PNetworkManager: ObservableObject, Sendable {
         
         networkState = .connecting
         
- // 建立连接
-        networkLayer.connectToDevice(device) { [weak self] connection in
-            guard let _ = self else { return }
-            
- // 认证连接
-            Task {
-                do {
-                    try await connection.authenticate()
-                    connectionEstablished()
-                } catch {
-                    connectionFailed(error)
-                }
-            }
-        } connectionFailed: { deviceId, error in
-            connectionFailed(error)
-        }
-    }
+        let deviceCopy = device
+        Task { @MainActor in
+            do {
+                let connection = try await establishConnection(to: deviceCopy)
+                self.activeConnections[deviceCopy.deviceId] = connection
+                self.monitorConnection(connection)
+                self.addToHistory(deviceCopy)
 
-    private func mapDiscovered(_ d: DiscoveredDevice) -> P2PDevice {
-        let address = d.ipv4 ?? d.ipv6 ?? ""
-        let portInt = d.portMap["_skybridge._tcp"] ?? d.portMap.values.first ?? 0
-        let endpoints: [String] = {
-            if portInt > 0 {
-                return ["\(address):\(portInt)"]
-            } else {
-                return address.isEmpty ? [] : [address]
+                try await connection.authenticate()
+                self.networkState = .connected
+                connectionEstablished()
+            } catch {
+                self.activeConnections.removeValue(forKey: deviceCopy.deviceId)
+                if self.activeConnections.isEmpty {
+                    self.networkState = .disconnected
+                }
+                connectionFailed(error)
             }
-        }()
-        return P2PDevice(
-            id: d.id.uuidString,
-            name: d.name,
-            type: .macOS,
-            address: address,
-            port: UInt16(portInt),
-            osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
-            capabilities: [],
-            publicKey: Data(),
-            lastSeen: Date(),
-            endpoints: endpoints,
-            lastMessageTimestamp: nil,
-            isVerified: false,
-            verificationFailedReason: nil
-        )
+        }
     }
     
  /// 断开设备连接
@@ -240,7 +204,7 @@ public class P2PNetworkManager: ObservableObject, Sendable {
         guard let connection = activeConnections[deviceId] else { return }
         
  // 关闭连接
-        networkLayer.closeConnection(connection)
+        connection.disconnect()
         
  // 移除活跃连接
         activeConnections.removeValue(forKey: deviceId)
@@ -250,6 +214,108 @@ public class P2PNetworkManager: ObservableObject, Sendable {
             networkState = .disconnected
         }
     }
+
+    private func establishConnection(to device: P2PDevice) async throws -> P2PConnection {
+        guard !device.address.isEmpty else {
+            throw P2PConnectionError.disconnected
+        }
+        guard let port = NWEndpoint.Port(rawValue: device.port) else {
+            throw P2PConnectionError.disconnected
+        }
+
+        let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(device.address), port: port)
+        let parameters = NWParameters.tcp
+        parameters.includePeerToPeer = true
+        parameters.allowLocalEndpointReuse = true
+        if let tcpOptions = parameters.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
+            tcpOptions.enableKeepalive = true
+            tcpOptions.keepaliveIdle = 30
+            tcpOptions.keepaliveInterval = 15
+            tcpOptions.keepaliveCount = 4
+            tcpOptions.noDelay = true
+        }
+
+        let nw = NWConnection(to: endpoint, using: parameters)
+        let p2p = P2PConnection(device: device, connection: nw)
+
+        try await waitUntilReady(nw, updating: p2p, timeoutSeconds: 10)
+        return p2p
+    }
+
+    private func waitUntilReady(_ connection: NWConnection, updating p2p: P2PConnection, timeoutSeconds: Double) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            let resumed = OSAllocatedUnfairLock(initialState: false)
+
+            connection.stateUpdateHandler = { state in
+                Task { @MainActor in
+                    switch state {
+                    case .ready:
+                        p2p.markConnectedAndStartReceiving()
+                        let shouldResume = resumed.withLock { hasResumed in
+                            if !hasResumed {
+                                hasResumed = true
+                                return true
+                            }
+                            return false
+                        }
+                        if shouldResume {
+                            continuation.resume()
+                        }
+
+                    case .failed(let error):
+                        p2p.markFailed()
+                        let shouldResume = resumed.withLock { hasResumed in
+                            if !hasResumed {
+                                hasResumed = true
+                                return true
+                            }
+                            return false
+                        }
+                        if shouldResume {
+                            continuation.resume(throwing: error)
+                        }
+
+                    case .cancelled:
+                        p2p.disconnect()
+                        let shouldResume = resumed.withLock { hasResumed in
+                            if !hasResumed {
+                                hasResumed = true
+                                return true
+                            }
+                            return false
+                        }
+                        if shouldResume {
+                            continuation.resume(throwing: P2PConnectionError.disconnected)
+                        }
+
+                    default:
+                        break
+                    }
+                }
+            }
+
+            let queue = DispatchQueue(label: "com.skybridge.p2p.networkmanager.connection", qos: .userInitiated)
+            connection.start(queue: queue)
+
+            Task.detached {
+                try? await Task.sleep(for: .seconds(timeoutSeconds))
+                let shouldTimeout = resumed.withLock { hasResumed in
+                    if !hasResumed && connection.state != .ready && connection.state != .cancelled {
+                        hasResumed = true
+                        return true
+                    }
+                    return false
+                }
+                if shouldTimeout {
+                    connection.stateUpdateHandler = nil
+                    connection.cancel()
+                    await MainActor.run {
+                        continuation.resume(throwing: P2PConnectionError.disconnected)
+                    }
+                }
+            }
+        }
+    }
     
  /// 检查是否已连接到设备
     public func isConnected(to deviceId: String) -> Bool {
@@ -257,32 +323,6 @@ public class P2PNetworkManager: ObservableObject, Sendable {
     }
     
  // MARK: - 私有方法
-    
-    private func setupBindings() {
- // 监听网络层状态变化
-        networkLayer.connectionStatePublisher
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] state in
-                self?.handleNetworkStateChange(state)
-            }
-            .store(in: &p2pNetworkCancellables)
-    }
-    
-    private func handleNetworkStateChange(_ state: P2PConnectionStatus) {
-        switch state {
-        case .connected:
-            networkState = .connected
-        case .connecting:
-            networkState = .connecting
-        case .disconnected, .failed:
-            networkState = .disconnected
-        case .listening:
-            networkState = .discovering
-        case .authenticating, .authenticated, .networkUnavailable:
- // 这些状态不直接映射到网络状态，保持当前状态
-            break
-        }
-    }
     
     private func startDiscoveryTimer() {
         discoveryTimer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { [weak self] _ in
@@ -394,6 +434,8 @@ public class P2PNetworkManager: ObservableObject, Sendable {
     
     private func handleConnectionStatusChange(_ connection: P2PConnection, status: P2PConnectionStatus) {
         switch status {
+        case .connected, .authenticated:
+            networkState = .connected
         case .disconnected, .failed:
  // 连接断开，从活跃连接中移除
             activeConnections.removeValue(forKey: connection.device.deviceId)
