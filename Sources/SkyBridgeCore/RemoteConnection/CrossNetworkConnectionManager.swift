@@ -54,6 +54,8 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     private var pendingWebRTCOfferSessionIds: Set<String> = []
     private var webrtcRemoteIdBySessionId: [String: String] = [:]
     private var webrtcControlTasksBySessionId: [String: Task<Void, Never>] = [:]
+    private var webrtcInboundQueuesBySessionId: [String: InboundChunkQueue] = [:]
+    private var webrtcScreenStreamingTasksBySessionId: [String: Task<Void, Never>] = [:]
     private var webrtcSessionKeysBySessionId: [String: SessionKeys] = [:]
 
     // File transfer waiters (sessionID|transferId|op|chunkIndex -> continuation)
@@ -100,31 +102,43 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         }
         webrtcSessionsBySessionId.removeAll()
 
-        // 2) 取消控制通道任务
+        // 2) 结束入站队列，唤醒控制通道等待
+        for (_, queue) in webrtcInboundQueuesBySessionId {
+            await queue.finish()
+        }
+        webrtcInboundQueuesBySessionId.removeAll()
+
+        // 3) 取消控制通道任务
         for (_, task) in webrtcControlTasksBySessionId {
             task.cancel()
         }
         webrtcControlTasksBySessionId.removeAll()
 
-        // 3) 清空会话密钥
+        // 4) 取消屏幕推流任务
+        for (_, task) in webrtcScreenStreamingTasksBySessionId {
+            task.cancel()
+        }
+        webrtcScreenStreamingTasksBySessionId.removeAll()
+
+        // 5) 清空会话密钥
         webrtcSessionKeysBySessionId.removeAll()
         webrtcRemoteIdBySessionId.removeAll()
         pendingWebRTCOfferSessionIds.removeAll()
 
-        // 4) 关闭 WebSocket 信令
+        // 6) 关闭 WebSocket 信令
         if let sc = signalingClient {
             await sc.close()
         }
         signalingClient = nil
 
-        // 5) 取消所有文件传输等待
+        // 7) 取消所有文件传输等待
         let waiters = webrtcFileTransferWaiters
         webrtcFileTransferWaiters.removeAll()
         for (_, c) in waiters {
             c.resume(throwing: WebRTCFileTransferWaitError.cancelled)
         }
 
-        // 6) 重置状态
+        // 8) 重置状态
         currentConnection = nil
         connectionCode = nil
         qrCodeData = nil
@@ -627,6 +641,16 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         }
     }
 
+    private func failAllFileTransferWaitersForSession(sessionID: String, message: String) {
+        let prefix = "\(sessionID)|"
+        let keys = webrtcFileTransferWaiters.keys.filter { $0.hasPrefix(prefix) }
+        for k in keys {
+            if let w = webrtcFileTransferWaiters.removeValue(forKey: k) {
+                w.resume(throwing: WebRTCFileTransferWaitError.failed(message))
+            }
+        }
+    }
+
     private func waitForFileTransferMessage(
         sessionID: String,
         transferId: String,
@@ -710,8 +734,8 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         )
 
         do {
-            // DataChannel framing: keep chunks moderate; receiver writes at offset = idx * chunkSize.
-            let chunkSize = 64 * 1024
+            // DataChannel payload should stay conservative to avoid SCTP message-size rejection on mixed endpoints.
+            let chunkSize = 16 * 1024
             let totalChunks = Int(ceil(Double(fileSize) / Double(chunkSize)))
 
             let snap = await SelfIdentityProvider.shared.snapshot()
@@ -772,7 +796,12 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                         } catch {
                             lastError = error
                             // Best-effort resend: safe because receiver writes at fixed offset.
-                            try? sendFileTransferMessage(sessionID: sessionID, session: session, keys: keys, message: msg)
+                            do {
+                                try sendFileTransferMessage(sessionID: sessionID, session: session, keys: keys, message: msg)
+                            } catch {
+                                lastError = error
+                                break
+                            }
                         }
                     }
                     throw lastError ?? WebRTCFileTransferWaitError.timeout
@@ -845,12 +874,31 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 waiters.append(c)
             }
         }
+
+        func next(max: Int) async throws -> Data {
+            precondition(max > 0, "max must be greater than zero")
+            let chunk = try await next()
+            if chunk.count <= max {
+                return chunk
+            }
+            let head = Data(chunk.prefix(max))
+            let tail = Data(chunk.dropFirst(max))
+            pending.insert(tail, at: 0)
+            return head
+        }
+    }
+
+    private func stopWebRTCScreenStreaming(sessionID: String) {
+        if let task = webrtcScreenStreamingTasksBySessionId.removeValue(forKey: sessionID) {
+            task.cancel()
+        }
     }
 
     private func startWebRTCInboundHandshakeAndControlLoop(sessionID: String, session: WebRTCSession, endpointDescription: String) {
         if webrtcControlTasksBySessionId[sessionID] != nil { return }
 
         let queue = InboundChunkQueue()
+        webrtcInboundQueuesBySessionId[sessionID] = queue
         session.onData = { data in
             Task { await queue.push(data) }
         }
@@ -863,6 +911,14 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 endpointDescription: endpointDescription,
                 inbound: queue
             )
+            await queue.finish()
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.webrtcControlTasksBySessionId.removeValue(forKey: sessionID)
+                self.webrtcInboundQueuesBySessionId.removeValue(forKey: sessionID)
+                self.stopWebRTCScreenStreaming(sessionID: sessionID)
+                self.failAllFileTransferWaitersForSession(sessionID: sessionID, message: "WebRTC control channel closed")
+            }
         }
     }
 
@@ -888,9 +944,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         }
 
         func receiveSome(max: Int) async throws -> Data {
-            let d = try await inbound.next()
-            if d.count <= max { return d }
-            return d.prefix(max)
+            try await inbound.next(max: max)
         }
 
         func receiveExactly(_ length: Int) async throws -> Data {
@@ -982,6 +1036,24 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         }
         var inboundFileTransfers: [String: InboundFileTransferState] = [:]
         var inboundFileTransferCompleteTimers: [String: Task<Void, Never>] = [:]
+        defer {
+            for (_, task) in inboundFileTransferCompleteTimers {
+                task.cancel()
+            }
+            inboundFileTransferCompleteTimers.removeAll()
+
+            if !inboundFileTransfers.isEmpty {
+                for st in inboundFileTransfers.values {
+                    try? st.handle.close()
+                    try? FileManager.default.removeItem(at: st.tempURL)
+                    FileTransferManager.shared.failExternalTransfer(
+                        transferId: st.transferId,
+                        errorMessage: "WebRTC channel closed before transfer completion"
+                    )
+                }
+                inboundFileTransfers.removeAll()
+            }
+        }
 
         func sanitizeFileName(_ name: String) -> String {
             let last = (name as NSString).lastPathComponent
@@ -1071,12 +1143,58 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             return data as Data
         }
 
+        func startScreenStreamingIfNeeded(keys: SessionKeys) {
+            guard self.webrtcScreenStreamingTasksBySessionId[sessionID] == nil else { return }
+            self.webrtcScreenStreamingTasksBySessionId[sessionID] = Task { @MainActor [weak self, weak session] in
+                guard let self else { return }
+                guard let session else {
+                    self.webrtcScreenStreamingTasksBySessionId.removeValue(forKey: sessionID)
+                    return
+                }
+
+                defer { self.webrtcScreenStreamingTasksBySessionId.removeValue(forKey: sessionID) }
+
+                while !Task.isCancelled {
+                    do {
+                        try await Task.sleep(for: .milliseconds(250))
+                    } catch {
+                        break
+                    }
+                    guard let img = CGDisplayCreateImage(CGMainDisplayID()) else { continue }
+                    guard let jpg = jpegData(from: img) else { continue }
+                    let sd = ScreenDataWire(
+                        width: img.width,
+                        height: img.height,
+                        imageData: jpg,
+                        timestamp: Date().timeIntervalSince1970,
+                        format: "jpeg"
+                    )
+                    guard let payload = try? JSONEncoder().encode(sd) else { continue }
+                    let msg = RemoteMessageWire(type: .screenData, payload: payload)
+                    guard let plain = try? JSONEncoder().encode(msg) else { continue }
+
+                    do {
+                        let enc = try encryptAppPayload(plain, with: keys)
+                        let padded = TrafficPadding.wrapIfEnabled(enc, label: "tx/webrtc-screen")
+                        var framed = Data()
+                        var length = UInt32(padded.count).bigEndian
+                        framed.append(Data(bytes: &length, count: 4))
+                        framed.append(padded)
+                        try session.send(framed)
+                    } catch {
+                        self.logger.error("❌ WebRTC 屏幕推流发送失败: \(error.localizedDescription, privacy: .public)")
+                        break
+                    }
+                }
+            }
+        }
+
         logger.info("🤝 WebRTC 控制通道：启动入站握手/消息循环 session=\(sessionID, privacy: .public)")
 
         do {
             while true {
                 let lenData = try await receiveExactly(4)
-                let totalLen = lenData.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+                let totalLen = lenData.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self).bigEndian }
                 guard totalLen > 0 && totalLen < 1_048_576 else { break }
                 let payload = try await receiveExactly(Int(totalLen))
 
@@ -1721,33 +1839,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 case .established(let keys):
                     sessionKeys = keys
                     self.webrtcSessionKeysBySessionId[sessionID] = keys
-                    // Start low-FPS screen streaming over the encrypted channel (MVP).
-                    Task { @MainActor [weak session] in
-                        guard let session else { return }
-                        while !Task.isCancelled {
-                            try? await Task.sleep(for: .milliseconds(250))
-                            guard let img = CGDisplayCreateImage(CGMainDisplayID()) else { continue }
-                            guard let jpg = jpegData(from: img) else { continue }
-                            let sd = ScreenDataWire(
-                                width: img.width,
-                                height: img.height,
-                                imageData: jpg,
-                                timestamp: Date().timeIntervalSince1970,
-                                format: "jpeg"
-                            )
-                            guard let payload = try? JSONEncoder().encode(sd) else { continue }
-                            let msg = RemoteMessageWire(type: .screenData, payload: payload)
-                            guard let plain = try? JSONEncoder().encode(msg) else { continue }
-                            guard let enc = try? encryptAppPayload(plain, with: keys) else { continue }
-                            let padded = TrafficPadding.wrapIfEnabled(enc, label: "tx/webrtc-screen")
-                            // framed send must be on MainActor for WebRTCSession.send
-                            var framed = Data()
-                            var length = UInt32(padded.count).bigEndian
-                            framed.append(Data(bytes: &length, count: 4))
-                            framed.append(padded)
-                            try? session.send(framed)
-                        }
-                    }
+                    startScreenStreamingIfNeeded(keys: keys)
                 default:
                     break
                 }
@@ -2175,4 +2267,3 @@ public enum CrossNetworkConnectionError: Error {
     case timeout
     case networkError
 }
-
