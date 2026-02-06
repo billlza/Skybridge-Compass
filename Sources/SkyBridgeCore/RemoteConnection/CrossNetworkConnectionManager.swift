@@ -87,6 +87,22 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         logger.info("跨网络连接管理器初始化完成")
     }
 
+    private static func hasUsableTURNCredentials(_ ice: WebRTCSession.ICEConfig) -> Bool {
+        let turnURL = ice.turnURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let username = ice.turnUsername.trimmingCharacters(in: .whitespacesAndNewlines)
+        let password = ice.turnPassword.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !turnURL.isEmpty && !username.isEmpty && !password.isEmpty
+    }
+
+    private func logICEPlan(_ ice: WebRTCSession.ICEConfig, context: String) {
+        if Self.hasUsableTURNCredentials(ice) {
+            let userHint = String(ice.turnUsername.prefix(8))
+            logger.info("📡 \(context, privacy: .public) 使用 TURN+STUN: user=\(userHint, privacy: .public)...")
+        } else {
+            logger.warning("⚠️ \(context, privacy: .public) 未拿到可用 TURN 凭据，降级为 STUN-only")
+        }
+    }
+
     // MARK: - 连接生命周期管理
 
     /// 断开当前跨网连接，释放所有 WebRTC / Signaling 资源。
@@ -377,7 +393,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 
         // 动态获取 TURN 凭据（带缓存和回退）
         let ice = await SkyBridgeServerConfig.dynamicICEConfig()
-        logger.info("📡 连接码模式使用动态 TURN 凭据: user=\(ice.turnUsername.prefix(8))...")
+        logICEPlan(ice, context: "连接码模式")
 
         let session = WebRTCSession(sessionId: sessionID, localDeviceId: deviceFingerprint, role: .answerer, ice: ice)
 
@@ -485,7 +501,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 
         // 动态获取 TURN 凭据（带缓存和回退）
         let ice = await SkyBridgeServerConfig.dynamicICEConfig()
-        logger.info("📡 使用动态 TURN 凭据: user=\(ice.turnUsername.prefix(8))...")
+        logICEPlan(ice, context: "连接码发起方")
 
         let session = WebRTCSession(sessionId: sessionID, localDeviceId: deviceFingerprint, role: .offerer, ice: ice)
         session.onLocalOffer = { [weak self] sdp in
@@ -530,7 +546,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 
         // 动态获取 TURN 凭据（带缓存和回退）
         let ice = await SkyBridgeServerConfig.dynamicICEConfig()
-        logger.info("📡 answerer 使用动态 TURN 凭据: user=\(ice.turnUsername.prefix(8))...")
+        logICEPlan(ice, context: "二维码应答方")
 
         let session = WebRTCSession(sessionId: sessionID, localDeviceId: deviceFingerprint, role: .answerer, ice: ice)
 

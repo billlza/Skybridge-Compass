@@ -170,10 +170,24 @@ public actor TURNCredentialService {
     /// 静态凭据回退（仅在动态获取失败时使用）
     /// ⚠️ 这是临时兜底方案，生产环境应确保动态凭据服务可用
     private func fallbackCredentials() -> TURNCredentials {
+        let username = SkyBridgeServerConfig.turnUsername.trimmingCharacters(in: .whitespacesAndNewlines)
+        let password = SkyBridgeServerConfig.turnPassword.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !username.isEmpty, !password.isEmpty else {
+            logger.warning("⚠️ 静态回退 TURN 凭据不完整（缺少用户名或密码），将降级为 STUN-only")
+            return TURNCredentials(
+                username: "",
+                password: "",
+                ttl: 3600,
+                uris: [],
+                expiresAt: Date().addingTimeInterval(3600)
+            )
+        }
+
         logger.warning("⚠️ 使用静态回退凭据 - 请确保后端 TURN 凭据服务正常运行")
         return TURNCredentials(
-            username: SkyBridgeServerConfig.turnUsername,
-            password: SkyBridgeServerConfig.turnPassword,
+            username: username,
+            password: password,
             ttl: 3600,
             uris: [SkyBridgeServerConfig.turnURL],
             expiresAt: Date().addingTimeInterval(3600)
@@ -184,6 +198,16 @@ public actor TURNCredentialService {
 // MARK: - 扩展 SkyBridgeServerConfig
 
 extension SkyBridgeServerConfig {
+    private static func normalizedValue(_ raw: String) -> String {
+        raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func firstValidTurnURI(from uris: [String]) -> String? {
+        uris
+            .map { normalizedValue($0) }
+            .first { $0.hasPrefix("turn:") || $0.hasPrefix("turns:") }
+    }
+
     /// 客户端 API Key（用于认证 TURN 凭据请求）
     /// 注意：这个 key 是公开的，用于标识合法客户端，不是敏感凭据
     public static var clientAPIKey: String {
@@ -198,12 +222,16 @@ extension SkyBridgeServerConfig {
     /// 动态获取 TURN 凭据的 ICE 配置
     public static func dynamicICEConfig() async -> WebRTCSession.ICEConfig {
         let creds = await TURNCredentialService.shared.getCredentials()
+        let turnUsername = normalizedValue(creds.username)
+        let turnPassword = normalizedValue(creds.password)
+        let turnURL = firstValidTurnURI(from: creds.uris) ?? self.turnURL
+        let shouldUseTURN = !turnUsername.isEmpty && !turnPassword.isEmpty
+
         return WebRTCSession.ICEConfig(
             stunURL: stunURL,
-            turnURL: creds.uris.first ?? turnURL,
-            turnUsername: creds.username,
-            turnPassword: creds.password
+            turnURL: shouldUseTURN ? turnURL : "",
+            turnUsername: shouldUseTURN ? turnUsername : "",
+            turnPassword: shouldUseTURN ? turnPassword : ""
         )
     }
 }
-

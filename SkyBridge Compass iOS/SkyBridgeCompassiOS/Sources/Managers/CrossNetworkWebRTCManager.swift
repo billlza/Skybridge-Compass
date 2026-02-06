@@ -90,12 +90,27 @@ private enum CrossNetworkServerConfig {
 
     static func dynamicICEConfig() async -> WebRTCSession.ICEConfig {
         let creds = await CrossNetworkTURNCredentialService.shared.getCredentials()
+        let turnUsername = normalizedValue(creds.username)
+        let turnPassword = normalizedValue(creds.password)
+        let turnURL = firstValidTurnURI(from: creds.uris) ?? CrossNetworkServerConfig.turnURL
+        let shouldUseTURN = !turnUsername.isEmpty && !turnPassword.isEmpty
+
         return WebRTCSession.ICEConfig(
             stunURL: stunURL,
-            turnURL: creds.uris.first ?? turnURL,
-            turnUsername: creds.username,
-            turnPassword: creds.password
+            turnURL: shouldUseTURN ? turnURL : "",
+            turnUsername: shouldUseTURN ? turnUsername : "",
+            turnPassword: shouldUseTURN ? turnPassword : ""
         )
+    }
+
+    private static func normalizedValue(_ raw: String) -> String {
+        raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func firstValidTurnURI(from uris: [String]) -> String? {
+        uris
+            .map { normalizedValue($0) }
+            .first { $0.hasPrefix("turn:") || $0.hasPrefix("turns:") }
     }
 }
 
@@ -167,8 +182,22 @@ private actor CrossNetworkTURNCredentialService {
 
     private func fallback() -> TURNCredentials {
         // Safe fallback: do not embed secrets in the app.
-        let username = ProcessInfo.processInfo.environment["SKYBRIDGE_TURN_USERNAME"] ?? "skybridge"
-        let password = ProcessInfo.processInfo.environment["SKYBRIDGE_TURN_PASSWORD"] ?? ""
+        let username = (ProcessInfo.processInfo.environment["SKYBRIDGE_TURN_USERNAME"] ?? "skybridge")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let password = (ProcessInfo.processInfo.environment["SKYBRIDGE_TURN_PASSWORD"] ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !username.isEmpty, !password.isEmpty else {
+            logger.warning("⚠️ TURN fallback credentials incomplete, will use STUN-only.")
+            return TURNCredentials(
+                username: "",
+                password: "",
+                ttl: 3600,
+                uris: [],
+                expiresAt: Date().addingTimeInterval(3600)
+            )
+        }
+
         return TURNCredentials(
             username: username,
             password: password,

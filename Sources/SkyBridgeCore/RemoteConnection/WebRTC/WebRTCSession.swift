@@ -83,6 +83,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     }
     
     private let logger = Logger(subsystem: "com.skybridge.webrtc", category: "WebRTCSession")
+    private static let publicFallbackSTUNURL = "stun:stun.l.google.com:19302"
     
     public let sessionId: String
     public let localDeviceId: String
@@ -141,6 +142,52 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     deinit {
         close()
     }
+
+    private static func normalizedICEURL(_ raw: String) -> String? {
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return nil }
+        if value.hasPrefix("stun:") || value.hasPrefix("turn:") || value.hasPrefix("turns:") {
+            return value
+        }
+        return nil
+    }
+
+    private static func normalizedCredential(_ raw: String) -> String {
+        raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+#if canImport(WebRTC)
+    private func buildIceServers() -> [RTCIceServer] {
+        var servers: [RTCIceServer] = []
+
+        if let stunURL = Self.normalizedICEURL(ice.stunURL), stunURL.hasPrefix("stun:") {
+            servers.append(RTCIceServer(urlStrings: [stunURL]))
+        } else {
+            logger.warning("⚠️ Invalid STUN URL. sessionId=\(self.sessionId, privacy: .public)")
+        }
+
+        let turnURL = Self.normalizedICEURL(ice.turnURL)
+        let turnUsername = Self.normalizedCredential(ice.turnUsername)
+        let turnPassword = Self.normalizedCredential(ice.turnPassword)
+
+        if let turnURL, (turnURL.hasPrefix("turn:") || turnURL.hasPrefix("turns:")) {
+            if !turnUsername.isEmpty, !turnPassword.isEmpty {
+                servers.append(RTCIceServer(urlStrings: [turnURL], username: turnUsername, credential: turnPassword))
+            } else {
+                logger.warning("⚠️ TURN credentials missing, degraded to STUN-only. sessionId=\(self.sessionId, privacy: .public)")
+            }
+        } else if !ice.turnURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            logger.warning("⚠️ Invalid TURN URL. sessionId=\(self.sessionId, privacy: .public)")
+        }
+
+        if servers.isEmpty {
+            servers.append(RTCIceServer(urlStrings: [Self.publicFallbackSTUNURL]))
+            logger.warning("⚠️ No valid ICE servers, fallback to public STUN. sessionId=\(self.sessionId, privacy: .public)")
+        }
+
+        return servers
+    }
+#endif
     
     public func start() throws {
         guard !isClosed else { throw WebRTCError.alreadyClosed }
@@ -153,11 +200,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         let config = RTCConfiguration()
         config.sdpSemantics = .unifiedPlan
         config.continualGatheringPolicy = .gatherContinually
-        
-        // ICE servers: STUN + TURN
-        let stun = RTCIceServer(urlStrings: [ice.stunURL])
-        let turn = RTCIceServer(urlStrings: [ice.turnURL], username: ice.turnUsername, credential: ice.turnPassword)
-        config.iceServers = [stun, turn]
+        config.iceServers = buildIceServers()
         
         let constraints = RTCMediaConstraints(
             mandatoryConstraints: nil,
@@ -165,6 +208,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         )
         
         guard let pc = factory.peerConnection(with: config, constraints: constraints, delegate: self) else {
+            logger.error("❌ RTCPeerConnection creation failed: sessionId=\(self.sessionId, privacy: .public) iceServerCount=\(config.iceServers.count, privacy: .public)")
             sslHeld = false
             WebRTCSSL.release()
             throw WebRTCError.peerConnectionCreationFailed
