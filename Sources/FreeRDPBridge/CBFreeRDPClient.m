@@ -7,29 +7,62 @@
 #import <CoreMedia/CoreMedia.h>
 #import <sys/sysctl.h>
 #import <sys/utsname.h>
+#import <string.h>
 
 // FreeRDP 核心结构体和函数指针定义
 typedef struct _freerdp freerdp;
 typedef struct _rdpContext rdpContext;
 typedef struct _rdpSettings rdpSettings;
 typedef struct _rdpGdi rdpGdi;
+typedef struct _rdpInput rdpInput;
 
 // FreeRDP 函数指针类型定义 (基于 FreeRDP 3.x API)
 typedef const char *(*freerdp_version_string_fn)(void);
 typedef freerdp *(*freerdp_new_fn)(void);
 typedef void (*freerdp_free_fn)(freerdp *instance);
+typedef BOOL (*freerdp_context_new_fn)(freerdp *instance);
 typedef BOOL (*freerdp_connect_fn)(freerdp *instance);
 typedef BOOL (*freerdp_disconnect_fn)(freerdp *instance);
-typedef rdpSettings *(*freerdp_get_settings_fn)(freerdp *instance);
-typedef BOOL (*freerdp_set_connection_type_fn)(freerdp *instance, uint32_t type);
-typedef void (*freerdp_input_send_mouse_event_fn)(rdpContext *context, uint16_t flags, uint16_t x, uint16_t y);
-typedef void (*freerdp_input_send_keyboard_event_fn)(rdpContext *context, uint16_t flags, uint16_t code);
+typedef BOOL (*freerdp_set_connection_type_fn)(rdpSettings *settings, uint32_t type);
+typedef BOOL (*freerdp_input_send_mouse_event_fn)(rdpInput *input, uint16_t flags, uint16_t x, uint16_t y);
+typedef BOOL (*freerdp_input_send_keyboard_event_fn)(rdpInput *input, uint16_t flags, uint8_t code);
 
 // FreeRDP 3.x 新增设置 API
 typedef BOOL (*freerdp_settings_set_uint32_fn)(rdpSettings *settings, size_t id, uint32_t value);
 typedef BOOL (*freerdp_settings_set_string_fn)(rdpSettings *settings, size_t id, const char *value);
 typedef BOOL (*freerdp_settings_get_uint32_fn)(rdpSettings *settings, size_t id, uint32_t *value);
 typedef const char *(*freerdp_settings_get_string_fn)(rdpSettings *settings, size_t id);
+
+_Static_assert(sizeof(void *) == 8, "CBFreeRDPClient requires 64-bit pointer layout");
+
+enum {
+    CBRDPInstanceSlotContext = 0,
+    CBRDPContextSlotInput = 38,
+    CBRDPContextSlotSettings = 40
+};
+
+static void *CBReadPointerSlot(const void *base, size_t slot) {
+    if (!base) {
+        return NULL;
+    }
+    void *value = NULL;
+    memcpy(&value, ((const uint8_t *)base) + (slot * sizeof(void *)), sizeof(void *));
+    return value;
+}
+
+static rdpContext *CBGetContextFromInstance(freerdp *instance) {
+    return (rdpContext *)CBReadPointerSlot(instance, CBRDPInstanceSlotContext);
+}
+
+static rdpInput *CBGetInputFromInstance(freerdp *instance) {
+    rdpContext *context = CBGetContextFromInstance(instance);
+    return (rdpInput *)CBReadPointerSlot(context, CBRDPContextSlotInput);
+}
+
+static rdpSettings *CBGetSettingsFromInstance(freerdp *instance) {
+    rdpContext *context = CBGetContextFromInstance(instance);
+    return (rdpSettings *)CBReadPointerSlot(context, CBRDPContextSlotSettings);
+}
 
 // Apple Silicon 优化的硬件编解码器支持 (macOS 13+ with VideoToolbox)
 typedef struct {
@@ -53,9 +86,9 @@ static os_log_t CBFreeRDPLogger;
     freerdp_version_string_fn _versionString;
     freerdp_new_fn _clientNew;
     freerdp_free_fn _clientFree;
+    freerdp_context_new_fn _contextNew;
     freerdp_connect_fn _clientConnect;
     freerdp_disconnect_fn _clientDisconnect;
-    freerdp_get_settings_fn _getSettings;
     freerdp_set_connection_type_fn _setConnectionType;
     freerdp_input_send_mouse_event_fn _sendMouseEvent;
     freerdp_input_send_keyboard_event_fn _sendKeyboardEvent;
@@ -393,15 +426,13 @@ static void videoToolboxDecompressionCallback(
     
     os_log_info(CBFreeRDPLogger, "🚀 配置Apple Silicon优化设置");
     
- // 获取FreeRDP设置（如果可用）
-    if (_getSettings) {
-        rdpSettings *settings = _getSettings(_connectionRef);
-        if (settings) {
+ // 获取 FreeRDP 设置（通过运行时结构槽位访问）
+    rdpSettings *settings = [self currentSettings];
+    if (settings) {
  // 这里可以配置Apple Silicon特定的优化设置
  // 由于FreeRDP设置结构体的具体字段可能因版本而异，
  // 我们使用日志记录配置过程
-            os_log_info(CBFreeRDPLogger, "⚙️ Apple Silicon优化设置已应用");
-        }
+        os_log_info(CBFreeRDPLogger, "⚙️ Apple Silicon优化设置已应用");
     }
     
  // 配置硬件解码器优先级
@@ -440,6 +471,18 @@ static void videoToolboxDecompressionCallback(
         if (!strongSelf.connectionRef) {
             strongSelf.state = CBFreeRDPClientStateFailed;
             [strongSelf notifyState:@"无法创建 FreeRDP 客户端上下文"];
+            return;
+        }
+
+        if (![strongSelf ensureContextReady]) {
+            strongSelf.state = CBFreeRDPClientStateFailed;
+            [strongSelf notifyState:@"FreeRDP 上下文初始化失败"];
+            return;
+        }
+
+        if (![strongSelf applyConnectionIdentitySettings]) {
+            strongSelf.state = CBFreeRDPClientStateFailed;
+            [strongSelf notifyState:@"FreeRDP 连接参数写入失败"];
             return;
         }
 
@@ -488,13 +531,17 @@ static void videoToolboxDecompressionCallback(
                        buttonMask:(uint16_t)mask
 {
     os_log_debug(CBFreeRDPLogger, "Pointer event (%u, %u) mask %u", x, y, mask);
-    
- // FreeRDP 需要 rdpContext，从 freerdp 实例获取
+
     if (_sendMouseEvent && self.connectionRef) {
- // 注意：freerdp 实例包含 context 字段，需要正确转换
- // 这里使用简化的实现，实际需要访问 freerdp->context
-        rdpContext *context = (rdpContext *)((char *)self.connectionRef + 0);  // 需要根据实际结构调整
-        _sendMouseEvent(context, x, y, mask);
+        rdpInput *input = CBGetInputFromInstance(self.connectionRef);
+        if (!input) {
+            os_log_error(CBFreeRDPLogger, "❌ Pointer event dropped: rdpInput unavailable");
+            return;
+        }
+        const BOOL ok = _sendMouseEvent(input, mask, x, y);
+        if (!ok) {
+            os_log_error(CBFreeRDPLogger, "❌ Pointer event send failed");
+        }
     }
 }
 
@@ -502,15 +549,89 @@ static void videoToolboxDecompressionCallback(
                                 down:(BOOL)down
 {
     os_log_debug(CBFreeRDPLogger, "Keyboard event code %u down %d", code, down);
-    
- // FreeRDP 需要 rdpContext
+
     if (_sendKeyboardEvent && self.connectionRef) {
-        rdpContext *context = (rdpContext *)((char *)self.connectionRef + 0);  // 需要根据实际结构调整
-        _sendKeyboardEvent(context, code, down);
+        rdpInput *input = CBGetInputFromInstance(self.connectionRef);
+        if (!input) {
+            os_log_error(CBFreeRDPLogger, "❌ Keyboard event dropped: rdpInput unavailable");
+            return;
+        }
+        const uint16_t flags = down ? KBD_FLAGS_DOWN : KBD_FLAGS_RELEASE;
+        const BOOL ok = _sendKeyboardEvent(input, flags, (uint8_t)(code & 0xFF));
+        if (!ok) {
+            os_log_error(CBFreeRDPLogger, "❌ Keyboard event send failed");
+        }
     }
 }
 
 #pragma mark - Helpers
+
+- (BOOL)ensureContextReady
+{
+    if (!self.connectionRef) {
+        return NO;
+    }
+
+    if (CBGetContextFromInstance(self.connectionRef)) {
+        return YES;
+    }
+
+    if (!_contextNew) {
+        os_log_error(CBFreeRDPLogger, "❌ freerdp_context_new symbol unavailable");
+        return NO;
+    }
+
+    if (!_contextNew(self.connectionRef)) {
+        os_log_error(CBFreeRDPLogger, "❌ freerdp_context_new failed");
+        return NO;
+    }
+
+    if (!CBGetContextFromInstance(self.connectionRef)) {
+        os_log_error(CBFreeRDPLogger, "❌ FreeRDP context remains NULL after initialization");
+        return NO;
+    }
+
+    return YES;
+}
+
+- (rdpSettings *)currentSettings
+{
+    if (!self.connectionRef) {
+        return NULL;
+    }
+    return CBGetSettingsFromInstance(self.connectionRef);
+}
+
+- (BOOL)applyConnectionIdentitySettings
+{
+    if (!_settingsSetString || !_settingsSetUint32) {
+        os_log_error(CBFreeRDPLogger, "❌ Required FreeRDP settings APIs unavailable");
+        return NO;
+    }
+
+    rdpSettings *settings = [self currentSettings];
+    if (!settings) {
+        os_log_error(CBFreeRDPLogger, "❌ Unable to resolve rdpSettings from context");
+        return NO;
+    }
+
+    BOOL ok = TRUE;
+    ok = ok && _settingsSetString(settings, FreeRDP_ServerHostname, self.targetHost.UTF8String);
+    ok = ok && _settingsSetUint32(settings, FreeRDP_ServerPort, (uint32_t)self.targetPort);
+    ok = ok && _settingsSetString(settings, FreeRDP_Username, self.username.UTF8String);
+    ok = ok && _settingsSetString(settings, FreeRDP_Password, self.password.UTF8String);
+
+    if (self.domain.length > 0) {
+        ok = ok && _settingsSetString(settings, FreeRDP_Domain, self.domain.UTF8String);
+    }
+
+    if (!ok) {
+        os_log_error(CBFreeRDPLogger, "❌ Failed to apply one or more connection identity settings");
+        return NO;
+    }
+
+    return YES;
+}
 
 - (void)notifyState:(NSString *)description
 {
@@ -527,8 +648,12 @@ static void videoToolboxDecompressionCallback(
     }
 
     NSArray<NSString *> *candidatePaths = @[
-        @"/usr/local/lib/libfreerdp2.dylib",
+        @"/opt/homebrew/lib/libfreerdp3.dylib",
+        @"/usr/local/lib/libfreerdp3.dylib",
+        @"/usr/lib/libfreerdp3.dylib",
+        @"libfreerdp3.dylib",
         @"/opt/homebrew/lib/libfreerdp2.dylib",
+        @"/usr/local/lib/libfreerdp2.dylib",
         @"/usr/lib/libfreerdp2.dylib",
         @"libfreerdp2.dylib"
     ];
@@ -542,7 +667,7 @@ static void videoToolboxDecompressionCallback(
     }
 
     if (!_libraryHandle) {
-        os_log_error(CBFreeRDPLogger, "❌ 无法加载 libfreerdp2.dylib - RDP 远程桌面功能不可用");
+        os_log_error(CBFreeRDPLogger, "❌ 无法加载 libfreerdp3/libfreerdp2 动态库 - RDP 远程桌面功能不可用");
         if (error) {
  // 提供详细的安装说明
             NSString *installGuide = @"远程桌面 (RDP) 功能需要 FreeRDP 库支持。\n\n"
@@ -558,7 +683,7 @@ static void videoToolboxDecompressionCallback(
             NSDictionary *userInfo = @{
                 NSLocalizedDescriptionKey: @"RDP 远程桌面功能暂不可用",
                 NSLocalizedRecoverySuggestionErrorKey: installGuide,
-                NSLocalizedFailureReasonErrorKey: @"未找到 libfreerdp2.dylib 库文件",
+                NSLocalizedFailureReasonErrorKey: @"未找到 libfreerdp3.dylib 或 libfreerdp2.dylib 库文件",
                 @"InstallCommand": @"brew install freerdp",
                 @"AlternativeFeatures": @[@"VNC", @"SSH", @"UltraStream"]
             };
@@ -572,9 +697,9 @@ static void videoToolboxDecompressionCallback(
     _versionString = (freerdp_version_string_fn)dlsym(_libraryHandle, "freerdp_get_version_string");
     _clientNew = (freerdp_new_fn)dlsym(_libraryHandle, "freerdp_new");
     _clientFree = (freerdp_free_fn)dlsym(_libraryHandle, "freerdp_free");
+    _contextNew = (freerdp_context_new_fn)dlsym(_libraryHandle, "freerdp_context_new");
     _clientConnect = (freerdp_connect_fn)dlsym(_libraryHandle, "freerdp_connect");
     _clientDisconnect = (freerdp_disconnect_fn)dlsym(_libraryHandle, "freerdp_disconnect");
-    _getSettings = (freerdp_get_settings_fn)dlsym(_libraryHandle, "freerdp_settings_get_pointer");
     _setConnectionType = (freerdp_set_connection_type_fn)dlsym(_libraryHandle, "freerdp_set_connection_type");
     
  // FreeRDP 3.x 新增设置 API
@@ -592,14 +717,17 @@ static void videoToolboxDecompressionCallback(
     if (!_versionString) [missingSymbols addObject:@"freerdp_get_version_string"];
     if (!_clientNew) [missingSymbols addObject:@"freerdp_new"];
     if (!_clientFree) [missingSymbols addObject:@"freerdp_free"];
+    if (!_contextNew) [missingSymbols addObject:@"freerdp_context_new"];
     if (!_clientConnect) [missingSymbols addObject:@"freerdp_connect"];
     if (!_clientDisconnect) [missingSymbols addObject:@"freerdp_disconnect"];
+    if (!_settingsSetUint32) [missingSymbols addObject:@"freerdp_settings_set_uint32"];
+    if (!_settingsSetString) [missingSymbols addObject:@"freerdp_settings_set_string"];
     
     if (missingSymbols.count > 0) {
         os_log_error(CBFreeRDPLogger, "❌ FreeRDP 基础函数符号缺失: %{public}@", [missingSymbols componentsJoinedByString:@", "]);
         if (error) {
             NSDictionary *userInfo = @{
-                NSLocalizedDescriptionKey: [NSString stringWithFormat:@"libfreerdp2.dylib 缺少必要的导出符号: %@", [missingSymbols componentsJoinedByString:@", "]],
+                NSLocalizedDescriptionKey: [NSString stringWithFormat:@"FreeRDP 动态库缺少必要的导出符号: %@", [missingSymbols componentsJoinedByString:@", "]],
                 @"MissingSymbols": missingSymbols
             };
  *error = [NSError errorWithDomain:@"com.skybridge.compass.freerdp"
@@ -626,10 +754,8 @@ static void videoToolboxDecompressionCallback(
         }
     }
     
- // 设置 API 为可选（FreeRDP 2.x 可能不支持）
+ // 设置 API 为可选（读取路径可降级），写入路径在连接时会做强校验
     NSMutableArray<NSString *> *optionalMissing = [NSMutableArray array];
-    if (!_settingsSetUint32) [optionalMissing addObject:@"freerdp_settings_set_uint32"];
-    if (!_settingsSetString) [optionalMissing addObject:@"freerdp_settings_set_string"];
     if (!_settingsGetUint32) [optionalMissing addObject:@"freerdp_settings_get_uint32"];
     if (!_settingsGetString) [optionalMissing addObject:@"freerdp_settings_get_string"];
     
@@ -647,7 +773,7 @@ static void videoToolboxDecompressionCallback(
         os_log_info(CBFreeRDPLogger, "⚠️ freerdp_input_send_keyboard_event 不可用，键盘输入可能受限");
     }
 
-    os_log_info(CBFreeRDPLogger, "✅ libfreerdp2.dylib 加载成功，符号验证通过");
+    os_log_info(CBFreeRDPLogger, "✅ libfreerdp 动态库加载成功，符号验证通过");
     return YES;
 }
 
@@ -671,7 +797,7 @@ static void videoToolboxDecompressionCallback(
         return;
     }
     
-    rdpSettings *settings = _getSettings ? _getSettings(_connectionRef) : NULL;
+    rdpSettings *settings = [self currentSettings];
     if (!settings) {
         os_log_error(CBFreeRDPLogger, "❌ 无法获取 FreeRDP 设置对象");
         return;
@@ -758,7 +884,7 @@ static void videoToolboxDecompressionCallback(
         return;
     }
     
-    rdpSettings *settings = _getSettings ? _getSettings(_connectionRef) : NULL;
+    rdpSettings *settings = [self currentSettings];
     if (!settings) {
         os_log_error(CBFreeRDPLogger, "❌ 无法获取 FreeRDP 设置对象");
         return;
@@ -766,27 +892,41 @@ static void videoToolboxDecompressionCallback(
     
     os_log_info(CBFreeRDPLogger, "🌐 开始配置网络设置");
     
- // 连接类型设置
-    NSString *connectionType = networkSettings[@"connectionType"];
-    if (connectionType && _setConnectionType) {
+ // 连接类型设置（兼容 Swift RawValue + 旧枚举）
+    id connectionTypeRaw = networkSettings[@"connectionType"];
+    if (connectionTypeRaw && _setConnectionType) {
         uint32_t type = CONNECTION_TYPE_AUTODETECT;
-        
-        if ([connectionType isEqualToString:@"modem"]) {
-            type = CONNECTION_TYPE_MODEM;
-        } else if ([connectionType isEqualToString:@"broadband_low"]) {
-            type = CONNECTION_TYPE_BROADBAND_LOW;
-        } else if ([connectionType isEqualToString:@"satellite"]) {
-            type = CONNECTION_TYPE_SATELLITE;
-        } else if ([connectionType isEqualToString:@"broadband_high"]) {
-            type = CONNECTION_TYPE_BROADBAND_HIGH;
-        } else if ([connectionType isEqualToString:@"wan"]) {
-            type = CONNECTION_TYPE_WAN;
-        } else if ([connectionType isEqualToString:@"lan"]) {
-            type = CONNECTION_TYPE_LAN;
+        NSString *connectionType = nil;
+
+        if ([connectionTypeRaw isKindOfClass:[NSNumber class]]) {
+            type = (uint32_t)[(NSNumber *)connectionTypeRaw unsignedIntegerValue];
+            connectionType = [(NSNumber *)connectionTypeRaw stringValue];
+        } else if ([connectionTypeRaw isKindOfClass:[NSString class]]) {
+            connectionType = [(NSString *)connectionTypeRaw lowercaseString];
+            if ([connectionType isEqualToString:@"modem"]) {
+                type = CONNECTION_TYPE_MODEM;
+            } else if ([connectionType isEqualToString:@"broadband_low"] || [connectionType isEqualToString:@"mobile"]) {
+                type = CONNECTION_TYPE_BROADBAND_LOW;
+            } else if ([connectionType isEqualToString:@"satellite"]) {
+                type = CONNECTION_TYPE_SATELLITE;
+            } else if ([connectionType isEqualToString:@"broadband_high"]) {
+                type = CONNECTION_TYPE_BROADBAND_HIGH;
+            } else if ([connectionType isEqualToString:@"wan"]) {
+                type = CONNECTION_TYPE_WAN;
+            } else if ([connectionType isEqualToString:@"lan"]) {
+                type = CONNECTION_TYPE_LAN;
+            } else if ([connectionType isEqualToString:@"auto"]) {
+                type = CONNECTION_TYPE_AUTODETECT;
+            }
         }
-        
-        _setConnectionType(_connectionRef, type);
-        os_log_info(CBFreeRDPLogger, "✅ 连接类型: %@ (type=%u)", connectionType, type);
+
+        if (!_setConnectionType(settings, type)) {
+            os_log_error(CBFreeRDPLogger, "❌ 连接类型设置失败: %{public}@ (type=%u)",
+                        connectionType ?: @"(unknown)", type);
+        } else {
+            os_log_info(CBFreeRDPLogger, "✅ 连接类型: %{public}@ (type=%u)",
+                       connectionType ?: @"(unknown)", type);
+        }
     }
     
  // 缓存优化 (Apple Silicon 特定)
