@@ -13,6 +13,7 @@ import Foundation
 import Network
 import OSLog
 import CryptoKit
+import Security
 import Metal
 import ScreenCaptureKit
 import VideoToolbox
@@ -278,37 +279,119 @@ fileprivate struct UltraStreamHeader {
     
     init?(data: Data) {
         guard data.count >= UltraStreamHeader.length else { return nil }
-        
-        func read<T>(_ type: T.Type, _ offset: inout Int) -> T {
-            let size = MemoryLayout<T>.size
-            let range = offset ..< (offset + size)
-            let value = data[range].withUnsafeBytes { $0.load(as: T.self) }
-            offset += size
-            return value
+
+        var magic: UInt32 = 0
+        var ver: UInt8 = 0
+        var flagRaw: UInt8 = 0
+        var codec: UInt8 = 0
+        var reservedByte: UInt8 = 0
+        var frameIdBE: UInt32 = 0
+        var timestampBE: UInt32 = 0
+        var widthBE: UInt16 = 0
+        var heightBE: UInt16 = 0
+        var chunkIndexBE: UInt16 = 0
+        var chunkCountBE: UInt16 = 0
+        var payloadLengthBE: UInt32 = 0
+
+        data.withUnsafeBytes { raw in
+            let magicBE = raw.loadUnaligned(fromByteOffset: 0, as: UInt32.self)
+            magic = UInt32(bigEndian: magicBE)
+
+            ver = raw.load(fromByteOffset: 4, as: UInt8.self)
+            flagRaw = raw.load(fromByteOffset: 5, as: UInt8.self)
+            codec = raw.load(fromByteOffset: 6, as: UInt8.self)
+            reservedByte = raw.load(fromByteOffset: 7, as: UInt8.self)
+
+            frameIdBE = raw.loadUnaligned(fromByteOffset: 8, as: UInt32.self)
+            timestampBE = raw.loadUnaligned(fromByteOffset: 12, as: UInt32.self)
+            widthBE = raw.loadUnaligned(fromByteOffset: 16, as: UInt16.self)
+            heightBE = raw.loadUnaligned(fromByteOffset: 18, as: UInt16.self)
+            chunkIndexBE = raw.loadUnaligned(fromByteOffset: 20, as: UInt16.self)
+            chunkCountBE = raw.loadUnaligned(fromByteOffset: 22, as: UInt16.self)
+            payloadLengthBE = raw.loadUnaligned(fromByteOffset: 24, as: UInt32.self)
         }
-        
-        var offset = 0
-        let magicBE: UInt32 = read(UInt32.self, &offset)
-        let magic = UInt32(bigEndian: magicBE)
+
         guard magic == UltraStreamHeader.magic else { return nil }
-        
-        let ver: UInt8 = read(UInt8.self, &offset)
+        guard ver == UltraStreamHeader.versionCurrent else { return nil }
+
         version = ver
-        
-        let flagRaw: UInt8 = read(UInt8.self, &offset)
         flags = UltraStreamFlags(rawValue: flagRaw)
-        
-        let codec: UInt8 = read(UInt8.self, &offset)
         codecRaw = codec
-        
-        reserved = read(UInt8.self, &offset)
-        frameId = UInt32(bigEndian: read(UInt32.self, &offset))
-        timestampMs = UInt32(bigEndian: read(UInt32.self, &offset))
-        width = UInt16(bigEndian: read(UInt16.self, &offset))
-        height = UInt16(bigEndian: read(UInt16.self, &offset))
-        chunkIndex = UInt16(bigEndian: read(UInt16.self, &offset))
-        chunkCount = UInt16(bigEndian: read(UInt16.self, &offset))
-        payloadLength = UInt32(bigEndian: read(UInt32.self, &offset))
+        reserved = reservedByte
+        frameId = UInt32(bigEndian: frameIdBE)
+        timestampMs = UInt32(bigEndian: timestampBE)
+        width = UInt16(bigEndian: widthBE)
+        height = UInt16(bigEndian: heightBE)
+        chunkIndex = UInt16(bigEndian: chunkIndexBE)
+        chunkCount = UInt16(bigEndian: chunkCountBE)
+        payloadLength = UInt32(bigEndian: payloadLengthBE)
+    }
+}
+
+// MARK: - 握手负载（AEAD 加密）
+
+@available(macOS 26.0, *)
+fileprivate struct UltraStreamHandshakePayload {
+    static let magic: UInt32 = 0x55534831 // ASCII "USH1"
+    static let versionCurrent: UInt8 = 1
+    static let nonceSize: Int = 16
+    static let encodedLength: Int = 4 + 1 + 8 + nonceSize
+
+    let timestampMs: UInt64
+    let nonce: Data
+
+    init(timestampMs: UInt64, nonce: Data) {
+        self.timestampMs = timestampMs
+        self.nonce = nonce
+    }
+
+    static func makeRandom() throws -> UltraStreamHandshakePayload {
+        var nonce = Data(count: nonceSize)
+        let status = nonce.withUnsafeMutableBytes { buffer -> OSStatus in
+            guard let base = buffer.baseAddress else { return errSecParam }
+            return SecRandomCopyBytes(kSecRandomDefault, nonceSize, base)
+        }
+        guard status == errSecSuccess else {
+            throw UltraStreamError.internalError("SecRandomCopyBytes failed: \(status)")
+        }
+        let ts = UInt64(Date().timeIntervalSince1970 * 1000.0)
+        return UltraStreamHandshakePayload(timestampMs: ts, nonce: nonce)
+    }
+
+    func encode() -> Data {
+        var data = Data(capacity: Self.encodedLength)
+
+        var magicBE = Self.magic.bigEndian
+        withUnsafeBytes(of: &magicBE) { data.append(contentsOf: $0) }
+
+        data.append(Self.versionCurrent)
+
+        var tsBE = timestampMs.bigEndian
+        withUnsafeBytes(of: &tsBE) { data.append(contentsOf: $0) }
+
+        data.append(nonce)
+        return data
+    }
+
+    init?(data: Data) {
+        guard data.count == Self.encodedLength else { return nil }
+        var magic: UInt32 = 0
+        var ver: UInt8 = 0
+        var ts: UInt64 = 0
+        data.withUnsafeBytes { raw in
+            let magicBE = raw.loadUnaligned(fromByteOffset: 0, as: UInt32.self)
+            magic = UInt32(bigEndian: magicBE)
+
+            ver = raw.load(fromByteOffset: 4, as: UInt8.self)
+
+            let tsBE = raw.loadUnaligned(fromByteOffset: 5, as: UInt64.self)
+            ts = UInt64(bigEndian: tsBE)
+        }
+        guard magic == Self.magic else { return nil }
+        guard ver == Self.versionCurrent else { return nil }
+        timestampMs = ts
+
+        nonce = data.subdata(in: 13..<13 + Self.nonceSize)
     }
 }
 
@@ -390,6 +473,7 @@ public final class UltraStreamSender {
     private var startTime: Date = Date()
     private var running = false
     private let sendQueue = DispatchQueue(label: "com.skybridge.ultrastream.sender")
+    private var handshakeTask: Task<Void, Never>?
     
  /// - Parameters:
  /// - host: 对端主机（IPv4/IPv6）
@@ -438,6 +522,8 @@ public final class UltraStreamSender {
         }
         
         connection.start(queue: sendQueue)
+
+        startHandshakeBurst()
         
  // 绑定编码回调 -> UltraStream 发送
         captureStreamer.onEncodedFrame = { [weak self] data, w, h, type in
@@ -470,9 +556,70 @@ public final class UltraStreamSender {
     public func stop() {
         guard running else { return }
         running = false
+        handshakeTask?.cancel()
+        handshakeTask = nil
         captureStreamer.stop()
         connection.cancel()
         log.info("UltraStream Sender stopped")
+    }
+
+    private func startHandshakeBurst() {
+        handshakeTask?.cancel()
+        handshakeTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.sendHandshakePacket()
+
+            do {
+                try await Task.sleep(for: .milliseconds(200))
+            } catch {
+                return
+            }
+            guard self.running, !Task.isCancelled else { return }
+            self.sendHandshakePacket()
+
+            do {
+                try await Task.sleep(for: .milliseconds(400))
+            } catch {
+                return
+            }
+            guard self.running, !Task.isCancelled else { return }
+            self.sendHandshakePacket()
+        }
+    }
+
+    private func sendHandshakePacket() {
+        do {
+            let handshake = try UltraStreamHandshakePayload.makeRandom().encode()
+            let headerForAAD = UltraStreamHeader(
+                flags: [.handshake],
+                codecRaw: 0,
+                frameId: 0,
+                timestampMs: 0,
+                width: 0,
+                height: 0,
+                chunkIndex: 0,
+                chunkCount: 1,
+                payloadLength: 0
+            )
+            let aad = headerForAAD.aadData()
+            let cipher = try crypto.encrypt(plaintext: handshake, aad: aad)
+
+            let header = UltraStreamHeader(
+                flags: [.handshake],
+                codecRaw: 0,
+                frameId: 0,
+                timestampMs: 0,
+                width: 0,
+                height: 0,
+                chunkIndex: 0,
+                chunkCount: 1,
+                payloadLength: UInt32(cipher.count)
+            )
+            let packet = header.encode() + cipher
+            sendPacket(packet)
+        } catch {
+            log.error("UltraStream handshake send failed: \(error.localizedDescription)")
+        }
     }
     
  /// 处理编码后的单帧数据 -> 分片 + 加密 + 发送
@@ -642,17 +789,19 @@ public final class UltraStreamReceiver {
         
  // 启动帧清理定时器
         startFrameCleanupTimer()
+
+        receiveLoop()
         
  // 等待握手完成
         try await performHandshake()
-        
-        receiveLoop()
-        
+
         log.info("UltraStream Receiver started")
     }
     
  /// 执行握手（接收端等待发送端的握手包）
     private func performHandshake() async throws {
+        if case .completed = handshakeState { return }
+
         handshakeState = .inProgress
         
         return try await withCheckedThrowingContinuation { continuation in
@@ -668,6 +817,20 @@ public final class UltraStreamReceiver {
                 }
             }
         }
+    }
+
+    private func completeHandshake(source: String) {
+        if case .completed = handshakeState { return }
+        handshakeState = .completed
+        handshakeTimer?.invalidate()
+        handshakeTimer = nil
+
+        if let cont = handshakeContinuation {
+            handshakeContinuation = nil
+            cont.resume()
+        }
+
+        log.info("✅ UltraStream handshake completed (\(source, privacy: .public))")
     }
     
  /// 启动帧清理定时器（清理超时的帧重组状态）
@@ -686,26 +849,43 @@ public final class UltraStreamReceiver {
         }
     }
     
- /// 处理握手包
+    /// 处理握手包
     private func handleHandshakePacket(header: UltraStreamHeader, payload: Data) {
-        guard handshakeState == .inProgress else {
-            log.warning("收到握手包但状态不正确: \(self.handshakeState)")
+        if case .completed = handshakeState { return }
+
+        // 握手包必须为单包
+        guard header.chunkCount == 1, header.chunkIndex == 0 else {
+            log.error("UltraStream handshake packet invalid chunking: index=\(header.chunkIndex), count=\(header.chunkCount)")
             return
         }
-        
- // 解析握手消息（简化实现：payload 应包含服务器公钥或确认消息）
- // 这里可以解析握手消息，验证服务器身份等
- // 简化实现：直接接受握手
-        handshakeState = .completed
-        handshakeTimer?.invalidate()
-        handshakeTimer = nil
-        
-        if let cont = handshakeContinuation {
-            handshakeContinuation = nil
-            cont.resume()
+
+        let headerForAAD = UltraStreamHeader(
+            flags: header.flags,
+            codecRaw: header.codecRaw,
+            frameId: header.frameId,
+            timestampMs: header.timestampMs,
+            width: header.width,
+            height: header.height,
+            chunkIndex: 0,
+            chunkCount: header.chunkCount,
+            payloadLength: 0
+        )
+        let aad = headerForAAD.aadData()
+
+        let clear: Data
+        do {
+            clear = try crypto.decrypt(ciphertext: payload, aad: aad)
+        } catch {
+            log.warning("UltraStream handshake decrypt failed: \(error.localizedDescription)")
+            return
         }
-        
-        log.info("✅ UltraStream 握手完成")
+
+        guard UltraStreamHandshakePayload(data: clear) != nil else {
+            log.error("UltraStream handshake payload invalid")
+            return
+        }
+
+        completeHandshake(source: "packet")
     }
     
     public func stop() {
@@ -768,29 +948,37 @@ public final class UltraStreamReceiver {
             log.error("UltraStream invalid header")
             return
         }
-        
-        let payload = packet.subdata(in: UltraStreamHeader.length ..< UltraStreamHeader.length + Int(header.payloadLength))
+
+        let payloadLength = Int(header.payloadLength)
+        let payloadStart = UltraStreamHeader.length
+        let payloadEnd = payloadStart + payloadLength
+        guard payloadLength >= 0, payloadEnd <= packet.count else {
+            log.error("UltraStream payload length invalid: header=\(header.payloadLength), packetBytes=\(packet.count)")
+            return
+        }
+        let payload = packet.subdata(in: payloadStart..<payloadEnd)
         
  // 处理握手包
         if header.flags.contains(.handshake) {
             handleHandshakePacket(header: header, payload: payload)
             return
         }
+
+        if case .failed = handshakeState { return }
         
         guard let codec = UltraStreamConfig.Codec(rawValue: header.codecRaw) else {
             log.error("UltraStream unsupported codec: \(header.codecRaw)")
             return
         }
         
- // 检查握手状态
-        guard handshakeState == .completed else {
-            log.warning("收到数据包但握手未完成，忽略")
-            return
-        }
-        
         let frameId = header.frameId
         let totalChunks = Int(header.chunkCount)
         let chunkIndex = Int(header.chunkIndex)
+
+        guard totalChunks > 0, chunkIndex >= 0, chunkIndex < totalChunks else {
+            log.error("UltraStream invalid chunking: frameId=\(frameId), index=\(chunkIndex), count=\(totalChunks)")
+            return
+        }
         
  // 检查重复帧
         if let existing = assemblies[frameId], existing.receivedChunks[chunkIndex] != nil {
@@ -837,14 +1025,17 @@ public final class UltraStreamReceiver {
             clear = try crypto.decrypt(ciphertext: cipher, aad: aad)
         } catch {
             log.error("UltraStream decrypt failed: \(error.localizedDescription)")
- // 标记为损坏帧
-            NotificationCenter.default.post(
-                name: .ultraStreamFrameError,
-                object: nil,
-                userInfo: ["frameId": frameId, "error": UltraStreamError.frameCorrupted]
-            )
+            if case .completed = handshakeState {
+                NotificationCenter.default.post(
+                    name: .ultraStreamFrameError,
+                    object: nil,
+                    userInfo: ["frameId": frameId, "error": UltraStreamError.frameCorrupted]
+                )
+            }
             return
         }
+
+        completeHandshake(source: "frame")
         
  // 使用你的 RemoteFrameRenderer 做 VideoToolbox + Metal 解码渲染
         let frameType: RemoteFrameType = (codec == .hevc) ? .hevc : .h264

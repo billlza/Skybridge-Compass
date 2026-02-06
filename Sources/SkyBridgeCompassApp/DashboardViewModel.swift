@@ -327,7 +327,20 @@ final class DashboardViewModel: ObservableObject {
             let (baseStatus, p2pStatus, inboundCount, isTransferring) = baseTuple
             let (presenceConnections, rekeyStatusByPeerId) = presenceTuple
 
-            let unifiedConnected = unifiedDevices.filter { $0.connectionStatus == .connected && !$0.isLocalDevice }
+            // 统一“顶部连接态”与设备卡片语义：
+            // - 明确已连接(.connected)
+            // - 在线(.online)但带有最近握手/守护痕迹（避免把纯扫描到的设备误判为已连接）
+            let unifiedLinkedPeers = unifiedDevices.filter { device in
+                guard !device.isLocalDevice else { return false }
+                if device.connectionStatus == .connected { return true }
+                if device.connectionStatus == .online {
+                    return device.lastConnectedAt != nil ||
+                        device.lastCryptoKind != nil ||
+                        device.lastCryptoSuite != nil ||
+                        device.guardStatus != nil
+                }
+                return false
+            }
 
             // Detail string for UX: show crypto + guard when present.
             if let newest = presenceConnections.sorted(by: { $0.connectedAt > $1.connectedAt }).first {
@@ -336,7 +349,7 @@ final class DashboardViewModel: ObservableObject {
                 } else {
                     self.connectionDetail = "\(newest.cryptoKind) · \(newest.suite) · 守护中"
                 }
-            } else if let newestUnified = unifiedConnected.sorted(by: { ($0.lastConnectedAt ?? .distantPast) > ($1.lastConnectedAt ?? .distantPast) }).first {
+            } else if let newestUnified = unifiedLinkedPeers.sorted(by: { ($0.lastConnectedAt ?? .distantPast) > ($1.lastConnectedAt ?? .distantPast) }).first {
                 let kind = newestUnified.lastCryptoKind ?? "Classic"
                 let suite = newestUnified.lastCryptoSuite ?? "X25519"
                 let guardStatus = newestUnified.guardStatus ?? "守护中"
@@ -354,7 +367,7 @@ final class DashboardViewModel: ObservableObject {
                 self.connectionStatus = .connected
                 return
             }
-            if !unifiedConnected.isEmpty {
+            if !unifiedLinkedPeers.isEmpty {
                 self.connectionStatus = .connected
                 return
             }

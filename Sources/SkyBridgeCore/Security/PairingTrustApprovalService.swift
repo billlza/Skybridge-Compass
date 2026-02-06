@@ -54,6 +54,18 @@ public final class PairingTrustApprovalService: ObservableObject {
     
     /// Current pending request (drives UI sheet).
     @Published public private(set) var pendingRequest: Request?
+
+    /// Decision selected for the current pending request (set after user action).
+    @Published public private(set) var pendingDecision: Decision?
+
+    /// 6-digit SAS verification code derived from the current session's transcript hash.
+    @Published public private(set) var pendingVerificationCode: String?
+
+    /// Negotiated suite for which `pendingVerificationCode` was derived.
+    @Published public private(set) var pendingVerificationSuite: String?
+
+    /// Last time the verification fields were updated (best-effort).
+    @Published public private(set) var pendingVerificationUpdatedAt: Date?
     
     private let logger = Logger(subsystem: "com.skybridge.compass", category: "PairingTrustApproval")
     private let policyKey = "com.skybridge.pairingTrust.policy.v1"
@@ -103,7 +115,11 @@ public final class PairingTrustApprovalService: ObservableObject {
             logger.warning("Pairing request ignored because another prompt is pending. deviceId=\(deviceId, privacy: .public)")
             return .reject
         }
-        
+
+        pendingDecision = nil
+        pendingVerificationCode = nil
+        pendingVerificationSuite = nil
+        pendingVerificationUpdatedAt = nil
         pendingRequest = request
         logger.info("🔔 Pairing/trust approval required: name=\(request.displayName, privacy: .public) deviceId=\(deviceId, privacy: .public)")
         
@@ -112,12 +128,32 @@ public final class PairingTrustApprovalService: ObservableObject {
         }
     }
     
+    /// Update the transcript-bound pairing verification code for the current prompt (if it matches the declared deviceId).
+    public func updateVerificationCode(declaredDeviceId: String, sessionKeys: SessionKeys) {
+        guard let req = pendingRequest, req.declaredDeviceId == declaredDeviceId else { return }
+        pendingVerificationCode = sessionKeys.pairingVerificationCode()
+        pendingVerificationSuite = sessionKeys.negotiatedSuite.rawValue
+        pendingVerificationUpdatedAt = Date()
+    }
+
+    /// Called when the user dismisses the sheet (ESC/click outside/close button).
+    /// If the request hasn't been resolved yet, treat dismissal as `reject`.
+    public func userDismissedCurrentPrompt() {
+        guard let req = pendingRequest else { return }
+        if continuationByRequestId[req.id] != nil {
+            resolve(req, decision: .reject)
+            return
+        }
+
+        pendingRequest = nil
+        pendingDecision = nil
+        pendingVerificationCode = nil
+        pendingVerificationSuite = nil
+        pendingVerificationUpdatedAt = nil
+    }
+
     /// Resolve a pending request from UI.
     public func resolve(_ request: Request, decision: Decision) {
-        defer {
-            pendingRequest = nil
-        }
-        
         if decision == .alwaysAllow || decision == .reject {
             policyByDeviceId[request.declaredDeviceId] = decision.rawValue
             savePolicy()
@@ -126,9 +162,20 @@ public final class PairingTrustApprovalService: ObservableObject {
         if let cont = continuationByRequestId.removeValue(forKey: request.id) {
             cont.resume(returning: decision)
         }
-        
+
+        pendingDecision = decision
+
+        // For allow decisions, keep the sheet open so we can surface the transcript-bound SAS code
+        // after the follow-up (rekey) handshake completes. The user dismisses the sheet manually.
+        if decision == .reject {
+            pendingRequest = nil
+            pendingDecision = nil
+            pendingVerificationCode = nil
+            pendingVerificationSuite = nil
+            pendingVerificationUpdatedAt = nil
+        }
+
         logger.info("Pairing/trust decision: \(decision.rawValue, privacy: .public) deviceId=\(request.declaredDeviceId, privacy: .public)")
     }
 }
-
 

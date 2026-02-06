@@ -55,6 +55,50 @@ public final class TrustedDeviceStore: ObservableObject {
         save()
     }
 
+    /// 合并 CloudKit 同步的可信设备（并集策略：不自动删除本地设备）
+    public func mergeFromCloud(_ devices: [TrustedDevice]) {
+        guard !devices.isEmpty else { return }
+
+        var changed = false
+
+        for remote in devices {
+            guard !remote.id.isEmpty else { continue }
+
+            if let idx = trustedDevices.firstIndex(where: { $0.id == remote.id }) {
+                var current = trustedDevices[idx]
+
+                if !remote.name.isEmpty, remote.name != current.name {
+                    current.name = remote.name
+                    changed = true
+                }
+                if remote.platform != .unknown, remote.platform != current.platform {
+                    current.platform = remote.platform
+                    changed = true
+                }
+                if let ip = remote.ipAddress, !ip.isEmpty, ip != current.ipAddress {
+                    current.ipAddress = ip
+                    changed = true
+                }
+                // addedAt：取更早的时间，保持“首次信任时间”语义
+                if remote.addedAt < current.addedAt {
+                    current.addedAt = remote.addedAt
+                    changed = true
+                }
+
+                if changed {
+                    trustedDevices[idx] = current
+                }
+            } else {
+                trustedDevices.append(remote)
+                changed = true
+            }
+        }
+
+        if changed {
+            save()
+        }
+    }
+
     public func untrust(deviceId: String) {
         trustedDevices.removeAll { $0.id == deviceId }
         save()
@@ -75,5 +119,4 @@ public final class TrustedDeviceStore: ObservableObject {
         UserDefaults.standard.set(data, forKey: storageKey)
     }
 }
-
 

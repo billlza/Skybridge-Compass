@@ -2,7 +2,7 @@ import Foundation
 import OSLog
 
 #if canImport(WebRTC)
-import WebRTC
+@preconcurrency import WebRTC
 #endif
 
 @available(iOS 17.0, *)
@@ -128,7 +128,12 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
 #if canImport(WebRTC)
         guard let pc = peerConnection else { return }
         let cand = RTCIceCandidate(sdp: candidate, sdpMLineIndex: sdpMLineIndex ?? 0, sdpMid: sdpMid)
-        pc.add(cand)
+        pc.add(cand) { [weak self] error in
+            guard let self else { return }
+            if let error {
+                self.logger.error("⚠️ addIceCandidate failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
 #endif
     }
     
@@ -152,13 +157,14 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
                 return
             }
             guard let sdp else { return }
+            let sdpString = sdp.sdp
             pc.setLocalDescription(sdp) { [weak self] err in
                 guard let self else { return }
                 if let err {
                     self.logger.error("❌ setLocalDescription(offer) failed: \(err.localizedDescription, privacy: .public)")
                     return
                 }
-                self.onLocalOffer?(sdp.sdp)
+                self.onLocalOffer?(sdpString)
             }
         }
     }
@@ -173,13 +179,14 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
                 return
             }
             guard let sdp else { return }
+            let sdpString = sdp.sdp
             pc.setLocalDescription(sdp) { [weak self] err in
                 guard let self else { return }
                 if let err {
                     self.logger.error("❌ setLocalDescription(answer) failed: \(err.localizedDescription, privacy: .public)")
                     return
                 }
-                self.onLocalAnswer?(sdp.sdp)
+                self.onLocalAnswer?(sdpString)
             }
         }
     }
@@ -216,5 +223,3 @@ extension WebRTCSession: RTCDataChannelDelegate {
     }
 }
 #endif
-
-

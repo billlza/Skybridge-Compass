@@ -760,6 +760,40 @@ public actor P2PChunkTransferService {
     
  /// 活跃传输
     private var activeTransfers: [UUID: TransferContext] = [:]
+
+    // MARK: - Transport Wiring
+
+    private var transportHandlersInstalled = false
+    private var upstreamOnControlReceived: (@Sendable (Data) -> Void)?
+    private var upstreamOnQUICFileChunkReceived: (@Sendable (FileChannelId, QUICFileChunk) -> Void)?
+
+    // MARK: - Outgoing ACK State
+
+    private final class OutgoingTransferState {
+        var pendingAcks: Set<UInt64> = []
+        var completedChunks: Set<UInt64> = []
+        var retransmitRequested: Set<UInt64> = []
+        var retryCount: [UInt64: Int] = [:]
+        var sentAt: [UInt64: ContinuousClock.Instant] = [:]
+        var waiters: [UUID: CheckedContinuation<Void, Never>] = [:]
+    }
+
+    private var outgoing: [UUID: OutgoingTransferState] = [:]
+
+    // MARK: - Incoming ACK Coalescing (receiver -> sender)
+
+    private var pendingAckIndices: [UUID: Set<UInt64>] = [:]
+    private var ackFlushTasks: [UUID: Task<Void, Never>] = [:]
+
+    // MARK: - Coding
+
+    private let jsonEncoder: JSONEncoder = {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        return encoder
+    }()
+
+    private let jsonDecoder = JSONDecoder()
     
  /// 传输状态回调
     public var onStateChanged: (@Sendable (UUID, P2PTransferStatus) -> Void)?
@@ -773,6 +807,176 @@ public actor P2PChunkTransferService {
         self.transport = transport
         self.config = config
     }
+
+    private func ensureTransportHandlersInstalled() async {
+        guard !transportHandlersInstalled else { return }
+        transportHandlersInstalled = true
+
+        let existingControl = await transport.getOnControlReceived()
+        let existingChunk = await transport.getOnQUICFileChunkReceived()
+        upstreamOnControlReceived = existingControl
+        upstreamOnQUICFileChunkReceived = existingChunk
+
+        await transport.setOnControlReceived { [weak self] data in
+            existingControl?(data)
+            guard let self else { return }
+            Task { await self.handleControlReceived(data) }
+        }
+
+        await transport.setOnQUICFileChunkReceived { [weak self] channelId, chunk in
+            existingChunk?(channelId, chunk)
+            guard let self else { return }
+            Task { await self.handleQUICFileChunkReceived(channelId: channelId, chunk: chunk) }
+        }
+    }
+
+    private func handleControlReceived(_ data: Data) async {
+        // Prefer decoding ACK first; metadata is larger and less frequent.
+        if let ack = try? jsonDecoder.decode(P2PFileChunkAck.self, from: data) {
+            processIncomingAck(ack)
+            return
+        }
+
+        if let metadata = try? jsonDecoder.decode(P2PFileTransferMetadata.self, from: data) {
+            do {
+                try await handleReceivedMetadata(metadata)
+            } catch {
+                SkyBridgeLogger.p2p.error("Failed to handle received metadata: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func handleQUICFileChunkReceived(channelId: FileChannelId, chunk: QUICFileChunk) async {
+        // Decode P2PFileChunk from QUIC payload (JSON-encoded by sender).
+        guard let fileChunk = try? jsonDecoder.decode(P2PFileChunk.self, from: chunk.data) else {
+            SkyBridgeLogger.p2p.error("Failed to decode P2PFileChunk (transfer=\(channelId.transferId))")
+            return
+        }
+
+        do {
+            let ack = try await handleReceivedChunk(fileChunk)
+            await enqueueAckToSend(ack)
+        } catch {
+            SkyBridgeLogger.p2p.error("Failed to handle received chunk: \(error.localizedDescription)")
+        }
+    }
+
+    private func processIncomingAck(_ ack: P2PFileChunkAck) {
+        guard let state = outgoing[ack.transferId] else { return }
+
+        switch ack.ackType {
+        case .received:
+            for index in ack.acknowledgedChunks {
+                state.pendingAcks.remove(index)
+                state.completedChunks.insert(index)
+            }
+        case .checksumFailed, .retransmitRequest:
+            for index in ack.acknowledgedChunks {
+                state.pendingAcks.remove(index)
+                state.retransmitRequested.insert(index)
+            }
+        }
+
+        signalOutgoing(transferId: ack.transferId)
+    }
+
+    private func waitForOutgoingSignal(transferId: UUID) async {
+        guard let state = outgoing[transferId] else { return }
+        let token = UUID()
+
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                state.waiters[token] = continuation
+            }
+        } onCancel: {
+            Task { [weak self] in
+                await self?.removeOutgoingWaiter(transferId: transferId, token: token)
+            }
+        }
+    }
+
+    private func removeOutgoingWaiter(transferId: UUID, token: UUID) {
+        outgoing[transferId]?.waiters.removeValue(forKey: token)
+    }
+
+    private func waitForOutgoingSignalOrTimeout(transferId: UUID, timeout: Duration) async -> Bool {
+        await withTaskGroup(of: Bool.self) { group in
+            group.addTask { [transferId] in
+                await self.waitForOutgoingSignal(transferId: transferId)
+                return true
+            }
+            group.addTask {
+                try? await Task.sleep(for: timeout)
+                return false
+            }
+            let result = await group.next() ?? false
+            group.cancelAll()
+            return result
+        }
+    }
+
+    private func signalOutgoing(transferId: UUID) {
+        guard let state = outgoing[transferId], !state.waiters.isEmpty else { return }
+        let waiters = state.waiters.values
+        state.waiters.removeAll()
+        for waiter in waiters {
+            waiter.resume()
+        }
+    }
+
+    private func enqueueAckToSend(_ ack: P2PFileChunkAck) async {
+        switch ack.ackType {
+        case .received:
+            var set = pendingAckIndices[ack.transferId] ?? []
+            set.formUnion(ack.acknowledgedChunks)
+            pendingAckIndices[ack.transferId] = set
+
+            // Flush eagerly when it helps the sender's window advance.
+            if set.count >= max(1, config.windowSize / 2) {
+                await flushAck(transferId: ack.transferId, ackType: .received)
+                return
+            }
+
+            if ackFlushTasks[ack.transferId] == nil {
+                ackFlushTasks[ack.transferId] = Task { [transferId = ack.transferId] in
+                    try? await Task.sleep(for: .milliseconds(20))
+                    await self.flushAck(transferId: transferId, ackType: .received)
+                }
+            }
+
+        case .checksumFailed, .retransmitRequest:
+            // These should be sent immediately to reduce wasted bandwidth.
+            await sendAck(ack)
+        }
+    }
+
+    private func flushAck(transferId: UUID, ackType: P2PChunkAckType) async {
+        ackFlushTasks[transferId]?.cancel()
+        ackFlushTasks[transferId] = nil
+
+        guard var indices = pendingAckIndices[transferId], !indices.isEmpty else { return }
+        pendingAckIndices[transferId] = []
+
+        let sorted = indices.sorted()
+        indices.removeAll(keepingCapacity: false)
+
+        await sendAck(
+            P2PFileChunkAck(
+                transferId: transferId,
+                acknowledgedChunks: sorted,
+                ackType: ackType
+            )
+        )
+    }
+
+    private func sendAck(_ ack: P2PFileChunkAck) async {
+        do {
+            let data = try jsonEncoder.encode(ack)
+            try await transport.sendControl(data)
+        } catch {
+            SkyBridgeLogger.p2p.error("Failed to send ACK: \(error.localizedDescription)")
+        }
+    }
     
  // MARK: - Send Operations
     
@@ -781,6 +985,8 @@ public actor P2PChunkTransferService {
         metadata: P2PFileTransferMetadata,
         dataProvider: @escaping @Sendable (UInt64) async throws -> Data
     ) async throws {
+        await ensureTransportHandlersInstalled()
+
         let context = TransferContext(
             transferId: metadata.transferId,
             direction: .send,
@@ -800,9 +1006,7 @@ public actor P2PChunkTransferService {
     
  /// 发送元数据
     private func sendMetadata(_ metadata: P2PFileTransferMetadata) async throws {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = .sortedKeys
-        let data = try encoder.encode(metadata)
+        let data = try jsonEncoder.encode(metadata)
         try await transport.sendControl(data)
     }
     
@@ -812,81 +1016,124 @@ public actor P2PChunkTransferService {
         dataProvider: @escaping @Sendable (UInt64) async throws -> Data
     ) async throws {
         let totalChunks = context.metadata.totalChunks
+        let transferId = context.transferId
+        let clock = ContinuousClock()
+        let ackTimeout = Duration.seconds(config.ackTimeoutSeconds)
+        let state = OutgoingTransferState()
+        outgoing[transferId] = state
+        defer { outgoing.removeValue(forKey: transferId) }
+
         var nextChunkIndex: UInt64 = 0
-        var pendingAcks: Set<UInt64> = []
-        var completedChunks: Set<UInt64> = []
-        var retryCount: [UInt64: Int] = [:]
+        var lastReportedCompletedCount = 0
         
  // 打开文件流
-        let streamHandle = try await transport.openFileStream(transferId: context.transferId)
+        let streamHandle = try await transport.openFileStream(transferId: transferId)
         
-        while completedChunks.count < Int(totalChunks) {
+        while state.completedChunks.count < Int(totalChunks) {
  // 检查取消
             if context.isCancelled {
                 throw P2PFileTransferError.transferCancelled
             }
+
+            if context.isPaused {
+                // Keep the sender responsive (resume()/cancel() will signal).
+                _ = await waitForOutgoingSignalOrTimeout(transferId: transferId, timeout: .milliseconds(200))
+                continue
+            }
+
+            // 优先处理对端请求的重传
+            while state.pendingAcks.count < config.windowSize, let idx = state.retransmitRequested.min() {
+                state.retransmitRequested.remove(idx)
+                try await sendChunk(
+                    transferId: transferId,
+                    chunkIndex: idx,
+                    totalChunks: totalChunks,
+                    streamHandle: streamHandle,
+                    dataProvider: dataProvider
+                )
+            }
             
  // 发送窗口内的块
-            while pendingAcks.count < config.windowSize && nextChunkIndex < totalChunks {
+            while state.pendingAcks.count < config.windowSize && nextChunkIndex < totalChunks {
                 let chunkIndex = nextChunkIndex
                 nextChunkIndex += 1
                 
                 do {
-                    let data = try await dataProvider(chunkIndex)
-                    let chunkHash = Data(SHA256.hash(data: data))
-                    
-                    let chunk = P2PFileChunk(
-                        transferId: context.transferId,
+                    try await sendChunk(
+                        transferId: transferId,
                         chunkIndex: chunkIndex,
-                        filePath: "", // 由元数据确定
-                        offset: chunkIndex * UInt64(config.chunkSize),
-                        data: data,
-                        chunkHash: chunkHash,
-                        isLastChunk: chunkIndex == totalChunks - 1
+                        totalChunks: totalChunks,
+                        streamHandle: streamHandle,
+                        dataProvider: dataProvider
                     )
-                    
- // 编码并发送
-                    let encoder = JSONEncoder()
-                    let chunkData = try encoder.encode(chunk)
-                    
-                    let quicChunk = QUICFileChunk(
-                        index: chunkIndex,
-                        data: chunkData,
-                        isLast: chunk.isLastChunk,
-                        checksum: chunkHash
-                    )
-                    
-                    try await transport.sendQUICFileChunk(quicChunk, on: streamHandle)
-                    pendingAcks.insert(chunkIndex)
-                    
                 } catch {
- // 重试逻辑
-                    let count = (retryCount[chunkIndex] ?? 0) + 1
-                    retryCount[chunkIndex] = count
-                    
+                    // 发送阶段失败：回滚 nextChunkIndex，让窗口重试该块
+                    nextChunkIndex = chunkIndex
+                    let count = (state.retryCount[chunkIndex] ?? 0) + 1
+                    state.retryCount[chunkIndex] = count
                     if count >= config.maxRetries {
                         throw P2PFileTransferError.networkError("块 \(chunkIndex) 发送失败，已重试 \(count) 次")
                     }
-                    
- // 重新加入队列
-                    nextChunkIndex = chunkIndex
                 }
             }
-            
- // 等待 ACK（简化实现，实际应通过回调处理）
-            try await Task.sleep(nanoseconds: 10_000_000) // 10ms
-            
- // 模拟 ACK 处理（实际应从 transport 回调获取）
- // 这里假设所有发送的块都被确认
-            for pending in pendingAcks {
-                completedChunks.insert(pending)
+
+            // 更新进度（在 ACK 到来后推进）
+            if state.completedChunks.count != lastReportedCompletedCount {
+                lastReportedCompletedCount = state.completedChunks.count
+                let progress = Double(lastReportedCompletedCount) / Double(totalChunks)
+                let speed = calculateSpeed(context: context, completedChunks: lastReportedCompletedCount)
+                onProgressUpdated?(transferId, progress, speed)
             }
-            pendingAcks.removeAll()
-            
- // 更新进度
-            let progress = Double(completedChunks.count) / Double(totalChunks)
-            let speed = calculateSpeed(context: context, completedChunks: completedChunks.count)
-            onProgressUpdated?(context.transferId, progress, speed)
+
+            // 全部发送且已确认
+            if state.completedChunks.count >= Int(totalChunks) {
+                break
+            }
+
+            // 如果没有未确认块，则继续发
+            guard !state.pendingAcks.isEmpty else { continue }
+
+            // 等待 ACK 或超时触发重传
+            let now = clock.now
+            let nextDeadline: ContinuousClock.Instant? = state.pendingAcks.compactMap { idx in
+                guard let sent = state.sentAt[idx] else { return nil }
+                return sent.advanced(by: ackTimeout)
+            }.min()
+
+            let timeout: Duration
+            if let nextDeadline {
+                let remaining = now.duration(to: nextDeadline)
+                timeout = remaining > .zero ? remaining : .zero
+            } else {
+                timeout = ackTimeout
+            }
+
+            let signalled = await waitForOutgoingSignalOrTimeout(transferId: transferId, timeout: timeout)
+            if signalled {
+                continue
+            }
+
+            // 超时：重传仍未确认的块（在窗口内原位重发，不改变 pending 集）
+            let resendNow = clock.now
+            for idx in state.pendingAcks {
+                guard let sent = state.sentAt[idx] else { continue }
+                if sent.advanced(by: ackTimeout) > resendNow {
+                    continue
+                }
+                let count = (state.retryCount[idx] ?? 0) + 1
+                state.retryCount[idx] = count
+                if count > config.maxRetries {
+                    throw P2PFileTransferError.transferTimeout
+                }
+                try await sendChunk(
+                    transferId: transferId,
+                    chunkIndex: idx,
+                    totalChunks: totalChunks,
+                    streamHandle: streamHandle,
+                    dataProvider: dataProvider,
+                    markPending: false
+                )
+            }
         }
         
  // 关闭流
@@ -894,11 +1141,55 @@ public actor P2PChunkTransferService {
         
         onStateChanged?(context.transferId, .completed)
     }
+
+    private func sendChunk(
+        transferId: UUID,
+        chunkIndex: UInt64,
+        totalChunks: UInt64,
+        streamHandle: FileStreamHandle,
+        dataProvider: @escaping @Sendable (UInt64) async throws -> Data,
+        markPending: Bool = true
+    ) async throws {
+        guard let state = outgoing[transferId] else {
+            throw P2PFileTransferError.networkError("Outgoing transfer state missing")
+        }
+
+        let data = try await dataProvider(chunkIndex)
+        let chunkHash = Data(SHA256.hash(data: data))
+
+        let chunk = P2PFileChunk(
+            transferId: transferId,
+            chunkIndex: chunkIndex,
+            filePath: "", // 由元数据确定
+            offset: chunkIndex * UInt64(config.chunkSize),
+            data: data,
+            chunkHash: chunkHash,
+            isLastChunk: chunkIndex == totalChunks - 1
+        )
+
+        let chunkData = try jsonEncoder.encode(chunk)
+
+        let quicChunk = QUICFileChunk(
+            index: chunkIndex,
+            data: chunkData,
+            isLast: chunk.isLastChunk,
+            checksum: chunkHash
+        )
+
+        try await transport.sendQUICFileChunk(quicChunk, on: streamHandle)
+
+        if markPending {
+            state.pendingAcks.insert(chunkIndex)
+        }
+        state.sentAt[chunkIndex] = ContinuousClock().now
+    }
     
  // MARK: - Receive Operations
     
  /// 处理接收到的元数据
     public func handleReceivedMetadata(_ metadata: P2PFileTransferMetadata) async throws {
+        await ensureTransportHandlersInstalled()
+
         let context = TransferContext(
             transferId: metadata.transferId,
             direction: .receive,
@@ -951,12 +1242,14 @@ public actor P2PChunkTransferService {
     public func pause(transferId: UUID) {
         activeTransfers[transferId]?.isPaused = true
         onStateChanged?(transferId, .paused)
+        signalOutgoing(transferId: transferId)
     }
     
  /// 恢复传输
     public func resume(transferId: UUID) {
         activeTransfers[transferId]?.isPaused = false
         onStateChanged?(transferId, .transferring)
+        signalOutgoing(transferId: transferId)
     }
     
  /// 取消传输
@@ -964,6 +1257,7 @@ public actor P2PChunkTransferService {
         activeTransfers[transferId]?.isCancelled = true
         activeTransfers.removeValue(forKey: transferId)
         onStateChanged?(transferId, .cancelled)
+        signalOutgoing(transferId: transferId)
     }
     
  /// 获取恢复数据

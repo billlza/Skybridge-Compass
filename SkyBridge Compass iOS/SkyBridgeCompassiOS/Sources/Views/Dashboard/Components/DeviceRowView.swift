@@ -354,6 +354,7 @@ struct DeviceDetailSheet: View {
     @ObservedObject private var trustedStore: TrustedDeviceStore = .shared
     @State private var isConnecting = false
     @State private var connectError: String?
+    @State private var showPQCVerification: Bool = false
     
     var body: some View {
         NavigationStack {
@@ -385,13 +386,20 @@ struct DeviceDetailSheet: View {
                 
                 // 操作
                 Section {
-                    if !trustedStore.isTrusted(deviceId: device.id) {
+                    if trustedStore.isTrusted(deviceId: device.id) {
+                        HStack(spacing: 10) {
+                            Image(systemName: trustSymbolName)
+                                .foregroundStyle(.green)
+                            Text("已受信任（PQC 引导）")
+                                .foregroundStyle(.secondary)
+                        }
+                    } else {
                         Button {
-                            trustedStore.trust(device)
+                            showPQCVerification = true
                         } label: {
                             HStack {
-                                Image(systemName: trustSymbolName)
-                                Text("加入受信任设备（用于PQC引导）")
+                                Image(systemName: "lock.shield")
+                                Text("PQC 身份验证（输入验证码）")
                             }
                         }
                     }
@@ -443,6 +451,9 @@ struct DeviceDetailSheet: View {
                 Button("好的") { connectError = nil }
             } message: {
                 Text(connectError ?? "")
+            }
+            .sheet(isPresented: $showPQCVerification) {
+                PQCVerificationView(device: device)
             }
         }
     }

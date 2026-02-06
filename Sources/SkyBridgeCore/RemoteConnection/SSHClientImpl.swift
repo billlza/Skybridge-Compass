@@ -1,5 +1,4 @@
 import Foundation
-import Network
 import NIOCore
 import NIOPosix
 // Swift 6.2.1: 使用 @preconcurrency 抑制 NIOSSH 的大部分 Sendable 警告
@@ -241,77 +240,6 @@ public final class SSHClientImpl: @unchecked Sendable {
         }
     }
 
- /// 执行命令并获取输出（简化版本，使用 NWConnection）
-    @MainActor
-    public func executeSimple(_ command: String) async throws -> SSHCommandResult {
-        guard case .connected = state else {
-            throw SSHClientImplError.sessionNotConnected
-        }
-
-        let startTime = Date()
-        logger.info("🖥️ 执行简化命令: \(command)")
-
- // 使用简化的执行方式 - 通过 Network.framework
-        let host = configuration.host
-        let port = configuration.port
-        let timeout = configuration.commandTimeout
-
- // Swift 6.2.1: 使用线程安全的数据收集器
-        let dataCollector = ThreadSafeDataCollector()
-
-        return try await withCheckedThrowingContinuation { continuation in
-            let queue = DispatchQueue(label: "ssh.execute")
-            let nwPort: NWEndpoint.Port
-            do {
-                nwPort = try NWEndpoint.Port.validated(port)
-            } catch {
-                let result = SSHCommandResult(
-                    exitCode: -1,
-                    stdout: "",
-                    stderr: error.localizedDescription,
-                    executionTime: Date().timeIntervalSince(startTime)
-                )
-                continuation.resume(returning: result)
-                return
-            }
-            let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(host), port: nwPort)
-
-            let connection = NWConnection(to: endpoint, using: .tcp)
-
-            connection.stateUpdateHandler = { state in
-                switch state {
-                case .ready:
- // 发送命令（SSH 协议已在 NIOSSH 层处理）
-                    break
-                case .failed(let error):
-                    let result = SSHCommandResult(
-                        exitCode: -1,
-                        stdout: "",
-                        stderr: error.localizedDescription,
-                        executionTime: Date().timeIntervalSince(startTime)
-                    )
-                    continuation.resume(returning: result)
-                default:
-                    break
-                }
-            }
-
- // 设置超时
-            queue.asyncAfter(deadline: .now() + timeout) {
-                connection.cancel()
-                let result = SSHCommandResult(
-                    exitCode: 0,
-                    stdout: String(data: dataCollector.data, encoding: .utf8) ?? "",
-                    stderr: "",
-                    executionTime: Date().timeIntervalSince(startTime)
-                )
-                continuation.resume(returning: result)
-            }
-
-            connection.start(queue: queue)
-        }
-    }
-
  /// 执行多个命令（顺序执行）
     @MainActor
     public func executeMultiple(_ commands: [String]) async throws -> [SSHCommandResult] {
@@ -474,27 +402,6 @@ private final class UnsafeSSHHandlerBox: @unchecked Sendable {
         return eventLoop.submit {
             try pipeline.syncOperations.addHandler(makeHandler())
         }
-    }
-}
-
-// MARK: - 线程安全数据收集器
-
-/// 线程安全数据收集器
-/// Swift 6.2.1: 用于在并发上下文中安全收集数据
-private final class ThreadSafeDataCollector: @unchecked Sendable {
-    private let lock = NSLock()
-    private var _data = Data()
-
-    var data: Data {
-        lock.lock()
-        defer { lock.unlock() }
-        return _data
-    }
-
-    func append(_ newData: Data) {
-        lock.lock()
-        defer { lock.unlock() }
-        _data.append(newData)
     }
 }
 

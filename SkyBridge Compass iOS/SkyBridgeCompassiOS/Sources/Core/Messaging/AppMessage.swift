@@ -7,6 +7,10 @@ public enum AppMessage: Codable, Sendable, Equatable {
     case clipboard(ClipboardPayload)
     case pairingIdentityExchange(PairingIdentityExchangePayload)
     case heartbeat(HeartbeatPayload)
+    /// Lightweight RTT probe (request).
+    case ping(PingPayload)
+    /// Lightweight RTT probe (response).
+    case pong(PongPayload)
 
     public struct ClipboardPayload: Codable, Sendable, Equatable {
         public let mimeType: String
@@ -87,5 +91,22 @@ public enum AppMessage: Codable, Sendable, Equatable {
             self.chip = chip
         }
     }
-}
 
+    /// Ping request payload. Receiver should respond with `pong(id:)` as fast as possible.
+    public struct PingPayload: Codable, Sendable, Equatable {
+        public let id: UInt64
+
+        public init(id: UInt64) {
+            self.id = id
+        }
+    }
+
+    /// Pong response payload (echoes `PingPayload.id`).
+    public struct PongPayload: Codable, Sendable, Equatable {
+        public let id: UInt64
+
+        public init(id: UInt64) {
+            self.id = id
+        }
+    }
+}

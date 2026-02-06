@@ -233,6 +233,24 @@ public class P2PConnectionManager: ObservableObject {
         
         SkyBridgeLogger.shared.info("⏹️ P2P 监听器已停止")
     }
+
+    /// 握手验证码（6 位数字）——用于“配对/信任”阶段的人工可视比对（论文中的 OOB pairing ceremony）。
+    ///
+    /// - Important: Code is deterministically derived from the *handshake transcript hash* to bind user verification
+    ///   to the negotiated suite + policy + key shares. Both peers compute the same value after a successful handshake.
+    public func pairingVerificationCode(for deviceId: String) -> String? {
+        guard let keys = sessionKeys[deviceId] else { return nil }
+
+        var material = Data("SkyBridge-Pairing-SAS|".utf8)
+        material.append(keys.transcriptHash)
+
+        let digest = SHA256.hash(data: material)
+        let raw = digest.withUnsafeBytes { ptr -> UInt32 in
+            ptr.loadUnaligned(as: UInt32.self).bigEndian
+        }
+        let code = Int(raw % 1_000_000)
+        return String(format: "%06d", code)
+    }
     
     /// 连接到设备
     public func connect(to device: DiscoveredDevice) async throws {
@@ -447,12 +465,10 @@ public class P2PConnectionManager: ObservableObject {
         SkyBridgeLogger.shared.info("✅ 已连接到 \(device.name)")
         startHeartbeatIfNeeded(deviceId: device.id)
 
-        // 更新灵动岛状态
-        if #available(iOS 16.2, *) {
-            let suite = sessionKeys[device.id]?.negotiatedSuite.rawValue ?? "已连接"
-            Task {
-                await LiveActivityManager.shared.setConnected(deviceName: device.name, cryptoSuite: suite)
-            }
+        // 更新灵动岛状态（iOS 17+）
+        let suite = sessionKeys[device.id]?.negotiatedSuite.rawValue ?? "已连接"
+        Task {
+            await LiveActivityManager.shared.setConnected(deviceName: device.name, cryptoSuite: suite)
         }
     }
     
@@ -480,11 +496,9 @@ public class P2PConnectionManager: ObservableObject {
         connectionStatusByDeviceId[device.id] = .disconnected
         connectionErrorByDeviceId.removeValue(forKey: device.id)
 
-        // 更新灵动岛状态
-        if #available(iOS 16.2, *) {
-            Task {
-                await LiveActivityManager.shared.setDisconnected()
-            }
+        // 更新灵动岛状态（iOS 17+）
+        Task {
+            await LiveActivityManager.shared.setDisconnected()
         }
         
         SkyBridgeLogger.shared.info("🔌 已断开与 \(device.name) 的连接")
@@ -693,6 +707,26 @@ public class P2PConnectionManager: ObservableObject {
             await handlePairingIdentityExchangeRequest(from: peerId, payload: payload)
         case .heartbeat:
             break
+        case .ping(let payload):
+            await replyPong(to: peerId, pingId: payload.id)
+        case .pong:
+            break
+        }
+    }
+
+    private func replyPong(to peerId: String, pingId: UInt64) async {
+        // Avoid mixing business traffic during in-band rekey.
+        if rekeyInProgress.contains(peerId) { return }
+        guard let connection = connections[peerId] else { return }
+        guard sessionKeys[peerId] != nil else { return }
+
+        do {
+            let message = AppMessage.pong(.init(id: pingId))
+            let payload = try JSONEncoder().encode(message)
+            let ciphertext = try encryptForDevice(payload, deviceId: peerId)
+            try await send(data: ciphertext, over: connection)
+        } catch {
+            SkyBridgeLogger.shared.debug("ℹ️ pong reply failed (ignored): \(error.localizedDescription)")
         }
     }
     
@@ -1043,15 +1077,13 @@ public class P2PConnectionManager: ObservableObject {
         negotiatedSuiteByDeviceId[deviceId] = keys.negotiatedSuite
 
         // Keep Live Activity in sync with the latest negotiated suite (e.g., after Classic -> PQC rekey).
-        if #available(iOS 16.2, *) {
-            let name =
-                deviceNameHint
-                ?? lastKnownDevices[deviceId]?.name
-                ?? discoveryManager.discoveredDevices.first(where: { $0.id == deviceId })?.name
-                ?? deviceId
-            Task {
-                await LiveActivityManager.shared.setConnected(deviceName: name, cryptoSuite: keys.negotiatedSuite.rawValue)
-            }
+        let name =
+            deviceNameHint
+            ?? lastKnownDevices[deviceId]?.name
+            ?? discoveryManager.discoveredDevices.first(where: { $0.id == deviceId })?.name
+            ?? deviceId
+        Task {
+            await LiveActivityManager.shared.setConnected(deviceName: name, cryptoSuite: keys.negotiatedSuite.rawValue)
         }
     }
     

@@ -14,10 +14,10 @@ import ActivityKit
 /// - This file must be included in both the iOS app target and the Widget extension target.
 /// - Do NOT define these types only inside the widget target; the app needs them to update the activity.
 @available(iOS 16.2, *)
-public struct SkyBridgeActivityAttributes: ActivityAttributes {
+	public struct SkyBridgeActivityAttributes: ActivityAttributes {
 
-    /// 动态内容（可更新）
-    public struct ContentState: Codable, Hashable {
+	    /// 动态内容（可更新）
+	    public struct ContentState: Codable, Hashable, Sendable {
         // 连接状态
         public var isConnected: Bool
         public var connectedDeviceName: String?
@@ -62,7 +62,7 @@ public struct SkyBridgeActivityAttributes: ActivityAttributes {
         }
     }
 
-    public enum TransferDirection: String, Codable, Hashable {
+	    public enum TransferDirection: String, Codable, Hashable, Sendable {
         case none
         case upload
         case download
@@ -81,5 +81,4 @@ public struct SkyBridgeActivityAttributes: ActivityAttributes {
 
     public init() {}
 }
-
 

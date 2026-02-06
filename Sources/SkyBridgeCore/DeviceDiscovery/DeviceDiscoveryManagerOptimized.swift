@@ -1495,6 +1495,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         // 触发 iOS 端 fallback（再叠加 fallbackRateLimited 就会出现你截图里的循环失败）。
         var driver: HandshakeDriver? = nil
         var sessionKeys: SessionKeys? = nil
+        var declaredDeviceIdForVerification: String? = nil
         var didMarkConnected = false
         
         // Heartbeat: avoid Swift concurrency Tasks here (StrictConcurrency) because they would capture
@@ -1720,6 +1721,15 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                                     if case .service(let name, _, _, _) = connection.endpoint { return name }
                                     return peer.deviceId
                                 }()
+
+                                declaredDeviceIdForVerification = payload.deviceId
+                                await MainActor.run {
+                                    PairingTrustApprovalService.shared.updateVerificationCode(
+                                        declaredDeviceId: payload.deviceId,
+                                        sessionKeys: keys
+                                    )
+                                }
+
                                 let request = PairingTrustApprovalService.Request(
                                     peerEndpoint: endpoint,
                                     declaredDeviceId: payload.deviceId,
@@ -1822,6 +1832,15 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                                 let outPadded = TrafficPadding.wrapIfEnabled(outCipher, label: "tx")
                                 try await transport.send(to: peer, data: outPadded)
                                 logger.info("🔑 已回传本机 KEM 公钥：count=\(kemKeys.count, privacy: .public) decision=\(decision.rawValue, privacy: .public)")
+                            case .ping(let payload):
+                                // RTT probe: respond as fast as possible with an echoed pong.
+                                let reply = AppMessage.pong(.init(id: payload.id))
+                                let outPlain = try JSONEncoder().encode(reply)
+                                let outCipher = try encryptAppPayload(outPlain, with: keys)
+                                let outPadded = TrafficPadding.wrapIfEnabled(outCipher, label: "tx")
+                                try await transport.send(to: peer, data: outPadded)
+                            case .pong:
+                                break
                             default:
                                 break
                             }
@@ -1937,6 +1956,14 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                 case .waitingFinished(_, let keys, _):
                     sessionKeys = keys
                     postConnectedUX(keys: keys)
+                    if let declaredDeviceIdForVerification {
+                        await MainActor.run {
+                            PairingTrustApprovalService.shared.updateVerificationCode(
+                                declaredDeviceId: declaredDeviceIdForVerification,
+                                sessionKeys: keys
+                            )
+                        }
+                    }
                     hbState.withLock {
                         $0.sessionKeys = keys
                         $0.pausedForRekey = false
@@ -1944,6 +1971,14 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                 case .established(let keys):
                     sessionKeys = keys
                     postConnectedUX(keys: keys)
+                    if let declaredDeviceIdForVerification {
+                        await MainActor.run {
+                            PairingTrustApprovalService.shared.updateVerificationCode(
+                                declaredDeviceId: declaredDeviceIdForVerification,
+                                sessionKeys: keys
+                            )
+                        }
+                    }
                     hbState.withLock {
                         $0.sessionKeys = keys
                         $0.pausedForRekey = false

@@ -9,6 +9,11 @@ public struct TrustGraphView: View {
     @State private var selectedDevice: TrustGraphDevice?
     @State private var showingRevokeConfirmation = false
     @State private var showingClearAllConfirmation = false
+    @State private var showingKeyRotationSheet = false
+    @State private var keyRotationTargetDevice: TrustGraphDevice?
+    @State private var keyRotationCertificateText = ""
+    @State private var keyRotationErrorMessage: String?
+    @State private var isApplyingKeyRotation = false
     @State private var searchText = ""
     
     public init() {}
@@ -61,6 +66,9 @@ public struct TrustGraphView: View {
             Button("取消", role: .cancel) {}
         } message: {
             Text("这将撤销所有已信任设备的信任关系。此操作不可撤销。")
+        }
+        .sheet(isPresented: $showingKeyRotationSheet) {
+            keyRotationSheet
         }
     }
     
@@ -360,7 +368,11 @@ public struct TrustGraphView: View {
             
             HStack(spacing: 12) {
                 Button(action: {
-                    // TODO: 实现密钥轮换
+                    keyRotationTargetDevice = device
+                    keyRotationCertificateText = ""
+                    keyRotationErrorMessage = nil
+                    isApplyingKeyRotation = false
+                    showingKeyRotationSheet = true
                 }) {
                     Label("轮换密钥", systemImage: "arrow.triangle.2.circlepath")
                 }
@@ -375,6 +387,135 @@ public struct TrustGraphView: View {
                 .tint(.red)
             }
         }
+    }
+
+    // MARK: - Key rotation sheet
+
+    @ViewBuilder
+    private var keyRotationSheet: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    if let target = keyRotationTargetDevice {
+                        Text("目标设备：\(target.displayName)")
+                            .font(.callout.weight(.medium))
+                        Text("旧设备 ID：\(target.deviceId)")
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    } else {
+                        Text("未选择目标设备")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Section("新证书（P2PIdentityCertificate）") {
+                    TextEditor(text: $keyRotationCertificateText)
+                        .font(.caption.monospaced())
+                        .frame(minHeight: 180)
+                        .textSelection(.enabled)
+
+                    Text("支持粘贴 JSON 或 base64(JSON)。安全起见，建议使用“pairing-confirmed”证书，并且 signerId 指向旧设备 ID。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                if let msg = keyRotationErrorMessage, !msg.isEmpty {
+                    Section("错误") {
+                        Text(msg)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                            .textSelection(.enabled)
+                    }
+                }
+            }
+            .navigationTitle("轮换密钥")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") {
+                        showingKeyRotationSheet = false
+                    }
+                    .disabled(isApplyingKeyRotation)
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(isApplyingKeyRotation ? "处理中…" : "应用") {
+                        applyKeyRotationFromSheet()
+                    }
+                    .disabled(isApplyingKeyRotation || keyRotationTargetDevice == nil || keyRotationCertificateText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+        }
+    }
+
+    private func applyKeyRotationFromSheet() {
+        guard let target = keyRotationTargetDevice else { return }
+        let input = keyRotationCertificateText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !input.isEmpty else { return }
+
+        isApplyingKeyRotation = true
+        keyRotationErrorMessage = nil
+
+        Task {
+            defer { isApplyingKeyRotation = false }
+            do {
+                let cert = try parseIdentityCertificate(from: input)
+                try await trustManager.applyKeyRotation(oldDeviceId: target.deviceId, newCertificate: cert)
+                // 轮换后旧记录会被撤销并从列表里消失；尽量把 UI selection 切到新设备
+                selectedDevice = trustManager.trustedDevices.first(where: { $0.deviceId == cert.deviceId })
+                showingKeyRotationSheet = false
+            } catch {
+                keyRotationErrorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func parseIdentityCertificate(from text: String) throws -> P2PIdentityCertificate {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { throw TrustGraphError.invalidPublicKey }
+
+        var candidates: [Data] = []
+        if let utf8 = trimmed.data(using: .utf8) {
+            candidates.append(utf8)
+        }
+        if let b64 = Data(base64Encoded: trimmed) {
+            candidates.append(b64)
+        }
+
+        for data in candidates {
+            if let cert = decodeIdentityCertificate(data) {
+                return cert
+            }
+        }
+        throw TrustGraphError.invalidPublicKey
+    }
+
+    private func decodeIdentityCertificate(_ data: Data) -> P2PIdentityCertificate? {
+        // 尽量兼容多种 date 编码格式
+        let decoders: [JSONDecoder] = [
+            {
+                let d = JSONDecoder()
+                d.dateDecodingStrategy = .millisecondsSince1970
+                return d
+            }(),
+            {
+                let d = JSONDecoder()
+                d.dateDecodingStrategy = .secondsSince1970
+                return d
+            }(),
+            {
+                let d = JSONDecoder()
+                d.dateDecodingStrategy = .iso8601
+                return d
+            }(),
+            JSONDecoder()
+        ]
+
+        for decoder in decoders {
+            if let cert = try? decoder.decode(P2PIdentityCertificate.self, from: data) {
+                return cert
+            }
+        }
+        return nil
     }
     
     private var emptyDetailView: some View {

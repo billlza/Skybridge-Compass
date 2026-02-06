@@ -758,7 +758,7 @@ public actor HandshakeContext {
         peerNonce = messageA.clientNonce
         peerKeyShares = Dictionary(uniqueKeysWithValues: messageA.keyShares.map { ($0.suite, $0.shareBytes) })
         
-        // 选择套件（简化：选择第一个共同支持的）
+        // 选择套件：按发起方优先级，从 offered 列表中选择本端支持的首个套件
         var selectedSuite: CryptoSuite?
         for suite in messageA.supportedSuites {
             if cryptoProvider.supportsSuite(suite) {
@@ -1095,4 +1095,3 @@ public actor HandshakeContext {
         isZeroized = true
     }
 }
-

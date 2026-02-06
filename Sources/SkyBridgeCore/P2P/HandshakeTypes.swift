@@ -13,6 +13,9 @@
 //
 
 import Foundation
+#if canImport(CryptoKit)
+import CryptoKit
+#endif
 #if canImport(Security)
 import Security
 #endif
@@ -187,6 +190,29 @@ public struct SessionKeys: Sendable {
         self.transcriptHash = transcriptHash
         self.sessionId = sessionId
         self.createdAt = createdAt
+    }
+}
+
+// MARK: - SessionKeys + Pairing Verification Code (SAS)
+
+@available(macOS 14.0, iOS 17.0, *)
+extension SessionKeys {
+    /// 6-digit Short Authentication String (SAS) used for the paper's out-of-band pairing ceremony.
+    ///
+    /// Deterministically derived from the handshake transcript hash so the user verification is bound to:
+    /// - the negotiated suite,
+    /// - policy-in-transcript,
+    /// - key shares, nonces, and Finished MACs.
+    public func pairingVerificationCode() -> String {
+        var material = Data("SkyBridge-Pairing-SAS|".utf8)
+        material.append(transcriptHash)
+
+        let digest = SHA256.hash(data: material)
+        let raw = digest.withUnsafeBytes { ptr -> UInt32 in
+            ptr.loadUnaligned(as: UInt32.self).bigEndian
+        }
+        let code = Int(raw % 1_000_000)
+        return String(format: "%06d", code)
     }
 }
 

@@ -227,13 +227,25 @@ public class PQCCryptoManager: ObservableObject {
         guard code.count == 6, code.allSatisfy(\.isNumber) else {
             throw PQCError.invalidCode
         }
-        
-        // TODO: 实际验证逻辑
-        // 1. 验证 PQC 签名
-        // 2. 验证验证码匹配
-        // 3. 将设备添加到受信任列表
-        
-        try? await Task.sleep(for: .seconds(1))
+
+        // 1) 要求存在已建立的会话（验证码与握手 transcriptHash 绑定）
+        guard let suite = P2PConnectionManager.instance.negotiatedSuiteByDeviceId[device.id] else {
+            throw PQCError.verificationFailed
+        }
+
+        // 2) 严格模式：要求已切换到 PQC/Hybrid suite（论文 strictPQC）
+        if enforcePQCHandshake, !suite.isPQCGroup {
+            throw PQCError.verificationFailed
+        }
+
+        // 3) 生成期望验证码并比对
+        guard let expected = P2PConnectionManager.instance.pairingVerificationCode(for: device.id) else {
+            throw PQCError.verificationFailed
+        }
+        guard expected == code else {
+            SkyBridgeLogger.shared.warning("❌ 设备验证码不匹配: device=\(device.name) expected=\(expected) got=\(code)")
+            throw PQCError.verificationFailed
+        }
 
         // 先落一个“可信设备持久化”闭环：验证成功即加入可信列表（设置页可见、可撤销）
         TrustedDeviceStore.shared.trust(device)
@@ -266,11 +278,28 @@ public class PQCCryptoManager: ObservableObject {
             signingPublicKey = sigPublicData
             hasKeyPair = true
             
-            // TODO: 从 Keychain 加载密钥生成日期
-            keyGenerationDate = Date()
+            // 从 Keychain attributes 读取创建时间（若不可用则保持 nil）
+            keyGenerationDate = keychainItemCreationDate(account: "pqc.kem.private.\(currentSuite.wireId)")
             
             SkyBridgeLogger.shared.info("✅ 从 Keychain 加载密钥成功")
         }
+    }
+
+    private func keychainItemCreationDate(account: String) -> Date? {
+        // In-memory keychain（单元测试模式）不支持属性查询
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrAccount as String: account,
+            kSecReturnAttributes as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        guard status == errSecSuccess, let attrs = result as? [String: Any] else {
+            return nil
+        }
+        return attrs[kSecAttrCreationDate as String] as? Date
     }
 }
 

@@ -310,15 +310,15 @@
 			path = Core;
 			sourceTree = "<group>";
 		};
-		1F533AD5F0CCB737717CFEFA /* LiveActivities */ = {
-			isa = PBXGroup;
-			children = (
-				0E7F0EB851AACE0E22241F4C /* SkyBridgeActivityAttributes.swift */,
-			);
-			name = LiveActivities;
-			path = SkyBridgeCompassiOS/Sources/LiveActivities;
-			sourceTree = "<group>";
-		};
+			1F533AD5F0CCB737717CFEFA /* LiveActivities */ = {
+				isa = PBXGroup;
+				children = (
+					0E7F0EB851AACE0E22241F4C /* SkyBridgeActivityAttributes.swift */,
+				);
+				name = LiveActivities;
+				path = LiveActivities;
+				sourceTree = "<group>";
+			};
 		246F49E019C595ACECDDCFB1 /* Trust */ = {
 			isa = PBXGroup;
 			children = (
@@ -489,14 +489,13 @@
 			path = App;
 			sourceTree = "<group>";
 		};
-		B55949760F23D445644575EB = {
-			isa = PBXGroup;
-			children = (
-				1F533AD5F0CCB737717CFEFA /* LiveActivities */,
-				FD919CD6A1AD0CEA831170C9 /* Resources */,
-				6D412A097F84B30E664CA7DC /* Sources */,
-				297AD52CD355D33FD4AE1BFB /* Supporting Files */,
-				62BE32F1C64718CA8ED7151A /* Widgets */,
+			B55949760F23D445644575EB = {
+				isa = PBXGroup;
+				children = (
+					FD919CD6A1AD0CEA831170C9 /* Resources */,
+					6D412A097F84B30E664CA7DC /* Sources */,
+					297AD52CD355D33FD4AE1BFB /* Supporting Files */,
+					62BE32F1C64718CA8ED7151A /* Widgets */,
 				E4C4142A1C9CD93F8C89639C /* Frameworks */,
 				03F70A41D63801AEDAF221E2 /* Products */,
 			);
@@ -830,12 +829,12 @@
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
-				SWIFT_COMPILATION_MODE = wholemodule;
-				SWIFT_OPTIMIZATION_LEVEL = "-O";
-				SWIFT_VERSION = 5.0;
+					SWIFT_COMPILATION_MODE = wholemodule;
+					SWIFT_OPTIMIZATION_LEVEL = "-O";
+					SWIFT_VERSION = 6.0;
+				};
+				name = Release;
 			};
-			name = Release;
-		};
 		9B93D4A8BF90B7BE67D74AC2 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -853,44 +852,58 @@
 			};
 			name = Release;
 		};
-		D644F22ADA9D632A3253DB94 /* Debug */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
-				CODE_SIGN_IDENTITY = "iPhone Developer";
-				DEVELOPMENT_TEAM = YKUPL7Z869;
-				INFOPLIST_FILE = "SkyBridgeCompassiOS/Supporting Files/Info.plist";
-				LD_RUNPATH_SEARCH_PATHS = (
-					"$(inherited)",
-					"@executable_path/Frameworks",
-				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.skybridge.compass.ios;
-				SDKROOT = iphoneos;
-				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) DEBUG HAS_APPLE_PQC_SDK";
-				SWIFT_STRICT_CONCURRENCY = targeted;
-				TARGETED_DEVICE_FAMILY = "1,2";
+			D644F22ADA9D632A3253DB94 /* Debug */ = {
+				isa = XCBuildConfiguration;
+				buildSettings = {
+					ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+					CODE_SIGN_IDENTITY = "iPhone Developer";
+					DEVELOPMENT_TEAM = YKUPL7Z869;
+					INFOPLIST_FILE = "SkyBridgeCompassiOS/Supporting Files/Info.plist";
+					LD_RUNPATH_SEARCH_PATHS = (
+						"$(inherited)",
+						"@executable_path/Frameworks",
+					);
+					OTHER_SWIFT_FLAGS = (
+						"$(inherited)",
+						"-Xcc",
+						"-I",
+						"-Xcc",
+						"$(SRCROOT)/../Sources/Vendor/WebRTCHeaders",
+					);
+					PRODUCT_BUNDLE_IDENTIFIER = com.skybridge.compass.ios;
+					SDKROOT = iphoneos;
+					SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) DEBUG HAS_APPLE_PQC_SDK";
+					SWIFT_STRICT_CONCURRENCY = targeted;
+					TARGETED_DEVICE_FAMILY = "1,2";
+				};
+				name = Debug;
 			};
-			name = Debug;
-		};
-		F7736BB6A670D1A60E09564A /* Release */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
-				CODE_SIGN_IDENTITY = "iPhone Developer";
-				DEVELOPMENT_TEAM = YKUPL7Z869;
-				INFOPLIST_FILE = "SkyBridgeCompassiOS/Supporting Files/Info.plist";
-				LD_RUNPATH_SEARCH_PATHS = (
-					"$(inherited)",
-					"@executable_path/Frameworks",
-				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.skybridge.compass.ios;
-				SDKROOT = iphoneos;
-				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) HAS_APPLE_PQC_SDK";
-				SWIFT_STRICT_CONCURRENCY = targeted;
-				TARGETED_DEVICE_FAMILY = "1,2";
+			F7736BB6A670D1A60E09564A /* Release */ = {
+				isa = XCBuildConfiguration;
+				buildSettings = {
+					ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+					CODE_SIGN_IDENTITY = "iPhone Developer";
+					DEVELOPMENT_TEAM = YKUPL7Z869;
+					INFOPLIST_FILE = "SkyBridgeCompassiOS/Supporting Files/Info.plist";
+					LD_RUNPATH_SEARCH_PATHS = (
+						"$(inherited)",
+						"@executable_path/Frameworks",
+					);
+					OTHER_SWIFT_FLAGS = (
+						"$(inherited)",
+						"-Xcc",
+						"-I",
+						"-Xcc",
+						"$(SRCROOT)/../Sources/Vendor/WebRTCHeaders",
+					);
+					PRODUCT_BUNDLE_IDENTIFIER = com.skybridge.compass.ios;
+					SDKROOT = iphoneos;
+					SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) HAS_APPLE_PQC_SDK";
+					SWIFT_STRICT_CONCURRENCY = targeted;
+					TARGETED_DEVICE_FAMILY = "1,2";
+				};
+				name = Release;
 			};
-			name = Release;
-		};
 		F8AC3788031CA72DFE7FBD99 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -948,12 +961,12 @@
 				ONLY_ACTIVE_ARCH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
-				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
-				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
-				SWIFT_VERSION = 5.0;
+					SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+					SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+					SWIFT_VERSION = 6.0;
+				};
+				name = Debug;
 			};
-			name = Debug;
-		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */

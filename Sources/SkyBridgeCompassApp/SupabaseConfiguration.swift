@@ -53,7 +53,7 @@ public final class SupabaseConfiguration: ObservableObject {
         } else {
             SkyBridgeLogger.ui.debugOnly("⚠️ [SupabaseConfiguration] Keychain 和环境变量都未配置")
             SkyBridgeLogger.ui.debugOnly("   请在应用中配置 Supabase 或设置环境变量")
- // 不再自动使用演示模式，让用户手动配置
+ // 未配置：保持离线状态，等待用户显式配置
             configurationError = "未找到 Supabase 配置，请在设置中配置"
             isConfigured = false
         }
@@ -101,35 +101,6 @@ public final class SupabaseConfiguration: ObservableObject {
         SkyBridgeLogger.ui.debugOnly("✅ Supabase已配置成功")
         SkyBridgeLogger.ui.debugOnly("   URL: \(configuration.url)")
         SkyBridgeLogger.ui.debugOnly("   匿名密钥: \(String(configuration.anonKey.prefix(10)))...")
-    }
-    
- /// 配置演示模式（用于开发和测试）
- ///
- /// ⚠️ 警告：演示模式不会连接到真实的 Supabase 后端。
- /// 生产环境请使用以下方式配置：
- /// 1. 设置环境变量 SUPABASE_URL 和 SUPABASE_ANON_KEY
- /// 2. 在应用设置中手动配置
- /// 3. 将配置保存到 Keychain
-    public func configureDemoMode() {
- // ⚠️ 演示模式：使用本地模拟配置，不连接真实后端
- // 演示模式仅用于 UI 预览和开发测试，不提供任何后端功能
-        
-        SkyBridgeLogger.ui.warning("⚠️ 演示模式已启用 - 不连接真实 Supabase 后端")
-        SkyBridgeLogger.ui.warning("   在线功能（如账号同步、云备份）将不可用")
-        SkyBridgeLogger.ui.warning("   请配置真实的 Supabase 项目以启用完整功能")
-        
- // 设置为离线/演示状态，而不是使用无效的占位符密钥
-        isConfigured = false
-        configurationError = "演示模式：在线功能已禁用。请在设置中配置 Supabase 以启用云功能。"
-        currentConfiguration = nil
-        
- // 打印配置指南
-        Self.printSetupInstructions()
-    }
-    
- /// 检查是否处于演示/离线模式
-    public var isDemoMode: Bool {
-        return !isConfigured || currentConfiguration == nil
     }
     
  /// 获取配置指南文本（用于 UI 显示）

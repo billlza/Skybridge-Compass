@@ -8,8 +8,6 @@ import CryptoKit
 
 #if canImport(FreeRDPBridge)
 import FreeRDPBridge
-#else
-#error("FreeRDPBridge framework 未找到：请在工程中添加真实的 FreeRDPBridge 依赖，或移除 RDP 支持。")
 #endif
 
 // MARK: - 错误定义
@@ -82,7 +80,7 @@ public enum RemoteDesktopError: Error, LocalizedError, Sendable {
         
         安装完成后重启 SkyBridge Compass Pro 即可使用 RDP 功能。
         
-        替代方案：您也可以使用 VNC 或 UltraStream 协议连接到远程设备。
+        替代方案：您也可以使用 VNC 连接到远程设备。
         """
     }
 }
@@ -160,6 +158,10 @@ public final class RemoteDesktopManager: ObservableObject, Sendable {
  // MARK: - 建立连接（自动 + 手动两种）
 
     public func connect(to device: DiscoveredDevice, tenant: TenantDescriptor) async throws {
+        #if !canImport(FreeRDPBridge)
+        throw RemoteDesktopError.freeRDPUnavailable(installGuide: RemoteDesktopError.freeRDPInstallGuide)
+        #endif
+
         let credentials = try await TenantAccessController.shared.credentials(for: tenant.id)
         guard let host = device.ipv4 ?? device.ipv6 else {
             throw RemoteDesktopError.missingAddress(device)
@@ -190,6 +192,10 @@ public final class RemoteDesktopManager: ObservableObject, Sendable {
                         password: String,
                         domain: String? = nil,
                         displayName: String? = nil) async throws {
+        #if !canImport(FreeRDPBridge)
+        throw RemoteDesktopError.freeRDPUnavailable(installGuide: RemoteDesktopError.freeRDPInstallGuide)
+        #endif
+
         guard port > 0 && port <= Int(UInt16.max) else {
             throw RemoteDesktopError.connectionFailed("非法端口 \(port)")
         }
@@ -740,3 +746,65 @@ final class RemoteDesktopSession {
         client.applyAllSettings(dict)
     }
 }
+
+#if !canImport(FreeRDPBridge)
+// MARK: - FreeRDPBridge 缺失时的降级桩（保证可编译）
+//
+// 目标：
+// - 让 SkyBridgeCore 在不包含 FreeRDPBridge / FreeRDP 二进制依赖的环境里仍可编译
+// - 运行时若调用 RDP 功能，给出明确的不可用错误，而不是编译期 #error 直接阻断
+
+enum CBFreeRDPClientState: Int {
+    case idle
+    case connecting
+    case connected
+    case disconnecting
+    case failed
+    case disconnected
+}
+
+enum CBFreeRDPFrameType: UInt {
+    case bgra = 0
+    case h264 = 1
+    case hevc = 2
+}
+
+final class CBFreeRDPClient {
+    var frameCallback: ((Data, UInt32, UInt32, UInt32, CBFreeRDPFrameType) -> Void)?
+    var stateCallback: ((String) -> Void)?
+
+    private(set) var state: CBFreeRDPClientState = .idle
+
+    init(host: String, port: UInt16, username: String, password: String, domain: String?) {
+        _ = host
+        _ = port
+        _ = username
+        _ = password
+        _ = domain
+    }
+
+    func connect() throws {
+        state = .failed
+        throw RemoteDesktopError.freeRDPUnavailable(installGuide: RemoteDesktopError.freeRDPInstallGuide)
+    }
+
+    func disconnect() {
+        state = .disconnected
+    }
+
+    func submitPointerEvent(with x: UInt16, y: UInt16, buttonMask: UInt16) {
+        _ = x
+        _ = y
+        _ = buttonMask
+    }
+
+    func submitKeyboardEvent(withCode code: UInt16, down: Bool) {
+        _ = code
+        _ = down
+    }
+
+    func applyAllSettings(_ dict: [String: Any]) {
+        _ = dict
+    }
+}
+#endif

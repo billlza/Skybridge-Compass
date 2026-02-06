@@ -322,7 +322,7 @@ public class BackgroundTaskManager: ObservableObject {
 
 /// 后台 URL 会话管理
 @available(iOS 17.0, *)
-public class BackgroundURLSessionManager: NSObject {
+public final class BackgroundURLSessionManager: NSObject, @unchecked Sendable {
     
     public static let shared = BackgroundURLSessionManager()
     
@@ -385,4 +385,3 @@ extension BackgroundURLSessionManager: URLSessionDelegate, URLSessionDownloadDel
         }
     }
 }
-

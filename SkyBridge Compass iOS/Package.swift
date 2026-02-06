@@ -58,8 +58,8 @@ let package = Package(
             ],
             swiftSettings: ([
                 .enableUpcomingFeature("StrictConcurrency"),
-                // WebRTC binary header overlay (SwiftPM): macOS slice is missing headers in some distributions.
-                .unsafeFlags(["-Xcc", "-I", "-Xcc", "../Sources/Vendor/WebRTCHeaders"], .when(platforms: [.macOS])),
+                // WebRTC binary header overlay (SwiftPM): some distributions omit internal headers referenced by WebRTC.h.
+                .unsafeFlags(["-Xcc", "-I", "-Xcc", "../Sources/Vendor/WebRTCHeaders"]),
             ] + (enableApplePQCSDK ? [.define("HAS_APPLE_PQC_SDK")] : []))
         )
     ],

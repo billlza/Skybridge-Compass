@@ -21,7 +21,7 @@ public struct LogEntry: Identifiable, Codable, Sendable, Equatable {
 ///
 /// Important: Logging may happen at very high frequency (especially Network.framework / discovery).
 /// To avoid main-thread Task backlog and memory spikes, we keep a lock-backed buffer and throttle UI flushes.
-public final class LogStore: ObservableObject {
+public final class LogStore: ObservableObject, @unchecked Sendable {
     public static let shared = LogStore()
 
     @Published public private(set) var entries: [LogEntry] = []
@@ -122,5 +122,4 @@ extension LogLevel {
         }
     }
 }
-
 

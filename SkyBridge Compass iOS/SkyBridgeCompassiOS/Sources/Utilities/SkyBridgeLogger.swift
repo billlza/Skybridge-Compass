@@ -2,13 +2,14 @@ import Foundation
 import os.log
 
 /// SkyBridge 日志系统
-public class SkyBridgeLogger {
+public final class SkyBridgeLogger: @unchecked Sendable {
     public static let shared = SkyBridgeLogger(subsystem: "com.skybridge.compass", category: "General")
     
     private let logger: Logger
     private let category: String
-    private let echoToXcodeConsole: Bool
-    private let consoleMinLevel: LogLevel
+    private let lock = NSLock()
+    private var echoToXcodeConsole: Bool
+    private var consoleMinLevel: LogLevel
     
     public init(subsystem: String = "com.skybridge.compass", category: String = "General") {
         self.logger = Logger(subsystem: subsystem, category: category)
@@ -48,7 +49,9 @@ public class SkyBridgeLogger {
     }
     
     public func configure(level: LogLevel) {
-        // 配置日志级别
+        lock.lock()
+        consoleMinLevel = level
+        lock.unlock()
     }
     
     public func info(_ message: String) {
@@ -76,8 +79,13 @@ public class SkyBridgeLogger {
     }
 
     private func echo(level: LogLevel, message: String) {
-        guard echoToXcodeConsole else { return }
-        guard level.rank >= consoleMinLevel.rank else { return }
+        lock.lock()
+        let echoEnabled = echoToXcodeConsole
+        let minLevel = consoleMinLevel
+        lock.unlock()
+
+        guard echoEnabled else { return }
+        guard level.rank >= minLevel.rank else { return }
         let df = DateFormatter()
         df.dateFormat = "HH:mm:ss.SSS"
         let ts = df.string(from: Date())

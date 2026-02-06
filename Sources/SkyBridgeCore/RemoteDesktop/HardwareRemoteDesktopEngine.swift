@@ -602,9 +602,12 @@ private class RemoteDesktopStreamer: @unchecked Sendable {
     
     func sendFrame(_ data: Data, timestamp: CFTimeInterval) async throws {
         guard let connection = connection, isStreaming else { return }
-        
-        let message = P2PMessage.remoteDesktopFrame(data)
-        try await connection.sendMessage(message)
+
+        // Paper-aligned: remote desktop stream frames MUST be carried over the established SessionKeys channel.
+        // Avoid JSON/base64 overhead (which destroys throughput and latency).
+        let safeTimestamp = timestamp.isFinite ? max(0, timestamp) : 0
+        let timestampNs = UInt64(safeTimestamp * 1_000_000_000.0)
+        try await connection.sendRemoteDesktopFrame(data, timestampNs: timestampNs)
     }
 }
 

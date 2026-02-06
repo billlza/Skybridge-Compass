@@ -798,8 +798,7 @@ public final class DeviceDiscoveryService: ObservableObject {
                     self?.logger.info("⏰ 发现超时，自动停止扫描")
                     // If we have an active secure session, keep discovery/advertising alive.
                     // Otherwise the peer may treat us as "offline" and tear down the guarded connection.
-                    if #available(macOS 14.0, iOS 17.0, *),
-                       ConnectionPresenceService.shared.isConnected {
+                    if ConnectionPresenceService.shared.isConnected {
                         self?.logger.info("🛡️ 发现超时：检测到已连接会话，保持发现服务运行（不自动停止）")
                         return
                     }

@@ -9,7 +9,7 @@ set -euo pipefail
 # 1) 先确保在项目根目录运行过 Release 构建：
 #    xcodebuild -workspace .swiftpm/xcode/package.xcworkspace \
 #               -scheme SkyBridgeCompassApp \
-#               -configuration Release -destination 'platform=macOS' \
+#               -configuration Release -destination 'platform=macOS,arch=arm64' \
 #               -derivedDataPath .build/xcode build
 # 2) 运行本脚本：
 #    Scripts/package_app.sh

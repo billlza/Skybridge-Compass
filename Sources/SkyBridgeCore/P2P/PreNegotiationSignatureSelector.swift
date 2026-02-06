@@ -138,6 +138,7 @@ public struct PreNegotiationSignatureSelector: Sendable {
  ///
  /// **Property 3: Signature Provider Selection by Algorithm**
  /// **Validates: Requirements 3.1, 3.2, 3.3**
+    @available(*, deprecated, message: "请使用 selectProvider(for: ProtocolSigningAlgorithm)。P-256 ECDSA 不允许用于主协议签名（sigA/sigB）。若需要 P-256（legacy 验证 / Secure Enclave PoP），请使用 P256SignatureProvider。")
     public static func selectProvider(for algorithm: SignatureAlgorithm) -> any ProtocolSignatureProvider {
         switch algorithm {
         case .mlDSA65:
@@ -149,8 +150,9 @@ public struct PreNegotiationSignatureSelector: Sendable {
             
         case .p256ECDSA:
  // P-256 ECDSA 不允许用于主协议签名 (sigA/sigB)
- // 使用 Ed25519 作为 fallback，调用方应使用 ProtocolSigningAlgorithm 版本
- // TODO: 2 将废弃此方法，改用 selectProvider(for: ProtocolSigningAlgorithm)
+            // 使用 Ed25519 作为 fallback（避免 Debug 断言导致测试/运行时崩溃）。
+            // 调用方应改用 `ProtocolSigningAlgorithm` 版本；若需要 P-256（legacy 验证 / Secure Enclave PoP），请使用 `P256SignatureProvider`。
+            SkyBridgeLogger.p2p.warning("Deprecated selectProvider(for: SignatureAlgorithm) called with P-256 ECDSA (illegal for sigA/sigB). Falling back to ClassicSignatureProvider. Use ProtocolSigningAlgorithm/P256SignatureProvider instead.")
             return ClassicSignatureProvider()
         }
     }
@@ -180,8 +182,14 @@ public struct PreNegotiationSignatureSelector: Sendable {
         offeredSuites: [CryptoSuite]
     ) -> (algorithm: SignatureAlgorithm, provider: any ProtocolSignatureProvider) {
         let algorithm = selectForMessageA(offeredSuites: offeredSuites)
-        let provider = selectProvider(for: algorithm)
-        return (algorithm, provider)
+        // `selectForMessageA` 的返回值只可能是 ed25519 / mlDSA65，但这里仍使用类型安全的转换，
+        // 避免误用 `.p256ECDSA` 路径（该路径对主协议签名是非法的）。
+        if let protocolAlg = ProtocolSigningAlgorithm(from: algorithm) {
+            let provider = selectProvider(for: protocolAlg)
+            return (algorithm, provider)
+        }
+        SkyBridgeLogger.p2p.error("Unexpected SignatureAlgorithm for protocol signing: \(algorithm.rawValue). Falling back to ClassicSignatureProvider.")
+        return (algorithm, ClassicSignatureProvider())
     }
 }
 

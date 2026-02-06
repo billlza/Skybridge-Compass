@@ -6,9 +6,9 @@
 // Requirements: 5.1, 5.2, 5.3, 5.4, 5.5, 5.6
 //
 // QUIC 多流传输管理：
-// 1. Control Channel: 第一个 bidirectional stream (可靠)
+// 1. Control Channel: 可靠（基于 QUIC reliable stream 的应用层复用）
 // 2. Video Channel: 单例 datagram flow (不可靠, 每连接只有一个)
-// 3. File Channels: N 个 bidirectional streams (可靠)
+// 3. File Channels: N 个可靠“逻辑流”（同一可靠流上复用，避免在同一 NWConnection 上并发 receive）
 //
 
 import Foundation
@@ -330,11 +330,16 @@ public actor QUICTransportService {
     /// 连接端点（用于诊断；本实现不支持真实“QUIC streams”）
     private var connectedEndpoint: NWEndpoint?
 
- /// 控制流
-    private var controlStream: NWConnection?
+    /// connect() 的一次性等待 continuation（由 actor 串行化保证只 resume 一次）
+    private var connectContinuation: CheckedContinuation<Void, Error>?
 
- /// 文件流映射
-    private var fileStreams: [FileChannelId: NWConnection] = [:]
+    /// 可靠“数据平面”复用接收缓冲
+    private var reliableReceiveBuffer = Data()
+    private var reliableReceiveBufferOffset: Int = 0
+
+    /// 本端打开的文件“逻辑流”（仅用于并发限制/关闭；对端可直接发送未知 channelId）
+    private var fileStreams: Set<FileChannelId> = []
+    private var nextFileStreamIndexByTransferId: [UUID: Int] = [:]
 
  /// 当前网络质量
     private var networkQuality: QUICNetworkQuality = .unknown
@@ -358,6 +363,24 @@ public actor QUICTransportService {
 
  /// 连接状态变化回调
     public var onStateChanged: (@Sendable (QUICConnectionState) -> Void)?
+
+ // MARK: - Callback Wiring
+
+    public func getOnControlReceived() -> (@Sendable (Data) -> Void)? {
+        onControlReceived
+    }
+
+    public func setOnControlReceived(_ handler: (@Sendable (Data) -> Void)?) {
+        onControlReceived = handler
+    }
+
+    public func getOnQUICFileChunkReceived() -> (@Sendable (FileChannelId, QUICFileChunk) -> Void)? {
+        onQUICFileChunkReceived
+    }
+
+    public func setOnQUICFileChunkReceived(_ handler: (@Sendable (FileChannelId, QUICFileChunk) -> Void)?) {
+        onQUICFileChunkReceived = handler
+    }
 
  // MARK: - Initialization
 
@@ -400,25 +423,14 @@ public actor QUICTransportService {
         connection = conn
         connectedEndpoint = endpoint
 
- // 等待连接就绪
+        // 等待连接就绪（由 handleConnectionState 串行化 resume，避免 double-resume）
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            conn.stateUpdateHandler = { newState in
-                switch newState {
-                case .ready:
-                    continuation.resume()
-                case .failed(let error):
-                    continuation.resume(throwing: QUICTransportError.connectionFailed(error.localizedDescription))
-                case .cancelled:
-                    continuation.resume(throwing: QUICTransportError.connectionFailed("Connection cancelled"))
-                default:
-                    break
-                }
+            self.connectContinuation = continuation
+            conn.stateUpdateHandler = { [weak self] newState in
+                Task { await self?.handleConnectionState(newState) }
             }
             conn.start(queue: .global(qos: .userInitiated))
         }
-
-        state = .connected
-        onStateChanged?(.connected)
 
  // 获取 datagram 大小
  // 检查路径是否有可用接口，如果有则使用保守值
@@ -428,22 +440,25 @@ public actor QUICTransportService {
 
  // 开始接收 datagram
         startReceivingDatagrams()
+        // 开始接收可靠复用流（control + file）
+        startReceivingReliableStream()
 
         SkyBridgeLogger.p2p.info("QUIC connected")
     }
 
  /// 断开连接
     public func disconnect() async {
-        connection?.cancel()
-        controlStream?.cancel()
-
-        for (_, stream) in fileStreams {
-            stream.cancel()
+        if let continuation = connectContinuation {
+            connectContinuation = nil
+            continuation.resume(throwing: QUICTransportError.connectionFailed("Connection cancelled"))
         }
+        connection?.cancel()
         fileStreams.removeAll()
+        nextFileStreamIndexByTransferId.removeAll()
+        reliableReceiveBuffer.removeAll(keepingCapacity: false)
+        reliableReceiveBufferOffset = 0
 
         connection = nil
-        controlStream = nil
         state = .disconnected
         onStateChanged?(.disconnected)
 
@@ -458,17 +473,7 @@ public actor QUICTransportService {
             throw QUICTransportError.notConnected
         }
 
- // 确保控制流已打开
-        if controlStream == nil {
-            controlStream = try await openBidirectionalStream()
-            startReceivingControl()
-        }
-
-        guard let stream = controlStream else {
-            throw QUICTransportError.streamOpenFailed("Control stream not available")
-        }
-
-        try await send(data: data, on: stream)
+        try await sendReliableFrame(kind: .control, channelId: nil, payload: data)
     }
 
  // MARK: - Video Channel (Datagram)
@@ -512,21 +517,17 @@ public actor QUICTransportService {
             throw QUICTransportError.streamOpenFailed("Max concurrent streams reached")
         }
 
-        let stream = try await openBidirectionalStream()
-        let streamIndex = fileStreams.count
+        let streamIndex = nextFileStreamIndexByTransferId[transferId] ?? 0
+        nextFileStreamIndexByTransferId[transferId] = streamIndex + 1
         let channelId = FileChannelId(transferId: transferId, streamIndex: streamIndex)
-
-        fileStreams[channelId] = stream
-
- // 开始接收
-        startReceivingFile(channelId: channelId, stream: stream)
+        fileStreams.insert(channelId)
 
         return FileStreamHandle(channelId: channelId)
     }
 
  /// 发送文件块（可靠，指定句柄）
     public func sendQUICFileChunk(_ chunk: QUICFileChunk, on handle: FileStreamHandle) async throws {
-        guard let stream = fileStreams[handle.channelId] else {
+        guard fileStreams.contains(handle.channelId) else {
             throw QUICTransportError.streamOpenFailed("File stream not found")
         }
 
@@ -553,14 +554,12 @@ public actor QUICTransportService {
             data.append(checksum)
         }
 
-        try await send(data: data, on: stream)
+        try await sendReliableFrame(kind: .fileChunk, channelId: handle.channelId, payload: data)
     }
 
  /// 关闭文件流
     public func closeFileStream(_ handle: FileStreamHandle) async {
-        if let stream = fileStreams.removeValue(forKey: handle.channelId) {
-            stream.cancel()
-        }
+        fileStreams.remove(handle.channelId)
     }
 
  // MARK: - Connection Access
@@ -580,9 +579,8 @@ public actor QUICTransportService {
 
  // 如果当前流数超过限制，关闭多余的流
         while fileStreams.count > maxConcurrentStreams {
-            if let (channelId, stream) = fileStreams.first {
-                stream.cancel()
-                fileStreams.removeValue(forKey: channelId)
+            if let channelId = fileStreams.first {
+                fileStreams.remove(channelId)
             }
         }
 
@@ -592,24 +590,31 @@ public actor QUICTransportService {
  // MARK: - Private Methods
 
  /// 处理连接状态
-    private func handleConnectionState(
-        _ newState: NWConnection.State,
-        continuation: CheckedContinuation<Void, Error>?
-    ) {
+    private func handleConnectionState(_ newState: NWConnection.State) {
         switch newState {
         case .ready:
             state = .connected
             onStateChanged?(.connected)
-            continuation?.resume()
+            if let continuation = connectContinuation {
+                connectContinuation = nil
+                continuation.resume()
+            }
 
         case .failed(let error):
             state = .failed
             onStateChanged?(.failed)
-            continuation?.resume(throwing: QUICTransportError.connectionFailed(error.localizedDescription))
+            if let continuation = connectContinuation {
+                connectContinuation = nil
+                continuation.resume(throwing: QUICTransportError.connectionFailed(error.localizedDescription))
+            }
 
         case .cancelled:
             state = .disconnected
             onStateChanged?(.disconnected)
+            if let continuation = connectContinuation {
+                connectContinuation = nil
+                continuation.resume(throwing: QUICTransportError.connectionFailed("Connection cancelled"))
+            }
 
         case .waiting(let error):
             SkyBridgeLogger.p2p.warning("Connection waiting: \(error.localizedDescription)")
@@ -619,13 +624,178 @@ public actor QUICTransportService {
         }
     }
 
- /// 打开双向流
-    private func openBidirectionalStream() async throws -> NWConnection {
-        // ⚠️ 重要：当前实现没有使用 Network.framework 的真正 QUIC stream API，
-        // 直接在同一个 NWConnection 上并发 receive 会导致随机丢包/卡死/“幽灵中断”。
-        // 为了避免“看似可用但其实不稳定”，这里直接 fail-fast。
-        let ep = connectedEndpoint.map { String(describing: $0) } ?? "unknown-endpoint"
-        throw QUICTransportError.notImplemented("QUIC streams are not implemented in QUICTransportService (endpoint=\(ep)). Use TCP framed transport (HandshakeDriver) or implement stream multiplexing explicitly.")
+    // MARK: Reliable Framing (control + file chunks)
+
+    private static let reliableFrameVersion: UInt8 = 1
+
+    private enum ReliableFrameKind: UInt8 {
+        case control = 0
+        case fileChunk = 1
+    }
+
+    private func sendReliableFrame(
+        kind: ReliableFrameKind,
+        channelId: FileChannelId?,
+        payload: Data
+    ) async throws {
+        guard let conn = connection else { throw QUICTransportError.notConnected }
+        let frame = try encodeReliableFrame(kind: kind, channelId: channelId, payload: payload)
+        try await send(data: frame, on: conn)
+    }
+
+    private func encodeReliableFrame(
+        kind: ReliableFrameKind,
+        channelId: FileChannelId?,
+        payload: Data
+    ) throws -> Data {
+        guard payload.count <= Int(UInt32.max) else {
+            throw QUICTransportError.sendFailed("Payload too large: \(payload.count) bytes")
+        }
+
+        var data = Data()
+        data.reserveCapacity(32 + payload.count)
+
+        data.append(Self.reliableFrameVersion)
+        data.append(kind.rawValue)
+
+        switch kind {
+        case .control:
+            break
+        case .fileChunk:
+            guard let channelId else {
+                throw QUICTransportError.sendFailed("Missing FileChannelId for fileChunk frame")
+            }
+
+            var uuidBytes = channelId.transferId.uuid
+            withUnsafeBytes(of: &uuidBytes) { raw in
+                data.append(contentsOf: raw)
+            }
+
+            var streamIndexBE = UInt32(channelId.streamIndex).bigEndian
+            data.append(contentsOf: withUnsafeBytes(of: &streamIndexBE) { Data($0) })
+        }
+
+        var lengthBE = UInt32(payload.count).bigEndian
+        data.append(contentsOf: withUnsafeBytes(of: &lengthBE) { Data($0) })
+        data.append(payload)
+        return data
+    }
+
+    private func startReceivingReliableStream() {
+        guard let conn = connection else { return }
+
+        // Use a larger read size to reduce callback churn for 256KB file chunks.
+        let maxRead = max(64 * 1024, P2PConstants.fileChunkSize + 1024)
+
+        conn.receive(minimumIncompleteLength: 1, maximumLength: maxRead) { [weak self] data, _, isComplete, error in
+            guard let self else { return }
+
+            Task {
+                if let data, !data.isEmpty {
+                    await self.appendReliableBytes(data)
+                }
+
+                if !isComplete && error == nil {
+                    await self.startReceivingReliableStream()
+                } else if let error {
+                    SkyBridgeLogger.p2p.error("Reliable stream receive failed: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
+    private func appendReliableBytes(_ data: Data) {
+        reliableReceiveBuffer.append(data)
+        parseReliableFrames()
+        compactReliableBufferIfNeeded()
+    }
+
+    private func compactReliableBufferIfNeeded() {
+        // Avoid unbounded growth when we parse many frames.
+        guard reliableReceiveBufferOffset > 0 else { return }
+        if reliableReceiveBufferOffset > 64 * 1024 || reliableReceiveBufferOffset > reliableReceiveBuffer.count / 2 {
+            reliableReceiveBuffer.removeSubrange(0..<reliableReceiveBufferOffset)
+            reliableReceiveBufferOffset = 0
+        }
+    }
+
+    private func parseReliableFrames() {
+        while true {
+            let available = reliableReceiveBuffer.count - reliableReceiveBufferOffset
+            // Need at least version(1) + kind(1) + length(4)
+            guard available >= 6 else { return }
+
+            let base = reliableReceiveBufferOffset
+
+            let version = reliableReceiveBuffer[base]
+            guard version == Self.reliableFrameVersion else {
+                // Protocol mismatch: drop buffer to resync to next frame boundary.
+                SkyBridgeLogger.p2p.error("Reliable frame version mismatch: \(version) != \(Self.reliableFrameVersion)")
+                reliableReceiveBuffer.removeAll(keepingCapacity: true)
+                reliableReceiveBufferOffset = 0
+                return
+            }
+
+            guard let kind = ReliableFrameKind(rawValue: self.reliableReceiveBuffer[base + 1]) else {
+                SkyBridgeLogger.p2p.error("Unknown reliable frame kind: \(self.reliableReceiveBuffer[base + 1])")
+                self.reliableReceiveBuffer.removeAll(keepingCapacity: true)
+                self.reliableReceiveBufferOffset = 0
+                return
+            }
+
+            var cursor = base + 2
+            var channelId: FileChannelId?
+
+            if kind == .fileChunk {
+                // Need transferId(16) + streamIndex(4)
+                guard available >= 2 + 16 + 4 + 4 else { return }
+                guard let transferId = decodeUUID(from: reliableReceiveBuffer, at: cursor) else {
+                    SkyBridgeLogger.p2p.error("Failed to decode transferId in reliable frame")
+                    reliableReceiveBuffer.removeAll(keepingCapacity: true)
+                    reliableReceiveBufferOffset = 0
+                    return
+                }
+                cursor += 16
+
+                let streamIndexBE: UInt32 = reliableReceiveBuffer.withUnsafeBytes { raw in
+                    raw.loadUnaligned(fromByteOffset: cursor, as: UInt32.self)
+                }
+                cursor += 4
+                channelId = FileChannelId(transferId: transferId, streamIndex: Int(UInt32(bigEndian: streamIndexBE)))
+            }
+
+            // length
+            let lengthBE: UInt32 = reliableReceiveBuffer.withUnsafeBytes { raw in
+                raw.loadUnaligned(fromByteOffset: cursor, as: UInt32.self)
+            }
+            let length = Int(UInt32(bigEndian: lengthBE))
+            cursor += 4
+
+            let frameTotal = (cursor - base) + length
+            guard available >= frameTotal else { return }
+
+            let payloadRange = cursor..<(cursor + length)
+            let payload = Data(reliableReceiveBuffer[payloadRange])
+
+            reliableReceiveBufferOffset += frameTotal
+
+            switch kind {
+            case .control:
+                handleControlMessage(payload)
+            case .fileChunk:
+                if let channelId {
+                    handleFileData(channelId: channelId, data: payload)
+                }
+            }
+        }
+    }
+
+    private func decodeUUID(from data: Data, at offset: Int) -> UUID? {
+        guard offset >= 0, data.count >= offset + 16 else { return nil }
+        return data.withUnsafeBytes { raw in
+            guard let base = raw.bindMemory(to: UInt8.self).baseAddress else { return nil }
+            return NSUUID(uuidBytes: base.advanced(by: offset)) as UUID
+        }
     }
 
  /// 发送数据
@@ -663,42 +833,6 @@ public actor QUICTransportService {
         }
     }
 
- /// 开始接收控制消息
-    private func startReceivingControl() {
-        guard let stream = controlStream else { return }
-
-        stream.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, isComplete, error in
-            guard let self = self else { return }
-
-            Task {
-                if let data = data {
-                    await self.handleControlMessage(data)
-                }
-
-                if !isComplete && error == nil {
-                    await self.startReceivingControl()
-                }
-            }
-        }
-    }
-
- /// 开始接收文件数据
-    private func startReceivingFile(channelId: FileChannelId, stream: NWConnection) {
-        stream.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, isComplete, error in
-            guard let self = self else { return }
-
-            Task {
-                if let data = data {
-                    await self.handleFileData(channelId: channelId, data: data)
-                }
-
-                if !isComplete && error == nil {
-                    await self.startReceivingFile(channelId: channelId, stream: stream)
-                }
-            }
-        }
-    }
-
  /// 处理视频帧
     private func handleVideoFrame(_ packet: VideoFramePacket) {
         onVideoFrameReceived?(packet)
@@ -711,37 +845,29 @@ public actor QUICTransportService {
 
  /// 处理文件数据
     private func handleFileData(channelId: FileChannelId, data: Data) {
- // 解码文件块
-        guard data.count >= 13 else { return } // 8 + 1 + 4 = 13 bytes header
+        // Decode file chunk: index(8) + flags(1) + len(4) + payload + checksum(optional)
+        data.withUnsafeBytes { raw in
+            guard raw.count >= 13 else { return }
 
-        var offset = 0
+            let indexBE = raw.loadUnaligned(fromByteOffset: 0, as: UInt64.self)
+            let index = UInt64(bigEndian: indexBE)
 
- // index
-        let index = data.subdata(in: offset..<offset+8).withUnsafeBytes {
-            $0.load(as: UInt64.self).bigEndian
+            let flags = raw[8]
+            let isLast = (flags & 0x01) != 0
+
+            let lengthBE = raw.loadUnaligned(fromByteOffset: 9, as: UInt32.self)
+            let length = Int(UInt32(bigEndian: lengthBE))
+
+            let payloadStart = 13
+            let payloadEnd = payloadStart + length
+            guard payloadEnd <= raw.count else { return }
+
+            let chunkData = Data(data[payloadStart..<payloadEnd])
+            let checksum: Data? = (payloadEnd < raw.count) ? Data(data[payloadEnd..<raw.count]) : nil
+
+            let chunk = QUICFileChunk(index: index, data: chunkData, isLast: isLast, checksum: checksum)
+            onQUICFileChunkReceived?(channelId, chunk)
         }
-        offset += 8
-
- // flags
-        let flags = data[offset]
-        let isLast = (flags & 0x01) != 0
-        offset += 1
-
- // length
-        let length = data.subdata(in: offset..<offset+4).withUnsafeBytes {
-            $0.load(as: UInt32.self).bigEndian
-        }
-        offset += 4
-
- // data
-        let chunkData = data.subdata(in: offset..<offset+Int(length))
-        offset += Int(length)
-
- // checksum (optional)
-        let checksum: Data? = data.count > offset ? data.subdata(in: offset..<data.count) : nil
-
-        let chunk = QUICFileChunk(index: index, data: chunkData, isLast: isLast, checksum: checksum)
-        onQUICFileChunkReceived?(channelId, chunk)
     }
 }
 
