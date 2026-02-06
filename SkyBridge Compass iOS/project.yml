@@ -36,6 +36,9 @@ targets:
         TARGETED_DEVICE_FAMILY: "1,2"
         INFOPLIST_FILE: "SkyBridgeCompassiOS/Supporting Files/Info.plist"
         SWIFT_STRICT_CONCURRENCY: targeted
+        # WebRTC (third-party binary package) exposes an incomplete umbrella header on iOS.
+        # Keep this warning enabled for our own frameworks; suppress only at app integration boundary.
+        CLANG_WARN_INCOMPLETE_UMBRELLA: NO
         # Important: do NOT define HAS_APPLE_PQC_SDK by default.
         # If you have an SDK that actually contains CryptoKit PQC types (MLKEM/MLDSA),
         # add `HAS_APPLE_PQC_SDK` in Target Build Settings -> Swift Compiler - Custom Flags.

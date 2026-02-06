@@ -856,6 +856,7 @@
 				isa = XCBuildConfiguration;
 				buildSettings = {
 					ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+					CLANG_WARN_INCOMPLETE_UMBRELLA = NO;
 					CODE_SIGN_IDENTITY = "iPhone Developer";
 					DEVELOPMENT_TEAM = YKUPL7Z869;
 					INFOPLIST_FILE = "SkyBridgeCompassiOS/Supporting Files/Info.plist";
@@ -882,6 +883,7 @@
 				isa = XCBuildConfiguration;
 				buildSettings = {
 					ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+					CLANG_WARN_INCOMPLETE_UMBRELLA = NO;
 					CODE_SIGN_IDENTITY = "iPhone Developer";
 					DEVELOPMENT_TEAM = YKUPL7Z869;
 					INFOPLIST_FILE = "SkyBridgeCompassiOS/Supporting Files/Info.plist";
