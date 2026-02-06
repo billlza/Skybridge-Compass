@@ -17,6 +17,15 @@ import UIKit
 import UserNotifications
 #endif
 
+public extension Notification.Name {
+    static let connectableDeviceDiscovered = Notification.Name("ConnectableDeviceDiscovered")
+    static let fileTransferStarted = Notification.Name("FileTransferStarted")
+    static let fileTransferProgress = Notification.Name("FileTransferProgress")
+    static let fileTransferCompleted = Notification.Name("FileTransferCompleted")
+    static let fileTransferFailed = Notification.Name("FileTransferFailed")
+    static let quantumCertValidationEvent = Notification.Name("QuantumCertValidationEvent")
+}
+
 // MARK: - File Transfer Constants
 
 /// 文件传输常量
@@ -270,6 +279,10 @@ public class FileTransferManager: ObservableObject {
 
     private var inFlightTransferCount: Int = 0
     private var transferWaiters: [CheckedContinuation<Void, Never>] = []
+    private var lastProgressEventAtByTransferId: [String: Date] = [:]
+    private var lastProgressEventPercentByTransferId: [String: Int] = [:]
+    private let progressEventMinInterval: TimeInterval = 0.25
+    private let progressEventMinStepPercent: Int = 2
     
     /// P2P 连接管理器
     private var connectionManager: P2PConnectionManager { P2PConnectionManager.instance }
@@ -631,6 +644,7 @@ public class FileTransferManager: ObservableObject {
             activeTransfers[index].status = .failed
             activeTransfers.remove(at: index)
         }
+        clearProgressEventState(for: transferId)
         
         updateTransferringState()
     }
@@ -1028,6 +1042,7 @@ public class FileTransferManager: ObservableObject {
         
         var fileName: String?
         var direction: SkyBridgeActivityAttributes.TransferDirection = .none
+        var transferSnapshot: FileTransfer?
 
         if let index = activeTransfers.firstIndex(where: { $0.id == transferId }) {
             activeTransfers[index].progress = progress
@@ -1035,6 +1050,7 @@ public class FileTransferManager: ObservableObject {
             activeTransfers[index].status = .transferring
             fileName = activeTransfers[index].fileName
             direction = activeTransfers[index].isIncoming ? .download : .upload
+            transferSnapshot = activeTransfers[index]
         }
         
         transferStates[transferId]?.transferredBytes = transferredBytes
@@ -1042,6 +1058,16 @@ public class FileTransferManager: ObservableObject {
         
         // 更新总进度
         updateTotalProgress()
+
+        if let transferSnapshot {
+            postInAppTransferProgressEventIfNeeded(
+                transfer: transferSnapshot,
+                transferredBytes: transferredBytes,
+                totalBytes: totalBytes,
+                progress: progress,
+                speed: speed
+            )
+        }
 
         // 更新灵动岛传输进度（iOS 17+）
         if let name = fileName {
@@ -1145,6 +1171,58 @@ public class FileTransferManager: ObservableObject {
             userInfo: userInfo
         )
     }
+
+    private func postInAppTransferProgressEventIfNeeded(
+        transfer: FileTransfer,
+        transferredBytes: Int64,
+        totalBytes: Int64,
+        progress: Double,
+        speed: Double
+    ) {
+        let transferId = transfer.id
+        let now = Date()
+        let clampedProgress = min(max(progress, 0), 1)
+        let percent = Int((clampedProgress * 100).rounded(.down))
+        let lastPercent = lastProgressEventPercentByTransferId[transferId] ?? -1
+        let lastEventAt = lastProgressEventAtByTransferId[transferId] ?? .distantPast
+        let intervalElapsed = now.timeIntervalSince(lastEventAt) >= progressEventMinInterval
+        let stepAdvanced = percent >= lastPercent + progressEventMinStepPercent
+        let isBoundary = percent == 0 || percent == 100
+
+        guard intervalElapsed || stepAdvanced || isBoundary else {
+            return
+        }
+
+        lastProgressEventAtByTransferId[transferId] = now
+        lastProgressEventPercentByTransferId[transferId] = percent
+
+        var userInfo: [String: Any] = [
+            "transferId": transfer.id,
+            "fileName": transfer.fileName,
+            "fileSize": transfer.fileSize,
+            "direction": transfer.isIncoming ? "incoming" : "outgoing",
+            "remotePeer": transfer.remotePeer,
+            "progress": clampedProgress,
+            "progressPercent": percent,
+            "transferredBytes": max(0, transferredBytes),
+            "totalBytes": max(0, totalBytes),
+            "speedBytesPerSecond": max(0, speed),
+            "speedDisplay": formatSpeed(speed)
+        ]
+        if let localPath = transfer.localPath, !localPath.isEmpty {
+            userInfo["localPath"] = localPath
+        }
+        NotificationCenter.default.post(
+            name: .fileTransferProgress,
+            object: nil,
+            userInfo: userInfo
+        )
+    }
+
+    private func clearProgressEventState(for transferId: String) {
+        lastProgressEventAtByTransferId.removeValue(forKey: transferId)
+        lastProgressEventPercentByTransferId.removeValue(forKey: transferId)
+    }
     
     /// 计算传输速度
     private func calculateSpeed(transferId: String, transferredBytes: Int64) -> Double {
@@ -1232,6 +1310,7 @@ public class FileTransferManager: ObservableObject {
         // 清理状态
         transferStates[transferId]?.connection?.cancel()
         transferStates.removeValue(forKey: transferId)
+        clearProgressEventState(for: transferId)
         
         updateTransferringState()
     }
@@ -1342,6 +1421,7 @@ public class FileTransferManager: ObservableObject {
         Task {
             await LiveActivityManager.shared.transferCompleted()
         }
+        clearProgressEventState(for: transferId)
         updateTransferringState()
     }
     
