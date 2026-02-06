@@ -29,6 +29,7 @@ public struct EnhancedDeviceDiscoveryView: View {
 
  // 跨网络连接
     @StateObject private var crossNetworkManager = CrossNetworkConnectionManager()
+    @StateObject private var p2pDiscoveryService = P2PDiscoveryService()
 
  // 🆕 真实iCloud设备发现(不再单独使用,已整合到统一管理器中)
  // @StateObject private var iCloudManager = iCloudDeviceDiscoveryManager()
@@ -99,7 +100,13 @@ public struct EnhancedDeviceDiscoveryView: View {
                             uniqueIdentifier: manualCode.isEmpty ? nil : manualCode,
                             signalStrength: nil
                         )
-                        Task { try? await P2PDiscoveryService().connectToDevice(device) }
+                        Task {
+                            do {
+                                try await p2pDiscoveryService.connectToDevice(device)
+                            } catch {
+                                logger.error("❌ 手动连接失败: \(error.localizedDescription, privacy: .public)")
+                            }
+                        }
                     }
                     .keyboardShortcut(.defaultAction)
                 }
@@ -1425,12 +1432,27 @@ public struct EnhancedDeviceDiscoveryView: View {
 
  // MARK: - 辅助方法
 
- /// 🆕 连接到在线设备
+    /// 🆕 连接到在线设备
     private func connectToOnlineDevice(_ device: OnlineDevice) {
         Task {
- // Swift 6.2: 移除不可达的catch块，markDeviceAsConnected不抛出错误
-            unifiedDeviceManager.markDeviceAsConnected(device.id)
-            logger.info("✅ 在线设备连接成功: \(device.name)")
+            let discoveredDevice = DiscoveredDevice(
+                id: device.id,
+                name: device.name,
+                ipv4: device.ipv4,
+                ipv6: device.ipv6,
+                services: device.services,
+                portMap: device.portMap,
+                connectionTypes: device.connectionTypes,
+                uniqueIdentifier: device.uniqueIdentifier,
+                signalStrength: nil
+            )
+            do {
+                try await p2pDiscoveryService.connectToDevice(discoveredDevice)
+                unifiedDeviceManager.markDeviceAsConnected(device.id)
+                logger.info("✅ 在线设备连接成功: \(device.name)")
+            } catch {
+                logger.error("❌ 在线设备连接失败: \(device.name, privacy: .public), \(error.localizedDescription, privacy: .public)")
+            }
         }
     }
 

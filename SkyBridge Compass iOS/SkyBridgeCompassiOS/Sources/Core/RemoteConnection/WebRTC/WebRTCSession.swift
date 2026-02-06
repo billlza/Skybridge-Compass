@@ -58,6 +58,8 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         case webRTCNotAvailable
         case peerConnectionCreationFailed
         case dataChannelNotReady
+        case dataChannelNotOpen
+        case dataChannelSendFailed
         case alreadyClosed
         
         public var errorDescription: String? {
@@ -65,6 +67,8 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             case .webRTCNotAvailable: return "WebRTC 模块不可用（请确认已添加 WebRTC 依赖）"
             case .peerConnectionCreationFailed: return "创建 RTCPeerConnection 失败"
             case .dataChannelNotReady: return "DataChannel 未就绪"
+            case .dataChannelNotOpen: return "DataChannel 未打开"
+            case .dataChannelSendFailed: return "DataChannel 发送失败"
             case .alreadyClosed: return "WebRTCSession 已关闭"
             }
         }
@@ -214,7 +218,9 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         guard !isClosed else { throw WebRTCError.alreadyClosed }
 #if canImport(WebRTC)
         guard let dc = dataChannel else { throw WebRTCError.dataChannelNotReady }
-        _ = dc.sendData(RTCDataBuffer(data: data, isBinary: true))
+        guard dc.readyState == .open else { throw WebRTCError.dataChannelNotOpen }
+        let buffer = RTCDataBuffer(data: data, isBinary: true)
+        guard dc.sendData(buffer) else { throw WebRTCError.dataChannelSendFailed }
 #else
         throw WebRTCError.webRTCNotAvailable
 #endif

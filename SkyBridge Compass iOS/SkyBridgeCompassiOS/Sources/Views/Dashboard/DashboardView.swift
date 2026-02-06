@@ -664,11 +664,14 @@ private struct QRCodeHubSheet: View {
     }
 
     @Environment(\.dismiss) private var dismiss
+    @StateObject private var crossNetworkManager = CrossNetworkWebRTCManager.instance
     @State private var mode: Mode = .scan
     @State private var pendingPairing: QRCodeData?
     @State private var scannerSessionID = UUID()
     @State private var isConnecting = false
     @State private var codeInput: String = ""
+    @State private var generatedCode: String = ""
+    @State private var isGeneratingCode = false
 
     let onScanPairingData: (QRCodeData) -> Void
     let onScanConnectLink: (String) -> Void
@@ -741,7 +744,7 @@ private struct QRCodeHubSheet: View {
                         MyPairingQRCodeView()
                         
                     case .code:
-                        VStack(spacing: 16) {
+                        VStack(spacing: 18) {
                             Spacer()
                             
                             VStack(spacing: 10) {
@@ -795,8 +798,59 @@ private struct QRCodeHubSheet: View {
                             .tint(.cyan)
                             .disabled(codeInput.count != 6)
                             .padding(.horizontal, 24)
+
+                            Divider()
+                                .overlay(Color.white.opacity(0.12))
+                                .padding(.horizontal, 24)
+
+                            VStack(spacing: 10) {
+                                Text("我的连接码")
+                                    .font(.headline)
+                                    .foregroundStyle(.primary)
+
+                                Text(generatedCode.isEmpty ? (crossNetworkManager.localConnectionCode ?? "未生成") : generatedCode)
+                                    .font(.system(size: 34, weight: .bold, design: .rounded))
+                                    .monospacedDigit()
+                                    .foregroundStyle(.cyan)
+                                    .padding(.vertical, 2)
+
+                                Text("在 macOS 端输入此 6 位连接码即可连接到本机")
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                                    .multilineTextAlignment(.center)
+                            }
+                            .padding(.horizontal, 24)
+
+                            Button {
+                                Task {
+                                    isGeneratingCode = true
+                                    defer { isGeneratingCode = false }
+                                    if let code = await crossNetworkManager.generateConnectionCode() {
+                                        generatedCode = code
+                                    }
+                                }
+                            } label: {
+                                HStack(spacing: 8) {
+                                    if isGeneratingCode {
+                                        ProgressView()
+                                            .controlSize(.small)
+                                    }
+                                    Text(isGeneratingCode ? "生成中..." : "生成并等待连接")
+                                        .fontWeight(.semibold)
+                                }
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 12)
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(isGeneratingCode)
+                            .padding(.horizontal, 24)
                             
                             Spacer()
+                        }
+                        .onAppear {
+                            if generatedCode.isEmpty, let existing = crossNetworkManager.localConnectionCode {
+                                generatedCode = existing
+                            }
                         }
                     }
                 }
