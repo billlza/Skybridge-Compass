@@ -198,6 +198,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     @Published public private(set) var lastScreenData: ScreenData?
     @Published public private(set) var remoteDeviceName: String?
     @Published public private(set) var remoteDeviceId: String?
+    @Published public private(set) var localConnectionCode: String?
     
     private var signaling: WebSocketSignalingClient?
     private var session: WebRTCSession?
@@ -208,6 +209,8 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     private var sessionKeys: SessionKeys?
     private var inboundQueue: InboundChunkQueue?
     private var receiveTask: Task<Void, Never>?
+    private var currentRole: WebRTCSession.Role?
+    private var handshakeStartedSessionIds: Set<String> = []
     
     // File transfer waiters (transferId|op|chunkIndex -> continuation)
     private var fileTransferWaiters: [String: CheckedContinuation<CrossNetworkFileTransferMessage, Error>] = [:]
@@ -265,12 +268,45 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     public func connect(withCode rawCode: String) async {
         do {
             let code = try normalizeConnectionCode(rawCode)
-            // 对端在 macOS 侧会以 sessionId=code 启动 offerer。
-            try await connect(sessionId: code, remoteName: nil, remotePeerDeviceId: "webrtc-\(code)")
+            // 对端会以 sessionId=code 启动 offerer，本端作为 answerer 加入。
+            try await connect(
+                sessionId: code,
+                remoteName: nil,
+                remotePeerDeviceId: "webrtc-\(code)",
+                role: .answerer
+            )
         } catch {
             let msg = error.localizedDescription
             lastError = msg
             state = .failed(msg)
+        }
+    }
+
+    /// 生成本机连接码并等待对端（例如 macOS）输入连接。
+    /// - Returns: 6 位连接码；失败时返回 `nil` 且更新 `state/.failed`。
+    @discardableResult
+    public func generateConnectionCode() async -> String? {
+        if let existing = localConnectionCode,
+           currentRole == .offerer,
+           case .connecting(let sid) = state, sid == existing {
+            return existing
+        }
+        if let existing = localConnectionCode,
+           currentRole == .offerer,
+           case .connected(let sid) = state, sid == existing {
+            return existing
+        }
+
+        do {
+            let code = Self.generateShortCode()
+            try await connect(sessionId: code, remoteName: nil, remotePeerDeviceId: nil, role: .offerer)
+            localConnectionCode = code
+            return code
+        } catch {
+            let msg = error.localizedDescription
+            lastError = msg
+            state = .failed(msg)
+            return nil
         }
     }
     
@@ -287,6 +323,9 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         sessionKeys = nil
         remoteDeviceName = nil
         remoteDeviceId = nil
+        localConnectionCode = nil
+        currentRole = nil
+        handshakeStartedSessionIds.removeAll()
         failAllFileTransferWaiters(FileTransferWaitError.cancelled)
         cleanupInboundFileTransfers()
         if let inboundQueue {
@@ -360,6 +399,11 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         guard code.count == 6 else { throw ConnectionCodeError.invalid }
         return code
     }
+
+    private static func generateShortCode() -> String {
+        let charset = Array("ABCDEFGHJKLMNPQRSTUVWXYZ23456789")
+        return String((0..<6).compactMap { _ in charset.randomElement() })
+    }
     
     private func parseSkybridgeConnectLink(_ string: String) throws -> DynamicQRCodeData {
         guard string.hasPrefix("skybridge://connect/") else {
@@ -375,16 +419,34 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     }
     
     private func connect(from qr: DynamicQRCodeData) async throws {
-        try await connect(sessionId: qr.sessionID, remoteName: qr.deviceName, remotePeerDeviceId: qr.deviceFingerprint)
+        try await connect(
+            sessionId: qr.sessionID,
+            remoteName: qr.deviceName,
+            remotePeerDeviceId: qr.deviceFingerprint,
+            role: .answerer
+        )
     }
     
-    private func connect(sessionId: String, remoteName: String?, remotePeerDeviceId: String) async throws {
+    private func connect(
+        sessionId: String,
+        remoteName: String?,
+        remotePeerDeviceId: String?,
+        role: WebRTCSession.Role
+    ) async throws {
+        if signaling != nil || session != nil || currentSessionId != nil {
+            await disconnect()
+        }
+
         currentSessionId = sessionId
         state = .connecting(sessionId: sessionId)
         lastError = nil
-        handshakePeerId = remotePeerDeviceId
+        handshakePeerId = remotePeerDeviceId ?? "webrtc-\(sessionId)"
         remoteDeviceName = remoteName
         remoteDeviceId = remotePeerDeviceId
+        currentRole = role
+        if role != .offerer {
+            localConnectionCode = nil
+        }
         
         // 1) WebSocket signaling
         let wsURL = URL(string: CrossNetworkServerConfig.signalingWebSocketURL)!
@@ -399,15 +461,28 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         
         await signaling.connect()
         
-        // 2) WebRTC session (answerer)
+        // 2) WebRTC session (offerer / answerer)
         let localId = localDeviceId
 
         // SECURITY: Never hardcode TURN credentials in the client app.
         // Use short-lived TURN REST credentials fetched from backend (with safe fallback).
         let ice = await CrossNetworkServerConfig.dynamicICEConfig()
         
-        let s = WebRTCSession(sessionId: sessionId, localDeviceId: localId, role: .answerer, ice: ice)
+        let s = WebRTCSession(sessionId: sessionId, localDeviceId: localId, role: role, ice: ice)
         self.session = s
+
+        s.onLocalOffer = { [weak self] (sdp: String) in
+            guard let self else { return }
+            Task {
+                let env = WebRTCSignalingEnvelope(
+                    sessionId: sessionId,
+                    from: localId,
+                    type: .offer,
+                    payload: WebRTCSignalingEnvelope.Payload(sdp: sdp)
+                )
+                try? await self.signaling?.send(env)
+            }
+        }
         
         s.onLocalAnswer = { [weak self] (sdp: String) in
             guard let self else { return }
@@ -434,13 +509,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
                 try? await self.signaling?.send(env)
             }
         }
-        
-        s.onReady = { [weak self] in
-            Task { @MainActor in
-                self?.state = .connected(sessionId: sessionId)
-            }
-        }
-        
+
         // Inbound frames from DataChannel
         let inbound = InboundChunkQueue()
         self.inboundQueue = inbound
@@ -448,15 +517,32 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             Task { await inbound.push(data) }
         }
         
+        s.onReady = { [weak self] in
+            Task { @MainActor in
+                guard let self else { return }
+                guard self.currentSessionId == sessionId else { return }
+                self.state = .connected(sessionId: sessionId)
+
+                // DataChannel opened; start handshake once per session.
+                if !self.handshakeStartedSessionIds.contains(sessionId) {
+                    self.handshakeStartedSessionIds.insert(sessionId)
+                    let peerDeviceId = self.handshakePeerId ?? "webrtc-\(sessionId)"
+                    Task {
+                        await self.startHandshakeOverWebRTC(
+                            sessionId: sessionId,
+                            peerDeviceId: peerDeviceId,
+                            session: s,
+                            inbound: inbound
+                        )
+                    }
+                }
+            }
+        }
+        
         try s.start()
         
         // 3) Join room (best-effort)
         try? await signaling.send(WebRTCSignalingEnvelope(sessionId: sessionId, from: localId, type: .join, payload: nil))
-        
-        // 4) Kick off handshake as initiator (iOS initiates once DataChannel is up)
-        Task {
-            await self.startHandshakeOverWebRTC(sessionId: sessionId, peerDeviceId: remotePeerDeviceId, session: s, inbound: inbound)
-        }
     }
     
     private func handleEnvelope(_ env: WebRTCSignalingEnvelope) {
@@ -1023,6 +1109,18 @@ private actor InboundChunkQueue {
             waiters.append(c)
         }
     }
+
+    func next(max: Int) async throws -> Data {
+        precondition(max > 0, "max must be greater than zero")
+        let chunk = try await next()
+        if chunk.count <= max {
+            return chunk
+        }
+        let head = Data(chunk.prefix(max))
+        let tail = Data(chunk.dropFirst(max))
+        pending.insert(tail, at: 0)
+        return head
+    }
 }
 
 @available(iOS 17.0, *)
@@ -1047,23 +1145,6 @@ private extension CrossNetworkWebRTCManager {
             try await MainActor.run {
                 try session.send(framed)
             }
-        }
-        
-        func receiveSome(max: Int) async throws -> Data {
-            let d = try await inbound.next()
-            if d.count <= max { return d }
-            return d.prefix(max)
-        }
-        
-        func receiveExactly(_ length: Int) async throws -> Data {
-            var buffer = Data()
-            buffer.reserveCapacity(length)
-            while buffer.count < length {
-                let remaining = length - buffer.count
-                let chunk = try await receiveSome(max: min(65536, remaining))
-                buffer.append(chunk)
-            }
-            return buffer
         }
         
         do {
@@ -1097,6 +1178,8 @@ private extension CrossNetworkWebRTCManager {
             await MainActor.run {
                 self.lastError = "WebRTC 握手失败: \(error.localizedDescription)"
                 self.state = .failed(self.lastError ?? "WebRTC handshake failed")
+                self.sessionKeys = nil
+                self.handshakeStartedSessionIds.remove(sessionId)
             }
         }
     }
@@ -1189,4 +1272,3 @@ private extension CrossNetworkWebRTCManager {
         return try AES.GCM.open(box, using: key)
     }
 }
-
