@@ -342,6 +342,7 @@ public class FileTransferManager: ObservableObject {
         
         activeTransfers.append(transfer)
         isTransferring = true
+        postInAppTransferEvent(name: "FileTransferStarted", transfer: transfer)
         
         // 创建传输状态
         var state = TransferState(transferId: transfer.id)
@@ -576,6 +577,7 @@ public class FileTransferManager: ObservableObject {
         
         activeTransfers.append(transfer)
         isTransferring = true
+        postInAppTransferEvent(name: "FileTransferStarted", transfer: transfer)
         postLocalFileTransferNotification(
             title: "正在接收文件",
             body: "\(metadata.fileName) 来自 \(peer)",
@@ -1118,6 +1120,31 @@ public class FileTransferManager: ObservableObject {
         }
         #endif
     }
+
+    private func postInAppTransferEvent(
+        name: String,
+        transfer: FileTransfer,
+        error: String? = nil
+    ) {
+        var userInfo: [String: Any] = [
+            "transferId": transfer.id,
+            "fileName": transfer.fileName,
+            "fileSize": transfer.fileSize,
+            "direction": transfer.isIncoming ? "incoming" : "outgoing",
+            "remotePeer": transfer.remotePeer
+        ]
+        if let localPath = transfer.localPath, !localPath.isEmpty {
+            userInfo["localPath"] = localPath
+        }
+        if let error, !error.isEmpty {
+            userInfo["error"] = error
+        }
+        NotificationCenter.default.post(
+            name: Notification.Name(name),
+            object: nil,
+            userInfo: userInfo
+        )
+    }
     
     /// 计算传输速度
     private func calculateSpeed(transferId: String, transferredBytes: Int64) -> Double {
@@ -1174,6 +1201,7 @@ public class FileTransferManager: ObservableObject {
                         fileName: finalizedTransfer.fileName,
                         localPath: finalizedTransfer.localPath
                     )
+                    postInAppTransferEvent(name: "FileTransferCompleted", transfer: finalizedTransfer)
                 } else {
                     postLocalFileTransferNotification(
                         title: "文件发送完成",
@@ -1181,6 +1209,7 @@ public class FileTransferManager: ObservableObject {
                         transferId: finalizedTransfer.id,
                         fileName: finalizedTransfer.fileName
                     )
+                    postInAppTransferEvent(name: "FileTransferCompleted", transfer: finalizedTransfer)
                 }
             } else {
                 let reason = error?.localizedDescription ?? "未知错误"
@@ -1191,6 +1220,7 @@ public class FileTransferManager: ObservableObject {
                     fileName: finalizedTransfer.fileName,
                     localPath: finalizedTransfer.localPath
                 )
+                postInAppTransferEvent(name: "FileTransferFailed", transfer: finalizedTransfer, error: reason)
             }
         }
 
@@ -1238,6 +1268,7 @@ public class FileTransferManager: ObservableObject {
         )
         activeTransfers.append(transfer)
         updateTransferringState()
+        postInAppTransferEvent(name: "FileTransferStarted", transfer: transfer)
         postLocalFileTransferNotification(
             title: "收到文件传输请求",
             body: "\(fileName) 来自 \(fromPeerName)",
@@ -1295,6 +1326,7 @@ public class FileTransferManager: ObservableObject {
                     fileName: completedTransfer.fileName,
                     localPath: completedTransfer.localPath
                 )
+                postInAppTransferEvent(name: "FileTransferCompleted", transfer: completedTransfer)
             } else {
                 postLocalFileTransferNotification(
                     title: "文件接收失败",
@@ -1303,6 +1335,7 @@ public class FileTransferManager: ObservableObject {
                     fileName: completedTransfer.fileName,
                     localPath: completedTransfer.localPath
                 )
+                postInAppTransferEvent(name: "FileTransferFailed", transfer: completedTransfer, error: error ?? "未知错误")
             }
         }
 

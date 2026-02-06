@@ -183,16 +183,7 @@ public struct DashboardView: View {
                 ToolbarItem(placement: .navigationBarLeading) {
                     UserAvatarButton()
                 }
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button {
-                        showingQRScanner = true
-                    } label: {
-                        Image(systemName: "qrcode.viewfinder")
-                            .font(.title3)
-                    }
-                }
-                
-                ToolbarItem(placement: .navigationBarTrailing) {
+                ToolbarItemGroup(placement: .navigationBarTrailing) {
                     Button {
                         Task { await viewModel.refresh() }
                     } label: {
@@ -201,6 +192,15 @@ public struct DashboardView: View {
                         } else {
                             Image(systemName: "arrow.clockwise")
                         }
+                    }
+
+                    DashboardNotificationBellButton()
+
+                    Button {
+                        showingQRScanner = true
+                    } label: {
+                        Image(systemName: "qrcode.viewfinder")
+                            .font(.title3)
                     }
                 }
             }
@@ -1409,6 +1409,273 @@ private struct SeededGenerator: RandomNumberGenerator {
         z = (z ^ (z >> 27)) &* 0x94D049BB133111EB
         return z ^ (z >> 31)
     }
+}
+
+@available(iOS 17.0, *)
+private struct DashboardNotificationBellButton: View {
+    @State private var showCenter = false
+    @State private var unreadCount: Int = 0
+    @State private var events: [DashboardNotificationItem] = []
+    @State private var notifiedConnectableDevices: [String: Date] = [:]
+
+    private let maxEvents = 100
+
+    var body: some View {
+        Button {
+            showCenter = true
+            unreadCount = 0
+        } label: {
+            ZStack(alignment: .topTrailing) {
+                Image(systemName: "bell")
+                    .font(.title3)
+                    .foregroundStyle(.primary)
+                    .padding(8)
+                    .background(.ultraThinMaterial, in: Circle())
+                    .overlay(
+                        Circle()
+                            .stroke(Color.primary.opacity(0.15), lineWidth: 1)
+                    )
+                if unreadCount > 0 {
+                    Text("\(min(unreadCount, 99))")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2)
+                        .background(
+                            LinearGradient(
+                                colors: [.red, .pink],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            ),
+                            in: Capsule()
+                        )
+                        .offset(x: 6, y: -6)
+                }
+            }
+        }
+        .buttonStyle(.plain)
+        .sheet(isPresented: $showCenter) {
+            NavigationStack {
+                Group {
+                    if events.isEmpty {
+                        ContentUnavailableView("暂无通知", systemImage: "bell.slash")
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else {
+                        ScrollView {
+                            VStack(alignment: .leading, spacing: 10) {
+                                ForEach(events) { item in
+                                    HStack(alignment: .top, spacing: 10) {
+                                        Image(systemName: item.iconName)
+                                            .foregroundColor(item.color)
+                                            .frame(width: 16)
+                                        VStack(alignment: .leading, spacing: 3) {
+                                            Text(item.title)
+                                                .font(.subheadline.weight(.semibold))
+                                            if let detail = item.detail, !detail.isEmpty {
+                                                Text(detail)
+                                                    .font(.caption)
+                                                    .foregroundStyle(.secondary)
+                                            }
+                                            Text(item.timestampFormatted)
+                                                .font(.caption2)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                        Spacer(minLength: 0)
+                                    }
+                                    .padding(10)
+                                    .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                }
+                            }
+                            .padding()
+                        }
+                    }
+                }
+                .navigationTitle("通知中心")
+                .toolbar {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button("清空") {
+                            events.removeAll()
+                            unreadCount = 0
+                        }
+                        .disabled(events.isEmpty)
+                    }
+                }
+            }
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("ConnectableDeviceDiscovered"))) { note in
+            handleConnectableDeviceDiscovered(note)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("FileTransferStarted"))) { note in
+            let fileName = (note.userInfo?["fileName"] as? String) ?? "未知文件"
+            let fileSize = (note.userInfo?["fileSize"] as? Int64) ?? 0
+            let direction = (note.userInfo?["direction"] as? String) ?? "unknown"
+            let remotePeer = (note.userInfo?["remotePeer"] as? String) ?? ""
+            var detail = "\(fileName) · \(byteCount(fileSize))"
+            if !remotePeer.isEmpty {
+                detail += " · \(remotePeer)"
+            }
+            if direction == "incoming", let localPath = note.userInfo?["localPath"] as? String, !localPath.isEmpty {
+                detail += " · 保存到 \(localPath)"
+            }
+            appendEvent(
+                title: direction == "incoming" ? "正在接收文件" : "正在发送文件",
+                detail: detail,
+                level: .info,
+                icon: "arrow.left.arrow.right.circle"
+            )
+        }
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("FileTransferCompleted"))) { note in
+            let fileName = (note.userInfo?["fileName"] as? String) ?? "未知文件"
+            let fileSize = (note.userInfo?["fileSize"] as? Int64) ?? 0
+            let direction = (note.userInfo?["direction"] as? String) ?? ""
+            let localPath = (note.userInfo?["localPath"] as? String)
+            var detail = "\(fileName) · \(byteCount(fileSize))"
+            if let localPath, !localPath.isEmpty, direction == "incoming" {
+                detail += " · 已保存到 \(localPath)"
+            }
+            appendEvent(title: "文件传输完成", detail: detail, level: .success, icon: "checkmark.circle.fill")
+        }
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("FileTransferFailed"))) { note in
+            let fileName = (note.userInfo?["fileName"] as? String) ?? "未知文件"
+            let error = (note.userInfo?["error"] as? String) ?? "未知错误"
+            appendEvent(title: "文件传输失败", detail: "\(fileName) · \(error)", level: .error, icon: "xmark.circle.fill")
+        }
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("fileChunkVerified"))) { note in
+            appendEvent(from: note, fallbackTitle: "分块校验通过", success: true, icon: "checkmark.seal")
+        }
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("fileChunkVerifyFailed"))) { note in
+            appendEvent(from: note, fallbackTitle: "分块校验失败", success: false, icon: "xmark.seal")
+        }
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("fileMerkleVerified"))) { note in
+            let ok = (note.userInfo?["ok"] as? Bool) ?? false
+            appendEvent(from: note, fallbackTitle: ok ? "Merkle 校验通过" : "Merkle 校验失败", success: ok, icon: ok ? "checkmark.seal" : "exclamationmark.triangle")
+        }
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("QuantumCertValidationEvent"))) { note in
+            let ok = (note.userInfo?["ok"] as? Bool) ?? false
+            let reason = (note.userInfo?["reason"] as? String) ?? ""
+            let elapsed = (note.userInfo?["elapsed"] as? TimeInterval) ?? 0
+            let title = ok ? "证书校验通过" : "证书校验失败"
+            let detail = reason.isEmpty ? String(format: "耗时 %.0fms", elapsed * 1000) : "\(reason) · " + String(format: "%.0fms", elapsed * 1000)
+            appendEvent(title: title, detail: detail, level: ok ? .success : .error, icon: ok ? "lock.shield" : "lock.slash")
+        }
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("fileMerkleTiming"))) { note in
+            let phase = (note.userInfo?["phase"] as? String) ?? "merkle"
+            let file = (note.userInfo?["fileName"] as? String) ?? ""
+            let size = (note.userInfo?["fileSize"] as? Int64) ?? 0
+            let chunk = (note.userInfo?["chunkSize"] as? Int) ?? 0
+            let elapsed = (note.userInfo?["elapsedMs"] as? Double) ?? 0
+            let metal = (note.userInfo?["metalAvailable"] as? Bool) ?? false
+            let title = phase == "verify" ? "Merkle 校验耗时" : "Merkle 计算耗时"
+            let detail = "\(file) · \(byteCount(size)) · chunk=\(byteCount(Int64(chunk))) · " + String(format: "%.0fms", elapsed) + (metal ? " · Metal" : "")
+            appendEvent(title: title, detail: detail, level: .info, icon: "timer")
+        }
+    }
+
+    private func appendEvent(from note: Notification, fallbackTitle: String, success: Bool, icon: String) {
+        var detail: String? = nil
+        if let info = note.userInfo {
+            let transferId = info["transferId"] as? String
+            let chunkIndex = info["chunkIndex"] as? Int
+            let expected = info["expected"] as? String
+            let actual = info["actual"] as? String
+            let error = info["error"] as? String
+            var parts: [String] = []
+            if let transferId { parts.append("ID:\(transferId)") }
+            if let chunkIndex { parts.append("Chunk:\(chunkIndex)") }
+            if let expected, let actual {
+                parts.append("期望/实际: \(expected.prefix(8)) / \(actual.prefix(8))")
+            }
+            if let error { parts.append(error) }
+            if !parts.isEmpty { detail = parts.joined(separator: " · ") }
+        }
+        appendEvent(title: fallbackTitle, detail: detail, level: success ? .success : .error, icon: icon)
+    }
+
+    private func handleConnectableDeviceDiscovered(_ note: Notification) {
+        let now = Date()
+        notifiedConnectableDevices = notifiedConnectableDevices.filter { now.timeIntervalSince($0.value) < 3600 }
+
+        guard let deviceId = note.userInfo?["deviceId"] as? String,
+              let name = note.userInfo?["name"] as? String,
+              let address = note.userInfo?["address"] as? String,
+              let port = note.userInfo?["port"] as? UInt16,
+              let isVerified = note.userInfo?["isVerified"] as? Bool else {
+            return
+        }
+        guard notifiedConnectableDevices[deviceId] == nil else { return }
+
+        let trustText = isVerified ? "已验签" : "未验证"
+        var detail = "\(name) · \(address):\(port) · \(trustText)"
+        if let reason = note.userInfo?["verificationFailedReason"] as? String, !reason.isEmpty {
+            detail += " · 原因: \(reason)"
+        }
+        appendEvent(
+            title: isVerified ? "📡 发现可连接设备" : "📡 发现可连接设备（未验证）",
+            detail: detail,
+            level: isVerified ? .success : .warning,
+            icon: isVerified ? "antenna.radiowaves.left.and.right" : "exclamationmark.shield.fill"
+        )
+        notifiedConnectableDevices[deviceId] = now
+    }
+
+    private func appendEvent(title: String, detail: String?, level: DashboardNotificationItem.Level, icon: String) {
+        let item = DashboardNotificationItem(
+            title: title,
+            detail: detail,
+            level: level,
+            iconName: icon,
+            timestamp: Date()
+        )
+        events.insert(item, at: 0)
+        if events.count > maxEvents {
+            events.removeLast(events.count - maxEvents)
+        }
+        if !showCenter {
+            unreadCount += 1
+        }
+    }
+
+    private func byteCount(_ bytes: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: max(0, bytes), countStyle: .file)
+    }
+}
+
+private struct DashboardNotificationItem: Identifiable {
+    enum Level {
+        case success
+        case warning
+        case error
+        case info
+    }
+
+    let id = UUID()
+    let title: String
+    let detail: String?
+    let level: Level
+    let iconName: String
+    let timestamp: Date
+
+    var color: Color {
+        switch level {
+        case .success: return .green
+        case .warning: return .orange
+        case .error: return .red
+        case .info: return .blue
+        }
+    }
+
+    var timestampFormatted: String {
+        DashboardNotificationItem.timeFormatter.string(from: timestamp)
+    }
+
+    private static let timeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.dateFormat = "HH:mm:ss"
+        return formatter
+    }()
 }
 
 // MARK: - Dashboard Tab
