@@ -54,6 +54,8 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
     private var localIPAddresses: Set<String> = []
  /// 本机物理网卡 MAC 地址集合（缓存）
     private var localMacAddresses: Set<String> = []
+ /// 当前物理连接的 USB 设备指纹（用于“USB 在线态”判断）
+    private var activeUSBPresenceTokens: Set<String> = []
     private var pathMonitor: NWPathMonitor?
 
  /// 设备清理定时器(移除长时间离线的设备)
@@ -151,88 +153,32 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
 
     /// 解析在线设备对应的底层发现记录（用于连接时保留真实 Bonjour/IP 元数据）。
     public func resolvedDiscoveredDevice(for onlineDevice: OnlineDevice) -> DiscoveredDevice? {
+        resolvedDiscoveredCandidates(for: onlineDevice, limit: 1).first
+    }
+
+    /// 解析在线设备对应的候选发现记录（按可连接性与稳定性降序）。
+    public func resolvedDiscoveredCandidates(
+        for onlineDevice: OnlineDevice,
+        limit: Int = 3
+    ) -> [DiscoveredDevice] {
+        guard limit > 0 else { return [] }
         let candidates = networkDiscovery.discoveredDevices
-        guard !candidates.isEmpty else { return nil }
+        guard !candidates.isEmpty else { return [] }
 
-        let normalizedOnlineName = normalizeDeviceName(onlineDevice.name)
-        let normalizedIPv4 = onlineDevice.ipv4.map(Self.normalizeIPAddress)
-        let normalizedIPv6 = onlineDevice.ipv6.map(Self.normalizeIPAddress)
-
-        let strongId: String? = {
-            guard onlineDevice.uniqueIdentifier.hasPrefix("id:") else { return nil }
-            return String(onlineDevice.uniqueIdentifier.dropFirst("id:".count))
-        }()
-        let pubKeyFP: String? = {
-            guard onlineDevice.uniqueIdentifier.hasPrefix("fp:") else { return nil }
-            return String(onlineDevice.uniqueIdentifier.dropFirst("fp:".count)).lowercased()
-        }()
-
-        var best: (score: Int, device: DiscoveredDevice)?
-
-        for candidate in candidates where !candidate.isLocalDevice {
-            var score = 0
-            let candidateIsSyntheticPeer = Self.isSyntheticPeerDisplayName(candidate.name)
-            let candidateHasSkyBridgeControlEndpoint =
-                candidate.services.contains("_skybridge._tcp")
-                || candidate.services.contains("_skybridge._udp")
-                || (candidate.portMap["_skybridge._tcp"] ?? 0) > 0
-                || (candidate.portMap["_skybridge._udp"] ?? 0) > 0
-            let candidateHasAddress = candidate.ipv4 != nil || candidate.ipv6 != nil
-            let candidateHasUsablePort = candidate.portMap.values.contains(where: { $0 > 0 })
-            let candidateNetworkReachable = candidateHasSkyBridgeControlEndpoint || (candidateHasAddress && candidateHasUsablePort)
-
-            if let strongId, let candidateId = candidate.deviceId, candidateId == strongId {
-                score += 200
+        let context = makeCandidateMatchingContext(for: onlineDevice)
+        let scored = candidates
+            .filter { !$0.isLocalDevice }
+            .compactMap { candidate -> (score: Int, device: DiscoveredDevice)? in
+                let score = scoreCandidateDevice(candidate, context: context)
+                guard score > 0 else { return nil }
+                return (score, candidate)
             }
-            if let pubKeyFP, let candidateFP = candidate.pubKeyFP?.lowercased(), candidateFP == pubKeyFP {
-                score += 180
+            .sorted { lhs, rhs in
+                if lhs.score != rhs.score { return lhs.score > rhs.score }
+                return lhs.device.name < rhs.device.name
             }
 
-            if let normalizedIPv4, let candidateIPv4 = candidate.ipv4.map(Self.normalizeIPAddress), candidateIPv4 == normalizedIPv4 {
-                score += 120
-            }
-            if let normalizedIPv6, let candidateIPv6 = candidate.ipv6.map(Self.normalizeIPAddress), candidateIPv6 == normalizedIPv6 {
-                score += 110
-            }
-
-            if normalizeDeviceName(candidate.name) == normalizedOnlineName {
-                score += 60
-            }
-
-            if candidate.services.contains("_skybridge._tcp") {
-                score += 50
-            }
-            if (candidate.portMap["_skybridge._tcp"] ?? 0) > 0 {
-                score += 20
-            }
-            if !candidateNetworkReachable {
-                // 避免选中仅 USB / 无可连端口 的候选，防止后续把能力标签误当 Bonjour service type。
-                score -= 180
-            }
-            if candidate.connectionTypes == [.usb], !candidateHasSkyBridgeControlEndpoint {
-                score -= 120
-            }
-            if candidateIsSyntheticPeer {
-                // `peer:fe80::...` 这类名称通常是瞬态端点，优先级应低于真实 Bonjour 设备名。
-                // 仅在没有 stable id / 公钥指纹时作为最后兜底，避免“同一设备多条离线记录”误绑定。
-                if strongId == nil, pubKeyFP == nil {
-                    score -= 90
-                } else {
-                    score -= 40
-                }
-            }
-            if onlineDevice.connectionTypes.contains(.usb), candidate.connectionTypes.contains(.usb) {
-                score += 10
-            }
-
-            guard score > 0 else { continue }
-            if let best, best.score >= score {
-                continue
-            }
-            best = (score, candidate)
-        }
-
-        return best?.device
+        return scored.prefix(limit).map(\.device)
     }
 
  /// 标记设备为已连接
@@ -467,9 +413,10 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         updateDevicesList()
     }
 
- /// 处理USB设备更新
+    /// 处理USB设备更新
     private func handleUSBDevicesUpdate(_ devices: [USBDevice]) {
         logger.debug("🔌 USB设备更新: \(devices.count) 台")
+        activeUSBPresenceTokens = Set(devices.flatMap { usbPresenceTokens(for: $0) })
 
         for device in devices {
             let identifier = generateUniqueIdentifier(
@@ -992,13 +939,19 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         // 更新设备状态
         for i in 0..<uniqueDevices.count {
             let device = uniqueDevices[i]
-            let timeSinceLastSeen = now.timeIntervalSince(device.lastSeen)
+            let usbAttached = isActivelyAttachedOverUSB(device)
+            if usbAttached {
+                uniqueDevices[i].lastSeen = now
+            }
+            let timeSinceLastSeen = now.timeIntervalSince(uniqueDevices[i].lastSeen)
 
  // 判断设备状态
             if device.isLocalDevice {
                 uniqueDevices[i].connectionStatus = .connected
             } else if isActivelyConnected(device) {
                 uniqueDevices[i].connectionStatus = .connected
+            } else if usbAttached {
+                uniqueDevices[i].connectionStatus = .online
             } else if timeSinceLastSeen < 60 {
  // 60秒内有响应,认为在线
                 uniqueDevices[i].connectionStatus = .online
@@ -1073,6 +1026,99 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         )
     }
 
+    private struct CandidateMatchingContext {
+        let normalizedOnlineName: String
+        let normalizedIPv4: String?
+        let normalizedIPv6: String?
+        let strongId: String?
+        let pubKeyFP: String?
+        let prefersUSB: Bool
+    }
+
+    private func makeCandidateMatchingContext(for onlineDevice: OnlineDevice) -> CandidateMatchingContext {
+        let strongId: String? = {
+            guard onlineDevice.uniqueIdentifier.hasPrefix("id:") else { return nil }
+            return String(onlineDevice.uniqueIdentifier.dropFirst("id:".count))
+        }()
+        let pubKeyFP: String? = {
+            guard onlineDevice.uniqueIdentifier.hasPrefix("fp:") else { return nil }
+            return String(onlineDevice.uniqueIdentifier.dropFirst("fp:".count)).lowercased()
+        }()
+        return CandidateMatchingContext(
+            normalizedOnlineName: normalizeDeviceName(onlineDevice.name),
+            normalizedIPv4: onlineDevice.ipv4.map(Self.normalizeIPAddress),
+            normalizedIPv6: onlineDevice.ipv6.map(Self.normalizeIPAddress),
+            strongId: strongId,
+            pubKeyFP: pubKeyFP,
+            prefersUSB: onlineDevice.connectionTypes.contains(.usb)
+        )
+    }
+
+    private func scoreCandidateDevice(
+        _ candidate: DiscoveredDevice,
+        context: CandidateMatchingContext
+    ) -> Int {
+        var score = 0
+        let candidateIsSyntheticPeer = Self.isSyntheticPeerDisplayName(candidate.name)
+        let candidateHasSkyBridgeControlEndpoint =
+            candidate.services.contains("_skybridge._tcp")
+            || candidate.services.contains("_skybridge._udp")
+            || (candidate.portMap["_skybridge._tcp"] ?? 0) > 0
+            || (candidate.portMap["_skybridge._udp"] ?? 0) > 0
+        let candidateHasAddress = candidate.ipv4 != nil || candidate.ipv6 != nil
+        let candidateHasUsablePort = candidate.portMap.values.contains(where: { $0 > 0 })
+        let candidateNetworkReachable = candidateHasSkyBridgeControlEndpoint || (candidateHasAddress && candidateHasUsablePort)
+
+        if let strongId = context.strongId, let candidateId = candidate.deviceId, candidateId == strongId {
+            score += 200
+        }
+        if let pubKeyFP = context.pubKeyFP, let candidateFP = candidate.pubKeyFP?.lowercased(), candidateFP == pubKeyFP {
+            score += 180
+        }
+
+        if let normalizedIPv4 = context.normalizedIPv4,
+           let candidateIPv4 = candidate.ipv4.map(Self.normalizeIPAddress),
+           candidateIPv4 == normalizedIPv4 {
+            score += 120
+        }
+        if let normalizedIPv6 = context.normalizedIPv6,
+           let candidateIPv6 = candidate.ipv6.map(Self.normalizeIPAddress),
+           candidateIPv6 == normalizedIPv6 {
+            score += 110
+        }
+
+        if normalizeDeviceName(candidate.name) == context.normalizedOnlineName {
+            score += 60
+        }
+
+        if candidate.services.contains("_skybridge._tcp") {
+            score += 50
+        }
+        if (candidate.portMap["_skybridge._tcp"] ?? 0) > 0 {
+            score += 20
+        }
+        if !candidateNetworkReachable {
+            // 避免选中仅 USB / 无可连端口 的候选，防止后续把能力标签误当 Bonjour service type。
+            score -= 180
+        }
+        if candidate.connectionTypes == [.usb], !candidateHasSkyBridgeControlEndpoint {
+            score -= 120
+        }
+        if candidateIsSyntheticPeer {
+            // `peer:fe80::...` 这类名称通常是瞬态端点，优先级应低于真实 Bonjour 设备名。
+            // 仅在没有 stable id / 公钥指纹时作为最后兜底，避免“同一设备多条离线记录”误绑定。
+            if context.strongId == nil, context.pubKeyFP == nil {
+                score -= 90
+            } else {
+                score -= 40
+            }
+        }
+        if context.prefersUSB, candidate.connectionTypes.contains(.usb) {
+            score += 10
+        }
+        return score
+    }
+
  /// 生成唯一标识符
     private func generateUniqueIdentifier(
         stableDeviceId: String?,
@@ -1129,6 +1175,39 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
             .replacingOccurrences(of: "_", with: "")
 
         return normalized
+    }
+
+    private func usbPresenceTokens(for device: USBDevice) -> [String] {
+        var tokens: [String] = []
+        if let serial = device.serialNumber?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !serial.isEmpty {
+            tokens.append("serial:\(serial)")
+        }
+        let normalizedName = normalizeDeviceName(device.name)
+        if !normalizedName.isEmpty {
+            tokens.append("name:\(normalizedName)")
+        }
+        return tokens
+    }
+
+    private func usbPresenceTokens(for device: OnlineDevice) -> [String] {
+        var tokens: [String] = []
+        if let serial = device.serialNumber?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !serial.isEmpty {
+            tokens.append("serial:\(serial)")
+        }
+        let normalizedName = normalizeDeviceName(device.name)
+        if !normalizedName.isEmpty {
+            tokens.append("name:\(normalizedName)")
+        }
+        return tokens
+    }
+
+    private func isActivelyAttachedOverUSB(_ device: OnlineDevice) -> Bool {
+        guard device.connectionTypes.contains(.usb) else { return false }
+        let tokens = usbPresenceTokens(for: device)
+        guard !tokens.isEmpty else { return false }
+        return tokens.contains { activeUSBPresenceTokens.contains($0) }
     }
 
  /// 识别本机设备

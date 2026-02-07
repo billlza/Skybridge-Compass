@@ -1466,17 +1466,51 @@ public struct EnhancedDeviceDiscoveryView: View {
     /// 🆕 连接到在线设备
     private func connectToOnlineDevice(_ device: OnlineDevice) {
         Task {
-            let discoveredDevice = unifiedDeviceManager.resolvedDiscoveredDevice(for: device) ?? fallbackDiscoveredDevice(for: device)
+            let preferUSBRoute = device.connectionTypes.contains(.usb)
+            var discoveredCandidates = unifiedDeviceManager.resolvedDiscoveredCandidates(for: device, limit: 6)
+            let fallback = fallbackDiscoveredDevice(for: device)
+            if !discoveredCandidates.contains(where: { isSameConnectTarget($0, fallback) }) {
+                discoveredCandidates.append(fallback)
+            }
+            let routePreference: P2PDiscoveryService.ConnectionRoutePreference = preferUSBRoute ? .preferUSB : .automatic
+
             do {
-                try await p2pDiscoveryService.connectToDevice(discoveredDevice)
-                unifiedDeviceManager.markDeviceAsConnected(device.id)
-                connectionCodeErrorMessage = nil
-                logger.info("✅ 在线设备连接成功: \(device.name)")
+                var lastError: Error?
+                for candidate in discoveredCandidates {
+                    do {
+                        try await p2pDiscoveryService.connectToDevice(candidate, routePreference: routePreference)
+                        unifiedDeviceManager.markDeviceAsConnected(device.id)
+                        connectionCodeErrorMessage = nil
+                        logger.info("✅ 在线设备连接成功: \(device.name)")
+                        return
+                    } catch {
+                        lastError = error
+                        logger.warning("⚠️ 在线设备候选连接失败，将尝试下一个候选: \(candidate.name, privacy: .public) err=\(error.localizedDescription, privacy: .public)")
+                    }
+                }
+                throw lastError ?? P2PDiscoveryError.noConnectableEndpoint
             } catch {
                 logger.error("❌ 在线设备连接失败: \(device.name, privacy: .public), \(error.localizedDescription, privacy: .public)")
                 connectionCodeErrorMessage = error.localizedDescription
             }
         }
+    }
+
+    private func isSameConnectTarget(_ lhs: DiscoveredDevice, _ rhs: DiscoveredDevice) -> Bool {
+        if let leftID = lhs.uniqueIdentifier, let rightID = rhs.uniqueIdentifier, !leftID.isEmpty, leftID == rightID {
+            return true
+        }
+        let leftIPv4 = lhs.ipv4?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let rightIPv4 = rhs.ipv4?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let leftIPv4, let rightIPv4, !leftIPv4.isEmpty, leftIPv4 == rightIPv4 {
+            return true
+        }
+        let leftIPv6 = lhs.ipv6?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let rightIPv6 = rhs.ipv6?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let leftIPv6, let rightIPv6, !leftIPv6.isEmpty, leftIPv6 == rightIPv6 {
+            return true
+        }
+        return lhs.name == rhs.name && Set(lhs.services) == Set(rhs.services)
     }
 
     private func fallbackDiscoveredDevice(for device: OnlineDevice) -> DiscoveredDevice {

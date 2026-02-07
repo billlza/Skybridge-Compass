@@ -82,6 +82,16 @@ public class P2PDiscoveryService: BaseManager {
         case plainTCP = "tcp"
     }
 
+    public enum ConnectionRoutePreference: Sendable {
+        case automatic
+        case preferUSB
+    }
+
+    private enum InterfacePreference: String {
+        case automatic
+        case wiredEthernetOnly
+    }
+
     private final class WaitForConnectionContext: @unchecked Sendable {
         private let resumed = OSAllocatedUnfairLock(initialState: false)
         private let continuation: CheckedContinuation<Void, Error>
@@ -257,19 +267,35 @@ public class P2PDiscoveryService: BaseManager {
 
     /// 连接到指定设备（优先 Bonjour 服务名，失败时自动回退到 host:port）
     public func connectToDevice(_ device: DiscoveredDevice) async throws {
+        try await connectToDevice(device, routePreference: .automatic)
+    }
+
+    /// 连接到指定设备（可指定路由偏好，例如 USB 优先）。
+    public func connectToDevice(
+        _ device: DiscoveredDevice,
+        routePreference: ConnectionRoutePreference
+    ) async throws {
         logger.info("尝试连接到设备: \(device.name)")
 
+        let preferUSBRoute = routePreference == .preferUSB || device.connectionTypes.contains(.usb)
         let primaryServiceType = "_skybridge._tcp"
         let connectableServiceTypes = normalizedConnectableServiceTypes(from: device.services)
         let preferredServiceType = connectableServiceTypes.contains(primaryServiceType) ? primaryServiceType : connectableServiceTypes.first
         let serviceName = resolvedBonjourServiceName(for: device)
+        let hasBonjourIdentifier = isBonjourIdentifier(device.uniqueIdentifier)
+        let shouldFallbackToDefaultSkyBridgePort =
+            hasBonjourIdentifier
+            || device.source == .skybridgeBonjour
+            || device.source == .skybridgeP2P
+            || connectableServiceTypes.contains(primaryServiceType)
+            || connectableServiceTypes.contains("_skybridge._udp")
         let portValue = resolvedPort(
             for: device,
             preferredServiceType: preferredServiceType,
             primaryServiceType: primaryServiceType,
-            connectableServiceTypes: connectableServiceTypes
+            connectableServiceTypes: connectableServiceTypes,
+            allowSkyBridgeDefaultFallback: shouldFallbackToDefaultSkyBridgePort
         )
-        let hasBonjourIdentifier = isBonjourIdentifier(device.uniqueIdentifier)
         let shouldAttemptBonjourService = !serviceName.isEmpty
             && !isLikelyIPAddress(serviceName)
             && (hasBonjourIdentifier || (device.ipv4 == nil && device.ipv6 == nil))
@@ -285,14 +311,19 @@ public class P2PDiscoveryService: BaseManager {
         } else {
             primaryEndpoint = nil
         }
-        let hostFallbackEndpoint = makeHostFallbackEndpoint(device: device, portValue: portValue)
+        let hostFallbackEndpoints = makeHostFallbackEndpoints(device: device, portValue: portValue)
 
         var endpointAttempts: [NWEndpoint] = []
-        if let primaryEndpoint {
-            endpointAttempts.append(primaryEndpoint)
-        }
-        if let hostFallbackEndpoint {
-            endpointAttempts.append(hostFallbackEndpoint)
+        if preferUSBRoute {
+            endpointAttempts.append(contentsOf: hostFallbackEndpoints)
+            if let primaryEndpoint {
+                endpointAttempts.append(primaryEndpoint)
+            }
+        } else {
+            if let primaryEndpoint {
+                endpointAttempts.append(primaryEndpoint)
+            }
+            endpointAttempts.append(contentsOf: hostFallbackEndpoints)
         }
 
         // If type metadata is missing but we still have Bonjour identity, probe SkyBridge default service.
@@ -318,30 +349,32 @@ public class P2PDiscoveryService: BaseManager {
                 device: device,
                 preferredServiceType: preferredServiceType
             )
-            for (index, plan) in securityPlans.enumerated() {
-                do {
-                    if case .service(let name, let type, _, _) = endpoint {
-                        logger.info("📡 尝试 Bonjour 连接: \(name, privacy: .public) [\(type, privacy: .public)] security=\(plan.rawValue, privacy: .public)")
-                    } else {
-                        logger.info("📡 尝试地址连接: \(endpoint.debugDescription, privacy: .public) security=\(plan.rawValue, privacy: .public)")
-                    }
+            let interfacePreferences = interfacePreferences(for: endpoint, preferUSBRoute: preferUSBRoute)
+            for interfacePreference in interfacePreferences {
+                for plan in securityPlans {
+                    do {
+                        if case .service(let name, let type, _, _) = endpoint {
+                            logger.info("📡 尝试 Bonjour 连接: \(name, privacy: .public) [\(type, privacy: .public)] security=\(plan.rawValue, privacy: .public) route=\(interfacePreference.rawValue, privacy: .public)")
+                        } else {
+                            logger.info("📡 尝试地址连接: \(endpoint.debugDescription, privacy: .public) security=\(plan.rawValue, privacy: .public) route=\(interfacePreference.rawValue, privacy: .public)")
+                        }
 
-                    let connection = makeConnection(to: endpoint, securityPlan: plan)
-                    connections[device.id.uuidString] = connection
-                    connectionStatus = .connecting
-                    try await waitForConnection(connection, deviceId: device.id.uuidString)
+                        let connection = makeConnection(
+                            to: endpoint,
+                            securityPlan: plan,
+                            interfacePreference: interfacePreference
+                        )
+                        connections[device.id.uuidString] = connection
+                        connectionStatus = .connecting
+                        try await waitForConnection(connection, deviceId: device.id.uuidString)
 
-                    logger.info("✅ 成功连接到设备: \(device.name)")
-                    return
-                } catch {
-                    lastError = error
-                    logger.warning("⚠️ 连接尝试失败，将回退到下一方案: \(error.localizedDescription, privacy: .public)")
-                    connections[device.id.uuidString]?.cancel()
-                    connections.removeValue(forKey: device.id.uuidString)
-
-                    let hasMorePlansForEndpoint = index < securityPlans.count - 1
-                    if hasMorePlansForEndpoint {
-                        continue
+                        logger.info("✅ 成功连接到设备: \(device.name)")
+                        return
+                    } catch {
+                        lastError = error
+                        logger.warning("⚠️ 连接尝试失败，将回退到下一方案: \(error.localizedDescription, privacy: .public)")
+                        connections[device.id.uuidString]?.cancel()
+                        connections.removeValue(forKey: device.id.uuidString)
                     }
                 }
             }
@@ -391,13 +424,18 @@ public class P2PDiscoveryService: BaseManager {
         return false
     }
 
-    private func makeConnection(to endpoint: NWEndpoint, securityPlan: ConnectionSecurityPlan) -> NWConnection {
+    private func makeConnection(
+        to endpoint: NWEndpoint,
+        securityPlan: ConnectionSecurityPlan,
+        interfacePreference: InterfacePreference
+    ) -> NWConnection {
         let net = RemoteDesktopSettingsManager.shared.settings.networkSettings
         if securityPlan == .encryptedTLS, let tls = TLSConfigurator.options(for: net.encryptionAlgorithm) {
             let tcp = NWProtocolTCP.Options()
             let params = NWParameters(tls: tls, tcp: tcp)
             params.includePeerToPeer = true
             params.allowLocalEndpointReuse = true
+            applyInterfacePreference(interfacePreference, to: params)
             if let tcpOptions = params.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
                 tcpOptions.enableKeepalive = true
                 tcpOptions.keepaliveIdle = 30
@@ -415,6 +453,7 @@ public class P2PDiscoveryService: BaseManager {
         let params = NWParameters.tcp
         params.includePeerToPeer = true
         params.allowLocalEndpointReuse = true
+        applyInterfacePreference(interfacePreference, to: params)
         if let tcpOptions = params.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
             tcpOptions.enableKeepalive = true
             tcpOptions.keepaliveIdle = 30
@@ -425,11 +464,17 @@ public class P2PDiscoveryService: BaseManager {
         return NWConnection(to: endpoint, using: params)
     }
 
+    private func applyInterfacePreference(_ preference: InterfacePreference, to params: NWParameters) {
+        guard preference == .wiredEthernetOnly else { return }
+        params.requiredInterfaceType = .wiredEthernet
+    }
+
     private func resolvedPort(
         for device: DiscoveredDevice,
         preferredServiceType: String?,
         primaryServiceType: String,
-        connectableServiceTypes: [String]
+        connectableServiceTypes: [String],
+        allowSkyBridgeDefaultFallback: Bool
     ) -> Int {
         if let preferredServiceType, let preferredPort = device.portMap[preferredServiceType], preferredPort > 0 {
             return preferredPort
@@ -442,33 +487,53 @@ public class P2PDiscoveryService: BaseManager {
                 return port
             }
         }
+        if allowSkyBridgeDefaultFallback {
+            return 9527
+        }
         return 0
     }
 
-    private func makeHostFallbackEndpoint(device: DiscoveredDevice, portValue: Int) -> NWEndpoint? {
+    private func makeHostFallbackEndpoints(device: DiscoveredDevice, portValue: Int) -> [NWEndpoint] {
         guard portValue > 0, let port = NWEndpoint.Port(rawValue: UInt16(portValue)) else {
-            return nil
+            return []
         }
 
+        var endpoints: [NWEndpoint] = []
+
         if let ipv4 = device.ipv4, !ipv4.isEmpty {
-            if isLocalIPAddress(ipv4) {
-                logger.debug("忽略本机地址，跳过连接尝试: \(ipv4)")
-                return nil
+            let trimmedIPv4 = ipv4.trimmingCharacters(in: .whitespacesAndNewlines)
+            if isLocalIPAddress(trimmedIPv4) {
+                logger.debug("忽略本机地址，跳过连接尝试: \(trimmedIPv4)")
+            } else {
+                endpoints.append(.hostPort(host: NWEndpoint.Host(trimmedIPv4), port: port))
             }
-            return .hostPort(host: NWEndpoint.Host(ipv4), port: port)
         }
 
         if let ipv6 = device.ipv6, !ipv6.isEmpty {
             let trimmedIPv6 = ipv6.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmedIPv6.lowercased().hasPrefix("fe80:") {
+            if isLocalIPAddress(trimmedIPv6) {
+                logger.debug("忽略本机地址，跳过连接尝试: \(trimmedIPv6)")
+            } else if trimmedIPv6.lowercased().hasPrefix("fe80:") {
                 // IPv6 链路本地地址必须保留 scope id（例如 %en0），否则连接不可达。
-                return .hostPort(host: NWEndpoint.Host(trimmedIPv6), port: port)
+                endpoints.append(.hostPort(host: NWEndpoint.Host(trimmedIPv6), port: port))
+            } else {
+                let normalizedIPv6 = trimmedIPv6.split(separator: "%", maxSplits: 1).first.map(String.init) ?? trimmedIPv6
+                endpoints.append(.hostPort(host: NWEndpoint.Host(normalizedIPv6), port: port))
             }
-            let normalizedIPv6 = trimmedIPv6.split(separator: "%", maxSplits: 1).first.map(String.init) ?? trimmedIPv6
-            return .hostPort(host: NWEndpoint.Host(normalizedIPv6), port: port)
         }
 
-        return nil
+        return endpoints
+    }
+
+    private func interfacePreferences(
+        for endpoint: NWEndpoint,
+        preferUSBRoute: Bool
+    ) -> [InterfacePreference] {
+        guard preferUSBRoute else { return [.automatic] }
+        if case .hostPort = endpoint {
+            return [.wiredEthernetOnly, .automatic]
+        }
+        return [.automatic]
     }
 
     private func normalizedConnectableServiceTypes(from rawTypes: [String]) -> [String] {
