@@ -260,12 +260,22 @@ public class P2PDiscoveryService: BaseManager {
         logger.info("尝试连接到设备: \(device.name)")
 
         let primaryServiceType = "_skybridge._tcp"
-        let preferredServiceType = device.services.contains(primaryServiceType) ? primaryServiceType : device.services.first
+        let connectableServiceTypes = normalizedConnectableServiceTypes(from: device.services)
+        let preferredServiceType = connectableServiceTypes.contains(primaryServiceType) ? primaryServiceType : connectableServiceTypes.first
         let serviceName = resolvedBonjourServiceName(for: device)
-        let portValue = resolvedPort(for: device, preferredServiceType: preferredServiceType, primaryServiceType: primaryServiceType)
+        let portValue = resolvedPort(
+            for: device,
+            preferredServiceType: preferredServiceType,
+            primaryServiceType: primaryServiceType,
+            connectableServiceTypes: connectableServiceTypes
+        )
+        let hasBonjourIdentifier = isBonjourIdentifier(device.uniqueIdentifier)
+        let shouldAttemptBonjourService = !serviceName.isEmpty
+            && !isLikelyIPAddress(serviceName)
+            && (hasBonjourIdentifier || (device.ipv4 == nil && device.ipv6 == nil))
 
         let primaryEndpoint: NWEndpoint?
-        if let preferredServiceType, !serviceName.isEmpty {
+        if shouldAttemptBonjourService, let preferredServiceType {
             primaryEndpoint = .service(
                 name: serviceName,
                 type: preferredServiceType,
@@ -285,8 +295,8 @@ public class P2PDiscoveryService: BaseManager {
             endpointAttempts.append(hostFallbackEndpoint)
         }
 
-        // If service type is missing but we still have a plausible service name, probe SkyBridge default service.
-        if endpointAttempts.isEmpty, !serviceName.isEmpty {
+        // If type metadata is missing but we still have Bonjour identity, probe SkyBridge default service.
+        if endpointAttempts.isEmpty, shouldAttemptBonjourService {
             endpointAttempts.append(
                 .service(
                     name: serviceName,
@@ -297,23 +307,8 @@ public class P2PDiscoveryService: BaseManager {
             )
         }
 
-        // Last resort: if we know a service type but no useful name/address, still try with cleaned display name.
-        if endpointAttempts.isEmpty, let preferredServiceType {
-            let fallbackName = sanitizedBonjourServiceName(device.name)
-            if !fallbackName.isEmpty {
-                endpointAttempts.append(
-                    .service(
-                        name: fallbackName,
-                        type: preferredServiceType,
-                        domain: serviceDomain,
-                        interface: nil
-                    )
-                )
-            }
-        }
-
         guard !endpointAttempts.isEmpty else {
-            throw P2PDiscoveryError.scanningFailed
+            throw P2PDiscoveryError.noConnectableEndpoint
         }
 
         var lastError: Error?
@@ -433,7 +428,8 @@ public class P2PDiscoveryService: BaseManager {
     private func resolvedPort(
         for device: DiscoveredDevice,
         preferredServiceType: String?,
-        primaryServiceType: String
+        primaryServiceType: String,
+        connectableServiceTypes: [String]
     ) -> Int {
         if let preferredServiceType, let preferredPort = device.portMap[preferredServiceType], preferredPort > 0 {
             return preferredPort
@@ -441,7 +437,12 @@ public class P2PDiscoveryService: BaseManager {
         if let primaryPort = device.portMap[primaryServiceType], primaryPort > 0 {
             return primaryPort
         }
-        return device.portMap.values.first(where: { $0 > 0 }) ?? 0
+        for serviceType in connectableServiceTypes {
+            if let port = device.portMap[serviceType], port > 0 {
+                return port
+            }
+        }
+        return 0
     }
 
     private func makeHostFallbackEndpoint(device: DiscoveredDevice, portValue: Int) -> NWEndpoint? {
@@ -468,6 +469,52 @@ public class P2PDiscoveryService: BaseManager {
         }
 
         return nil
+    }
+
+    private func normalizedConnectableServiceTypes(from rawTypes: [String]) -> [String] {
+        let allowedTypes: Set<String> = ["_skybridge._tcp", "_skybridge._udp"]
+        var seen = Set<String>()
+        var ordered: [String] = []
+
+        for rawType in rawTypes {
+            let normalized = rawType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard allowedTypes.contains(normalized), isValidBonjourServiceType(normalized) else {
+                continue
+            }
+            if seen.insert(normalized).inserted {
+                ordered.append(normalized)
+            }
+        }
+        return ordered
+    }
+
+    private func isValidBonjourServiceType(_ raw: String) -> Bool {
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard value.hasPrefix("_") else { return false }
+        guard value.hasSuffix("._tcp") || value.hasSuffix("._udp") else { return false }
+
+        let serviceLabel = value
+            .replacingOccurrences(of: "._tcp", with: "")
+            .replacingOccurrences(of: "._udp", with: "")
+            .dropFirst()
+        guard !serviceLabel.isEmpty, serviceLabel.count <= 15 else { return false }
+        return serviceLabel.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-") }
+    }
+
+    private func isBonjourIdentifier(_ identifier: String?) -> Bool {
+        guard let identifier else { return false }
+        let normalized = identifier.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return normalized.hasPrefix("bonjour:") || normalized.hasPrefix("recent:bonjour:")
+    }
+
+    private func isLikelyIPAddress(_ raw: String) -> Bool {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.contains(":") { return true }
+        let segments = trimmed.split(separator: ".")
+        return segments.count == 4 && segments.allSatisfy { part in
+            guard let value = Int(part), (0...255).contains(value) else { return false }
+            return String(value) == String(part) || part == "0"
+        }
     }
 
     private func resolvedBonjourServiceName(for device: DiscoveredDevice) -> String {
@@ -512,18 +559,38 @@ public class P2PDiscoveryService: BaseManager {
             return ""
         }
 
-        // Strip "ModelName (...)" suffix added by some TXT metadata projections.
-        if let open = name.lastIndex(of: "("), name.hasSuffix(")"), open > name.startIndex {
-            let prefix = name[..<open].trimmingCharacters(in: .whitespacesAndNewlines)
-            if !prefix.isEmpty {
-                name = prefix
+        // Strip unstable metadata suffixes often appended by discovery overlays:
+        // "iPhone [高速]" / "iPhone (Model)" / "iPhone 【Wi-Fi】".
+        while true {
+            if let stripped = stripTrailingBracketSuffix(from: name, open: "(", close: ")") {
+                name = stripped
+                continue
             }
+            if let stripped = stripTrailingBracketSuffix(from: name, open: "[", close: "]") {
+                name = stripped
+                continue
+            }
+            if let stripped = stripTrailingBracketSuffix(from: name, open: "【", close: "】") {
+                name = stripped
+                continue
+            }
+            break
         }
 
         for suffix in [" 📱", " 🍎"] where name.hasSuffix(suffix) {
             name = String(name.dropLast(suffix.count))
         }
         return name.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func stripTrailingBracketSuffix(from raw: String, open: Character, close: Character) -> String? {
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard value.last == close else { return nil }
+        guard let openIndex = value.lastIndex(of: open), openIndex > value.startIndex else { return nil }
+
+        let prefix = value[..<openIndex].trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prefix.isEmpty else { return nil }
+        return String(prefix)
     }
 
  /// 断开与指定设备的连接
@@ -1578,7 +1645,16 @@ public class P2PDiscoveryService: BaseManager {
  /// Swift 6.2.1：公钥数据在发现阶段暂不可用，将在安全握手时获取
     private static func mapToP2PDevice(_ d: DiscoveredDevice) -> P2PDevice {
         let address = d.ipv4 ?? d.ipv6 ?? ""
-        let portInt = d.portMap["_skybridge._tcp"] ?? d.portMap.values.first ?? 0
+        let portInt: Int = {
+            if let port = d.portMap["_skybridge._tcp"], port > 0 { return port }
+            if let port = d.portMap["_skybridge._udp"], port > 0 { return port }
+            for (serviceType, port) in d.portMap where port > 0 {
+                if serviceType.hasPrefix("_"), serviceType.hasSuffix("._tcp") || serviceType.hasSuffix("._udp") {
+                    return port
+                }
+            }
+            return 0
+        }()
         let endpoints: [String] = portInt > 0 ? ["\(address):\(portInt)"] : (address.isEmpty ? [] : [address])
         let stableId: String = {
             if let persistent = d.deviceId, !persistent.isEmpty {
@@ -1647,6 +1723,7 @@ public enum P2PDiscoveryError: Error, LocalizedError {
     case connectionCancelled
     case timeout
     case scanningFailed
+    case noConnectableEndpoint
 
     public var errorDescription: String? {
         switch self {
@@ -1658,6 +1735,8 @@ public enum P2PDiscoveryError: Error, LocalizedError {
             return "连接超时"
         case .scanningFailed:
             return "扫描失败"
+        case .noConnectableEndpoint:
+            return "设备未暴露可连接的 SkyBridge 控制端点"
         }
     }
 }
