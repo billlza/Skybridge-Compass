@@ -51,6 +51,18 @@ const WS_MAX_CLIENTS_PER_ROOM = Number(process.env.WS_MAX_CLIENTS_PER_ROOM || 4)
 // SECURITY: default to deny-by-default (no CORS header). Set explicitly if you have a browser client.
 const CORS_ORIGIN = process.env.CORS_ORIGIN || ''; // e.g. "https://app.example.com,https://admin.example.com"
 
+// TURN credential endpoint (RFC 7635-style short-lived credentials)
+const TURN_CLIENT_API_KEY = process.env.TURN_CLIENT_API_KEY || process.env.SKYBRIDGE_CLIENT_API_KEY || 'skybridge-client-v1';
+const TURN_ENFORCE_API_KEY = /^(1|true|yes)$/i.test(process.env.TURN_ENFORCE_API_KEY || 'true');
+const TURN_CRED_TTL_SECONDS = Number(process.env.TURN_CRED_TTL_SECONDS || 3600);
+const TURN_SHARED_SECRET = process.env.TURN_SHARED_SECRET || '';
+const TURN_STATIC_USERNAME = process.env.TURN_USERNAME || process.env.SKYBRIDGE_TURN_USERNAME || '';
+const TURN_STATIC_PASSWORD = process.env.TURN_PASSWORD || process.env.SKYBRIDGE_TURN_PASSWORD || '';
+const TURN_URIS = (process.env.TURN_URIS || process.env.TURN_URLS || 'turn:54.92.79.99:3478')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+
 // Brute-force mitigation for /api/lookup (code enumeration)
 const LOOKUP_INVALID_WINDOW_MS = Number(process.env.LOOKUP_INVALID_WINDOW_MS || 60_000);
 const LOOKUP_INVALID_MAX = Number(process.env.LOOKUP_INVALID_MAX || 20); // per IP per window
@@ -116,6 +128,12 @@ function isPlainObject(x) {
 
 function safeUpperCode(x) {
   return String(x || '').trim().toUpperCase();
+}
+
+function safeClientTag(x) {
+  const normalized = String(x || '').trim().replace(/[^a-zA-Z0-9._:-]/g, '');
+  if (!normalized) return 'anon';
+  return normalized.slice(0, 64);
 }
 
 // Simple in-memory rate limiter (per IP)
@@ -300,7 +318,7 @@ app.get('/', (req, res) => {
     ok: true,
     service: 'skybridge-signaling',
     time: new Date().toISOString(),
-    endpoints: ['/health', '/healthz', '/api/register', '/api/lookup/:code', '/api/answer/:code', '/api/ice/:sessionId', '/ws']
+    endpoints: ['/health', '/healthz', '/api/register', '/api/lookup/:code', '/api/answer/:code', '/api/ice/:sessionId', '/api/turn/credentials', '/ws']
   });
 });
 
@@ -321,6 +339,42 @@ const rlRegister = rateLimit({ windowMs: 60_000, max: 30 });
 const rlLookup   = rateLimit({ windowMs: 60_000, max: 30 });
 const rlAnswer   = rateLimit({ windowMs: 60_000, max: 60 });
 const rlIce      = rateLimit({ windowMs: 60_000, max: 240 });
+const rlTurn     = rateLimit({ windowMs: 60_000, max: 120 });
+
+// -------------------- REST API: dynamic TURN credentials --------------------
+app.get('/api/turn/credentials', rlTurn, (req, res) => {
+  if (TURN_ENFORCE_API_KEY) {
+    const apiKey = String(req.get('X-API-Key') || '').trim();
+    if (!apiKey || apiKey !== TURN_CLIENT_API_KEY) {
+      return res.status(401).json({ error: 'unauthorized' });
+    }
+  }
+
+  const ttl = Math.max(60, Math.min(24 * 3600, Math.trunc(TURN_CRED_TTL_SECONDS || 3600)));
+  if (!TURN_URIS.length) {
+    return res.status(503).json({ error: 'turn_uris_not_configured' });
+  }
+
+  // Preferred mode: generate short-lived TURN REST credentials from shared secret.
+  if (TURN_SHARED_SECRET) {
+    const clientTag = safeClientTag(req.get('X-Device-Id') || req.query.deviceId || req.ip);
+    const username = `${Math.floor(now() / 1000) + ttl}:${clientTag}`;
+    const password = crypto.createHmac('sha1', TURN_SHARED_SECRET).update(username).digest('base64');
+    return res.json({ username, password, ttl, uris: TURN_URIS });
+  }
+
+  // Fallback mode: static long-term credentials (still avoids 404 and preserves compatibility).
+  if (TURN_STATIC_USERNAME && TURN_STATIC_PASSWORD) {
+    return res.json({
+      username: TURN_STATIC_USERNAME,
+      password: TURN_STATIC_PASSWORD,
+      ttl,
+      uris: TURN_URIS
+    });
+  }
+
+  return res.status(503).json({ error: 'turn_credentials_not_configured' });
+});
 
 // -------------------- REST API: register --------------------
 app.post('/api/register', rlRegister, (req, res) => {
@@ -750,4 +804,3 @@ server.listen(PORT, HOST, () => {
   console.log(`Security: ALLOW_INSECURE=${ALLOW_INSECURE} WS_MAX_MSG_BYTES=${WS_MAX_MSG_BYTES} WS_MAX_MSGS_PER_10S=${WS_MAX_MSGS_PER_10S} WS_MAX_CLIENTS_PER_ROOM=${WS_MAX_CLIENTS_PER_ROOM}`);
   console.log('========================================');
 });
-

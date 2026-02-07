@@ -36,6 +36,25 @@ private enum WebRTCSSL {
 }
 #endif
 
+#if canImport(WebRTC)
+@available(iOS 17.0, *)
+private enum WebRTCPeerConnectionFactoryProvider {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var sharedFactory: RTCPeerConnectionFactory?
+
+    static func factory() -> RTCPeerConnectionFactory {
+        lock.lock()
+        defer { lock.unlock() }
+        if let sharedFactory {
+            return sharedFactory
+        }
+        let factory = RTCPeerConnectionFactory()
+        sharedFactory = factory
+        return factory
+    }
+}
+#endif
+
 @available(iOS 17.0, *)
 public final class WebRTCSession: NSObject, @unchecked Sendable {
     public enum Role: Sendable { case offerer, answerer }
@@ -186,7 +205,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
 #if canImport(WebRTC)
         WebRTCSSL.retain()
         sslHeld = true
-        let factory = RTCPeerConnectionFactory()
+        let factory = WebRTCPeerConnectionFactoryProvider.factory()
         
         let config = RTCConfiguration()
         config.sdpSemantics = .unifiedPlan

@@ -220,70 +220,100 @@ public class P2PDiscoveryService: BaseManager {
         stopAdvertising()
     }
 
-    /// 连接到指定设备（基于 IPv4 + 主服务端口）
+    /// 连接到指定设备（优先 Bonjour 服务名，失败时自动回退到 host:port）
     public func connectToDevice(_ device: DiscoveredDevice) async throws {
         logger.info("尝试连接到设备: \(device.name)")
 
         let primaryServiceType = "_skybridge._tcp"
-        let fallbackServiceType = device.services.first
-        let serviceName = sanitizedBonjourServiceName(device.name)
+        let preferredServiceType = device.services.contains(primaryServiceType) ? primaryServiceType : device.services.first
+        let serviceName = resolvedBonjourServiceName(for: device)
+        let portValue = resolvedPort(for: device, preferredServiceType: preferredServiceType, primaryServiceType: primaryServiceType)
 
-        let endpoint: NWEndpoint
-        if device.services.contains(primaryServiceType), !serviceName.isEmpty {
-            // Prefer Bonjour service endpoint: it works even when IP/port are not yet resolved.
-            endpoint = .service(
+        let primaryEndpoint: NWEndpoint?
+        if let preferredServiceType, !serviceName.isEmpty {
+            primaryEndpoint = .service(
                 name: serviceName,
-                type: primaryServiceType,
+                type: preferredServiceType,
                 domain: serviceDomain,
                 interface: nil
             )
-            logger.info("使用 Bonjour 主服务连接: \(serviceName, privacy: .public) [\(primaryServiceType, privacy: .public)]")
         } else {
-            // Fallback to host/port path when service endpoint is unavailable.
-            let preferredKey = fallbackServiceType ?? primaryServiceType
-            let portValue = device.portMap[preferredKey] ?? device.portMap[primaryServiceType] ?? device.portMap.values.first ?? 0
-            if portValue > 0, let port = NWEndpoint.Port(rawValue: UInt16(portValue)) {
-                if let ipv4 = device.ipv4, !ipv4.isEmpty {
-                    if isLocalIPAddress(ipv4) {
-                        logger.debug("忽略本机地址，跳过连接尝试: \(ipv4)")
-                        throw P2PDiscoveryError.connectionCancelled
-                    }
-                    endpoint = .hostPort(host: NWEndpoint.Host(ipv4), port: port)
-                } else if let ipv6 = device.ipv6, !ipv6.isEmpty {
-                    let normalizedIPv6 = ipv6.split(separator: "%", maxSplits: 1).first.map(String.init) ?? ipv6
-                    endpoint = .hostPort(host: NWEndpoint.Host(normalizedIPv6), port: port)
-                } else if let fallbackServiceType, !serviceName.isEmpty {
-                    endpoint = .service(
-                        name: serviceName,
-                        type: fallbackServiceType,
-                        domain: serviceDomain,
-                        interface: nil
-                    )
-                    logger.info("使用 Bonjour 备用服务连接: \(serviceName, privacy: .public) [\(fallbackServiceType, privacy: .public)]")
-                } else {
-                    throw P2PDiscoveryError.deviceNotConnected
-                }
-            } else if let fallbackServiceType, !serviceName.isEmpty {
-                endpoint = .service(
+            primaryEndpoint = nil
+        }
+        let hostFallbackEndpoint = makeHostFallbackEndpoint(device: device, portValue: portValue)
+
+        var endpointAttempts: [NWEndpoint] = []
+        if let primaryEndpoint {
+            endpointAttempts.append(primaryEndpoint)
+        }
+        if let hostFallbackEndpoint {
+            endpointAttempts.append(hostFallbackEndpoint)
+        }
+
+        // If service type is missing but we still have a plausible service name, probe SkyBridge default service.
+        if endpointAttempts.isEmpty, !serviceName.isEmpty {
+            endpointAttempts.append(
+                .service(
                     name: serviceName,
-                    type: fallbackServiceType,
+                    type: primaryServiceType,
                     domain: serviceDomain,
                     interface: nil
                 )
-                logger.info("使用 Bonjour 备用服务连接: \(serviceName, privacy: .public) [\(fallbackServiceType, privacy: .public)]")
-            } else {
-                throw P2PDiscoveryError.scanningFailed
+            )
+        }
+
+        // Last resort: if we know a service type but no useful name/address, still try with cleaned display name.
+        if endpointAttempts.isEmpty, let preferredServiceType {
+            let fallbackName = sanitizedBonjourServiceName(device.name)
+            if !fallbackName.isEmpty {
+                endpointAttempts.append(
+                    .service(
+                        name: fallbackName,
+                        type: preferredServiceType,
+                        domain: serviceDomain,
+                        interface: nil
+                    )
+                )
             }
         }
 
- // 应用统一 TLS 策略（近距连接）
+        guard !endpointAttempts.isEmpty else {
+            throw P2PDiscoveryError.scanningFailed
+        }
+
+        var lastError: Error?
+        for endpoint in endpointAttempts {
+            do {
+                if case .service(let name, let type, _, _) = endpoint {
+                    logger.info("📡 尝试 Bonjour 连接: \(name, privacy: .public) [\(type, privacy: .public)]")
+                } else {
+                    logger.info("📡 尝试地址连接: \(endpoint.debugDescription, privacy: .public)")
+                }
+
+                let connection = makeConnection(to: endpoint)
+                connections[device.id.uuidString] = connection
+                connectionStatus = .connecting
+                try await waitForConnection(connection, deviceId: device.id.uuidString)
+
+                logger.info("✅ 成功连接到设备: \(device.name)")
+                return
+            } catch {
+                lastError = error
+                logger.warning("⚠️ 连接尝试失败，将回退到下一方案: \(error.localizedDescription, privacy: .public)")
+                connections[device.id.uuidString]?.cancel()
+                connections.removeValue(forKey: device.id.uuidString)
+            }
+        }
+
+        connectionStatus = .failed
+        throw lastError ?? P2PDiscoveryError.connectionCancelled
+    }
+
+    private func makeConnection(to endpoint: NWEndpoint) -> NWConnection {
         let net = RemoteDesktopSettingsManager.shared.settings.networkSettings
-        let connection: NWConnection
-        if net.enableEncryption,
-           let tls = TLSConfigurator.options(for: net.encryptionAlgorithm) {
+        if net.enableEncryption, let tls = TLSConfigurator.options(for: net.encryptionAlgorithm) {
             let tcp = NWProtocolTCP.Options()
             let params = NWParameters(tls: tls, tcp: tcp)
-            // 🧷 关键：补齐 peer-to-peer + reuse + keepalive，降低“空闲被清理→幽灵断开”
             params.includePeerToPeer = true
             params.allowLocalEndpointReuse = true
             if let tcpOptions = params.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
@@ -293,32 +323,101 @@ public class P2PDiscoveryService: BaseManager {
                 tcpOptions.keepaliveCount = 4
                 tcpOptions.noDelay = true
             }
-            connection = NWConnection(to: endpoint, using: params)
-        } else {
-            let params = NWParameters.tcp
-            params.includePeerToPeer = true
-            params.allowLocalEndpointReuse = true
-            if let tcpOptions = params.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
-                tcpOptions.enableKeepalive = true
-                tcpOptions.keepaliveIdle = 30
-                tcpOptions.keepaliveInterval = 15
-                tcpOptions.keepaliveCount = 4
-                tcpOptions.noDelay = true
-            }
-            connection = NWConnection(to: endpoint, using: params)
+            return NWConnection(to: endpoint, using: params)
         }
 
-        connections[device.id.uuidString] = connection
-        connectionStatus = .connecting
+        let params = NWParameters.tcp
+        params.includePeerToPeer = true
+        params.allowLocalEndpointReuse = true
+        if let tcpOptions = params.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
+            tcpOptions.enableKeepalive = true
+            tcpOptions.keepaliveIdle = 30
+            tcpOptions.keepaliveInterval = 15
+            tcpOptions.keepaliveCount = 4
+            tcpOptions.noDelay = true
+        }
+        return NWConnection(to: endpoint, using: params)
+    }
 
-        // 等待连接建立（内部会设置 stateUpdateHandler 并启动连接）
-        try await waitForConnection(connection, deviceId: device.id.uuidString)
+    private func resolvedPort(
+        for device: DiscoveredDevice,
+        preferredServiceType: String?,
+        primaryServiceType: String
+    ) -> Int {
+        if let preferredServiceType, let preferredPort = device.portMap[preferredServiceType], preferredPort > 0 {
+            return preferredPort
+        }
+        if let primaryPort = device.portMap[primaryServiceType], primaryPort > 0 {
+            return primaryPort
+        }
+        return device.portMap.values.first(where: { $0 > 0 }) ?? 0
+    }
 
-        logger.info("✅ 成功连接到设备: \(device.name)")
+    private func makeHostFallbackEndpoint(device: DiscoveredDevice, portValue: Int) -> NWEndpoint? {
+        guard portValue > 0, let port = NWEndpoint.Port(rawValue: UInt16(portValue)) else {
+            return nil
+        }
+
+        if let ipv4 = device.ipv4, !ipv4.isEmpty {
+            if isLocalIPAddress(ipv4) {
+                logger.debug("忽略本机地址，跳过连接尝试: \(ipv4)")
+                return nil
+            }
+            return .hostPort(host: NWEndpoint.Host(ipv4), port: port)
+        }
+
+        if let ipv6 = device.ipv6, !ipv6.isEmpty {
+            let normalizedIPv6 = ipv6.split(separator: "%", maxSplits: 1).first.map(String.init) ?? ipv6
+            return .hostPort(host: NWEndpoint.Host(normalizedIPv6), port: port)
+        }
+
+        return nil
+    }
+
+    private func resolvedBonjourServiceName(for device: DiscoveredDevice) -> String {
+        let candidates = [
+            sanitizedBonjourServiceName(device.name),
+            sanitizedBonjourServiceName(extractBonjourServiceName(fromIdentifier: device.uniqueIdentifier) ?? "")
+        ]
+        return candidates.first(where: { !$0.isEmpty }) ?? ""
+    }
+
+    private func extractBonjourServiceName(fromIdentifier identifier: String?) -> String? {
+        guard let identifier else { return nil }
+        let normalized = identifier.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        func parseName(from payload: String) -> String? {
+            let name = payload.split(separator: "@", maxSplits: 1).first.map(String.init)
+            return name?.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        if normalized.hasPrefix("recent:bonjour:") {
+            let payload = String(normalized.dropFirst("recent:bonjour:".count))
+            return parseName(from: payload)
+        }
+        if normalized.hasPrefix("bonjour:") {
+            let payload = String(normalized.dropFirst("bonjour:".count))
+            return parseName(from: payload)
+        }
+        return nil
     }
 
     private func sanitizedBonjourServiceName(_ raw: String) -> String {
         var name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return "" }
+
+        if name.lowercased().hasPrefix("peer:") {
+            return ""
+        }
+
+        // Strip "ModelName (...)" suffix added by some TXT metadata projections.
+        if let open = name.lastIndex(of: "("), name.hasSuffix(")"), open > name.startIndex {
+            let prefix = name[..<open].trimmingCharacters(in: .whitespacesAndNewlines)
+            if !prefix.isEmpty {
+                name = prefix
+            }
+        }
+
         for suffix in [" 📱", " 🍎"] where name.hasSuffix(suffix) {
             name = String(name.dropLast(suffix.count))
         }
@@ -1619,23 +1718,10 @@ fileprivate func P2P_ResolveHost(_ host: NWEndpoint.Host) -> (ipv4: String?, ipv
 }
 
 fileprivate func P2P_ExtractNetworkAddrs(_ result: NWBrowser.Result) -> (ipv4: String?, ipv6: String?) {
-    var ipv4: String?
-    var ipv6: String?
-    if !result.interfaces.isEmpty {
-        for interface in result.interfaces {
-            let name = interface.name
-            if let addrs = P2P_GetIPAddressesForInterface(name) {
-                if ipv4 == nil { ipv4 = addrs.ipv4 }
-                if ipv6 == nil { ipv6 = addrs.ipv6 }
-            }
-        }
+    // Never infer peer address from local interfaces; that produces false self-IP and broken connectability checks.
+    // For Bonjour services we rely on NetService resolveViaNetServiceIfNeeded(...) to hydrate real addresses later.
+    if case .hostPort(let host, _) = result.endpoint {
+        return P2P_ResolveHost(host) ?? (nil, nil)
     }
-    if case .service(let name, let type, _, _) = result.endpoint {
-        let host = NWEndpoint.Host(name + "." + type.replacingOccurrences(of: "_", with: "") + ".local")
-        if let resolved = P2P_ResolveHost(host) {
-            if ipv4 == nil { ipv4 = resolved.ipv4 }
-            if ipv6 == nil { ipv6 = resolved.ipv6 }
-        }
-    }
-    return (ipv4, ipv6)
+    return (nil, nil)
 }

@@ -35,6 +35,28 @@ private enum WebRTCSSL {
 }
 #endif
 
+#if canImport(WebRTC)
+/// Shared RTCPeerConnectionFactory provider.
+///
+/// A long-lived factory avoids repeated native stack bring-up/tear-down and prevents
+/// edge-case creation failures when short-lived local factories race with session lifecycle.
+private enum WebRTCPeerConnectionFactoryProvider {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var sharedFactory: RTCPeerConnectionFactory?
+
+    static func factory() -> RTCPeerConnectionFactory {
+        lock.lock()
+        defer { lock.unlock() }
+        if let sharedFactory {
+            return sharedFactory
+        }
+        let factory = RTCPeerConnectionFactory()
+        sharedFactory = factory
+        return factory
+    }
+}
+#endif
+
 /// WebRTC 会话：负责 PeerConnection + DataChannel + ICE 收发
 ///
 /// 注意：
@@ -192,10 +214,9 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     public func start() throws {
         guard !isClosed else { throw WebRTCError.alreadyClosed }
 #if canImport(WebRTC)
-        // WebRTC factory is not Sendable; keep it as a local instance (avoid global/shared state under Swift 6 checks).
         WebRTCSSL.retain()
         sslHeld = true
-        let factory = RTCPeerConnectionFactory()
+        let factory = WebRTCPeerConnectionFactoryProvider.factory()
         
         let config = RTCConfiguration()
         config.sdpSemantics = .unifiedPlan

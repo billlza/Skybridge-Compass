@@ -144,9 +144,70 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         return onlineDevices.first { $0.id == id }
     }
 
- /// 根据唯一标识符查找设备
+    /// 根据唯一标识符查找设备
     public func device(withIdentifier identifier: String) -> OnlineDevice? {
         return deviceMap[identifier]
+    }
+
+    /// 解析在线设备对应的底层发现记录（用于连接时保留真实 Bonjour/IP 元数据）。
+    public func resolvedDiscoveredDevice(for onlineDevice: OnlineDevice) -> DiscoveredDevice? {
+        let candidates = networkDiscovery.discoveredDevices
+        guard !candidates.isEmpty else { return nil }
+
+        let normalizedOnlineName = normalizeDeviceName(onlineDevice.name)
+        let normalizedIPv4 = onlineDevice.ipv4.map(Self.normalizeIPAddress)
+        let normalizedIPv6 = onlineDevice.ipv6.map(Self.normalizeIPAddress)
+
+        let strongId: String? = {
+            guard onlineDevice.uniqueIdentifier.hasPrefix("id:") else { return nil }
+            return String(onlineDevice.uniqueIdentifier.dropFirst("id:".count))
+        }()
+        let pubKeyFP: String? = {
+            guard onlineDevice.uniqueIdentifier.hasPrefix("fp:") else { return nil }
+            return String(onlineDevice.uniqueIdentifier.dropFirst("fp:".count)).lowercased()
+        }()
+
+        var best: (score: Int, device: DiscoveredDevice)?
+
+        for candidate in candidates where !candidate.isLocalDevice {
+            var score = 0
+
+            if let strongId, let candidateId = candidate.deviceId, candidateId == strongId {
+                score += 200
+            }
+            if let pubKeyFP, let candidateFP = candidate.pubKeyFP?.lowercased(), candidateFP == pubKeyFP {
+                score += 180
+            }
+
+            if let normalizedIPv4, let candidateIPv4 = candidate.ipv4.map(Self.normalizeIPAddress), candidateIPv4 == normalizedIPv4 {
+                score += 120
+            }
+            if let normalizedIPv6, let candidateIPv6 = candidate.ipv6.map(Self.normalizeIPAddress), candidateIPv6 == normalizedIPv6 {
+                score += 110
+            }
+
+            if normalizeDeviceName(candidate.name) == normalizedOnlineName {
+                score += 60
+            }
+
+            if candidate.services.contains("_skybridge._tcp") {
+                score += 30
+            }
+            if (candidate.portMap["_skybridge._tcp"] ?? 0) > 0 {
+                score += 20
+            }
+            if onlineDevice.connectionTypes.contains(.usb), candidate.connectionTypes.contains(.usb) {
+                score += 10
+            }
+
+            guard score > 0 else { continue }
+            if let best, best.score >= score {
+                continue
+            }
+            best = (score, candidate)
+        }
+
+        return best?.device
     }
 
  /// 标记设备为已连接
@@ -827,6 +888,15 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         return normalized.hasPrefix("peer:")
     }
 
+    private static func syntheticPeerHost(fromDisplayName displayName: String) -> String? {
+        guard isSyntheticPeerDisplayName(displayName) else { return nil }
+        let normalizedPeerId = normalizedPeerIdentifier(displayName)
+        let extracted = extractIPComponents(fromNormalizedPeerId: normalizedPeerId)
+        if let ipv6 = extracted.ipv6 { return normalizeIPAddress(ipv6) }
+        if let ipv4 = extracted.ipv4 { return normalizeIPAddress(ipv4) }
+        return nil
+    }
+
     private static func preferredRecentDevice(_ lhs: OnlineDevice, _ rhs: OnlineDevice) -> OnlineDevice {
         if lhs.connectionStatus.priority != rhs.connectionStatus.priority {
             return lhs.connectionStatus.priority > rhs.connectionStatus.priority ? lhs : rhs
@@ -916,6 +986,15 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
             }
         }
 
+        let nonSyntheticHosts: Set<String> = Set(
+            uniqueDevices.compactMap { device in
+                guard !Self.isSyntheticPeerDisplayName(device.name) else { return nil }
+                if let ipv6 = device.ipv6 { return Self.normalizeIPAddress(ipv6) }
+                if let ipv4 = device.ipv4 { return Self.normalizeIPAddress(ipv4) }
+                return nil
+            }
+        )
+
  // 过滤设备:
  // 1. 本机(始终显示)
  // 2. 在线设备
@@ -923,12 +1002,21 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
  // 4. 有连接历史的设备
  // 5. 已授权的设备
         let filteredDevices = uniqueDevices.filter { device in
-            device.isLocalDevice ||
-            device.connectionStatus == .online ||
-            device.connectionStatus == .connected ||
-            now.timeIntervalSince(device.lastSeen) < 60 ||
-            device.lastConnectedAt != nil ||
-            device.isAuthorized
+            if Self.isSyntheticPeerDisplayName(device.name) {
+                // 历史 peer:* 只在当前确实连接且没有可替代实体时保留，避免列表噪声。
+                guard device.connectionStatus == .connected else { return false }
+                if let host = Self.syntheticPeerHost(fromDisplayName: device.name),
+                   nonSyntheticHosts.contains(host) {
+                    return false
+                }
+            }
+
+            return device.isLocalDevice ||
+                device.connectionStatus == .online ||
+                device.connectionStatus == .connected ||
+                now.timeIntervalSince(device.lastSeen) < 60 ||
+                device.lastConnectedAt != nil ||
+                device.isAuthorized
         }
 
  // 排序: 本机 > 已连接 > 在线 > 离线
