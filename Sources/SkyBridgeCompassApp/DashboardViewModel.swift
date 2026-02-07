@@ -568,9 +568,6 @@ final class DashboardViewModel: ObservableObject {
             signalStrength: nil
         )
 
- // 标记为已连接
-        unifiedDeviceManager.markDeviceAsConnected(onlineDevice.id)
-
  // 执行连接
         await connect(to: discoveredDevice)
     }

@@ -49,6 +49,8 @@ public class P2PDiscoveryService: BaseManager {
 
     /// 当前活跃连接（按 DiscoveredDevice.id.uuidString 存）
     private var connections: [String: NWConnection] = [:]
+    /// 已完成应用层握手认证的连接（用于保持 P2PConnection 生命周期）
+    private var authenticatedConnections: [String: P2PConnection] = [:]
     private var txtResolveCooldown: [String: Date] = [:]
     private let outboundConnectionQueue = DispatchQueue(
         label: "com.skybridge.p2p.discovery.outbound-connection",
@@ -240,6 +242,8 @@ public class P2PDiscoveryService: BaseManager {
         discoveredDevices.removeAll()
         connections.values.forEach { $0.cancel() }
         connections.removeAll()
+        authenticatedConnections.values.forEach { $0.disconnect() }
+        authenticatedConnections.removeAll()
         txtResolveCooldown.removeAll()
         connectionStatus = .disconnected
         // Ensure advertising is on while scanning.
@@ -262,6 +266,12 @@ public class P2PDiscoveryService: BaseManager {
         }
         browsers.removeAll()
 
+        connections.values.forEach { $0.cancel() }
+        connections.removeAll()
+        authenticatedConnections.values.forEach { $0.disconnect() }
+        authenticatedConnections.removeAll()
+        connectionStatus = .disconnected
+
         stopAdvertising()
     }
 
@@ -276,6 +286,12 @@ public class P2PDiscoveryService: BaseManager {
         routePreference: ConnectionRoutePreference
     ) async throws {
         logger.info("尝试连接到设备: \(device.name)")
+        let deviceKey = device.id.uuidString
+        connections[deviceKey]?.cancel()
+        connections.removeValue(forKey: deviceKey)
+        if let existingAuthenticated = authenticatedConnections.removeValue(forKey: deviceKey) {
+            existingAuthenticated.disconnect()
+        }
 
         let preferUSBRoute = routePreference == .preferUSB || device.connectionTypes.contains(.usb)
         let primaryServiceType = "_skybridge._tcp"
@@ -364,17 +380,43 @@ public class P2PDiscoveryService: BaseManager {
                             securityPlan: plan,
                             interfacePreference: interfacePreference
                         )
-                        connections[device.id.uuidString] = connection
+                        connections[deviceKey] = connection
                         connectionStatus = .connecting
-                        try await waitForConnection(connection, deviceId: device.id.uuidString)
+                        try await waitForConnection(connection, deviceId: deviceKey)
+
+                        if shouldAuthenticateAsSkyBridgeControl(
+                            endpoint: endpoint,
+                            device: device,
+                            preferredServiceType: preferredServiceType
+                        ) {
+                            logger.info("🔐 传输层已就绪，开始应用层握手认证")
+                            let authenticated = try await authenticateConnection(
+                                connection,
+                                for: device,
+                                endpoint: endpoint,
+                                fallbackPort: portValue
+                            )
+                            if let replaced = authenticatedConnections.updateValue(authenticated, forKey: deviceKey),
+                               replaced.id != authenticated.id {
+                                replaced.disconnect()
+                            }
+                        } else {
+                            if let replaced = authenticatedConnections.removeValue(forKey: deviceKey) {
+                                replaced.disconnect()
+                            }
+                        }
 
                         logger.info("✅ 成功连接到设备: \(device.name)")
+                        connectionStatus = .connected
                         return
                     } catch {
                         lastError = error
                         logger.warning("⚠️ 连接尝试失败，将回退到下一方案: \(error.localizedDescription, privacy: .public)")
-                        connections[device.id.uuidString]?.cancel()
-                        connections.removeValue(forKey: device.id.uuidString)
+                        if let authenticated = authenticatedConnections.removeValue(forKey: deviceKey) {
+                            authenticated.disconnect()
+                        }
+                        connections[deviceKey]?.cancel()
+                        connections.removeValue(forKey: deviceKey)
                     }
                 }
             }
@@ -382,6 +424,110 @@ public class P2PDiscoveryService: BaseManager {
 
         connectionStatus = .failed
         throw lastError ?? P2PDiscoveryError.connectionCancelled
+    }
+
+    private func shouldAuthenticateAsSkyBridgeControl(
+        endpoint: NWEndpoint,
+        device: DiscoveredDevice,
+        preferredServiceType: String?
+    ) -> Bool {
+        isSkyBridgeControlEndpoint(endpoint, device: device, preferredServiceType: preferredServiceType)
+    }
+
+    private func authenticateConnection(
+        _ connection: NWConnection,
+        for device: DiscoveredDevice,
+        endpoint: NWEndpoint,
+        fallbackPort: Int,
+        timeoutSeconds: TimeInterval = 12
+    ) async throws -> P2PConnection {
+        let p2pDevice = makeP2PDeviceForConnection(
+            from: device,
+            endpoint: endpoint,
+            fallbackPort: fallbackPort
+        )
+        let authenticatedConnection = P2PConnection(device: p2pDevice, connection: connection)
+        authenticatedConnection.markConnectedAndStartReceiving()
+
+        do {
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                group.addTask {
+                    try await authenticatedConnection.authenticate()
+                }
+                group.addTask {
+                    try await Task.sleep(for: .seconds(timeoutSeconds))
+                    throw P2PDiscoveryError.timeout
+                }
+                defer { group.cancelAll() }
+                _ = try await group.next()
+            }
+            return authenticatedConnection
+        } catch {
+            authenticatedConnection.disconnect()
+            throw error
+        }
+    }
+
+    private func makeP2PDeviceForConnection(
+        from device: DiscoveredDevice,
+        endpoint: NWEndpoint,
+        fallbackPort: Int
+    ) -> P2PDevice {
+        let address: String = {
+            switch endpoint {
+            case .hostPort(let host, _):
+                return String(describing: host)
+            case .service(let name, _, let domain, _):
+                return domain.isEmpty ? "\(name).local." : "\(name).\(domain)"
+            default:
+                return device.ipv4 ?? device.ipv6 ?? ""
+            }
+        }()
+
+        let port: UInt16 = {
+            switch endpoint {
+            case .hostPort(_, let hostPort):
+                return hostPort.rawValue
+            case .service(_, _, let servicePort, _):
+                if let parsed = UInt16(servicePort) { return parsed }
+            default:
+                break
+            }
+            if let parsedFallback = UInt16(exactly: fallbackPort), parsedFallback > 0 {
+                return parsedFallback
+            }
+            return 9527
+        }()
+
+        let persistentDeviceId = device.deviceId?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let uniqueIdentifier = device.uniqueIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedId: String = {
+            if let persistentDeviceId, !persistentDeviceId.isEmpty { return persistentDeviceId }
+            if let uniqueIdentifier, !uniqueIdentifier.isEmpty { return uniqueIdentifier }
+            return device.id.uuidString
+        }()
+
+        let capabilities = Array(Set(device.services)).sorted()
+        let endpoints = [endpoint.debugDescription]
+
+        return P2PDevice(
+            id: resolvedId,
+            name: resolvedBonjourServiceName(for: device),
+            type: .macOS,
+            address: address,
+            port: port,
+            osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
+            capabilities: capabilities,
+            publicKey: Data(),
+            lastSeen: Date(),
+            endpoints: endpoints,
+            lastMessageTimestamp: nil,
+            isVerified: false,
+            verificationFailedReason: device.pubKeyFP == nil ? "等待公钥交换" : nil,
+            persistentDeviceId: persistentDeviceId,
+            pubKeyFingerprint: device.pubKeyFP,
+            macAddresses: device.macSet.isEmpty ? nil : device.macSet
+        )
     }
 
     private func preferredConnectionSecurityPlans(
@@ -662,6 +808,9 @@ public class P2PDiscoveryService: BaseManager {
     public func disconnectFromDevice(_ deviceId: String) {
         logger.info("🔌 断开设备连接: \(deviceId)")
 
+        if let authenticated = authenticatedConnections.removeValue(forKey: deviceId) {
+            authenticated.disconnect()
+        }
         connections[deviceId]?.cancel()
         connections.removeValue(forKey: deviceId)
 
@@ -959,14 +1108,22 @@ public class P2PDiscoveryService: BaseManager {
     private func handleConnectionStateUpdate(_ state: NWConnection.State, for deviceId: String) {
         switch state {
         case .ready:
-            logger.info("✅ 连接就绪: \(deviceId)")
-            connectionStatus = .connected
+            logger.info("✅ 连接传输层就绪: \(deviceId)")
+            if connectionStatus == .disconnected || connectionStatus == .failed {
+                connectionStatus = .connecting
+            }
         case .failed(let error):
             logger.error("❌ 连接失败: \(deviceId), 错误: \(error.localizedDescription)")
+            if let authenticated = authenticatedConnections.removeValue(forKey: deviceId) {
+                authenticated.disconnect()
+            }
             connections.removeValue(forKey: deviceId)
             connectionStatus = .failed
         case .cancelled:
             logger.info("⏹️ 连接已取消: \(deviceId)")
+            if let authenticated = authenticatedConnections.removeValue(forKey: deviceId) {
+                authenticated.disconnect()
+            }
             connections.removeValue(forKey: deviceId)
             connectionStatus = connections.isEmpty ? .disconnected : connectionStatus
         default:
