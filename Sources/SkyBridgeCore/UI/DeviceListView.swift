@@ -451,10 +451,12 @@ struct DeviceCardView: View {
                     Button("断开连接", action: onDisconnect)
                         .buttonStyle(SecondaryButtonStyle())
                 } else {
- // 当设备未公开任何端口时，标记为“不可连接”并禁用按钮，避免徒劳的尝试
+ // Bonjour 服务可直接基于 service name 建连，不要求必须提前暴露端口。
                     let availablePort = device.portMap.values.first ?? 0
-                    Button(availablePort > 0 ? "连接" : "不可连接", action: onConnect)
-                        .disabled(availablePort == 0)
+                    let canConnectViaBonjour = device.services.contains("_skybridge._tcp") || device.services.contains("_skybridge._udp")
+                    let canConnect = availablePort > 0 || canConnectViaBonjour
+                    Button(canConnect ? "连接" : "不可连接", action: onConnect)
+                        .disabled(!canConnect)
                         .buttonStyle(PrimaryButtonStyle())
                 }
                 

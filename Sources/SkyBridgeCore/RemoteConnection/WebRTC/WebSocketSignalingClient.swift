@@ -8,6 +8,17 @@ import Network
 /// - 只提供最小能力：connect / send / onEnvelope
 /// - 具体 session join/leave 逻辑由上层管理器处理
 public actor WebSocketSignalingClient {
+    public enum SignalingError: LocalizedError {
+        case notConnected
+
+        public var errorDescription: String? {
+            switch self {
+            case .notConnected:
+                return "信令 WebSocket 未连接"
+            }
+        }
+    }
+
     private let logger = Logger(subsystem: "com.skybridge.signal", category: "WebRTCSignalingWS")
     private let url: URL
     
@@ -60,7 +71,9 @@ public actor WebSocketSignalingClient {
     }
     
     public func send(_ envelope: WebRTCSignalingEnvelope) async throws {
-        guard let ws else { return }
+        guard let ws, isConnected else {
+            throw SignalingError.notConnected
+        }
         let data = try JSONEncoder().encode(envelope)
         guard let text = String(data: data, encoding: .utf8) else { return }
         try await ws.send(text: text)
@@ -75,11 +88,13 @@ public actor WebSocketSignalingClient {
     
     private func handleClose() {
         isConnected = false
+        ws = nil
         logger.info("⏹️ signaling websocket closed")
     }
-    
+
     private func handleError(_ error: NWError) {
         isConnected = false
+        ws = nil
         logger.error("❌ signaling websocket error: \(error.localizedDescription, privacy: .public)")
     }
     
@@ -100,5 +115,4 @@ private final class ActorBox<T: Actor>: @unchecked Sendable {
     weak var value: T?
     init(_ value: T) { self.value = value }
 }
-
 

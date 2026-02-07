@@ -3,6 +3,17 @@ import OSLog
 
 @available(iOS 17.0, *)
 public actor WebSocketSignalingClient {
+    public enum SignalingError: LocalizedError {
+        case notConnected
+
+        public var errorDescription: String? {
+            switch self {
+            case .notConnected:
+                return "信令 WebSocket 未连接"
+            }
+        }
+    }
+
     private let logger = Logger(subsystem: "com.skybridge.compass.ios", category: "WebRTCSignalingWS")
     private let url: URL
     private var task: URLSessionWebSocketTask?
@@ -37,7 +48,9 @@ public actor WebSocketSignalingClient {
     }
     
     public func send(_ envelope: WebRTCSignalingEnvelope) async throws {
-        guard let task else { return }
+        guard let task else {
+            throw SignalingError.notConnected
+        }
         let data = try JSONEncoder().encode(envelope)
         guard let text = String(data: data, encoding: .utf8) else { return }
         try await task.send(.string(text))
@@ -52,6 +65,7 @@ public actor WebSocketSignalingClient {
     }
     
     private func receiveLoop() async {
+        defer { receiveLoopTask = nil }
         while !Task.isCancelled {
             guard let task else { return }
             do {
@@ -68,6 +82,8 @@ public actor WebSocketSignalingClient {
                 }
             } catch {
                 logger.error("signaling receive failed: \(error.localizedDescription, privacy: .public)")
+                task.cancel(with: .goingAway, reason: nil)
+                self.task = nil
                 return
             }
         }

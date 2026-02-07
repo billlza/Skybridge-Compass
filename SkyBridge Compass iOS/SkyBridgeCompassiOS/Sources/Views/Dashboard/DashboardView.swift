@@ -698,8 +698,13 @@ private struct QRCodeHubSheet: View {
                                     pendingPairing = data
                                 },
                                 onScanString: { string in
-                                    // 兼容 macOS 跨网二维码：skybridge://connect/<base64>
-                                    if string.hasPrefix("skybridge://connect/") {
+                                    // 兼容 macOS 跨网二维码：skybridge://connect/<payload> 或 skybridge://connect?data=<payload>
+                                    let isCrossNetworkConnectLink: Bool = {
+                                        if string.hasPrefix("skybridge://connect/") { return true }
+                                        guard let url = URL(string: string) else { return false }
+                                        return url.scheme == "skybridge" && url.host == "connect"
+                                    }()
+                                    if isCrossNetworkConnectLink {
                                         SkyBridgeLogger.shared.info("🌐 扫描到跨网连接二维码")
                                         onScanConnectLink(string)
                                         dismiss()

@@ -398,9 +398,28 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         var attemptsLeft = max(0, retries)
         while true {
             do {
-                try await signaling?.send(envelope)
+                if signaling == nil {
+                    let wsURL = URL(string: CrossNetworkServerConfig.signalingWebSocketURL)!
+                    let newSignaling = WebSocketSignalingClient(url: wsURL)
+                    self.signaling = newSignaling
+                    await newSignaling.setOnEnvelope { [weak self] env in
+                        Task { @MainActor in
+                            self?.handleEnvelope(env)
+                        }
+                    }
+                    await newSignaling.connect()
+                }
+
+                guard let signaling else {
+                    throw WebSocketSignalingClient.SignalingError.notConnected
+                }
+                try await signaling.send(envelope)
                 return
             } catch {
+                if let wsError = error as? WebSocketSignalingClient.SignalingError,
+                   case .notConnected = wsError {
+                    await signaling?.connect()
+                }
                 if attemptsLeft == 0 {
                     lastError = "信令发送失败: \(error.localizedDescription)"
                     return
@@ -416,7 +435,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         joinHeartbeatTask = nil
     }
 
-    private func startJoinHeartbeat(sessionId: String, localId: String, attempts: Int = 10) {
+    private func startJoinHeartbeat(sessionId: String, localId: String, attempts: Int = 30) {
         stopJoinHeartbeat()
         joinHeartbeatTask = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -454,7 +473,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         }
     }
 
-    private func startOfferResendLoop(sessionId: String, localId: String, attempts: Int = 12) {
+    private func startOfferResendLoop(sessionId: String, localId: String, attempts: Int = 40) {
         stopOfferResendLoop()
         offerResendTask = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -538,16 +557,61 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     }
     
     private func parseSkybridgeConnectLink(_ string: String) throws -> DynamicQRCodeData {
-        guard string.hasPrefix("skybridge://connect/") else {
+        let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let payload = extractConnectPayload(from: trimmed) else {
             throw ConnectLinkError.invalidFormat
         }
-        let base64Part = string.replacingOccurrences(of: "skybridge://connect/", with: "")
-        guard let jsonData = Data(base64Encoded: base64Part) else {
+
+        guard let jsonData = decodeConnectPayload(payload) else {
             throw ConnectLinkError.invalidBase64
         }
         let qr = try JSONDecoder().decode(DynamicQRCodeData.self, from: jsonData)
         guard qr.expiresAt > Date() else { throw ConnectLinkError.expired }
         return qr
+    }
+
+    private func extractConnectPayload(from raw: String) -> String? {
+        let prefix = "skybridge://connect/"
+        if raw.hasPrefix(prefix) {
+            return String(raw.dropFirst(prefix.count))
+        }
+
+        guard let url = URL(string: raw), url.scheme == "skybridge", url.host == "connect" else {
+            return nil
+        }
+        let pathPayload = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        if !pathPayload.isEmpty {
+            return pathPayload
+        }
+        if let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+           let queryPayload = components.queryItems?.first(where: { $0.name == "data" })?.value,
+           !queryPayload.isEmpty {
+            return queryPayload
+        }
+        return nil
+    }
+
+    private func decodeConnectPayload(_ rawPayload: String) -> Data? {
+        var candidates: [String] = []
+        candidates.append(rawPayload)
+        if let decoded = rawPayload.removingPercentEncoding, !decoded.isEmpty {
+            candidates.append(decoded)
+        }
+
+        for candidate in candidates {
+            if let data = Data(base64Encoded: candidate, options: [.ignoreUnknownCharacters]) {
+                return data
+            }
+
+            let urlSafe = candidate
+                .replacingOccurrences(of: "-", with: "+")
+                .replacingOccurrences(of: "_", with: "/")
+            let padded = urlSafe + String(repeating: "=", count: (4 - (urlSafe.count % 4)) % 4)
+            if let data = Data(base64Encoded: padded, options: [.ignoreUnknownCharacters]) {
+                return data
+            }
+        }
+        return nil
     }
     
     private func connect(from qr: DynamicQRCodeData) async throws {
