@@ -37,6 +37,7 @@ public struct EnhancedDeviceDiscoveryView: View {
  // UI 状态
     @State private var selectedConnectionMode: DiscoveryMode = .localScan
     @State private var searchText = ""
+    @State private var connectionCodeInput = ""
  // 控制二维码扫描弹窗显示与错误提示。
     @State private var showingScanner: Bool = false
     @State private var scannerErrorMessage: String?
@@ -640,8 +641,10 @@ public struct EnhancedDeviceDiscoveryView: View {
             .sheet(isPresented: $showingScanner) {
                 QRCodeScannerView(
                     onResult: { result in
- // 仅处理动态连接二维码，格式 skybridge://connect/<base64>
-                        if result.hasPrefix("skybridge://connect/") {
+ // 兼容两种跨网二维码格式：
+ // - skybridge://connect/<base64>
+ // - skybridge://connect?data=<base64>
+                        if isCrossNetworkConnectLink(result) {
                             Task {
                                 do {
                                     let data = Data(result.utf8)
@@ -1402,7 +1405,7 @@ public struct EnhancedDeviceDiscoveryView: View {
                         .fontWeight(.semibold)
 
                     VStack(spacing: 12) {
-                        TextField(LocalizationManager.shared.localizedString("discovery.code.enterPrompt"), text: $searchText)
+                        TextField(LocalizationManager.shared.localizedString("discovery.code.enterPrompt"), text: $connectionCodeInput)
                             .font(.system(size: 28, weight: .semibold, design: .rounded))
                             .textFieldStyle(.plain)
                             .multilineTextAlignment(.center)
@@ -1411,15 +1414,20 @@ public struct EnhancedDeviceDiscoveryView: View {
                             .padding(.vertical, 16)
                             .background(Color(NSColor.textBackgroundColor))
                             .cornerRadius(12)
-                            .onChange(of: searchText) { _, newValue in
-                                searchText = String(newValue.prefix(6).uppercased().filter { $0.isLetter || $0.isNumber })
+                            .onChange(of: connectionCodeInput) { _, newValue in
+                                connectionCodeInput = String(
+                                    newValue
+                                        .uppercased()
+                                        .filter { "ABCDEFGHJKLMNPQRSTUVWXYZ23456789".contains($0) }
+                                        .prefix(6)
+                                )
                             }
 
                         Button(action: {
                             Task {
                                 do {
                                     connectionCodeErrorMessage = nil
-                                    _ = try await crossNetworkManager.connectWithCode(searchText)
+                                    _ = try await crossNetworkManager.connectWithCode(connectionCodeInput)
                                 } catch {
                                     connectionCodeErrorMessage = error.localizedDescription
                                     logger.error("❌ 连接码连接失败: \(error.localizedDescription, privacy: .public)")
@@ -1435,7 +1443,7 @@ public struct EnhancedDeviceDiscoveryView: View {
                             .padding(.vertical, 12)
                         }
                         .buttonStyle(.borderedProminent)
-                        .disabled(searchText.count != 6)
+                        .disabled(connectionCodeInput.count != 6)
                         .frame(width: 240)
 
                         if let connectionCodeErrorMessage, !connectionCodeErrorMessage.isEmpty {
@@ -1495,6 +1503,21 @@ public struct EnhancedDeviceDiscoveryView: View {
             deviceId: mappedDeviceId,
             pubKeyFP: mappedPubKeyFP
         )
+    }
+
+    private func isCrossNetworkConnectLink(_ raw: String) -> Bool {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix("skybridge://connect/") { return true }
+        guard let url = URL(string: trimmed), url.scheme == "skybridge", url.host == "connect" else {
+            return false
+        }
+        let pathPayload = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        if !pathPayload.isEmpty { return true }
+        if let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+           let queryPayload = components.queryItems?.first(where: { $0.name == "data" })?.value {
+            return !queryPayload.isEmpty
+        }
+        return false
     }
 
     private func connectToLocalDevice(_ device: DiscoveredDevice) {

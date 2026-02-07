@@ -46,6 +46,8 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     ]
     private var activeListeners: [ConnectionListener] = []
     private var deviceFingerprint: String
+    private static let shortCodeAlphabet = Array("ABCDEFGHJKLMNPQRSTUVWXYZ23456789")
+    private static let shortCodeAllowedCharacters = Set(shortCodeAlphabet)
 
     // MARK: - WebRTC (ICE / DataChannel)
 
@@ -337,13 +339,12 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         logger.info("扫描动态二维码")
 
         guard let qrString = String(data: data, encoding: .utf8),
-              qrString.hasPrefix("skybridge://connect/") else {
+              let payload = Self.extractConnectPayload(from: qrString) else {
             throw CrossNetworkConnectionError.invalidQRCode
         }
 
  // 1. 解析 QR 码
-        let base64Part = qrString.replacingOccurrences(of: "skybridge://connect/", with: "")
-        guard let jsonData = Self.decodeBase64Payload(base64Part) else {
+        guard let jsonData = Self.decodeBase64Payload(payload) else {
             throw CrossNetworkConnectionError.invalidQRCode
         }
 
@@ -477,8 +478,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     /// 通过连接码连接
     public func connectWithCode(_ code: String) async throws -> RemoteConnection {
         // 作为“输入方”（answerer）加入对端创建的 sessionId=code 的 WebRTC 会话。
-        let normalized = String(code.prefix(6).uppercased().filter { $0.isLetter || $0.isNumber })
-        guard normalized.count == 6 else {
+        guard let normalized = Self.normalizeConnectionCode(code) else {
             throw CrossNetworkConnectionError.invalidDevice
         }
         logger.info("使用连接码连接: \(normalized)")
@@ -2241,8 +2241,37 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 
     private static func generateShortCode() -> String {
  // 生成 6 位字母数字码（排除易混淆字符：0/O, 1/I/l）
-        let charset = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-        return String((0..<6).compactMap { _ in charset.randomElement() })
+        String((0..<6).compactMap { _ in shortCodeAlphabet.randomElement() })
+    }
+
+    private static func normalizeConnectionCode(_ raw: String) -> String? {
+        let normalized = raw
+            .uppercased()
+            .filter { shortCodeAllowedCharacters.contains($0) }
+        guard normalized.count == 6 else { return nil }
+        return normalized
+    }
+
+    private static func extractConnectPayload(from raw: String) -> String? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let prefix = "skybridge://connect/"
+        if trimmed.hasPrefix(prefix) {
+            return String(trimmed.dropFirst(prefix.count))
+        }
+
+        guard let url = URL(string: trimmed), url.scheme == "skybridge", url.host == "connect" else {
+            return nil
+        }
+        let pathPayload = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        if !pathPayload.isEmpty {
+            return pathPayload
+        }
+        if let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+           let queryPayload = components.queryItems?.first(where: { $0.name == "data" })?.value,
+           !queryPayload.isEmpty {
+            return queryPayload
+        }
+        return nil
     }
 
     private static func base64URLEncodedString(from data: Data) -> String {

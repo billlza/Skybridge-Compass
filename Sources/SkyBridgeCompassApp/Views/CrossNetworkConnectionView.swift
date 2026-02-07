@@ -433,7 +433,12 @@ struct CrossNetworkConnectionView: View {
                             .cornerRadius(12)
                             .onChange(of: inputCode) { _, newValue in
  // 限制输入长度和字符
-                                inputCode = String(newValue.prefix(6).uppercased().filter { $0.isLetter || $0.isNumber })
+                                inputCode = String(
+                                    newValue
+                                        .uppercased()
+                                        .filter { "ABCDEFGHJKLMNPQRSTUVWXYZ23456789".contains($0) }
+                                        .prefix(6)
+                                )
                             }
 
                         Button(action: {
