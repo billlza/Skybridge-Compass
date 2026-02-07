@@ -53,6 +53,9 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     private var webrtcSessionsBySessionId: [String: WebRTCSession] = [:]
     private var pendingWebRTCOfferSessionIds: Set<String> = []
     private var webrtcRemoteIdBySessionId: [String: String] = [:]
+    private var webrtcLatestOfferBySessionId: [String: String] = [:]
+    private var webrtcJoinHeartbeatTasksBySessionId: [String: Task<Void, Never>] = [:]
+    private var webrtcOfferResendTasksBySessionId: [String: Task<Void, Never>] = [:]
     private var webrtcControlTasksBySessionId: [String: Task<Void, Never>] = [:]
     private var webrtcInboundQueuesBySessionId: [String: InboundChunkQueue] = [:]
     private var webrtcScreenStreamingTasksBySessionId: [String: Task<Void, Never>] = [:]
@@ -103,6 +106,54 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         }
     }
 
+    private func stopJoinHeartbeat(for sessionID: String) {
+        webrtcJoinHeartbeatTasksBySessionId[sessionID]?.cancel()
+        webrtcJoinHeartbeatTasksBySessionId.removeValue(forKey: sessionID)
+    }
+
+    private func startJoinHeartbeat(for sessionID: String, attempts: Int = 10) {
+        stopJoinHeartbeat(for: sessionID)
+        webrtcJoinHeartbeatTasksBySessionId[sessionID] = Task { @MainActor [weak self] in
+            guard let self else { return }
+            var remaining = max(0, attempts)
+            while remaining > 0, !Task.isCancelled, self.webrtcSessionsBySessionId[sessionID] != nil {
+                await self.sendSignal(.init(sessionId: sessionID, from: self.deviceFingerprint, type: .join, payload: nil), retries: 2)
+                remaining -= 1
+                if remaining == 0 { break }
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
+    }
+
+    private func stopOfferResendLoop(for sessionID: String) {
+        webrtcOfferResendTasksBySessionId[sessionID]?.cancel()
+        webrtcOfferResendTasksBySessionId.removeValue(forKey: sessionID)
+    }
+
+    private func resendCachedOfferIfNeeded(for sessionID: String, reason: String) async {
+        guard let sdp = webrtcLatestOfferBySessionId[sessionID] else { return }
+        logger.info("🔁 重发本地 offer: session=\(sessionID, privacy: .public) reason=\(reason, privacy: .public)")
+        await sendSignal(
+            .init(sessionId: sessionID, from: deviceFingerprint, type: .offer, payload: .init(sdp: sdp)),
+            retries: 2
+        )
+    }
+
+    private func startOfferResendLoop(for sessionID: String, attempts: Int = 12) {
+        stopOfferResendLoop(for: sessionID)
+        webrtcOfferResendTasksBySessionId[sessionID] = Task { @MainActor [weak self] in
+            guard let self else { return }
+            var remaining = max(0, attempts)
+            while remaining > 0, !Task.isCancelled, self.webrtcSessionsBySessionId[sessionID] != nil {
+                if case .connected = self.connectionStatus { break }
+                await self.resendCachedOfferIfNeeded(for: sessionID, reason: "periodic")
+                remaining -= 1
+                if remaining == 0 { break }
+                try? await Task.sleep(for: .milliseconds(1500))
+            }
+        }
+    }
+
     // MARK: - 连接生命周期管理
 
     /// 断开当前跨网连接，释放所有 WebRTC / Signaling 资源。
@@ -139,7 +190,18 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         // 5) 清空会话密钥
         webrtcSessionKeysBySessionId.removeAll()
         webrtcRemoteIdBySessionId.removeAll()
+        webrtcLatestOfferBySessionId.removeAll()
         pendingWebRTCOfferSessionIds.removeAll()
+
+        for (_, task) in webrtcJoinHeartbeatTasksBySessionId {
+            task.cancel()
+        }
+        webrtcJoinHeartbeatTasksBySessionId.removeAll()
+
+        for (_, task) in webrtcOfferResendTasksBySessionId {
+            task.cancel()
+        }
+        webrtcOfferResendTasksBySessionId.removeAll()
 
         // 6) 关闭 WebSocket 信令
         if let sc = signalingClient {
@@ -385,6 +447,12 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         // 作为“输入方”（answerer）加入对端创建的 sessionId=code 的 WebRTC 会话。
         let normalized = String(code.prefix(6).uppercased().filter { $0.isLetter || $0.isNumber })
         logger.info("使用连接码连接: \(normalized)")
+
+        if let existing = currentConnection, existing.id == normalized {
+            logger.info("复用已有连接码会话: \(normalized, privacy: .public)")
+            return existing
+        }
+
         connectionStatus = .connecting
 
         ensureSignalingConnected()
@@ -409,6 +477,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             guard let self else { return }
             Task { @MainActor in
                 self.logger.info("✅ WebRTC answerer ready: session=\(sessionID, privacy: .public)")
+                self.stopJoinHeartbeat(for: sessionID)
                 self.currentConnection = RemoteConnection(id: sessionID, deviceName: "Remote Device", transport: .webrtc(session))
                 self.connectionStatus = .connected
                 self.startWebRTCInboundHandshakeAndControlLoop(sessionID: sessionID, session: session, endpointDescription: "webrtc:\(sessionID)")
@@ -425,8 +494,9 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             throw error
         }
 
-        // best-effort join
-        await sendSignal(.init(sessionId: sessionID, from: deviceFingerprint, type: .join, payload: nil))
+        // 主动加入会话并在短时间内心跳重发，避免 WS 时序抖动导致 offer 丢失。
+        await sendSignal(.init(sessionId: sessionID, from: deviceFingerprint, type: .join, payload: nil), retries: 2)
+        startJoinHeartbeat(for: sessionID)
 
         let connection = RemoteConnection(id: sessionID, deviceName: "Remote Device", transport: .webrtc(session))
         logger.info("✅ 通过连接码开始连接（等待对端 offer）")
@@ -506,8 +576,9 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         let session = WebRTCSession(sessionId: sessionID, localDeviceId: deviceFingerprint, role: .offerer, ice: ice)
         session.onLocalOffer = { [weak self] sdp in
             guard let self else { return }
-            Task {
-                await self.sendSignal(.init(sessionId: sessionID, from: self.deviceFingerprint, type: .offer, payload: .init(sdp: sdp)))
+            Task { @MainActor in
+                self.webrtcLatestOfferBySessionId[sessionID] = sdp
+                await self.sendSignal(.init(sessionId: sessionID, from: self.deviceFingerprint, type: .offer, payload: .init(sdp: sdp)), retries: 2)
             }
         }
         session.onLocalICECandidate = { [weak self] payload in
@@ -520,6 +591,8 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             guard let self else { return }
             Task { @MainActor in
                 self.logger.info("✅ WebRTC offerer ready: session=\(sessionID, privacy: .public)")
+                self.stopJoinHeartbeat(for: sessionID)
+                self.stopOfferResendLoop(for: sessionID)
                 // 当前 UI 只需要体现“已连接”；后续会把 DataChannel 接入握手/控制通道。
                 self.currentConnection = RemoteConnection(id: sessionID, deviceName: "Remote Device", transport: .webrtc(session))
                 self.connectionStatus = .connected
@@ -533,8 +606,14 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 
         do {
             try session.start()
+            await sendSignal(.init(sessionId: sessionID, from: deviceFingerprint, type: .join, payload: nil), retries: 2)
+            startJoinHeartbeat(for: sessionID)
+            startOfferResendLoop(for: sessionID)
         } catch {
             logger.error("❌ startWebRTCOfferSession failed: \(error.localizedDescription, privacy: .public)")
+            stopJoinHeartbeat(for: sessionID)
+            stopOfferResendLoop(for: sessionID)
+            webrtcLatestOfferBySessionId.removeValue(forKey: sessionID)
             connectionStatus = .failed(error.localizedDescription)
         }
     }
@@ -568,16 +647,26 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         try session.start()
 
         // 主动发送 join，帮助服务端/对端建立“同会话订阅”的心智模型（服务端可忽略）
-        await sendSignal(.init(sessionId: sessionID, from: deviceFingerprint, type: .join, payload: nil))
+        await sendSignal(.init(sessionId: sessionID, from: deviceFingerprint, type: .join, payload: nil), retries: 2)
+        startJoinHeartbeat(for: sessionID)
 
         return RemoteConnection(id: sessionID, deviceName: qrData.deviceName, transport: .webrtc(session))
     }
 
-    private func sendSignal(_ env: WebRTCSignalingEnvelope) async {
-        do {
-            try await signalingClient?.send(env)
-        } catch {
-            logger.error("❌ signaling send failed: \(error.localizedDescription, privacy: .public)")
+    private func sendSignal(_ env: WebRTCSignalingEnvelope, retries: Int = 0) async {
+        var attemptsLeft = max(0, retries)
+        while true {
+            do {
+                try await signalingClient?.send(env)
+                return
+            } catch {
+                if attemptsLeft == 0 {
+                    logger.error("❌ signaling send failed: type=\(env.type.rawValue, privacy: .public) session=\(env.sessionId, privacy: .public) err=\(error.localizedDescription, privacy: .public)")
+                    return
+                }
+                attemptsLeft -= 1
+                try? await Task.sleep(for: .milliseconds(350))
+            }
         }
     }
 
@@ -592,10 +681,13 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 
         switch env.type {
         case .offer:
+            stopJoinHeartbeat(for: env.sessionId)
             if let sdp = env.payload?.sdp {
                 session.setRemoteOffer(sdp)
             }
         case .answer:
+            stopJoinHeartbeat(for: env.sessionId)
+            stopOfferResendLoop(for: env.sessionId)
             if let sdp = env.payload?.sdp {
                 session.setRemoteAnswer(sdp)
             }
@@ -603,8 +695,13 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             if let p = env.payload, let c = p.candidate {
                 session.addRemoteICECandidate(candidate: c, sdpMid: p.sdpMid, sdpMLineIndex: p.sdpMLineIndex)
             }
-        case .join, .leave:
-            break
+        case .join:
+            Task { @MainActor [weak self] in
+                await self?.resendCachedOfferIfNeeded(for: env.sessionId, reason: "remote-join")
+            }
+        case .leave:
+            stopJoinHeartbeat(for: env.sessionId)
+            stopOfferResendLoop(for: env.sessionId)
         }
     }
 

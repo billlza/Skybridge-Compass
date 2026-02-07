@@ -241,6 +241,9 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     private var currentRole: WebRTCSession.Role?
     private var handshakeStartedSessionIds: Set<String> = []
     private var connectionCodeBootstrapTask: Task<Void, Never>?
+    private var latestLocalOfferBySessionId: [String: String] = [:]
+    private var joinHeartbeatTask: Task<Void, Never>?
+    private var offerResendTask: Task<Void, Never>?
     
     // File transfer waiters (transferId|op|chunkIndex -> continuation)
     private var fileTransferWaiters: [String: CheckedContinuation<CrossNetworkFileTransferMessage, Error>] = [:]
@@ -374,6 +377,11 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         currentRole = nil
         connectionCodeBootstrapTask?.cancel()
         connectionCodeBootstrapTask = nil
+        joinHeartbeatTask?.cancel()
+        joinHeartbeatTask = nil
+        offerResendTask?.cancel()
+        offerResendTask = nil
+        latestLocalOfferBySessionId.removeAll()
         handshakeStartedSessionIds.removeAll()
         failAllFileTransferWaiters(FileTransferWaitError.cancelled)
         cleanupInboundFileTransfers()
@@ -384,6 +392,81 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         receiveTask?.cancel()
         receiveTask = nil
         state = .idle
+    }
+
+    private func sendEnvelope(_ envelope: WebRTCSignalingEnvelope, retries: Int = 0) async {
+        var attemptsLeft = max(0, retries)
+        while true {
+            do {
+                try await signaling?.send(envelope)
+                return
+            } catch {
+                if attemptsLeft == 0 {
+                    lastError = "信令发送失败: \(error.localizedDescription)"
+                    return
+                }
+                attemptsLeft -= 1
+                try? await Task.sleep(for: .milliseconds(350))
+            }
+        }
+    }
+
+    private func stopJoinHeartbeat() {
+        joinHeartbeatTask?.cancel()
+        joinHeartbeatTask = nil
+    }
+
+    private func startJoinHeartbeat(sessionId: String, localId: String, attempts: Int = 10) {
+        stopJoinHeartbeat()
+        joinHeartbeatTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            var remaining = max(0, attempts)
+            while remaining > 0, !Task.isCancelled, self.currentSessionId == sessionId {
+                await self.sendEnvelope(
+                    WebRTCSignalingEnvelope(sessionId: sessionId, from: localId, type: .join, payload: nil),
+                    retries: 2
+                )
+                remaining -= 1
+                if remaining == 0 { break }
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
+    }
+
+    private func stopOfferResendLoop() {
+        offerResendTask?.cancel()
+        offerResendTask = nil
+    }
+
+    private func resendCachedOfferIfNeeded(sessionId: String, localId: String, reason: String) async {
+        guard let sdp = latestLocalOfferBySessionId[sessionId] else { return }
+        await sendEnvelope(
+            WebRTCSignalingEnvelope(
+                sessionId: sessionId,
+                from: localId,
+                type: .offer,
+                payload: WebRTCSignalingEnvelope.Payload(sdp: sdp)
+            ),
+            retries: 2
+        )
+        if reason != "periodic" {
+            lastError = nil
+        }
+    }
+
+    private func startOfferResendLoop(sessionId: String, localId: String, attempts: Int = 12) {
+        stopOfferResendLoop()
+        offerResendTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            var remaining = max(0, attempts)
+            while remaining > 0, !Task.isCancelled, self.currentSessionId == sessionId {
+                if case .connected = self.state { break }
+                await self.resendCachedOfferIfNeeded(sessionId: sessionId, localId: localId, reason: "periodic")
+                remaining -= 1
+                if remaining == 0 { break }
+                try? await Task.sleep(for: .milliseconds(1500))
+            }
+        }
     }
     
     /// 发送远程桌面消息（鼠标/键盘/屏幕）到 macOS（通过已建立的 WebRTC DataChannel + 会话密钥）
@@ -523,13 +606,16 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         s.onLocalOffer = { [weak self] (sdp: String) in
             guard let self else { return }
             Task {
+                await MainActor.run {
+                    self.latestLocalOfferBySessionId[sessionId] = sdp
+                }
                 let env = WebRTCSignalingEnvelope(
                     sessionId: sessionId,
                     from: localId,
                     type: .offer,
                     payload: WebRTCSignalingEnvelope.Payload(sdp: sdp)
                 )
-                try? await self.signaling?.send(env)
+                await self.sendEnvelope(env, retries: 2)
             }
         }
         
@@ -542,7 +628,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
                     type: .answer,
                     payload: WebRTCSignalingEnvelope.Payload(sdp: sdp)
                 )
-                try? await self.signaling?.send(env)
+                await self.sendEnvelope(env, retries: 2)
             }
         }
         
@@ -555,7 +641,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
                     type: .iceCandidate,
                     payload: payload
                 )
-                try? await self.signaling?.send(env)
+                await self.sendEnvelope(env, retries: 1)
             }
         }
 
@@ -570,6 +656,8 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             Task { @MainActor in
                 guard let self else { return }
                 guard self.currentSessionId == sessionId else { return }
+                self.stopJoinHeartbeat()
+                self.stopOfferResendLoop()
                 self.state = .connected(sessionId: sessionId)
 
                 // DataChannel opened; start handshake once per session.
@@ -589,9 +677,13 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         }
         
         try s.start()
-        
-        // 3) Join room (best-effort)
-        try? await signaling.send(WebRTCSignalingEnvelope(sessionId: sessionId, from: localId, type: .join, payload: nil))
+
+        // 3) Join room + heartbeat to mask websocket timing jitters.
+        await sendEnvelope(WebRTCSignalingEnvelope(sessionId: sessionId, from: localId, type: .join, payload: nil), retries: 2)
+        startJoinHeartbeat(sessionId: sessionId, localId: localId)
+        if role == .offerer {
+            startOfferResendLoop(sessionId: sessionId, localId: localId)
+        }
     }
     
     private func handleEnvelope(_ env: WebRTCSignalingEnvelope) {
@@ -607,10 +699,13 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         
         switch env.type {
         case .offer:
+            stopJoinHeartbeat()
             if let sdp = env.payload?.sdp {
                 session?.setRemoteOffer(sdp)
             }
         case .answer:
+            stopJoinHeartbeat()
+            stopOfferResendLoop()
             if let sdp = env.payload?.sdp {
                 session?.setRemoteAnswer(sdp)
             }
@@ -618,8 +713,16 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             if let p = env.payload, let c = p.candidate {
                 session?.addRemoteICECandidate(candidate: c, sdpMid: p.sdpMid, sdpMLineIndex: p.sdpMLineIndex)
             }
-        case .join, .leave:
-            break
+        case .join:
+            if currentRole == .offerer, let sid = currentSessionId, sid == env.sessionId {
+                let localId = localDeviceId
+                Task { @MainActor [weak self] in
+                    await self?.resendCachedOfferIfNeeded(sessionId: sid, localId: localId, reason: "remote-join")
+                }
+            }
+        case .leave:
+            stopJoinHeartbeat()
+            stopOfferResendLoop()
         }
     }
 }

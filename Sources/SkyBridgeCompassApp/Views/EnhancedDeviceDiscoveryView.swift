@@ -954,12 +954,10 @@ public struct EnhancedDeviceDiscoveryView: View {
 
  // 连接按钮(仅对非本机在线设备显示)
                 if !device.isLocalDevice && device.connectionStatus == .online {
- // 若设备未公开端口，则标记为“不可连接”并禁用按钮
-                    let availablePort = device.portMap.values.first ?? 0
-                    Button(availablePort > 0 ? LocalizationManager.shared.localizedString("discovery.action.connect") : LocalizationManager.shared.localizedString("discovery.action.notConnectable")) {
+                    Button(isLikelyConnectable ? LocalizationManager.shared.localizedString("discovery.action.connect") : LocalizationManager.shared.localizedString("discovery.action.notConnectable")) {
                         onConnect()
                     }
-                    .disabled(availablePort == 0)
+                    .disabled(!isLikelyConnectable)
                     .buttonStyle(.borderedProminent)
                 }
             }
@@ -1002,6 +1000,14 @@ public struct EnhancedDeviceDiscoveryView: View {
             case .bluetooth: return Color.cyan.opacity(0.8)
             case .unknown: return Color.gray.opacity(0.6)
             }
+        }
+
+        private var isLikelyConnectable: Bool {
+            let hasPort = device.portMap.values.contains { $0 > 0 }
+            let hasServiceHint = !device.services.isEmpty
+            let hasReachableAddress = (device.ipv4?.isEmpty == false) || (device.ipv6?.isEmpty == false)
+            let hasUSBPath = device.connectionTypes.contains(.usb)
+            return hasPort || hasServiceHint || hasReachableAddress || hasUSBPath
         }
     }
 
@@ -1054,12 +1060,10 @@ public struct EnhancedDeviceDiscoveryView: View {
 
                 Spacer()
 
- // 本地设备若未公开端口，同样视为不可连接
-                let availablePort = device.portMap.values.first ?? 0
-                Button(availablePort > 0 ? LocalizationManager.shared.localizedString("discovery.action.connect") : LocalizationManager.shared.localizedString("discovery.action.notConnectable")) {
+                Button(isLikelyConnectable ? LocalizationManager.shared.localizedString("discovery.action.connect") : LocalizationManager.shared.localizedString("discovery.action.notConnectable")) {
                     onConnect()
                 }
-                .disabled(availablePort == 0)
+                .disabled(!isLikelyConnectable)
                 .buttonStyle(.borderedProminent)
             }
             .padding(16)
@@ -1093,6 +1097,14 @@ public struct EnhancedDeviceDiscoveryView: View {
             case .bluetooth: return Color.cyan.opacity(0.8)
             case .unknown: return Color.gray.opacity(0.6)
             }
+        }
+
+        private var isLikelyConnectable: Bool {
+            let hasPort = device.portMap.values.contains { $0 > 0 }
+            let hasServiceHint = !device.services.isEmpty
+            let hasReachableAddress = (device.ipv4?.isEmpty == false) || (device.ipv6?.isEmpty == false)
+            let hasUSBPath = device.connectionTypes.contains(.usb)
+            return hasPort || hasServiceHint || hasReachableAddress || hasUSBPath
         }
     }
 
