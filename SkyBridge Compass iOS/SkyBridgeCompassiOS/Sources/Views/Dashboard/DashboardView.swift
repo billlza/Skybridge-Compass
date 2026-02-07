@@ -783,7 +783,12 @@ private struct QRCodeHubSheet: View {
                                 )
                                 .padding(.horizontal, 24)
                                 .onChange(of: codeInput) { _, newValue in
-                                    codeInput = String(newValue.prefix(6).uppercased().filter { $0.isLetter || $0.isNumber })
+                                    codeInput = String(
+                                        newValue
+                                            .uppercased()
+                                            .filter { "ABCDEFGHJKLMNPQRSTUVWXYZ23456789".contains($0) }
+                                            .prefix(6)
+                                    )
                                 }
                             
                             Button {

@@ -316,13 +316,13 @@ public class P2PDiscoveryService: BaseManager {
             throw P2PDiscoveryError.scanningFailed
         }
 
-        let securityPlans = preferredConnectionSecurityPlans(
-            device: device,
-            preferredServiceType: preferredServiceType
-        )
-
         var lastError: Error?
         for endpoint in endpointAttempts {
+            let securityPlans = preferredConnectionSecurityPlans(
+                for: endpoint,
+                device: device,
+                preferredServiceType: preferredServiceType
+            )
             for (index, plan) in securityPlans.enumerated() {
                 do {
                     if case .service(let name, let type, _, _) = endpoint {
@@ -357,16 +357,13 @@ public class P2PDiscoveryService: BaseManager {
     }
 
     private func preferredConnectionSecurityPlans(
+        for endpoint: NWEndpoint,
         device: DiscoveredDevice,
         preferredServiceType: String?
     ) -> [ConnectionSecurityPlan] {
         // SkyBridge 近距通道使用应用层握手加密（HandshakeDriver + SessionKeys）。
         // 为避免与 iOS 端 length-framed 明文控制通道发生 TLS 记录头错配，这里固定使用 plain TCP。
-        let isSkyBridgeControlChannel = preferredServiceType == "_skybridge._tcp"
-            || preferredServiceType == "_skybridge._udp"
-            || device.services.contains("_skybridge._tcp")
-            || device.services.contains("_skybridge._udp")
-        if isSkyBridgeControlChannel {
+        if isSkyBridgeControlEndpoint(endpoint, device: device, preferredServiceType: preferredServiceType) {
             return [.plainTCP]
         }
 
@@ -375,6 +372,28 @@ public class P2PDiscoveryService: BaseManager {
             return [.plainTCP]
         }
         return [.encryptedTLS, .plainTCP]
+    }
+
+    private func isSkyBridgeControlEndpoint(
+        _ endpoint: NWEndpoint,
+        device: DiscoveredDevice,
+        preferredServiceType: String?
+    ) -> Bool {
+        let skybridgeServices = Set(["_skybridge._tcp", "_skybridge._udp"])
+
+        if case .service(_, let type, _, _) = endpoint, skybridgeServices.contains(type) {
+            return true
+        }
+        if let preferredServiceType, skybridgeServices.contains(preferredServiceType) {
+            return true
+        }
+        if device.services.contains(where: { skybridgeServices.contains($0) }) {
+            return true
+        }
+        if device.portMap["_skybridge._tcp"] != nil || device.portMap["_skybridge._udp"] != nil {
+            return true
+        }
+        return false
     }
 
     private func makeConnection(to endpoint: NWEndpoint, securityPlan: ConnectionSecurityPlan) -> NWConnection {
@@ -439,7 +458,12 @@ public class P2PDiscoveryService: BaseManager {
         }
 
         if let ipv6 = device.ipv6, !ipv6.isEmpty {
-            let normalizedIPv6 = ipv6.split(separator: "%", maxSplits: 1).first.map(String.init) ?? ipv6
+            let trimmedIPv6 = ipv6.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmedIPv6.lowercased().hasPrefix("fe80:") {
+                // IPv6 链路本地地址必须保留 scope id（例如 %en0），否则连接不可达。
+                return .hostPort(host: NWEndpoint.Host(trimmedIPv6), port: port)
+            }
+            let normalizedIPv6 = trimmedIPv6.split(separator: "%", maxSplits: 1).first.map(String.init) ?? trimmedIPv6
             return .hostPort(host: NWEndpoint.Host(normalizedIPv6), port: port)
         }
 
@@ -472,6 +496,12 @@ public class P2PDiscoveryService: BaseManager {
             return parseName(from: payload)
         }
         return nil
+    }
+
+    private func bonjourIdentifier(from endpoint: NWEndpoint) -> String? {
+        guard case .service(let name, _, let domain, _) = endpoint else { return nil }
+        let normalizedDomain = domain.isEmpty ? serviceDomain : domain.lowercased()
+        return "bonjour:\(name)@\(normalizedDomain)"
     }
 
     private func sanitizedBonjourServiceName(_ raw: String) -> String {
@@ -618,6 +648,7 @@ public class P2PDiscoveryService: BaseManager {
     private func addDiscoveredDevice(from result: NWBrowser.Result, serviceType: String) {
         let deviceName = extractDeviceName(from: result)
         let (ipv4, ipv6, port) = extractNetworkInfo(from: result)
+        let bonjourUniqueIdentifier = bonjourIdentifier(from: result.endpoint)
 
  // 根据服务类型推断设备类型（纯 UI 用，不影响连接逻辑）
         var detectedDeviceType = ""
@@ -644,7 +675,7 @@ public class P2PDiscoveryService: BaseManager {
             services: [serviceType],
             portMap: [serviceType: port],
             connectionTypes: [.wifi], // 网络发现的设备默认为 Wi-Fi
-            uniqueIdentifier: ipv4 ?? ipv6,
+            uniqueIdentifier: bonjourUniqueIdentifier ?? ipv4 ?? ipv6,
             signalStrength: nil,
             isLocalDevice: isProbablyLocalDevice(name: deviceName, ipv4: ipv4, ipv6: ipv6)
         )
@@ -672,9 +703,13 @@ public class P2PDiscoveryService: BaseManager {
             if !existingDevice.services.contains(serviceType) {
                 existingDevice.services.append(serviceType)
                 existingDevice.portMap[serviceType] = port
-                discoveredDevices[existingIndex] = existingDevice
-                logger.debug("🔄 更新设备服务: \(device.name) - 新增服务: \(serviceType)")
             }
+            if let bonjourUniqueIdentifier,
+               existingDevice.uniqueIdentifier?.hasPrefix("bonjour:") != true {
+                existingDevice.uniqueIdentifier = bonjourUniqueIdentifier
+            }
+            discoveredDevices[existingIndex] = existingDevice
+            logger.debug("🔄 更新设备服务: \(device.name) - 新增服务: \(serviceType)")
         } else {
  // 新设备，添加到列表
             discoveredDevices.append(device)
@@ -683,7 +718,8 @@ public class P2PDiscoveryService: BaseManager {
     }
 
     private func addDiscoveredDeviceAsync(from result: NWBrowser.Result, serviceType: String) {
-        Task.detached { [serviceType] in
+        let bonjourUniqueIdentifier = bonjourIdentifier(from: result.endpoint)
+        Task.detached { [serviceType, bonjourUniqueIdentifier] in
             let deviceName = P2P_ExtractDeviceName(result)
             let (ipv4, ipv6) = P2P_ExtractNetworkAddrs(result)
             let port = 0
@@ -707,7 +743,7 @@ public class P2PDiscoveryService: BaseManager {
                 services: [serviceType],
                 portMap: [serviceType: port],
                 connectionTypes: [.wifi],
-                uniqueIdentifier: ipv4 ?? ipv6
+                uniqueIdentifier: bonjourUniqueIdentifier ?? ipv4 ?? ipv6
             )
             await MainActor.run { [self] in
                 if let existingIndex = self.discoveredDevices.firstIndex(where: { existing in
@@ -721,9 +757,13 @@ public class P2PDiscoveryService: BaseManager {
                     if !existing.services.contains(serviceType) {
                         existing.services.append(serviceType)
                         existing.portMap[serviceType] = port
-                        self.discoveredDevices[existingIndex] = existing
-                        self.logger.debug("🔄 更新设备服务: \(device.name) - 新增服务: \(serviceType)")
                     }
+                    if let bonjourUniqueIdentifier,
+                       existing.uniqueIdentifier?.hasPrefix("bonjour:") != true {
+                        existing.uniqueIdentifier = bonjourUniqueIdentifier
+                    }
+                    self.discoveredDevices[existingIndex] = existing
+                    self.logger.debug("🔄 更新设备服务: \(device.name) - 新增服务: \(serviceType)")
                     self.resolveViaNetServiceIfNeeded(result: result, deviceIndex: existingIndex, serviceType: serviceType)
                 } else {
                     self.discoveredDevices.append(device)
@@ -1506,6 +1546,7 @@ public class P2PDiscoveryService: BaseManager {
                 if (newPortMap[serviceType] ?? 0) == 0 && port > 0 { newPortMap[serviceType] = port }
                 let newIPv4 = dd.ipv4 ?? found4
                 let newIPv6 = dd.ipv6 ?? found6
+                let bonjourUniqueIdentifier = self.bonjourIdentifier(from: result.endpoint)
                 let updated = DiscoveredDevice(
                     id: dd.id,
                     name: dd.name,
@@ -1514,7 +1555,7 @@ public class P2PDiscoveryService: BaseManager {
                     services: dd.services,
                     portMap: newPortMap,
                     connectionTypes: dd.connectionTypes,
-                    uniqueIdentifier: dd.uniqueIdentifier
+                    uniqueIdentifier: bonjourUniqueIdentifier ?? dd.uniqueIdentifier
                 )
                 self.discoveredDevices[deviceIndex] = updated
             }

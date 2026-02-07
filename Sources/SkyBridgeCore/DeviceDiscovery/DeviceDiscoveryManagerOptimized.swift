@@ -310,10 +310,27 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         guard portInt > 0 else { throw DeviceDiscoveryError.scanningFailed }
         let port = NWEndpoint.Port(integerLiteral: UInt16(portInt))
         let endpoint = NWEndpoint.hostPort(host: host, port: port)
+        let isSkyBridgeControlChannel = device.services.contains("_skybridge._tcp")
+            || device.services.contains("_skybridge._udp")
+            || device.portMap["_skybridge._tcp"] != nil
+            || device.portMap["_skybridge._udp"] != nil
  // 应用TLS配置（统一近距加密策略）
         let net = RemoteDesktopSettingsManager.shared.settings.networkSettings
         var connection: NWConnection
-        if net.enableEncryption, let tls = TLSConfigurator.options(for: net.encryptionAlgorithm) {
+        if isSkyBridgeControlChannel {
+            // SkyBridge 控制通道使用应用层握手加密；传输层固定纯 TCP，避免 iOS 端 length-framed 通道出现 TLS 头错配。
+            encryptionStatus = "应用层握手加密"
+            let params = NWParameters.tcp
+            params.includePeerToPeer = true
+            params.allowLocalEndpointReuse = true
+            if let tcpOptions = params.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
+                tcpOptions.enableKeepalive = true
+                tcpOptions.keepaliveIdle = 30
+                tcpOptions.keepaliveInterval = 15
+                tcpOptions.keepaliveCount = 4
+            }
+            connection = NWConnection(to: endpoint, using: params)
+        } else if net.enableEncryption, let tls = TLSConfigurator.options(for: net.encryptionAlgorithm) {
             let tcp = NWProtocolTCP.Options()
             let params = NWParameters(tls: tls, tcp: tcp)
             if SettingsManager.shared.enablePQCHybridTLS {

@@ -228,6 +228,8 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     @Published public private(set) var remoteDeviceName: String?
     @Published public private(set) var remoteDeviceId: String?
     @Published public private(set) var localConnectionCode: String?
+    private static let shortCodeAlphabet = Array("ABCDEFGHJKLMNPQRSTUVWXYZ23456789")
+    private static let shortCodeAllowedCharacters = Set(shortCodeAlphabet)
     
     private var signaling: WebSocketSignalingClient?
     private var session: WebRTCSession?
@@ -546,14 +548,17 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     }
     
     private func normalizeConnectionCode(_ raw: String) throws -> String {
-        let code = String(raw.prefix(6).uppercased().filter { $0.isLetter || $0.isNumber })
+        let code = String(
+            raw
+                .uppercased()
+                .filter { Self.shortCodeAllowedCharacters.contains($0) }
+        )
         guard code.count == 6 else { throw ConnectionCodeError.invalid }
         return code
     }
 
     private static func generateShortCode() -> String {
-        let charset = Array("ABCDEFGHJKLMNPQRSTUVWXYZ23456789")
-        return String((0..<6).compactMap { _ in charset.randomElement() })
+        String((0..<6).compactMap { _ in shortCodeAlphabet.randomElement() })
     }
     
     private func parseSkybridgeConnectLink(_ string: String) throws -> DynamicQRCodeData {
