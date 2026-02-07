@@ -47,9 +47,13 @@ public class P2PDiscoveryService: BaseManager {
  /// Bonjour 监听器（本机作为服务端被发现）
     private var listener: NWListener?
 
- /// 当前活跃连接（按 DiscoveredDevice.id.uuidString 存）
+    /// 当前活跃连接（按 DiscoveredDevice.id.uuidString 存）
     private var connections: [String: NWConnection] = [:]
     private var txtResolveCooldown: [String: Date] = [:]
+    private let outboundConnectionQueue = DispatchQueue(
+        label: "com.skybridge.p2p.discovery.outbound-connection",
+        qos: .utility
+    )
 
  /// 服务类型瘦身策略 - 默认仅SkyBridge；兼容/调试模式可扩展
     private let allServiceTypes = [
@@ -72,6 +76,37 @@ public class P2PDiscoveryService: BaseManager {
     }
 
     private let serviceDomain = "local."
+
+    private enum ConnectionSecurityPlan: String {
+        case encryptedTLS = "tls"
+        case plainTCP = "tcp"
+    }
+
+    private final class WaitForConnectionContext: @unchecked Sendable {
+        private let resumed = OSAllocatedUnfairLock(initialState: false)
+        private let continuation: CheckedContinuation<Void, Error>
+        var timeoutTask: Task<Void, Never>?
+
+        init(continuation: CheckedContinuation<Void, Error>) {
+            self.continuation = continuation
+        }
+
+        func complete(_ result: Result<Void, Error>) {
+            let shouldResume = resumed.withLock { isResumed -> Bool in
+                guard !isResumed else { return false }
+                isResumed = true
+                return true
+            }
+            guard shouldResume else { return }
+            timeoutTask?.cancel()
+            switch result {
+            case .success:
+                continuation.resume()
+            case .failure(let error):
+                continuation.resume(throwing: error)
+            }
+        }
+    }
 
  // MARK: - 初始化
 
@@ -281,27 +316,36 @@ public class P2PDiscoveryService: BaseManager {
             throw P2PDiscoveryError.scanningFailed
         }
 
+        let securityPlans = preferredConnectionSecurityPlans()
+
         var lastError: Error?
         for endpoint in endpointAttempts {
-            do {
-                if case .service(let name, let type, _, _) = endpoint {
-                    logger.info("📡 尝试 Bonjour 连接: \(name, privacy: .public) [\(type, privacy: .public)]")
-                } else {
-                    logger.info("📡 尝试地址连接: \(endpoint.debugDescription, privacy: .public)")
+            for (index, plan) in securityPlans.enumerated() {
+                do {
+                    if case .service(let name, let type, _, _) = endpoint {
+                        logger.info("📡 尝试 Bonjour 连接: \(name, privacy: .public) [\(type, privacy: .public)] security=\(plan.rawValue, privacy: .public)")
+                    } else {
+                        logger.info("📡 尝试地址连接: \(endpoint.debugDescription, privacy: .public) security=\(plan.rawValue, privacy: .public)")
+                    }
+
+                    let connection = makeConnection(to: endpoint, securityPlan: plan)
+                    connections[device.id.uuidString] = connection
+                    connectionStatus = .connecting
+                    try await waitForConnection(connection, deviceId: device.id.uuidString)
+
+                    logger.info("✅ 成功连接到设备: \(device.name)")
+                    return
+                } catch {
+                    lastError = error
+                    logger.warning("⚠️ 连接尝试失败，将回退到下一方案: \(error.localizedDescription, privacy: .public)")
+                    connections[device.id.uuidString]?.cancel()
+                    connections.removeValue(forKey: device.id.uuidString)
+
+                    let hasMorePlansForEndpoint = index < securityPlans.count - 1
+                    if hasMorePlansForEndpoint {
+                        continue
+                    }
                 }
-
-                let connection = makeConnection(to: endpoint)
-                connections[device.id.uuidString] = connection
-                connectionStatus = .connecting
-                try await waitForConnection(connection, deviceId: device.id.uuidString)
-
-                logger.info("✅ 成功连接到设备: \(device.name)")
-                return
-            } catch {
-                lastError = error
-                logger.warning("⚠️ 连接尝试失败，将回退到下一方案: \(error.localizedDescription, privacy: .public)")
-                connections[device.id.uuidString]?.cancel()
-                connections.removeValue(forKey: device.id.uuidString)
             }
         }
 
@@ -309,9 +353,17 @@ public class P2PDiscoveryService: BaseManager {
         throw lastError ?? P2PDiscoveryError.connectionCancelled
     }
 
-    private func makeConnection(to endpoint: NWEndpoint) -> NWConnection {
+    private func preferredConnectionSecurityPlans() -> [ConnectionSecurityPlan] {
         let net = RemoteDesktopSettingsManager.shared.settings.networkSettings
-        if net.enableEncryption, let tls = TLSConfigurator.options(for: net.encryptionAlgorithm) {
+        guard net.enableEncryption, TLSConfigurator.options(for: net.encryptionAlgorithm) != nil else {
+            return [.plainTCP]
+        }
+        return [.encryptedTLS, .plainTCP]
+    }
+
+    private func makeConnection(to endpoint: NWEndpoint, securityPlan: ConnectionSecurityPlan) -> NWConnection {
+        let net = RemoteDesktopSettingsManager.shared.settings.networkSettings
+        if securityPlan == .encryptedTLS, let tls = TLSConfigurator.options(for: net.encryptionAlgorithm) {
             let tcp = NWProtocolTCP.Options()
             let params = NWParameters(tls: tls, tcp: tcp)
             params.includePeerToPeer = true
@@ -324,6 +376,10 @@ public class P2PDiscoveryService: BaseManager {
                 tcpOptions.noDelay = true
             }
             return NWConnection(to: endpoint, using: params)
+        }
+
+        if securityPlan == .encryptedTLS {
+            logger.warning("⚠️ TLS 配置不可用，降级为纯 TCP")
         }
 
         let params = NWParameters.tcp
@@ -1036,70 +1092,34 @@ public class P2PDiscoveryService: BaseManager {
     }
 
     /// 等待连接建立（负责设置 stateUpdateHandler + 启动连接）
-    private func waitForConnection(_ connection: NWConnection, deviceId: String) async throws {
-        try await withCheckedThrowingContinuation { continuation in
-            let resumed = OSAllocatedUnfairLock(initialState: false)
+    private func waitForConnection(_ connection: NWConnection, deviceId: String, timeoutSeconds: TimeInterval = 10) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            let context = WaitForConnectionContext(continuation: continuation)
+
             connection.stateUpdateHandler = { [weak self] state in
+                Task { @MainActor in
+                    self?.handleConnectionStateUpdate(state, for: deviceId)
+                }
+
                 switch state {
                 case .ready:
-                    connection.stateUpdateHandler = nil
-                    let shouldResume = resumed.withLock { isResumed -> Bool in
-                        guard !isResumed else { return false }
-                        isResumed = true
-                        return true
-                    }
-                    guard shouldResume else { return }
-                    Task { @MainActor in
-                        self?.handleConnectionStateUpdate(state, for: deviceId)
-                        continuation.resume()
-                    }
+                    context.complete(.success(()))
                 case .failed(let error):
-                    connection.stateUpdateHandler = nil
-                    let shouldResume = resumed.withLock { isResumed -> Bool in
-                        guard !isResumed else { return false }
-                        isResumed = true
-                        return true
-                    }
-                    guard shouldResume else { return }
-                    Task { @MainActor in
-                        self?.handleConnectionStateUpdate(state, for: deviceId)
-                        continuation.resume(throwing: error)
-                    }
+                    context.complete(.failure(error))
                 case .cancelled:
-                    connection.stateUpdateHandler = nil
-                    let shouldResume = resumed.withLock { isResumed -> Bool in
-                        guard !isResumed else { return false }
-                        isResumed = true
-                        return true
-                    }
-                    guard shouldResume else { return }
-                    Task { @MainActor in
-                        self?.handleConnectionStateUpdate(state, for: deviceId)
-                        continuation.resume(throwing: P2PDiscoveryError.connectionCancelled)
-                    }
+                    context.complete(.failure(P2PDiscoveryError.connectionCancelled))
                 default:
-                    Task { @MainActor in
-                        self?.handleConnectionStateUpdate(state, for: deviceId)
-                    }
+                    break
                 }
             }
 
-            let connectionQueue = DispatchQueue(label: "com.skybridge.p2p.discovery.connection", qos: .utility)
-            connection.start(queue: connectionQueue)
+            connection.start(queue: outboundConnectionQueue)
 
-            Task {
-                try? await Task.sleep(nanoseconds: 5_000_000_000)
-                let shouldResume = resumed.withLock { isResumed -> Bool in
-                    guard !isResumed else { return false }
-                    isResumed = true
-                    return true
-                }
-                guard shouldResume else { return }
-                connection.stateUpdateHandler = nil
+            context.timeoutTask = Task {
+                try? await Task.sleep(for: .seconds(timeoutSeconds))
+                guard !Task.isCancelled else { return }
                 connection.cancel()
-                await MainActor.run {
-                    continuation.resume(throwing: P2PDiscoveryError.connectionCancelled)
-                }
+                context.complete(.failure(P2PDiscoveryError.timeout))
             }
         }
     }
@@ -1568,6 +1588,7 @@ public enum P2PDiscoveryConnectionStatus: String, CaseIterable {
 public enum P2PDiscoveryError: Error, LocalizedError {
     case deviceNotConnected
     case connectionCancelled
+    case timeout
     case scanningFailed
 
     public var errorDescription: String? {
@@ -1576,6 +1597,8 @@ public enum P2PDiscoveryError: Error, LocalizedError {
             return "设备未连接"
         case .connectionCancelled:
             return "连接已取消"
+        case .timeout:
+            return "连接超时"
         case .scanningFailed:
             return "扫描失败"
         }

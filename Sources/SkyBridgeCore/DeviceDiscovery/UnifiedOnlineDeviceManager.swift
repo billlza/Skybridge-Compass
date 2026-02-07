@@ -171,6 +171,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
 
         for candidate in candidates where !candidate.isLocalDevice {
             var score = 0
+            let candidateIsSyntheticPeer = Self.isSyntheticPeerDisplayName(candidate.name)
 
             if let strongId, let candidateId = candidate.deviceId, candidateId == strongId {
                 score += 200
@@ -191,10 +192,19 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
             }
 
             if candidate.services.contains("_skybridge._tcp") {
-                score += 30
+                score += 50
             }
             if (candidate.portMap["_skybridge._tcp"] ?? 0) > 0 {
                 score += 20
+            }
+            if candidateIsSyntheticPeer {
+                // `peer:fe80::...` 这类名称通常是瞬态端点，优先级应低于真实 Bonjour 设备名。
+                // 仅在没有 stable id / 公钥指纹时作为最后兜底，避免“同一设备多条离线记录”误绑定。
+                if strongId == nil, pubKeyFP == nil {
+                    score -= 90
+                } else {
+                    score -= 40
+                }
             }
             if onlineDevice.connectionTypes.contains(.usb), candidate.connectionTypes.contains(.usb) {
                 score += 10

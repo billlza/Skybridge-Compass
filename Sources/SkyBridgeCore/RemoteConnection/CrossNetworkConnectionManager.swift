@@ -111,7 +111,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         webrtcJoinHeartbeatTasksBySessionId.removeValue(forKey: sessionID)
     }
 
-    private func startJoinHeartbeat(for sessionID: String, attempts: Int = 10) {
+    private func startJoinHeartbeat(for sessionID: String, attempts: Int = 30) {
         stopJoinHeartbeat(for: sessionID)
         webrtcJoinHeartbeatTasksBySessionId[sessionID] = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -171,7 +171,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         )
     }
 
-    private func startOfferResendLoop(for sessionID: String, attempts: Int = 12) {
+    private func startOfferResendLoop(for sessionID: String, attempts: Int = 40) {
         stopOfferResendLoop(for: sessionID)
         webrtcOfferResendTasksBySessionId[sessionID] = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -314,10 +314,10 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             expiresAt: Date().addingTimeInterval(validDuration)
         )
 
- // 4. 编码为 JSON + Base64
+ // 4. 编码为 JSON + URL-safe Base64（避免扫码器对 + / = 的兼容问题）
         let encoder = JSONEncoder()
         let jsonData = try encoder.encode(qrData)
-        let base64String = jsonData.base64EncodedString()
+        let base64String = Self.base64URLEncodedString(from: jsonData)
 
  // 5. 添加协议前缀（用于识别）
         let qrString = "skybridge://connect/\(base64String)"
@@ -343,7 +343,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 
  // 1. 解析 QR 码
         let base64Part = qrString.replacingOccurrences(of: "skybridge://connect/", with: "")
-        guard let jsonData = Data(base64Encoded: base64Part) else {
+        guard let jsonData = Self.decodeBase64Payload(base64Part) else {
             throw CrossNetworkConnectionError.invalidQRCode
         }
 
@@ -701,9 +701,19 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         var attemptsLeft = max(0, retries)
         while true {
             do {
-                try await signalingClient?.send(env)
+                if signalingClient == nil {
+                    ensureSignalingConnected()
+                }
+                guard let signalingClient else {
+                    throw WebSocketSignalingClient.SignalingError.notConnected
+                }
+                try await signalingClient.send(env)
                 return
             } catch {
+                if let wsError = error as? WebSocketSignalingClient.SignalingError,
+                   case .notConnected = wsError {
+                    ensureSignalingConnected()
+                }
                 if attemptsLeft == 0 {
                     logger.error("❌ signaling send failed: type=\(env.type.rawValue, privacy: .public) session=\(env.sessionId, privacy: .public) err=\(error.localizedDescription, privacy: .public)")
                     return
@@ -2233,6 +2243,35 @@ public final class CrossNetworkConnectionManager: ObservableObject {
  // 生成 6 位字母数字码（排除易混淆字符：0/O, 1/I/l）
         let charset = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
         return String((0..<6).compactMap { _ in charset.randomElement() })
+    }
+
+    private static func base64URLEncodedString(from data: Data) -> String {
+        data.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+
+    private static func decodeBase64Payload(_ raw: String) -> Data? {
+        var candidates: [String] = []
+        candidates.append(raw)
+        if let decoded = raw.removingPercentEncoding, !decoded.isEmpty {
+            candidates.append(decoded)
+        }
+
+        for candidate in candidates {
+            if let data = Data(base64Encoded: candidate, options: [.ignoreUnknownCharacters]) {
+                return data
+            }
+            let normalized = candidate
+                .replacingOccurrences(of: "-", with: "+")
+                .replacingOccurrences(of: "_", with: "/")
+            let padded = normalized + String(repeating: "=", count: (4 - (normalized.count % 4)) % 4)
+            if let data = Data(base64Encoded: padded, options: [.ignoreUnknownCharacters]) {
+                return data
+            }
+        }
+        return nil
     }
 
     private static func buildCanonicalSignaturePayload(
