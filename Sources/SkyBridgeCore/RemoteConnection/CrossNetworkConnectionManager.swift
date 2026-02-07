@@ -130,6 +130,38 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         webrtcOfferResendTasksBySessionId.removeValue(forKey: sessionID)
     }
 
+    private func cleanupWebRTCSession(_ sessionID: String, reason: String, closeSession: Bool = true) {
+        logger.info("🧹 清理 WebRTC 会话: session=\(sessionID, privacy: .public) reason=\(reason, privacy: .public)")
+
+        stopJoinHeartbeat(for: sessionID)
+        stopOfferResendLoop(for: sessionID)
+        pendingWebRTCOfferSessionIds.remove(sessionID)
+        webrtcLatestOfferBySessionId.removeValue(forKey: sessionID)
+        webrtcRemoteIdBySessionId.removeValue(forKey: sessionID)
+        webrtcSessionKeysBySessionId.removeValue(forKey: sessionID)
+
+        if let controlTask = webrtcControlTasksBySessionId.removeValue(forKey: sessionID) {
+            controlTask.cancel()
+        }
+        if let streamTask = webrtcScreenStreamingTasksBySessionId.removeValue(forKey: sessionID) {
+            streamTask.cancel()
+        }
+        if let inboundQueue = webrtcInboundQueuesBySessionId.removeValue(forKey: sessionID) {
+            Task { await inboundQueue.finish() }
+        }
+        failAllFileTransferWaitersForSession(sessionID: sessionID, message: "会话已结束")
+
+        if closeSession, let session = webrtcSessionsBySessionId.removeValue(forKey: sessionID) {
+            session.close()
+        } else {
+            webrtcSessionsBySessionId.removeValue(forKey: sessionID)
+        }
+
+        if currentConnection?.id == sessionID {
+            currentConnection = nil
+        }
+    }
+
     private func resendCachedOfferIfNeeded(for sessionID: String, reason: String) async {
         guard let sdp = webrtcLatestOfferBySessionId[sessionID] else { return }
         logger.info("🔁 重发本地 offer: session=\(sessionID, privacy: .public) reason=\(reason, privacy: .public)")
@@ -442,10 +474,13 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         return code
     }
 
- /// 通过连接码连接
+    /// 通过连接码连接
     public func connectWithCode(_ code: String) async throws -> RemoteConnection {
         // 作为“输入方”（answerer）加入对端创建的 sessionId=code 的 WebRTC 会话。
         let normalized = String(code.prefix(6).uppercased().filter { $0.isLetter || $0.isNumber })
+        guard normalized.count == 6 else {
+            throw CrossNetworkConnectionError.invalidDevice
+        }
         logger.info("使用连接码连接: \(normalized)")
 
         if let existing = currentConnection, existing.id == normalized {
@@ -453,11 +488,15 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             return existing
         }
 
+        let sessionID = normalized
+        if let existingSession = webrtcSessionsBySessionId[sessionID] {
+            logger.info("复用已有会话（避免重复创建）: \(sessionID, privacy: .public)")
+            return RemoteConnection(id: sessionID, deviceName: "Remote Device", transport: .webrtc(existingSession))
+        }
+
         connectionStatus = .connecting
 
         ensureSignalingConnected()
-
-        let sessionID = normalized
 
         // 动态获取 TURN 凭据（带缓存和回退）
         let ice = await SkyBridgeServerConfig.dynamicICEConfig()
@@ -490,6 +529,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             try session.start()
         } catch {
             logger.error("❌ connectWithCode(WebRTC) start failed: \(error.localizedDescription, privacy: .public)")
+            cleanupWebRTCSession(sessionID, reason: "answerer_start_failed")
             connectionStatus = .failed(error.localizedDescription)
             throw error
         }
@@ -611,9 +651,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             startOfferResendLoop(for: sessionID)
         } catch {
             logger.error("❌ startWebRTCOfferSession failed: \(error.localizedDescription, privacy: .public)")
-            stopJoinHeartbeat(for: sessionID)
-            stopOfferResendLoop(for: sessionID)
-            webrtcLatestOfferBySessionId.removeValue(forKey: sessionID)
+            cleanupWebRTCSession(sessionID, reason: "offerer_start_failed")
             connectionStatus = .failed(error.localizedDescription)
         }
     }
@@ -644,7 +682,13 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 
         webrtcSessionsBySessionId[sessionID] = session
 
-        try session.start()
+        do {
+            try session.start()
+        } catch {
+            cleanupWebRTCSession(sessionID, reason: "qr_answerer_start_failed")
+            connectionStatus = .failed(error.localizedDescription)
+            throw error
+        }
 
         // 主动发送 join，帮助服务端/对端建立“同会话订阅”的心智模型（服务端可忽略）
         await sendSignal(.init(sessionId: sessionID, from: deviceFingerprint, type: .join, payload: nil), retries: 2)
@@ -700,8 +744,10 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 await self?.resendCachedOfferIfNeeded(for: env.sessionId, reason: "remote-join")
             }
         case .leave:
-            stopJoinHeartbeat(for: env.sessionId)
-            stopOfferResendLoop(for: env.sessionId)
+            cleanupWebRTCSession(env.sessionId, reason: "remote_leave")
+            if currentConnection == nil {
+                connectionStatus = .idle
+            }
         }
     }
 

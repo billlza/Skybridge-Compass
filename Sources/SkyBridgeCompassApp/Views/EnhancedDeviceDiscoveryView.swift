@@ -40,6 +40,7 @@ public struct EnhancedDeviceDiscoveryView: View {
  // 控制二维码扫描弹窗显示与错误提示。
     @State private var showingScanner: Bool = false
     @State private var scannerErrorMessage: String?
+    @State private var connectionCodeErrorMessage: String?
     @State private var extendedSearchCountdown: Int = 0
     @State private var showManualConnectSheet: Bool = false
     @State private var manualIP: String = ""
@@ -954,10 +955,9 @@ public struct EnhancedDeviceDiscoveryView: View {
 
  // 连接按钮(仅对非本机在线设备显示)
                 if !device.isLocalDevice && device.connectionStatus == .online {
-                    Button(isLikelyConnectable ? LocalizationManager.shared.localizedString("discovery.action.connect") : LocalizationManager.shared.localizedString("discovery.action.notConnectable")) {
+                    Button(LocalizationManager.shared.localizedString("discovery.action.connect")) {
                         onConnect()
                     }
-                    .disabled(!isLikelyConnectable)
                     .buttonStyle(.borderedProminent)
                 }
             }
@@ -1002,13 +1002,6 @@ public struct EnhancedDeviceDiscoveryView: View {
             }
         }
 
-        private var isLikelyConnectable: Bool {
-            let hasPort = device.portMap.values.contains { $0 > 0 }
-            let hasServiceHint = !device.services.isEmpty
-            let hasReachableAddress = (device.ipv4?.isEmpty == false) || (device.ipv6?.isEmpty == false)
-            let hasUSBPath = device.connectionTypes.contains(.usb)
-            return hasPort || hasServiceHint || hasReachableAddress || hasUSBPath
-        }
     }
 
  // MARK: - 本地设备卡片
@@ -1060,10 +1053,9 @@ public struct EnhancedDeviceDiscoveryView: View {
 
                 Spacer()
 
-                Button(isLikelyConnectable ? LocalizationManager.shared.localizedString("discovery.action.connect") : LocalizationManager.shared.localizedString("discovery.action.notConnectable")) {
+                Button(LocalizationManager.shared.localizedString("discovery.action.connect")) {
                     onConnect()
                 }
-                .disabled(!isLikelyConnectable)
                 .buttonStyle(.borderedProminent)
             }
             .padding(16)
@@ -1099,13 +1091,6 @@ public struct EnhancedDeviceDiscoveryView: View {
             }
         }
 
-        private var isLikelyConnectable: Bool {
-            let hasPort = device.portMap.values.contains { $0 > 0 }
-            let hasServiceHint = !device.services.isEmpty
-            let hasReachableAddress = (device.ipv4?.isEmpty == false) || (device.ipv6?.isEmpty == false)
-            let hasUSBPath = device.connectionTypes.contains(.usb)
-            return hasPort || hasServiceHint || hasReachableAddress || hasUSBPath
-        }
     }
 
  /// iCloud设备卡片
@@ -1357,7 +1342,13 @@ public struct EnhancedDeviceDiscoveryView: View {
 
                                 Button(action: {
                                     Task {
-                                        try? await crossNetworkManager.generateConnectionCode()
+                                        do {
+                                            connectionCodeErrorMessage = nil
+                                            try await crossNetworkManager.generateConnectionCode()
+                                        } catch {
+                                            connectionCodeErrorMessage = error.localizedDescription
+                                            logger.error("❌ 重新生成连接码失败: \(error.localizedDescription, privacy: .public)")
+                                        }
                                     }
                                 }) {
                                     Label(LocalizationManager.shared.localizedString("discovery.smartCode.regenerate"), systemImage: "arrow.clockwise")
@@ -1378,7 +1369,13 @@ public struct EnhancedDeviceDiscoveryView: View {
                     } else {
                         Button(action: {
                             Task {
-                                try? await crossNetworkManager.generateConnectionCode()
+                                do {
+                                    connectionCodeErrorMessage = nil
+                                    try await crossNetworkManager.generateConnectionCode()
+                                } catch {
+                                    connectionCodeErrorMessage = error.localizedDescription
+                                    logger.error("❌ 生成连接码失败: \(error.localizedDescription, privacy: .public)")
+                                }
                             }
                         }) {
                             VStack(spacing: 12) {
@@ -1420,7 +1417,13 @@ public struct EnhancedDeviceDiscoveryView: View {
 
                         Button(action: {
                             Task {
-                                try? await crossNetworkManager.connectWithCode(searchText)
+                                do {
+                                    connectionCodeErrorMessage = nil
+                                    _ = try await crossNetworkManager.connectWithCode(searchText)
+                                } catch {
+                                    connectionCodeErrorMessage = error.localizedDescription
+                                    logger.error("❌ 连接码连接失败: \(error.localizedDescription, privacy: .public)")
+                                }
                             }
                         }) {
                             HStack {
@@ -1434,6 +1437,14 @@ public struct EnhancedDeviceDiscoveryView: View {
                         .buttonStyle(.borderedProminent)
                         .disabled(searchText.count != 6)
                         .frame(width: 240)
+
+                        if let connectionCodeErrorMessage, !connectionCodeErrorMessage.isEmpty {
+                            Text(connectionCodeErrorMessage)
+                                .font(.caption)
+                                .foregroundColor(.red)
+                                .frame(width: 240)
+                                .multilineTextAlignment(.center)
+                        }
                     }
                     .frame(height: 180)
                 }
@@ -1447,25 +1458,43 @@ public struct EnhancedDeviceDiscoveryView: View {
     /// 🆕 连接到在线设备
     private func connectToOnlineDevice(_ device: OnlineDevice) {
         Task {
-            let discoveredDevice = DiscoveredDevice(
-                id: device.id,
-                name: device.name,
-                ipv4: device.ipv4,
-                ipv6: device.ipv6,
-                services: device.services,
-                portMap: device.portMap,
-                connectionTypes: device.connectionTypes,
-                uniqueIdentifier: device.uniqueIdentifier,
-                signalStrength: nil
-            )
+            let discoveredDevice = unifiedDeviceManager.resolvedDiscoveredDevice(for: device) ?? fallbackDiscoveredDevice(for: device)
             do {
                 try await p2pDiscoveryService.connectToDevice(discoveredDevice)
                 unifiedDeviceManager.markDeviceAsConnected(device.id)
+                connectionCodeErrorMessage = nil
                 logger.info("✅ 在线设备连接成功: \(device.name)")
             } catch {
                 logger.error("❌ 在线设备连接失败: \(device.name, privacy: .public), \(error.localizedDescription, privacy: .public)")
+                connectionCodeErrorMessage = error.localizedDescription
             }
         }
+    }
+
+    private func fallbackDiscoveredDevice(for device: OnlineDevice) -> DiscoveredDevice {
+        let mappedDeviceId: String? = {
+            guard device.uniqueIdentifier.hasPrefix("id:") else { return nil }
+            return String(device.uniqueIdentifier.dropFirst("id:".count))
+        }()
+        let mappedPubKeyFP: String? = {
+            guard device.uniqueIdentifier.hasPrefix("fp:") else { return nil }
+            return String(device.uniqueIdentifier.dropFirst("fp:".count))
+        }()
+        return DiscoveredDevice(
+            id: device.id,
+            name: device.name,
+            ipv4: device.ipv4,
+            ipv6: device.ipv6,
+            services: device.services,
+            portMap: device.portMap,
+            connectionTypes: device.connectionTypes,
+            uniqueIdentifier: device.uniqueIdentifier,
+            signalStrength: nil,
+            source: .skybridgeBonjour,
+            isLocalDevice: device.isLocalDevice,
+            deviceId: mappedDeviceId,
+            pubKeyFP: mappedPubKeyFP
+        )
     }
 
     private func connectToLocalDevice(_ device: DiscoveredDevice) {
