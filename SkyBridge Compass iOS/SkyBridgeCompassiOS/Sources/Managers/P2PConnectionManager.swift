@@ -583,8 +583,14 @@ public class P2PConnectionManager: ObservableObject {
                     ptr.load(as: UInt32.self).bigEndian
                 }
                 let bodyLen = Int(length)
-                guard bodyLen >= 0, bodyLen <= 2_000_000 else {
-                    SkyBridgeLogger.shared.error("❌ 接收长度头非法: \(bodyLen)")
+                guard bodyLen <= 2_000_000 else {
+                    if self?.looksLikeTLSRecordHeader(lengthData) == true {
+                        SkyBridgeLogger.shared.warning("⚠️ 检测到 TLS 记录头，但当前通道期望 length-framed 明文握手，已关闭该入站连接")
+                        self?.cleanupBrokenInboundConnection(connection, peerId: peerId, reason: "传输协议不匹配（收到 TLS 记录头）")
+                    } else {
+                        SkyBridgeLogger.shared.error("❌ 接收长度头非法: \(bodyLen)")
+                        self?.cleanupBrokenInboundConnection(connection, peerId: peerId, reason: "非法消息长度头: \(bodyLen)")
+                    }
                     return
                 }
 
@@ -606,6 +612,37 @@ public class P2PConnectionManager: ObservableObject {
                 }
             }
         }
+    }
+
+    private func looksLikeTLSRecordHeader(_ header: Data) -> Bool {
+        guard header.count == 4 else { return false }
+        let bytes = [UInt8](header)
+        let contentType = bytes[0]
+        let majorVersion = bytes[1]
+        let minorVersion = bytes[2]
+        guard [0x14, 0x15, 0x16, 0x17].contains(contentType) else { return false }
+        guard majorVersion == 0x03 else { return false }
+        return minorVersion <= 0x04 // TLS 1.0...1.3
+    }
+
+    private func cleanupBrokenInboundConnection(_ connection: NWConnection, peerId: String, reason: String) {
+        connection.cancel()
+
+        let isTrackedConnection = connections[peerId].map { $0 === connection } ?? false
+        guard isTrackedConnection else { return }
+
+        connections.removeValue(forKey: peerId)
+        handshakeDrivers.removeValue(forKey: peerId)
+        sharedSecrets.removeValue(forKey: peerId)
+        sessionKeys.removeValue(forKey: peerId)
+        negotiatedSuiteByDeviceId.removeValue(forKey: peerId)
+        heartbeatTasks[peerId]?.cancel()
+        heartbeatTasks.removeValue(forKey: peerId)
+        reconnectTasks[peerId]?.cancel()
+        reconnectTasks.removeValue(forKey: peerId)
+        reconnectAttempts.removeValue(forKey: peerId)
+        connectionStatusByDeviceId[peerId] = .failed
+        connectionErrorByDeviceId[peerId] = reason
     }
     
     /// 处理收到的消息

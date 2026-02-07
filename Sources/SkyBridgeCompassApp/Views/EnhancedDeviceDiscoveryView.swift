@@ -1344,7 +1344,7 @@ public struct EnhancedDeviceDiscoveryView: View {
                                     Task {
                                         do {
                                             connectionCodeErrorMessage = nil
-                                            try await crossNetworkManager.generateConnectionCode()
+                                            _ = try await crossNetworkManager.generateConnectionCode()
                                         } catch {
                                             connectionCodeErrorMessage = error.localizedDescription
                                             logger.error("❌ 重新生成连接码失败: \(error.localizedDescription, privacy: .public)")
@@ -1371,7 +1371,7 @@ public struct EnhancedDeviceDiscoveryView: View {
                             Task {
                                 do {
                                     connectionCodeErrorMessage = nil
-                                    try await crossNetworkManager.generateConnectionCode()
+                                    _ = try await crossNetworkManager.generateConnectionCode()
                                 } catch {
                                     connectionCodeErrorMessage = error.localizedDescription
                                     logger.error("❌ 生成连接码失败: \(error.localizedDescription, privacy: .public)")

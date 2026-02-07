@@ -316,7 +316,10 @@ public class P2PDiscoveryService: BaseManager {
             throw P2PDiscoveryError.scanningFailed
         }
 
-        let securityPlans = preferredConnectionSecurityPlans()
+        let securityPlans = preferredConnectionSecurityPlans(
+            device: device,
+            preferredServiceType: preferredServiceType
+        )
 
         var lastError: Error?
         for endpoint in endpointAttempts {
@@ -353,7 +356,20 @@ public class P2PDiscoveryService: BaseManager {
         throw lastError ?? P2PDiscoveryError.connectionCancelled
     }
 
-    private func preferredConnectionSecurityPlans() -> [ConnectionSecurityPlan] {
+    private func preferredConnectionSecurityPlans(
+        device: DiscoveredDevice,
+        preferredServiceType: String?
+    ) -> [ConnectionSecurityPlan] {
+        // SkyBridge 近距通道使用应用层握手加密（HandshakeDriver + SessionKeys）。
+        // 为避免与 iOS 端 length-framed 明文控制通道发生 TLS 记录头错配，这里固定使用 plain TCP。
+        let isSkyBridgeControlChannel = preferredServiceType == "_skybridge._tcp"
+            || preferredServiceType == "_skybridge._udp"
+            || device.services.contains("_skybridge._tcp")
+            || device.services.contains("_skybridge._udp")
+        if isSkyBridgeControlChannel {
+            return [.plainTCP]
+        }
+
         let net = RemoteDesktopSettingsManager.shared.settings.networkSettings
         guard net.enableEncryption, TLSConfigurator.options(for: net.encryptionAlgorithm) != nil else {
             return [.plainTCP]
