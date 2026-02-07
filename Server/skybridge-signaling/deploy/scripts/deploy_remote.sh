@@ -11,6 +11,7 @@ Usage:
 Options:
   --host <host>            Remote host (required)
   --user <user>            SSH user (required)
+  --identity-file <path>   SSH private key for remote login (optional)
   --port <port>            SSH port (default: 22)
   --app-dir <path>         Remote app root (default: /opt/skybridge-signaling)
   --service <name>         systemd service name (default: skybridge-signaling)
@@ -23,6 +24,7 @@ USAGE
 
 HOST=""
 USER_NAME=""
+IDENTITY_FILE=""
 PORT="22"
 APP_DIR="/opt/skybridge-signaling"
 SERVICE_NAME="skybridge-signaling"
@@ -37,6 +39,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --user)
             USER_NAME="${2:-}"
+            shift 2
+            ;;
+        --identity-file)
+            IDENTITY_FILE="${2:-}"
             shift 2
             ;;
         --port)
@@ -77,6 +83,11 @@ if [[ -z "$HOST" || -z "$USER_NAME" ]]; then
     exit 1
 fi
 
+if [[ -n "$IDENTITY_FILE" && ! -f "$IDENTITY_FILE" ]]; then
+    echo "identity file does not exist: $IDENTITY_FILE" >&2
+    exit 1
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 SERVER_DIR="$PROJECT_ROOT/Server/skybridge-signaling"
@@ -113,6 +124,13 @@ REMOTE_ENV="$APP_DIR/shared/config/production.env"
 REMOTE_CURRENT="$APP_DIR/current"
 REMOTE_TARGET="${USER_NAME}@${HOST}"
 
+SSH_CMD=(ssh -p "$PORT")
+SCP_CMD=(scp -P "$PORT")
+if [[ -n "$IDENTITY_FILE" ]]; then
+    SSH_CMD+=( -i "$IDENTITY_FILE" -o IdentitiesOnly=yes )
+    SCP_CMD+=( -i "$IDENTITY_FILE" -o IdentitiesOnly=yes )
+fi
+
 cleanup() {
     rm -f "$ARCHIVE_PATH"
 }
@@ -128,10 +146,10 @@ tar \
   .
 
 echo "[deploy] Uploading archive to $REMOTE_TARGET"
-scp -P "$PORT" "$ARCHIVE_PATH" "$REMOTE_TARGET:$REMOTE_ARCHIVE"
+"${SCP_CMD[@]}" "$ARCHIVE_PATH" "$REMOTE_TARGET:$REMOTE_ARCHIVE"
 
 echo "[deploy] Provisioning release directory and dependencies"
-ssh -p "$PORT" "$REMOTE_TARGET" \
+"${SSH_CMD[@]}" "$REMOTE_TARGET" \
   "APP_DIR='$APP_DIR' REMOTE_ARCHIVE='$REMOTE_ARCHIVE' REMOTE_RELEASE_DIR='$REMOTE_RELEASE_DIR' REMOTE_ENV='$REMOTE_ENV' REMOTE_CURRENT='$REMOTE_CURRENT' bash -s" <<'REMOTE_PREP'
 set -euo pipefail
 
@@ -175,9 +193,9 @@ if [[ "$SKIP_SYSTEMD" != "true" ]]; then
     fi
 
     echo "[deploy] Installing systemd service: $SERVICE_NAME"
-    scp -P "$PORT" "$SERVICE_TEMPLATE" "$REMOTE_TARGET:/tmp/${SERVICE_NAME}.service"
+    "${SCP_CMD[@]}" "$SERVICE_TEMPLATE" "$REMOTE_TARGET:/tmp/${SERVICE_NAME}.service"
 
-    ssh -p "$PORT" "$REMOTE_TARGET" \
+    "${SSH_CMD[@]}" "$REMOTE_TARGET" \
       "SERVICE_NAME='$SERVICE_NAME' HEALTH_URL='$HEALTH_URL' bash -s" <<'REMOTE_SYSTEMD'
 set -euo pipefail
 

@@ -11,6 +11,7 @@ Usage:
 Options:
   --host <host>            Remote host (required)
   --user <user>            SSH user (required)
+  --identity-file <path>   SSH private key for remote login (optional)
   --port <port>            SSH port (default: 22)
   --app-dir <path>         Remote app root (default: /opt/skybridge-signaling)
   --service <name>         systemd service name (default: skybridge-signaling)
@@ -23,6 +24,7 @@ USAGE
 
 HOST=""
 USER_NAME=""
+IDENTITY_FILE=""
 PORT="22"
 APP_DIR="/opt/skybridge-signaling"
 SERVICE_NAME="skybridge-signaling"
@@ -37,6 +39,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --user)
             USER_NAME="${2:-}"
+            shift 2
+            ;;
+        --identity-file)
+            IDENTITY_FILE="${2:-}"
             shift 2
             ;;
         --port)
@@ -77,9 +83,18 @@ if [[ -z "$HOST" || -z "$USER_NAME" ]]; then
     exit 1
 fi
 
-REMOTE_TARGET="${USER_NAME}@${HOST}"
+if [[ -n "$IDENTITY_FILE" && ! -f "$IDENTITY_FILE" ]]; then
+    echo "identity file does not exist: $IDENTITY_FILE" >&2
+    exit 1
+fi
 
-ssh -p "$PORT" "$REMOTE_TARGET" \
+REMOTE_TARGET="${USER_NAME}@${HOST}"
+SSH_CMD=(ssh -p "$PORT")
+if [[ -n "$IDENTITY_FILE" ]]; then
+    SSH_CMD+=( -i "$IDENTITY_FILE" -o IdentitiesOnly=yes )
+fi
+
+"${SSH_CMD[@]}" "$REMOTE_TARGET" \
   "APP_DIR='$APP_DIR' SERVICE_NAME='$SERVICE_NAME' TARGET_RELEASE='$TARGET_RELEASE' HEALTH_URL='$HEALTH_URL' bash -s" <<'REMOTE_ROLLBACK'
 set -euo pipefail
 
