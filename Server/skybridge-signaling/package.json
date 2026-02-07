@@ -2,9 +2,16 @@
   "name": "skybridge-signaling",
   "version": "1.0.0",
   "description": "SkyBridge Compass Signaling Server",
+  "private": true,
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "start:prod": "NODE_ENV=production node server.js",
+    "check": "node --check server.js",
+    "smoke": "bash ./deploy/scripts/smoke_local.sh http://127.0.0.1:8443"
+  },
+  "engines": {
+    "node": ">=20.0.0"
   },
   "dependencies": {
     "express": "^4.18.2",

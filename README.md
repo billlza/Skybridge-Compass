@@ -53,6 +53,26 @@ SkyBridge Compass Pro 是一个以 **跨平台协议内核（SkyBridgeCore）** 
 
 > 生产环境建议使用 **短期 TURN 凭据**（例如 coturn 的 REST API / shared secret），避免在客户端硬编码用户名密码。
 
+### 信令服务部署（推荐生产流程）
+
+仓库已内置可复用部署资产（systemd + Nginx + 原子发布 + 回滚）：
+
+- 部署文档：`Server/skybridge-signaling/deploy/README.md`
+- 环境模板：`Server/skybridge-signaling/production.env.example`
+- 一键部署：`Server/skybridge-signaling/deploy/scripts/deploy_remote.sh`
+- 一键回滚：`Server/skybridge-signaling/deploy/scripts/rollback_remote.sh`
+- 本地烟雾测试：`Server/skybridge-signaling/deploy/scripts/smoke_local.sh`
+
+最小上线命令：
+
+```bash
+bash Server/skybridge-signaling/deploy/scripts/deploy_remote.sh \
+  --host <server-ip-or-dns> \
+  --user <ssh-user>
+```
+
+该流程会强制校验 `/api/turn/credentials` 路由语义，避免“代码已修复但线上仍旧 404”的配置漂移问题。
+
 ## 构建与运行（macOS）
 
 1. 用 Xcode 打开 `Package.swift`

@@ -1,0 +1,30 @@
+[Unit]
+Description=SkyBridge Compass Signaling Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=skybridge
+Group=skybridge
+WorkingDirectory=/opt/skybridge-signaling/current
+EnvironmentFile=/opt/skybridge-signaling/shared/config/production.env
+ExecStart=/usr/bin/env node server.js
+Restart=always
+RestartSec=3
+TimeoutStopSec=15
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ReadWritePaths=/opt/skybridge-signaling
+
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
