@@ -1480,6 +1480,9 @@ public struct EnhancedDeviceDiscoveryView: View {
     }
 
     private func fallbackDiscoveredDevice(for device: OnlineDevice) -> DiscoveredDevice {
+        let normalizedServices = device.services
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            .filter { $0.hasPrefix("_") && ($0.hasSuffix("._tcp") || $0.hasSuffix("._udp")) }
         let mappedDeviceId: String? = {
             guard device.uniqueIdentifier.hasPrefix("id:") else { return nil }
             return String(device.uniqueIdentifier.dropFirst("id:".count))
@@ -1493,7 +1496,7 @@ public struct EnhancedDeviceDiscoveryView: View {
             name: device.name,
             ipv4: device.ipv4,
             ipv6: device.ipv6,
-            services: device.services,
+            services: normalizedServices,
             portMap: device.portMap,
             connectionTypes: device.connectionTypes,
             uniqueIdentifier: device.uniqueIdentifier,

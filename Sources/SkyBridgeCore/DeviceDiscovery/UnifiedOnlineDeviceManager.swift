@@ -172,6 +172,14 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         for candidate in candidates where !candidate.isLocalDevice {
             var score = 0
             let candidateIsSyntheticPeer = Self.isSyntheticPeerDisplayName(candidate.name)
+            let candidateHasSkyBridgeControlEndpoint =
+                candidate.services.contains("_skybridge._tcp")
+                || candidate.services.contains("_skybridge._udp")
+                || (candidate.portMap["_skybridge._tcp"] ?? 0) > 0
+                || (candidate.portMap["_skybridge._udp"] ?? 0) > 0
+            let candidateHasAddress = candidate.ipv4 != nil || candidate.ipv6 != nil
+            let candidateHasUsablePort = candidate.portMap.values.contains(where: { $0 > 0 })
+            let candidateNetworkReachable = candidateHasSkyBridgeControlEndpoint || (candidateHasAddress && candidateHasUsablePort)
 
             if let strongId, let candidateId = candidate.deviceId, candidateId == strongId {
                 score += 200
@@ -196,6 +204,13 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
             }
             if (candidate.portMap["_skybridge._tcp"] ?? 0) > 0 {
                 score += 20
+            }
+            if !candidateNetworkReachable {
+                // 避免选中仅 USB / 无可连端口 的候选，防止后续把能力标签误当 Bonjour service type。
+                score -= 180
+            }
+            if candidate.connectionTypes == [.usb], !candidateHasSkyBridgeControlEndpoint {
+                score -= 120
             }
             if candidateIsSyntheticPeer {
                 // `peer:fe80::...` 这类名称通常是瞬态端点，优先级应低于真实 Bonjour 设备名。

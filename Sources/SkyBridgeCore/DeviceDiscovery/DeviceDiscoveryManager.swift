@@ -182,7 +182,7 @@ public class DeviceDiscoveryManager: BaseManager {
             throw DeviceDiscoveryError.connectionCancelled
         }
 
-        let portNumber = device.portMap["_skybridge._tcp"] ?? device.portMap.values.first ?? 0
+        let portNumber = resolvedConnectablePort(for: device)
         guard portNumber > 0 else { throw DeviceDiscoveryError.scanningFailed }
         let host = NWEndpoint.Host(ipv4)
         let port = NWEndpoint.Port(integerLiteral: UInt16(portNumber))
@@ -192,8 +192,14 @@ public class DeviceDiscoveryManager: BaseManager {
         let net = RemoteDesktopSettingsManager.shared.settings.networkSettings
 
         let connection: NWConnection
-        if net.enableEncryption,
-           let tls = TLSConfigurator.options(for: net.encryptionAlgorithm) {
+        if isSkyBridgeControlDevice(device) {
+            // SkyBridge 控制通道使用应用层握手加密；传输层固定纯 TCP。
+            let params = NWParameters.tcp
+            params.includePeerToPeer = true
+            params.allowLocalEndpointReuse = true
+            connection = NWConnection(to: endpoint, using: params)
+        } else if net.enableEncryption,
+                  let tls = TLSConfigurator.options(for: net.encryptionAlgorithm) {
             let tcp = NWProtocolTCP.Options()
             let params = NWParameters(tls: tls, tcp: tcp)
             connection = NWConnection(to: endpoint, using: params)
@@ -208,6 +214,30 @@ public class DeviceDiscoveryManager: BaseManager {
         try await waitForConnection(connection, deviceId: deviceId)
 
         logger.info("✅ 成功连接到设备: \(device.name, privacy: .public)")
+    }
+
+    private func isSkyBridgeControlDevice(_ device: DiscoveredDevice) -> Bool {
+        device.services.contains("_skybridge._tcp")
+            || device.services.contains("_skybridge._udp")
+            || device.portMap["_skybridge._tcp"] != nil
+            || device.portMap["_skybridge._udp"] != nil
+    }
+
+    private func resolvedConnectablePort(for device: DiscoveredDevice) -> Int {
+        if let port = device.portMap["_skybridge._tcp"], port > 0 { return port }
+        if let port = device.portMap["_skybridge._udp"], port > 0 { return port }
+
+        for (serviceType, port) in device.portMap where port > 0 {
+            if looksLikeBonjourServiceType(serviceType) {
+                return port
+            }
+        }
+        return 0
+    }
+
+    private func looksLikeBonjourServiceType(_ raw: String) -> Bool {
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.hasPrefix("_") && (value.hasSuffix("._tcp") || value.hasSuffix("._udp"))
     }
 
  /// 断开与指定设备的连接

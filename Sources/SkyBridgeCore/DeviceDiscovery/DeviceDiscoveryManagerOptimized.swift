@@ -170,16 +170,14 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
  // 使用序列号作为唯一标识符，如果没有序列号则使用设备ID
         let uniqueId = usbDevice.serialNumber ?? usbDevice.deviceID
 
- // 构建服务列表
-        var services: [String] = ["USB"]
-        services.append(contentsOf: usbDevice.capabilities)
-
         return DiscoveredDevice(
             id: UUID(),
             name: usbDevice.name,
             ipv4: nil, // USB设备没有IP地址
             ipv6: nil,
-            services: services,
+            // USB capability（例如“高速”）不是 Bonjour service type，不能写入 services；
+            // 否则连接层会把它当成 NWEndpoint.service(type:)，触发非法端点构造。
+            services: [],
             portMap: [:],
             connectionTypes: [.usb],
             uniqueIdentifier: uniqueId,
@@ -306,14 +304,11 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         }
 
         let host = NWEndpoint.Host(hostAddress)
-        let portInt = device.portMap.values.first ?? 0
+        let portInt = resolvedConnectablePort(for: device)
         guard portInt > 0 else { throw DeviceDiscoveryError.scanningFailed }
         let port = NWEndpoint.Port(integerLiteral: UInt16(portInt))
         let endpoint = NWEndpoint.hostPort(host: host, port: port)
-        let isSkyBridgeControlChannel = device.services.contains("_skybridge._tcp")
-            || device.services.contains("_skybridge._udp")
-            || device.portMap["_skybridge._tcp"] != nil
-            || device.portMap["_skybridge._udp"] != nil
+        let isSkyBridgeControlChannel = isSkyBridgeControlDevice(device)
  // 应用TLS配置（统一近距加密策略）
         let net = RemoteDesktopSettingsManager.shared.settings.networkSettings
         var connection: NWConnection
@@ -418,6 +413,30 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
 
         try await waitForConnection(connection)
         logger.info("✅ 连接成功: \(device.name)")
+    }
+
+    private func isSkyBridgeControlDevice(_ device: DiscoveredDevice) -> Bool {
+        device.services.contains("_skybridge._tcp")
+            || device.services.contains("_skybridge._udp")
+            || device.portMap["_skybridge._tcp"] != nil
+            || device.portMap["_skybridge._udp"] != nil
+    }
+
+    private func resolvedConnectablePort(for device: DiscoveredDevice) -> Int {
+        if let port = device.portMap["_skybridge._tcp"], port > 0 { return port }
+        if let port = device.portMap["_skybridge._udp"], port > 0 { return port }
+
+        for (serviceType, port) in device.portMap where port > 0 {
+            if looksLikeBonjourServiceType(serviceType) {
+                return port
+            }
+        }
+        return 0
+    }
+
+    private func looksLikeBonjourServiceType(_ raw: String) -> Bool {
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.hasPrefix("_") && (value.hasSuffix("._tcp") || value.hasSuffix("._udp"))
     }
 
  // MARK: - TLS 握手详情模型与辅助映射
