@@ -293,6 +293,10 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     
     public func setRemoteAnswer(_ sdp: String) {
 #if canImport(WebRTC)
+        if hasRemoteDescription {
+            logger.debug("ℹ️ ignore duplicate remote answer. sessionId=\(self.sessionId, privacy: .public)")
+            return
+        }
         guard let pc = peerConnection else { return }
         let desc = RTCSessionDescription(type: .answer, sdp: sdp)
         pc.setRemoteDescription(desc) { [weak self] error in

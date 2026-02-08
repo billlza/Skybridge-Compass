@@ -773,7 +773,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
                 // DataChannel opened; start handshake once per session.
                 if !self.handshakeStartedSessionIds.contains(sessionId) {
                     self.handshakeStartedSessionIds.insert(sessionId)
-                    let peerDeviceId = self.handshakePeerId ?? "webrtc-\(sessionId)"
+                    let peerDeviceId = self.remoteDeviceId ?? self.handshakePeerId ?? "webrtc-\(sessionId)"
                     Task {
                         await self.startHandshakeOverWebRTC(
                             sessionId: sessionId,
@@ -807,6 +807,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         // If we don't know the remote id yet (e.g., code mode), learn it from signaling.
         if remoteDeviceId == nil || remoteDeviceId?.hasPrefix("webrtc-") == true {
             remoteDeviceId = env.from
+            handshakePeerId = env.from
         }
         
         switch env.type {
@@ -1426,13 +1427,23 @@ private extension CrossNetworkWebRTCManager {
         do {
             let compatibilityModeEnabled = UserDefaults.standard.bool(forKey: "Settings.EnableCompatibilityMode")
             let capability = CryptoProviderFactory.detectCapability()
+            let trustedPeerKEMKeys = await KEMTrustStore.shared.kemPublicKeys(for: peerDeviceId)
+            let hasTrustedPeerKEMKey = !trustedPeerKEMKeys.isEmpty
             let strictPQCRequested: Bool = {
                 if compatibilityModeEnabled { return false }
                 if #available(iOS 26.0, *) { return true }
                 return false
             }()
             let selection: CryptoProviderFactory.SelectionPolicy
-            if strictPQCRequested {
+            if !hasTrustedPeerKEMKey {
+                selection = .classicOnly
+                if strictPQCRequested {
+                    SkyBridgeLogger.shared.warning(
+                        "⚠️ WebRTC strictPQC requested but peer KEM trust key missing; " +
+                        "fallback to classic bootstrap. peer=\(peerDeviceId)"
+                    )
+                }
+            } else if strictPQCRequested {
                 if capability.hasApplePQC || capability.hasLiboqs {
                     selection = .requirePQC
                 } else {
@@ -1447,7 +1458,8 @@ private extension CrossNetworkWebRTCManager {
             }
             SkyBridgeLogger.shared.info(
                 "🤝 WebRTC handshake bootstrap: session=\(sessionId), policy=\(selection.rawValue), " +
-                "compatMode=\(compatibilityModeEnabled), hasApplePQC=\(capability.hasApplePQC), hasLiboqs=\(capability.hasLiboqs)"
+                "compatMode=\(compatibilityModeEnabled), hasApplePQC=\(capability.hasApplePQC), hasLiboqs=\(capability.hasLiboqs), " +
+                "peer=\(peerDeviceId), trustedKEM=\(hasTrustedPeerKEMKey)"
             )
             try await SkyBridgeiOSCore.shared.initialize(policy: selection)
             
@@ -1475,9 +1487,32 @@ private extension CrossNetworkWebRTCManager {
             }
             SkyBridgeLogger.shared.info("✅ WebRTC 握手完成（DataChannel） session=\(sessionId)")
         } catch {
-            SkyBridgeLogger.shared.error("❌ WebRTC 握手失败（DataChannel） session=\(sessionId): \(error.localizedDescription)")
+            let reason: String
+            if let hs = error as? HandshakeError {
+                switch hs {
+                case .alreadyInProgress:
+                    reason = "alreadyInProgress"
+                case .noSigningCapability:
+                    reason = "noSigningCapability"
+                case .failed(let failure):
+                    reason = String(describing: failure)
+                case .emptyOfferedSuites:
+                    reason = "emptyOfferedSuites"
+                case .homogeneityViolation(let message):
+                    reason = "homogeneityViolation(\(message))"
+                case .providerAlgorithmMismatch(let provider, let algorithm):
+                    reason = "providerAlgorithmMismatch(provider=\(provider), algorithm=\(algorithm))"
+                case .signatureAlgorithmMismatch(let algorithm, let keyHandleType):
+                    reason = "signatureAlgorithmMismatch(algorithm=\(algorithm), keyHandle=\(keyHandleType))"
+                case .contextZeroized:
+                    reason = "contextZeroized"
+                }
+            } else {
+                reason = error.localizedDescription
+            }
+            SkyBridgeLogger.shared.error("❌ WebRTC 握手失败（DataChannel） session=\(sessionId): \(reason)")
             await MainActor.run {
-                self.lastError = "WebRTC 握手失败: \(error.localizedDescription)"
+                self.lastError = "WebRTC 握手失败: \(reason)"
                 self.state = .failed(self.lastError ?? "WebRTC handshake failed")
                 self.readiness = .idle
                 self.sessionKeys = nil
