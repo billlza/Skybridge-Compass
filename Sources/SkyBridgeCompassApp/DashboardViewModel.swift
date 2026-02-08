@@ -327,19 +327,10 @@ final class DashboardViewModel: ObservableObject {
             let (baseStatus, p2pStatus, inboundCount, isTransferring) = baseTuple
             let (presenceConnections, rekeyStatusByPeerId) = presenceTuple
 
-            // 统一“顶部连接态”与设备卡片语义：
-            // - 明确已连接(.connected)
-            // - 在线(.online)但带有最近握手/守护痕迹（避免把纯扫描到的设备误判为已连接）
+            // 统一“顶部连接态”判定：
+            // 只把明确的实时连接态(.connected)视为已连接，避免历史/扫描信息导致假阳性。
             let unifiedLinkedPeers = unifiedDevices.filter { device in
-                guard !device.isLocalDevice else { return false }
-                if device.connectionStatus == .connected { return true }
-                if device.connectionStatus == .online {
-                    return device.lastConnectedAt != nil ||
-                        device.lastCryptoKind != nil ||
-                        device.lastCryptoSuite != nil ||
-                        device.guardStatus != nil
-                }
-                return false
+                !device.isLocalDevice && device.connectionStatus == .connected
             }
 
             // Detail string for UX: show crypto + guard when present.
@@ -350,10 +341,13 @@ final class DashboardViewModel: ObservableObject {
                     self.connectionDetail = "\(newest.cryptoKind) · \(newest.suite) · 守护中"
                 }
             } else if let newestUnified = unifiedLinkedPeers.sorted(by: { ($0.lastConnectedAt ?? .distantPast) > ($1.lastConnectedAt ?? .distantPast) }).first {
-                let kind = newestUnified.lastCryptoKind ?? "Classic"
-                let suite = newestUnified.lastCryptoSuite ?? "X25519"
-                let guardStatus = newestUnified.guardStatus ?? "守护中"
-                self.connectionDetail = "\(kind) · \(suite) · \(guardStatus)"
+                if let kind = newestUnified.lastCryptoKind,
+                   let suite = newestUnified.lastCryptoSuite {
+                    let guardStatus = newestUnified.guardStatus ?? "守护中"
+                    self.connectionDetail = "\(kind) · \(suite) · \(guardStatus)"
+                } else {
+                    self.connectionDetail = newestUnified.name
+                }
             } else {
                 self.connectionDetail = nil
             }
