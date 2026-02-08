@@ -1696,31 +1696,37 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             let extracted = extractIPFromPeerId(peerIdForPresence)
 
             Task { @MainActor in
-                // Best-effort: map raw peer:<ip> to a known device name from unified discovery.
-                let resolvedName: String = {
+                // Best-effort: map raw peer:<ip> to a known device name/address from unified discovery.
+                let resolved: (name: String, address: String?) = {
                     let devices = UnifiedOnlineDeviceManager.shared.onlineDevices
                     if let v6 = extracted.ipv6,
                        let d = devices.first(where: { ($0.ipv6?.contains(v6) ?? false) }) {
-                        return d.name
+                        return (d.name, d.ipv4 ?? d.ipv6 ?? v6)
                     }
                     if let v4 = extracted.ipv4,
                        let d = devices.first(where: { $0.ipv4 == v4 }) {
-                        return d.name
+                        return (d.name, d.ipv4 ?? d.ipv6 ?? v4)
                     }
                     // If endpoint is a bonjour service, prefer that name.
                     if endpointDescriptionForPresence.contains("bonjour:") {
-                        return endpointDescriptionForPresence
+                        let bonjourName = endpointDescriptionForPresence
                             .replacingOccurrences(of: "bonjour:", with: "")
                             .split(separator: "@", maxSplits: 1)
                             .first
                             .map(String.init) ?? fallbackName
+                        if let d = devices.first(where: { $0.name == bonjourName }) {
+                            return (d.name, d.ipv4 ?? d.ipv6)
+                        }
+                        return (bonjourName, nil)
                     }
-                    return fallbackName
+                    return (fallbackName, nil)
                 }()
+                let resolvedAddress = resolved.address ?? extracted.ipv4 ?? extracted.ipv6
 
                 ConnectionPresenceService.shared.markConnected(
                     peerId: peerIdForPresence,
-                    displayName: resolvedName,
+                    displayName: resolved.name,
+                    address: resolvedAddress,
                     cryptoKind: kind,
                     suite: suite.rawValue
                 )
@@ -1728,14 +1734,14 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
 
                 UnifiedOnlineDeviceManager.shared.markDeviceAsConnected(
                     peerId: peerIdForPresence,
-                    displayName: resolvedName,
+                    displayName: resolved.name,
                     cryptoKind: kind,
                     suite: suite.rawValue,
                     guardStatus: "守护中"
                 )
 
                 SettingsManager.shared.sendSystemNotification(
-                    title: "✅ 已连接 \(resolvedName)",
+                    title: "✅ 已连接 \(resolved.name)",
                     body: "\(kind) · \(suite.rawValue) · 守护连接中",
                     categoryIdentifier: "DISCOVERY_ALERT"
                 )
@@ -1831,9 +1837,25 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                                 }()
                                 if let resolvedName {
                                     Task { @MainActor in
+                                        let extracted = extractIPFromPeerId(peerIdForPresence)
+                                        let normalizedName = resolvedName
+                                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                                            .lowercased()
+                                        let devices = UnifiedOnlineDeviceManager.shared.onlineDevices
+                                        let matched = devices.first { device in
+                                            device.name
+                                                .trimmingCharacters(in: .whitespacesAndNewlines)
+                                                .lowercased() == normalizedName
+                                        }
+                                        let resolvedAddress =
+                                            matched?.ipv4
+                                            ?? matched?.ipv6
+                                            ?? extracted.ipv4
+                                            ?? extracted.ipv6
                                         ConnectionPresenceService.shared.markConnected(
                                             peerId: peerIdForPresence,
                                             displayName: resolvedName,
+                                            address: resolvedAddress,
                                             cryptoKind: kind,
                                             suite: suite.rawValue
                                         )

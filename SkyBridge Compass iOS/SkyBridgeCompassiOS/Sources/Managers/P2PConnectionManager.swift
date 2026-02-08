@@ -731,17 +731,11 @@ public class P2PConnectionManager: ObservableObject {
             connectionErrorByDeviceId.removeValue(forKey: peerId)
             startHeartbeatIfNeeded(deviceId: peerId)
 
-            let pseudoDevice = DiscoveredDevice(
-                id: peerId,
-                name: peerId,
-                modelName: "Unknown",
-                platform: .macOS,
-                osVersion: "Unknown",
-                ipAddress: peerId,
-                signalStrength: -50,
-                lastSeen: Date()
+            let activeDevice = makeActiveConnectionDevice(
+                peerId: peerId,
+                connection: connections[peerId]
             )
-            upsertActiveConnection(device: pseudoDevice, status: .connected)
+            upsertActiveConnection(device: activeDevice, status: .connected)
 
         case .failed(let reason):
             handshakeDrivers.removeValue(forKey: peerId)
@@ -1218,6 +1212,66 @@ public class P2PConnectionManager: ObservableObject {
             return
         }
         activeConnections.append(Connection(device: device, status: status))
+    }
+
+    private func makeActiveConnectionDevice(peerId: String, connection: NWConnection?) -> DiscoveredDevice {
+        if let discovered = discoveryManager.discoveredDevices.first(where: { $0.id == peerId }) {
+            return discovered
+        }
+
+        let endpointAddress = endpointHostAddress(connection?.endpoint)
+        let bonjour = parseBonjourPeerIdentifier(peerId)
+        let fallbackName = bonjour?.name ?? endpointAddress ?? peerId
+
+        var services: [String] = []
+        if bonjour != nil {
+            services.append(DiscoveryServiceType.skybridge.rawValue)
+        }
+
+        return DiscoveredDevice(
+            id: peerId,
+            name: fallbackName,
+            bonjourServiceName: bonjour?.name,
+            modelName: "Unknown",
+            platform: .macOS,
+            osVersion: "Unknown",
+            ipAddress: endpointAddress,
+            bonjourServiceType: bonjour != nil ? DiscoveryServiceType.skybridge.rawValue : nil,
+            bonjourServiceDomain: bonjour?.domain,
+            services: services,
+            portMap: [:],
+            signalStrength: -50,
+            lastSeen: Date(),
+            isConnected: true,
+            isTrusted: false,
+            publicKey: nil,
+            advertisedCapabilities: [],
+            capabilities: []
+        )
+    }
+
+    private func parseBonjourPeerIdentifier(_ peerId: String) -> (name: String, domain: String)? {
+        guard peerId.hasPrefix("bonjour:") else { return nil }
+        let payload = String(peerId.dropFirst("bonjour:".count))
+        let parts = payload.split(separator: "@", maxSplits: 1).map(String.init)
+        guard let name = parts.first, !name.isEmpty else { return nil }
+        let domain = parts.count > 1 ? parts[1] : "local."
+        return (name, domain)
+    }
+
+    private func endpointHostAddress(_ endpoint: NWEndpoint?) -> String? {
+        guard let endpoint else { return nil }
+        guard case .hostPort(let host, _) = endpoint else { return nil }
+        switch host {
+        case .ipv4(let ipv4):
+            return "\(ipv4)"
+        case .ipv6(let ipv6):
+            return "\(ipv6)"
+        case .name(let name, _):
+            return name
+        @unknown default:
+            return nil
+        }
     }
 
     private func setSessionKeys(_ keys: SessionKeys, for deviceId: String, deviceNameHint: String? = nil) {

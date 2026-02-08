@@ -104,60 +104,167 @@ public class FileTransferManager: BaseManager {
     /// Sends a file to the currently active P2P peer.
     /// This resolves the peer from ConnectionPresenceService (Authenticated) or P2PConnectionService (UDP) as fallback.
     public func sendFileToFirstActivePeer(at url: URL) async throws {
-        // 1. Try ConnectionPresenceService (Authenticated PQC session) - Preferred
-        // The handshake logic populates this service with the peer's address.
-        if let presence = ConnectionPresenceService.shared.activeConnections.first,
-           let address = presence.address {
-            try await sendFile(
-                at: url,
-                to: presence.id,
-                deviceName: presence.displayName,
-                ipAddress: address,
-                port: 8080
+        let routes = await resolveActivePeerRoutes()
+        guard !routes.isEmpty else {
+            throw NSError(
+                domain: "SkyBridge.FileTransfer",
+                code: -1001,
+                userInfo: [NSLocalizedDescriptionKey: "未建立可用 P2P 连接 (No Authenticated Peer or UDP Link)"]
             )
-            return
         }
-        
-        // 2. Fallback: Get functional network connection (for IP) from P2PConnectionService
-        let activeInfos = await P2PConnectionService.shared.currentConnections()
-        // We only care about ready connections
-        guard let activeInfo = activeInfos.first(where: { $0.isReady }),
-              let endpoint = activeInfo.endpoint else {
-             // If presence exists but no address, and no UDP connection -> Error
-             throw NSError(domain: "SkyBridge.FileTransfer", code: -1001, userInfo: [NSLocalizedDescriptionKey: "未建立可用 P2P 连接 (No Authenticated Peer or UDP Link)"])
-        }
-        
-        // 3. Resolve IP from endpoint (Fallback path)
-        var targetIP: String?
-        if case .hostPort(let host, _) = endpoint {
-            switch host {
-            case .ipv4(let ipv4):
-                targetIP = "\(ipv4)"
-            case .ipv6(let ipv6):
-                targetIP = "\(ipv6)"
-            case .name(let name, _):
-                targetIP = name
-            @unknown default:
-                break
+
+        var lastError: Error?
+        for route in routes {
+            do {
+                logger.info(
+                    "📡 尝试活跃会话文件路由: peer=\(route.deviceName) addr=\(route.ipAddress):\(route.port)"
+                )
+                try await sendFile(
+                    at: url,
+                    to: route.deviceId,
+                    deviceName: route.deviceName,
+                    ipAddress: route.ipAddress,
+                    port: route.port
+                )
+                return
+            } catch {
+                lastError = error
+                logger.warning(
+                    "⚠️ 活跃会话文件路由失败，尝试下一条: peer=\(route.deviceName, privacy: .public) addr=\(route.ipAddress, privacy: .public):\(route.port) err=\(error.localizedDescription, privacy: .public)"
+                )
             }
         }
-        
-        guard let ip = targetIP else {
-             throw NSError(domain: "SkyBridge.FileTransfer", code: -1002, userInfo: [NSLocalizedDescriptionKey: "无法解析对端 IP 地址 (Fallback)"])
-        }
-        
-        // 4. Get Display Name (from Presence Service if available)
-        let presenceObj = ConnectionPresenceService.shared.activeConnections.first
-        let displayName = presenceObj?.displayName ?? "P2P Device"
-        let deviceId = presenceObj?.id ?? UUID().uuidString
-        
-        try await sendFile(
-            at: url,
-            to: deviceId,
-            deviceName: displayName,
-            ipAddress: ip,
-            port: 8080
+
+        throw lastError ?? NSError(
+            domain: "SkyBridge.FileTransfer",
+            code: -1003,
+            userInfo: [NSLocalizedDescriptionKey: "已发现活跃连接，但无法解析可用传输路由"]
         )
+    }
+
+    private struct ActivePeerRoute {
+        let deviceId: String
+        let deviceName: String
+        let ipAddress: String
+        let port: Int
+    }
+
+    private func resolveActivePeerRoutes() async -> [ActivePeerRoute] {
+        var routes: [ActivePeerRoute] = []
+        var dedupe = Set<String>()
+
+        func appendRoute(
+            deviceId: String,
+            deviceName: String,
+            address: String?,
+            port: Int = 8080
+        ) {
+            guard let address = sanitizeAddress(address) else { return }
+            let key = "\(address.lowercased()):\(port)"
+            guard !dedupe.contains(key) else { return }
+            dedupe.insert(key)
+            routes.append(
+                ActivePeerRoute(
+                    deviceId: deviceId,
+                    deviceName: deviceName.isEmpty ? "P2P Device" : deviceName,
+                    ipAddress: address,
+                    port: port
+                )
+            )
+        }
+
+        let presence = ConnectionPresenceService.shared.activeConnections
+            .sorted(by: { $0.connectedAt > $1.connectedAt })
+        for conn in presence {
+            appendRoute(
+                deviceId: conn.id,
+                deviceName: conn.displayName,
+                address: conn.address ?? parseAddressFromPeerId(conn.id),
+                port: 8080
+            )
+        }
+
+        if #available(macOS 14.0, *) {
+            let connectedDevices = UnifiedOnlineDeviceManager.shared.onlineDevices
+                .filter { !$0.isLocalDevice && $0.connectionStatus == .connected }
+                .sorted { ($0.lastConnectedAt ?? .distantPast) > ($1.lastConnectedAt ?? .distantPast) }
+            for device in connectedDevices {
+                let transferPort = device.portMap["_skybridge-transfer._tcp"] ?? 8080
+                appendRoute(
+                    deviceId: device.uniqueIdentifier,
+                    deviceName: device.name,
+                    address: device.ipv4 ?? device.ipv6,
+                    port: transferPort
+                )
+            }
+        }
+
+        let activeInfos = await P2PConnectionService.shared.currentConnections()
+        for info in activeInfos where info.isReady {
+            appendRoute(
+                deviceId: info.id.uuidString,
+                deviceName: "P2P Device",
+                address: parseAddressFromEndpoint(info.endpoint),
+                port: 8080
+            )
+        }
+
+        return routes
+    }
+
+    private func parseAddressFromEndpoint(_ endpoint: NWEndpoint?) -> String? {
+        guard let endpoint else { return nil }
+        guard case .hostPort(let host, _) = endpoint else { return nil }
+        switch host {
+        case .ipv4(let ipv4):
+            return "\(ipv4)"
+        case .ipv6(let ipv6):
+            return "\(ipv6)"
+        case .name(let name, _):
+            return name
+        @unknown default:
+            return nil
+        }
+    }
+
+    private func parseAddressFromPeerId(_ peerId: String) -> String? {
+        guard peerId.hasPrefix("peer:") else { return nil }
+        return sanitizeAddress(String(peerId.dropFirst("peer:".count)))
+    }
+
+    private func sanitizeAddress(_ raw: String?) -> String? {
+        guard var token = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !token.isEmpty else {
+            return nil
+        }
+
+        if token.hasPrefix("host:") {
+            token = String(token.dropFirst("host:".count))
+        } else if token.hasPrefix("peer:") {
+            token = String(token.dropFirst("peer:".count))
+        } else if token.hasPrefix("ip:") {
+            token = String(token.dropFirst("ip:".count))
+        }
+
+        if token.hasPrefix("[") && token.hasSuffix("]") {
+            token = String(token.dropFirst().dropLast())
+        }
+        if token.contains(":"),
+           let dot = token.lastIndex(of: "."),
+           token[token.index(after: dot)...].allSatisfy({ $0.isNumber }) {
+            token = String(token[..<dot])
+        } else {
+            let parts = token.split(separator: ".")
+            if parts.count == 5,
+               parts.dropLast().allSatisfy({ Int($0) != nil }),
+               let port = Int(parts.last ?? ""),
+               (0...65535).contains(port) {
+                token = parts.dropLast().map(String.init).joined(separator: ".")
+            }
+        }
+
+        let sanitized = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        return sanitized.isEmpty ? nil : sanitized
     }
 
     /// 发送文件到指定设备
