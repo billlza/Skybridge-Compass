@@ -1,5 +1,6 @@
 import SwiftUI
 import UniformTypeIdentifiers
+import QuickLook
 
 /// 文件传输视图 - 与 Files app 集成，支持拖放和分享
 @available(iOS 17.0, *)
@@ -11,6 +12,8 @@ struct FileTransferView: View {
     
     @State private var showFilePicker = false
     @State private var targetDevice: DiscoveredDevice?
+    @State private var previewItem: FilePreviewItem?
+    @State private var fileOpenErrorMessage: String?
     
     var body: some View {
         NavigationStack {
@@ -62,6 +65,17 @@ struct FileTransferView: View {
                 allowsMultipleSelection: true
             ) { result in
                 handleFileSelection(result)
+            }
+            .sheet(item: $previewItem) { item in
+                FileQuickLookPreview(url: item.url)
+            }
+            .alert("无法打开文件", isPresented: Binding(
+                get: { fileOpenErrorMessage != nil },
+                set: { if !$0 { fileOpenErrorMessage = nil } }
+            )) {
+                Button("好的", role: .cancel) { fileOpenErrorMessage = nil }
+            } message: {
+                Text(fileOpenErrorMessage ?? "未知错误")
             }
         }
     }
@@ -209,7 +223,10 @@ struct FileTransferView: View {
                     .padding(.vertical, 40)
             } else {
                 ForEach(fileTransferManager.transferHistory) { transfer in
-                    FileTransferHistoryCard(transfer: transfer)
+                    FileTransferHistoryCard(
+                        transfer: transfer,
+                        onOpenFile: openLocalFile
+                    )
                 }
             }
         }
@@ -253,6 +270,15 @@ struct FileTransferView: View {
     
     private func clearHistory() {
         fileTransferManager.clearHistory()
+    }
+
+    private func openLocalFile(_ url: URL) {
+        let path = url.path
+        guard FileManager.default.fileExists(atPath: path) else {
+            fileOpenErrorMessage = "文件不存在，可能已被删除。\n路径：\(path)"
+            return
+        }
+        previewItem = FilePreviewItem(url: url)
     }
 }
 
@@ -409,7 +435,7 @@ struct FileTransferCard: View {
 
 struct FileTransferHistoryCard: View {
     let transfer: FileTransfer
-    @Environment(\.openURL) private var openURL
+    let onOpenFile: (URL) -> Void
 
     private var relativeTimestampText: String {
         let formatter = RelativeDateTimeFormatter()
@@ -463,7 +489,7 @@ struct FileTransferHistoryCard: View {
                         .lineLimit(1)
                     Spacer()
                     Button("打开") {
-                        openURL(URL(fileURLWithPath: localPath))
+                        onOpenFile(URL(fileURLWithPath: localPath))
                     }
                     .font(.caption2)
                     .buttonStyle(.borderless)
@@ -478,6 +504,46 @@ struct FileTransferHistoryCard: View {
     private func displayLocation(path: String) -> String {
         let url = URL(fileURLWithPath: path)
         return "Downloads/\(url.lastPathComponent)"
+    }
+}
+
+private struct FilePreviewItem: Identifiable {
+    let url: URL
+    var id: String { url.path }
+}
+
+private struct FileQuickLookPreview: UIViewControllerRepresentable {
+    let url: URL
+
+    func makeUIViewController(context: Context) -> QLPreviewController {
+        let controller = QLPreviewController()
+        controller.dataSource = context.coordinator
+        return controller
+    }
+
+    func updateUIViewController(_ controller: QLPreviewController, context: Context) {
+        context.coordinator.url = url
+        controller.reloadData()
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(url: url)
+    }
+
+    final class Coordinator: NSObject, QLPreviewControllerDataSource {
+        var url: URL
+
+        init(url: URL) {
+            self.url = url
+        }
+
+        func numberOfPreviewItems(in controller: QLPreviewController) -> Int {
+            1
+        }
+
+        func previewController(_ controller: QLPreviewController, previewItemAt index: Int) -> QLPreviewItem {
+            url as NSURL
+        }
     }
 }
 
