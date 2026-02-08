@@ -122,11 +122,13 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
 #if canImport(WebRTC)
     private var peerConnection: RTCPeerConnection?
     private var dataChannel: RTCDataChannel?
+    private var pendingRemoteICECandidates: [RTCIceCandidate] = []
 #endif
     
     private var isClosed = false
     private var sslHeld = false
     private var didNotifyDisconnected = false
+    private var hasRemoteDescription = false
     
     public init(sessionId: String, localDeviceId: String, role: Role, ice: ICEConfig) {
         self.sessionId = sessionId
@@ -146,8 +148,10 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         guard !isClosed else { return }
         isClosed = true
         didNotifyDisconnected = true
+        hasRemoteDescription = false
         onDisconnected = nil
 #if canImport(WebRTC)
+        pendingRemoteICECandidates.removeAll(keepingCapacity: false)
         dataChannel?.close()
         dataChannel = nil
         peerConnection?.close()
@@ -218,7 +222,9 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     public func start() throws {
         guard !isClosed else { throw WebRTCError.alreadyClosed }
         didNotifyDisconnected = false
+        hasRemoteDescription = false
 #if canImport(WebRTC)
+        pendingRemoteICECandidates.removeAll(keepingCapacity: false)
         WebRTCSSL.retain()
         sslHeld = true
         let factory = WebRTCPeerConnectionFactoryProvider.factory()
@@ -276,6 +282,8 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
                 self.logger.error("❌ setRemoteOffer failed: \(error.localizedDescription, privacy: .public)")
                 return
             }
+            self.hasRemoteDescription = true
+            self.flushPendingRemoteICECandidates()
             Task { @MainActor in
                 self.createAnswer()
             }
@@ -291,16 +299,23 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             guard let self else { return }
             if let error {
                 self.logger.error("❌ setRemoteAnswer failed: \(error.localizedDescription, privacy: .public)")
+                return
             }
+            self.hasRemoteDescription = true
+            self.flushPendingRemoteICECandidates()
         }
 #endif
     }
     
     public func addRemoteICECandidate(candidate: String, sdpMid: String?, sdpMLineIndex: Int32?) {
 #if canImport(WebRTC)
-        guard let pc = peerConnection else { return }
         let cand = RTCIceCandidate(sdp: candidate, sdpMLineIndex: sdpMLineIndex ?? 0, sdpMid: sdpMid)
-        pc.add(cand) { _ in }
+        guard hasRemoteDescription else {
+            pendingRemoteICECandidates.append(cand)
+            logger.debug("⏳ queue remote ICE candidate until remote description is set. sessionId=\(self.sessionId, privacy: .public) pending=\(self.pendingRemoteICECandidates.count, privacy: .public)")
+            return
+        }
+        addRemoteICECandidateInternal(cand)
 #endif
     }
     
@@ -317,6 +332,28 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     }
     
 #if canImport(WebRTC)
+    private func addRemoteICECandidateInternal(_ candidate: RTCIceCandidate) {
+        guard let pc = peerConnection else { return }
+        pc.add(candidate) { [weak self] error in
+            guard let self else { return }
+            if let error {
+                self.logger.error("⚠️ addIceCandidate failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+
+    private func flushPendingRemoteICECandidates() {
+        guard hasRemoteDescription else { return }
+        guard !pendingRemoteICECandidates.isEmpty else { return }
+
+        let pending = pendingRemoteICECandidates
+        pendingRemoteICECandidates.removeAll(keepingCapacity: false)
+        logger.info("🔄 applying queued remote ICE candidates. sessionId=\(self.sessionId, privacy: .public) count=\(pending.count, privacy: .public)")
+        for candidate in pending {
+            addRemoteICECandidateInternal(candidate)
+        }
+    }
+
     private func createOffer() {
         guard let pc = peerConnection else { return }
         let constraints = RTCMediaConstraints(mandatoryConstraints: ["OfferToReceiveAudio": "false", "OfferToReceiveVideo": "false"], optionalConstraints: nil)

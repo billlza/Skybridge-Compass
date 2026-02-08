@@ -422,7 +422,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         readiness = .idle
     }
 
-    private func sendEnvelope(_ envelope: WebRTCSignalingEnvelope, retries: Int = 0) async {
+    private func sendEnvelope(_ envelope: WebRTCSignalingEnvelope, retries: Int = 2) async {
         var attemptsLeft = max(0, retries)
         while true {
             do {

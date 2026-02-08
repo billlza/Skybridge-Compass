@@ -621,7 +621,10 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     // MARK: - WebRTC Connection
 
     private func ensureSignalingConnected() {
-        if signalingClient != nil { return }
+        if let client = signalingClient {
+            Task { await client.connect() }
+            return
+        }
         guard let url = URL(string: SkyBridgeServerConfig.signalingWebSocketURL) else { return }
         let client = WebSocketSignalingClient(url: url)
         self.signalingClient = client
@@ -770,11 +773,13 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         return RemoteConnection(id: sessionID, deviceName: qrData.deviceName, transport: .webrtc(session))
     }
 
-    private func sendSignal(_ env: WebRTCSignalingEnvelope, retries: Int = 0) async {
+    private func sendSignal(_ env: WebRTCSignalingEnvelope, retries: Int = 2) async {
         var attemptsLeft = max(0, retries)
         while true {
             do {
-                if signalingClient == nil {
+                if let signalingClient {
+                    await signalingClient.connect()
+                } else {
                     ensureSignalingConnected()
                 }
                 guard let signalingClient else {
@@ -785,7 +790,11 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             } catch {
                 if let wsError = error as? WebSocketSignalingClient.SignalingError,
                    case .notConnected = wsError {
-                    ensureSignalingConnected()
+                    if let signalingClient {
+                        await signalingClient.connect()
+                    } else {
+                        ensureSignalingConnected()
+                    }
                 }
                 if attemptsLeft == 0 {
                     logger.error("❌ signaling send failed: type=\(env.type.rawValue, privacy: .public) session=\(env.sessionId, privacy: .public) err=\(error.localizedDescription, privacy: .public)")
@@ -799,7 +808,10 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 
     private func handleSignalingEnvelope(_ env: WebRTCSignalingEnvelope) {
         guard env.from != deviceFingerprint else { return }
-        guard let session = webrtcSessionsBySessionId[env.sessionId] else { return }
+        guard let session = webrtcSessionsBySessionId[env.sessionId] else {
+            logger.debug("ℹ️ drop signaling envelope without local session: type=\(env.type.rawValue, privacy: .public) session=\(env.sessionId, privacy: .public)")
+            return
+        }
 
         // 记录对端 id（用于未来做定向路由）
         if webrtcRemoteIdBySessionId[env.sessionId] == nil {
