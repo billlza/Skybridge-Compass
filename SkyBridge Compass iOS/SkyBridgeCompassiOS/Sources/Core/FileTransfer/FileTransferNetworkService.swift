@@ -54,7 +54,7 @@ public actor FileTransferNetworkService {
     // MARK: - Public Methods
     
     /// 启动监听服务
-    public func startListening() throws {
+    public func startListening() async throws {
         guard !isListening else { return }
         
         let parameters = NWParameters.tcp
@@ -71,12 +71,7 @@ public actor FileTransferNetworkService {
         
         // 配置 Bonjour 以便 macOS 端发现 (修复"未建立可用文件传输通道"错误)
         #if canImport(UIKit)
-        let deviceName: String
-        if Thread.isMainThread {
-            deviceName = UIDevice.current.name
-        } else {
-            deviceName = DispatchQueue.main.sync { UIDevice.current.name }
-        }
+        let deviceName = await Self.currentDeviceName()
         #else
         let deviceName = "iOS Device"
         #endif
@@ -107,6 +102,13 @@ public actor FileTransferNetworkService {
         
         SkyBridgeLogger.shared.info("📁 文件传输服务已启动，端口: \(self.port)")
     }
+
+    #if canImport(UIKit)
+    @MainActor
+    private static func currentDeviceName() -> String {
+        UIDevice.current.name
+    }
+    #endif
     
     /// 停止监听服务
     public func stopListening() {
