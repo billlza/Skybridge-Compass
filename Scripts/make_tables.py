@@ -130,7 +130,7 @@ def _artifact_date_from_main_tex() -> str | None:
     Prefer the artifact date pinned in the main paper TeX to avoid accidentally
     selecting placeholder/future artifacts (e.g., 2099-01-01).
     """
-    tex = PROJECT_ROOT / "Docs" / "IEEE_Paper_SkyBridge_Compass_patched.tex"
+    tex = PROJECT_ROOT / "Docs" / "TDSC-2026-01-0318_IEEE_Paper_SkyBridge_Compass_patched.tex"
     if not tex.exists():
         return None
     try:

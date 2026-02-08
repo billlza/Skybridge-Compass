@@ -87,8 +87,8 @@ swift test
 
 ## 论文与 PDF 源码位置
 
-- 主论文 LaTeX：`Docs/IEEE_Paper_SkyBridge_Compass_patched.tex`
-- Supplementary LaTeX：`Docs/supplementary.tex`
+- 主论文 LaTeX：`Docs/TDSC-2026-01-0318_IEEE_Paper_SkyBridge_Compass_patched.tex`
+- Supplementary LaTeX：`Docs/TDSC-2026-01-0318_supplementary.tex`
 - 一键编译脚本：`./compile_paper.sh`（会自动生成 figures + 编译主论文和 Supplementary）
 
 ## 可复现实验（Artifact 复核）
@@ -182,7 +182,7 @@ ARTIFACT_DATE=2026-01-16 python3 Scripts/aggregate_realnet.py
 
 - `git rev-parse HEAD` 应为 `8a68fa6e0fe78147d2b18d3287681f5d07c74afd`
 - `git describe --tags --always` 应输出 `artifact-v1`（或等价形式如 `artifact-v1-0-g8a68fa6`）
-- 生成的 PDF：`Docs/IEEE_Paper_SkyBridge_Compass_patched.pdf` 与 `Docs/supplementary.pdf`
+- 生成的 PDF：`Docs/TDSC-2026-01-0318_IEEE_Paper_SkyBridge_Compass_patched.pdf` 与 `Docs/TDSC-2026-01-0318_supplementary.pdf`
 - CSV 输出目录：`Artifacts/`
 
 ## Release 校验

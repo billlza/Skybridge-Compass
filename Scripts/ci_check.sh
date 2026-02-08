@@ -35,14 +35,15 @@ fi
 # 3. Compile and check PDF
 echo "[3/5] Compiling PDF..."
 cd "$DOCS_DIR"
-pdflatex -interaction=nonstopmode IEEE_Paper_SkyBridge_Compass_patched.tex > /dev/null 2>&1
-pdflatex -interaction=nonstopmode IEEE_Paper_SkyBridge_Compass_patched.tex > /dev/null 2>&1
-pdflatex -interaction=nonstopmode supplementary.tex > /dev/null 2>&1
+pdflatex -interaction=nonstopmode TDSC-2026-01-0318_supplementary.tex > /dev/null 2>&1
+pdflatex -interaction=nonstopmode TDSC-2026-01-0318_IEEE_Paper_SkyBridge_Compass_patched.tex > /dev/null 2>&1
+pdflatex -interaction=nonstopmode TDSC-2026-01-0318_supplementary.tex > /dev/null 2>&1
+pdflatex -interaction=nonstopmode TDSC-2026-01-0318_IEEE_Paper_SkyBridge_Compass_patched.tex > /dev/null 2>&1
 echo "  DONE: PDFs compiled"
 
 # 4. Check PDF text extraction for soft hyphens
 echo "[4/5] Checking PDF text for soft hyphens..."
-pdftotext IEEE_Paper_SkyBridge_Compass_patched.pdf /tmp/ci_paper_text.txt
+pdftotext TDSC-2026-01-0318_IEEE_Paper_SkyBridge_Compass_patched.pdf /tmp/ci_paper_text.txt
 SOFT_HYPHEN=$(python3 -c "
 text = open('/tmp/ci_paper_text.txt').read()
 print(text.count('\u00ad'))
@@ -56,7 +57,7 @@ fi
 
 # 5. Check for undefined references
 echo "[5/5] Checking for undefined references..."
-UNDEF=$(grep -c "undefined" IEEE_Paper_SkyBridge_Compass_patched.log 2>/dev/null || true)
+UNDEF=$(grep -c "undefined" TDSC-2026-01-0318_IEEE_Paper_SkyBridge_Compass_patched.log 2>/dev/null || true)
 UNDEF=${UNDEF:-0}
 if [ "$UNDEF" -gt 0 ]; then
     echo "  WARN: $UNDEF undefined reference warnings (run pdflatex again)"

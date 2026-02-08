@@ -7,10 +7,10 @@ set -euo pipefail
 PROJECT_DIR="/Users/bill/Desktop/SkyBridge Compass Pro release"
 DOCS_DIR="$PROJECT_DIR/Docs"
 OUT_DIR="$PROJECT_DIR/out"
-TEX_FILE="IEEE_Paper_SkyBridge_Compass_patched.tex"
-PDF_FILE="IEEE_Paper_SkyBridge_Compass_patched.pdf"
-SUPP_TEX_FILE="supplementary.tex"
-SUPP_PDF_FILE="supplementary.pdf"
+TEX_FILE="TDSC-2026-01-0318_IEEE_Paper_SkyBridge_Compass_patched.tex"
+PDF_FILE="TDSC-2026-01-0318_IEEE_Paper_SkyBridge_Compass_patched.pdf"
+SUPP_TEX_FILE="TDSC-2026-01-0318_supplementary.tex"
+SUPP_PDF_FILE="TDSC-2026-01-0318_supplementary.pdf"
 
 SKIP_FIGURES=0
 SKIP_CHECKS=0

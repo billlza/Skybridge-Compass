@@ -15,7 +15,7 @@
 \usepackage{xr-hyper}
 % Allow supplementary to reference main-paper labels when the .aux exists.
 \makeatletter
-\IfFileExists{IEEE_Paper_SkyBridge_Compass_patched.aux}{\externaldocument{IEEE_Paper_SkyBridge_Compass_patched}}{}
+\IfFileExists{TDSC-2026-01-0318_IEEE_Paper_SkyBridge_Compass_patched.aux}{\externaldocument{TDSC-2026-01-0318_IEEE_Paper_SkyBridge_Compass_patched}}{}
 \makeatother
 
 % Submission format: suppress running headers and page numbers.
@@ -38,12 +38,13 @@
 \newcommand{\real}[1]{#1}
 \newcommand{\artifacturl}{https://github.com/billlza/Skybridge-Compass}
 \newcommand{\artifacturlshort}{https://github.com/billlza/Skybridge-Compass}
-\newcommand{\artifacttag}{artifact-v3}
-\newcommand{\artifactsha}{c23a8b4a3d01}
-\newcommand{\artifactzipurl}{\artifacturl/archive/refs/tags/\artifacttag.zip}
-\newcommand{\artifactzipsha}{c370f07d\allowbreak{}a6fe825c\allowbreak{}2132f447\allowbreak{}db3287e0\allowbreak{}689d0344\allowbreak{}b26b4d97\allowbreak{}ff4f043d\allowbreak{}2cbac1e3}
-\newcommand{\artifacttarurl}{\artifacturl/archive/refs/tags/\artifacttag.tar.gz}
-\newcommand{\artifacttarsha}{ff467cdc\allowbreak{}761a9a65\allowbreak{}28de871f\allowbreak{}0fd8663e\allowbreak{}788e0aa7\allowbreak{}a6af5b88\allowbreak{}83199a2b\allowbreak{}e68642c9}
+\newcommand{\artifacttag}{tdsc-2026-01-0318-ios-sim-fix}
+\newcommand{\artifactsha}{e127b1ead488}
+\newcommand{\artifactshafull}{e127b1ead48882dc00ad5cc03bebcd13b39ddaea}
+\newcommand{\artifactzipurl}{\artifacturl/archive/\artifactshafull.zip}
+\newcommand{\artifactzipsha}{833251a2\allowbreak{}70630434\allowbreak{}5d5419ba\allowbreak{}da06322d\allowbreak{}4f3327f3\allowbreak{}a4d7bb37\allowbreak{}dd2f72fd\allowbreak{}b361ed40}
+\newcommand{\artifacttarurl}{\artifacturl/archive/\artifactshafull.tar.gz}
+\newcommand{\artifacttarsha}{83535062\allowbreak{}cabeaf3f\allowbreak{}788f8ebd\allowbreak{}52536ec8\allowbreak{}9a591881\allowbreak{}85ba8a0a\allowbreak{}9fcb1cfe\allowbreak{}629af39f}
 \providecommand{\tightlist}{%
 	  \setlength{\itemsep}{0pt}\setlength{\parskip}{0pt}}
 
@@ -160,10 +161,10 @@ Artifact release:
 \begin{itemize}\tightlist
 \raggedright
 \item URL: \url{\artifacturl}
-\item Tag: \texttt{\artifacttag}
+\item Git ref: \texttt{\artifacttag}
 \item Commit: \texttt{\artifactsha}
-\item Source archive: \href{\artifactzipurl}{\texttt{\artifacttag.zip}} SHA256=\texttt{\artifactzipsha}
-\item Source archive: \href{\artifacttarurl}{\texttt{\artifacttag.tar.gz}} SHA256=\texttt{\artifacttarsha}
+\item Source archive: \href{\artifactzipurl}{\texttt{\artifactsha.zip}} SHA256=\texttt{\artifactzipsha}
+\item Source archive: \href{\artifacttarurl}{\texttt{\artifactsha.tar.gz}} SHA256=\texttt{\artifacttarsha}
 \end{itemize}
 
 \section*{Supplementary Methods and Details}
@@ -935,7 +936,7 @@ compile-fail harness tests correctly produce compile errors.
 
 Table~\ref{tab:artifact-map} maps implementation components to source
 files in the artifact repository (\href{\artifacturl}{\artifacturlshort},
-tag=\texttt{\artifacttag}).
+ref=\texttt{\artifacttag}, commit=\texttt{\artifactsha}).
 
 \begin{table}[!t]
 \centering
@@ -945,17 +946,20 @@ tag=\texttt{\artifacttag}).
 \toprule
 Component & File (Lines) \\
 \midrule
-Provider Protocol & \mbox{\texttt{CryptoProviderProtocol.swift}} (L24--110) \\
-Handshake Types & \mbox{\texttt{HandshakeTypes.swift}} (L270--289) \\
-Provider Factory & \mbox{\texttt{CryptoProviderFactory.swift}} (L18--139) \\
-Handshake Driver & \mbox{\texttt{HandshakeDriver.swift}} (L88--166, L992--1012) \\
-Handshake Context & \mbox{\texttt{HandshakeContext.swift}} (L27--100, L848--900) \\
-Secure Bytes & \mbox{\texttt{SecureBytes.swift}} (L18--99) \\
-Message Signatures & \mbox{\texttt{HandshakeMessages.swift}} (L555--567, L797--818) \\
-Apple PQC Provider & \mbox{\texttt{ApplePQCProvider.swift}} (L22--120) \\
-Security Events & \mbox{\texttt{SecurityEventEmitter.swift}} (L21--140) \\
-SE Signing & {\scriptsize\texttt{SecureEnclaveSigningCallback.swift}} (L40--94) \\
-Signature Selector & {\tiny\texttt{PreNegotiationSignatureSelector.swift}} (L69--96) \\
+Provider Protocol & {\scriptsize\texttt{Sources/SkyBridgeCore/P2P/CryptoProviderProtocol.swift}} (L24--113) \\
+Handshake Types & {\scriptsize\texttt{Sources/SkyBridgeCore/P2P/HandshakeTypes.swift}} (L297--320) \\
+Provider Factory & {\scriptsize\texttt{Sources/SkyBridgeCore/P2P/CryptoProviderFactory.swift}} (L18--179) \\
+Handshake Driver & {\scriptsize\texttt{Sources/SkyBridgeCore/P2P/HandshakeDriver.swift}} (L258--338, L1042--1145) \\
+Handshake Context & {\scriptsize\texttt{Sources/SkyBridgeCore/P2P/HandshakeContext.swift}} (L27--100, L862--933) \\
+Secure Bytes & {\scriptsize\texttt{Sources/SkyBridgeCore/P2P/SecureBytes.swift}} (L25--99) \\
+Message Signatures & {\scriptsize\texttt{Sources/SkyBridgeCore/P2P/HandshakeMessages.swift}} (L557--569, L801--821) \\
+Apple PQC Provider & {\scriptsize\texttt{Sources/SkyBridgeCore/P2P/Providers/ApplePQCProvider.swift}} (L27--152) \\
+Security Events & {\scriptsize\texttt{Sources/SkyBridgeCore/Security/SecurityEventEmitter.swift}} (L22--136) \\
+SE Signing & {\scriptsize\texttt{Sources/SkyBridgeCore/P2P/SecureEnclaveSigningCallback.swift}} (L40--94) \\
+Signature Selector & {\scriptsize\texttt{Sources/SkyBridgeCore/P2P/PreNegotiationSignatureSelector.swift}} (L69--96) \\
+Route-Aware Discovery & {\scriptsize\texttt{Sources/SkyBridgeCore/P2P/P2PDiscoveryService.swift}} (L278--457) \\
+Connection State Guarding & {\scriptsize\texttt{Sources/SkyBridgeCore/DeviceDiscovery/UnifiedOnlineDeviceManager.swift}} (L940--989) \\
+Active Transfer Route Selection & {\scriptsize\texttt{Sources/SkyBridgeCore/FileTransfer/FileTransferManager.swift}} (L104--213) \\
 \bottomrule
 \end{tabular}
 \end{table}

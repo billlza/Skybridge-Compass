@@ -2133,10 +2133,10 @@ def postprocess_docx_ieee(docx_path: Path, author_lines: list[str] | None = None
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--docs-dir", required=True, help="Docs directory containing .tex/.aux and figures/")
-    ap.add_argument("--tex", default="IEEE_Paper_SkyBridge_Compass_patched.tex", help="Main LaTeX file name")
-    ap.add_argument("--aux", default="IEEE_Paper_SkyBridge_Compass_patched.aux", help="Main AUX file name")
-    ap.add_argument("--supp-aux", default="supplementary.aux", help="Supplementary AUX file name (optional)")
-    ap.add_argument("--out-docx", default="IEEE_Paper_SkyBridge_Compass_patched.docx", help="Output DOCX file name")
+    ap.add_argument("--tex", default="TDSC-2026-01-0318_IEEE_Paper_SkyBridge_Compass_patched.tex", help="Main LaTeX file name")
+    ap.add_argument("--aux", default="TDSC-2026-01-0318_IEEE_Paper_SkyBridge_Compass_patched.aux", help="Main AUX file name")
+    ap.add_argument("--supp-aux", default="TDSC-2026-01-0318_supplementary.aux", help="Supplementary AUX file name (optional)")
+    ap.add_argument("--out-docx", default="TDSC-2026-01-0318_IEEE_Paper_SkyBridge_Compass_patched.docx", help="Output DOCX file name")
     ap.add_argument("--backup-existing", action="store_true", help="Backup existing output docx with timestamp suffix")
     ap.add_argument(
         "--reference-doc",
@@ -2187,7 +2187,7 @@ def main() -> int:
 
     # Extract author affiliation/email lines for DOCX front-matter.
     # Prefer IEEEtran compsoc \IEEEcompsocthanksitem blocks from the main TeX (has multi-author info),
-    # fall back to supplementary.tex's simple \author{...\\...} if needed.
+    # fall back to TDSC supplementary.tex's simple \author{...\\...} if needed.
     def _clean_tex_inline(s: str) -> str:
         s = re.sub(r"%.*$", "", s, flags=re.MULTILINE)
         # Simple inline macro stripping for display in Word (keep content)
@@ -2216,7 +2216,7 @@ def main() -> int:
 
     if not author_lines:
         try:
-            supp_tex = (docs / "supplementary.tex").read_text(encoding="utf-8", errors="ignore")
+            supp_tex = (docs / "TDSC-2026-01-0318_supplementary.tex").read_text(encoding="utf-8", errors="ignore")
             m = re.search(r"\\author\{([\s\S]*?)\}", supp_tex)
             if m:
                 raw = m.group(1)
@@ -2394,5 +2394,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
 

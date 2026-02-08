@@ -45,9 +45,9 @@
 }
 \usepackage{xr-hyper}
 % Allow main paper to reference Supplementary Table/Figure numbers via \ref{}.
-% Build supplementary.tex at least once so supplementary.aux exists.
+% Build TDSC supplementary once so TDSC supplementary .aux exists.
 \makeatletter
-\IfFileExists{supplementary.aux}{\externaldocument{supplementary}}{}
+\IfFileExists{TDSC-2026-01-0318_supplementary.aux}{\externaldocument{TDSC-2026-01-0318_supplementary}}{}
 \makeatother
 \usepackage{xcolor}
 \usepackage{fvextra}
@@ -132,18 +132,18 @@
 
 \newcommand{\artifacturl}{https://github.com/billlza/Skybridge-Compass}
 \newcommand{\artifacturlshort}{https://github.com/billlza/Skybridge-Compass}
-\newcommand{\artifacttag}{artifact-v3}
-\newcommand{\artifactsha}{c23a8b4a3d01}
-\newcommand{\artifactshafull}{c23a8b4a3d01acf71faf5615e184ee44594b7cae}
-\newcommand{\artifactzipurl}{\artifacturl/archive/refs/tags/\artifacttag.zip}
-\newcommand{\artifactzipsha}{c370f07d\allowbreak\hspace{0pt}a6fe825c\allowbreak\hspace{0pt}2132f447\allowbreak\hspace{0pt}db3287e0\allowbreak\hspace{0pt}689d0344\allowbreak\hspace{0pt}b26b4d97\allowbreak\hspace{0pt}ff4f043d\allowbreak\hspace{0pt}2cbac1e3}
-\newcommand{\artifacttarurl}{\artifacturl/archive/refs/tags/\artifacttag.tar.gz}
-\newcommand{\artifacttarsha}{ff467cdc\allowbreak\hspace{0pt}761a9a65\allowbreak\hspace{0pt}28de871f\allowbreak\hspace{0pt}0fd8663e\allowbreak\hspace{0pt}788e0aa7\allowbreak\hspace{0pt}a6af5b88\allowbreak\hspace{0pt}83199a2b\allowbreak\hspace{0pt}e68642c9}
+\newcommand{\artifacttag}{tdsc-2026-01-0318-ios-sim-fix}
+\newcommand{\artifactsha}{e127b1ead488}
+\newcommand{\artifactshafull}{e127b1ead48882dc00ad5cc03bebcd13b39ddaea}
+\newcommand{\artifactzipurl}{\artifacturl/archive/\artifactshafull.zip}
+\newcommand{\artifactzipsha}{833251a2\allowbreak\hspace{0pt}70630434\allowbreak\hspace{0pt}5d5419ba\allowbreak\hspace{0pt}da06322d\allowbreak\hspace{0pt}4f3327f3\allowbreak\hspace{0pt}a4d7bb37\allowbreak\hspace{0pt}dd2f72fd\allowbreak\hspace{0pt}b361ed40}
+\newcommand{\artifacttarurl}{\artifacturl/archive/\artifactshafull.tar.gz}
+\newcommand{\artifacttarsha}{83535062\allowbreak\hspace{0pt}cabeaf3f\allowbreak\hspace{0pt}788f8ebd\allowbreak\hspace{0pt}52536ec8\allowbreak\hspace{0pt}9a591881\allowbreak\hspace{0pt}85ba8a0a\allowbreak\hspace{0pt}9fcb1cfe\allowbreak\hspace{0pt}629af39f}
 \newcommand{\artifactdate}{2026-01-23}
 \newcommand{\artifactdateSystemImpact}{2026-01-23}
 \newcommand{\artifactcsv}[1]{\texttt{#1\_\artifactdate.csv}}
 \newcommand{\artifactpath}[1]{\texttt{Artifacts/#1\_\artifactdate.csv}}
-\newcommand{\implref}[2]{Implementation reference: \href{\artifacturl}{\artifacturlshort} (tag=\texttt{\artifacttag}, commit=\texttt{\artifactsha}), file: \texttt{#1}, lines: #2.}
+\newcommand{\implref}[2]{Implementation reference: \href{\artifacturl}{\artifacturlshort} (ref=\texttt{\artifacttag}, commit=\texttt{\artifactsha}), file: \texttt{#1}, lines: #2.}
 
 
 \title{SkyBridge Compass: A Crypto-Agile P2P Handshake Framework for Remote Desktop and File Transfer with Auditable Downgrade Policy and Post-Quantum Readiness}
@@ -648,6 +648,15 @@ Classic-only & PQC available & Classic established & Initiator policy respected 
 boundary (dashed) and policy guard (diamond).}
 \label{fig:architecture}
 \end{figure*}
+
+\textbf{Implementation alignment (GitHub HEAD, 2026-02-08).} In the
+current code revision, connection orchestration for the remote
+desktop/file-transfer path is route-aware and authentication-gated:
+local discovery can prefer USB-capable host endpoints, control-channel
+connections are promoted to ``connected'' only after handshake
+authentication, and active file-transfer routing prioritizes live
+authenticated sessions before fallback candidates. These implementation
+surfaces are enumerated in the Supplementary Artifact Map.
 
 \subsection{CryptoProvider
 Protocol}\label{b.-cryptoprovider-protocol}
@@ -1464,7 +1473,7 @@ configurations. Classic handshakes remain near 2~ms (2.3~ms at p99); CryptoKit
 PQC stays under 6.7~ms at p99 with variance dominated by ML-DSA signature
 verification overhead. Extended statistics (mean/p50/p95/p99, std) are
 available in Supplementary Tables~\ref{tab:supp-latency}--\ref{tab:supp-rtt}
-(submitted as separate file \texttt{supplementary.pdf}).
+(submitted as separate file \texttt{TDSC-2026-01-0318\_supplementary.pdf}).
 
 \begin{figure}
 \pandocbounded{{\centering\includegraphics[keepaspectratio,width=\columnwidth]{figures/fig_handshake_latency.pdf}\par}}
@@ -1719,11 +1728,11 @@ This work received no external funding.
 Artifact release:
 \begin{itemize}
 \item URL: \url{\artifacturl}
-\item Tag: \texttt{\artifacttag}
+\item Git ref: \texttt{\artifacttag}
 \item Commit: \texttt{\artifactsha}
-\item Source archive: \href{\artifactzipurl}{\texttt{\artifacttag.zip}}
+\item Source archive: \href{\artifactzipurl}{\texttt{\artifactsha.zip}}
   \par\noindent SHA256=\texttt{\artifactzipsha}
-\item Source archive: \href{\artifacttarurl}{\texttt{\artifacttag.tar.gz}}
+\item Source archive: \href{\artifacttarurl}{\texttt{\artifactsha.tar.gz}}
   \par\noindent SHA256=\texttt{\artifacttarsha}
 \end{itemize}
 See the repository README for environment details and CSV schemas.
