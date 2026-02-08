@@ -15,10 +15,25 @@ set -euo pipefail
 #    Scripts/package_app.sh
 # 3) 生成的 .app 会位于 dist/SkyBridge\ Compass\ Pro.app
 #
-# 注意：脚本使用临时 ad-hoc 签名用于本机验证。后续可替换为正式团队证书并进行 Notarization。
+# 注意：脚本优先使用 Developer ID / Apple Development 证书签名；
+# 若本机无可用证书则回退 ad-hoc（此时特权 Helper 安装可能失败）。
 
 function log() {
   echo "[package] $1"
+}
+
+function select_identity() {
+  local dev_id
+  local apple_dev
+  dev_id=$(security find-identity -v -p codesigning | awk -F '"' '/Developer ID Application/ {print $2; exit}')
+  apple_dev=$(security find-identity -v -p codesigning | awk -F '"' '/Apple Development/ {print $2; exit}')
+  if [[ -n "${dev_id}" ]]; then
+    echo "${dev_id}"
+  elif [[ -n "${apple_dev}" ]]; then
+    echo "${apple_dev}"
+  else
+    echo ""
+  fi
 }
 
 ROOT_DIR=$(pwd)
@@ -29,6 +44,7 @@ CONTENTS_DIR="${APP_DIR}/Contents"
 MACOS_DIR="${CONTENTS_DIR}/MacOS"
 RES_DIR="${CONTENTS_DIR}/Resources"
 FW_DIR="${CONTENTS_DIR}/Frameworks"
+SIGN_IDENTITY="${IDENTITY:-$(select_identity)}"
 
 # 中文注释：可执行文件与资源 bundle 名称（来自 Xcode 构建输出）
 EXECUTABLE="SkyBridgeCompassApp"
@@ -124,14 +140,30 @@ HELPER_NAME="com.skybridge.PowerMetricsHelper"
 HELPER_EXECUTABLE="PowerMetricsHelper"
 HELPER_SRC_DIR="${ROOT_DIR}/Sources/PowerMetricsHelper"
 HELPER_DST_DIR="${CONTENTS_DIR}/Library/LaunchDaemons/${HELPER_NAME}"
+HELPER_BIN_PATH="${BUILD_DIR}/${HELPER_EXECUTABLE}"
+
+# 某些构建路径只会产出主 App，可在这里补构建 Helper
+if [[ ! -x "${HELPER_BIN_PATH}" ]]; then
+  log "未检测到 PowerMetricsHelper，尝试单独构建..."
+  if xcodebuild -workspace .swiftpm/xcode/package.xcworkspace \
+                -scheme "${HELPER_EXECUTABLE}" \
+                -configuration Release \
+                -destination 'platform=macOS' \
+                -derivedDataPath "${ROOT_DIR}/.build/xcode" \
+                build >/dev/null 2>&1; then
+    log "PowerMetricsHelper 构建完成"
+  else
+    log "PowerMetricsHelper 构建失败，将继续打包主应用（高级监控功能不可用）"
+  fi
+fi
 
 # 检查 Helper 可执行文件是否存在
-if [[ -x "${BUILD_DIR}/${HELPER_EXECUTABLE}" ]]; then
+if [[ -x "${HELPER_BIN_PATH}" ]]; then
   log "打包 PowerMetricsHelper 到 .app/Contents/Library/LaunchDaemons/"
   mkdir -p "${HELPER_DST_DIR}"
   
   # 拷贝 Helper 可执行文件（重命名为 plist 中指定的名称）
-  cp "${BUILD_DIR}/${HELPER_EXECUTABLE}" "${HELPER_DST_DIR}/${HELPER_NAME}"
+  cp "${HELPER_BIN_PATH}" "${HELPER_DST_DIR}/${HELPER_NAME}"
   chmod +x "${HELPER_DST_DIR}/${HELPER_NAME}"
   
   # 拷贝 launchd plist 文件到 LaunchDaemons 目录
@@ -139,17 +171,34 @@ if [[ -x "${BUILD_DIR}/${HELPER_EXECUTABLE}" ]]; then
   
   # 拷贝 Info.plist 到 Helper bundle 目录
   cp "${HELPER_SRC_DIR}/Info.plist" "${HELPER_DST_DIR}/"
+
+  # Helper bundle 在 LaunchDaemons 目录，需显式签名，否则主 App 深度签名可能不会覆盖到它
+  if [[ -n "${SIGN_IDENTITY}" ]]; then
+    codesign --force --sign "${SIGN_IDENTITY}" --timestamp "${HELPER_DST_DIR}" >/dev/null 2>&1 || {
+      log "警告：Helper 显式签名失败，后续将依赖主 App 深度签名"
+    }
+  fi
   
   log "PowerMetricsHelper 打包完成"
 else
-  log "跳过 PowerMetricsHelper（未找到可执行文件：${BUILD_DIR}/${HELPER_EXECUTABLE}）"
+  log "跳过 PowerMetricsHelper（未找到可执行文件：${HELPER_BIN_PATH}）"
 fi
 
-# 临时 ad-hoc 签名（包含深度资源）
-log "进行 ad-hoc 签名（深度签名）"
-codesign --force --deep --sign - "${APP_DIR}" >/dev/null 2>&1 || {
-  echo "警告：codesign 签名失败，但可在开发机上运行（未 notarize）。" >&2
-}
+# 优先使用正式证书签名；未配置证书时回退 ad-hoc
+if [[ -n "${SIGN_IDENTITY}" ]]; then
+  log "使用证书签名：${SIGN_IDENTITY}"
+  codesign --force --deep --sign "${SIGN_IDENTITY}" --options runtime --timestamp "${APP_DIR}" >/dev/null 2>&1 || {
+    echo "警告：证书签名失败，回退 ad-hoc 签名。" >&2
+    codesign --force --deep --sign - "${APP_DIR}" >/dev/null 2>&1 || {
+      echo "警告：codesign 签名失败，但可在开发机上运行（未 notarize）。" >&2
+    }
+  }
+else
+  log "未检测到可用证书，使用 ad-hoc 签名"
+  codesign --force --deep --sign - "${APP_DIR}" >/dev/null 2>&1 || {
+    echo "警告：codesign 签名失败，但可在开发机上运行（未 notarize）。" >&2
+  }
+fi
 
 # 验证签名（非强制）
 if codesign --verify --deep --strict --verbose=2 "${APP_DIR}" >/dev/null 2>&1; then
