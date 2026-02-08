@@ -366,6 +366,9 @@ public struct HandshakeMessageA: Sendable {
     
     /// 从二进制格式解码
     public static func decode(from data: Data) throws -> HandshakeMessageA {
+        // Accept SBP1 handshake padding (Phase C1): unwrap before decoding.
+        // This matches macOS implementation for consistent behavior.
+        let data = HandshakePadding.unwrapIfNeeded(data, label: "HandshakeMessageA.decode")
         guard data.count >= 5 else {
             throw HandshakeError.failed(.invalidMessageFormat("MessageA too short"))
         }
@@ -646,6 +649,8 @@ public struct HandshakeMessageB: Sendable {
     
     /// 从二进制格式解码
     public static func decode(from data: Data) throws -> HandshakeMessageB {
+        // Accept SBP1 handshake padding (Phase C1): unwrap before decoding.
+        let data = HandshakePadding.unwrapIfNeeded(data, label: "HandshakeMessageB.decode")
         guard data.count >= 5 else {
             throw HandshakeError.failed(.invalidMessageFormat("MessageB too short"))
         }
@@ -816,6 +821,8 @@ public struct HandshakeFinished: Sendable {
     }
     
     public static func decode(from data: Data) throws -> HandshakeFinished {
+        // Accept SBP1 handshake padding (Phase C1): unwrap before decoding.
+        let data = HandshakePadding.unwrapIfNeeded(data, label: "HandshakeFinished.decode")
         guard data.count == Self.encodedLength else {
             throw HandshakeError.failed(.invalidMessageFormat("Finished length mismatch"))
         }

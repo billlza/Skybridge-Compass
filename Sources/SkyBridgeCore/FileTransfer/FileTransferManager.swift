@@ -101,7 +101,66 @@ public class FileTransferManager: BaseManager {
         logger.info("📂 接收目录已更新: \(url?.path ?? "默认Downloads/SkyBridge")")
     }
 
- /// 发送文件到指定设备
+    /// Sends a file to the currently active P2P peer.
+    /// This resolves the peer from ConnectionPresenceService (Authenticated) or P2PConnectionService (UDP) as fallback.
+    public func sendFileToFirstActivePeer(at url: URL) async throws {
+        // 1. Try ConnectionPresenceService (Authenticated PQC session) - Preferred
+        // The handshake logic populates this service with the peer's address.
+        if let presence = ConnectionPresenceService.shared.activeConnections.first,
+           let address = presence.address {
+            try await sendFile(
+                at: url,
+                to: presence.id,
+                deviceName: presence.displayName,
+                ipAddress: address,
+                port: 8080
+            )
+            return
+        }
+        
+        // 2. Fallback: Get functional network connection (for IP) from P2PConnectionService
+        let activeInfos = await P2PConnectionService.shared.currentConnections()
+        // We only care about ready connections
+        guard let activeInfo = activeInfos.first(where: { $0.isReady }),
+              let endpoint = activeInfo.endpoint else {
+             // If presence exists but no address, and no UDP connection -> Error
+             throw NSError(domain: "SkyBridge.FileTransfer", code: -1001, userInfo: [NSLocalizedDescriptionKey: "未建立可用 P2P 连接 (No Authenticated Peer or UDP Link)"])
+        }
+        
+        // 3. Resolve IP from endpoint (Fallback path)
+        var targetIP: String?
+        if case .hostPort(let host, _) = endpoint {
+            switch host {
+            case .ipv4(let ipv4):
+                targetIP = "\(ipv4)"
+            case .ipv6(let ipv6):
+                targetIP = "\(ipv6)"
+            case .name(let name, _):
+                targetIP = name
+            @unknown default:
+                break
+            }
+        }
+        
+        guard let ip = targetIP else {
+             throw NSError(domain: "SkyBridge.FileTransfer", code: -1002, userInfo: [NSLocalizedDescriptionKey: "无法解析对端 IP 地址 (Fallback)"])
+        }
+        
+        // 4. Get Display Name (from Presence Service if available)
+        let presenceObj = ConnectionPresenceService.shared.activeConnections.first
+        let displayName = presenceObj?.displayName ?? "P2P Device"
+        let deviceId = presenceObj?.id ?? UUID().uuidString
+        
+        try await sendFile(
+            at: url,
+            to: deviceId,
+            deviceName: displayName,
+            ipAddress: ip,
+            port: 8080
+        )
+    }
+
+    /// 发送文件到指定设备
     public func sendFile(at url: URL, to deviceId: String, deviceName: String, ipAddress: String, port: Int = 8080) async throws {
         logger.info("📤 开始发送文件: \(url.lastPathComponent) 到设备: \(deviceName)")
         lastTransferActivityAt = Date()
@@ -140,6 +199,10 @@ public class FileTransferManager: BaseManager {
                 deviceId: deviceId,
                 deviceName: deviceName
             )
+            defer {
+                connection.cancel()
+                networkService.disconnectFromDevice(deviceId)
+            }
 
  // 计算文件哈希（用于完整性验证）
             transfer.fileHash = try await calculateFileHash(at: url)
@@ -149,6 +212,15 @@ public class FileTransferManager: BaseManager {
 
  // 分块发送文件
             try await sendFileInChunks(from: url, transfer: transfer, to: connection)
+
+            // 必须等待接收端“落盘回执”，否则不能判定为成功（避免假阳性）
+            let receipt = try await waitForTransferReceipt(
+                from: connection,
+                expectedTransferId: transfer.id,
+                expectedFileSize: fileSize,
+                expectedFileHash: transfer.fileHash
+            )
+            logger.info("✅ 接收端已确认落盘: transfer=\(receipt.transferId) bytes=\(receipt.receivedBytes)")
 
  // 标记传输完成
             transfer.status = .completed
@@ -337,6 +409,20 @@ public class FileTransferManager: BaseManager {
             logger.info("📁 已保存到: \(receivePath.path, privacy: .public)")
             lastTransferActivityAt = Date()
 
+            // 发送“落盘完成”回执给发送端，用于发送端成功判定
+            let receipt = FileTransferReceipt(
+                transferId: transfer.id,
+                success: true,
+                receivedBytes: metadata.fileSize,
+                fileHash: receivedHash,
+                error: nil
+            )
+            do {
+                try await sendTransferReceipt(receipt, to: connection)
+            } catch {
+                logger.error("⚠️ 发送落盘回执失败: \(error.localizedDescription, privacy: .public)")
+            }
+
  // 发送接收完成通知
             NotificationCenter.default.post(
                 name: Notification.Name("FileTransferCompleted"),
@@ -373,6 +459,16 @@ public class FileTransferManager: BaseManager {
         } catch {
             logger.error("❌ 文件接收失败: \(error)")
             lastTransferActivityAt = Date()
+
+            // 失败路径也尽量回执，避免发送端长时间等待直到超时
+            let failureReceipt = FileTransferReceipt(
+                transferId: metadata.transferId,
+                success: false,
+                receivedBytes: 0,
+                fileHash: nil,
+                error: error.localizedDescription
+            )
+            try? await sendTransferReceipt(failureReceipt, to: connection)
 
  // 发送接收失败通知
             NotificationCenter.default.post(
@@ -943,6 +1039,53 @@ public class FileTransferManager: BaseManager {
         }
     }
 
+    /// 发送端等待接收端“落盘回执”
+    private func waitForTransferReceipt(
+        from connection: NWConnection,
+        expectedTransferId: String,
+        expectedFileSize: Int64,
+        expectedFileHash: String?
+    ) async throws -> FileTransferReceipt {
+        let headerData = try await receiveData(length: 8, from: connection, timeout: 15)
+        let header = parseHeader(headerData)
+        guard header.type == .receipt else {
+            throw FileTransferError.receiverNotConfirmed
+        }
+        guard header.length > 0, header.length <= maxMessageBytes else {
+            throw FileTransferError.invalidHeader
+        }
+
+        let payload = try await receiveData(length: header.length, from: connection, timeout: 15)
+        let receipt = try JSONDecoder().decode(FileTransferReceipt.self, from: payload)
+        guard receipt.transferId == expectedTransferId else {
+            throw FileTransferError.invalidHeader
+        }
+        guard receipt.success else {
+            logger.error("❌ 接收端拒绝传输: \(receipt.error ?? "unknown", privacy: .public)")
+            throw FileTransferError.receiverRejected
+        }
+        guard receipt.receivedBytes == expectedFileSize else {
+            logger.error("❌ 接收端字节数不一致: expected=\(expectedFileSize) got=\(receipt.receivedBytes)")
+            throw FileTransferError.receiverNotConfirmed
+        }
+
+        if let expectedFileHash, !expectedFileHash.isEmpty,
+           let peerHash = receipt.fileHash, !peerHash.isEmpty,
+           peerHash.lowercased() != expectedFileHash.lowercased() {
+            logger.error("❌ 接收端哈希不一致: expected=\(expectedFileHash, privacy: .public) got=\(peerHash, privacy: .public)")
+            throw FileTransferError.integrityCheckFailed
+        }
+
+        return receipt
+    }
+
+    /// 接收端发送落盘回执
+    private func sendTransferReceipt(_ receipt: FileTransferReceipt, to connection: NWConnection) async throws {
+        let payload = try JSONEncoder().encode(receipt)
+        let header = createHeader(type: .receipt, length: payload.count)
+        try await sendData(header + payload, to: connection)
+    }
+
  /// 发送数据
     private func sendData(_ data: Data, to connection: NWConnection) async throws {
         return try await withCheckedThrowingContinuation { continuation in
@@ -957,15 +1100,46 @@ public class FileTransferManager: BaseManager {
     }
 
  /// 接收数据
-    private func receiveData(length: Int, from connection: NWConnection) async throws -> Data {
+    private func receiveData(length: Int, from connection: NWConnection, timeout: TimeInterval? = nil) async throws -> Data {
         return try await withCheckedThrowingContinuation { continuation in
+            final class Once: @unchecked Sendable {
+                private let lock = NSLock()
+                private var didResume = false
+                func run(_ block: () -> Void) {
+                    lock.lock()
+                    defer { lock.unlock() }
+                    guard !didResume else { return }
+                    didResume = true
+                    block()
+                }
+            }
+            let once = Once()
+
+            if let timeout, timeout > 0 {
+                DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout) {
+                    once.run {
+                        continuation.resume(throwing: FileTransferError.timeout)
+                    }
+                }
+            }
+
             connection.receive(minimumIncompleteLength: length, maximumLength: length) { data, _, isComplete, error in
                 if let error = error {
-                    continuation.resume(throwing: error)
-                } else if let data = data {
-                    continuation.resume(returning: data)
+                    once.run {
+                        continuation.resume(throwing: error)
+                    }
+                } else if let data = data, data.count == length {
+                    once.run {
+                        continuation.resume(returning: data)
+                    }
+                } else if isComplete {
+                    once.run {
+                        continuation.resume(throwing: FileTransferError.connectionClosed)
+                    }
                 } else {
-                    continuation.resume(throwing: FileTransferError.connectionClosed)
+                    once.run {
+                        continuation.resume(throwing: FileTransferError.connectionClosed)
+                    }
                 }
             }
         }
@@ -1423,6 +1597,15 @@ private struct FileChunk: Codable {
     let size: Int
 }
 
+/// 传输完成回执（接收端 -> 发送端）
+private struct FileTransferReceipt: Codable {
+    let transferId: String
+    let success: Bool
+    let receivedBytes: Int64
+    let fileHash: String?
+    let error: String?
+}
+
 /// 传输方向
 public enum TransferDirection: String, CaseIterable {
     case incoming = "接收"
@@ -1444,6 +1627,7 @@ private enum MessageType: UInt32 {
     case metadata = 1
     case chunk = 2
     case complete = 3
+    case receipt = 4
     case unknown = 0
 }
 
@@ -1454,6 +1638,9 @@ public enum FileTransferError: Error, LocalizedError {
     case transferCancelled
     case connectionClosed
     case fileNotFound
+    case timeout
+    case receiverNotConfirmed
+    case receiverRejected
 
     public var errorDescription: String? {
         switch self {
@@ -1467,6 +1654,12 @@ public enum FileTransferError: Error, LocalizedError {
             return "连接已关闭"
         case .fileNotFound:
             return "文件未找到"
+        case .timeout:
+            return "等待超时"
+        case .receiverNotConfirmed:
+            return "接收端未确认文件已落盘"
+        case .receiverRejected:
+            return "接收端拒绝或处理失败"
         }
     }
 }

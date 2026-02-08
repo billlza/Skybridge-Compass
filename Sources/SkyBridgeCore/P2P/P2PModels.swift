@@ -455,12 +455,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
     private let sessionKeysLock = OSAllocatedUnfairLock<SessionKeys?>(initialState: nil)
     @available(macOS 14.0, iOS 17.0, *)
     private let remoteDesktopFrameHandlerLock = OSAllocatedUnfairLock<(@Sendable (Data, UInt64) -> Void)?>(initialState: nil)
-    @available(macOS 14.0, iOS 17.0, *)
-    private lazy var handshakePeer = PeerIdentifier(
-        deviceId: device.deviceId,
-        displayName: device.name,
-        address: "\(device.address):\(device.port)"
-    )
+    private var handshakePeer: PeerIdentifier
 
     @available(macOS 14.0, iOS 17.0, *)
     private struct MetricsState: Sendable {
@@ -474,6 +469,10 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
 
     @available(macOS 14.0, iOS 17.0, *)
     private let metricsLock = OSAllocatedUnfairLock(initialState: MetricsState())
+    @available(macOS 14.0, iOS 17.0, *)
+    private let rekeyInProgressLock = OSAllocatedUnfairLock<Bool>(initialState: false)
+    @available(macOS 14.0, iOS 17.0, *)
+    private let lastPairingIdentityExchangeSentAtLock = OSAllocatedUnfairLock<Date?>(initialState: nil)
     private var metricsTask: Task<Void, Never>?
 
     private var receiveTask: Task<Void, Never>?
@@ -482,16 +481,50 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
     public init(device: P2PDevice, connection: NWConnection) {
         self.device = device
         self.connection = connection
+        self.handshakePeer = PeerIdentifier(
+            deviceId: device.deviceId,
+            displayName: device.name,
+            address: "\(device.address):\(device.port)"
+        )
     }
 
     deinit {
         disconnect()
     }
 
+    private func resolveCurrentRemoteIP() -> String? {
+        // Try active path first (most reliable)
+        if let endpoint = connection.currentPath?.remoteEndpoint,
+           case .hostPort(let host, _) = endpoint {
+            switch host {
+            case .ipv4(let ipv4): return "\(ipv4)"
+            case .ipv6(let ipv6): return "\(ipv6)"
+            default: break
+            }
+        }
+        
+        // Fallback to initial endpoint
+        if case .hostPort(let host, _) = connection.endpoint {
+             switch host {
+             case .ipv4(let ipv4): return "\(ipv4)"
+             case .ipv6(let ipv6): return "\(ipv6)"
+             default: break
+             }
+        }
+        return nil
+    }
+
     // MARK: - Lifecycle
 
     public func markConnectedAndStartReceiving() {
         status = .connected
+        lastActivity = Date()
+        startReceivingIfNeeded()
+    }
+
+    /// Start frame receiving before application-layer authentication without promoting state to "connected".
+    /// This avoids transport-ready false positives while still allowing handshake traffic.
+    public func startReceivingForHandshake() {
         lastActivity = Date()
         startReceivingIfNeeded()
     }
@@ -532,6 +565,12 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             throw P2PConnectionError.handshakeUnavailable
         }
 
+        handshakePeer = await resolveHandshakePeerIdentifier()
+        if handshakePeer.deviceId != device.deviceId {
+            SkyBridgeLogger.p2p.info(
+                "🧭 Handshake peer id normalized: raw=\(self.device.deviceId, privacy: .public) resolved=\(self.handshakePeer.deviceId, privacy: .public)"
+            )
+        }
         startReceivingIfNeeded()
 
         do {
@@ -551,7 +590,59 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         let compatibilityModeEnabled = UserDefaults.standard.bool(forKey: "Settings.EnableCompatibilityMode")
         let policy = HandshakePolicy.recommendedDefault(compatibilityModeEnabled: compatibilityModeEnabled)
         let selection: CryptoProviderFactory.SelectionPolicy = policy.requirePQC ? .requirePQC : .preferPQC
-        let baseProvider = CryptoProviderFactory.make(policy: selection)
+        let strictProvider = CryptoProviderFactory.make(policy: selection)
+
+        do {
+            let sessionKeys = try await performHandshakeAttempt(
+                policy: policy,
+                selectionPolicy: selection,
+                preferPQC: true
+            )
+            
+            // PQC UI Fix: Immediately update presence service with negotiated suite
+            // This ensures UI shows "ApplePQC" immediately if negotiated, or "Classic" if not yet upgraded.
+            await MainActor.run {
+                let suite = sessionKeys.negotiatedSuite
+                let cryptoKind: String = {
+                    if suite.isPQCGroup { return "ApplePQC" }
+                    if suite.isHybrid { return "Hybrid" }
+                    return "Classic"
+                }()
+                
+                // Use explicit logging to confirm UI update
+                SkyBridgeLogger.p2p.info("✅ Handshake Success. Updating UI Presence: \(cryptoKind) / \(suite.rawValue)")
+                
+                ConnectionPresenceService.shared.markConnected(
+                    peerId: self.handshakePeer.deviceId,
+                    displayName: self.device.name,
+                    address: self.resolveCurrentRemoteIP() ?? self.device.address,
+                    cryptoKind: cryptoKind,
+                    suite: suite.rawValue
+                )
+            }
+
+            return sessionKeys
+        } catch {
+            if let bootstrapped = try await performStrictPQCBootstrapIfNeeded(
+                for: error,
+                strictPolicy: policy,
+                strictSelection: selection,
+                strictProvider: strictProvider
+            ) {
+                return bootstrapped
+            }
+            await logSuiteNegotiationDiagnosticsIfNeeded(error, policy: policy, cryptoProvider: strictProvider)
+            throw error
+        }
+    }
+
+    @available(macOS 14.0, iOS 17.0, *)
+    private func performHandshakeAttempt(
+        policy: HandshakePolicy,
+        selectionPolicy: CryptoProviderFactory.SelectionPolicy,
+        preferPQC: Bool
+    ) async throws -> SessionKeys {
+        let baseProvider = CryptoProviderFactory.make(policy: selectionPolicy)
 
         struct DirectHandshakeTransport: DiscoveryTransport {
             let sendFramed: @Sendable (Data) async throws -> Void
@@ -565,9 +656,11 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             try await self.sendFramed(data)
         }
 
+        handshakeDriverLock.withLock { $0 = nil }
+
         return try await TwoAttemptHandshakeManager.performHandshakeWithPreparation(
             deviceId: handshakePeer.deviceId,
-            preferPQC: true,
+            preferPQC: preferPQC,
             policy: policy,
             cryptoProvider: baseProvider
         ) { [weak self] preparation in
@@ -576,7 +669,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             let cryptoProvider: any CryptoProvider = {
                 switch preparation.strategy {
                 case .pqcOnly:
-                    return CryptoProviderFactory.make(policy: selection)
+                    return CryptoProviderFactory.make(policy: selectionPolicy)
                 case .classicOnly:
                     return CryptoProviderFactory.make(policy: .classicOnly)
                 }
@@ -606,6 +699,556 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             self.handshakeDriverLock.withLock { $0 = driver }
             return try await driver.initiateHandshake(with: self.handshakePeer)
         }
+    }
+
+    @available(macOS 14.0, iOS 17.0, *)
+    private func performStrictPQCBootstrapIfNeeded(
+        for error: Error,
+        strictPolicy: HandshakePolicy,
+        strictSelection: CryptoProviderFactory.SelectionPolicy,
+        strictProvider: any CryptoProvider
+    ) async throws -> SessionKeys? {
+        guard strictPolicy.requirePQC else { return nil }
+        guard let handshakeError = error as? HandshakeError,
+              case .failed(let failureReason) = handshakeError else {
+            return nil
+        }
+
+        enum BootstrapTrigger {
+            case missingKEM
+            case staleKEMRecovery
+        }
+        let trigger: BootstrapTrigger
+        switch failureReason {
+        case .suiteNegotiationFailed:
+            trigger = .missingKEM
+        case .timeout:
+            trigger = .staleKEMRecovery
+        default:
+            return nil
+        }
+
+        let requiredPQCSuites = strictProvider.supportedSuites.filter { $0.isPQCGroup }
+        guard !requiredPQCSuites.isEmpty else { return nil }
+
+        let diag = await resolveSuiteNegotiationTrustDiagnostic()
+        let missingWireIds = requiredPQCSuites.map(\.wireId).filter { !diag.kemSuiteWireIds.contains($0) }
+
+        switch trigger {
+        case .missingKEM:
+            guard !missingWireIds.isEmpty || !diag.hasTrust else { return nil }
+            SkyBridgeLogger.p2p.warning(
+                "🧩 strictPQC bootstrap: missing peer KEM identity keys. Establishing one-time Classic channel to provision KEM keys, then rekey to PQC. peer=\(self.handshakePeer.deviceId, privacy: .public)"
+            )
+        case .staleKEMRecovery:
+            guard diag.hasTrust, !diag.kemSuiteWireIds.isEmpty else { return nil }
+            let knownKEMSummary = diag.kemSuiteWireIds.map(String.init).joined(separator: ",")
+            SkyBridgeLogger.p2p.warning(
+                "🧩 strictPQC recovery: handshake timed out with existing KEM records (possible stale/rotated KEM identity keys). Attempting one-time Classic bootstrap to refresh keys, then rekey to PQC. peer=\(self.handshakePeer.deviceId, privacy: .public) knownKEM=\(knownKEMSummary, privacy: .public)"
+            )
+        }
+
+        let bootstrapPolicy = HandshakePolicy(
+            requirePQC: false,
+            allowClassicFallback: false,
+            minimumTier: .classic,
+            requireSecureEnclavePoP: strictPolicy.requireSecureEnclavePoP
+        )
+        let classicKeys = try await performHandshakeAttempt(
+            policy: bootstrapPolicy,
+            selectionPolicy: .classicOnly,
+            preferPQC: false
+        )
+
+        sessionKeysLock.withLock { $0 = classicKeys }
+        handshakeDriverLock.withLock { $0 = nil }
+
+        rekeyInProgressLock.withLock { $0 = true }
+        defer { rekeyInProgressLock.withLock { $0 = false } }
+
+        try await sendPairingIdentityExchange(force: true)
+        let kemReady = await waitForPeerKEMPublicKeys(
+            requiredSuites: requiredPQCSuites,
+            timeoutSeconds: 30
+        )
+        guard kemReady else {
+            throw P2PConnectionError.bootstrapKEMKeyTimeout
+        }
+
+        SkyBridgeLogger.p2p.info(
+            "🔁 strictPQC bootstrap: peer KEM keys received, rekeying to PQC. peer=\(self.handshakePeer.deviceId, privacy: .public)"
+        )
+        let rekeyed = try await performHandshakeAttempt(
+            policy: strictPolicy,
+            selectionPolicy: strictSelection,
+            preferPQC: true
+        )
+        handshakeDriverLock.withLock { $0 = nil }
+        
+        // Notify UI that rekey succeeded, updating the displayed crypto kind
+        let suite = rekeyed.negotiatedSuite
+        let cryptoKind: String = {
+            if suite.isHybrid { return "Hybrid" }
+            if suite.isPQCGroup { return "ApplePQC" }
+            return "Classic"
+        }()
+        await MainActor.run {
+            ConnectionPresenceService.shared.markConnected(
+                peerId: self.handshakePeer.deviceId,
+                displayName: self.device.name,
+                address: self.resolveCurrentRemoteIP() ?? self.device.address,
+                cryptoKind: cryptoKind,
+                suite: suite.rawValue
+            )
+        }
+        
+        return rekeyed
+    }
+
+    @available(macOS 14.0, iOS 17.0, *)
+    private func resolveHandshakePeerIdentifier() async -> PeerIdentifier {
+        let fallback = PeerIdentifier(
+            deviceId: device.deviceId,
+            displayName: device.name,
+            address: "\(device.address):\(device.port)"
+        )
+
+        let candidates = trustLookupCandidates(
+            primary: fallback.deviceId,
+            persistent: device.persistentDeviceId
+        )
+        let fingerprint = normalizedFingerprint(device.pubKeyFingerprint)
+        let aliasName = extractDisplayNameAlias(from: fallback.deviceId)
+        let displayNameAlias = normalizedDisplayName(fallback.displayName)
+
+        let resolvedId: String = await MainActor.run {
+            let trust = TrustSyncService.shared
+
+            for candidate in candidates {
+                if trust.getTrustRecord(deviceId: candidate) != nil {
+                    return candidate
+                }
+            }
+
+            if let fingerprint {
+                let matches = trust.activeTrustRecords.filter { record in
+                    !record.pubKeyFP.isEmpty && record.pubKeyFP.caseInsensitiveCompare(fingerprint) == .orderedSame
+                }
+                if matches.count == 1, !matches[0].deviceId.isEmpty {
+                    return matches[0].deviceId
+                }
+            }
+
+            if let aliasName {
+                let matches = trust.activeTrustRecords.filter { record in
+                    guard let recordName = record.deviceName?.trimmingCharacters(in: .whitespacesAndNewlines),
+                          !recordName.isEmpty else { return false }
+                    return recordName.caseInsensitiveCompare(aliasName) == .orderedSame
+                }
+                if matches.count == 1, !matches[0].deviceId.isEmpty {
+                    return matches[0].deviceId
+                }
+            }
+
+            if let displayNameAlias {
+                let matches = trust.activeTrustRecords.filter { record in
+                    guard let recordName = record.deviceName?.trimmingCharacters(in: .whitespacesAndNewlines),
+                          !recordName.isEmpty else { return false }
+                    return recordName.caseInsensitiveCompare(displayNameAlias) == .orderedSame
+                }
+                if matches.count == 1, !matches[0].deviceId.isEmpty {
+                    return matches[0].deviceId
+                }
+            }
+
+            return candidates.first ?? fallback.deviceId
+        }
+
+        return PeerIdentifier(
+            deviceId: resolvedId,
+            displayName: fallback.displayName,
+            address: fallback.address
+        )
+    }
+
+    private func trustLookupCandidates(primary: String, persistent: String?) -> [String] {
+        var ordered: [String] = []
+        var seen: Set<String> = []
+
+        func append(_ value: String?) {
+            guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else { return }
+            guard !seen.contains(value) else { return }
+            seen.insert(value)
+            ordered.append(value)
+        }
+
+        func appendDerived(from identifier: String) {
+            append(identifier)
+
+            if identifier.hasPrefix("recent:") {
+                let inner = String(identifier.dropFirst("recent:".count))
+                append(inner)
+                appendDerived(from: inner)
+            }
+
+            if identifier.hasPrefix("id:") {
+                append(String(identifier.dropFirst("id:".count)))
+            }
+
+            if identifier.hasPrefix("mac:bonjour:") {
+                append(String(identifier.dropFirst("mac:".count)))
+            }
+
+            if identifier.hasPrefix("fp:") {
+                append(String(identifier.dropFirst("fp:".count)))
+            }
+
+            if identifier.hasPrefix("name:") {
+                append(String(identifier.dropFirst("name:".count)))
+            }
+
+            if let normalizedBonjour = normalizeBonjourIdentifier(identifier) {
+                append(normalizedBonjour)
+            }
+        }
+
+        append(persistent)
+        appendDerived(from: primary)
+        return ordered
+    }
+
+    private func normalizeBonjourIdentifier(_ identifier: String) -> String? {
+        guard identifier.hasPrefix("bonjour:") else { return nil }
+        let payload = String(identifier.dropFirst("bonjour:".count))
+        let pieces = payload.split(separator: "@", maxSplits: 1).map(String.init)
+        guard let rawName = pieces.first?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !rawName.isEmpty else { return nil }
+        let rawDomain = pieces.count > 1 ? pieces[1] : "local"
+        let domain = rawDomain.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "local"
+            : rawDomain.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return "bonjour:\(rawName)@\(domain)"
+    }
+
+    private func normalizedFingerprint(_ fingerprint: String?) -> String? {
+        guard let raw = fingerprint?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
+            return nil
+        }
+        return raw.lowercased()
+    }
+
+    private func extractDisplayNameAlias(from identifier: String) -> String? {
+        let normalized = identifier.trimmingCharacters(in: .whitespacesAndNewlines)
+        if normalized.hasPrefix("recent:name:") {
+            let payload = String(normalized.dropFirst("recent:name:".count))
+            return payload.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        if normalized.hasPrefix("name:") {
+            let payload = String(normalized.dropFirst("name:".count))
+            return payload.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return nil
+    }
+
+    private func normalizedDisplayName(_ raw: String?) -> String? {
+        guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
+            return nil
+        }
+        return raw
+    }
+
+    private func capabilityValue(prefix: String, in capabilities: [String]) -> String? {
+        for capability in capabilities {
+            guard capability.hasPrefix(prefix) else { continue }
+            let value = String(capability.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !value.isEmpty {
+                return value
+            }
+        }
+        return nil
+    }
+
+    @MainActor
+    private func trustRecordsMatchingCandidates(_ candidates: [String]) -> [TrustRecord] {
+        let normalizedCandidates = Set(candidates
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty })
+        guard !normalizedCandidates.isEmpty else { return [] }
+
+        var matchedByDeviceId: [String: TrustRecord] = [:]
+        for record in TrustSyncService.shared.activeTrustRecords where !record.isTombstone {
+            if normalizedCandidates.contains(record.deviceId) {
+                matchedByDeviceId[record.deviceId] = record
+                continue
+            }
+
+            let peerEndpoint = capabilityValue(prefix: "peerEndpoint=", in: record.capabilities)
+            let declared = capabilityValue(prefix: "declaredDeviceId=", in: record.capabilities)
+            if (peerEndpoint != nil && normalizedCandidates.contains(peerEndpoint!)) ||
+                (declared != nil && normalizedCandidates.contains(declared!)) {
+                matchedByDeviceId[record.deviceId] = record
+            }
+        }
+
+        return Array(matchedByDeviceId.values)
+    }
+
+    @available(macOS 14.0, iOS 17.0, *)
+    private struct SuiteNegotiationTrustDiagnostic: Sendable {
+        let resolvedId: String?
+        let hasTrust: Bool
+        let kemSuiteWireIds: [UInt16]
+        let matchedBy: String
+    }
+
+    @available(macOS 14.0, iOS 17.0, *)
+    private func resolveSuiteNegotiationTrustDiagnostic() async -> SuiteNegotiationTrustDiagnostic {
+        let fallback = PeerIdentifier(
+            deviceId: device.deviceId,
+            displayName: device.name,
+            address: "\(device.address):\(device.port)"
+        )
+        let candidates = trustLookupCandidates(primary: fallback.deviceId, persistent: device.persistentDeviceId)
+        let fingerprint = normalizedFingerprint(device.pubKeyFingerprint)
+        let alias = extractDisplayNameAlias(from: fallback.deviceId) ?? normalizedDisplayName(fallback.displayName)
+
+        var diagnostic = await MainActor.run {
+            let trust = TrustSyncService.shared
+            for candidate in candidates {
+                if let record = trust.getTrustRecord(deviceId: candidate) {
+                    let kemIds = record.kemPublicKeys?.map(\.suiteWireId) ?? []
+                    return SuiteNegotiationTrustDiagnostic(
+                        resolvedId: candidate,
+                        hasTrust: true,
+                        kemSuiteWireIds: kemIds,
+                        matchedBy: "candidate"
+                    )
+                }
+            }
+
+            let related = trustRecordsMatchingCandidates(candidates)
+            if !related.isEmpty {
+                let kemUnion = Set(related
+                    .flatMap { $0.kemPublicKeys?.map(\.suiteWireId) ?? [] })
+                    .sorted()
+                return SuiteNegotiationTrustDiagnostic(
+                    resolvedId: related.first?.deviceId,
+                    hasTrust: true,
+                    kemSuiteWireIds: kemUnion,
+                    matchedBy: "candidateAlias"
+                )
+            }
+
+            if let fingerprint {
+                let matches = trust.activeTrustRecords.filter { record in
+                    !record.pubKeyFP.isEmpty && record.pubKeyFP.caseInsensitiveCompare(fingerprint) == .orderedSame
+                }
+                if matches.count == 1, !matches[0].deviceId.isEmpty {
+                    let kemIds = matches[0].kemPublicKeys?.map(\.suiteWireId) ?? []
+                    return SuiteNegotiationTrustDiagnostic(
+                        resolvedId: matches[0].deviceId,
+                        hasTrust: true,
+                        kemSuiteWireIds: kemIds,
+                        matchedBy: "fingerprint"
+                    )
+                }
+            }
+
+            if let alias {
+                let matches = trust.activeTrustRecords.filter { record in
+                    guard let recordName = record.deviceName?.trimmingCharacters(in: .whitespacesAndNewlines),
+                          !recordName.isEmpty else { return false }
+                    return recordName.caseInsensitiveCompare(alias) == .orderedSame
+                }
+                if matches.count == 1, !matches[0].deviceId.isEmpty {
+                    let kemIds = matches[0].kemPublicKeys?.map(\.suiteWireId) ?? []
+                    return SuiteNegotiationTrustDiagnostic(
+                        resolvedId: matches[0].deviceId,
+                        hasTrust: true,
+                        kemSuiteWireIds: kemIds,
+                        matchedBy: "name"
+                    )
+                }
+            }
+
+            return SuiteNegotiationTrustDiagnostic(
+                resolvedId: nil,
+                hasTrust: false,
+                kemSuiteWireIds: [],
+                matchedBy: "none"
+            )
+        }
+
+        let cachedSuites = await PeerKEMBootstrapStore.shared.availableSuiteWireIds(forCandidates: candidates)
+        guard !cachedSuites.isEmpty else { return diagnostic }
+
+        let mergedSuites = Set(diagnostic.kemSuiteWireIds).union(cachedSuites).sorted()
+        let matchedBy: String = {
+            if diagnostic.matchedBy == "none" {
+                return "bootstrapCache"
+            }
+            return "\(diagnostic.matchedBy)+bootstrapCache"
+        }()
+        let resolvedId = diagnostic.resolvedId ?? candidates.first
+        diagnostic = SuiteNegotiationTrustDiagnostic(
+            resolvedId: resolvedId,
+            hasTrust: diagnostic.hasTrust || !cachedSuites.isEmpty,
+            kemSuiteWireIds: mergedSuites,
+            matchedBy: matchedBy
+        )
+        return diagnostic
+    }
+
+    @available(macOS 14.0, iOS 17.0, *)
+    private func logSuiteNegotiationDiagnosticsIfNeeded(
+        _ error: Error,
+        policy: HandshakePolicy,
+        cryptoProvider: any CryptoProvider
+    ) async {
+        guard let handshakeError = error as? HandshakeError,
+              case .failed(.suiteNegotiationFailed) = handshakeError else {
+            return
+        }
+        let diag = await resolveSuiteNegotiationTrustDiagnostic()
+
+        let requiredPQC = cryptoProvider.supportedSuites
+            .filter { $0.isPQCGroup }
+            .map(\.wireId)
+
+        let missingPQC = requiredPQC.filter { !diag.kemSuiteWireIds.contains($0) }
+        let requiredPQCSummary = requiredPQC.map(String.init).joined(separator: ",")
+        let knownKEMSummary = diag.kemSuiteWireIds.map(String.init).joined(separator: ",")
+        let missingKEMSummary = missingPQC.map(String.init).joined(separator: ",")
+        let resolvedTrustId = diag.resolvedId ?? "nil"
+        let policyRequirePQC = policy.requirePQC ? "1" : "0"
+        let policyAllowClassicFallback = policy.allowClassicFallback ? "1" : "0"
+        let diagnostic = "🧩 握手协商失败诊断: peer=\(handshakePeer.deviceId) " +
+            "policy(requirePQC=\(policyRequirePQC),allowClassicFallback=\(policyAllowClassicFallback)) " +
+            "trustResolved=\(resolvedTrustId) by=\(diag.matchedBy) " +
+            "requiredPQC=\(requiredPQCSummary) knownKEM=\(knownKEMSummary) missingKEM=\(missingKEMSummary)"
+        SkyBridgeLogger.p2p.warning("\(diagnostic, privacy: .public)")
+
+        if policy.requirePQC && (!diag.hasTrust || !missingPQC.isEmpty) {
+            SkyBridgeLogger.p2p.warning(
+                "🔐 strictPQC 当前缺少对端 KEM 公钥。请先完成配对/信任引导（交换 KEM identity keys）后重试。"
+            )
+        }
+    }
+
+    @available(macOS 14.0, iOS 17.0, *)
+    private func sendPairingIdentityExchange(force: Bool = false) async throws {
+        let now = Date()
+        if !force {
+            let canSend = lastPairingIdentityExchangeSentAtLock.withLock { last in
+                guard let last else { return true }
+                return now.timeIntervalSince(last) >= 10
+            }
+            guard canSend else { return }
+        }
+
+        let provider = CryptoProviderFactory.make(policy: .preferPQC)
+        let suites = provider.supportedSuites.filter { $0.isPQCGroup }
+        let keyManager = DeviceIdentityKeyManager.shared
+        var kemKeys: [KEMPublicKeyInfo] = []
+        for suite in suites {
+            let publicKey = try await keyManager.getKEMPublicKey(for: suite, provider: provider)
+            kemKeys.append(KEMPublicKeyInfo(suiteWireId: suite.wireId, publicKey: publicKey))
+        }
+
+        let localDeviceId = await keyManager.getDeviceId()
+        let localDeviceName: String? = {
+            #if os(macOS)
+            return Host.current().localizedName
+            #else
+            return nil
+            #endif
+        }()
+        let localPlatform: String? = {
+            #if os(macOS)
+            return "macOS"
+            #elseif os(iOS)
+            return "iOS"
+            #else
+            return nil
+            #endif
+        }()
+        let localModel: String? = {
+            #if os(macOS)
+            return "Mac"
+            #elseif os(iOS)
+            return "iPhone"
+            #else
+            return nil
+            #endif
+        }()
+
+        let message = AppMessage.pairingIdentityExchange(.init(
+            deviceId: localDeviceId,
+            kemPublicKeys: kemKeys,
+            deviceName: localDeviceName,
+            modelName: localModel,
+            platform: localPlatform,
+            osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
+            chip: nil
+        ))
+        try await sendEncryptedAppMessage(message)
+        lastPairingIdentityExchangeSentAtLock.withLock { $0 = now }
+    }
+
+    @available(macOS 14.0, iOS 17.0, *)
+    private func waitForPeerKEMPublicKeys(
+        requiredSuites: [CryptoSuite],
+        timeoutSeconds: TimeInterval
+    ) async -> Bool {
+        let requiredWireIds = Set(requiredSuites.map(\.wireId))
+        guard !requiredWireIds.isEmpty else { return true }
+
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        while Date() < deadline {
+            let ready = await hasRequiredPeerKEMPublicKeys(requiredWireIds: requiredWireIds)
+            if ready { return true }
+            try? await Task.sleep(for: .milliseconds(250))
+        }
+        return await hasRequiredPeerKEMPublicKeys(requiredWireIds: requiredWireIds)
+    }
+
+    @available(macOS 14.0, iOS 17.0, *)
+    private func hasRequiredPeerKEMPublicKeys(requiredWireIds: Set<UInt16>) async -> Bool {
+        let candidates = trustLookupCandidates(primary: handshakePeer.deviceId, persistent: device.persistentDeviceId)
+
+        let trustSuites: Set<UInt16> = await MainActor.run {
+            let trust = TrustSyncService.shared
+            var availableUnion: Set<UInt16> = []
+
+            for candidate in candidates {
+                guard let record = trust.getTrustRecord(deviceId: candidate),
+                      let kemKeys = record.kemPublicKeys else {
+                    continue
+                }
+                availableUnion.formUnion(kemKeys.map(\.suiteWireId))
+            }
+
+            let related = trustRecordsMatchingCandidates(candidates)
+            for record in related {
+                if let kemKeys = record.kemPublicKeys {
+                    availableUnion.formUnion(kemKeys.map(\.suiteWireId))
+                }
+            }
+
+            return availableUnion
+        }
+
+        if requiredWireIds.isSubset(of: trustSuites) {
+            return true
+        }
+
+        let cachedSuites = Set(await PeerKEMBootstrapStore.shared.availableSuiteWireIds(forCandidates: candidates))
+        if requiredWireIds.isSubset(of: cachedSuites) {
+            return true
+        }
+
+        let combined = trustSuites.union(cachedSuites)
+        return requiredWireIds.isSubset(of: combined)
     }
 
     // MARK: - Framing IO (4-byte big-endian length)
@@ -791,6 +1434,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
     private func tickPing(clock: ContinuousClock) async {
         // Only ping once the encrypted session is established.
         guard await MainActor.run(body: { self.status == .authenticated }) else { return }
+        guard !rekeyInProgressLock.withLock({ $0 }) else { return }
         guard sessionKeysLock.withLock({ $0 }) != nil else { return }
 
         let now = clock.now
@@ -989,9 +1633,14 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
 
             if let msg = try? JSONDecoder().decode(AppMessage.self, from: plaintext) {
                 await handleAppMessage(msg)
+            } else if rekeyInProgressLock.withLock({ $0 }) {
+                SkyBridgeLogger.p2p.debug("ℹ️ rekey期间收到无法解析的业务帧（忽略）")
             }
         } catch {
             // Best-effort: ignore frames that aren't business messages for this channel.
+            if rekeyInProgressLock.withLock({ $0 }) {
+                SkyBridgeLogger.p2p.debug("ℹ️ rekey期间业务帧解密失败（忽略）: \(error.localizedDescription, privacy: .public)")
+            }
         }
     }
 
@@ -1019,16 +1668,15 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
 
     @available(macOS 14.0, iOS 17.0, *)
     private func handleAppMessage(_ message: AppMessage) async {
-        // Paper-aligned: AppMessage is business traffic carried over an established SessionKeys channel.
-        // This view-model oriented connection currently doesn't need to act on most message types.
         switch message {
         case .clipboard:
             break
-        case .pairingIdentityExchange:
-            break
+        case .pairingIdentityExchange(let payload):
+            await handlePairingIdentityExchange(payload)
         case .heartbeat:
             break
         case .ping(let payload):
+            guard !rekeyInProgressLock.withLock({ $0 }) else { return }
             // RTT probe: reply as fast as possible.
             do {
                 try await sendEncryptedAppMessage(.pong(.init(id: payload.id)))
@@ -1039,6 +1687,194 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             handlePong(id: payload.id)
         }
     }
+
+    @available(macOS 14.0, iOS 17.0, *)
+    private func handlePairingIdentityExchange(_ payload: AppMessage.PairingIdentityExchangePayload) async {
+        do {
+            try await persistPeerKEMTrustRecords(from: payload)
+        } catch {
+            SkyBridgeLogger.p2p.warning(
+                "⚠️ pairingIdentityExchange trust persistence degraded: \(error.localizedDescription, privacy: .public)"
+            )
+        }
+
+        do {
+            try await sendPairingIdentityExchange(force: false)
+        } catch {
+            SkyBridgeLogger.p2p.warning(
+                "⚠️ pairingIdentityExchange reply failed: \(error.localizedDescription, privacy: .public)"
+            )
+        }
+    }
+
+    private func normalizedNonEmptyString(_ raw: String?) -> String? {
+        guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
+            return nil
+        }
+        return raw
+    }
+
+    private func mergedKEMPublicKeys(
+        existing: [KEMPublicKeyInfo]?,
+        incoming: [KEMPublicKeyInfo]
+    ) -> [KEMPublicKeyInfo]? {
+        var bySuite: [UInt16: Data] = [:]
+        for key in existing ?? [] {
+            bySuite[key.suiteWireId] = key.publicKey
+        }
+        for key in incoming {
+            bySuite[key.suiteWireId] = key.publicKey
+        }
+        guard !bySuite.isEmpty else { return nil }
+        return bySuite.keys.sorted().compactMap { suite in
+            guard let publicKey = bySuite[suite] else { return nil }
+            return KEMPublicKeyInfo(suiteWireId: suite, publicKey: publicKey)
+        }
+    }
+
+    @available(macOS 14.0, iOS 17.0, *)
+    private func persistPeerKEMTrustRecords(from payload: AppMessage.PairingIdentityExchangePayload) async throws {
+        guard let declaredDeviceId = normalizedNonEmptyString(payload.deviceId) else { return }
+        let peerDeviceId = handshakePeer.deviceId
+        let rawDeviceId = normalizedNonEmptyString(device.deviceId)
+        let persistentDeviceId = normalizedNonEmptyString(device.persistentDeviceId)
+        let displayName = normalizedNonEmptyString(payload.deviceName)
+            ?? normalizedNonEmptyString(device.name)
+            ?? peerDeviceId
+
+        let platform = normalizedNonEmptyString(payload.platform) ?? ""
+        let osVersion = normalizedNonEmptyString(payload.osVersion) ?? ""
+        let modelName = normalizedNonEmptyString(payload.modelName) ?? ""
+        let chip = normalizedNonEmptyString(payload.chip) ?? ""
+
+        var baseCapabilities = [String]()
+        baseCapabilities.append("trusted")
+        baseCapabilities.append("pqc_bootstrap")
+        baseCapabilities.append("platform=\(platform)")
+        baseCapabilities.append("osVersion=\(osVersion)")
+        baseCapabilities.append("modelName=\(modelName)")
+        baseCapabilities.append("chip=\(chip)")
+        baseCapabilities.append("peerEndpoint=\(peerDeviceId)")
+
+        var bootstrapIds: [String] = []
+        var bootstrapSeen: Set<String> = []
+        func appendBootstrapId(_ raw: String?) {
+            guard let value = normalizedNonEmptyString(raw) else { return }
+            guard bootstrapSeen.insert(value).inserted else { return }
+            bootstrapIds.append(value)
+        }
+        appendBootstrapId(declaredDeviceId)
+        appendBootstrapId(peerDeviceId)
+        appendBootstrapId(rawDeviceId)
+        appendBootstrapId(persistentDeviceId)
+
+        let bootstrapCacheEnabled = !bootstrapIds.isEmpty && !payload.kemPublicKeys.isEmpty
+        if bootstrapCacheEnabled {
+            await PeerKEMBootstrapStore.shared.upsert(
+                deviceIds: bootstrapIds,
+                kemPublicKeys: payload.kemPublicKeys
+            )
+        }
+
+        var savedIds: [String] = []
+        var lastError: Error?
+
+        func upsert(_ deviceId: String, caps: [String]) async {
+            do {
+                try await upsertTrustRecordForBootstrap(
+                    deviceId: deviceId,
+                    displayName: displayName,
+                    incomingKEMKeys: payload.kemPublicKeys,
+                    capabilities: caps
+                )
+                savedIds.append(deviceId)
+            } catch {
+                lastError = error
+                SkyBridgeLogger.p2p.warning(
+                    "⚠️ KEM trust alias upsert failed: id=\(deviceId, privacy: .public) err=\(error.localizedDescription, privacy: .public)"
+                )
+            }
+        }
+
+        await upsert(declaredDeviceId, caps: baseCapabilities)
+
+        if peerDeviceId != declaredDeviceId {
+            await upsert(
+                peerDeviceId,
+                caps: baseCapabilities + ["alias=true", "declaredDeviceId=\(declaredDeviceId)"]
+            )
+        }
+
+        if let rawDeviceId, rawDeviceId != declaredDeviceId, rawDeviceId != peerDeviceId {
+            await upsert(
+                rawDeviceId,
+                caps: baseCapabilities + ["alias=true", "declaredDeviceId=\(declaredDeviceId)"]
+            )
+        }
+        if let persistent = persistentDeviceId,
+           persistent != declaredDeviceId, persistent != peerDeviceId, persistent != rawDeviceId {
+            await upsert(
+                persistent,
+                caps: baseCapabilities + ["alias=true", "declaredDeviceId=\(declaredDeviceId)"]
+            )
+        }
+
+        if savedIds.isEmpty, let lastError {
+            if bootstrapCacheEnabled {
+                SkyBridgeLogger.p2p.warning(
+                    "⚠️ TrustSync KEM persistence failed; using bootstrap cache only: declared=\(declaredDeviceId, privacy: .public) peer=\(peerDeviceId, privacy: .public) err=\(lastError.localizedDescription, privacy: .public)"
+                )
+            } else {
+                throw lastError
+            }
+        }
+
+        let savedSummary = savedIds.joined(separator: ",")
+        let cachedSuites = await PeerKEMBootstrapStore.shared.availableSuiteWireIds(forCandidates: bootstrapIds)
+        let cachedSummary = cachedSuites.map(String.init).joined(separator: ",")
+        if !savedIds.isEmpty {
+            SkyBridgeLogger.p2p.info(
+                "🔑 已保存对端 KEM 公钥：declared=\(declaredDeviceId, privacy: .public) peer=\(peerDeviceId, privacy: .public) trust=\(savedSummary, privacy: .public) cacheSuites=\(cachedSummary, privacy: .public) keys=\(payload.kemPublicKeys.count)"
+            )
+        } else if bootstrapCacheEnabled {
+            SkyBridgeLogger.p2p.info(
+                "🔑 已缓存对端 KEM 公钥（TrustSync degraded）：declared=\(declaredDeviceId, privacy: .public) peer=\(peerDeviceId, privacy: .public) cacheSuites=\(cachedSummary, privacy: .public) keys=\(payload.kemPublicKeys.count)"
+            )
+        }
+    }
+
+    @available(macOS 14.0, iOS 17.0, *)
+    @MainActor
+    private func upsertTrustRecordForBootstrap(
+        deviceId: String,
+        displayName: String,
+        incomingKEMKeys: [KEMPublicKeyInfo],
+        capabilities: [String]
+    ) async throws {
+        let trust = TrustSyncService.shared
+        let existing = trust.getTrustRecord(deviceId: deviceId)
+        let mergedCapabilities = Array(Set((existing?.capabilities ?? []) + capabilities)).sorted()
+        let mergedKEM = mergedKEMPublicKeys(existing: existing?.kemPublicKeys, incoming: incomingKEMKeys)
+        let resolvedDisplayName = normalizedNonEmptyString(displayName)
+            ?? existing?.deviceName
+
+        let record = TrustRecord(
+            deviceId: deviceId,
+            pubKeyFP: existing?.pubKeyFP ?? "",
+            publicKey: existing?.publicKey ?? Data(),
+            secureEnclavePublicKey: existing?.secureEnclavePublicKey,
+            protocolPublicKey: existing?.protocolPublicKey,
+            legacyP256PublicKey: existing?.legacyP256PublicKey,
+            signatureAlgorithm: existing?.signatureAlgorithm,
+            kemPublicKeys: mergedKEM,
+            attestationLevel: existing?.attestationLevel ?? .none,
+            attestationData: existing?.attestationData,
+            capabilities: mergedCapabilities,
+            signature: Data(),
+            deviceName: resolvedDisplayName
+        )
+        _ = try await trust.addTrustRecord(record)
+    }
 }
 
 public enum P2PConnectionError: Error, LocalizedError, Sendable {
@@ -1046,6 +1882,7 @@ public enum P2PConnectionError: Error, LocalizedError, Sendable {
     case noSessionKeys
     case disconnected
     case invalidFrameLength(Int)
+    case bootstrapKEMKeyTimeout
 
     public var errorDescription: String? {
         switch self {
@@ -1057,6 +1894,8 @@ public enum P2PConnectionError: Error, LocalizedError, Sendable {
             return "连接已断开"
         case .invalidFrameLength(let length):
             return "无效的帧长度：\(length)"
+        case .bootstrapKEMKeyTimeout:
+            return "等待对端 KEM 公钥超时（请确认对端已批准配对/信任并重试）"
         }
     }
 }

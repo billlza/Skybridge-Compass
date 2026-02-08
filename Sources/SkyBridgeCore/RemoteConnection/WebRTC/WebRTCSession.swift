@@ -117,6 +117,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     public var onLocalICECandidate: (@Sendable (WebRTCSignalingEnvelope.Payload) -> Void)?
     public var onData: (@Sendable (Data) -> Void)?
     public var onReady: (@Sendable () -> Void)?
+    public var onDisconnected: (@Sendable (String) -> Void)?
     
 #if canImport(WebRTC)
     private var peerConnection: RTCPeerConnection?
@@ -125,6 +126,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     
     private var isClosed = false
     private var sslHeld = false
+    private var didNotifyDisconnected = false
     
     public init(sessionId: String, localDeviceId: String, role: Role, ice: ICEConfig) {
         self.sessionId = sessionId
@@ -143,6 +145,8 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     public func close() {
         guard !isClosed else { return }
         isClosed = true
+        didNotifyDisconnected = true
+        onDisconnected = nil
 #if canImport(WebRTC)
         dataChannel?.close()
         dataChannel = nil
@@ -213,6 +217,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     
     public func start() throws {
         guard !isClosed else { throw WebRTCError.alreadyClosed }
+        didNotifyDisconnected = false
 #if canImport(WebRTC)
         WebRTCSSL.retain()
         sslHeld = true
@@ -253,6 +258,12 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
 #else
         throw WebRTCError.webRTCNotAvailable
 #endif
+    }
+
+    private func notifyDisconnectedIfNeeded(reason: String) {
+        guard !didNotifyDisconnected else { return }
+        didNotifyDisconnected = true
+        onDisconnected?(reason)
     }
     
     public func setRemoteOffer(_ sdp: String) {
@@ -363,6 +374,14 @@ extension WebRTCSession: RTCPeerConnectionDelegate {
     
     public func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceConnectionState) {
         logger.info("ICE connection state: \(String(describing: newState), privacy: .public)")
+        switch newState {
+        case .failed:
+            notifyDisconnectedIfNeeded(reason: "ice_failed")
+        case .closed:
+            notifyDisconnectedIfNeeded(reason: "ice_closed")
+        default:
+            break
+        }
     }
     
     public func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceGatheringState) {}
@@ -383,6 +402,8 @@ extension WebRTCSession: RTCDataChannelDelegate {
         logger.info("DataChannel state: \(String(describing: dataChannel.readyState), privacy: .public)")
         if dataChannel.readyState == .open {
             onReady?()
+        } else if dataChannel.readyState == .closed {
+            notifyDisconnectedIfNeeded(reason: "data_channel_closed")
         }
     }
     

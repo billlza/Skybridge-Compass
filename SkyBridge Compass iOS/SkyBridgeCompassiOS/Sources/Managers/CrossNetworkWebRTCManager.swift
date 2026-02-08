@@ -221,8 +221,15 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         case connected(sessionId: String)
         case failed(String)
     }
+
+    public enum Readiness: Sendable, Equatable {
+        case idle
+        case transportReady(sessionId: String)
+        case handshakeComplete(sessionId: String, negotiatedSuite: String)
+    }
     
     @Published public private(set) var state: State = .idle
+    @Published public private(set) var readiness: Readiness = .idle
     @Published public private(set) var lastError: String?
     @Published public private(set) var lastScreenData: ScreenData?
     @Published public private(set) var remoteDeviceName: String?
@@ -286,6 +293,20 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     
     public static let instance = CrossNetworkWebRTCManager()
     private init() {}
+
+    public var isTransportReady: Bool {
+        switch readiness {
+        case .transportReady, .handshakeComplete:
+            return true
+        case .idle:
+            return false
+        }
+    }
+
+    public var isHandshakeComplete: Bool {
+        if case .handshakeComplete = readiness { return true }
+        return false
+    }
     
     public func connect(fromScannedString string: String) async {
         do {
@@ -295,6 +316,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             let msg = error.localizedDescription
             lastError = msg
             state = .failed(msg)
+            readiness = .idle
         }
     }
     
@@ -314,6 +336,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             let msg = error.localizedDescription
             lastError = msg
             state = .failed(msg)
+            readiness = .idle
         }
     }
 
@@ -336,6 +359,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         localConnectionCode = code
         currentRole = .offerer
         state = .connecting(sessionId: code)
+        readiness = .idle
         lastError = nil
 
         connectionCodeBootstrapTask?.cancel()
@@ -353,6 +377,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
                 let msg = error.localizedDescription
                 self.lastError = msg
                 self.state = .failed(msg)
+                self.readiness = .idle
             }
             if self.connectionCodeBootstrapTask?.isCancelled == false {
                 self.connectionCodeBootstrapTask = nil
@@ -394,6 +419,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         receiveTask?.cancel()
         receiveTask = nil
         state = .idle
+        readiness = .idle
     }
 
     private func sendEnvelope(_ envelope: WebRTCSignalingEnvelope, retries: Int = 0) async {
@@ -640,6 +666,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
 
         currentSessionId = sessionId
         state = .connecting(sessionId: sessionId)
+        readiness = .idle
         lastError = nil
         handshakePeerId = remotePeerDeviceId ?? "webrtc-\(sessionId)"
         remoteDeviceName = remoteName
@@ -720,6 +747,19 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         s.onData = { data in
             Task { await inbound.push(data) }
         }
+
+        s.onDisconnected = { [weak self] reason in
+            Task { @MainActor in
+                guard let self else { return }
+                guard self.currentSessionId == sessionId else { return }
+                let msg = "WebRTC 传输已断开: \(reason)"
+                self.lastError = msg
+                await self.disconnect()
+                self.lastError = msg
+                self.state = .failed(msg)
+                self.readiness = .idle
+            }
+        }
         
         s.onReady = { [weak self] in
             Task { @MainActor in
@@ -727,7 +767,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
                 guard self.currentSessionId == sessionId else { return }
                 self.stopJoinHeartbeat()
                 self.stopOfferResendLoop()
-                self.state = .connected(sessionId: sessionId)
+                self.readiness = .transportReady(sessionId: sessionId)
 
                 // DataChannel opened; start handshake once per session.
                 if !self.handshakeStartedSessionIds.contains(sessionId) {
@@ -867,6 +907,15 @@ private extension CrossNetworkWebRTCManager {
         fileTransferWaiters.removeAll()
         for (_, c) in waiters {
             c.resume(throwing: error)
+        }
+    }
+
+    func failFileTransferWaiters(transferId: String, message: String) {
+        let keys = fileTransferWaiters.keys.filter { $0.hasPrefix("\(transferId)|") }
+        for key in keys {
+            if let waiter = fileTransferWaiters.removeValue(forKey: key) {
+                waiter.resume(throwing: FileTransferError.transferFailed(message))
+            }
         }
     }
     
@@ -1287,8 +1336,11 @@ private extension CrossNetworkWebRTCManager {
             handleInboundFileTransferWire(msg)
             
         case .error:
-            // Surface as an ack/error to sender waiters.
-            handleInboundFileTransferWire(msg)
+            // Fail any pending iOS->macOS sender waits for this transfer immediately.
+            failFileTransferWaiters(
+                transferId: msg.transferId,
+                message: msg.message ?? "remote error"
+            )
         }
     }
 }
@@ -1394,11 +1446,19 @@ private extension CrossNetworkWebRTCManager {
             
             let keys = try await driver.initiateHandshake(with: peer)
             self.sessionKeys = keys
+            if self.currentSessionId == sessionId {
+                self.state = .connected(sessionId: sessionId)
+                self.readiness = .handshakeComplete(
+                    sessionId: sessionId,
+                    negotiatedSuite: keys.negotiatedSuite.rawValue
+                )
+            }
             SkyBridgeLogger.shared.info("✅ WebRTC 握手完成（DataChannel） session=\(sessionId)")
         } catch {
             await MainActor.run {
                 self.lastError = "WebRTC 握手失败: \(error.localizedDescription)"
                 self.state = .failed(self.lastError ?? "WebRTC handshake failed")
+                self.readiness = .idle
                 self.sessionKeys = nil
                 self.handshakeStartedSessionIds.remove(sessionId)
             }

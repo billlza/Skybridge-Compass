@@ -385,14 +385,16 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         logger.debug("📡 网络设备更新: \(devices.count) 台")
 
         for device in devices {
+            let preferredMAC = preferredMACAddress(from: device.macSet)
             let identifier = generateUniqueIdentifier(
                 stableDeviceId: device.deviceId,
                 pubKeyFP: device.pubKeyFP,
-                macAddress: device.uniqueIdentifier,
+                macAddress: preferredMAC,
                 serialNumber: nil,
                 name: device.name,
                 ipv4: device.ipv4,
-                ipv6: device.ipv6
+                ipv6: device.ipv6,
+                discoveryIdentifier: device.uniqueIdentifier
             )
 
             mergeOrCreateDevice(
@@ -401,7 +403,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                 deviceType: device.deviceType,
                 ipv4: device.ipv4,
                 ipv6: device.ipv6,
-                macAddress: device.uniqueIdentifier,
+                macAddress: preferredMAC,
                 serialNumber: nil,
                 connectionTypes: device.connectionTypes,
                 services: device.services,
@@ -539,6 +541,10 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                 isLocalDevice: false,
                 isAuthorized: isAuthorized || existingDevice.isAuthorized
             ))
+            let upgradedIdentifier = preferredIdentifier(current: existingDevice.uniqueIdentifier, incoming: identifier)
+            if upgradedIdentifier != existingDevice.uniqueIdentifier {
+                existingDevice = Self.copyDevice(existingDevice, uniqueIdentifier: upgradedIdentifier)
+            }
  // 合并完成后基于最新来源/MAC/类型重算本机标记
             existingDevice.isLocalDevice = isLocalCandidate(
                 identifier: existingDevice.uniqueIdentifier,
@@ -549,6 +555,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
             )
 
             deviceMap[identifier] = existingDevice
+            deviceMap[upgradedIdentifier] = existingDevice
 
             logger.debug("🔄 合并设备信息: \(name)")
         } else {
@@ -582,6 +589,10 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                         isLocalDevice: false,
                         isAuthorized: isAuthorized || existingDevice.isAuthorized
                     ))
+                    let upgradedIdentifier = preferredIdentifier(current: existingDevice.uniqueIdentifier, incoming: identifier)
+                    if upgradedIdentifier != existingDevice.uniqueIdentifier {
+                        existingDevice = Self.copyDevice(existingDevice, uniqueIdentifier: upgradedIdentifier)
+                    }
  // 合并完成后基于最新来源/MAC/类型重算本机标记
                     existingDevice.isLocalDevice = isLocalCandidate(
                         identifier: existingDevice.uniqueIdentifier,
@@ -594,6 +605,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
  // 更新两个标识符的映射
                     deviceMap[identifier] = existingDevice
                     deviceMap[similarIdentifier] = existingDevice
+                    deviceMap[upgradedIdentifier] = existingDevice
 
                     logger.debug("🔄 发现相似设备并合并: \(name)")
                 }
@@ -1033,6 +1045,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         let strongId: String?
         let pubKeyFP: String?
         let prefersUSB: Bool
+        let hasStrongIdentityAnchor: Bool
     }
 
     private func makeCandidateMatchingContext(for onlineDevice: OnlineDevice) -> CandidateMatchingContext {
@@ -1050,7 +1063,8 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
             normalizedIPv6: onlineDevice.ipv6.map(Self.normalizeIPAddress),
             strongId: strongId,
             pubKeyFP: pubKeyFP,
-            prefersUSB: onlineDevice.connectionTypes.contains(.usb)
+            prefersUSB: onlineDevice.connectionTypes.contains(.usb),
+            hasStrongIdentityAnchor: strongId != nil || pubKeyFP != nil || onlineDevice.ipv4 != nil || onlineDevice.ipv6 != nil
         )
     }
 
@@ -1059,6 +1073,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         context: CandidateMatchingContext
     ) -> Int {
         var score = 0
+        let normalizedCandidateName = normalizeDeviceName(candidate.name)
         let candidateIsSyntheticPeer = Self.isSyntheticPeerDisplayName(candidate.name)
         let candidateHasSkyBridgeControlEndpoint =
             candidate.services.contains("_skybridge._tcp")
@@ -1069,25 +1084,55 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         let candidateHasUsablePort = candidate.portMap.values.contains(where: { $0 > 0 })
         let candidateNetworkReachable = candidateHasSkyBridgeControlEndpoint || (candidateHasAddress && candidateHasUsablePort)
 
-        if let strongId = context.strongId, let candidateId = candidate.deviceId, candidateId == strongId {
+        let strongIdMatched = {
+            guard let strongId = context.strongId, let candidateId = candidate.deviceId else { return false }
+            return candidateId == strongId
+        }()
+        let pubKeyMatched = {
+            guard let pubKeyFP = context.pubKeyFP, let candidateFP = candidate.pubKeyFP?.lowercased() else { return false }
+            return candidateFP == pubKeyFP
+        }()
+        let ipv4Matched = {
+            guard let normalizedIPv4 = context.normalizedIPv4,
+                  let candidateIPv4 = candidate.ipv4.map(Self.normalizeIPAddress) else { return false }
+            return candidateIPv4 == normalizedIPv4
+        }()
+        let ipv6Matched = {
+            guard let normalizedIPv6 = context.normalizedIPv6,
+                  let candidateIPv6 = candidate.ipv6.map(Self.normalizeIPAddress) else { return false }
+            return candidateIPv6 == normalizedIPv6
+        }()
+        let nameMatched = {
+            guard !context.normalizedOnlineName.isEmpty, !normalizedCandidateName.isEmpty else { return false }
+            if normalizedCandidateName == context.normalizedOnlineName { return true }
+            let minLength = min(normalizedCandidateName.count, context.normalizedOnlineName.count)
+            guard minLength >= 8 else { return false }
+            return normalizedCandidateName.contains(context.normalizedOnlineName)
+                || context.normalizedOnlineName.contains(normalizedCandidateName)
+        }()
+        let identityMatched = strongIdMatched || pubKeyMatched || ipv4Matched || ipv6Matched || nameMatched
+
+        // Never attempt unrelated devices for a selected target; this avoids false-positive candidate lists
+        // like "other iPhone / local Mac" showing up under one online device.
+        if !identityMatched {
+            return 0
+        }
+
+        if strongIdMatched {
             score += 200
         }
-        if let pubKeyFP = context.pubKeyFP, let candidateFP = candidate.pubKeyFP?.lowercased(), candidateFP == pubKeyFP {
+        if pubKeyMatched {
             score += 180
         }
 
-        if let normalizedIPv4 = context.normalizedIPv4,
-           let candidateIPv4 = candidate.ipv4.map(Self.normalizeIPAddress),
-           candidateIPv4 == normalizedIPv4 {
+        if ipv4Matched {
             score += 120
         }
-        if let normalizedIPv6 = context.normalizedIPv6,
-           let candidateIPv6 = candidate.ipv6.map(Self.normalizeIPAddress),
-           candidateIPv6 == normalizedIPv6 {
+        if ipv6Matched {
             score += 110
         }
 
-        if normalizeDeviceName(candidate.name) == context.normalizedOnlineName {
+        if nameMatched {
             score += 60
         }
 
@@ -1116,6 +1161,9 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         if context.prefersUSB, candidate.connectionTypes.contains(.usb) {
             score += 10
         }
+        if context.hasStrongIdentityAnchor, !strongIdMatched && !pubKeyMatched && !ipv4Matched && !ipv6Matched {
+            score -= 40
+        }
         return score
     }
 
@@ -1127,18 +1175,22 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         serialNumber: String?,
         name: String,
         ipv4: String?,
-        ipv6: String?
+        ipv6: String?,
+        discoveryIdentifier: String? = nil
     ) -> String {
         // 优先级（强→弱）:
-        // deviceId (stable) > pubKeyFP (stable) > MAC地址 > 序列号 > IPv4 > IPv6 > 名称
+        // deviceId (stable) > pubKeyFP (stable) > Bonjour/IP identity > MAC地址 > 序列号 > IPv4 > IPv6 > 名称
         if let id = stableDeviceId, !id.isEmpty {
             return "id:\(id)"
         }
         if let fp = pubKeyFP, fp.count == 64, fp.allSatisfy({ $0.isHexDigit }) {
             return "fp:\(fp)"
         }
-        if let mac = macAddress, !mac.isEmpty {
-            return "mac:\(mac.lowercased())"
+        if let discoveryIdentifier = normalizedDiscoveryIdentifier(discoveryIdentifier) {
+            return discoveryIdentifier
+        }
+        if let normalizedMAC = normalizedMACAddress(macAddress) {
+            return "mac:\(normalizedMAC)"
         }
 
         if let serial = serialNumber, !serial.isEmpty {
@@ -1154,6 +1206,98 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         }
 
         return "name:\(name)"
+    }
+
+    private func normalizedDiscoveryIdentifier(_ raw: String?) -> String? {
+        guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
+            return nil
+        }
+
+        if raw.hasPrefix("id:"),
+           let normalized = normalizeStableIdentifier(String(raw.dropFirst("id:".count))) {
+            return "id:\(normalized)"
+        }
+        if raw.hasPrefix("fp:"),
+           let normalized = normalizeFingerprint(String(raw.dropFirst("fp:".count))) {
+            return "fp:\(normalized)"
+        }
+        if raw.hasPrefix("bonjour:") || raw.hasPrefix("recent:bonjour:") {
+            return raw
+        }
+        if raw.hasPrefix("ip:") {
+            let payload = String(raw.dropFirst("ip:".count))
+            let normalized = Self.normalizeIPAddress(payload)
+            return normalized.isEmpty ? nil : "ip:\(normalized)"
+        }
+        if let stable = normalizeStableIdentifier(raw) {
+            return "id:\(stable)"
+        }
+        let normalizedIP = Self.normalizeIPAddress(raw)
+        if !normalizedIP.isEmpty, normalizedIP.contains(".") || normalizedIP.contains(":") {
+            return "ip:\(normalizedIP)"
+        }
+        return nil
+    }
+
+    private func normalizedMACAddress(_ raw: String?) -> String? {
+        guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
+            return nil
+        }
+        let normalized = raw.replacingOccurrences(of: "-", with: ":").lowercased()
+        let pattern = "^([0-9a-f]{2}:){5}[0-9a-f]{2}$"
+        guard normalized.range(of: pattern, options: .regularExpression) != nil else { return nil }
+        return normalized
+    }
+
+    private func preferredMACAddress(from candidates: Set<String>) -> String? {
+        for value in candidates {
+            if let normalized = normalizedMACAddress(value) {
+                return normalized
+            }
+        }
+        return nil
+    }
+
+    private func normalizeStableIdentifier(_ raw: String?) -> String? {
+        guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
+            return nil
+        }
+        guard raw.count >= 8 else { return nil }
+        return raw
+    }
+
+    private func normalizeFingerprint(_ raw: String?) -> String? {
+        guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), !raw.isEmpty else {
+            return nil
+        }
+        guard raw.range(of: "^[0-9a-f]{16,128}$", options: .regularExpression) != nil else { return nil }
+        return raw
+    }
+
+    private func preferredIdentifier(current: String, incoming: String) -> String {
+        let currentScore = identifierStrength(current)
+        let incomingScore = identifierStrength(incoming)
+        if incomingScore > currentScore {
+            return incoming
+        }
+        return current
+    }
+
+    private func identifierStrength(_ identifier: String) -> Int {
+        if identifier.hasPrefix("id:") { return 600 }
+        if identifier.hasPrefix("fp:") { return 550 }
+        if identifier.hasPrefix("recent:bonjour:") { return 450 }
+        if identifier.hasPrefix("bonjour:") { return 440 }
+        if identifier.hasPrefix("serial:") { return 350 }
+        if identifier.hasPrefix("mac:") { return 320 }
+        if identifier.hasPrefix("ip:") { return 260 }
+        if identifier.hasPrefix("recent:peer:") { return 180 }
+        if identifier.hasPrefix("name:") { return 100 }
+        if normalizeStableIdentifier(identifier) != nil { return 500 }
+        if Self.normalizeIPAddress(identifier).contains(".") || Self.normalizeIPAddress(identifier).contains(":") {
+            return 240
+        }
+        return 10
     }
 
  /// 标准化设备名称

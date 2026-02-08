@@ -336,16 +336,20 @@ public class DeviceDiscoveryManager: ObservableObject {
             tcp.keepaliveCount = 4
         }
         
-        // 设置本地端口
-        if port > 0 {
-            parameters.requiredLocalEndpoint = NWEndpoint.hostPort(
-                host: .ipv4(.any),
-                port: NWEndpoint.Port(integerLiteral: port)
-            )
-        }
-        
         do {
-            listener = try NWListener(using: parameters)
+            if port > 0 {
+                guard let boundPort = NWEndpoint.Port(rawValue: port) else {
+                    throw NSError(
+                        domain: "DeviceDiscoveryManager",
+                        code: -1,
+                        userInfo: [NSLocalizedDescriptionKey: "无效监听端口: \(port)"]
+                    )
+                }
+                // Bind on port only (no fixed host), so the listener can accept both IPv4/IPv6.
+                listener = try NWListener(using: parameters, on: boundPort)
+            } else {
+                listener = try NWListener(using: parameters)
+            }
         } catch {
             SkyBridgeLogger.shared.error("❌ 创建监听器失败: \(error.localizedDescription)")
             self.error = error

@@ -48,6 +48,7 @@ public struct EnhancedDeviceDiscoveryView: View {
     @State private var manualPort: String = "11550"
     @State private var manualCode: String = ""
     @State private var hoveredConnectionMode: DiscoveryMode? = nil
+    @State private var connectingOnlineDeviceIds: Set<UUID> = []
 
     @State private var selectedTrustedRecord: TrustRecord?
     @State private var showTrustedRecordSheet: Bool = false
@@ -387,7 +388,10 @@ public struct EnhancedDeviceDiscoveryView: View {
                     Text("最近连接")
                         .font(.headline)
                     ForEach(recentlyConnected) { device in
-                        OnlineDeviceCard(device: device) {
+                        OnlineDeviceCard(
+                            device: device,
+                            isConnecting: connectingOnlineDeviceIds.contains(device.id)
+                        ) {
                             // If already connected, no-op; otherwise, we keep this as a future reconnect entry.
                             connectToOnlineDevice(device)
                         }
@@ -434,7 +438,10 @@ public struct EnhancedDeviceDiscoveryView: View {
                     )
                 } else {
                     ForEach(filteredOnlineDevicesNonLocal) { device in
-                        OnlineDeviceCard(device: device) {
+                        OnlineDeviceCard(
+                            device: device,
+                            isConnecting: connectingOnlineDeviceIds.contains(device.id)
+                        ) {
                             connectToOnlineDevice(device)
                         }
                     }
@@ -879,8 +886,15 @@ public struct EnhancedDeviceDiscoveryView: View {
 
     struct OnlineDeviceCard: View {
         let device: OnlineDevice
+        let isConnecting: Bool
         let onConnect: () -> Void
         @EnvironmentObject var themeConfiguration: ThemeConfiguration
+
+        init(device: OnlineDevice, isConnecting: Bool = false, onConnect: @escaping () -> Void) {
+            self.device = device
+            self.isConnecting = isConnecting
+            self.onConnect = onConnect
+        }
 
         var body: some View {
             HStack(spacing: 16) {
@@ -956,12 +970,17 @@ public struct EnhancedDeviceDiscoveryView: View {
 
                 Spacer()
 
- // 连接按钮(仅对非本机在线设备显示)
+                // 连接按钮(仅对非本机在线设备显示)
                 if !device.isLocalDevice && device.connectionStatus == .online {
-                    Button(LocalizationManager.shared.localizedString("discovery.action.connect")) {
-                        onConnect()
+                    if isConnecting {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Button(LocalizationManager.shared.localizedString("discovery.action.connect")) {
+                            onConnect()
+                        }
+                        .buttonStyle(.borderedProminent)
                     }
-                    .buttonStyle(.borderedProminent)
                 }
             }
             .padding(16)
@@ -1465,7 +1484,14 @@ public struct EnhancedDeviceDiscoveryView: View {
 
     /// 🆕 连接到在线设备
     private func connectToOnlineDevice(_ device: OnlineDevice) {
+        if connectingOnlineDeviceIds.contains(device.id) { return }
+        connectingOnlineDeviceIds.insert(device.id)
         Task {
+            defer {
+                Task { @MainActor in
+                    connectingOnlineDeviceIds.remove(device.id)
+                }
+            }
             let preferUSBRoute = device.connectionTypes.contains(.usb)
             var discoveredCandidates = unifiedDeviceManager.resolvedDiscoveredCandidates(for: device, limit: 6)
             let fallback = fallbackDiscoveredDevice(for: device)
@@ -1514,12 +1540,23 @@ public struct EnhancedDeviceDiscoveryView: View {
     }
 
     private func fallbackDiscoveredDevice(for device: OnlineDevice) -> DiscoveredDevice {
-        let normalizedServices = device.services
+        var normalizedServices = device.services
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
             .filter { $0.hasPrefix("_") && ($0.hasSuffix("._tcp") || $0.hasSuffix("._udp")) }
+        if normalizedServices.isEmpty,
+           device.sources.contains(.skybridgeBonjour) || device.sources.contains(.skybridgeP2P) {
+            normalizedServices = ["_skybridge._tcp"]
+        }
         let mappedDeviceId: String? = {
             guard device.uniqueIdentifier.hasPrefix("id:") else { return nil }
             return String(device.uniqueIdentifier.dropFirst("id:".count))
+        }()
+        let inferredDeviceId: String? = {
+            let trimmed = device.uniqueIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return nil }
+            guard !trimmed.contains(":") else { return nil }
+            guard trimmed.count >= 8 else { return nil }
+            return trimmed
         }()
         let mappedPubKeyFP: String? = {
             guard device.uniqueIdentifier.hasPrefix("fp:") else { return nil }
@@ -1537,7 +1574,7 @@ public struct EnhancedDeviceDiscoveryView: View {
             signalStrength: nil,
             source: .skybridgeBonjour,
             isLocalDevice: device.isLocalDevice,
-            deviceId: mappedDeviceId,
+            deviceId: mappedDeviceId ?? inferredDeviceId,
             pubKeyFP: mappedPubKeyFP
         )
     }

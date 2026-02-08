@@ -29,6 +29,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     @Published public var qrCodeData: Data?
     @Published public var availableCloudDevices: [CloudDevice] = []
     @Published public var connectionStatus: CrossNetworkConnectionStatus = .idle
+    @Published public private(set) var readiness: CrossNetworkReadiness = .idle
     @Published public var currentConnection: RemoteConnection?
 
  // MARK: - 私有属性
@@ -79,6 +80,12 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         case failed(String) // 使用String而不是Error，以符合Sendable要求
     }
 
+    public enum CrossNetworkReadiness: Sendable, Equatable {
+        case idle
+        case transportReady(sessionId: String)
+        case handshakeComplete(sessionId: String, negotiatedSuite: String)
+    }
+
  // 为了向后兼容，保留类型别名（但建议使用 CrossNetworkConnectionStatus）
     @available(*, deprecated, renamed: "CrossNetworkConnectionStatus", message: "使用 CrossNetworkConnectionStatus 以避免与全局 ConnectionStatus 冲突")
     public typealias ConnectionStatus = CrossNetworkConnectionStatus
@@ -90,6 +97,20 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         self.deviceFingerprint = Self.generateDeviceFingerprint()
 
         logger.info("跨网络连接管理器初始化完成")
+    }
+
+    public var isTransportReady: Bool {
+        switch readiness {
+        case .transportReady, .handshakeComplete:
+            return true
+        case .idle:
+            return false
+        }
+    }
+
+    public var isHandshakeComplete: Bool {
+        if case .handshakeComplete = readiness { return true }
+        return false
     }
 
     private static func hasUsableTURNCredentials(_ ice: WebRTCSession.ICEConfig) -> Bool {
@@ -161,6 +182,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 
         if currentConnection?.id == sessionID {
             currentConnection = nil
+            readiness = .idle
         }
     }
 
@@ -255,6 +277,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         connectionCode = nil
         qrCodeData = nil
         connectionStatus = .idle
+        readiness = .idle
 
         logger.info("✅ CrossNetworkConnectionManager disconnected; all resources released")
     }
@@ -266,6 +289,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     public func generateDynamicQRCode(validDuration: TimeInterval = 300) async throws -> Data {
         logger.info("生成动态二维码，有效期: \(validDuration)秒")
         connectionStatus = .generating
+        readiness = .idle
 
  // 1. 生成会话密钥对（Curve25519 用于密钥协商）
  // 会话密钥用于后续P2P加密握手，独立于签名密钥
@@ -326,6 +350,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 
         self.qrCodeData = qrString.data(using: .utf8)
         self.connectionStatus = .waiting(code: sessionID)
+        self.readiness = .idle
 
         // 6. 启动 WebRTC offerer（等待对端扫码后通过 signaling 完成 SDP/ICE，DataChannel ready 后进入 connected）
         startWebRTCOfferSession(sessionID: sessionID)
@@ -395,7 +420,8 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         let connection = try await establishWebRTCConnection(with: qrData)
 
         self.currentConnection = connection
-        self.connectionStatus = .connected
+        self.connectionStatus = .connecting
+        self.readiness = .idle
 
         logger.info("✅ 通过二维码连接成功")
         return connection
@@ -428,6 +454,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     public func connectToCloudDevice(_ device: CloudDevice) async throws -> RemoteConnection {
         logger.info("连接到 iCloud 设备: \(device.name)")
         connectionStatus = .connecting
+        readiness = .idle
 
  // 1. 通过 iCloud KV Store 交换 ICE 候选
         let sessionID = UUID().uuidString
@@ -448,6 +475,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 
         self.currentConnection = connection
         self.connectionStatus = .connected
+        self.readiness = .transportReady(sessionId: connection.id)
 
         logger.info("✅ 通过 iCloud 连接成功")
         return connection
@@ -459,6 +487,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     public func generateConnectionCode() async throws -> String {
         logger.info("生成智能连接码")
         connectionStatus = .generating
+        readiness = .idle
 
         // 1) 生成短码（6 位，排除易混淆字符）
         let code = Self.generateShortCode()
@@ -467,6 +496,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         //    iOS 端只需输入同一 code 即可 join 同一 signaling room 并完成 offer/answer/ICE。
         self.connectionCode = code
         self.connectionStatus = .waiting(code: code)
+        self.readiness = .idle
 
         // 3) 启动 WebRTC offerer（等待对端输入 code 后 join，同会话完成 SDP/ICE，DataChannel ready）
         startWebRTCOfferSession(sessionID: code)
@@ -495,6 +525,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         }
 
         connectionStatus = .connecting
+        readiness = .idle
 
         ensureSignalingConnected()
 
@@ -512,13 +543,23 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             guard let self else { return }
             Task { await self.sendSignal(.init(sessionId: sessionID, from: self.deviceFingerprint, type: .iceCandidate, payload: payload)) }
         }
+        session.onDisconnected = { [weak self] reason in
+            guard let self else { return }
+            Task { @MainActor in
+                guard self.currentConnection?.id == sessionID else { return }
+                self.cleanupWebRTCSession(sessionID, reason: "transport_disconnected:\(reason)")
+                self.connectionStatus = .failed("WebRTC transport disconnected: \(reason)")
+                self.readiness = .idle
+            }
+        }
         session.onReady = { [weak self] in
             guard let self else { return }
             Task { @MainActor in
                 self.logger.info("✅ WebRTC answerer ready: session=\(sessionID, privacy: .public)")
                 self.stopJoinHeartbeat(for: sessionID)
                 self.currentConnection = RemoteConnection(id: sessionID, deviceName: "Remote Device", transport: .webrtc(session))
-                self.connectionStatus = .connected
+                self.connectionStatus = .connecting
+                self.readiness = .transportReady(sessionId: sessionID)
                 self.startWebRTCInboundHandshakeAndControlLoop(sessionID: sessionID, session: session, endpointDescription: "webrtc:\(sessionID)")
             }
         }
@@ -531,6 +572,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             logger.error("❌ connectWithCode(WebRTC) start failed: \(error.localizedDescription, privacy: .public)")
             cleanupWebRTCSession(sessionID, reason: "answerer_start_failed")
             connectionStatus = .failed(error.localizedDescription)
+            readiness = .idle
             throw error
         }
 
@@ -627,15 +669,24 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 await self.sendSignal(.init(sessionId: sessionID, from: self.deviceFingerprint, type: .iceCandidate, payload: payload))
             }
         }
+        session.onDisconnected = { [weak self] reason in
+            guard let self else { return }
+            Task { @MainActor in
+                guard self.currentConnection?.id == sessionID else { return }
+                self.cleanupWebRTCSession(sessionID, reason: "transport_disconnected:\(reason)")
+                self.connectionStatus = .failed("WebRTC transport disconnected: \(reason)")
+                self.readiness = .idle
+            }
+        }
         session.onReady = { [weak self] in
             guard let self else { return }
             Task { @MainActor in
                 self.logger.info("✅ WebRTC offerer ready: session=\(sessionID, privacy: .public)")
                 self.stopJoinHeartbeat(for: sessionID)
                 self.stopOfferResendLoop(for: sessionID)
-                // 当前 UI 只需要体现“已连接”；后续会把 DataChannel 接入握手/控制通道。
                 self.currentConnection = RemoteConnection(id: sessionID, deviceName: "Remote Device", transport: .webrtc(session))
-                self.connectionStatus = .connected
+                self.connectionStatus = .connecting
+                self.readiness = .transportReady(sessionId: sessionID)
 
                 // 启动“握手/控制通道”消费者：把 DataChannel 当作一条 length-framed byte stream，复用现有 HandshakeDriver / AppMessage 逻辑。
                 self.startWebRTCInboundHandshakeAndControlLoop(sessionID: sessionID, session: session, endpointDescription: "webrtc:\(sessionID)")
@@ -653,6 +704,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             logger.error("❌ startWebRTCOfferSession failed: \(error.localizedDescription, privacy: .public)")
             cleanupWebRTCSession(sessionID, reason: "offerer_start_failed")
             connectionStatus = .failed(error.localizedDescription)
+            readiness = .idle
         }
     }
 
@@ -679,6 +731,26 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 await self.sendSignal(.init(sessionId: sessionID, from: self.deviceFingerprint, type: .iceCandidate, payload: payload))
             }
         }
+        session.onDisconnected = { [weak self] reason in
+            guard let self else { return }
+            Task { @MainActor in
+                guard self.currentConnection?.id == sessionID else { return }
+                self.cleanupWebRTCSession(sessionID, reason: "transport_disconnected:\(reason)")
+                self.connectionStatus = .failed("WebRTC transport disconnected: \(reason)")
+                self.readiness = .idle
+            }
+        }
+        session.onReady = { [weak self] in
+            guard let self else { return }
+            Task { @MainActor in
+                self.logger.info("✅ WebRTC QR answerer ready: session=\(sessionID, privacy: .public)")
+                self.stopJoinHeartbeat(for: sessionID)
+                self.currentConnection = RemoteConnection(id: sessionID, deviceName: qrData.deviceName, transport: .webrtc(session))
+                self.connectionStatus = .connecting
+                self.readiness = .transportReady(sessionId: sessionID)
+                self.startWebRTCInboundHandshakeAndControlLoop(sessionID: sessionID, session: session, endpointDescription: "webrtc:\(sessionID)")
+            }
+        }
 
         webrtcSessionsBySessionId[sessionID] = session
 
@@ -687,6 +759,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         } catch {
             cleanupWebRTCSession(sessionID, reason: "qr_answerer_start_failed")
             connectionStatus = .failed(error.localizedDescription)
+            readiness = .idle
             throw error
         }
 
@@ -757,6 +830,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             cleanupWebRTCSession(env.sessionId, reason: "remote_leave")
             if currentConnection == nil {
                 connectionStatus = .idle
+                readiness = .idle
             }
         }
     }
@@ -1087,6 +1161,11 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 self.webrtcInboundQueuesBySessionId.removeValue(forKey: sessionID)
                 self.stopWebRTCScreenStreaming(sessionID: sessionID)
                 self.failAllFileTransferWaitersForSession(sessionID: sessionID, message: "WebRTC control channel closed")
+                if self.webrtcSessionsBySessionId[sessionID] != nil {
+                    self.cleanupWebRTCSession(sessionID, reason: "control_channel_closed")
+                    self.connectionStatus = .failed("WebRTC control channel closed")
+                    self.readiness = .idle
+                }
             }
         }
     }
@@ -1387,6 +1466,14 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                                 )
                                 let decision = await PairingTrustApprovalService.shared.decide(for: request)
                                 guard decision != PairingTrustApprovalService.Decision.reject else { break }
+
+                                await PeerKEMBootstrapStore.shared.upsert(
+                                    deviceIds: [payload.deviceId, endpointDescription],
+                                    kemPublicKeys: payload.kemPublicKeys
+                                )
+                                logger.info(
+                                    "🔑 WebRTC bootstrap KEM cache updated: declared=\(payload.deviceId, privacy: .public) peer=\(endpointDescription, privacy: .public) keys=\(payload.kemPublicKeys.count, privacy: .public)"
+                                )
 
                                 let provider = CryptoProviderFactory.make(policy: .preferPQC)
                                 let suites = provider.supportedSuites.filter { $0.isPQCGroup }
@@ -2004,11 +2091,20 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 switch st {
                 case .waitingFinished(_, let keys, _):
                     sessionKeys = keys
-                    self.webrtcSessionKeysBySessionId[sessionID] = keys
                 case .established(let keys):
                     sessionKeys = keys
                     self.webrtcSessionKeysBySessionId[sessionID] = keys
+                    self.connectionStatus = .connected
+                    self.readiness = .handshakeComplete(
+                        sessionId: sessionID,
+                        negotiatedSuite: keys.negotiatedSuite.rawValue
+                    )
                     startScreenStreamingIfNeeded(keys: keys)
+                case .failed(let reason):
+                    self.cleanupWebRTCSession(sessionID, reason: "handshake_failed")
+                    self.connectionStatus = .failed("WebRTC handshake failed: \(reason)")
+                    self.readiness = .idle
+                    return
                 default:
                     break
                 }
@@ -2149,6 +2245,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 await MainActor.run {
                     self.currentConnection = connection
                     self.connectionStatus = .connected
+                    self.readiness = .transportReady(sessionId: connection.id)
                 }
             }
         }
@@ -2166,6 +2263,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 await MainActor.run {
                     self.currentConnection = connection
                     self.connectionStatus = .connected
+                    self.readiness = .transportReady(sessionId: connection.id)
                 }
             }
         }

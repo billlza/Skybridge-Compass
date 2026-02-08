@@ -848,6 +848,14 @@ public class DeviceDiscoveryManager: BaseManager {
                                     break
                                 }
 
+                                await PeerKEMBootstrapStore.shared.upsert(
+                                    deviceIds: [payload.deviceId, peerDeviceId],
+                                    kemPublicKeys: payload.kemPublicKeys
+                                )
+                                logger.info(
+                                    "🔑 已缓存对端 KEM 公钥（bootstrap）：declared=\(payload.deviceId, privacy: .public) peer=\(peerDeviceId, privacy: .public) keys=\(payload.kemPublicKeys.count, privacy: .public)"
+                                )
+
                                 // Reply with our KEM identity public keys (bootstrap for iOS initiator).
                                 let provider = CryptoProviderFactory.make(policy: .preferPQC)
                                 let suites = provider.supportedSuites.filter { $0.isPQCGroup }
@@ -1242,20 +1250,7 @@ public class DeviceDiscoveryManager: BaseManager {
         var ipv6: String?
         var port: Int = 0
 
- // 方法 1: 从接口推断 IP
-        if !result.interfaces.isEmpty {
-            for interface in result.interfaces {
-                let interfaceName = interface.name
-                logger.debug("检查网络接口: \(interfaceName, privacy: .public)")
-
-                if let addresses = getIPAddressesForInterface(interfaceName) {
-                    if ipv4 == nil { ipv4 = addresses.ipv4 }
-                    if ipv6 == nil { ipv6 = addresses.ipv6 }
-                }
-            }
-        }
-
- // 方法 2: 使用 NetService 解析端口 + 地址（当 endpoint 为 service 时）
+ // 方法 1: 使用 NetService 解析端口 + 地址（当 endpoint 为 service 时）
         if case .service(let name, let type, let domain, _) = result.endpoint {
             let netService = NetService(domain: domain.isEmpty ? "local." : domain,
                                         type: type,
@@ -1486,15 +1481,6 @@ nonisolated private static func DDM_ExtractNetworkInfo(_ result: NWBrowser.Resul
     var ipv4: String?
     var ipv6: String?
     var port: Int = 0
-    if !result.interfaces.isEmpty {
-        for interface in result.interfaces {
-            let name = interface.name
-            if let addrs = DDM_GetIPAddressesForInterface(name) {
-                if ipv4 == nil { ipv4 = addrs.ipv4 }
-                if ipv6 == nil { ipv6 = addrs.ipv6 }
-            }
-        }
-    }
     if case .service(let name, let type, let domain, _) = result.endpoint, port == 0 {
         let netService = NetService(domain: domain.isEmpty ? "local." : domain, type: type, name: name)
         netService.resolve(withTimeout: 1.0)

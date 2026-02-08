@@ -31,6 +31,7 @@ struct SkyBridgeCompassApp: App {
     @StateObject private var localizationManager = LocalizationManager.instance
 
     @Environment(\.scenePhase) private var scenePhase
+    @State private var backgroundTeardownTask: Task<Void, Never>?
     
     // MARK: - Scene Configuration
     
@@ -218,6 +219,8 @@ struct SkyBridgeCompassApp: App {
 
         switch phase {
         case .active:
+            backgroundTeardownTask?.cancel()
+            backgroundTeardownTask = nil
             // 前台：确保按设置启动
             applyDiscoverySettings()
             if !connectionManager.isListening {
@@ -228,19 +231,29 @@ struct SkyBridgeCompassApp: App {
         case .background:
             // 后台：若不允许后台连接，则关掉 discovery + listener（省电）
             guard !settings.allowBackgroundConnection else { return }
-            // UX fix:
-            // Avoid stopping discovery/listener immediately on background transitions (lock screen, app switch),
-            // which can interrupt ongoing handshakes/transfers and create reconnect loops.
-            // If we are truly idle, we can stop; otherwise keep running.
-            let hasActiveP2P = !connectionManager.activeConnections.isEmpty
-            let isTransferring = FileTransferManager.instance.isTransferring
-            let hasCrossNetwork: Bool = {
-                if case .connected = CrossNetworkWebRTCManager.instance.state { return true }
-                return false
-            }()
-            if !hasActiveP2P && !isTransferring && !hasCrossNetwork {
-                discoveryManager.stopDiscovery()
-                connectionManager.stopListening()
+            backgroundTeardownTask?.cancel()
+            backgroundTeardownTask = Task { @MainActor in
+                // Grace period: allow users to switch from iPhone -> Mac and initiate connection without
+                // instantly tearing down iOS listener/discovery.
+                try? await Task.sleep(for: .seconds(30))
+                guard !Task.isCancelled else { return }
+                guard scenePhase == .background else { return }
+
+                let hasActiveP2P = !connectionManager.activeConnections.isEmpty
+                let isTransferring = FileTransferManager.instance.isTransferring
+                let hasCrossNetwork: Bool = {
+                    if case .connected = CrossNetworkWebRTCManager.instance.state { return true }
+                    return false
+                }()
+
+                if !hasActiveP2P && !isTransferring && !hasCrossNetwork {
+                    discoveryManager.stopDiscovery()
+                    connectionManager.stopListening()
+                    SkyBridgeLogger.shared.info("⏹️ 后台空闲超过 30s，已停止 discovery/listener")
+                } else {
+                    SkyBridgeLogger.shared.info("ℹ️ 后台仍有活动连接/传输，保持 discovery/listener")
+                }
+                backgroundTeardownTask = nil
             }
 
         default:

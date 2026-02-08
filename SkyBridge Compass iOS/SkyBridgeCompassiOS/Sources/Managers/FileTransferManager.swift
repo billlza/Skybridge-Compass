@@ -156,6 +156,7 @@ public enum TransferMessageType: UInt32, Codable, Sendable {
     case metadata = 1
     case chunk = 2
     case complete = 3
+    case receipt = 4
     case unknown = 0
 }
 
@@ -184,6 +185,29 @@ public struct TransferHeader: Sendable {
         let lengthValue = data.suffix(4).withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
         let type = TransferMessageType(rawValue: typeValue) ?? .unknown
         return TransferHeader(type: type, length: Int(lengthValue))
+    }
+}
+
+/// 接收端落盘回执（用于发送端最终成功判定）
+public struct TransferReceipt: Codable, Sendable {
+    public let transferId: String
+    public let success: Bool
+    public let receivedBytes: Int64
+    public let fileHash: String?
+    public let error: String?
+    
+    public init(
+        transferId: String,
+        success: Bool,
+        receivedBytes: Int64,
+        fileHash: String? = nil,
+        error: String? = nil
+    ) {
+        self.transferId = transferId
+        self.success = success
+        self.receivedBytes = receivedBytes
+        self.fileHash = fileHash
+        self.error = error
     }
 }
 
@@ -431,6 +455,7 @@ public class FileTransferManager: ObservableObject {
             }
 
             let connection = try await createConnection(to: endpoint)
+            defer { connection.cancel() }
             transferStates[transfer.id]?.connection = connection
             
             // 发送元数据
@@ -438,6 +463,14 @@ public class FileTransferManager: ObservableObject {
             
             // 分块发送文件
             try await sendFileInChunks(from: url, transfer: transfer, over: connection, chunkSize: effectiveChunkSize)
+
+            // 必须等待接收端“落盘回执”，否则不能标记发送成功
+            _ = try await waitForTransferReceipt(
+                over: connection,
+                expectedTransferId: transfer.id,
+                expectedFileSize: fileSize,
+                expectedFileHash: fileHash
+            )
             
             // 完成传输
             await completeTransfer(transfer.id, success: true)
@@ -496,6 +529,7 @@ public class FileTransferManager: ObservableObject {
         
         var sentBytes: Int64 = 0
         var chunkIndex = 0
+        var fileHasher = SHA256()
         
         while sentBytes < metadata.fileSize {
             // Cancel check
@@ -511,6 +545,7 @@ public class FileTransferManager: ObservableObject {
             try fileHandle.seek(toOffset: UInt64(sentBytes))
             let chunkData = fileHandle.readData(ofLength: Int(currentChunkSize))
             let rawSize = chunkData.count
+            fileHasher.update(data: chunkData)
             
             let msg = CrossNetworkFileTransferMessage(
                 op: .chunk,
@@ -554,7 +589,13 @@ public class FileTransferManager: ObservableObject {
             await updateProgress(transfer.id, transferredBytes: sentBytes, totalBytes: metadata.fileSize)
         }
         
-        let done = CrossNetworkFileTransferMessage(op: .complete, transferId: transfer.id)
+        let fileSha256 = Data(fileHasher.finalize())
+        let done = CrossNetworkFileTransferMessage(
+            op: .complete,
+            transferId: transfer.id,
+            receivedBytes: metadata.fileSize,
+            fileSha256: fileSha256
+        )
         try await crossNetwork.sendFileTransferMessage(done)
         _ = try await crossNetwork.waitForFileTransferAck(
             transferId: transfer.id,
@@ -580,6 +621,7 @@ public class FileTransferManager: ObservableObject {
         
         // 创建传输记录
         let transfer = FileTransfer(
+            id: metadata.transferId,
             fileName: metadata.fileName,
             fileSize: metadata.fileSize,
             fileType: determineFileType(fromName: metadata.fileName),
@@ -618,6 +660,19 @@ public class FileTransferManager: ObservableObject {
             guard receivedHash == metadata.fileHash else {
                 throw FileTransferError.checksumMismatch
             }
+
+            // 向发送端发送落盘回执（失败不影响本地已完成结果）
+            let receipt = TransferReceipt(
+                transferId: metadata.transferId,
+                success: true,
+                receivedBytes: metadata.fileSize,
+                fileHash: receivedHash
+            )
+            do {
+                try await sendReceipt(receipt, over: connection)
+            } catch {
+                SkyBridgeLogger.shared.error("⚠️ 落盘回执发送失败: \(error.localizedDescription)")
+            }
             
             // 完成传输
             await completeTransfer(transfer.id, success: true)
@@ -627,6 +682,14 @@ public class FileTransferManager: ObservableObject {
             return targetURL
             
         } catch {
+            let failure = TransferReceipt(
+                transferId: metadata.transferId,
+                success: false,
+                receivedBytes: 0,
+                fileHash: nil,
+                error: error.localizedDescription
+            )
+            try? await sendReceipt(failure, over: connection)
             await completeTransfer(transfer.id, success: false, error: error)
             throw error
         }
@@ -764,6 +827,50 @@ public class FileTransferManager: ObservableObject {
         let header = TransferHeader(type: .complete, length: 0)
         try await sendData(header.encoded, over: connection)
     }
+
+    /// 发送接收端回执（落盘确认/失败原因）
+    private func sendReceipt(_ receipt: TransferReceipt, over connection: NWConnection) async throws {
+        let data = try JSONEncoder().encode(receipt)
+        if data.count > maxMessageBytes {
+            throw FileTransferError.invalidMetadata
+        }
+        let header = TransferHeader(type: .receipt, length: data.count)
+        try await sendData(header.encoded + data, over: connection)
+    }
+
+    /// 发送端等待接收端落盘回执，避免“仅发送完成即成功”的假阳性
+    private func waitForTransferReceipt(
+        over connection: NWConnection,
+        expectedTransferId: String,
+        expectedFileSize: Int64,
+        expectedFileHash: String
+    ) async throws -> TransferReceipt {
+        let header = try await receiveHeader(from: connection, timeout: 15)
+        guard header.type == .receipt else {
+            throw FileTransferError.transferFailed("接收端未返回落盘回执")
+        }
+        guard header.length > 0 else {
+            throw FileTransferError.invalidMetadata
+        }
+
+        let payload = try await receiveData(length: header.length, from: connection, timeout: 15)
+        let receipt = try JSONDecoder().decode(TransferReceipt.self, from: payload)
+        guard receipt.transferId == expectedTransferId else {
+            throw FileTransferError.invalidMetadata
+        }
+        guard receipt.success else {
+            throw FileTransferError.transferFailed("接收端处理失败: \(receipt.error ?? "unknown")")
+        }
+        guard receipt.receivedBytes == expectedFileSize else {
+            throw FileTransferError.transferFailed("接收端字节数不一致: \(receipt.receivedBytes)/\(expectedFileSize)")
+        }
+        if let peerHash = receipt.fileHash, !peerHash.isEmpty,
+           peerHash.lowercased() != expectedFileHash.lowercased() {
+            throw FileTransferError.checksumMismatch
+        }
+
+        return receipt
+    }
     
     // MARK: - Private Methods - Receiving
     
@@ -821,7 +928,10 @@ public class FileTransferManager: ObservableObject {
         }
         
         // 等待完成信号
-        _ = try await receiveHeader(from: connection)
+        let completeHeader = try await receiveHeader(from: connection)
+        guard completeHeader.type == .complete else {
+            throw FileTransferError.invalidMetadata
+        }
     }
     
     /// 接收分块
@@ -840,8 +950,8 @@ public class FileTransferManager: ObservableObject {
     }
     
     /// 接收头部
-    private func receiveHeader(from connection: NWConnection) async throws -> TransferHeader {
-        let headerData = try await receiveData(length: 8, from: connection)
+    private func receiveHeader(from connection: NWConnection, timeout: TimeInterval? = nil) async throws -> TransferHeader {
+        let headerData = try await receiveData(length: 8, from: connection, timeout: timeout)
         guard let header = TransferHeader.decode(from: headerData) else {
             throw FileTransferError.invalidMetadata
         }
@@ -952,15 +1062,46 @@ public class FileTransferManager: ObservableObject {
     }
     
     /// 接收数据
-    private func receiveData(length: Int, from connection: NWConnection) async throws -> Data {
+    private func receiveData(length: Int, from connection: NWConnection, timeout: TimeInterval? = nil) async throws -> Data {
         let data: Data = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data, Error>) in
-            connection.receive(minimumIncompleteLength: length, maximumLength: length) { data, _, _, error in
+            final class Once: @unchecked Sendable {
+                private let lock = NSLock()
+                private var done = false
+                func run(_ block: () -> Void) {
+                    lock.lock()
+                    defer { lock.unlock() }
+                    guard !done else { return }
+                    done = true
+                    block()
+                }
+            }
+            let once = Once()
+
+            if let timeout, timeout > 0 {
+                queue.asyncAfter(deadline: .now() + timeout) {
+                    once.run {
+                        continuation.resume(throwing: FileTransferError.timeout)
+                    }
+                }
+            }
+
+            connection.receive(minimumIncompleteLength: length, maximumLength: length) { data, _, isComplete, error in
                 if let error = error {
-                    continuation.resume(throwing: FileTransferError.networkError(error.localizedDescription))
-                } else if let data = data {
-                    continuation.resume(returning: data)
+                    once.run {
+                        continuation.resume(throwing: FileTransferError.networkError(error.localizedDescription))
+                    }
+                } else if let data = data, data.count == length {
+                    once.run {
+                        continuation.resume(returning: data)
+                    }
+                } else if isComplete {
+                    once.run {
+                        continuation.resume(throwing: FileTransferError.transferFailed("Connection closed"))
+                    }
                 } else {
-                    continuation.resume(throwing: FileTransferError.transferFailed("No data received"))
+                    once.run {
+                        continuation.resume(throwing: FileTransferError.transferFailed("No data received"))
+                    }
                 }
             }
         }

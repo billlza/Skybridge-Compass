@@ -8,6 +8,9 @@
 
 import Foundation
 import Network
+#if canImport(UIKit)
+import UIKit
+#endif
 
 // MARK: - File Transfer Network Service
 
@@ -65,6 +68,27 @@ public actor FileTransferNetworkService {
         }
         
         listener = try NWListener(using: parameters, on: NWEndpoint.Port(integerLiteral: port))
+        
+        // 配置 Bonjour 以便 macOS 端发现 (修复"未建立可用文件传输通道"错误)
+        #if canImport(UIKit)
+        let deviceName: String
+        if Thread.isMainThread {
+            deviceName = UIDevice.current.name
+        } else {
+            deviceName = DispatchQueue.main.sync { UIDevice.current.name }
+        }
+        #else
+        let deviceName = "iOS Device"
+        #endif
+
+        let txtRecord: [String: Data] = [
+            "version": "1.0".data(using: .utf8) ?? Data(),
+            "device": deviceName.data(using: .utf8) ?? Data(),
+            "capabilities": "file-transfer".data(using: .utf8) ?? Data()
+        ]
+        let txtData = NetService.data(fromTXTRecord: txtRecord)
+        
+        listener?.service = NWListener.Service(type: "_skybridge-transfer._tcp", txtRecord: txtData)
         
         listener?.stateUpdateHandler = { [weak self] state in
             Task { [weak self] in

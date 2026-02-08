@@ -18,13 +18,13 @@ public struct DiscoveryState {
 
 /// 设备发现服务，负责在本地网络中扫描和发现可连接的设备
 ///
-/// 🔄 2025年优化：现在使用 DeviceDiscoveryManagerOptimized 作为底层实现
+/// 🔄 2026年优化：现在使用 DeviceDiscoveryManagerOptimized 作为底层实现
 /// - 自动包含网络设备和USB设备
 /// - 自动进行设备去重和合并
 /// - 支持连接类型标签（Wi-Fi、USB等）
 /// - 🆕 真正使用SettingsManager中的网络设置
 ///
-/// ⚡ Swift 6.2.1 改进：使用 actor 模型确保线程安全
+/// ⚡ Swift 6.2.3 改进：使用 actor 模型确保线程安全
 @available(macOS 14.0, *)
 @MainActor
 public final class DeviceDiscoveryService: ObservableObject {

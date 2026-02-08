@@ -1008,6 +1008,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
  // 快速提取基本信息（不阻塞）
         let deviceName = extractDeviceNameQuick(from: result)
         let strong = extractStrongIdentityQuick(from: result)
+        let bonjourID = Self.bonjourIdentifier(from: result.endpoint)
         let deviceId = UUID()
 
  // 守卫：非 SkyBridge serviceType 的设备强制标记为非本机
@@ -1028,7 +1029,13 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             services: [serviceType],
             portMap: [serviceType: 0],
             connectionTypes: [.wifi], // 网络发现默认为Wi-Fi
-            uniqueIdentifier: strong.deviceId ?? nil,
+            uniqueIdentifier: Self.preferredUniqueIdentifier(
+                deviceId: strong.deviceId,
+                pubKeyFP: strong.pubKeyFP,
+                bonjourID: bonjourID,
+                ipv4: nil,
+                ipv6: nil
+            ),
             signalStrength: nil,
             isLocalDevice: false, // 非SkyBridge服务默认非本机，后续由resolveIsLocal统一判定
             deviceId: strong.deviceId,
@@ -1055,7 +1062,13 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                 services: [serviceType],
                 portMap: [serviceType: port],
                 connectionTypes: [.wifi],
-                uniqueIdentifier: strong.deviceId ?? (ipv4 ?? ipv6),
+                uniqueIdentifier: Self.preferredUniqueIdentifier(
+                    deviceId: strong.deviceId,
+                    pubKeyFP: strong.pubKeyFP,
+                    bonjourID: bonjourID,
+                    ipv4: ipv4,
+                    ipv6: ipv6
+                ),
                 signalStrength: await self.measureLinkQuality(host: ipv4 ?? ipv6, port: port),
                 isLocalDevice: false, // 后续由 resolveIsLocal 统一判定
                 deviceId: strong.deviceId,
@@ -1086,25 +1099,13 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             port = Int(servicePort) ?? 0
         }
 
- // 使用 NWConnection 异步解析（不阻塞）
+ // 服务端点场景下，不应把 result.interfaces 映射成“远端地址”；
+ // interfaces 仅表示本机可用接口，会导致误把本机 IP 记成对端地址。
+ // 因此这里仅返回端口，地址留空，连接时优先走 Bonjour service endpoint。
         guard case .service = result.endpoint else {
             return (nil, nil, port)
         }
-
- // 从接口快速获取IP（不使用DNS）
-        var ipv4: String?
-        var ipv6: String?
-
-        if !result.interfaces.isEmpty {
-            for interface in result.interfaces {
-                if let addresses = await getIPAddressesForInterfaceAsync(interface.name) {
-                    if ipv4 == nil { ipv4 = addresses.ipv4 }
-                    if ipv6 == nil { ipv6 = addresses.ipv6 }
-                }
-            }
-        }
-
-        return (ipv4, ipv6, port)
+        return (nil, nil, port)
     }
 
     private func measureLinkQuality(host: String?, port: Int) async -> Double? {
@@ -1259,6 +1260,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
  // 更新现有设备信息（不添加新设备）
         let deviceName = extractDeviceNameQuick(from: result)
         let strong = extractStrongIdentityQuick(from: result)
+        let bonjourID = Self.bonjourIdentifier(from: result.endpoint)
         let (ipv4, ipv6, port) = await extractNetworkInfoAsync(from: result)
 
         await MainActor.run {
@@ -1291,7 +1293,13 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                     services: newServices,
                     portMap: newPortMap,
                     connectionTypes: existingDevice.connectionTypes,
-                    uniqueIdentifier: strong.deviceId ?? existingDevice.uniqueIdentifier,
+                    uniqueIdentifier: Self.preferredUniqueIdentifier(
+                        deviceId: strong.deviceId ?? existingDevice.deviceId,
+                        pubKeyFP: strong.pubKeyFP ?? existingDevice.pubKeyFP,
+                        bonjourID: bonjourID,
+                        ipv4: ipv4 ?? existingDevice.ipv4,
+                        ipv6: ipv6 ?? existingDevice.ipv6
+                    ) ?? existingDevice.uniqueIdentifier,
                     signalStrength: existingDevice.signalStrength,
                     source: existingDevice.source,
                     isLocalDevice: existingDevice.isLocalDevice,
@@ -1308,11 +1316,63 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
     private func extractStrongIdentityQuick(from result: NWBrowser.Result) -> (deviceId: String?, pubKeyFP: String?) {
         if case .bonjour(let txtRecord) = result.metadata {
             let dict = BonjourTXTParser.parse(txtRecord)
-            let devId = dict["deviceId"] ?? dict["id"] ?? dict["deviceID"] ?? dict["device_id"]
-            let fp = dict["pubKeyFP"] ?? dict["pubKeyFp"] ?? dict["pubkeyfp"]
+            let devId = Self.sanitizeStableDeviceId(dict["deviceId"] ?? dict["id"] ?? dict["deviceID"] ?? dict["device_id"])
+            let fp = Self.sanitizePubKeyFingerprint(dict["pubKeyFP"] ?? dict["pubKeyFp"] ?? dict["pubkeyfp"])
             return (devId, fp)
         }
         return (nil, nil)
+    }
+
+    nonisolated private static func preferredUniqueIdentifier(
+        deviceId: String?,
+        pubKeyFP: String?,
+        bonjourID: String?,
+        ipv4: String?,
+        ipv6: String?
+    ) -> String? {
+        if let id = sanitizeStableDeviceId(deviceId) {
+            return "id:\(id)"
+        }
+        if let fp = sanitizePubKeyFingerprint(pubKeyFP) {
+            return "fp:\(fp)"
+        }
+        if let bonjourID, !bonjourID.isEmpty {
+            return bonjourID
+        }
+        if let ipv4 = ipv4?.trimmingCharacters(in: .whitespacesAndNewlines), !ipv4.isEmpty {
+            return "ip:\(ipv4)"
+        }
+        if let ipv6 = ipv6?.trimmingCharacters(in: .whitespacesAndNewlines), !ipv6.isEmpty {
+            return "ip:\(ipv6)"
+        }
+        return nil
+    }
+
+    nonisolated private static func bonjourIdentifier(from endpoint: NWEndpoint) -> String? {
+        guard case .service(let name, _, let domain, _) = endpoint else { return nil }
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty else { return nil }
+        let trimmedDomain = domain.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedDomain = trimmedDomain.isEmpty ? "local." : trimmedDomain.lowercased()
+        return "bonjour:\(trimmedName)@\(normalizedDomain)"
+    }
+
+    nonisolated private static func sanitizeStableDeviceId(_ raw: String?) -> String? {
+        guard let value = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else {
+            return nil
+        }
+        guard value.count >= 8 else { return nil }
+        return value
+    }
+
+    nonisolated private static func sanitizePubKeyFingerprint(_ raw: String?) -> String? {
+        guard let value = raw?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), !value.isEmpty else {
+            return nil
+        }
+        guard value.range(of: "^[0-9a-f]{16,128}$", options: .regularExpression) != nil else {
+            return nil
+        }
+        return value
     }
 
     private func handleBrowserStateUpdate(_ state: NWBrowser.State, for serviceType: String) {
@@ -1820,6 +1880,10 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                                 // Persist peer KEM identity keys for PQC suite negotiation.
                                 // Without this, the next PQC rekey will fail on macOS with suiteNegotiationFailed
                                 // because `peerKEMPublicKeys[suite] == nil`.
+                                await PeerKEMBootstrapStore.shared.upsert(
+                                    deviceIds: [payload.deviceId, peer.deviceId],
+                                    kemPublicKeys: payload.kemPublicKeys
+                                )
                                 do {
                                     // Persist two records:
                                     // - canonical: keyed by declared stable deviceId (used for UI and policy)
@@ -1872,7 +1936,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
 
                                     logger.info("🔑 已保存对端 KEM 公钥到 TrustSync：declared=\(payload.deviceId, privacy: .public) peer=\(peer.deviceId, privacy: .public) keys=\(payload.kemPublicKeys.count, privacy: .public)")
                                 } catch {
-                                    logger.error("❌ 保存对端 KEM 公钥失败（将导致 PQC rekey 失败）: \(error.localizedDescription, privacy: .public)")
+                                    logger.warning("⚠️ 保存对端 KEM 公钥到 TrustSync 失败，已降级使用 bootstrap cache: \(error.localizedDescription, privacy: .public)")
                                 }
 
                                 // Reply with our KEM identity public keys (bootstrap for iOS initiator).

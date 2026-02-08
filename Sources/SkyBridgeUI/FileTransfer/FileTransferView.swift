@@ -595,23 +595,21 @@ public struct FileTransferView: View {
     }
 
     private func sendSelectedFiles() {
-        Task {
+        Task { @MainActor in
             for fileURL in selectedFiles {
                 do {
-                    // Prefer cross-network (WebRTC DataChannel) when available.
+                    // 1. Prefer Cross-Network (WebRTC DataChannel) when available.
                     if case .connected = crossNetworkManager.connectionStatus,
                        let conn = crossNetworkManager.currentConnection,
                        case .webrtc = conn.transport {
                         try await crossNetworkManager.sendFileToConnectedPeer(fileURL)
-                    } else {
-                        // Fallback: legacy placeholder LAN path (requires real device selection in future).
-                        try await fileTransferManager.sendFile(
-                            at: fileURL,
-                            to: "default-device",
-                            deviceName: "默认设备",
-                            ipAddress: "192.168.1.100"
-                        )
+                        continue
                     }
+                    
+                    // 2. Try Local P2P (Bonjour/IP) via FileTransferManager internal resolution
+                    // This handles active peer lookup and throws if no connection exists.
+                    try await fileTransferManager.sendFileToFirstActivePeer(at: fileURL)
+                    continue
                 } catch {
                     SkyBridgeLogger.ui.error("传输失败: \(error.localizedDescription, privacy: .private)")
                 }

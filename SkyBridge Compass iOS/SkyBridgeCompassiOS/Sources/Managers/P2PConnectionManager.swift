@@ -51,6 +51,9 @@ public class P2PConnectionManager: ObservableObject {
     
     /// Bootstrap rekey tasks (Classic -> PQC) keyed by peerId.
     private var bootstrapRekeyTasks: [String: Task<Void, Never>] = [:]
+
+    /// Inbound peers currently using legacy classic bootstrap responder driver.
+    private var inboundLegacyBootstrapPeers: Set<String> = []
     
     /// In-band rekey flag (pause heartbeat / non-essential business sends to reduce ciphertext-handshake interleaving).
     private var rekeyInProgress: Set<String> = []
@@ -201,7 +204,14 @@ public class P2PConnectionManager: ObservableObject {
     
     /// 开始监听连接（使用 DeviceDiscoveryManager 的广播功能）
     public func startListening() async throws {
-        guard !isListening else { return }
+        if discoveryManager.isAdvertising {
+            isListening = true
+            return
+        }
+        if isListening {
+            // Recover from stale state (e.g. listener failed/cancelled but flag not updated).
+            isListening = false
+        }
         
         // 确保 SkyBridgeCore 已按当前设置初始化（允许按 policy 重新初始化）
         if pqcManager.enforcePQCHandshake {
@@ -219,7 +229,13 @@ public class P2PConnectionManager: ObservableObject {
         
         // 使用 DeviceDiscoveryManager 的广播功能
         try await discoveryManager.startAdvertising(port: 9527)
+        guard discoveryManager.isAdvertising else {
+            isListening = false
+            lastError = "P2P 广播监听未进入可用状态"
+            throw P2PError.connectionFailed
+        }
         isListening = true
+        lastError = nil
         
         SkyBridgeLogger.shared.info("🎧 P2P 监听器已启动（通过 Bonjour 广播）")
     }
@@ -463,6 +479,9 @@ public class P2PConnectionManager: ObservableObject {
         }
         
         SkyBridgeLogger.shared.info("✅ 已连接到 \(device.name)")
+        connectionStatusByDeviceId[device.id] = .connected
+        connectionErrorByDeviceId.removeValue(forKey: device.id)
+        upsertActiveConnection(device: device, status: .connected)
         startHeartbeatIfNeeded(deviceId: device.id)
 
         // 更新灵动岛状态（iOS 17+）
@@ -489,6 +508,7 @@ public class P2PConnectionManager: ObservableObject {
         sessionKeys.removeValue(forKey: device.id)
         negotiatedSuiteByDeviceId.removeValue(forKey: device.id)
         handshakeDrivers.removeValue(forKey: device.id)
+        inboundLegacyBootstrapPeers.remove(device.id)
         await transport?.removeConnection(for: device.id)
         
         // 更新活动连接列表
@@ -633,6 +653,7 @@ public class P2PConnectionManager: ObservableObject {
 
         connections.removeValue(forKey: peerId)
         handshakeDrivers.removeValue(forKey: peerId)
+        inboundLegacyBootstrapPeers.remove(peerId)
         sharedSecrets.removeValue(forKey: peerId)
         sessionKeys.removeValue(forKey: peerId)
         negotiatedSuiteByDeviceId.removeValue(forKey: peerId)
@@ -653,54 +674,17 @@ public class P2PConnectionManager: ObservableObject {
         let unwrapped = TrafficPadding.unwrapIfNeeded(data, label: "rx")
 
         SkyBridgeLogger.shared.debug("📨 收到消息 (\(unwrapped.count) bytes) from \(peerId)")
-        
-        // 如果有对应的握手驱动器，传递消息
+
+        // 已有握手驱动器：交给握手状态机处理
         if let driver = handshakeDrivers[peerId] {
-            let peer = PeerIdentifier(deviceId: peerId)
-            await driver.handleMessage(unwrapped, from: peer)
-            
-            // 检查握手状态
-            let state = await driver.getCurrentState()
-            switch state {
-            case .established(let keys):
-                // 握手成功
-                setSessionKeys(keys, for: peerId)
-                handshakeDrivers.removeValue(forKey: peerId)
-                currentHandshakeState = "握手成功 (Suite: \(keys.negotiatedSuite.rawValue))"
-                SkyBridgeLogger.shared.info("✅ 握手完成: \(peerId) (Suite: \(keys.negotiatedSuite.rawValue))")
-                connectionStatusByDeviceId[peerId] = .connected
-                connectionErrorByDeviceId.removeValue(forKey: peerId)
-                startHeartbeatIfNeeded(deviceId: peerId)
-                
-                // 创建 Connection 对象
-                let pseudoDevice = DiscoveredDevice(
-                    id: peerId,
-                    name: peerId,
-                    modelName: "Unknown",
-                    platform: .macOS,
-                    osVersion: "Unknown",
-                    ipAddress: peerId,
-                    signalStrength: -50,
-                    lastSeen: Date()
-                )
-                upsertActiveConnection(device: pseudoDevice, status: .connected)
-                
-            case .failed(let reason):
-                // 握手失败
-                handshakeDrivers.removeValue(forKey: peerId)
-                currentHandshakeState = "握手失败: \(reason)"
-                lastError = "\(reason)"
-                connectionStatusByDeviceId[peerId] = .failed
-                connectionErrorByDeviceId[peerId] = "\(reason)"
-                SkyBridgeLogger.shared.error("❌ 握手失败: \(peerId) - \(reason)")
-                
-            default:
-                // 握手进行中
-                break
-            }
-            
-            // 重要：只要该帧已被握手驱动处理，就不要继续向下当作“业务消息”解密/解析
-            // 否则在刚刚 established 并移除 driver 的同一帧（例如 Finished 38B）会落入业务解密路径，触发 CryptoKitError 3。
+            await processHandshakeFrame(unwrapped, from: peerId, initialDriver: driver)
+            return
+        }
+
+        // 支持“已建立会话上的入站 rekey”：
+        // 若当前无 driver 但已存在 sessionKeys，且收到的是 MessageA，则切换回握手模式而不是误当业务密文。
+        if let rekeyDriver = await ensureInboundRekeyDriverIfNeeded(for: peerId, frame: unwrapped) {
+            await processHandshakeFrame(unwrapped, from: peerId, initialDriver: rekeyDriver)
             return
         }
 
@@ -722,15 +706,134 @@ public class P2PConnectionManager: ObservableObject {
         }
     }
 
+    private func processHandshakeFrame(_ frame: Data, from peerId: String, initialDriver: HandshakeDriver) async {
+        if shouldUseLegacyBootstrapInboundDriver(for: frame, peerId: peerId) {
+            do {
+                try await switchToLegacyBootstrapInboundDriver(for: peerId)
+            } catch {
+                SkyBridgeLogger.shared.warning("⚠️ legacyBootstrap(inbound) driver switch failed: \(error.localizedDescription)")
+            }
+        }
+
+        let activeDriver = handshakeDrivers[peerId] ?? initialDriver
+        let peer = PeerIdentifier(deviceId: peerId)
+        await activeDriver.handleMessage(frame, from: peer)
+
+        let state = await activeDriver.getCurrentState()
+        switch state {
+        case .established(let keys):
+            setSessionKeys(keys, for: peerId)
+            handshakeDrivers.removeValue(forKey: peerId)
+            rekeyInProgress.remove(peerId)
+            currentHandshakeState = "握手成功 (Suite: \(keys.negotiatedSuite.rawValue))"
+            SkyBridgeLogger.shared.info("✅ 握手完成: \(peerId) (Suite: \(keys.negotiatedSuite.rawValue))")
+            connectionStatusByDeviceId[peerId] = .connected
+            connectionErrorByDeviceId.removeValue(forKey: peerId)
+            startHeartbeatIfNeeded(deviceId: peerId)
+
+            let pseudoDevice = DiscoveredDevice(
+                id: peerId,
+                name: peerId,
+                modelName: "Unknown",
+                platform: .macOS,
+                osVersion: "Unknown",
+                ipAddress: peerId,
+                signalStrength: -50,
+                lastSeen: Date()
+            )
+            upsertActiveConnection(device: pseudoDevice, status: .connected)
+
+        case .failed(let reason):
+            handshakeDrivers.removeValue(forKey: peerId)
+            rekeyInProgress.remove(peerId)
+            currentHandshakeState = "握手失败: \(reason)"
+            lastError = "\(reason)"
+            connectionStatusByDeviceId[peerId] = .failed
+            connectionErrorByDeviceId[peerId] = "\(reason)"
+            SkyBridgeLogger.shared.error("❌ 握手失败: \(peerId) - \(reason)")
+
+        default:
+            break
+        }
+    }
+
+    private func ensureInboundRekeyDriverIfNeeded(for peerId: String, frame: Data) async -> HandshakeDriver? {
+        guard handshakeDrivers[peerId] == nil else { return handshakeDrivers[peerId] }
+        guard sessionKeys[peerId] != nil else { return nil }
+
+        let handshakeFrame = HandshakePadding.unwrapIfNeeded(frame, label: "rx")
+        guard let messageA = try? HandshakeMessageA.decode(from: handshakeFrame) else { return nil }
+        guard !messageA.supportedSuites.isEmpty else { return nil }
+
+        let peerHasPQCGroup = messageA.supportedSuites.contains { $0.isPQCGroup }
+        let previousPolicy = effectiveSelectionPolicy(enforcePQC: pqcManager.enforcePQCHandshake)
+
+        do {
+            if !peerHasPQCGroup && pqcManager.enforcePQCHandshake {
+                try await switchToLegacyBootstrapInboundDriver(for: peerId)
+            } else {
+                try await skyBridgeCore.initialize(policy: previousPolicy)
+                guard let transport else { throw P2PError.connectionFailed }
+                let driver = try skyBridgeCore.createHandshakeDriver(transport: transport)
+                handshakeDrivers[peerId] = driver
+            }
+        } catch {
+            SkyBridgeLogger.shared.warning("⚠️ 入站 rekey driver 初始化失败: \(error.localizedDescription)")
+            return nil
+        }
+
+        sessionKeys.removeValue(forKey: peerId)
+        rekeyInProgress.insert(peerId)
+        currentHandshakeState = "收到对端 rekey 请求，重新握手中..."
+        SkyBridgeLogger.shared.info(
+            "🔁 收到对端 rekey 请求，切换到握手模式: peer=\(peerId) suites=\(messageA.supportedSuites.map(\.rawValue).joined(separator: ","))"
+        )
+        return handshakeDrivers[peerId]
+    }
+
     private func isLikelyHandshakeControlPacket(_ data: Data) -> Bool {
+        let frame = HandshakePadding.unwrapIfNeeded(data, label: "rx")
         // Finished: 固定长度 38 bytes（magic 4 + version 1 + direction 1 + mac 32）
-        if data.count == 38, (try? HandshakeFinished.decode(from: data)) != nil {
+        if frame.count == 38, (try? HandshakeFinished.decode(from: frame)) != nil {
             return true
         }
         // MessageA / MessageB：长度通常 < 2KB，且可以被解码（用于避免误解密）
-        if (try? HandshakeMessageA.decode(from: data)) != nil { return true }
-        if (try? HandshakeMessageB.decode(from: data)) != nil { return true }
+        if (try? HandshakeMessageA.decode(from: frame)) != nil { return true }
+        if (try? HandshakeMessageB.decode(from: frame)) != nil { return true }
         return false
+    }
+
+    private func shouldUseLegacyBootstrapInboundDriver(for frame: Data, peerId: String) -> Bool {
+        guard pqcManager.enforcePQCHandshake else { return false }
+        guard !inboundLegacyBootstrapPeers.contains(peerId) else { return false }
+        guard sessionKeys[peerId] == nil else { return false }
+
+        let handshakeFrame = HandshakePadding.unwrapIfNeeded(frame, label: "rx")
+        guard let messageA = try? HandshakeMessageA.decode(from: handshakeFrame) else {
+            return false
+        }
+        guard !messageA.supportedSuites.isEmpty else { return false }
+        let peerHasPQCGroup = messageA.supportedSuites.contains { $0.isPQCGroup }
+        return !peerHasPQCGroup
+    }
+
+    private func switchToLegacyBootstrapInboundDriver(for peerId: String) async throws {
+        guard let transport else { throw P2PError.connectionFailed }
+
+        SkyBridgeLogger.shared.info(
+            "🧩 legacyBootstrap(inbound): strictPQC enabled but peer offered classic-only. " +
+            "Allowing classic bootstrap channel for KEM provisioning. peer=\(peerId)"
+        )
+
+        let previousPolicy = effectiveSelectionPolicy(enforcePQC: pqcManager.enforcePQCHandshake)
+        try await skyBridgeCore.initialize(policy: .classicOnly)
+        let classicDriver = try skyBridgeCore.createHandshakeDriver(transport: transport)
+        handshakeDrivers[peerId] = classicDriver
+        inboundLegacyBootstrapPeers.insert(peerId)
+
+        if previousPolicy != .classicOnly {
+            try await skyBridgeCore.initialize(policy: previousPolicy)
+        }
     }
 
     private func handleAppMessage(_ message: AppMessage, from peerId: String) async {
@@ -966,12 +1069,11 @@ public class P2PConnectionManager: ObservableObject {
     private func handleConnectionStateChange(_ state: NWConnection.State, for device: DiscoveredDevice) async {
         switch state {
         case .ready:
-            connectionStatusByDeviceId[device.id] = .connected
+            // Transport ready != protocol handshake complete.
+            connectionStatusByDeviceId[device.id] = .connecting
             connectionErrorByDeviceId.removeValue(forKey: device.id)
             userInitiatedDisconnects.remove(device.id)
-            upsertActiveConnection(device: device, status: .connected)
             lastActivityByDeviceId[device.id] = Date()
-            startHeartbeatIfNeeded(deviceId: device.id)
 
         case .waiting(let error):
             connectionStatusByDeviceId[device.id] = .connecting
@@ -1103,7 +1205,16 @@ public class P2PConnectionManager: ObservableObject {
 
     private func upsertActiveConnection(device: DiscoveredDevice, status: ConnectionStatus) {
         if let index = activeConnections.firstIndex(where: { $0.device.id == device.id }) {
-            activeConnections[index].status = status
+            let existing = activeConnections[index]
+            activeConnections[index] = Connection(
+                id: existing.id,
+                device: device,
+                status: status,
+                encryptionType: existing.encryptionType,
+                latency: existing.latency,
+                bandwidth: existing.bandwidth,
+                connectedAt: existing.connectedAt
+            )
             return
         }
         activeConnections.append(Connection(device: device, status: status))

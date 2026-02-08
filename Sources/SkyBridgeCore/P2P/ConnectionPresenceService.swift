@@ -15,6 +15,7 @@ public final class ConnectionPresenceService: ObservableObject {
     public struct ActiveConnection: Identifiable, Sendable, Hashable {
         public let id: String // peerId (e.g. bonjour:<name>@local.)
         public let displayName: String
+        public let address: String? // IP/Host address for file transfer
         public let cryptoKind: String // ApplePQC / Hybrid / Classic (user-facing category)
         public let suite: String // e.g. ML-KEM-768, X-Wing, X25519
         public let connectedAt: Date
@@ -22,12 +23,14 @@ public final class ConnectionPresenceService: ObservableObject {
         public init(
             id: String,
             displayName: String,
+            address: String? = nil,
             cryptoKind: String,
             suite: String,
             connectedAt: Date = Date()
         ) {
             self.id = id
             self.displayName = displayName
+            self.address = address
             self.cryptoKind = cryptoKind
             self.suite = suite
             self.connectedAt = connectedAt
@@ -75,12 +78,14 @@ public final class ConnectionPresenceService: ObservableObject {
     public func markConnected(
         peerId: String,
         displayName: String,
+        address: String? = nil,
         cryptoKind: String,
         suite: String
     ) {
         let conn = ActiveConnection(
             id: peerId,
             displayName: displayName,
+            address: address,
             cryptoKind: cryptoKind,
             suite: suite,
             connectedAt: Date()
@@ -93,7 +98,7 @@ public final class ConnectionPresenceService: ObservableObject {
             activeConnections.append(conn)
         }
         
-        logger.info("✅ presence connected: peer=\(peerId, privacy: .public) kind=\(cryptoKind, privacy: .public) suite=\(suite, privacy: .public)")
+        logger.info("✅ presence connected: peer=\(peerId, privacy: .public) addr=\(address ?? "nil", privacy: .public) kind=\(cryptoKind, privacy: .public) suite=\(suite, privacy: .public)")
         // If we were in a "rekeying" state for this peer, clear it on successful connection update.
         rekeyStatusByPeerId.removeValue(forKey: peerId)
     }
