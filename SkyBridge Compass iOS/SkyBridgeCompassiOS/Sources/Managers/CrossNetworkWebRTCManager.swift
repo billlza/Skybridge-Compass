@@ -768,6 +768,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
                 self.stopJoinHeartbeat()
                 self.stopOfferResendLoop()
                 self.readiness = .transportReady(sessionId: sessionId)
+                SkyBridgeLogger.shared.info("✅ WebRTC transport ready: session=\(sessionId), role=\(String(describing: role))")
 
                 // DataChannel opened; start handshake once per session.
                 if !self.handshakeStartedSessionIds.contains(sessionId) {
@@ -781,6 +782,8 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
                             inbound: inbound
                         )
                     }
+                } else {
+                    SkyBridgeLogger.shared.debug("ℹ️ skip duplicate WebRTC handshake start: session=\(sessionId)")
                 }
             }
         }
@@ -1421,15 +1424,31 @@ private extension CrossNetworkWebRTCManager {
         }
         
         do {
-            // Policy selection mirrors existing iOS behavior:
-            // - iOS < 26: ApplePQC 不可用，若强制 requirePQC 会直接变成 Unavailable，因此默认 preferPQC（落到 classic）。
-            // - iOS 26+: 默认 requirePQC（除非用户开启兼容模式 preferPQC）。
             let compatibilityModeEnabled = UserDefaults.standard.bool(forKey: "Settings.EnableCompatibilityMode")
-            let selection: CryptoProviderFactory.SelectionPolicy = {
-                if compatibilityModeEnabled { return .preferPQC }
-                if #available(iOS 26.0, *) { return .requirePQC }
-                return .preferPQC
+            let capability = CryptoProviderFactory.detectCapability()
+            let strictPQCRequested: Bool = {
+                if compatibilityModeEnabled { return false }
+                if #available(iOS 26.0, *) { return true }
+                return false
             }()
+            let selection: CryptoProviderFactory.SelectionPolicy
+            if strictPQCRequested {
+                if capability.hasApplePQC || capability.hasLiboqs {
+                    selection = .requirePQC
+                } else {
+                    selection = .preferPQC
+                    SkyBridgeLogger.shared.warning(
+                        "⚠️ WebRTC strictPQC requested but local PQC provider unavailable; fallback to preferPQC. " +
+                        "hasApplePQC=\(capability.hasApplePQC), hasLiboqs=\(capability.hasLiboqs)"
+                    )
+                }
+            } else {
+                selection = .preferPQC
+            }
+            SkyBridgeLogger.shared.info(
+                "🤝 WebRTC handshake bootstrap: session=\(sessionId), policy=\(selection.rawValue), " +
+                "compatMode=\(compatibilityModeEnabled), hasApplePQC=\(capability.hasApplePQC), hasLiboqs=\(capability.hasLiboqs)"
+            )
             try await SkyBridgeiOSCore.shared.initialize(policy: selection)
             
             let transport = FramedWebRTCTransport(sendFramed: { data in try await sendFramed(data) })
@@ -1444,6 +1463,7 @@ private extension CrossNetworkWebRTCManager {
                 await self.receiveLoop(sessionId: sessionId, session: session, inbound: inbound, driver: driver, peer: peer)
             }
             
+            SkyBridgeLogger.shared.info("🤝 WebRTC initiating handshake: session=\(sessionId), peer=\(peerDeviceId)")
             let keys = try await driver.initiateHandshake(with: peer)
             self.sessionKeys = keys
             if self.currentSessionId == sessionId {
@@ -1455,6 +1475,7 @@ private extension CrossNetworkWebRTCManager {
             }
             SkyBridgeLogger.shared.info("✅ WebRTC 握手完成（DataChannel） session=\(sessionId)")
         } catch {
+            SkyBridgeLogger.shared.error("❌ WebRTC 握手失败（DataChannel） session=\(sessionId): \(error.localizedDescription)")
             await MainActor.run {
                 self.lastError = "WebRTC 握手失败: \(error.localizedDescription)"
                 self.state = .failed(self.lastError ?? "WebRTC handshake failed")
