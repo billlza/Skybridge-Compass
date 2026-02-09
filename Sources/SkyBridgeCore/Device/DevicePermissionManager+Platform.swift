@@ -11,6 +11,7 @@
 import Foundation
 import ScreenCaptureKit
 import AppKit
+import CoreGraphics
 import OSLog
 import Combine
 
@@ -24,6 +25,9 @@ extension DevicePermissionManager {
  /// 检查屏幕录制权限
  /// - Returns: 权限状态
     public func checkScreenRecordingPermission() async -> SBPermissionStatus {
+        if CGPreflightScreenCaptureAccess() {
+            return .authorized
+        }
         do {
             _ = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
             return .authorized
@@ -36,15 +40,16 @@ extension DevicePermissionManager {
  /// 注意：macOS 不支持直接请求屏幕录制权限，需要用户手动授权
  /// - Returns: 是否已授权
     public func requestScreenRecordingPermission() async -> Bool {
- // 触发权限请求（通过尝试获取屏幕内容）
         let status = await checkScreenRecordingPermission()
         if status == .authorized {
             return true
         }
-        
- // 如果未授权，打开系统偏好设置
-        openScreenRecordingSettings()
-        return false
+
+        let granted = await MainActor.run { CGRequestScreenCaptureAccess() }
+        if !granted {
+            openScreenRecordingSettings()
+        }
+        return granted
     }
     
  /// 打开屏幕录制权限设置
@@ -215,6 +220,9 @@ public final class PlatformPermissionMonitor: ObservableObject {
  // MARK: - Private Methods
     
     private func checkScreenRecordingPermissionInternal() async -> SBPermissionStatus {
+        if CGPreflightScreenCaptureAccess() {
+            return .authorized
+        }
         do {
             _ = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
             return .authorized

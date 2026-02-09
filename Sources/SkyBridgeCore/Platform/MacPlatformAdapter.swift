@@ -217,9 +217,14 @@ extension MacPlatformAdapter: PlatformAdapter {
         case .accessibility:
             return requestAccessibilityPermission()
         case .screenRecording:
- // 触发权限请求（通过尝试获取屏幕内容）
-            _ = await checkScreenRecordingPermission()
-            return false  // 需要用户手动授权
+            if await checkScreenRecordingPermission() == .authorized {
+                return true
+            }
+            let granted = await MainActor.run { CGRequestScreenCaptureAccess() }
+            if !granted {
+                openPermissionSettings(.screenRecording)
+            }
+            return granted
         default:
             return false
         }
@@ -258,6 +263,9 @@ private extension MacPlatformAdapter {
  // MARK: - Permission Checks
     
     func checkScreenRecordingPermission() async -> SBPermissionStatus {
+        if CGPreflightScreenCaptureAccess() {
+            return .authorized
+        }
         do {
             _ = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
             return .authorized
