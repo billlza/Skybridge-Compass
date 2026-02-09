@@ -45,12 +45,14 @@ targets:
           - "-Wno-incomplete-umbrella"
         OTHER_CFLAGS: "$(inherited) -Wno-incomplete-umbrella"
         OTHER_CPLUSPLUSFLAGS: "$(inherited) -Wno-incomplete-umbrella"
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited)"
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS[sdk=iphoneos26*]: "$(inherited) HAS_APPLE_PQC_SDK"
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS[sdk=iphonesimulator26*]: "$(inherited) HAS_APPLE_PQC_SDK"
         # WebRTC (third-party binary package) exposes an incomplete umbrella header on iOS.
         # Keep this warning enabled for our own frameworks; suppress only at app integration boundary.
         CLANG_WARN_INCOMPLETE_UMBRELLA: NO
-        # Important: do NOT define HAS_APPLE_PQC_SDK by default.
-        # If you have an SDK that actually contains CryptoKit PQC types (MLKEM/MLDSA),
-        # add `HAS_APPLE_PQC_SDK` in Target Build Settings -> Swift Compiler - Custom Flags.
+        # Auto-enable Apple PQC compile gate only when building against iOS 26 SDK.
+        # This keeps older SDK builds portable while allowing 26.x builds to use native PQC.
 
   SkyBridgeCompass-Widgets:
     type: app-extension

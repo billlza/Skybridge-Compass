@@ -1430,7 +1430,26 @@ private extension CrossNetworkWebRTCManager {
             let strictPQCRequested = shouldRequestStrictPQC(compatibilityModeEnabled: compatibilityModeEnabled)
             strictPQCRequestedBySessionId[sessionId] = strictPQCRequested
             let capability = CryptoProviderFactory.detectCapability()
-            let trustedPeerKEMKeys = await KEMTrustStore.shared.kemPublicKeys(for: peerDeviceId)
+            var peerIdCandidates: [String] = []
+            for raw in [peerDeviceId, remoteDeviceId, handshakePeerId] {
+                guard let id = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !id.isEmpty else { continue }
+                if !peerIdCandidates.contains(id) {
+                    peerIdCandidates.append(id)
+                }
+            }
+            if peerIdCandidates.isEmpty {
+                peerIdCandidates = [peerDeviceId]
+            }
+
+            var trustedPeerKEMKeys: [CryptoSuite: Data] = [:]
+            var trustLookupPeerId = peerDeviceId
+            for candidate in peerIdCandidates {
+                let keys = await KEMTrustStore.shared.kemPublicKeys(for: candidate)
+                guard !keys.isEmpty else { continue }
+                trustedPeerKEMKeys = keys
+                trustLookupPeerId = candidate
+                break
+            }
             let hasTrustedPeerKEMKey = !trustedPeerKEMKeys.isEmpty
             let selection: CryptoProviderFactory.SelectionPolicy
             if !hasTrustedPeerKEMKey {
@@ -1457,7 +1476,7 @@ private extension CrossNetworkWebRTCManager {
             SkyBridgeLogger.shared.info(
                 "🤝 WebRTC handshake bootstrap: session=\(sessionId), policy=\(selection.rawValue), " +
                 "compatMode=\(compatibilityModeEnabled), hasApplePQC=\(capability.hasApplePQC), hasLiboqs=\(capability.hasLiboqs), " +
-                "peer=\(peerDeviceId), trustedKEM=\(hasTrustedPeerKEMKey)"
+                "peer=\(peerDeviceId), trustedKEM=\(hasTrustedPeerKEMKey), trustPeer=\(trustLookupPeerId)"
             )
             try await SkyBridgeiOSCore.shared.initialize(policy: selection)
             
