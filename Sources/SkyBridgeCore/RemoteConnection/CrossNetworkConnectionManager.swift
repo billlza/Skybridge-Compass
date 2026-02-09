@@ -62,6 +62,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     private var webrtcControlTasksBySessionId: [String: Task<Void, Never>] = [:]
     private var webrtcInboundQueuesBySessionId: [String: InboundChunkQueue] = [:]
     private var webrtcScreenStreamingTasksBySessionId: [String: Task<Void, Never>] = [:]
+    private var webrtcRemoteDesktopHeartbeatAtBySessionId: [String: Date] = [:]
     private var webrtcSessionKeysBySessionId: [String: SessionKeys] = [:]
 
     // File transfer waiters (sessionID|transferId|op|chunkIndex -> continuation)
@@ -162,6 +163,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         webrtcLatestOfferBySessionId.removeValue(forKey: sessionID)
         webrtcRemoteIdBySessionId.removeValue(forKey: sessionID)
         webrtcSessionKeysBySessionId.removeValue(forKey: sessionID)
+        webrtcRemoteDesktopHeartbeatAtBySessionId.removeValue(forKey: sessionID)
 
         if let controlTask = webrtcControlTasksBySessionId.removeValue(forKey: sessionID) {
             controlTask.cancel()
@@ -1211,9 +1213,10 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             while offset < framed.count {
                 let end = min(offset + maxDataChannelChunkBytes, framed.count)
                 let chunk = Data(framed[offset..<end])
-                try await MainActor.run {
-                    try session.send(chunk)
-                }
+                // Keep one framed payload contiguous on DataChannel.
+                // Avoid per-chunk actor hopping, which can interleave chunks from concurrent senders
+                // and corrupt the length-prefixed stream.
+                try session.send(chunk)
                 offset = end
             }
         }
@@ -1423,10 +1426,22 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             self.webrtcScreenStreamingTasksBySessionId[sessionID] = Task { @MainActor [weak self] in
                 guard let self else { return }
                 let maxBufferedAmountBytes: UInt64 = 1_500_000
+                let heartbeatTimeoutSeconds: TimeInterval = 8.0
+                var bytesSent: Int = 0
+                var framesSent: Int = 0
+                var logWindowStart = Date()
 
                 defer { self.webrtcScreenStreamingTasksBySessionId.removeValue(forKey: sessionID) }
 
                 while !Task.isCancelled {
+                    guard let lastHeartbeatAt = self.webrtcRemoteDesktopHeartbeatAtBySessionId[sessionID] else {
+                        self.logger.info("⏸️ WebRTC 屏幕推流等待远端心跳: session=\(sessionID, privacy: .public)")
+                        break
+                    }
+                    if Date().timeIntervalSince(lastHeartbeatAt) > heartbeatTimeoutSeconds {
+                        self.logger.info("⏹️ WebRTC 屏幕推流因远端心跳超时停止: session=\(sessionID, privacy: .public)")
+                        break
+                    }
                     do {
                         try await Task.sleep(for: .milliseconds(250))
                     } catch {
@@ -1456,6 +1471,19 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                         let enc = try encryptAppPayload(plain, with: keys)
                         let padded = TrafficPadding.wrapIfEnabled(enc, label: "tx/webrtc-screen")
                         try await sendFramed(padded)
+                        bytesSent += padded.count + 4
+                        framesSent += 1
+                        let elapsed = Date().timeIntervalSince(logWindowStart)
+                        if elapsed >= 5.0 {
+                            let upMBps = Double(bytesSent) / elapsed / 1024.0 / 1024.0
+                            let fps = Double(framesSent) / elapsed
+                            self.logger.info(
+                                "📈 WebRTC 屏幕推流吞吐: session=\(sessionID, privacy: .public) up=\(String(format: "%.2f", upMBps), privacy: .public)MB/s fps=\(String(format: "%.1f", fps), privacy: .public)"
+                            )
+                            bytesSent = 0
+                            framesSent = 0
+                            logWindowStart = Date()
+                        }
                     } catch {
                         self.logger.error("❌ WebRTC 屏幕推流发送失败: \(error.localizedDescription, privacy: .public)")
                         break
@@ -1580,6 +1608,9 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                                 let outCipher = try encryptAppPayload(outPlain, with: keys)
                                 let outPadded = TrafficPadding.wrapIfEnabled(outCipher, label: "tx/webrtc")
                                 try await sendFramed(outPadded)
+                            case .heartbeat:
+                                self.webrtcRemoteDesktopHeartbeatAtBySessionId[sessionID] = Date()
+                                startScreenStreamingIfNeeded(keys: keys)
                             default:
                                 break
                             }
@@ -2164,7 +2195,6 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                         sessionId: sessionID,
                         negotiatedSuite: keys.negotiatedSuite.rawValue
                     )
-                    startScreenStreamingIfNeeded(keys: keys)
                 case .failed(let reason):
                     self.cleanupWebRTCSession(sessionID, reason: "handshake_failed")
                     self.connectionStatus = .failed("WebRTC handshake failed: \(reason)")

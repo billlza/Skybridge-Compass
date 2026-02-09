@@ -5,6 +5,7 @@ import SwiftUI
 struct RemoteDesktopView: View {
     @EnvironmentObject private var connectionManager: P2PConnectionManager
     @StateObject private var remoteDesktopManager = RemoteDesktopManager.instance
+    @StateObject private var crossNetworkManager = CrossNetworkWebRTCManager.instance
     @StateObject private var settings = SettingsManager.instance
     
     @State private var selectedConnection: Connection?
@@ -57,7 +58,7 @@ struct RemoteDesktopView: View {
                 .font(.title2.bold())
                 .foregroundColor(.white)
             
-            if connectionManager.activeConnections.isEmpty {
+            if connectionManager.activeConnections.isEmpty && crossNetworkConnection == nil {
                 Text("当前没有活动连接\n请先在\"发现\"页面连接设备")
                     .font(.body)
                     .foregroundColor(.gray)
@@ -66,6 +67,12 @@ struct RemoteDesktopView: View {
             } else {
                 ScrollView {
                     LazyVStack(spacing: 12) {
+                        if let crossNetworkConnection {
+                            ConnectionCardView(connection: crossNetworkConnection)
+                                .onTapGesture {
+                                    connectToDevice(crossNetworkConnection)
+                                }
+                        }
                         ForEach(connectionManager.activeConnections) { connection in
                             ConnectionCardView(connection: connection)
                                 .onTapGesture {
@@ -89,6 +96,35 @@ struct RemoteDesktopView: View {
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )
+        )
+    }
+
+    private var crossNetworkConnection: Connection? {
+        guard case .connected(let sessionId) = crossNetworkManager.state else { return nil }
+        let remoteId = crossNetworkManager.remoteDeviceId ?? "webrtc-\(sessionId)"
+        let remoteName = crossNetworkManager.remoteDeviceName ?? "跨网设备"
+        let pseudoDevice = DiscoveredDevice(
+            id: remoteId,
+            name: remoteName,
+            modelName: "Remote",
+            platform: .macOS,
+            osVersion: "",
+            ipAddress: nil,
+            services: [],
+            portMap: [:],
+            signalStrength: -50,
+            lastSeen: Date(),
+            isConnected: true,
+            isTrusted: true,
+            publicKey: nil,
+            advertisedCapabilities: ["remote_desktop"],
+            capabilities: ["remote_desktop"]
+        )
+        return Connection(
+            id: "webrtc-\(sessionId)",
+            device: pseudoDevice,
+            status: .connected,
+            encryptionType: .pqc
         )
     }
     

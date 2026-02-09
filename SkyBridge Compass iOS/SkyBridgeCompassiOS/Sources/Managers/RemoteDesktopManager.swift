@@ -653,6 +653,7 @@ public class RemoteDesktopManager: ObservableObject {
                 state = .connected
                 isStreaming = true
                 state = .streaming
+                crossNetwork.startRemoteDesktopHeartbeat()
                 
                 // 订阅跨网屏幕帧
                 Task { [weak self] in
@@ -735,6 +736,7 @@ public class RemoteDesktopManager: ObservableObject {
         SkyBridgeLogger.shared.info("⏹️ 停止远程桌面流")
         
         isStreaming = false
+        crossNetwork.stopRemoteDesktopHeartbeat()
         if state == .streaming {
             state = .connected
         }
@@ -743,6 +745,7 @@ public class RemoteDesktopManager: ObservableObject {
     /// 断开连接
     public func disconnect() async {
         SkyBridgeLogger.shared.info("🔌 断开远程桌面连接")
+        crossNetwork.stopRemoteDesktopHeartbeat()
         
         // 关闭连接
         networkConnection?.cancel()

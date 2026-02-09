@@ -27,8 +27,8 @@ public struct EnhancedDeviceDiscoveryView: View {
     // Trusted / paired devices (from TrustSyncService)
     @StateObject private var trustSync = TrustSyncService.shared
 
- // 跨网络连接
-    @StateObject private var crossNetworkManager = CrossNetworkConnectionManager()
+ // 跨网络连接（使用共享实例，确保与文件传输/远程桌面等模块状态一致）
+    @StateObject private var crossNetworkManager = CrossNetworkConnectionManager.shared
     @StateObject private var p2pDiscoveryService = P2PDiscoveryService()
 
  // 🆕 真实iCloud设备发现(不再单独使用,已整合到统一管理器中)

@@ -11,6 +11,7 @@ import SkyBridgeCore
 /// - 可以与主窗口并存
 struct NearFieldMirrorView: View {
     @StateObject private var discoveryManager = DeviceDiscoveryManagerOptimized() // 高性能设备发现（2025年优化版）
+    @StateObject private var unifiedDeviceManager = UnifiedOnlineDeviceManager.shared
  // 近距镜像会话控制管理器（硬件级远程控制）
  // 注：RemoteControlManager 负责接收远端屏幕数据与输入事件处理，这里只负责启动/停止控制会话。
     @StateObject private var remoteControlManager = RemoteControlManager()
@@ -328,14 +329,17 @@ struct NearFieldMirrorView: View {
     }
     
     private func connectToDevice(_ device: DiscoveredDevice) {
-        selectedDevice = device
+        let targetDevice = resolveConnectableDevice(from: device)
+        selectedDevice = targetDevice
         isConnecting = true
         connectionError = nil
         
         Task {
  // 符合Swift 6.2.1最佳实践：connectToDevice是async throws方法，需要try-catch
             do {
-                try await discoveryManager.connectToDevice(device)
+                if discoveryManager.activeConnection(for: targetDevice.id) == nil {
+                    try await discoveryManager.connectToDevice(targetDevice)
+                }
  // 连接成功，进入镜像模式
                 await MainActor.run {
                     isConnecting = false
@@ -344,11 +348,11 @@ struct NearFieldMirrorView: View {
  // 启动近距镜像会话
  // 说明：从优化的设备发现管理器获取已建立的 NWConnection，交由 RemoteControlManager 管理。
  // 符合Swift 6.2.1最佳实践：startControlling是async方法（非throws），不需要try-catch
-                if let connection = discoveryManager.activeConnection(for: device.id) {
+                if let connection = discoveryManager.activeConnection(for: targetDevice.id) {
                     Task {
  // 使用设备ID字符串作为控制会话标识
-                        await remoteControlManager.startControlling(deviceId: device.id.uuidString, connection: connection)
-                        await MainActor.run { self.currentDeviceId = device.id.uuidString }
+                        await remoteControlManager.startControlling(deviceId: targetDevice.id.uuidString, connection: connection)
+                        await MainActor.run { self.currentDeviceId = targetDevice.id.uuidString }
                     }
                 } else {
  // 未能获取连接对象，提示错误
@@ -359,10 +363,85 @@ struct NearFieldMirrorView: View {
             } catch {
                 await MainActor.run {
                     isConnecting = false
-                    connectionError = error.localizedDescription
+                    if let discoveryError = error as? DeviceDiscoveryError,
+                       case .deviceNotConnected = discoveryError {
+                        connectionError = "设备当前没有可用的近距地址。请确认双方在同一局域网，且目标设备已开启近距发现后重试。"
+                    } else {
+                        connectionError = error.localizedDescription
+                    }
                 }
             }
         }
+    }
+
+    private func resolveConnectableDevice(from device: DiscoveredDevice) -> DiscoveredDevice {
+        guard device.ipv4 == nil && device.ipv6 == nil else { return device }
+        guard let matchedOnline = matchedOnlineDevice(for: device) else { return device }
+
+        if let resolved = unifiedDeviceManager.resolvedDiscoveredDevice(for: matchedOnline) {
+            return merge(device, with: resolved)
+        }
+
+        guard matchedOnline.ipv4 != nil || matchedOnline.ipv6 != nil else { return device }
+        return DiscoveredDevice(
+            id: device.id,
+            name: device.name,
+            ipv4: matchedOnline.ipv4,
+            ipv6: matchedOnline.ipv6,
+            services: device.services.isEmpty ? matchedOnline.services : device.services,
+            portMap: device.portMap.isEmpty ? matchedOnline.portMap : device.portMap,
+            connectionTypes: device.connectionTypes.union(matchedOnline.connectionTypes),
+            uniqueIdentifier: device.uniqueIdentifier ?? matchedOnline.uniqueIdentifier,
+            signalStrength: device.signalStrength,
+            source: device.source,
+            isLocalDevice: device.isLocalDevice,
+            deviceId: device.deviceId,
+            pubKeyFP: device.pubKeyFP,
+            macSet: device.macSet
+        )
+    }
+
+    private func merge(_ base: DiscoveredDevice, with resolved: DiscoveredDevice) -> DiscoveredDevice {
+        DiscoveredDevice(
+            id: base.id,
+            name: base.name,
+            ipv4: base.ipv4 ?? resolved.ipv4,
+            ipv6: base.ipv6 ?? resolved.ipv6,
+            services: base.services.isEmpty ? resolved.services : base.services,
+            portMap: base.portMap.isEmpty ? resolved.portMap : base.portMap,
+            connectionTypes: base.connectionTypes.union(resolved.connectionTypes),
+            uniqueIdentifier: base.uniqueIdentifier ?? resolved.uniqueIdentifier,
+            signalStrength: base.signalStrength ?? resolved.signalStrength,
+            source: base.source == .unknown ? resolved.source : base.source,
+            isLocalDevice: base.isLocalDevice,
+            deviceId: base.deviceId ?? resolved.deviceId,
+            pubKeyFP: base.pubKeyFP ?? resolved.pubKeyFP,
+            macSet: base.macSet.isEmpty ? resolved.macSet : base.macSet
+        )
+    }
+
+    private func matchedOnlineDevice(for device: DiscoveredDevice) -> OnlineDevice? {
+        let targetIdentifier = normalizedIdentifier(device.uniqueIdentifier)
+        let targetName = device.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return unifiedDeviceManager.onlineDevices.first { online in
+            guard !online.isLocalDevice else { return false }
+            if let targetIdentifier,
+               normalizedIdentifier(online.uniqueIdentifier) == targetIdentifier {
+                return true
+            }
+            return !targetName.isEmpty &&
+                online.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == targetName
+        }
+    }
+
+    private func normalizedIdentifier(_ value: String?) -> String? {
+        guard let raw = value?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
+            return nil
+        }
+        if raw.hasPrefix("recent:") {
+            return String(raw.dropFirst("recent:".count)).lowercased()
+        }
+        return raw.lowercased()
     }
 }
 
@@ -498,4 +577,3 @@ struct DeviceCardView: View {
 }
 
 // MARK: - 预览
-

@@ -1,6 +1,9 @@
 import Foundation
 import CryptoKit
 import OSLog
+#if canImport(UIKit)
+import UIKit
+#endif
 
 // MARK: - iOS-local server config (file-local, to avoid target membership issues)
 
@@ -257,6 +260,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     private var latestLocalOfferBySessionId: [String: String] = [:]
     private var joinHeartbeatTask: Task<Void, Never>?
     private var offerResendTask: Task<Void, Never>?
+    private var remoteDesktopHeartbeatTask: Task<Void, Never>?
     
     // File transfer waiters (transferId|op|chunkIndex -> continuation)
     private var fileTransferWaiters: [String: CheckedContinuation<CrossNetworkFileTransferMessage, Error>] = [:]
@@ -412,6 +416,8 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         joinHeartbeatTask = nil
         offerResendTask?.cancel()
         offerResendTask = nil
+        remoteDesktopHeartbeatTask?.cancel()
+        remoteDesktopHeartbeatTask = nil
         latestLocalOfferBySessionId.removeAll()
         handshakeStartedSessionIds.removeAll()
         rekeyInProgressSessionIds.removeAll()
@@ -531,6 +537,61 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         let encrypted = try encrypt(plaintext: data, with: keys)
         let padded = TrafficPadding.wrapIfEnabled(encrypted, label: "tx/webrtc-remote")
         try await sendFramed(padded, over: session)
+    }
+
+    public func startRemoteDesktopHeartbeat() {
+        remoteDesktopHeartbeatTask?.cancel()
+        remoteDesktopHeartbeatTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                guard let session = self.session,
+                      let sessionId = self.currentSessionId,
+                      case .connected(let activeSessionId) = self.state,
+                      activeSessionId == sessionId
+                else { break }
+
+                #if canImport(UIKit)
+                let localName = UIDevice.current.name
+                let localModel = UIDevice.current.model
+                #else
+                let localName: String? = nil
+                let localModel: String? = nil
+                #endif
+
+                let heartbeat = AppMessage.heartbeat(.init(
+                    sentAt: Date(),
+                    deviceId: self.localDeviceId,
+                    deviceName: localName,
+                    modelName: localModel,
+                    platform: "iOS",
+                    osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
+                    chip: nil
+                ))
+
+                do {
+                    try await self.sendAppMessageOverWebRTC(
+                        heartbeat,
+                        sessionId: sessionId,
+                        session: session,
+                        label: "tx/webrtc-heartbeat"
+                    )
+                } catch {
+                    SkyBridgeLogger.shared.debug("ℹ️ WebRTC heartbeat send failed: \(error.localizedDescription)")
+                    break
+                }
+
+                do {
+                    try await Task.sleep(for: .seconds(2))
+                } catch {
+                    break
+                }
+            }
+        }
+    }
+
+    public func stopRemoteDesktopHeartbeat() {
+        remoteDesktopHeartbeatTask?.cancel()
+        remoteDesktopHeartbeatTask = nil
     }
 
     private func cleanupInboundFileTransfers() {
@@ -1904,7 +1965,10 @@ private extension CrossNetworkWebRTCManager {
         while offset < framed.count {
             let end = min(offset + maxDataChannelChunkBytes, framed.count)
             let chunk = Data(framed[offset..<end])
-            try await MainActor.run { try session.send(chunk) }
+            // Keep one framed payload contiguous on DataChannel.
+            // Avoid per-chunk actor hopping, which can interleave chunks from concurrent senders
+            // and corrupt the length-prefixed byte stream.
+            try session.send(chunk)
             offset = end
         }
     }
