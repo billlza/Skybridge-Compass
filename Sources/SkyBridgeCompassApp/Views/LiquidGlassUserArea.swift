@@ -438,9 +438,9 @@ struct AboutWindow: View {
             VStack(spacing: 12) {
                 SVGEmbeddedImageView(
                     filePath: aboutIconPath,
-                    contentMode: .fit,
-                    safeInset: 12,
-                    clipCornerRadius: nil
+                    contentMode: .fill,
+                    safeInset: 0,
+                    clipCornerRadius: 22
                 )
                     .frame(width: 100, height: 100)
                     .shadow(color: .blue.opacity(0.3), radius: 20, x: 0, y: 10)
