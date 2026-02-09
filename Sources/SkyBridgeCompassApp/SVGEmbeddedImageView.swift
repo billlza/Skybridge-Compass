@@ -23,17 +23,24 @@ struct SVGEmbeddedImageView: View {
         .onAppear(perform: load)
     }
     private func load() {
+        let sourcePath = filePath
         Task.detached(priority: .utility) {
-            guard let data = try? String(contentsOfFile: filePath, encoding: .utf8) else { return }
-            let marker = "base64,"
-            guard let mRange = data.range(of: marker) else { return }
-            let start = mRange.upperBound
-            guard let end = data[start...].firstIndex(of: "\"") else { return }
-            let b64 = String(data[start..<end])
-            guard let raw = Data(base64Encoded: b64) else { return }
-            let img = NSImage(data: raw)
-            await MainActor.run { self.nsImage = img }
+            let image = SVGEmbeddedImageView.decodeEmbeddedBase64Image(at: sourcePath)
+                ?? NSImage(contentsOfFile: sourcePath)
+            guard let image else { return }
+            await MainActor.run { self.nsImage = image }
         }
+    }
+
+    nonisolated private static func decodeEmbeddedBase64Image(at path: String) -> NSImage? {
+        guard let data = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
+        let marker = "base64,"
+        guard let markerRange = data.range(of: marker) else { return nil }
+        let start = markerRange.upperBound
+        guard let end = data[start...].firstIndex(of: "\"") else { return nil }
+        let payload = String(data[start..<end])
+        guard let raw = Data(base64Encoded: payload) else { return nil }
+        return NSImage(data: raw)
     }
 }
 

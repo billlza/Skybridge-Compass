@@ -420,24 +420,29 @@ struct LiquidGlassButtonStyle: ButtonStyle {
 struct AboutWindow: View {
     @Environment(\.dismiss) private var dismiss
     
+    private var aboutIconPath: String {
+        if let bundled = Bundle.module.url(forResource: "about-main-icon", withExtension: "svg")
+            ?? Bundle.module.url(
+                forResource: "about-main-icon",
+                withExtension: "svg",
+                subdirectory: "Icons"
+            ) {
+            return bundled.path
+        }
+        return "/Users/bill/Desktop/1764932992803-2.svg"
+    }
+    
     var body: some View {
         VStack(spacing: 24) {
  // 应用图标和名称
             VStack(spacing: 12) {
-                RoundedRectangle(cornerRadius: 24)
-                    .fill(
-                        LinearGradient(
-                            colors: [.blue, .purple],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
+                SVGEmbeddedImageView(
+                    filePath: aboutIconPath,
+                    contentMode: .fit,
+                    safeInset: 12,
+                    clipCornerRadius: nil
+                )
                     .frame(width: 100, height: 100)
-                    .overlay(
-                        Image(systemName: "network")
-                            .font(.system(size: 48))
-                            .foregroundColor(.white)
-                    )
                     .shadow(color: .blue.opacity(0.3), radius: 20, x: 0, y: 10)
                 
                 VStack(spacing: 4) {
@@ -506,7 +511,7 @@ struct AboutWindow: View {
             
  // 版权信息
             VStack(spacing: 4) {
-                Text("© 2024-2025 SkyBridge Team")
+                Text("© 2024-2026 SkyBridge Team")
                     .font(.caption)
                     .foregroundColor(.secondary)
                 

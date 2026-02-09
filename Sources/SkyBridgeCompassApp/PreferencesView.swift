@@ -1193,7 +1193,7 @@ struct AdvancedPreferencesView: View {
 
  // 版权信息
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("© 2024-2025 SkyBridge Team. All rights reserved.")
+                        Text("© 2024-2026 SkyBridge Team. All rights reserved.")
                             .font(.caption)
                             .foregroundColor(.secondary)
 
@@ -1436,7 +1436,7 @@ struct AboutPreferencesView: View {
 
  // 版权信息
             VStack(spacing: 8) {
-                Text("© 2024-2025 SkyBridge Team")
+                Text("© 2024-2026 SkyBridge Team")
                     .font(.caption)
                     .foregroundColor(.secondary)
 
@@ -1736,7 +1736,7 @@ struct AboutPreferencesView: View {
                 Text("""
                 MIT License
 
-                Copyright (c) 2024-2025 SkyBridge Team
+                Copyright (c) 2024-2026 SkyBridge Team
 
                 Permission is hereby granted, free of charge, to any person obtaining a copy
                 of this software and associated documentation files (the "Software"), to deal
