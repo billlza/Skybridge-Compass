@@ -1222,8 +1222,8 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             try await sendFramed(data)
         })
 
-        // 使用 sessionID 作为“临时 peer id”，真实 deviceId 会在 pairingIdentityExchange / 业务层里出现。
-        let peer = PeerIdentifier(deviceId: "webrtc-\(sessionID)")
+        let peerDeviceId = webrtcRemoteIdBySessionId[sessionID] ?? "webrtc-\(sessionID)"
+        let peer = PeerIdentifier(deviceId: peerDeviceId)
 
         var driver: HandshakeDriver?
         var sessionKeys: SessionKeys?
@@ -2056,7 +2056,17 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     if let messageA = try? HandshakeMessageA.decode(from: frame) {
                         let hasPQCGroup = messageA.supportedSuites.contains { $0.isPQCGroup }
                         let compatibilityModeEnabled = UserDefaults.standard.bool(forKey: "Settings.EnableCompatibilityMode")
-                        let handshakePolicy = HandshakePolicy.recommendedDefault(compatibilityModeEnabled: compatibilityModeEnabled)
+                        let handshakePolicy: HandshakePolicy = {
+                            if hasPQCGroup {
+                                return HandshakePolicy.recommendedDefault(compatibilityModeEnabled: compatibilityModeEnabled)
+                            }
+                            // 首次跨网建链（尚未完成 KEM bootstrap）允许 classic 握手落地，避免 strictPQC 直接阻断通道建立。
+                            return HandshakePolicy(
+                                requirePQC: false,
+                                allowClassicFallback: false,
+                                minimumTier: .classic
+                            )
+                        }()
                         let sigAAlgorithm: ProtocolSigningAlgorithm = hasPQCGroup ? .mlDSA65 : .ed25519
                         let selection: CryptoProviderFactory.SelectionPolicy = {
                             if hasPQCGroup { return (handshakePolicy.requirePQC ? .requirePQC : .preferPQC) }
@@ -2091,7 +2101,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                             offeredSuites: offeredSuites,
                             policy: handshakePolicy
                         )
-                        logger.info("🤝 WebRTC 入站 HandshakeDriver 初始化完成: sigA=\(sigAAlgorithm.rawValue, privacy: .public)")
+                        logger.info("🤝 WebRTC 入站 HandshakeDriver 初始化完成: sigA=\(sigAAlgorithm.rawValue, privacy: .public) peer=\(peerDeviceId, privacy: .public) policyRequirePQC=\(handshakePolicy.requirePQC, privacy: .public)")
                     } else {
                         continue
                     }
