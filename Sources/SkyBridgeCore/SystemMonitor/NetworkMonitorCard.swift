@@ -18,6 +18,8 @@ public struct NetworkMonitorCard: View {
     
     @State private var animateUpload = false
     @State private var animateDownload = false
+    @State private var isUploadPulseInFlight = false
+    @State private var isDownloadPulseInFlight = false
     
  // MARK: - 初始化
     
@@ -272,9 +274,13 @@ public struct NetworkMonitorCard: View {
             animateUpload = true
             animateDownload = true
         }
+        isUploadPulseInFlight = false
+        isDownloadPulseInFlight = false
     }
     
     private func triggerUploadAnimation() {
+        guard !isUploadPulseInFlight else { return }
+        isUploadPulseInFlight = true
         withAnimation(.easeInOut(duration: 0.3)) {
             animateUpload = false
         }
@@ -284,10 +290,13 @@ public struct NetworkMonitorCard: View {
             withAnimation(.easeInOut(duration: 0.3)) {
                 animateUpload = true
             }
+            isUploadPulseInFlight = false
         }
     }
     
     private func triggerDownloadAnimation() {
+        guard !isDownloadPulseInFlight else { return }
+        isDownloadPulseInFlight = true
         withAnimation(.easeInOut(duration: 0.3)) {
             animateDownload = false
         }
@@ -297,6 +306,7 @@ public struct NetworkMonitorCard: View {
             withAnimation(.easeInOut(duration: 0.3)) {
                 animateDownload = true
             }
+            isDownloadPulseInFlight = false
         }
     }
 }

@@ -114,10 +114,12 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     private var pendingRemoteICECandidates: [RTCIceCandidate] = []
 #endif
     
-    private var isClosed = false
-    private var sslHeld = false
-    private var didNotifyDisconnected = false
-    private var hasRemoteDescription = false
+	    private var isClosed = false
+	    private var sslHeld = false
+	    private var didNotifyDisconnected = false
+	    private var didNotifyReady = false
+	    private var hasRemoteDescription = false
+	    private var isSettingRemoteDescription = false
     
     public init(sessionId: String, localDeviceId: String, role: Role, ice: ICEConfig) {
         self.sessionId = sessionId
@@ -133,12 +135,14 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     /// - 主动关闭 DataChannel 防止数据残留
     /// - 关闭 PeerConnection 终止 ICE / DTLS-SRTP 会话
     /// - 调用 RTCCleanupSSL() 释放 OpenSSL 上下文
-    public func close() {
-        guard !isClosed else { return }
-        isClosed = true
-        didNotifyDisconnected = true
-        hasRemoteDescription = false
-        onDisconnected = nil
+	    public func close() {
+	        guard !isClosed else { return }
+	        isClosed = true
+	        didNotifyDisconnected = true
+	        didNotifyReady = false
+	        hasRemoteDescription = false
+	        isSettingRemoteDescription = false
+	        onDisconnected = nil
 #if canImport(WebRTC)
         pendingRemoteICECandidates.removeAll(keepingCapacity: false)
         dataChannel?.close()
@@ -209,9 +213,10 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
 #endif
     
     public func start() throws {
-        guard !isClosed else { throw WebRTCError.alreadyClosed }
-        didNotifyDisconnected = false
-        hasRemoteDescription = false
+	        guard !isClosed else { throw WebRTCError.alreadyClosed }
+	        didNotifyDisconnected = false
+	        didNotifyReady = false
+	        hasRemoteDescription = false
 #if canImport(WebRTC)
         pendingRemoteICECandidates.removeAll(keepingCapacity: false)
         WebRTCSSL.retain()
@@ -253,43 +258,73 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         didNotifyDisconnected = true
         onDisconnected?(reason)
     }
-    
-    public func setRemoteOffer(_ sdp: String) {
-#if canImport(WebRTC)
-        guard let pc = peerConnection else { return }
-        let desc = RTCSessionDescription(type: .offer, sdp: sdp)
-        pc.setRemoteDescription(desc) { [weak self] error in
-            guard let self else { return }
-            if let error {
-                self.logger.error("❌ setRemoteOffer failed: \(error.localizedDescription, privacy: .public)")
-                return
-            }
-            self.hasRemoteDescription = true
-            self.flushPendingRemoteICECandidates()
-            self.createAnswer()
-        }
-#endif
+
+    private func notifyReadyIfNeeded() {
+        guard !didNotifyReady else { return }
+        didNotifyReady = true
+        onReady?()
     }
     
-    public func setRemoteAnswer(_ sdp: String) {
-#if canImport(WebRTC)
-        if hasRemoteDescription {
-            logger.debug("ℹ️ ignore duplicate remote answer. sessionId=\(self.sessionId, privacy: .public)")
-            return
-        }
-        guard let pc = peerConnection else { return }
-        let desc = RTCSessionDescription(type: .answer, sdp: sdp)
-        pc.setRemoteDescription(desc) { [weak self] error in
-            guard let self else { return }
-            if let error {
-                self.logger.error("❌ setRemoteAnswer failed: \(error.localizedDescription, privacy: .public)")
-                return
-            }
-            self.hasRemoteDescription = true
-            self.flushPendingRemoteICECandidates()
-        }
-#endif
-    }
+	    public func setRemoteOffer(_ sdp: String) {
+	#if canImport(WebRTC)
+	        if hasRemoteDescription || isSettingRemoteDescription {
+	            logger.debug("ℹ️ ignore duplicate remote offer. sessionId=\(self.sessionId, privacy: .public)")
+	            return
+	        }
+	        guard let pc = peerConnection else { return }
+	        if pc.remoteDescription != nil {
+	            hasRemoteDescription = true
+	            flushPendingRemoteICECandidates()
+	            logger.debug("ℹ️ remote offer already applied; ignore. sessionId=\(self.sessionId, privacy: .public)")
+	            return
+	        }
+	        let desc = RTCSessionDescription(type: .offer, sdp: sdp)
+	        isSettingRemoteDescription = true
+	        pc.setRemoteDescription(desc) { [weak self] error in
+	            guard let self else { return }
+	            self.isSettingRemoteDescription = false
+	            if let error {
+	                self.logger.error("❌ setRemoteOffer failed: \(error.localizedDescription, privacy: .public)")
+	                return
+	            }
+	            self.hasRemoteDescription = true
+	            self.flushPendingRemoteICECandidates()
+	            self.createAnswer()
+	        }
+	#endif
+	    }
+    
+	    public func setRemoteAnswer(_ sdp: String) {
+	#if canImport(WebRTC)
+	        guard let pc = peerConnection else { return }
+	        if hasRemoteDescription || isSettingRemoteDescription || pc.remoteDescription != nil {
+	            hasRemoteDescription = true
+	            flushPendingRemoteICECandidates()
+	            logger.debug("ℹ️ ignore duplicate remote answer. sessionId=\(self.sessionId, privacy: .public)")
+	            return
+	        }
+	        let desc = RTCSessionDescription(type: .answer, sdp: sdp)
+	        isSettingRemoteDescription = true
+	        pc.setRemoteDescription(desc) { [weak self] error in
+	            guard let self else { return }
+	            self.isSettingRemoteDescription = false
+	            if let error {
+	                // When the peer resends the same answer before our first callback returns,
+	                // WebRTC may already be stable and reject the duplicate call.
+	                if pc.signalingState == .stable || pc.remoteDescription != nil {
+	                    self.hasRemoteDescription = true
+	                    self.flushPendingRemoteICECandidates()
+	                    self.logger.debug("ℹ️ remote answer already applied; ignore. sessionId=\(self.sessionId, privacy: .public)")
+	                    return
+	                }
+	                self.logger.error("❌ setRemoteAnswer failed: \(error.localizedDescription, privacy: .public)")
+	                return
+	            }
+	            self.hasRemoteDescription = true
+	            self.flushPendingRemoteICECandidates()
+	        }
+	#endif
+	    }
     
     public func addRemoteICECandidate(candidate: String, sdpMid: String?, sdpMLineIndex: Int32?) {
 #if canImport(WebRTC)
@@ -411,7 +446,7 @@ extension WebRTCSession: RTCPeerConnectionDelegate {
     public func peerConnection(_ peerConnection: RTCPeerConnection, didOpen dataChannel: RTCDataChannel) {
         self.dataChannel = dataChannel
         dataChannel.delegate = self
-        onReady?()
+        notifyReadyIfNeeded()
     }
 }
 
@@ -419,7 +454,7 @@ extension WebRTCSession: RTCPeerConnectionDelegate {
 extension WebRTCSession: RTCDataChannelDelegate {
     public func dataChannelDidChangeState(_ dataChannel: RTCDataChannel) {
         if dataChannel.readyState == .open {
-            onReady?()
+            notifyReadyIfNeeded()
         } else if dataChannel.readyState == .closed {
             notifyDisconnectedIfNeeded(reason: "data_channel_closed")
         }

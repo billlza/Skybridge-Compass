@@ -938,11 +938,18 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     }
 
     private func sendFramed(_ payload: Data, over session: WebRTCSession) throws {
+        let maxDataChannelChunkBytes = 16 * 1024
         var framed = Data()
         var length = UInt32(payload.count).bigEndian
         framed.append(Data(bytes: &length, count: 4))
         framed.append(payload)
-        try session.send(framed)
+        var offset = 0
+        while offset < framed.count {
+            let end = min(offset + maxDataChannelChunkBytes, framed.count)
+            let chunk = Data(framed[offset..<end])
+            try session.send(chunk)
+            offset = end
+        }
     }
 
     private func sendFileTransferMessage(sessionID: String, session: WebRTCSession, keys: SessionKeys, message: CrossNetworkFileTransferMessage) throws {
@@ -1193,13 +1200,21 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             func send(to peer: PeerIdentifier, data: Data) async throws { try await sendRaw(data) }
         }
 
+        let maxDataChannelChunkBytes = 16 * 1024
+
         @Sendable func sendFramed(_ data: Data) async throws {
             var framed = Data()
             var length = UInt32(data.count).bigEndian
             framed.append(Data(bytes: &length, count: 4))
             framed.append(data)
-            try await MainActor.run {
-                try session.send(framed)
+            var offset = 0
+            while offset < framed.count {
+                let end = min(offset + maxDataChannelChunkBytes, framed.count)
+                let chunk = Data(framed[offset..<end])
+                try await MainActor.run {
+                    try session.send(chunk)
+                }
+                offset = end
             }
         }
 
@@ -1405,12 +1420,8 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 
         func startScreenStreamingIfNeeded(keys: SessionKeys) {
             guard self.webrtcScreenStreamingTasksBySessionId[sessionID] == nil else { return }
-            self.webrtcScreenStreamingTasksBySessionId[sessionID] = Task { @MainActor [weak self, weak session] in
+            self.webrtcScreenStreamingTasksBySessionId[sessionID] = Task { @MainActor [weak self] in
                 guard let self else { return }
-                guard let session else {
-                    self.webrtcScreenStreamingTasksBySessionId.removeValue(forKey: sessionID)
-                    return
-                }
 
                 defer { self.webrtcScreenStreamingTasksBySessionId.removeValue(forKey: sessionID) }
 
@@ -1436,11 +1447,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     do {
                         let enc = try encryptAppPayload(plain, with: keys)
                         let padded = TrafficPadding.wrapIfEnabled(enc, label: "tx/webrtc-screen")
-                        var framed = Data()
-                        var length = UInt32(padded.count).bigEndian
-                        framed.append(Data(bytes: &length, count: 4))
-                        framed.append(padded)
-                        try session.send(framed)
+                        try await sendFramed(padded)
                     } catch {
                         self.logger.error("❌ WebRTC 屏幕推流发送失败: \(error.localizedDescription, privacy: .public)")
                         break
@@ -1451,11 +1458,16 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 
         logger.info("🤝 WebRTC 控制通道：启动入站握手/消息循环 session=\(sessionID, privacy: .public)")
 
+        let maxInboundFrameBytes = 8_000_000
+
         do {
             while true {
                 let lenData = try await receiveExactly(4)
                 let totalLen = lenData.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self).bigEndian }
-                guard totalLen > 0 && totalLen < 1_048_576 else { break }
+                guard totalLen > 0 && totalLen < maxInboundFrameBytes else {
+                    logger.warning("⚠️ WebRTC frame length out of range: len=\(Int(totalLen), privacy: .public) max=\(maxInboundFrameBytes, privacy: .public)")
+                    break
+                }
                 let payload = try await receiveExactly(Int(totalLen))
 
                 let trafficUnwrapped = TrafficPadding.unwrapIfNeeded(payload, label: "rx/webrtc")
@@ -1488,11 +1500,33 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                                 )
 
                                 let provider = CryptoProviderFactory.make(policy: .preferPQC)
-                                let suites = provider.supportedSuites.filter { $0.isPQCGroup }
+                                var suites = provider.supportedSuites.filter { $0.isPQCGroup }
+                                #if HAS_APPLE_PQC_SDK
+                                if #available(iOS 26.0, macOS 26.0, *), provider.tier == .nativePQC {
+                                    suites.append(.mlkem768MLDSA65)
+                                    suites.append(.xwingMLDSA)
+                                }
+                                #endif
+                                suites = suites.reduce(into: [UInt16: CryptoSuite]()) { partialResult, suite in
+                                    partialResult[suite.wireId] = suite
+                                }.values.sorted { $0.wireId < $1.wireId }
                                 let km = DeviceIdentityKeyManager.shared
                                 var kemKeys: [KEMPublicKeyInfo] = []
                                 for s in suites {
-                                    if let pk = try? await km.getKEMPublicKey(for: s, provider: provider) {
+                                    let suiteProvider: any CryptoProvider = {
+                                        #if HAS_APPLE_PQC_SDK
+                                        if #available(iOS 26.0, macOS 26.0, *), provider.tier == .nativePQC {
+                                            if s == .xwingMLDSA {
+                                                return AppleXWingCryptoProvider()
+                                            }
+                                            if s.isPQCGroup {
+                                                return ApplePQCCryptoProvider()
+                                            }
+                                        }
+                                        #endif
+                                        return provider
+                                    }()
+                                    if let pk = try? await km.getKEMPublicKey(for: s, provider: suiteProvider) {
                                         kemKeys.append(KEMPublicKeyInfo(suiteWireId: s.wireId, publicKey: pk))
                                     }
                                 }
@@ -2107,14 +2141,15 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     }
                 }
 
-                guard let driver else { continue }
-                await driver.handleMessage(frame, from: peer)
-                let st = await driver.getCurrentState()
+                guard let activeDriver = driver else { continue }
+                await activeDriver.handleMessage(frame, from: peer)
+                let st = await activeDriver.getCurrentState()
                 switch st {
                 case .waitingFinished(_, let keys, _):
                     sessionKeys = keys
                 case .established(let keys):
                     sessionKeys = keys
+                    driver = nil
                     self.webrtcSessionKeysBySessionId[sessionID] = keys
                     self.connectionStatus = .connected
                     self.readiness = .handshakeComplete(
