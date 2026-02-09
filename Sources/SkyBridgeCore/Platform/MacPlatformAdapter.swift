@@ -46,10 +46,13 @@ extension MacPlatformAdapter: PlatformAdapter {
  // MARK: - Screen Capture
     
     public func startScreenCapture(config: ScreenCaptureConfig) async throws {
- // 检查屏幕录制权限
+ // 检查屏幕录制权限（未授权时先触发系统请求）
         let permissionStatus = await checkPermission(.screenRecording)
-        guard permissionStatus == .authorized else {
-            throw PlatformAdapterError.permissionDenied(.screenRecording)
+        if permissionStatus != .authorized {
+            let granted = await requestPermission(.screenRecording)
+            guard granted else {
+                throw PlatformAdapterError.permissionDenied(.screenRecording)
+            }
         }
         
  // 获取可共享内容
