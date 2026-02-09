@@ -1422,6 +1422,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             guard self.webrtcScreenStreamingTasksBySessionId[sessionID] == nil else { return }
             self.webrtcScreenStreamingTasksBySessionId[sessionID] = Task { @MainActor [weak self] in
                 guard let self else { return }
+                let maxBufferedAmountBytes: UInt64 = 1_500_000
 
                 defer { self.webrtcScreenStreamingTasksBySessionId.removeValue(forKey: sessionID) }
 
@@ -1430,6 +1431,13 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                         try await Task.sleep(for: .milliseconds(250))
                     } catch {
                         break
+                    }
+                    let bufferedAmount = session.dataChannelBufferedAmountBytes()
+                    if bufferedAmount > maxBufferedAmountBytes {
+                        self.logger.debug(
+                            "⏳ WebRTC 屏幕推流背压：跳过本帧 buffered=\(Int(bufferedAmount), privacy: .public)"
+                        )
+                        continue
                     }
                     guard let img = CGDisplayCreateImage(CGMainDisplayID()) else { continue }
                     guard let jpg = jpegData(from: img) else { continue }

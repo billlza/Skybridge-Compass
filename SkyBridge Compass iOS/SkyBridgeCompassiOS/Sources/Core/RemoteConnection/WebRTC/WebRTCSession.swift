@@ -373,6 +373,14 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         throw WebRTCError.webRTCNotAvailable
 #endif
     }
+
+    public func dataChannelBufferedAmountBytes() -> UInt64 {
+#if canImport(WebRTC)
+        return dataChannel?.bufferedAmount ?? 0
+#else
+        return 0
+#endif
+    }
     
 #if canImport(WebRTC)
     private func createOffer() {
@@ -429,6 +437,7 @@ extension WebRTCSession: RTCPeerConnectionDelegate {
     public func peerConnection(_ peerConnection: RTCPeerConnection, didRemove stream: RTCMediaStream) {}
     public func peerConnectionShouldNegotiate(_ peerConnection: RTCPeerConnection) {}
     public func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceConnectionState) {
+        logger.info("ICE connection state: \(String(describing: newState), privacy: .public)")
         switch newState {
         case .failed:
             notifyDisconnectedIfNeeded(reason: "ice_failed")
@@ -453,6 +462,7 @@ extension WebRTCSession: RTCPeerConnectionDelegate {
 @available(iOS 17.0, *)
 extension WebRTCSession: RTCDataChannelDelegate {
     public func dataChannelDidChangeState(_ dataChannel: RTCDataChannel) {
+        logger.info("DataChannel state: \(String(describing: dataChannel.readyState), privacy: .public)")
         if dataChannel.readyState == .open {
             notifyReadyIfNeeded()
         } else if dataChannel.readyState == .closed {

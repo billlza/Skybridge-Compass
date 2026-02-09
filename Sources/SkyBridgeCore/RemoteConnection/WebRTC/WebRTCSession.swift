@@ -369,6 +369,14 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         throw WebRTCError.webRTCNotAvailable
 #endif
     }
+
+    public func dataChannelBufferedAmountBytes() -> UInt64 {
+#if canImport(WebRTC)
+        return dataChannel?.bufferedAmount ?? 0
+#else
+        return 0
+#endif
+    }
     
 #if canImport(WebRTC)
     private func addRemoteICECandidateInternal(_ candidate: RTCIceCandidate) {
