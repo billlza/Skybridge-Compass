@@ -179,14 +179,18 @@ public struct TransferHeader: Sendable {
         return data
     }
     
-    public static func decode(from data: Data) -> TransferHeader? {
-        guard data.count >= 8 else { return nil }
-        let typeValue = data.prefix(4).withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
-        let lengthValue = data.suffix(4).withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
-        let type = TransferMessageType(rawValue: typeValue) ?? .unknown
-        return TransferHeader(type: type, length: Int(lengthValue))
-    }
-}
+	    public static func decode(from data: Data) -> TransferHeader? {
+	        guard data.count >= 8 else { return nil }
+	        let (typeValue, lengthValue) = data.withUnsafeBytes { raw -> (UInt32, UInt32) in
+	            let base = raw.baseAddress!
+	            let type = base.loadUnaligned(as: UInt32.self).bigEndian
+	            let length = base.advanced(by: 4).loadUnaligned(as: UInt32.self).bigEndian
+	            return (type, length)
+	        }
+	        let type = TransferMessageType(rawValue: typeValue) ?? .unknown
+	        return TransferHeader(type: type, length: Int(lengthValue))
+	    }
+	}
 
 /// 接收端落盘回执（用于发送端最终成功判定）
 public struct TransferReceipt: Codable, Sendable {

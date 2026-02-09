@@ -587,6 +587,8 @@ public actor HandshakeContext {
     
     public let role: HandshakeRole
     private let cryptoProvider: any CryptoProvider
+    private let pqcProvider: (any CryptoProvider)?
+    private let hybridProvider: (any CryptoProvider)?
     private let protocolSignatureProvider: any ProtocolSignatureProvider
     private let identityKeyHandle: SigningKeyHandle?
     private let identityPublicKey: Data
@@ -636,11 +638,36 @@ public actor HandshakeContext {
     ) {
         self.role = role
         self.cryptoProvider = cryptoProvider
+        #if HAS_APPLE_PQC_SDK
+        if #available(iOS 26.0, macOS 26.0, *), cryptoProvider.tier == .nativePQC {
+            self.pqcProvider = ApplePQCCryptoProvider()
+            self.hybridProvider = AppleXWingCryptoProvider()
+        } else {
+            self.pqcProvider = nil
+            self.hybridProvider = nil
+        }
+        #else
+        self.pqcProvider = nil
+        self.hybridProvider = nil
+        #endif
         self.protocolSignatureProvider = protocolSignatureProvider
         self.identityKeyHandle = identityKeyHandle
         self.identityPublicKey = identityPublicKey
         self.policy = policy
         self.peerKEMPublicKeys = peerKEMPublicKeys
+    }
+
+    private func provider(for suite: CryptoSuite) -> (any CryptoProvider)? {
+        if let hybridProvider, hybridProvider.supportsSuite(suite) {
+            return hybridProvider
+        }
+        if let pqcProvider, pqcProvider.supportsSuite(suite) {
+            return pqcProvider
+        }
+        if cryptoProvider.supportsSuite(suite) {
+            return cryptoProvider
+        }
+        return nil
     }
     
     // MARK: - MessageA Building (Initiator)
@@ -668,11 +695,17 @@ public actor HandshakeContext {
             guard let peerKEM = peerKEMPublicKeys[suite] else {
                 throw HandshakeError.failed(.missingPeerKEMPublicKey(suite: suite.rawValue))
             }
-            let encaps = try await cryptoProvider.kemEncapsulate(recipientPublicKey: peerKEM)
+            guard let kemProvider = provider(for: suite) else {
+                throw HandshakeError.failed(.suiteNegotiationFailed)
+            }
+            let encaps = try await kemProvider.kemEncapsulate(recipientPublicKey: peerKEM)
             kemSharedSecrets[suite] = encaps.sharedSecret
             keyShares = [HandshakeKeyShare(suite: suite, shareBytes: encaps.encapsulatedKey)]
         } else {
-            let keyPair = try await cryptoProvider.generateKeyPair(for: .ephemeral)
+            guard let suiteProvider = provider(for: suite) else {
+                throw HandshakeError.failed(.suiteNegotiationFailed)
+            }
+            let keyPair = try await suiteProvider.generateKeyPair(for: .ephemeral)
             ephemeralPrivateKey = SecureBytes(data: keyPair.privateKey.bytes)
             ephemeralPublicKey = keyPair.publicKey.bytes
             keyShares = [HandshakeKeyShare(suite: suite, shareBytes: keyPair.publicKey.bytes)]
@@ -761,7 +794,7 @@ public actor HandshakeContext {
         // 选择套件：按发起方优先级，从 offered 列表中选择本端支持的首个套件
         var selectedSuite: CryptoSuite?
         for suite in messageA.supportedSuites {
-            if cryptoProvider.supportsSuite(suite) {
+            if provider(for: suite) != nil {
                 selectedSuite = suite
                 break
             }
@@ -784,8 +817,14 @@ public actor HandshakeContext {
             guard let encapsulatedKey = peerKeyShares[suite] else {
                 throw HandshakeError.failed(.suiteNegotiationFailed)
             }
-            let local = try await P2PKEMIdentityKeyStore.shared.getOrCreateIdentityKey(for: suite, provider: cryptoProvider)
-            let sharedSecret = try await cryptoProvider.kemDecapsulate(
+            guard let suiteProvider = provider(for: suite) else {
+                throw HandshakeError.failed(.suiteNegotiationFailed)
+            }
+            let local = try await P2PKEMIdentityKeyStore.shared.getOrCreateIdentityKey(
+                for: suite,
+                provider: suiteProvider
+            )
+            let sharedSecret = try await suiteProvider.kemDecapsulate(
                 encapsulatedKey: encapsulatedKey,
                 privateKey: local.privateKey
             )
@@ -817,7 +856,7 @@ public actor HandshakeContext {
             guard let payloadSecret = kemSharedSecrets[suite] else {
                 throw HandshakeError.failed(.cryptoError("Missing KEM shared secret for \(suite.rawValue) (responder)"))
             }
-            let payloadPlaintext = try CryptoCapabilities.fromProvider(cryptoProvider).deterministicEncode()
+            let payloadPlaintext = try CryptoCapabilities.fromProvider(provider(for: suite) ?? cryptoProvider).deterministicEncode()
             encryptedPayload = try sealPayloadWithSharedSecret(
                 payloadSecret,
                 plaintext: payloadPlaintext,
@@ -830,8 +869,11 @@ public actor HandshakeContext {
             guard let peerShare = peerKeyShares[suite] else {
                 throw HandshakeError.failed(.suiteNegotiationFailed)
             }
-            let payloadPlaintext = try CryptoCapabilities.fromProvider(cryptoProvider).deterministicEncode()
-            let sealResult = try await cryptoProvider.kemDemSealWithSecret(
+            guard let suiteProvider = provider(for: suite) else {
+                throw HandshakeError.failed(.suiteNegotiationFailed)
+            }
+            let payloadPlaintext = try CryptoCapabilities.fromProvider(suiteProvider).deterministicEncode()
+            let sealResult = try await suiteProvider.kemDemSealWithSecret(
                 plaintext: payloadPlaintext,
                 recipientPublicKey: peerShare,
                 info: Data("handshake-payload".utf8)
@@ -946,8 +988,12 @@ public actor HandshakeContext {
         guard let privateKey = ephemeralPrivateKey else {
             throw HandshakeError.failed(.cryptoError("Missing initiator ephemeral private key"))
         }
-        
-        let openResult = try await cryptoProvider.kemDemOpenWithSecret(
+
+        guard let suiteProvider = provider(for: messageB.selectedSuite) else {
+            throw HandshakeError.failed(.suiteNegotiationFailed)
+        }
+
+        let openResult = try await suiteProvider.kemDemOpenWithSecret(
             sealedBox: messageB.encryptedPayload,
             privateKey: privateKey,
             info: Data("handshake-payload".utf8)

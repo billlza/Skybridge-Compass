@@ -36,7 +36,8 @@ function select_identity() {
   fi
 }
 
-ROOT_DIR=$(pwd)
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 BUILD_DIR="${ROOT_DIR}/.build/xcode/Build/Products/Release"
 APP_NAME="SkyBridge Compass Pro.app"
 APP_DIR="${ROOT_DIR}/dist/${APP_NAME}"
@@ -45,13 +46,33 @@ MACOS_DIR="${CONTENTS_DIR}/MacOS"
 RES_DIR="${CONTENTS_DIR}/Resources"
 FW_DIR="${CONTENTS_DIR}/Frameworks"
 SIGN_IDENTITY="${IDENTITY:-$(select_identity)}"
+SKIP_BUILD="${SKIP_BUILD:-0}"
+BUILD_DESTINATION="${BUILD_DESTINATION:-platform=macOS,arch=arm64}"
 
 # 中文注释：可执行文件与资源 bundle 名称（来自 Xcode 构建输出）
 EXECUTABLE="SkyBridgeCompassApp"
-SPM_RES_APP_BUNDLE="SkyBridgeCompassApp_SkyBridgeCompassApp.bundle"
-SPM_RES_CORE_BUNDLE="SkyBridgeCompassApp_SkyBridgeCore.bundle"
-CRYPTO_BUNDLE="swift-crypto_Crypto.bundle"
-NIOPOSIX_BUNDLE="swift-nio_NIOPosix.bundle"
+
+if [[ "${SKIP_BUILD}" != "1" ]]; then
+  log "执行 Release 构建，确保打包包含最新代码"
+  SDK_VER="$(xcrun --sdk macosx --show-sdk-version 2>/dev/null || echo "")"
+  SDK_MAJOR="$(echo "$SDK_VER" | awk -F. '{print $1}')"
+  if [[ -n "$SDK_MAJOR" && "$SDK_MAJOR" -ge 26 ]]; then
+    export SKYBRIDGE_ENABLE_APPLE_PQC_SDK=1
+    log "检测到 macOS SDK ${SDK_VER}（>=26），启用 Apple PQC 编译条件"
+  else
+    unset SKYBRIDGE_ENABLE_APPLE_PQC_SDK
+    log "未检测到 macOS SDK 26+（当前: ${SDK_VER:-unknown}），禁用 Apple PQC 编译条件"
+  fi
+
+  xcodebuild -workspace "${ROOT_DIR}/.swiftpm/xcode/package.xcworkspace" \
+             -scheme SkyBridgeCompassApp \
+             -configuration Release \
+             -destination "${BUILD_DESTINATION}" \
+             -derivedDataPath "${ROOT_DIR}/.build/xcode" \
+             build
+else
+  log "按 SKIP_BUILD=1 跳过构建，直接复用已有产物"
+fi
 
 # 校验构建产物是否存在
 if [[ ! -x "${BUILD_DIR}/${EXECUTABLE}" ]]; then
@@ -72,12 +93,17 @@ log "拷贝可执行文件到 .app/Contents/MacOS/"
 cp "${BUILD_DIR}/${EXECUTABLE}" "${MACOS_DIR}/${EXECUTABLE}"
 chmod +x "${MACOS_DIR}/${EXECUTABLE}"
 
-log "拷贝运行时 Frameworks（例如 WebRTC.framework）到 .app/Contents/Frameworks/"
-if [[ -d "${BUILD_DIR}/WebRTC.framework" ]]; then
-  rm -rf "${FW_DIR}/WebRTC.framework"
-  cp -R "${BUILD_DIR}/WebRTC.framework" "${FW_DIR}/"
-else
-  log "未找到 WebRTC.framework（若运行时报 dyld 缺失，请检查构建产物）"
+log "拷贝运行时 Frameworks 到 .app/Contents/Frameworks/"
+found_framework=0
+for framework in "${BUILD_DIR}"/*.framework; do
+  [[ -d "${framework}" ]] || continue
+  found_framework=1
+  name="$(basename "${framework}")"
+  rm -rf "${FW_DIR}/${name}"
+  cp -R "${framework}" "${FW_DIR}/"
+done
+if [[ "${found_framework}" -eq 0 ]]; then
+  log "未找到 .framework 产物（若运行时报 dyld 缺失，请检查构建产物）"
 fi
 
 # 确保可执行文件包含 Frameworks rpath（用于加载 @rpath/*.framework）
@@ -103,14 +129,16 @@ else
   log "未找到 swift-stdlib-tool，跳过 Swift dylib 拷贝"
 fi
 
-log "拷贝 SwiftPM 资源 bundle 到 .app/Contents/Resources/"
-for bundle in "${SPM_RES_APP_BUNDLE}" "${SPM_RES_CORE_BUNDLE}" "${CRYPTO_BUNDLE}" "${NIOPOSIX_BUNDLE}"; do
-  if [[ -d "${BUILD_DIR}/${bundle}" ]]; then
-    cp -R "${BUILD_DIR}/${bundle}" "${RES_DIR}/"
-  else
-    log "跳过不存在的资源：${bundle}"
-  fi
+log "拷贝构建产物中的资源 bundle 到 .app/Contents/Resources/"
+found_bundle=0
+for bundle in "${BUILD_DIR}"/*.bundle; do
+  [[ -d "${bundle}" ]] || continue
+  found_bundle=1
+  cp -R "${bundle}" "${RES_DIR}/"
 done
+if [[ "${found_bundle}" -eq 0 ]]; then
+  log "未发现 .bundle 资源产物"
+fi
 
 # 额外拷贝源资源目录（如 AppIcon），以确保非打进 bundle 的静态资源也可用
 SRC_RES_DIR="${ROOT_DIR}/Sources/SkyBridgeCompassApp/Resources"

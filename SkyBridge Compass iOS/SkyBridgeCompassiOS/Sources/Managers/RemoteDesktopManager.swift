@@ -917,8 +917,10 @@ public class RemoteDesktopManager: ObservableObject {
                 return
             }
             
-            let length = Int(lengthData.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian })
-            if length <= 0 || length > maxMessageBytes {
+	            let length = Int(lengthData.withUnsafeBytes { raw -> UInt32 in
+	                raw.baseAddress!.loadUnaligned(as: UInt32.self).bigEndian
+	            })
+	            if length <= 0 || length > maxMessageBytes {
                 Task { @MainActor in
                     self.state = .error("消息长度异常：\(length) bytes")
                 }

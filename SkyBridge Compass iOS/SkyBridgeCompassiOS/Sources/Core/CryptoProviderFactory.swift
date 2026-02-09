@@ -29,6 +29,11 @@ public enum CryptoProviderFactory {
         /// 仅经典算法
         case classicOnly = "classicOnly"
     }
+
+    private enum NativeSuitePreference: String {
+        case mlkem
+        case xwing
+    }
     
     // MARK: - Capability
     
@@ -101,6 +106,44 @@ public enum CryptoProviderFactory {
         return false
         #endif
     }
+
+    private static func isAppleXWingAvailable() -> Bool {
+        #if HAS_APPLE_PQC_SDK
+        if #available(iOS 26.0, macOS 26.0, *) {
+            return AppleXWingCryptoProvider.selfTest()
+        }
+        return false
+        #else
+        return false
+        #endif
+    }
+
+    private static func nativeSuitePreference() -> NativeSuitePreference {
+        if let raw = ProcessInfo.processInfo.environment["SB_PQC_PREFERRED_SUITE"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased(),
+           raw == "xwing" || raw == "hybrid" {
+            return .xwing
+        }
+
+        if UserDefaults.standard.bool(forKey: "Settings.PreferXWingHybrid") {
+            return .xwing
+        }
+
+        return .mlkem
+    }
+
+    private static func makeAppleNativeProvider() -> any CryptoProvider {
+        #if HAS_APPLE_PQC_SDK
+        if #available(iOS 26.0, macOS 26.0, *) {
+            if nativeSuitePreference() == .xwing, isAppleXWingAvailable() {
+                return AppleXWingCryptoProvider()
+            }
+            return ApplePQCCryptoProvider()
+        }
+        #endif
+        return UnavailablePQCProvider()
+    }
     
     // MARK: - Private Methods
     
@@ -113,9 +156,7 @@ public enum CryptoProviderFactory {
         case .preferPQC:
             #if HAS_APPLE_PQC_SDK
             if capability.hasApplePQC {
-                if #available(iOS 26.0, macOS 26.0, *) {
-                    return ApplePQCCryptoProvider()
-                }
+                return makeAppleNativeProvider()
             }
             #endif
             // NOTE: 若未来为 iOS 构建并集成 liboqs / OQS Provider，可在此处加入 liboqs PQC 回退。
@@ -124,9 +165,7 @@ public enum CryptoProviderFactory {
         case .requirePQC:
             #if HAS_APPLE_PQC_SDK
             if capability.hasApplePQC {
-                if #available(iOS 26.0, macOS 26.0, *) {
-                    return ApplePQCCryptoProvider()
-                }
+                return makeAppleNativeProvider()
             }
             #endif
             // 返回一个会抛错的 Provider

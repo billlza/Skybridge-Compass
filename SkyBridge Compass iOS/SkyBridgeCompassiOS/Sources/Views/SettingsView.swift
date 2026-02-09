@@ -276,6 +276,7 @@ struct SettingsView: View {
 @available(iOS 17.0, *)
 struct PQCSecuritySettingsView: View {
     @StateObject private var pqcManager = PQCCryptoManager.instance
+    @AppStorage("Settings.PreferXWingHybrid") private var preferXWingHybrid: Bool = false
     
     var body: some View {
         List {
@@ -335,6 +336,8 @@ struct PQCSecuritySettingsView: View {
                 Toggle("允许经典降级（兼容旧设备）", isOn: $pqcManager.allowClassicFallbackForCompatibility)
                     .disabled(pqcManager.enforcePQCHandshake)
                     .opacity(pqcManager.enforcePQCHandshake ? 0.5 : 1.0)
+
+                Toggle("优先 X-Wing 混合套件（iOS 26+）", isOn: $preferXWingHybrid)
                 
                 Toggle("密钥自动轮换", isOn: $pqcManager.autoKeyRotation)
                 

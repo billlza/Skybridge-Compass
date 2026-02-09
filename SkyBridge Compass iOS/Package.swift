@@ -38,18 +38,17 @@ let package = Package(
             targets: ["SkyBridgeCompassiOS"]
         )
     ],
-    dependencies: [
-        // 可以添加第三方依赖
-        // .package(url: "https://github.com/pointfreeco/swift-perception", from: "2.0.0"),
-        // WebRTC (ICE / DataChannel) - 跨网连接基础设施（走 STUN/TURN）
-        .package(url: "https://github.com/stasel/WebRTC", from: "141.0.0"),
-    ],
+    dependencies: [],
     targets: [
+        .binaryTarget(
+            name: "WebRTC",
+            path: "Vendor/WebRTC/WebRTC.xcframework"
+        ),
         // MARK: - iOS 主应用目标
         .target(
             name: "SkyBridgeCompassiOS",
             dependencies: [
-                .product(name: "WebRTC", package: "WebRTC")
+                "WebRTC"
             ],
             path: "SkyBridgeCompassiOS",
             sources: ["Sources"],

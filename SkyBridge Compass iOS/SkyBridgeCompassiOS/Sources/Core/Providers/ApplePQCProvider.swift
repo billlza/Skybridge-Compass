@@ -421,6 +421,219 @@ public struct ApplePQCCryptoProvider: CryptoProvider, Sendable {
     }
 }
 
+/// Apple 原生 Hybrid Provider - X-Wing(ML-KEM-768+X25519) + ML-DSA-65
+/// 仅在 iOS 26+/macOS 26+ 且 HAS_APPLE_PQC_SDK 定义时编译
+@available(iOS 26.0, macOS 26.0, *)
+public struct AppleXWingCryptoProvider: CryptoProvider, Sendable {
+
+    public let providerName = "AppleXWing"
+    public let tier: CryptoTier = .nativePQC
+    public let activeSuite: CryptoSuite = .xwingMLDSA
+
+    private static let nonceSize = 12
+    private static let aesKeySize = 32
+    private static let hkdfSaltLabel = "SkyBridge-KDF-Salt-v1|"
+
+    public init() {}
+
+    public static func selfTest() -> Bool {
+        do {
+            let _ = try XWingMLKEM768X25519.PrivateKey.generate()
+            let _ = try MLDSA65.PrivateKey()
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    private static func hkdfSalt(info: Data) -> Data {
+        var data = Data(hkdfSaltLabel.utf8)
+        data.append(info)
+        return Data(SHA256.hash(data: data))
+    }
+
+    public func hpkeSeal(
+        plaintext: Data,
+        recipientPublicKey: Data,
+        info: Data
+    ) async throws -> HPKESealedBox {
+        let publicKey = try XWingMLKEM768X25519.PublicKey(rawRepresentation: recipientPublicKey)
+
+        let encapsulationResult = try publicKey.encapsulate()
+        let sharedSecret = encapsulationResult.sharedSecret
+        let encapsulatedKey = encapsulationResult.encapsulated
+
+        let derivedKey = HKDF<SHA256>.deriveKey(
+            inputKeyMaterial: sharedSecret,
+            salt: Self.hkdfSalt(info: info),
+            info: info,
+            outputByteCount: Self.aesKeySize
+        )
+
+        let nonce = AES.GCM.Nonce()
+        let sealed = try AES.GCM.seal(plaintext, using: derivedKey, nonce: nonce)
+
+        return HPKESealedBox(
+            encapsulatedKey: encapsulatedKey,
+            ciphertext: sealed.ciphertext,
+            tag: sealed.tag,
+            nonce: Data(nonce)
+        )
+    }
+
+    public func hpkeOpen(
+        sealedBox: HPKESealedBox,
+        privateKey: Data,
+        info: Data
+    ) async throws -> Data {
+        try await hpkeOpen(sealedBox: sealedBox, privateKey: SecureBytes(data: privateKey), info: info)
+    }
+
+    public func hpkeOpen(
+        sealedBox: HPKESealedBox,
+        privateKey: SecureBytes,
+        info: Data
+    ) async throws -> Data {
+        let keyData = privateKey.noCopyData()
+        let privateKeyObj = try XWingMLKEM768X25519.PrivateKey(integrityCheckedRepresentation: keyData)
+        let sharedSecret = try privateKeyObj.decapsulate(sealedBox.encapsulatedKey)
+        let derivedKey = HKDF<SHA256>.deriveKey(
+            inputKeyMaterial: sharedSecret,
+            salt: Self.hkdfSalt(info: info),
+            info: info,
+            outputByteCount: Self.aesKeySize
+        )
+        guard sealedBox.nonce.count == Self.nonceSize else {
+            throw CryptoProviderError.invalidCiphertext("Invalid nonce length")
+        }
+        let nonce = try AES.GCM.Nonce(data: sealedBox.nonce)
+        let gcmBox = try AES.GCM.SealedBox(
+            nonce: nonce,
+            ciphertext: sealedBox.ciphertext,
+            tag: sealedBox.tag
+        )
+        return try AES.GCM.open(gcmBox, using: derivedKey)
+    }
+
+    public func kemDemSealWithSecret(
+        plaintext: Data,
+        recipientPublicKey: Data,
+        info: Data
+    ) async throws -> (sealedBox: HPKESealedBox, sharedSecret: SecureBytes) {
+        let publicKey = try XWingMLKEM768X25519.PublicKey(rawRepresentation: recipientPublicKey)
+        let encapsulationResult = try publicKey.encapsulate()
+        let sharedSecret = encapsulationResult.sharedSecret
+        let sharedSecretBytes = sharedSecret.withUnsafeBytes { Data($0) }
+        let sharedSecure = SecureBytes(data: sharedSecretBytes)
+        let derivedKey = HKDF<SHA256>.deriveKey(
+            inputKeyMaterial: sharedSecret,
+            salt: Self.hkdfSalt(info: info),
+            info: info,
+            outputByteCount: Self.aesKeySize
+        )
+        let nonce = AES.GCM.Nonce()
+        let sealed = try AES.GCM.seal(plaintext, using: derivedKey, nonce: nonce)
+        let box = HPKESealedBox(
+            encapsulatedKey: encapsulationResult.encapsulated,
+            ciphertext: sealed.ciphertext,
+            tag: sealed.tag,
+            nonce: Data(nonce)
+        )
+        return (sealedBox: box, sharedSecret: sharedSecure)
+    }
+
+    public func kemDemOpenWithSecret(
+        sealedBox: HPKESealedBox,
+        privateKey: SecureBytes,
+        info: Data
+    ) async throws -> (plaintext: Data, sharedSecret: SecureBytes) {
+        let keyData = privateKey.noCopyData()
+        let privateKeyObj = try XWingMLKEM768X25519.PrivateKey(integrityCheckedRepresentation: keyData)
+        let sharedSecret = try privateKeyObj.decapsulate(sealedBox.encapsulatedKey)
+        let sharedSecretBytes = sharedSecret.withUnsafeBytes { Data($0) }
+        let sharedSecure = SecureBytes(data: sharedSecretBytes)
+        let derivedKey = HKDF<SHA256>.deriveKey(
+            inputKeyMaterial: sharedSecret,
+            salt: Self.hkdfSalt(info: info),
+            info: info,
+            outputByteCount: Self.aesKeySize
+        )
+        guard sealedBox.nonce.count == Self.nonceSize else {
+            throw CryptoProviderError.invalidCiphertext("Invalid nonce length")
+        }
+        let nonce = try AES.GCM.Nonce(data: sealedBox.nonce)
+        let gcmBox = try AES.GCM.SealedBox(
+            nonce: nonce,
+            ciphertext: sealedBox.ciphertext,
+            tag: sealedBox.tag
+        )
+        let plaintext = try AES.GCM.open(gcmBox, using: derivedKey)
+        return (plaintext: plaintext, sharedSecret: sharedSecure)
+    }
+
+    public func kemEncapsulate(
+        recipientPublicKey: Data
+    ) async throws -> (encapsulatedKey: Data, sharedSecret: SecureBytes) {
+        let publicKey = try XWingMLKEM768X25519.PublicKey(rawRepresentation: recipientPublicKey)
+        let encapsulationResult = try publicKey.encapsulate()
+        let sharedSecretBytes = encapsulationResult.sharedSecret.withUnsafeBytes { Data($0) }
+        return (
+            encapsulatedKey: encapsulationResult.encapsulated,
+            sharedSecret: SecureBytes(data: sharedSecretBytes)
+        )
+    }
+
+    public func kemDecapsulate(
+        encapsulatedKey: Data,
+        privateKey: SecureBytes
+    ) async throws -> SecureBytes {
+        let keyData = privateKey.noCopyData()
+        let privateKeyObj = try XWingMLKEM768X25519.PrivateKey(integrityCheckedRepresentation: keyData)
+        let sharedSecret = try privateKeyObj.decapsulate(encapsulatedKey)
+        let sharedSecretBytes = sharedSecret.withUnsafeBytes { Data($0) }
+        return SecureBytes(data: sharedSecretBytes)
+    }
+
+    public func sign(data: Data, using keyHandle: SigningKeyHandle) async throws -> Data {
+        let privateKey: Data
+        switch keyHandle {
+        case .softwareKey(let bytes):
+            privateKey = bytes
+        case .callback(let callback):
+            return try await callback.sign(data: data)
+        #if canImport(Security)
+        case .secureEnclaveRef:
+            throw CryptoProviderError.invalidKeyFormat
+        #endif
+        }
+
+        let key = try MLDSA65.PrivateKey(integrityCheckedRepresentation: privateKey)
+        return try key.signature(for: data)
+    }
+
+    public func verify(data: Data, signature: Data, publicKey: Data) async throws -> Bool {
+        let key = try MLDSA65.PublicKey(rawRepresentation: publicKey)
+        return key.isValidSignature(signature, for: data)
+    }
+
+    public func generateKeyPair(for usage: KeyUsage) async throws -> KeyPair {
+        switch usage {
+        case .keyExchange, .ephemeral:
+            let privateKey = try XWingMLKEM768X25519.PrivateKey.generate()
+            return KeyPair(
+                publicKey: privateKey.publicKey.rawRepresentation,
+                privateKey: privateKey.integrityCheckedRepresentation
+            )
+        case .signing:
+            let privateKey = try MLDSA65.PrivateKey()
+            return KeyPair(
+                publicKey: privateKey.publicKey.rawRepresentation,
+                privateKey: privateKey.integrityCheckedRepresentation
+            )
+        }
+    }
+}
+
 #endif // HAS_APPLE_PQC_SDK
 
 // MARK: - PQC Availability Check
@@ -436,4 +649,3 @@ public func isApplePQCAvailable() -> Bool {
     }
     return false
 }
-

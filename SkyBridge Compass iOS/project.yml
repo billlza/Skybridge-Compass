@@ -7,9 +7,8 @@ options:
   xcodeVersion: "26.2"
 
 packages:
-  WebRTC:
-    url: https://github.com/stasel/WebRTC
-    from: 141.0.0
+  WebRTCLocal:
+    path: LocalPackages/WebRTCLocal
 
 targets:
   SkyBridgeCompass-iOS:
@@ -25,7 +24,7 @@ targets:
         buildPhase: resources
     dependencies:
       - sdk: AppIntents.framework
-      - package: WebRTC
+      - package: WebRTCLocal
         product: WebRTC
       - target: SkyBridgeCompass-Widgets
         embed: true
@@ -36,6 +35,16 @@ targets:
         TARGETED_DEVICE_FAMILY: "1,2"
         INFOPLIST_FILE: "SkyBridgeCompassiOS/Supporting Files/Info.plist"
         SWIFT_STRICT_CONCURRENCY: targeted
+        OTHER_SWIFT_FLAGS:
+          - "$(inherited)"
+          - "-Xcc"
+          - "-I"
+          - "-Xcc"
+          - "$(SRCROOT)/../Sources/Vendor/WebRTCHeaders"
+          - "-Xcc"
+          - "-Wno-incomplete-umbrella"
+        OTHER_CFLAGS: "$(inherited) -Wno-incomplete-umbrella"
+        OTHER_CPLUSPLUSFLAGS: "$(inherited) -Wno-incomplete-umbrella"
         # WebRTC (third-party binary package) exposes an incomplete umbrella header on iOS.
         # Keep this warning enabled for our own frameworks; suppress only at app integration boundary.
         CLANG_WARN_INCOMPLETE_UMBRELLA: NO

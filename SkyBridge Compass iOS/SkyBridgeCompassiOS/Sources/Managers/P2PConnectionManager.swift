@@ -599,11 +599,11 @@ public class P2PConnectionManager: ObservableObject {
                     return
                 }
                 
-                let length = lengthData.withUnsafeBytes { ptr in
-                    ptr.load(as: UInt32.self).bigEndian
-                }
-                let bodyLen = Int(length)
-                guard bodyLen <= 2_000_000 else {
+	                let length = lengthData.withUnsafeBytes { raw -> UInt32 in
+	                    raw.baseAddress!.loadUnaligned(as: UInt32.self).bigEndian
+	                }
+	                let bodyLen = Int(length)
+	                guard bodyLen <= 2_000_000 else {
                     if self?.looksLikeTLSRecordHeader(lengthData) == true {
                         SkyBridgeLogger.shared.warning("⚠️ 检测到 TLS 记录头，但当前通道期望 length-framed 明文握手，已关闭该入站连接")
                         self?.cleanupBrokenInboundConnection(connection, peerId: peerId, reason: "传输协议不匹配（收到 TLS 记录头）")
@@ -999,14 +999,7 @@ public class P2PConnectionManager: ObservableObject {
         guard let connection = connections[deviceId] else { throw P2PError.connectionFailed }
         guard sessionKeys[deviceId] != nil else { throw P2PError.noSessionKey }
 
-        // 选择当前可用的 PQC group suites，并为其生成/读取本机 KEM identity 公钥
-        let provider = CryptoProviderFactory.make(policy: .preferPQC)
-        let suites = provider.supportedSuites.filter { $0.isPQCGroup }
-        var kemKeys: [KEMPublicKeyInfo] = []
-        for s in suites {
-            let (pub, _) = try await P2PKEMIdentityKeyStore.shared.getOrCreateIdentityKey(for: s, provider: provider)
-            kemKeys.append(KEMPublicKeyInfo(suiteWireId: s.wireId, publicKey: pub))
-        }
+        let kemKeys = try await P2PKEMIdentityKeyStore.shared.getOrCreateBootstrapPublicKeys()
 
         // 设备 ID：用于对端把我们写入 trust store 的 key（尽量与 discovery 的 deviceId 对齐）
         #if canImport(UIKit)
