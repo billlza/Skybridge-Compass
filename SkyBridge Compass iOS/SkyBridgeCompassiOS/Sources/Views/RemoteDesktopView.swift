@@ -210,9 +210,7 @@ struct RemoteDesktopStreamView: View {
     private var touchControlOverlay: some View {
         Color.clear
             .contentShape(Rectangle())
-            .onTapGesture {
-                resetControlsTimer()
-            }
+            .allowsHitTesting(false)
     }
     
     private var controlToolbar: some View {
@@ -430,21 +428,49 @@ extension RemoteDesktopStreamView {
             .onChanged { value in
                 // 仅在 tap/drag 模式下发送 mouseMoved（避免和缩放/平移冲突过大）
                 guard touchMode != .scroll else { return }
-                remoteDesktopManager.handleTouch(at: value.location, in: geometry.frame(in: .local), type: .mouseMoved)
+                remoteDesktopManager.handleTouch(
+                    at: value.location,
+                    in: effectiveRemoteFrame(in: geometry),
+                    type: .mouseMoved
+                )
             }
             .onEnded { value in
                 switch touchMode {
                 case .tap:
                     // 轻触：down + up
-                    remoteDesktopManager.handleTouch(at: value.location, in: geometry.frame(in: .local), type: .leftMouseDown)
-                    remoteDesktopManager.handleTouch(at: value.location, in: geometry.frame(in: .local), type: .leftMouseUp)
+                    let frame = effectiveRemoteFrame(in: geometry)
+                    remoteDesktopManager.handleTouch(at: value.location, in: frame, type: .leftMouseDown)
+                    remoteDesktopManager.handleTouch(at: value.location, in: frame, type: .leftMouseUp)
                 case .drag:
                     // 拖动结束：抬起
-                    remoteDesktopManager.handleTouch(at: value.location, in: geometry.frame(in: .local), type: .leftMouseUp)
+                    remoteDesktopManager.handleTouch(
+                        at: value.location,
+                        in: effectiveRemoteFrame(in: geometry),
+                        type: .leftMouseUp
+                    )
                 case .scroll:
                     break
                 }
             }
+    }
+
+    private func effectiveRemoteFrame(in geometry: GeometryProxy) -> CGRect {
+        let full = geometry.frame(in: .local)
+        let resolution = remoteDesktopManager.resolution
+        guard resolution.width > 0, resolution.height > 0 else { return full }
+
+        let scale = min(
+            full.width / resolution.width,
+            full.height / resolution.height
+        )
+        let renderWidth = resolution.width * scale
+        let renderHeight = resolution.height * scale
+        return CGRect(
+            x: full.minX + (full.width - renderWidth) / 2.0,
+            y: full.minY + (full.height - renderHeight) / 2.0,
+            width: renderWidth,
+            height: renderHeight
+        )
     }
 }
 

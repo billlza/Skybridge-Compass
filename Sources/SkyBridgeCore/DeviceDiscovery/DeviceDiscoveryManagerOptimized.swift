@@ -289,25 +289,42 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
     public func connectToDevice(_ device: DiscoveredDevice) async throws {
         logger.info("连接设备: \(device.name)")
 
- // 根据 IPv6 设置选择地址
-        let hostAddress: String
+ // 根据 IPv6 设置选择地址；若地址缺失，则回退到 Bonjour service endpoint。
+        let endpoint: NWEndpoint
+        let serverNameForTLS: String
         if enableIPv6Support, let ipv6 = device.ipv6, !ipv6.isEmpty {
  // 优先使用 IPv6 地址
-            hostAddress = ipv6
+            let portInt = resolvedConnectablePort(for: device)
+            guard portInt > 0 else { throw DeviceDiscoveryError.scanningFailed }
+            let host = NWEndpoint.Host(ipv6)
+            let port = NWEndpoint.Port(integerLiteral: UInt16(portInt))
+            endpoint = NWEndpoint.hostPort(host: host, port: port)
+            serverNameForTLS = ipv6
             logger.info("🌐 使用 IPv6 地址连接: \(ipv6)")
-        } else if let ipv4 = device.ipv4 {
+        } else if let ipv4 = device.ipv4, !ipv4.isEmpty {
  // 回退到 IPv4
-            hostAddress = ipv4
+            let portInt = resolvedConnectablePort(for: device)
+            guard portInt > 0 else { throw DeviceDiscoveryError.scanningFailed }
+            let host = NWEndpoint.Host(ipv4)
+            let port = NWEndpoint.Port(integerLiteral: UInt16(portInt))
+            endpoint = NWEndpoint.hostPort(host: host, port: port)
+            serverNameForTLS = ipv4
             logger.info("🌐 使用 IPv4 地址连接: \(ipv4)")
+        } else if let serviceType = resolvedConnectableServiceType(for: device) {
+            let serviceName = device.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !serviceName.isEmpty else { throw DeviceDiscoveryError.deviceNotConnected }
+            endpoint = .service(
+                name: serviceName,
+                type: serviceType,
+                domain: serviceDomain,
+                interface: nil
+            )
+            serverNameForTLS = "\(serviceName).\(serviceDomain)"
+            logger.info("🌐 使用 Bonjour 服务连接: \(serviceName) \(serviceType)")
         } else {
             throw DeviceDiscoveryError.deviceNotConnected
         }
 
-        let host = NWEndpoint.Host(hostAddress)
-        let portInt = resolvedConnectablePort(for: device)
-        guard portInt > 0 else { throw DeviceDiscoveryError.scanningFailed }
-        let port = NWEndpoint.Port(integerLiteral: UInt16(portInt))
-        let endpoint = NWEndpoint.hostPort(host: host, port: port)
         let isSkyBridgeControlChannel = isSkyBridgeControlDevice(device)
  // 应用TLS配置（统一近距加密策略）
         let net = RemoteDesktopSettingsManager.shared.settings.networkSettings
@@ -335,9 +352,9 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             } else {
                 encryptionStatus = "TLS"
             }
- // 设置SNI（Server Name Indication），使用目标地址作为服务器名称
+ // 设置SNI（Server Name Indication），使用目标地址/服务名作为服务器名称
  // 中文说明：SNI用于服务器选择证书；在隐私诊断开启时也用于展示。
-            hostAddress.withCString { cstr in
+            serverNameForTLS.withCString { cstr in
                 sec_protocol_options_set_tls_server_name(tls.securityProtocolOptions, cstr)
             }
  // 在TLS握手验证回调中提取握手元数据（版本与cipher）
@@ -359,7 +376,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                     protocolVersion: TLSHandshakeDetails.string(from: version),
                     cipherSuite: TLSHandshakeDetails.string(from: cipher),
                     alpn: negotiatedALPN,
-                    sni: SettingsManager.shared.enableHandshakeDiagnostics ? hostAddress : nil
+                    sni: SettingsManager.shared.enableHandshakeDiagnostics ? serverNameForTLS : nil
                 )
                 Task { @MainActor in
                     self?.tlsHandshakeDetails = details
@@ -417,12 +434,15 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
 
     private func isSkyBridgeControlDevice(_ device: DiscoveredDevice) -> Bool {
         device.services.contains("_skybridge._tcp")
+            || device.services.contains("_skybridge-remote._tcp")
             || device.services.contains("_skybridge._udp")
             || device.portMap["_skybridge._tcp"] != nil
+            || device.portMap["_skybridge-remote._tcp"] != nil
             || device.portMap["_skybridge._udp"] != nil
     }
 
     private func resolvedConnectablePort(for device: DiscoveredDevice) -> Int {
+        if let port = device.portMap["_skybridge-remote._tcp"], port > 0 { return port }
         if let port = device.portMap["_skybridge._tcp"], port > 0 { return port }
         if let port = device.portMap["_skybridge._udp"], port > 0 { return port }
 
@@ -432,6 +452,26 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             }
         }
         return 0
+    }
+
+    private func resolvedConnectableServiceType(for device: DiscoveredDevice) -> String? {
+        if device.services.contains("_skybridge-remote._tcp") { return "_skybridge-remote._tcp" }
+        if device.services.contains("_skybridge._tcp") { return "_skybridge._tcp" }
+        if device.services.contains("_skybridge._udp") { return "_skybridge._udp" }
+
+        for serviceType in device.services where looksLikeBonjourServiceType(serviceType) {
+            return serviceType
+        }
+
+        if device.portMap["_skybridge-remote._tcp"] != nil { return "_skybridge-remote._tcp" }
+        if device.portMap["_skybridge._tcp"] != nil { return "_skybridge._tcp" }
+        if device.portMap["_skybridge._udp"] != nil { return "_skybridge._udp" }
+
+        for (serviceType, _) in device.portMap where looksLikeBonjourServiceType(serviceType) {
+            return serviceType
+        }
+
+        return nil
     }
 
     private func looksLikeBonjourServiceType(_ raw: String) -> Bool {

@@ -628,6 +628,8 @@ public class RemoteDesktopManager: ObservableObject {
     private var frameCount: Int = 0
     private var lastFrameTime: Date?
     private var lastHeartbeatTime: Date?
+    private var firstFrameWatchdogTask: Task<Void, Never>?
+    private var hasReceivedFrameInCurrentStream: Bool = false
     
     private let maxMessageBytes: Int = 8_000_000
     private let maxPendingFrames: Int = 1
@@ -708,6 +710,9 @@ public class RemoteDesktopManager: ObservableObject {
     
     /// 开始流媒体
     public func startStreaming() async throws {
+        if state == .streaming {
+            return
+        }
         guard state == .connected else {
             throw RemoteDesktopError.connectionFailed("未连接")
         }
@@ -718,10 +723,25 @@ public class RemoteDesktopManager: ObservableObject {
         state = .streaming
         frameCount = 0
         lastFrameTime = Date()
+        hasReceivedFrameInCurrentStream = false
+        firstFrameWatchdogTask?.cancel()
+        firstFrameWatchdogTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await Task.sleep(for: .seconds(5))
+            } catch {
+                return
+            }
+            guard self.state == .streaming, !self.hasReceivedFrameInCurrentStream else { return }
+            SkyBridgeLogger.shared.warning("⚠️ 远程桌面已连接但 5 秒内未收到屏幕帧，请检查 Mac 端录屏权限与采集状态")
+        }
     }
 
     /// 便捷入口：从 Connection 启动远程桌面（UI 侧直接调用）
     public func startStreaming(from connection: Connection) async throws {
+        if currentConnection?.device.id == connection.device.id, state == .streaming {
+            return
+        }
         // 若当前不是该设备的连接，先建立网络连接
         if currentConnection?.device.id != connection.device.id || state == .disconnected {
             try await connect(to: connection.device)
@@ -737,6 +757,8 @@ public class RemoteDesktopManager: ObservableObject {
         
         isStreaming = false
         crossNetwork.stopRemoteDesktopHeartbeat()
+        firstFrameWatchdogTask?.cancel()
+        firstFrameWatchdogTask = nil
         if state == .streaming {
             state = .connected
         }
@@ -746,6 +768,8 @@ public class RemoteDesktopManager: ObservableObject {
     public func disconnect() async {
         SkyBridgeLogger.shared.info("🔌 断开远程桌面连接")
         crossNetwork.stopRemoteDesktopHeartbeat()
+        firstFrameWatchdogTask?.cancel()
+        firstFrameWatchdogTask = nil
         
         // 关闭连接
         networkConnection?.cancel()
@@ -796,9 +820,11 @@ public class RemoteDesktopManager: ObservableObject {
     
     /// 从触控转换为鼠标事件
     public func handleTouch(at point: CGPoint, in bounds: CGRect, type: MouseEventType) {
+        guard bounds.width > 0, bounds.height > 0 else { return }
         // 将触控坐标转换为远程屏幕坐标
-        let normalizedX = point.x / bounds.width
-        let normalizedY = point.y / bounds.height
+        let normalizedX = (point.x - bounds.minX) / bounds.width
+        let normalizedY = (point.y - bounds.minY) / bounds.height
+        guard normalizedX >= 0, normalizedX <= 1, normalizedY >= 0, normalizedY <= 1 else { return }
         
         let remoteX = normalizedX * resolution.width
         let remoteY = normalizedY * resolution.height
@@ -965,6 +991,12 @@ public class RemoteDesktopManager: ObservableObject {
     }
     
     private func handleScreenData(_ screenData: ScreenData) async {
+        if !hasReceivedFrameInCurrentStream {
+            hasReceivedFrameInCurrentStream = true
+            SkyBridgeLogger.shared.info(
+                "✅ 收到首帧: \(screenData.width)x\(screenData.height), format=\(screenData.format ?? "unknown"), bytes=\(screenData.imageData.count)"
+            )
+        }
         // 更新分辨率
         resolution = CGSize(width: screenData.width, height: screenData.height)
         

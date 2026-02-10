@@ -22,6 +22,10 @@ final class ScreenCaptureKitStreamer: NSObject {
     private var preferredProfile: EncodingProfile = .auto
     private var lowLatencyEnabled: Bool = false
     private var jpegMode: Bool = false
+    private let sampleOutputQueue = DispatchQueue(
+        label: "com.skybridge.compass.sck.output",
+        qos: .userInteractive
+    )
 
  /// 编码后视频帧的回调
  /// - 参数说明：data 为压缩后比特流；w/h 为视频维度；type 为帧类型（h264/hevc）
@@ -64,7 +68,7 @@ final class ScreenCaptureKitStreamer: NSObject {
         configuration.capturesAudio = false
 
         output = StreamOutput(owner: self)
-        let filter = SCContentFilter(display: display, including: [], exceptingWindows: [])
+        let filter = SCContentFilter(display: display, excludingWindows: [])
         stream = SCStream(filter: filter, configuration: configuration, delegate: nil)
         if !jpegMode {
             try setupCompressionSession(width: width, height: height, codec: codecType)
@@ -75,7 +79,7 @@ final class ScreenCaptureKitStreamer: NSObject {
             logger.error("StreamOutput 创建失败")
             throw CocoaError(.featureUnsupported)
         }
-        try stream?.addStreamOutput(streamOutput, type: .screen, sampleHandlerQueue: .main)
+        try stream?.addStreamOutput(streamOutput, type: .screen, sampleHandlerQueue: sampleOutputQueue)
         try await stream?.startCapture()
         if jpegMode {
             logger.info("🎥 ScreenCaptureKit 采集启动：\(self.width)x\(self.height), codec=JPEG(BGRA)")
