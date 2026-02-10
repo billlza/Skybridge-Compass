@@ -619,8 +619,15 @@ public class RemoteDesktopManager: ObservableObject {
     @Published public var quality: StreamQuality = .auto
     
     // MARK: - Private Properties
+
+    private enum ActiveTransportMode {
+        case none
+        case lan
+        case crossNetwork
+    }
     
     private var networkConnection: NWConnection?
+    private var activeTransportMode: ActiveTransportMode = .none
     private let decoder = VideoDecoder()
     private let queue = DispatchQueue(label: "com.skybridge.remotedesktop", qos: .userInteractive)
     
@@ -644,14 +651,22 @@ public class RemoteDesktopManager: ObservableObject {
     /// 连接到远程桌面
     /// - Parameter device: 目标设备
     public func connect(to device: DiscoveredDevice) async throws {
-        SkyBridgeLogger.shared.info("📺 连接到远程桌面: \(device.name)")
+        let resolvedDevice = resolveLatestRemoteDesktopDevice(from: device)
+        if resolvedDevice.id != device.id {
+            SkyBridgeLogger.shared.info("ℹ️ 远程桌面连接设备已解析: \(device.id) -> \(resolvedDevice.id)")
+        }
+        SkyBridgeLogger.shared.info("📺 连接到远程桌面: \(resolvedDevice.name)")
         
         state = .connecting
         
         do {
-            // 如果已存在跨网 WebRTC 会话（扫码建立），优先走 DataChannel（无需 NWConnection / 端口可达）
-            if case .connected = crossNetwork.state {
-                currentConnection = Connection(device: device, status: .connected)
+            // 仅当目标设备就是跨网会话对端时才走 DataChannel。
+            // 避免“跨网已连接”误伤局域网远控（会导致画面/输入走错通道）。
+            if shouldUseCrossNetworkTransport(for: resolvedDevice) {
+                networkConnection?.cancel()
+                networkConnection = nil
+                activeTransportMode = .crossNetwork
+                currentConnection = Connection(device: resolvedDevice, status: .connected)
                 state = .connected
                 isStreaming = true
                 state = .streaming
@@ -671,27 +686,16 @@ public class RemoteDesktopManager: ObservableObject {
                 return
             }
 
+            crossNetwork.stopRemoteDesktopHeartbeat()
             // 建立连接：优先 Bonjour service（不依赖 IP/默认端口）
-            let endpoint: NWEndpoint
-            if device.services.contains(DiscoveredDevice.remoteControlServiceType) {
-                endpoint = .service(
-                    name: device.bonjourServiceName ?? device.name,
-                    type: DiscoveredDevice.remoteControlServiceType,
-                    domain: device.bonjourServiceDomain ?? "local.",
-                    interface: nil
-                )
-            } else if let ip = device.ipAddress, !ip.isEmpty {
-                let port = device.remoteControlPort ?? RemoteDesktopConstants.defaultPort
-                endpoint = .hostPort(host: .init(ip), port: .init(integerLiteral: port))
-            } else {
-                throw RemoteDesktopError.connectionFailed("设备缺少可连接地址（Bonjour/IP）")
-            }
+            let endpoint = try makeRemoteDesktopEndpoint(for: resolvedDevice)
 
             let connection = try await createConnection(to: endpoint)
             networkConnection = connection
+            activeTransportMode = .lan
 
             // 创建 Connection 对象
-            currentConnection = Connection(device: device, status: .connected)
+            currentConnection = Connection(device: resolvedDevice, status: .connected)
             state = .connected
             
             // 开始接收数据
@@ -703,6 +707,7 @@ public class RemoteDesktopManager: ObservableObject {
             SkyBridgeLogger.shared.info("✅ 远程桌面连接成功")
             
         } catch {
+            activeTransportMode = .none
             state = .error(error.localizedDescription)
             throw error
         }
@@ -745,8 +750,11 @@ public class RemoteDesktopManager: ObservableObject {
         // 若当前不是该设备的连接，先建立网络连接
         if currentConnection?.device.id != connection.device.id || state == .disconnected {
             try await connect(to: connection.device)
-            // 用 UI 传入的 Connection 覆盖展示层信息（不影响底层 networkConnection）
-            currentConnection = connection
+            // 仅在设备 id 一致时用 UI 传入的 Connection 覆盖展示信息；
+            // 若 connect 过程中已解析到更可靠的设备记录（如 bonjour:*），保留解析结果。
+            if currentConnection?.device.id == connection.device.id || currentConnection == nil {
+                currentConnection = connection
+            }
         }
         try await startStreaming()
     }
@@ -774,6 +782,7 @@ public class RemoteDesktopManager: ObservableObject {
         // 关闭连接
         networkConnection?.cancel()
         networkConnection = nil
+        activeTransportMode = .none
         
         // 清理解码器
         await decoder.cleanup()
@@ -835,6 +844,213 @@ public class RemoteDesktopManager: ObservableObject {
             await sendMouseEvent(event)
         }
     }
+
+    // MARK: - Private Methods - Device Resolution
+
+    private func makeRemoteDesktopEndpoint(for device: DiscoveredDevice) throws -> NWEndpoint {
+        let remoteServiceType = DiscoveredDevice.remoteControlServiceType
+        let parsedBonjour = parseBonjourIdentity(from: device.id)
+        let hasRemoteService = device.services.contains(remoteServiceType)
+            || device.bonjourServiceType == remoteServiceType
+
+        if hasRemoteService {
+            return .service(
+                name: device.bonjourServiceName ?? parsedBonjour?.name ?? device.name,
+                type: remoteServiceType,
+                domain: device.bonjourServiceDomain ?? parsedBonjour?.domain ?? "local.",
+                interface: nil
+            )
+        }
+
+        if let ip = bestIPAddress(for: device) {
+            let port = device.remoteControlPort ?? RemoteDesktopConstants.defaultPort
+            return .hostPort(host: .init(ip), port: .init(integerLiteral: port))
+        }
+
+        throw RemoteDesktopError.connectionFailed("设备缺少可连接地址（Bonjour/IP）")
+    }
+
+    private func resolveLatestRemoteDesktopDevice(from device: DiscoveredDevice) -> DiscoveredDevice {
+        var best = device
+        let discovered = DeviceDiscoveryManager.instance.discoveredDevices
+
+        if let exact = discovered.first(where: { $0.id == device.id }) {
+            best = preferredRemoteDesktopDevice(best, exact)
+        }
+
+        if let currentIP = bestIPAddress(for: best),
+           let byIP = discovered.first(where: { bestIPAddress(for: $0) == currentIP }) {
+            best = preferredRemoteDesktopDevice(best, byIP)
+        }
+
+        if let bonjourName = best.bonjourServiceName?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !bonjourName.isEmpty,
+           let byBonjour = discovered.first(where: { $0.bonjourServiceName == bonjourName }) {
+            best = preferredRemoteDesktopDevice(best, byBonjour)
+        }
+
+        if let parsedBonjour = parseBonjourIdentity(from: best.id),
+           let byParsedBonjour = discovered.first(where: {
+               $0.bonjourServiceName == parsedBonjour.name
+                   && (($0.bonjourServiceDomain ?? "local.") == parsedBonjour.domain)
+           }) {
+            best = preferredRemoteDesktopDevice(best, byParsedBonjour)
+        }
+
+        let normalizedName = normalizeDeviceName(best.name)
+        if !normalizedName.isEmpty,
+           let byName = discovered.first(where: { normalizeDeviceName($0.name) == normalizedName }) {
+            best = preferredRemoteDesktopDevice(best, byName)
+        }
+
+        if shouldUseUniqueRemoteCandidateFallback(for: best) {
+            let remoteCandidates = discovered.filter {
+                $0.services.contains(DiscoveredDevice.remoteControlServiceType)
+                    || $0.bonjourServiceType == DiscoveredDevice.remoteControlServiceType
+                    || $0.supportsRemoteControl
+            }
+            if remoteCandidates.count == 1, let only = remoteCandidates.first {
+                best = preferredRemoteDesktopDevice(best, only)
+            }
+        }
+
+        return best
+    }
+
+    private func preferredRemoteDesktopDevice(_ lhs: DiscoveredDevice, _ rhs: DiscoveredDevice) -> DiscoveredDevice {
+        remoteDesktopDeviceScore(rhs) > remoteDesktopDeviceScore(lhs) ? rhs : lhs
+    }
+
+    private func remoteDesktopDeviceScore(_ device: DiscoveredDevice) -> Int {
+        var score = 0
+        if device.services.contains(DiscoveredDevice.remoteControlServiceType)
+            || device.bonjourServiceType == DiscoveredDevice.remoteControlServiceType {
+            score += 120
+        }
+        if bestIPAddress(for: device) != nil {
+            score += 80
+        }
+        if let serviceName = device.bonjourServiceName, !serviceName.isEmpty {
+            score += 40
+        }
+        if !device.services.isEmpty {
+            score += 20
+        }
+        if !normalizeDeviceName(device.name).isEmpty {
+            score += 10
+        }
+        return score
+    }
+
+    private func shouldUseUniqueRemoteCandidateFallback(for device: DiscoveredDevice) -> Bool {
+        let hasRemoteService = device.services.contains(DiscoveredDevice.remoteControlServiceType)
+            || device.bonjourServiceType == DiscoveredDevice.remoteControlServiceType
+        if hasRemoteService {
+            return false
+        }
+
+        if device.id.hasPrefix("host:") || device.id.hasPrefix("peer:") {
+            return true
+        }
+        if bestIPAddress(for: device) != nil {
+            return true
+        }
+        return normalizeDeviceName(device.name).contains(":")
+    }
+
+    private func shouldUseCrossNetworkTransport(for device: DiscoveredDevice) -> Bool {
+        guard case .connected(let sessionId) = crossNetwork.state else { return false }
+
+        if device.id == "webrtc-\(sessionId)" || device.id.hasPrefix("webrtc-") {
+            return true
+        }
+
+        if let remoteId = crossNetwork.remoteDeviceId, !remoteId.isEmpty, remoteId == device.id {
+            return true
+        }
+
+        if let remoteName = crossNetwork.remoteDeviceName {
+            let normalizedRemoteName = normalizeDeviceName(remoteName)
+            if !normalizedRemoteName.isEmpty,
+               normalizeDeviceName(device.name) == normalizedRemoteName,
+               device.services.isEmpty,
+               device.ipAddress == nil {
+                return true
+            }
+        }
+
+        return false
+    }
+
+    private func normalizeDeviceName(_ raw: String) -> String {
+        raw
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: " ", with: "")
+    }
+
+    private func parseBonjourIdentity(from identifier: String) -> (name: String, domain: String)? {
+        guard identifier.hasPrefix("bonjour:") else { return nil }
+        let payload = String(identifier.dropFirst("bonjour:".count))
+        let parts = payload.split(separator: "@", maxSplits: 1).map(String.init)
+        guard let name = parts.first, !name.isEmpty else { return nil }
+        let domain = parts.count > 1 ? parts[1] : "local."
+        return (name, domain)
+    }
+
+    private func bestIPAddress(for device: DiscoveredDevice) -> String? {
+        sanitizeAddress(device.ipAddress)
+            ?? sanitizeAddress(addressFromIdentifier(device.id))
+    }
+
+    private func addressFromIdentifier(_ identifier: String) -> String? {
+        if identifier.hasPrefix("host:") {
+            return String(identifier.dropFirst("host:".count))
+        }
+        if identifier.hasPrefix("peer:") {
+            return String(identifier.dropFirst("peer:".count))
+        }
+        return nil
+    }
+
+    private func sanitizeAddress(_ raw: String?) -> String? {
+        guard var token = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !token.isEmpty else {
+            return nil
+        }
+
+        if token.hasPrefix("host:") {
+            token = String(token.dropFirst("host:".count))
+        } else if token.hasPrefix("peer:") {
+            token = String(token.dropFirst("peer:".count))
+        } else if token.hasPrefix("ip:") {
+            token = String(token.dropFirst("ip:".count))
+        }
+
+        if token.hasPrefix("[") && token.hasSuffix("]") {
+            token = String(token.dropFirst().dropLast())
+        }
+
+        if let zoneIndex = token.firstIndex(of: "%") {
+            token = String(token[..<zoneIndex])
+        }
+
+        if token.contains(":"),
+           let dot = token.lastIndex(of: "."),
+           token[token.index(after: dot)...].allSatisfy({ $0.isNumber }) {
+            token = String(token[..<dot])
+        } else {
+            let parts = token.split(separator: ".")
+            if parts.count == 5,
+               parts.dropLast().allSatisfy({ Int($0) != nil }),
+               let port = Int(parts.last ?? ""),
+               (0...65535).contains(port) {
+                token = parts.dropLast().map(String.init).joined(separator: ".")
+            }
+        }
+
+        let sanitized = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        return sanitized.isEmpty ? nil : sanitized
+    }
     
     // MARK: - Private Methods - Connection
     
@@ -894,13 +1110,20 @@ public class RemoteDesktopManager: ObservableObject {
     
     private func sendMessage(_ message: RemoteMessage) async throws {
         // WebRTC DataChannel path
-        if case .connected = crossNetwork.state {
+        if activeTransportMode == .crossNetwork {
             try await crossNetwork.sendRemoteDesktopMessage(message)
             return
         }
         
         // NWConnection path (LAN)
-        guard let connection = networkConnection else { throw RemoteDesktopError.disconnected }
+        guard let connection = networkConnection else {
+            if activeTransportMode == .none, case .connected = crossNetwork.state {
+                // 兼容旧状态：transport 尚未设置但 DataChannel 已连上时，回退走 WebRTC。
+                try await crossNetwork.sendRemoteDesktopMessage(message)
+                return
+            }
+            throw RemoteDesktopError.disconnected
+        }
         let data = try JSONEncoder().encode(message)
         if data.count > maxMessageBytes { throw RemoteDesktopError.streamingFailed("消息过大：\(data.count) bytes") }
         var length = UInt32(data.count).bigEndian

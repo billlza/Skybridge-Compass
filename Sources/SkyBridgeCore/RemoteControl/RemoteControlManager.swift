@@ -21,7 +21,7 @@ import CryptoKit
 // MARK: - 基础模型：消息/事件/屏幕帧
 
 /// 远程消息“信封”：所有消息都走它，避免裸 Data 粘包
-private struct RemoteMessage: Codable {
+private struct RemoteMessage: Codable, Sendable {
     let type: MessageType
     let payload: Data
 
@@ -34,7 +34,7 @@ private struct RemoteMessage: Codable {
 
 /// 屏幕数据（近距镜像主载体）
 /// imageData 通常为压缩后的视频帧（H.264 / HEVC），或者退化为静态图像字节
-private struct ScreenData: Codable {
+private struct ScreenData: Codable, Sendable {
     let width: Int
     let height: Int
     let imageData: Data
@@ -44,7 +44,7 @@ private struct ScreenData: Codable {
 }
 
 /// 鼠标事件类型
-public enum MouseEventType: String, Codable {
+public enum MouseEventType: String, Codable, Sendable {
     case leftMouseDown
     case leftMouseUp
     case rightMouseDown
@@ -55,13 +55,13 @@ public enum MouseEventType: String, Codable {
 }
 
 /// 键盘事件类型
-public enum KeyboardEventType: String, Codable {
+public enum KeyboardEventType: String, Codable, Sendable {
     case keyDown
     case keyUp
 }
 
 /// 远程鼠标事件
-public struct RemoteMouseEvent: Codable {
+public struct RemoteMouseEvent: Codable, Sendable {
     public let type: MouseEventType
     public let x: Double
     public let y: Double
@@ -76,7 +76,7 @@ public struct RemoteMouseEvent: Codable {
 }
 
 /// 远程键盘事件
-public struct RemoteKeyboardEvent: Codable {
+public struct RemoteKeyboardEvent: Codable, Sendable {
     public let type: KeyboardEventType
     public let keyCode: Int
     public let timestamp: TimeInterval
@@ -202,6 +202,9 @@ public final class RemoteControlManager: BaseManager {
     private let renderer = RemoteFrameRenderer()
     private var captureStreamer: ScreenCaptureKitStreamer?
     private var peers: [String: PeerConnection] = [:]
+    private let maxFramedMessageBytes = 8_000_000
+    private var latestOutboundScreenFrameByPeerId: [String: ScreenData] = [:]
+    private var outboundScreenSenderBusy: Set<String> = []
 
  /// Metal 设备，作为静态图像兜底（ImageIO -> CGImage -> MTLTexture）
     private let metalDevice: MTLDevice? = MTLCreateSystemDefaultDevice()
@@ -235,6 +238,8 @@ public final class RemoteControlManager: BaseManager {
 
         let peer = PeerConnection(id: deviceId, connection: connection)
         peers[deviceId] = peer
+        latestOutboundScreenFrameByPeerId.removeValue(forKey: deviceId)
+        outboundScreenSenderBusy.remove(deviceId)
 
         if !connectedDevices.contains(deviceId) {
             connectedDevices.append(deviceId)
@@ -253,6 +258,8 @@ public final class RemoteControlManager: BaseManager {
         peer.connection.cancel()
         peers.removeValue(forKey: deviceId)
         connectedDevices.removeAll { $0 == deviceId }
+        latestOutboundScreenFrameByPeerId.removeValue(forKey: deviceId)
+        outboundScreenSenderBusy.remove(deviceId)
 
         if connectedDevices.isEmpty {
             isControlling = false
@@ -315,6 +322,8 @@ public final class RemoteControlManager: BaseManager {
         peer.connection.cancel()
         peers.removeValue(forKey: deviceId)
         connectedDevices.removeAll { $0 == deviceId }
+        latestOutboundScreenFrameByPeerId.removeValue(forKey: deviceId)
+        outboundScreenSenderBusy.remove(deviceId)
 
         if connectedDevices.isEmpty {
             isBeingControlled = false
@@ -358,50 +367,46 @@ public final class RemoteControlManager: BaseManager {
 
         streamer.onEncodedFrame = { [weak self] data, width, height, frameType in
             guard let self else { return }
- // 在主线程捕获必要的值
-                    let fmt: String
-                    switch frameType {
-                    case .hevc: fmt = "hevc"
-                    case .h264: fmt = "h264"
-                    case .bgra:
-                        // 兼容 iOS：当 ScreenCaptureKitStreamer 运行在“JPEG 模式”时仍会用 .bgra 标记
-                        if data.count >= 2, data[0] == 0xFF, data[1] == 0xD8 {
-                            fmt = "jpeg"
-                        } else {
-                            fmt = "bgra"
-                        }
-                    }
+            // 在主线程捕获必要的值
+            let fmt: String
+            switch frameType {
+            case .hevc: fmt = "hevc"
+            case .h264: fmt = "h264"
+            case .bgra:
+                // 兼容 iOS：当 ScreenCaptureKitStreamer 运行在“JPEG 模式”时仍会用 .bgra 标记
+                if data.count >= 2, data[0] == 0xFF, data[1] == 0xD8 {
+                    fmt = "jpeg"
+                } else {
+                    fmt = "bgra"
+                }
+            }
             Task { [weak self] in
                 guard let self else { return }
-                do {
-                    let screen = ScreenData(
-                        width: width,
-                        height: height,
-                        imageData: data,
-                        timestamp: Date().timeIntervalSince1970,
-                        format: fmt
-                    )
-                    let encodedScreen = try JSONEncoder().encode(screen)
-                    let message = RemoteMessage(type: .screenData, payload: encodedScreen)
-                    let payload = try JSONEncoder().encode(message)
-
-                    try await self.sendRemoteFrame(payload, to: peer)
-                } catch {
-                    self.logger.error("❌ 发送屏幕数据失败: \(error.localizedDescription, privacy: .public)")
-                }
+                let frame = ScreenData(
+                    width: width,
+                    height: height,
+                    imageData: data,
+                    timestamp: Date().timeIntervalSince1970,
+                    format: fmt
+                )
+                await self.enqueueOutboundScreenFrame(frame, to: peer)
             }
         }
 
         // iOS 端目前优先走 JPEG（避免 H.264/HEVC NAL 兼容问题；后续可升级到完整 H26x 解码链路）
         let settings = RemoteDesktopSettingsManager.shared.settings
         let codec: RemoteFrameType = .bgra
-        let fps = settings.displaySettings.targetFrameRate
-        let gop = settings.displaySettings.keyFrameInterval
+        let preferredSize = preferredCaptureSize(for: settings.displaySettings.resolution)
+        let fps = max(12, min(settings.displaySettings.targetFrameRate, 30))
+        let gop = max(10, min(settings.displaySettings.keyFrameInterval, fps * 2))
+        logger.info(
+            "📺 推流参数: \(Int(preferredSize.width))x\(Int(preferredSize.height)) @\(fps)fps gop=\(gop)"
+        )
 
         do {
             try await streamer.start(
                 preferredCodec: codec,
-                preferredSize: nil,
+                preferredSize: preferredSize,
                 targetFPS: fps,
                 keyFrameInterval: gop
             )
@@ -411,14 +416,67 @@ public final class RemoteControlManager: BaseManager {
         }
     }
 
+    private func enqueueOutboundScreenFrame(_ frame: ScreenData, to peer: PeerConnection) async {
+        latestOutboundScreenFrameByPeerId[peer.id] = frame
+        guard !outboundScreenSenderBusy.contains(peer.id) else { return }
+        outboundScreenSenderBusy.insert(peer.id)
+
+        while true {
+            guard let next = latestOutboundScreenFrameByPeerId.removeValue(forKey: peer.id) else { break }
+            guard peers[peer.id] != nil else {
+                latestOutboundScreenFrameByPeerId.removeValue(forKey: peer.id)
+                break
+            }
+
+            do {
+                let encodedScreen = try JSONEncoder().encode(next)
+                let message = RemoteMessage(type: .screenData, payload: encodedScreen)
+                let payload = try JSONEncoder().encode(message)
+                try await sendRemoteFrame(payload, to: peer)
+            } catch {
+                logger.error("❌ 发送屏幕数据失败: \(error.localizedDescription, privacy: .public)")
+                break
+            }
+        }
+
+        outboundScreenSenderBusy.remove(peer.id)
+    }
+
+    private func preferredCaptureSize(for resolution: ResolutionSetting) -> CGSize {
+        if let dim = resolution.dimensions {
+            return CGSize(width: dim.width, height: dim.height)
+        }
+
+        let fallback = CGSize(width: 1280, height: 720)
+        guard let mode = CGDisplayCopyDisplayMode(CGMainDisplayID()) else {
+            return fallback
+        }
+
+        let nativeWidth = CGFloat(mode.width)
+        let nativeHeight = CGFloat(mode.height)
+        guard nativeWidth > 0, nativeHeight > 0 else {
+            return fallback
+        }
+
+        let longEdge = max(nativeWidth, nativeHeight)
+        let maxLongEdge: CGFloat = 1280
+        guard longEdge > maxLongEdge else {
+            return CGSize(width: nativeWidth, height: nativeHeight)
+        }
+
+        let scale = maxLongEdge / longEdge
+        return CGSize(
+            width: max(640, floor(nativeWidth * scale)),
+            height: max(360, floor(nativeHeight * scale))
+        )
+    }
+
  /// 控制端：从对端接收屏幕数据并渲染
     private func startReceivingScreenData(from peer: PeerConnection) {
         logger.info("📺 开始接收屏幕数据 <- \(peer.id, privacy: .public)")
 
         Task { [weak self, weak peer] in
             guard let self, let peer else { return }
-
-            let maxMessageBytes = 8_000_000
             var buffer = Data()
 
             while true {
@@ -428,22 +486,14 @@ public final class RemoteControlManager: BaseManager {
                         throw RemoteControlError.connectionClosed
                     }
                     buffer.append(chunk)
-                    if buffer.count > maxMessageBytes * 2 {
+                    if buffer.count > self.maxFramedMessageBytes * 2 {
                         throw RemoteControlError.invalidMessageLength(buffer.count)
                     }
 
-                    while buffer.count >= 4 {
-                        let length = buffer.prefix(4).withUnsafeBytes { ptr -> Int in
-                            let raw = ptr.load(as: UInt32.self)
-                            return Int(UInt32(bigEndian: raw))
-                        }
-                        guard length > 0, length <= maxMessageBytes else {
-                            throw RemoteControlError.invalidMessageLength(length)
-                        }
-                        guard buffer.count >= 4 + length else { break }
-
-                        let messageData = buffer.subdata(in: 4 ..< 4 + length)
-                        buffer.removeFirst(4 + length)
+                    while let messageData = try self.nextFramedMessage(
+                        from: &buffer,
+                        maxMessageBytes: self.maxFramedMessageBytes
+                    ) {
 
                         let plain: Data
                         if #available(macOS 14.0, *), let keys = peer.sessionKeys {
@@ -540,16 +590,14 @@ public final class RemoteControlManager: BaseManager {
                         throw RemoteControlError.connectionClosed
                     }
                     buffer.append(chunk)
+                    if buffer.count > self.maxFramedMessageBytes * 2 {
+                        throw RemoteControlError.invalidMessageLength(buffer.count)
+                    }
 
-                    while buffer.count >= 4 {
-                        let length = buffer.prefix(4).withUnsafeBytes { ptr -> Int in
-                            let raw = ptr.load(as: UInt32.self)
-                            return Int(UInt32(bigEndian: raw))
-                        }
-                        guard buffer.count >= 4 + length else { break }
-
-                        let messageData = buffer.subdata(in: 4 ..< 4 + length)
-                        buffer.removeFirst(4 + length)
+                    while let messageData = try self.nextFramedMessage(
+                        from: &buffer,
+                        maxMessageBytes: self.maxFramedMessageBytes
+                    ) {
 
                         try await self.handleInboundRemoteFrame(from: peer, frame: messageData)
                     }
@@ -722,6 +770,37 @@ public final class RemoteControlManager: BaseManager {
         }
     }
 
+    /// 尝试从缓冲区提取下一条完整的长度前缀帧
+    /// - Returns: 完整 payload；若数据还不完整返回 nil
+    private func nextFramedMessage(
+        from buffer: inout Data,
+        maxMessageBytes: Int
+    ) throws -> Data? {
+        guard buffer.count >= 4 else { return nil }
+        let length = parseFrameLength(from: buffer)
+        guard length > 0, length <= maxMessageBytes else {
+            throw RemoteControlError.invalidMessageLength(length)
+        }
+
+        let headerSize = 4
+        let totalSize = headerSize + length
+        guard totalSize <= buffer.count else { return nil }
+
+        let payloadStart = buffer.index(buffer.startIndex, offsetBy: headerSize)
+        let payloadEnd = buffer.index(payloadStart, offsetBy: length)
+        let payload = Data(buffer[payloadStart..<payloadEnd])
+        buffer.removeSubrange(buffer.startIndex..<payloadEnd)
+        return payload
+    }
+
+    private func parseFrameLength(from buffer: Data) -> Int {
+        buffer.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress else { return 0 }
+            let rawLength = base.loadUnaligned(as: UInt32.self)
+            return Int(UInt32(bigEndian: rawLength))
+        }
+    }
+
  /// 读取一块原始数据，交由上层做粘包处理
     private func receiveChunk(from connection: NWConnection) async throws -> Data {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Data, Error>) in
@@ -745,6 +824,8 @@ public final class RemoteControlManager: BaseManager {
         peers[peerId]?.connection.cancel()
         peers.removeValue(forKey: peerId)
         connectedDevices.removeAll { $0 == peerId }
+        latestOutboundScreenFrameByPeerId.removeValue(forKey: peerId)
+        outboundScreenSenderBusy.remove(peerId)
 
         if connectedDevices.isEmpty {
             isControlling = false
