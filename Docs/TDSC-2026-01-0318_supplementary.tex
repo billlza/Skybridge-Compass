@@ -35,10 +35,17 @@
 \makeatother
 \pagestyle{headings}
 
+% Float-page spacing tuning: reduce inter-float separation slightly to avoid
+% overfull vbox on float-only pages.
+\makeatletter
+\setlength{\@fpsep}{6pt plus 2fil}
+\setlength{\@dblfpsep}{6pt plus 2fil}
+\makeatother
+
 \newcommand{\real}[1]{#1}
 \newcommand{\artifacturl}{https://github.com/billlza/Skybridge-Compass}
 \newcommand{\artifacturlshort}{https://github.com/billlza/Skybridge-Compass}
-\newcommand{\artifacttag}{tdsc-2026-01-0318-ios-sim-fix-20260211}
+\newcommand{\artifacttag}{tdsc-2026-01-0318-ios-sim-fix-\allowbreak{}20260211}
 \newcommand{\artifactsha}{b16fe9386ff0}
 \newcommand{\artifactshafull}{b16fe9386ff047d17ba9a518b2c331f64493971e}
 \newcommand{\artifactzipurl}{\artifacturl/archive/\artifactshafull.zip}
@@ -75,28 +82,22 @@ This document provides extended data tables referenced in the main paper. All da
 \item Table~\ref{tab:supp-realnet-microstudy} (Real-network micro-study): STUN path + 12~kB-class payload measurements across Wi-Fi / hotspot labels (generated from \texttt{Artifacts/realnet\_*}). (Cross-NAT inbound-reachability depends on ISP/upstream equipment and may be infeasible without administrative control; see note below.)
 \end{itemize}
 
-\subsection*{Table~\ref{tab:supp-latency}: Full Handshake Latency Statistics}
-
+\clearpage
 \input{supp_tables/s1_latency}
 
-\subsection*{Table~\ref{tab:supp-rtt}: Full RTT Statistics}
-
+\clearpage
 \input{supp_tables/s2_rtt}
 
-\subsection*{Table~\ref{tab:supp-message-sizes}: Message Size Breakdown by Field}
-
+\clearpage
 \input{supp_tables/s3_message_sizes}
 
-\subsection*{Table~\ref{tab:supp-traffic-padding}: SBP2 Traffic Padding Quantization Summary}
-
+\clearpage
 \input{supp_tables/s7_traffic_padding}
 
-\subsection*{Table~\ref{tab:supp-traffic-padding-sensitivity}: SBP2 Bucket-Cap Sensitivity Study}
-
+\clearpage
 \input{supp_tables/s8_traffic_padding_sensitivity}
 
-\subsection*{Table~\ref{tab:supp-realnet-microstudy}: Real-Network Micro-Study (External Validity)}
-
+\clearpage
 \IfFileExists{supp_tables/s9_realnet_microstudy.tex}{\input{supp_tables/s9_realnet_microstudy}}{\noindent\textit{(Real-network micro-study table not present: run \texttt{Scripts/run\_real\_network\_probe.swift} and \texttt{Scripts/run\_real\_network\_e2e.swift}, then \texttt{python3 Scripts/aggregate\_realnet.py}.)}\par}
 
 \noindent\textit{Note: Cross-NAT direct inbound tests (no overlay/relay) are not universally feasible. In particular, double-NAT topologies (ISP router/modem upstream) and IPv6 inbound filtering can prevent any inbound reachability even when devices have global IPv6 addresses. In such environments, all client samples time out with empty connect-time fields, and we omit those rows from the main table to avoid conflating ``connectivity unavailable'' with protocol performance.}

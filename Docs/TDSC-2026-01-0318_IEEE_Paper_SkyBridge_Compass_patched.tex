@@ -132,7 +132,7 @@
 
 \newcommand{\artifacturl}{https://github.com/billlza/Skybridge-Compass}
 \newcommand{\artifacturlshort}{https://github.com/billlza/Skybridge-Compass}
-\newcommand{\artifacttag}{tdsc-2026-01-0318-ios-sim-fix-20260211}
+\newcommand{\artifacttag}{tdsc-2026-01-0318-ios-sim-fix-\allowbreak\hspace{0pt}20260211}
 \newcommand{\artifactsha}{b16fe9386ff0}
 \newcommand{\artifactshafull}{b16fe9386ff047d17ba9a518b2c331f64493971e}
 \newcommand{\artifactzipurl}{\artifacturl/archive/\artifactshafull.zip}
@@ -237,25 +237,23 @@ Operationally, the strict policy now has two explicit realizations:
 refresh paired KEM identity keys, followed by mandatory PQC rekey before
 business traffic is released).
 
-\textbf{Security Guarantees (Checklist).}
+\textbf{Verifiable Security Guarantees.}
 To reduce ambiguity in reviewer-facing claims, we state the v1 guarantees
-as a checklist of \emph{verifiable} properties under the threat model in
-Section~\ref{sec:security-model}:
+as a small set of \emph{verifiable} properties under the threat model in
+Section~\ref{sec:security-model}; the Supplementary Materials provide
+additional guarantees and artifact-level evidence pointers.
 {\small
 \begin{itemize}\tightlist
 \item \textbf{Negotiation integrity:} the Responder selects only a suite
   offered by the Initiator and with a matching key share; unknown suite
   IDs are rejected if they appear in \nbcode{keyShares[]} or as
   \texttt{selectedSuite}. \textit{Evidence:} Fig.~\ref{fig:handshake-sequence};
-  Table~\ref{tab:security-contract};
-  \texttt{Handshake\allowbreak\hspace{0pt}Driver\allowbreak\hspace{0pt}Tests}.
+  Table~\ref{tab:security-contract}.
 \item \textbf{Transcript binding:} \texttt{sigB} commits to MessageA and
   the chosen suite (and policy), so any tampering of
   \nbcode{supportedSuites[]}, \nbcode{keyShares[]}, or \texttt{policy}
-  fails verification. \textit{Evidence:} Table~\ref{tab:security-contract};
-  \texttt{Transcript\allowbreak\hspace{0pt}Integrity\allowbreak\hspace{0pt}PropertyTests};
-  \texttt{Protocol\allowbreak\hspace{0pt}Signature\allowbreak\hspace{0pt}RegressionTests}.
-\item \textbf{Downgrade resistance (policy-defined):} strict policy is
+  fails verification. \textit{Evidence:} Table~\ref{tab:security-contract}.
+\item \textbf{Downgrade resistance and auditability (policy-defined):} strict policy is
   explicit and auditable in two forms: \emph{Compliance Mode} forbids
   classic establishment entirely; \emph{Bootstrap-Assisted Mode} permits
   a one-time classic control channel only for paired KEM-key recovery
@@ -263,23 +261,16 @@ Section~\ref{sec:security-model}:
   permits classic fallback only for a local-only whitelist of
   capability/provider failures (timeouts and unauthenticated
   network-derived failures cannot trigger default-mode fallback).
+  Every fallback emits a structured \texttt{cryptoDowngrade} event.
   \textit{Evidence:} Fig.~\ref{fig:policy-downgrade}; Fig.~\ref{fig:downgrade-matrix};
-  \texttt{Policy\allowbreak\hspace{0pt}Downgrade\allowbreak\hspace{0pt}BenchTests};
-  Table~\ref{tab:legacy-fallback-preconditions}.
-\item \textbf{Explicit key confirmation:} two Finished frames provide
-  mutual confirmation, preventing half-open sessions (Fig.~\ref{fig:handshake-sequence}).
-  \textit{Evidence:} Table~\ref{tab:failure-mode-robustness};
-  \texttt{Handshake\allowbreak\hspace{0pt}Fault\allowbreak\hspace{0pt}Injection\allowbreak\hspace{0pt}BenchTests}.
-\item \textbf{Auditability of migration decisions:} every fallback emits
-  a structured \texttt{cryptoDowngrade} event with a minimal evidence
-  tuple (Section~\ref{sec:security-model}), enabling post-hoc verification
-  and detection (e.g., Fig.~\ref{fig:event-traces}). \textit{Evidence:}
-  Fig.~\ref{fig:event-traces}; Table~\ref{tab:security-contract}.
-\item \textbf{Non-claims (scope control):} v1 does \emph{not} claim PQC
-  PFS for KEM-to-static-recipient suites, nor tamper-evident audit logs;
-  see Section~\ref{sec:limitations}.
+  Table~\ref{tab:legacy-fallback-preconditions};
+  Fig.~\ref{fig:event-traces}.
 \end{itemize}
 }
+
+We additionally provide explicit key confirmation via two Finished
+frames (Fig.~\ref{fig:handshake-sequence}) and document v1 non-claims and
+limitations in Section~\ref{sec:limitations}.
 
 \subsection{Contributions}\label{a.-contributions}
 
@@ -391,7 +382,7 @@ PQC standardization and early deployments highlight size and performance
 costs, along with pressure for hybrid deployments \cite{ref8}, \cite{ref9},
 \cite{ref10}, \cite{ref22}, \cite{ref23}, \cite{ref24}, \cite{ref25}. We
 focus on making downgrade policy and auditability explicit across
-providers, treating Apple's CryptoKit PQC \cite{ref1} as a deployment
+providers, treating Apple's CryptoKit PQC \cite{ref1,ref34} as a deployment
 instance rather than a protocol dependency.
 
 \subsection{Secure State Machine
@@ -1177,7 +1168,7 @@ Materials (Platform Support Matrix).
 
 \subsection{Native PQC Integration}\label{b.-apple-pqc-integration}
 
-The native provider wraps CryptoKit ML-KEM/ML-DSA APIs \cite{ref1} when the
+The native provider wraps CryptoKit ML-KEM/ML-DSA APIs \cite{ref1,ref34} when the
 SDK exposes them, enabling platform-backed PQC suites and HPKE-based
 encapsulation. We treat this as a deployment instance rather than a
 protocol dependency; integration details are provided in the
@@ -1276,7 +1267,7 @@ suppression, legacy precondition enforcement, and auditability) and
 \textbf{cost-centric evidence} (handshake latency, wire overhead,
 provider selection overhead, and data-plane throughput).
 
-\textbf{Environment:} All experiments are run on Apple Silicon (M1/M3 class) with macOS 26.x, where CryptoKit PQC is available when the SDK exposes ML-KEM/ML-DSA types. Build configuration uses Release (\texttt{-O}) with non-essential logging disabled. Timing uses a monotonic clock (\texttt{ContinuousClock}) with N=1000 iterations after 10 warmup runs; reported percentiles (p50/p95/p99) are computed directly from samples.
+\textbf{Environment:} All experiments are run on Apple Silicon (M1/M3 class) with macOS 26.x, where CryptoKit PQC is available when the SDK exposes ML-KEM/ML-DSA types \cite{ref1,ref34}. Build configuration uses Release (\texttt{-O}) with non-essential logging disabled. Timing uses a monotonic clock (\texttt{ContinuousClock}) with N=1000 iterations after 10 warmup runs; reported percentiles (p50/p95/p99) are computed directly from samples.
 
 \textbf{Repeatability:} We support multi-batch repeatability by
 restarting the benchmark test process for each batch. Supplementary
@@ -1551,7 +1542,7 @@ identity fields, framing overhead) for MessageA/MessageB across Classic and PQC 
 \label{fig:message-size-breakdown}
 \end{figure}
 
-Note: X-Wing hybrid KEM adds 32~B to MessageA's keyshare (1120~B vs 1088~B for ML-KEM-768). Using the X-Wing snapshot (\texttt{\artifactdateXWing}), the measured total handshake size is 12,195~B (\texttt{MessageA.XWing}/\texttt{MessageB.XWing}); this is +32~B versus PQC in the same snapshot, while the additional +161~B vs the 12,002~B baseline reflects earlier framing overhead. Detailed field breakdowns are in Supplementary Table~\ref{tab:supp-message-sizes}.
+Note: X-Wing hybrid KEM adds 32~B to MessageA's keyshare (1120~B vs 1088~B for ML-KEM-768). Measured handshake sizes are reported in Supplementary Table~\ref{tab:supp-message-sizes} (\texttt{MessageA.XWing}/\texttt{MessageB.XWing}).
 
 \textbf{Data-Plane and Provider Selection.}
 Post-handshake symmetric AEAD (AES-256-GCM) throughput reaches 3.7~GB/s for 1~MiB payloads on Apple Silicon, with CPU cost of 0.25~ns/byte. In v1 the data-plane AEAD is fixed to AES-256-GCM and recorded separately from the handshake suite; thus throughput is independent of the negotiated KEM/signature suite. Provider selection overhead is sub-microsecond for cached paths (0.17~$\mu$s p50) and under 6~$\mu$s even for fallback scenarios. Detailed breakdowns are provided in the artifact CSV files.
@@ -1659,7 +1650,7 @@ reorder (10\% reorder, 50 ms, $\pm$20 ms) & 1.0000 & 368--370 & 0 \\
 \item
   \textbf{iOS PQC Availability (iOS < 26):} We do not currently bundle
   liboqs for iOS; therefore PQC suites are only available on iOS 26+
-  devices via CryptoKit PQC. To support reproducible mobile evaluation,
+  devices via CryptoKit PQC \cite{ref34}. To support reproducible mobile evaluation,
   we ship an \emph{on-device} self-test and micro-benchmark harness in the
   iOS app (Settings $\rightarrow$ PQC $\rightarrow$ ``Self-test/Bench''),
   which exports JSON artifacts for inclusion in Supplementary tables.
@@ -1832,7 +1823,7 @@ The author declares no competing interests.
 
 \bibitem{ref25} L. Ducas et al., ``CRYSTALS---Dilithium: A Lattice-Based Digital Signature Scheme,'' IACR Trans. CHES, vol.~2018, no.~1, pp.~238--268.
 
-\bibitem{ref34} Apple Inc., ``Apple Platform Security,'' Apple Security Guide, May 2024. {[}Online{]}. Available: \url{https://support.apple.com/guide/security/}
+\bibitem{ref34} Apple Inc., ``Quantum-secure cryptography in Apple operating systems,'' Apple Platform Security, Jan.~2026. {[}Online{]}. Available: \url{https://support.apple.com/guide/security/quantum-secure-cryptography-apple-devices-secc7c82e533/web}. Accessed: Feb.~2026.
 
 \bibitem{ref11} D. Beyer et al., ``Software Model Checking,'' in Handbook of Model Checking, Springer, 2018.
 
