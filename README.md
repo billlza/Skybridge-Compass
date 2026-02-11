@@ -96,20 +96,20 @@ swift test
 论文中标注的 artifact 信息如下（供 reviewer/编辑核对）：
 
 - URL：`https://github.com/billlza/Skybridge-Compass`
-- Git ref：`tdsc-2026-01-0318-ios-sim-fix-20260211`
-- Commit：`b16fe9386ff047d17ba9a518b2c331f64493971e`（short=`b16fe9386ff0`）
+- Git ref：`tdsc-2026-01-0318-ios-sim-fix-20260211-r2`
+- Commit：`e261f0b48ba7234d6ade681f2bf986ede4906bc6`（short=`e261f0b48ba7`）
 
 Source archive checksums（immutability 辅助证据）：
 
-- `b16fe9386ff0.zip`：`SHA256=460813da9ade5b79b333c94a1b76e14e6b522f630be1a6f0decb9845def3f258`
-- `b16fe9386ff0.tar.gz`：`SHA256=443b8ac90ffe42f757d65f1d79cd3d183b7d7ce502dd8bcd31cdb0161016f380`
+- `e261f0b48ba7.zip`：`SHA256=c4d3553bb1a448f35dfa5556393d3108e2545d226edcffa2aba66c32ce41c91e`
+- `e261f0b48ba7.tar.gz`：`SHA256=976b480c2dab7400bde0e832f1221c7bfb426227ae57a5a78789e1279ea990d1`
 
 最小复核流程（需要本机已安装 Xcode/Swift 与 TeXLive；PQC SDK 仅在 macOS 26+ 可用）：
 
 ```bash
 git clone https://github.com/billlza/Skybridge-Compass
 cd Skybridge-Compass
-git checkout tdsc-2026-01-0318-ios-sim-fix-20260211
+git checkout tdsc-2026-01-0318-ios-sim-fix-20260211-r2
 
 git rev-parse HEAD
 git describe --tags --always
@@ -180,8 +180,8 @@ ARTIFACT_DATE=2026-01-23 python3 Scripts/aggregate_realnet.py
 
 预期输出（关键点）：
 
-- `git rev-parse HEAD` 应为 `b16fe9386ff047d17ba9a518b2c331f64493971e`
-- `git describe --tags --always` 应输出 `tdsc-2026-01-0318-ios-sim-fix-20260211`（或等价形式）
+- `git rev-parse HEAD` 应为 `e261f0b48ba7234d6ade681f2bf986ede4906bc6`
+- `git describe --tags --always` 应输出 `tdsc-2026-01-0318-ios-sim-fix-20260211-r2`（或等价形式）
 - 生成的 PDF：`Docs/TDSC-2026-01-0318_IEEE_Paper_SkyBridge_Compass_patched.pdf` 与 `Docs/TDSC-2026-01-0318_supplementary.pdf`
 - CSV 输出目录：`Artifacts/`
 
