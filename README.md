@@ -75,22 +75,22 @@ swift test
 论文中标注的 artifact 信息如下（供 reviewer/编辑核对）：
 
 - URL：`https://github.com/billlza/Skybridge-Compass`
-- Submission truth tag：`tdsc-2026-01-0318`
-- Commit：`805c83a85d2279c3913745fdbabf4157ed3e332c`
+- Submission truth tag：`tdsc-2026-01-0318-ios-sim-fix-20260211`
+- Commit：`b16fe9386ff047d17ba9a518b2c331f64493971e`（short=`b16fe9386ff0`）
 
 Source archive checksums（immutability 辅助证据）：
 
-- `tdsc-2026-01-0318.zip`：`SHA256=c777f428672cec699fcf905c2e9902d8ce458e8d454d852d4fe0578038d97d2c`
-- `tdsc-2026-01-0318.tar.gz`：`SHA256=0ab8b649c937ca532d37764ebbdc07b692cfd738d649cfead80f87d4985f7d61`
+- `b16fe9386ff0.zip`：`SHA256=460813da9ade5b79b333c94a1b76e14e6b522f630be1a6f0decb9845def3f258`
+- `b16fe9386ff0.tar.gz`：`SHA256=443b8ac90ffe42f757d65f1d79cd3d183b7d7ce502dd8bcd31cdb0161016f380`
 
-对外呈现的唯一投稿基准 tag：`tdsc-2026-01-0318`（README 与论文一致）
+对外呈现的唯一投稿基准 tag：`tdsc-2026-01-0318-ios-sim-fix-20260211`（README 与论文一致）
 
 最小复核流程（需要本机已安装 Xcode/Swift 与 TeXLive；PQC SDK 仅在 macOS 26+ 可用）：
 
 ```bash
 git clone https://github.com/billlza/Skybridge-Compass
 cd Skybridge-Compass
-git checkout tdsc-2026-01-0318
+git checkout tdsc-2026-01-0318-ios-sim-fix-20260211
 
 git rev-parse HEAD
 git describe --tags --always
@@ -161,8 +161,8 @@ ARTIFACT_DATE=2026-01-23 python3 Scripts/aggregate_realnet.py
 
 预期输出（关键点）：
 
-- `git rev-parse HEAD` 应为 `805c83a85d2279c3913745fdbabf4157ed3e332c`
-- `git describe --tags --always` 应输出 `tdsc-2026-01-0318`（或等价形式）
+- `git rev-parse HEAD` 应为 `b16fe9386ff047d17ba9a518b2c331f64493971e`
+- `git describe --tags --always` 应输出 `tdsc-2026-01-0318-ios-sim-fix-20260211`（或等价形式）
 - 生成的 PDF（对外分发版本）：`TDSC-2026-01-0318_IEEE_Paper_SkyBridge_Compass_patched.pdf` 与 `Docs/TDSC-2026-01-0318_supplementary.pdf`
 - CSV 输出目录：`Artifacts/`
 
