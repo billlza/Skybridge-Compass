@@ -724,7 +724,7 @@ public actor HandshakeDriver {
             timeoutTask = nil
 
  // 发射取消事件 ( 11.6)
-            SecurityEventEmitter.emitDetached(SecurityEvent(
+            await SecurityEventEmitter.shared.emit(SecurityEvent(
                 type: .handshakeFailed,
                 severity: .info,
                 message: "Handshake cancelled by caller",
@@ -922,7 +922,7 @@ public actor HandshakeDriver {
                     sigAAlgorithm: sigAAlg
                 ) else {
  // 发射签名算法不匹配事件
-                    SecurityEventEmitter.emitDetached(SecurityEvent(
+                    await SecurityEventEmitter.shared.emit(SecurityEvent(
                         type: .signatureAlgorithmMismatch,
                         severity: .high,
                         message: "Suite-signature mismatch: selectedSuite incompatible with sigA algorithm",
@@ -1141,7 +1141,7 @@ public actor HandshakeDriver {
             // Phase A (TDSC): start tamper-evident audit chain anchored to transcript hash,
             // and emit an explicit "handshake established" event with session metadata.
             await AuditTrail.shared.beginSession(sessionId: sessionKeys.sessionId, anchor: sessionKeys.transcriptHash)
-            SecurityEventEmitter.emitDetached(SecurityEvent(
+            await SecurityEventEmitter.shared.emit(SecurityEvent(
                 type: .handshakeEstablished,
                 severity: .info,
                 message: "Handshake established (Finished verified)",
@@ -1209,7 +1209,7 @@ public actor HandshakeDriver {
         }
 
  // 发射事件 ( 11.5)
-        SecurityEventEmitter.emitDetached(SecurityEvent(
+        await SecurityEventEmitter.shared.emit(SecurityEvent(
             type: .handshakeFailed,
             severity: .warning,
             message: "Handshake failed: \(reason)",

@@ -12,7 +12,7 @@
     pdfsubject={},
     pdfkeywords={}
 }
-\usepackage{xr-hyper}
+\usepackage{xr}
 % Allow supplementary to reference main-paper labels when the .aux exists.
 \makeatletter
 \IfFileExists{TDSC-2026-01-0318_IEEE_Paper_SkyBridge_Compass_patched.aux}{\externaldocument{TDSC-2026-01-0318_IEEE_Paper_SkyBridge_Compass_patched}}{}
@@ -388,19 +388,32 @@ and is not used for the main protocol signatures (\texttt{sigA}/\texttt{sigB}).
 
 \begin{table*}[!t]
 \centering
+\tiny
 \caption{Post-quantum coverage by policy and established suite (v1). ``PQC confidentiality'' refers to resistance against store-now-decrypt-later adversaries \emph{while long-term KEM private keys remain uncompromised}; v1 does not claim PFS for KEM-based PQC suites.}
 \label{tab:supp-pqc-coverage}
-\begin{tabular}{@{}llllccc@{}}
+\begin{tabular}{@{}
+  >{\raggedright\arraybackslash}p{0.14\linewidth}
+  >{\raggedright\arraybackslash}p{0.15\linewidth}
+  >{\raggedright\arraybackslash}p{0.23\linewidth}
+  >{\raggedright\arraybackslash}p{0.22\linewidth}
+  ccc@{}}
 \toprule
 Policy & Outcome & KEM / key establishment & Protocol signature (\texttt{sigA}/\texttt{sigB}) & PQ conf. & PQ auth. & PFS \\
 \midrule
 default & PQC established & ML-KEM-768 (static recipient key) & ML-DSA-65 & yes & yes & no \\
 default & classic fallback & X25519 ephemeral DH & Ed25519 & no & no & yes \\
-strictPQC & PQC established & ML-KEM-768 (static recipient key) & ML-DSA-65 & yes & yes & no \\
-strictPQC & PQC unavailable & -- (handshake fails) & -- & -- & -- & -- \\
+strictPQC (Compliance) & PQC established & ML-KEM-768 (static recipient key) & ML-DSA-65 & yes & yes & no \\
+strictPQC (Compliance) & PQC unavailable & -- (handshake fails) & -- & -- & -- & -- \\
+strictPQC (Bootstrap-Asst.) & Control-only classic bootstrap for paired KEM-key recovery; mandatory PQC rekey & X25519 pre-rekey; ML-KEM-768 post-rekey & Ed25519 pre-rekey; ML-DSA-65 post-rekey & yes* & yes* & no \\
 \bottomrule
 \end{tabular}
 \end{table*}
+
+\noindent\textit{*Post-rekey guarantee:} in Bootstrap-Assisted mode,
+business traffic remains blocked until PQC rekey succeeds. Runtime
+assurance labels reported by the implementation are
+\texttt{pqc\_strict}, \texttt{bootstrap\_assisted},
+\texttt{legacy\_classic}, and \texttt{unknown}.
 
 Unknown suite identifiers are parsed as \texttt{unknown(wireId)} rather
 than causing parse failures. This allows older clients to gracefully
@@ -753,8 +766,18 @@ from pairing, the PQC attempt fails locally during \texttt{MessageA}
 construction (no key shares $\rightarrow$ \texttt{suiteNegotiationFailed}),
 so fallback is immediate and is not driven by network timeout.
 
-\textbf{Fallback Security:}
-Not all failures trigger fallback.
+\textbf{Strict Policy Modes:}
+\begin{itemize}\tightlist
+\item \textbf{Compliance Mode:} strict fail-closed semantics; no classic
+  establishment.
+\item \textbf{Bootstrap-Assisted Mode:} for paired peers with missing or
+  stale KEM identity keys, allow one temporary classic control channel
+  (\texttt{pairingIdentityExchange} only), then require successful PQC
+  rekey before business traffic.
+\end{itemize}
+
+\textbf{Fallback Security (default policy classic fallback):}
+Not all failures trigger default-mode classic fallback.
 
 \textbf{Allowed:}
 \begin{itemize}\tightlist
@@ -775,6 +798,15 @@ Timeout-based fallback is explicitly blocked to prevent attackers from
 forcing downgrade through packet dropping. Per-peer fallback is
 rate-limited (default 5-minute cooldown) to prevent rapid downgrade
 cycling.
+
+\textbf{Strict Bootstrap-Assisted triggers:}
+\begin{itemize}\tightlist
+\item \texttt{suiteNegotiationFailed} with paired trust and missing KEM identity key.
+\item \texttt{timeout} with paired trust and existing KEM key record (stale-key recovery).
+\end{itemize}
+During this strict recovery path, non-control business messages are
+blocked until PQC rekey succeeds; recovery completion/failure is emitted
+as \texttt{handshake\_fallback} security events.
 
 \subsection*{ML-DSA Key Sizes}
 
@@ -928,7 +960,7 @@ compile-fail harness tests correctly produce compile errors.
 \textbf{Key Properties:}
 (1) P-256 cannot be used as a protocol signature algorithm (compile-time enforced);
 (2) PQC attempts use only PQC suites, classic attempts use only classic suites;
-(3) Only PQC-unavailability errors trigger fallback;
+(3) Default-mode classic fallback is limited to whitelisted local capability errors, while strict Bootstrap-Assisted recovery is limited to paired KEM-key refresh triggers;
 (4) Legacy P-256 requires authenticated channel or existing TrustRecord;
 (5) All fallback and legacy acceptance events include full audit context.
 
@@ -946,20 +978,20 @@ ref=\texttt{\artifacttag}, commit=\texttt{\artifactsha}).
 \toprule
 Component & File (Lines) \\
 \midrule
-Provider Protocol & {\scriptsize\texttt{Sources/SkyBridgeCore/P2P/CryptoProviderProtocol.swift}} (L24--113) \\
-Handshake Types & {\scriptsize\texttt{Sources/SkyBridgeCore/P2P/HandshakeTypes.swift}} (L297--320) \\
-Provider Factory & {\scriptsize\texttt{Sources/SkyBridgeCore/P2P/CryptoProviderFactory.swift}} (L18--179) \\
-Handshake Driver & {\scriptsize\texttt{Sources/SkyBridgeCore/P2P/HandshakeDriver.swift}} (L258--338, L1042--1145) \\
-Handshake Context & {\scriptsize\texttt{Sources/SkyBridgeCore/P2P/HandshakeContext.swift}} (L27--100, L862--933) \\
-Secure Bytes & {\scriptsize\texttt{Sources/SkyBridgeCore/P2P/SecureBytes.swift}} (L25--99) \\
-Message Signatures & {\scriptsize\texttt{Sources/SkyBridgeCore/P2P/HandshakeMessages.swift}} (L557--569, L801--821) \\
-Apple PQC Provider & {\scriptsize\texttt{Sources/SkyBridgeCore/P2P/Providers/ApplePQCProvider.swift}} (L27--152) \\
-Security Events & {\scriptsize\texttt{Sources/SkyBridgeCore/Security/SecurityEventEmitter.swift}} (L22--136) \\
-SE Signing & {\scriptsize\texttt{Sources/SkyBridgeCore/P2P/SecureEnclaveSigningCallback.swift}} (L40--94) \\
-Signature Selector & {\scriptsize\texttt{Sources/SkyBridgeCore/P2P/PreNegotiationSignatureSelector.swift}} (L69--96) \\
-Route-Aware Discovery & {\scriptsize\texttt{Sources/SkyBridgeCore/P2P/P2PDiscoveryService.swift}} (L278--457) \\
-Connection State Guarding & {\scriptsize\texttt{Sources/SkyBridgeCore/DeviceDiscovery/UnifiedOnlineDeviceManager.swift}} (L940--989) \\
-Active Transfer Route Selection & {\scriptsize\texttt{Sources/SkyBridgeCore/FileTransfer/FileTransferManager.swift}} (L104--213) \\
+Provider Protocol & {\scriptsize\path{Sources/SkyBridgeCore/P2P/CryptoProviderProtocol.swift}} (L24--113) \\
+Handshake Types & {\scriptsize\path{Sources/SkyBridgeCore/P2P/HandshakeTypes.swift}} (L297--320) \\
+Provider Factory & {\scriptsize\path{Sources/SkyBridgeCore/P2P/CryptoProviderFactory.swift}} (L18--179) \\
+Handshake Driver & {\scriptsize\path{Sources/SkyBridgeCore/P2P/HandshakeDriver.swift}} (L258--338, L1042--1145) \\
+Handshake Context & {\scriptsize\path{Sources/SkyBridgeCore/P2P/HandshakeContext.swift}} (L27--100, L862--933) \\
+Secure Bytes & {\scriptsize\path{Sources/SkyBridgeCore/P2P/SecureBytes.swift}} (L25--99) \\
+Message Signatures & {\scriptsize\path{Sources/SkyBridgeCore/P2P/HandshakeMessages.swift}} (L557--569, L801--821) \\
+Apple PQC Provider & {\scriptsize\path{Sources/SkyBridgeCore/P2P/Providers/ApplePQCProvider.swift}} (L27--152) \\
+Security Events & {\scriptsize\path{Sources/SkyBridgeCore/Security/SecurityEventEmitter.swift}} (L22--136) \\
+SE Signing & {\scriptsize\path{Sources/SkyBridgeCore/P2P/SecureEnclaveSigningCallback.swift}} (L40--94) \\
+Signature Selector & {\scriptsize\path{Sources/SkyBridgeCore/P2P/PreNegotiationSignatureSelector.swift}} (L69--96) \\
+Route-Aware Discovery & {\scriptsize\path{Sources/SkyBridgeCore/P2P/P2PDiscoveryService.swift}} (L278--457) \\
+Connection State Guarding & {\scriptsize\path{Sources/SkyBridgeCore/DeviceDiscovery/UnifiedOnlineDeviceManager.swift}} (L940--989) \\
+Active Transfer Route Selection & {\scriptsize\path{Sources/SkyBridgeCore/FileTransfer/FileTransferManager.swift}} (L104--213) \\
 \bottomrule
 \end{tabular}
 \end{table}

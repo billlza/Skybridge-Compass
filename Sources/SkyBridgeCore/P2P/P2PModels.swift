@@ -432,6 +432,28 @@ public enum P2PConnectionStatus: String, Codable {
     }
 }
 
+// MARK: - 会话安全保证级别
+@available(macOS 14.0, iOS 17.0, *)
+public enum P2PSessionAssuranceLevel: String, Codable, Sendable {
+    case pqcStrict = "pqc_strict"
+    case bootstrapAssisted = "bootstrap_assisted"
+    case legacyClassic = "legacy_classic"
+    case unknown = "unknown"
+
+    public var displayName: String {
+        switch self {
+        case .pqcStrict:
+            return "PQC严格模式"
+        case .bootstrapAssisted:
+            return "引导恢复模式"
+        case .legacyClassic:
+            return "经典兼容模式"
+        case .unknown:
+            return "未知"
+        }
+    }
+}
+
 // MARK: - P2P连接
 public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sendable {
     public let id = UUID()
@@ -442,6 +464,8 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
     @Published public private(set) var lastActivity: Date = Date()
     @Published public private(set) var bytesReceived: UInt64 = 0
     @Published public private(set) var bytesSent: UInt64 = 0
+    @available(macOS 14.0, iOS 17.0, *)
+    @Published public private(set) var assuranceLevel: P2PSessionAssuranceLevel = .unknown
 
     // Real, continuously updated quality signals (no simulated constants).
     @Published public private(set) var measuredLatency: TimeInterval = 0
@@ -471,6 +495,8 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
     private let metricsLock = OSAllocatedUnfairLock(initialState: MetricsState())
     @available(macOS 14.0, iOS 17.0, *)
     private let rekeyInProgressLock = OSAllocatedUnfairLock<Bool>(initialState: false)
+    @available(macOS 14.0, iOS 17.0, *)
+    private let bootstrapAssistedHandshakeLock = OSAllocatedUnfairLock<Bool>(initialState: false)
     @available(macOS 14.0, iOS 17.0, *)
     private let lastPairingIdentityExchangeSentAtLock = OSAllocatedUnfairLock<Date?>(initialState: nil)
     private var metricsTask: Task<Void, Never>?
@@ -548,12 +574,17 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
                 state.outstandingPing = nil
                 state.pingResults.removeAll()
             }
+            rekeyInProgressLock.withLock { $0 = false }
+            bootstrapAssistedHandshakeLock.withLock { $0 = false }
         }
         connection.cancel()
         status = .disconnected
         measuredLatency = 0
         measuredPacketLoss = 0
         measuredBandwidthBytesPerSecond = 0
+        if #available(macOS 14.0, iOS 17.0, *) {
+            assuranceLevel = .unknown
+        }
     }
 
     // MARK: - Authentication (HandshakeDriver)
@@ -598,6 +629,22 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
                 selectionPolicy: selection,
                 preferPQC: true
             )
+            let usedBootstrapAssistedPath = bootstrapAssistedHandshakeLock.withLock { state in
+                let current = state
+                state = false
+                return current
+            }
+            let assurance = Self.classifySessionAssurance(
+                policy: policy,
+                negotiatedSuite: sessionKeys.negotiatedSuite,
+                bootstrapAssisted: usedBootstrapAssistedPath
+            )
+            await MainActor.run {
+                self.assuranceLevel = assurance
+            }
+            SkyBridgeLogger.p2p.info(
+                "🔐 Session assurance: \(assurance.rawValue, privacy: .public) suite=\(sessionKeys.negotiatedSuite.rawValue, privacy: .public) requirePQC=\(policy.requirePQC, privacy: .public) bootstrapAssisted=\(usedBootstrapAssistedPath, privacy: .public)"
+            )
             
             // PQC UI Fix: Immediately update presence service with negotiated suite
             // This ensures UI shows "ApplePQC" immediately if negotiated, or "Classic" if not yet upgraded.
@@ -623,6 +670,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
 
             return sessionKeys
         } catch {
+            bootstrapAssistedHandshakeLock.withLock { $0 = false }
             if let bootstrapped = try await performStrictPQCBootstrapIfNeeded(
                 for: error,
                 strictPolicy: policy,
@@ -747,6 +795,17 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
                 "🧩 strictPQC recovery: handshake timed out with existing KEM records (possible stale/rotated KEM identity keys). Attempting one-time Classic bootstrap to refresh keys, then rekey to PQC. peer=\(self.handshakePeer.deviceId, privacy: .public) knownKEM=\(knownKEMSummary, privacy: .public)"
             )
         }
+        await SecurityEventEmitter.shared.emit(SecurityEvent(
+            type: .handshakeFallback,
+            severity: .warning,
+            message: "Entering bootstrap-assisted mode before strict PQC rekey",
+            context: [
+                "deviceId": handshakePeer.deviceId,
+                "mode": "bootstrap_assisted",
+                "strictPolicy": "1",
+                "trigger": trigger == .missingKEM ? "missing_kem_identity_key" : "stale_kem_recovery"
+            ]
+        ))
 
         let bootstrapPolicy = HandshakePolicy(
             requirePQC: false,
@@ -801,6 +860,18 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
                 suite: suite.rawValue
             )
         }
+        bootstrapAssistedHandshakeLock.withLock { $0 = true }
+        await SecurityEventEmitter.shared.emit(SecurityEvent(
+            type: .handshakeFallback,
+            severity: .info,
+            message: "Bootstrap-assisted mode completed; session rekeyed to PQC",
+            context: [
+                "deviceId": handshakePeer.deviceId,
+                "mode": "bootstrap_assisted",
+                "strictPolicy": "1",
+                "resultSuite": rekeyed.negotiatedSuite.rawValue
+            ]
+        ))
         
         return rekeyed
     }
@@ -1285,12 +1356,27 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
 
     @available(macOS 14.0, iOS 17.0, *)
     private func sendEncryptedAppMessage(_ message: AppMessage) async throws {
+        let allowDuringBootstrap = Self.isBootstrapControlMessage(message)
+        if rekeyInProgressLock.withLock({ $0 }), !allowDuringBootstrap {
+            throw P2PConnectionError.bootstrapControlOnly
+        }
         let plaintext = try JSONEncoder().encode(message)
-        try await sendEncryptedBusinessPlaintext(plaintext, label: "tx")
+        try await sendEncryptedBusinessPlaintext(
+            plaintext,
+            label: "tx",
+            allowDuringBootstrap: allowDuringBootstrap
+        )
     }
 
     @available(macOS 14.0, iOS 17.0, *)
-    private func sendEncryptedBusinessPlaintext(_ plaintext: Data, label: String) async throws {
+    private func sendEncryptedBusinessPlaintext(
+        _ plaintext: Data,
+        label: String,
+        allowDuringBootstrap: Bool = false
+    ) async throws {
+        if rekeyInProgressLock.withLock({ $0 }), !allowDuringBootstrap {
+            throw P2PConnectionError.bootstrapControlOnly
+        }
         guard let keys = sessionKeysLock.withLock({ $0 }) else {
             throw P2PConnectionError.noSessionKeys
         }
@@ -1668,6 +1754,12 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
 
     @available(macOS 14.0, iOS 17.0, *)
     private func handleAppMessage(_ message: AppMessage) async {
+        if rekeyInProgressLock.withLock({ $0 }), !Self.isBootstrapControlMessage(message) {
+            SkyBridgeLogger.p2p.debug(
+                "ℹ️ bootstrap-assisted 模式下丢弃非引导控制消息: \(String(describing: message), privacy: .public)"
+            )
+            return
+        }
         switch message {
         case .clipboard:
             break
@@ -1705,6 +1797,32 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
                 "⚠️ pairingIdentityExchange reply failed: \(error.localizedDescription, privacy: .public)"
             )
         }
+    }
+
+    @available(macOS 14.0, iOS 17.0, *)
+    internal static func isBootstrapControlMessage(_ message: AppMessage) -> Bool {
+        if case .pairingIdentityExchange = message {
+            return true
+        }
+        return false
+    }
+
+    @available(macOS 14.0, iOS 17.0, *)
+    internal static func classifySessionAssurance(
+        policy: HandshakePolicy,
+        negotiatedSuite: CryptoSuite,
+        bootstrapAssisted: Bool
+    ) -> P2PSessionAssuranceLevel {
+        if bootstrapAssisted {
+            return .bootstrapAssisted
+        }
+        if negotiatedSuite.isPQCGroup {
+            return .pqcStrict
+        }
+        if !policy.requirePQC {
+            return .legacyClassic
+        }
+        return .unknown
     }
 
     private func normalizedNonEmptyString(_ raw: String?) -> String? {
@@ -1883,6 +2001,7 @@ public enum P2PConnectionError: Error, LocalizedError, Sendable {
     case disconnected
     case invalidFrameLength(Int)
     case bootstrapKEMKeyTimeout
+    case bootstrapControlOnly
 
     public var errorDescription: String? {
         switch self {
@@ -1896,6 +2015,8 @@ public enum P2PConnectionError: Error, LocalizedError, Sendable {
             return "无效的帧长度：\(length)"
         case .bootstrapKEMKeyTimeout:
             return "等待对端 KEM 公钥超时（请确认对端已批准配对/信任并重试）"
+        case .bootstrapControlOnly:
+            return "引导恢复期间仅允许 pairingIdentityExchange 控制消息"
         }
     }
 }
