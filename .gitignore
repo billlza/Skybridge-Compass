@@ -166,6 +166,9 @@ Docs/*.docx
 Docs/_docx_tmp/
 Docs/_docx_figs/
 Docs/__pycache__/
+Docs/_audit_main.txt
+Docs/_audit_supp.txt
+Docs/.render_supp/
 
 # Local placeholder assets
 ${BG_PNG}
