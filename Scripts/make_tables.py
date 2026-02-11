@@ -395,7 +395,7 @@ def mean_and_ci(values):
 def generate_repeatability_latency_table(latency_runs):
     """Generate supplementary repeatability table for latency (mean ± 95% CI across batches)."""
     lines = [
-        r"\begin{table*}[!t]",
+        r"\begin{table*}[!tp]",
         r"\centering",
         r"\caption{Supplementary Table \thetable: Repeatability across independent benchmark batches (latency). Table reports observed batch count $B$. Cells report mean and (when $B \ge 2$) $\pm$ 95\% CI across batches; each batch uses N=1000 iterations after 10 warmup runs.}",
         r"\label{tab:supp-repeatability-latency}",
@@ -444,7 +444,7 @@ def generate_repeatability_latency_table(latency_runs):
 def generate_repeatability_rtt_table(rtt_runs):
     """Generate supplementary repeatability table for RTT (mean ± 95% CI across batches)."""
     lines = [
-        r"\begin{table*}[!t]",
+        r"\begin{table*}[!tp]",
         r"\centering",
         r"\caption{Supplementary Table \thetable: Repeatability across independent benchmark batches (RTT). Table reports observed batch count $B$. Cells report mean and (when $B \ge 2$) $\pm$ 95\% CI across batches; each batch uses N=1000 iterations after 10 warmup runs.}",
         r"\label{tab:supp-repeatability-rtt}",
@@ -596,7 +596,7 @@ def generate_perf_summary_table(latency, rtt, msg_sizes):
 def generate_supp_latency_table(latency):
     """Generate supplementary full latency table."""
     lines = [
-        r"\begin{table*}[!t]",
+        r"\begin{table*}[!tp]",
         r"\centering",
         r"\caption{Supplementary Table \thetable: Full Handshake Latency Statistics.}",
         r"\label{tab:supp-latency}",
@@ -626,7 +626,7 @@ def generate_supp_latency_table(latency):
 def generate_supp_rtt_table(rtt):
     """Generate supplementary RTT table."""
     lines = [
-        r"\begin{table*}[!t]",
+        r"\begin{table*}[!tp]",
         r"\centering",
         r"\caption{Supplementary Table \thetable: Full RTT Statistics.}",
         r"\label{tab:supp-rtt}",
@@ -684,7 +684,7 @@ def generate_supp_message_sizes_table(msg_sizes):
             seen.add(key)
 
     lines = [
-        r"\begin{table*}[!t]",
+        r"\begin{table*}[!tp]",
         r"\centering",
         r"\caption{Supplementary Table \thetable: Message Size Breakdown by Field.}",
         r"\label{tab:supp-message-sizes}",
@@ -777,7 +777,7 @@ def generate_supp_traffic_padding_table(rows):
     filtered.sort(key=_sort_key)
 
     lines = [
-        r"\begin{table*}[!t]",
+        r"\begin{table*}[!tp]",
         r"\centering",
         r"\caption{Supplementary Table \thetable: SBP2 traffic padding quantization summary. ``raw''/``padded'' are aggregate bytes across events; overhead is relative to raw. Top bucket reports the most frequent bucket size (share).}",
         r"\label{tab:supp-traffic-padding}",
@@ -823,8 +823,15 @@ def generate_supp_traffic_padding_sensitivity_table(rows):
 
     idx = {(r["cap_bytes"], r["label"]): r for r in rows}
 
+    def _fmt_overhead_pct(pct: float) -> str:
+        # Avoid misleading "0%" when overhead is non-zero but rounds down
+        # (e.g., SBP2 header-only passthrough for over-cap frames).
+        if pct > 0.0 and pct < 0.05:
+            return r"\textless{}0.1\%"
+        return f"{pct:.0f}\\%"
+
     lines = [
-        r"\begin{table*}[!t]",
+        r"\begin{table*}[!tp]",
         r"\centering",
         r"\scriptsize",
         r"\setlength{\tabcolsep}{3pt}",
@@ -842,17 +849,24 @@ def generate_supp_traffic_padding_sensitivity_table(rows):
         row = [_latex_escape(lab)]
         for cap in caps:
             r = idx.get((cap, lab))
+            if lab.startswith("HS/") and not r:
+                row += [r"\textit{n/a}", r"\textit{n/a}", r"\textit{n/a}"]
+                continue
             if not r or r["raw_bytes"] <= 0:
                 row += ["-", "-", "-"]
                 continue
             pct = (r["overhead_ratio"] - 1.0) * 100.0 if r["overhead_ratio"] > 0 else 0.0
             over_cap_pct = max(0.0, min(1.0, r.get("over_cap_rate", 0.0))) * 100.0
-            row += [f"{pct:.0f}\\%", f"{over_cap_pct:.0f}\\%", f"{r['entropy_bits']:.2f}"]
+            row += [_fmt_overhead_pct(pct), f"{over_cap_pct:.0f}\\%", f"{r['entropy_bits']:.2f}"]
         lines.append(" & ".join(row) + r" \\")
 
     lines.extend([
         r"\bottomrule",
         r"\end{tabular}",
+        r"\vspace{2pt}",
+        r"\begin{minipage}{0.98\linewidth}",
+        r"\footnotesize\raggedright\textit{Notes:} \textit{n/a} denotes ``not applicable'' (handshake messages are padded by SBP1 rather than SBP2). \texttt{-} denotes ``not observed'' in the sampled protocol trace. The $>$cap rate is computed as the fraction of frames where (payload bytes + SBP2 header) exceeds the configured cap; such frames are passed through without additional bucket padding (beyond the fixed SBP2 header), so overhead may round to near-zero and entropy reflects unquantized size variability for that fraction.",
+        r"\end{minipage}",
         r"\end{table*}",
     ])
     return "\n".join(lines)

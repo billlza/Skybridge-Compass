@@ -127,6 +127,9 @@ final class TrafficPaddingSensitivityBenchTests: XCTestCase {
                 )
             }
 
+            // Give async stats tasks a chance to complete before snapshotting.
+            try await Task.sleep(for: .milliseconds(200))
+
             let snapshot = await TrafficPaddingStats.shared.snapshot()
             for key in wantedLabels() {
                 guard let st = snapshot[key] else { continue }
@@ -290,20 +293,32 @@ final class TrafficPaddingSensitivityBenchTests: XCTestCase {
     ) async throws {
         let aad = Data(("dp|\(sessionId)|\(directionLabel)").utf8)
 
-        for _ in 0..<6 {
-            let (label, plaintext) = controlPayloads[Int(rng.next() % UInt64(controlPayloads.count))]
-            let frame = try encryptFrame(plaintext: plaintext, key: sendKey, aad: aad)
-            try await sendViaTransport(frame, label: label, capBytes: capBytes, capCounters: &capCounters, from: transport, peer: peer)
-            _ = try decryptFrame(data: TrafficPadding.unwrapIfNeeded(TrafficPadding.wrapIfEnabled(frame, label: label), label: "rx"), key: recvKey, aad: aad)
+        // Deterministic coverage: send each control payload twice so table rows are never missing
+        // due to randomness (see Supplementary Table S8).
+        for (label, plaintext) in controlPayloads {
+            for _ in 0..<2 {
+                let frame = try encryptFrame(plaintext: plaintext, key: sendKey, aad: aad)
+                let wrapped = try await sendViaTransport(frame, label: label, capBytes: capBytes, capCounters: &capCounters, from: transport, peer: peer)
+                _ = try decryptFrame(data: TrafficPadding.unwrapIfNeeded(wrapped, label: "rx"), key: recvKey, aad: aad)
+            }
         }
 
         let medium = binarySizes.filter { $0.size <= 4096 }
-        for _ in 0..<6 {
+        // Deterministic coverage for the small/medium DP sizes.
+        for (label, sz) in medium {
+            let plaintext = rng.bytes(count: sz)
+            let frame = try encryptFrame(plaintext: plaintext, key: sendKey, aad: aad)
+            let wrapped = try await sendViaTransport(frame, label: label, capBytes: capBytes, capCounters: &capCounters, from: transport, peer: peer)
+            let decoded = try decryptFrame(data: TrafficPadding.unwrapIfNeeded(wrapped, label: "rx"), key: recvKey, aad: aad)
+            XCTAssertEqual(decoded.count, plaintext.count)
+        }
+        // Add one extra sample for distributional variety (does not affect coverage).
+        if !medium.isEmpty {
             let (label, sz) = medium[Int(rng.next() % UInt64(medium.count))]
             let plaintext = rng.bytes(count: sz)
             let frame = try encryptFrame(plaintext: plaintext, key: sendKey, aad: aad)
-            try await sendViaTransport(frame, label: label, capBytes: capBytes, capCounters: &capCounters, from: transport, peer: peer)
-            let decoded = try decryptFrame(data: TrafficPadding.unwrapIfNeeded(TrafficPadding.wrapIfEnabled(frame, label: label), label: "rx"), key: recvKey, aad: aad)
+            let wrapped = try await sendViaTransport(frame, label: label, capBytes: capBytes, capCounters: &capCounters, from: transport, peer: peer)
+            let decoded = try decryptFrame(data: TrafficPadding.unwrapIfNeeded(wrapped, label: "rx"), key: recvKey, aad: aad)
             XCTAssertEqual(decoded.count, plaintext.count)
         }
 
@@ -312,9 +327,9 @@ final class TrafficPaddingSensitivityBenchTests: XCTestCase {
             let label = "DP/16KiB"
             let plaintext = rng.bytes(count: 16 * 1024)
             let frame = try encryptFrame(plaintext: plaintext, key: sendKey, aad: aad)
-            try await sendViaTransport(frame, label: label, capBytes: capBytes, capCounters: &capCounters, from: transport, peer: peer)
+            let wrapped = try await sendViaTransport(frame, label: label, capBytes: capBytes, capCounters: &capCounters, from: transport, peer: peer)
             let decoded = try decryptFrame(
-                data: TrafficPadding.unwrapIfNeeded(TrafficPadding.wrapIfEnabled(frame, label: label), label: "rx"),
+                data: TrafficPadding.unwrapIfNeeded(wrapped, label: "rx"),
                 key: recvKey,
                 aad: aad
             )
@@ -332,9 +347,9 @@ final class TrafficPaddingSensitivityBenchTests: XCTestCase {
             let label = "DP/rdpMix"
             let plaintext = rng.bytes(count: sz)
             let frame = try encryptFrame(plaintext: plaintext, key: sendKey, aad: aad)
-            try await sendViaTransport(frame, label: label, capBytes: capBytes, capCounters: &capCounters, from: transport, peer: peer)
+            let wrapped = try await sendViaTransport(frame, label: label, capBytes: capBytes, capCounters: &capCounters, from: transport, peer: peer)
             let decoded = try decryptFrame(
-                data: TrafficPadding.unwrapIfNeeded(TrafficPadding.wrapIfEnabled(frame, label: label), label: "rx"),
+                data: TrafficPadding.unwrapIfNeeded(wrapped, label: "rx"),
                 key: recvKey,
                 aad: aad
             )
@@ -347,9 +362,9 @@ final class TrafficPaddingSensitivityBenchTests: XCTestCase {
             let label = "DP/fileMix"
             let plaintext = rng.bytes(count: sz)
             let frame = try encryptFrame(plaintext: plaintext, key: sendKey, aad: aad)
-            try await sendViaTransport(frame, label: label, capBytes: capBytes, capCounters: &capCounters, from: transport, peer: peer)
+            let wrapped = try await sendViaTransport(frame, label: label, capBytes: capBytes, capCounters: &capCounters, from: transport, peer: peer)
             let decoded = try decryptFrame(
-                data: TrafficPadding.unwrapIfNeeded(TrafficPadding.wrapIfEnabled(frame, label: label), label: "rx"),
+                data: TrafficPadding.unwrapIfNeeded(wrapped, label: "rx"),
                 key: recvKey,
                 aad: aad
             )
@@ -364,7 +379,7 @@ final class TrafficPaddingSensitivityBenchTests: XCTestCase {
         capCounters: inout [String: (wraps: Int, overCap: Int)],
         from transport: LoopbackDiscoveryTransport,
         peer: PeerIdentifier
-    ) async throws {
+    ) async throws -> Data {
         // SBP2 header is magic(4) + u32(actualLen)(4)
         let sbp2HeaderLen = 8
         var entry = capCounters[label] ?? (wraps: 0, overCap: 0)
@@ -376,6 +391,7 @@ final class TrafficPaddingSensitivityBenchTests: XCTestCase {
 
         let wrapped = TrafficPadding.wrapIfEnabled(payload, label: label)
         try await transport.send(to: peer, data: wrapped)
+        return wrapped
     }
 
     // DP1 frame:
@@ -448,5 +464,3 @@ private struct XorShift64Star {
         return out
     }
 }
-
-

@@ -1,6 +1,30 @@
 \documentclass[10pt,journal,compsoc]{IEEEtran}
+
+% === CRITICAL: ToUnicode mapping for correct text extraction ===
+% cmap must be loaded BEFORE font packages to ensure proper character mapping
+\usepackage{cmap}
+\input{glyphtounicode}
+\pdfgentounicode=1
+
+% Override Palatino with Times (required for IEEE TDSC)
+\usepackage{mathptmx}
+\usepackage{fix-cm}
+\usepackage[T1]{fontenc}  % Better font encoding for text extraction
+\usepackage[tracking=false,letterspace=0]{microtype}  % Disable letterspace to prevent char spreading
+\microtypesetup{expansion=false}  % Disable font expansion for tt fonts
+
 \usepackage{booktabs}
 \usepackage{url}
+\usepackage{xurl}
+\urlstyle{same}
+\Urlmuskip=0mu
+% Reset xurl's default lowercase breaks and use controlled break points only
+\makeatletter
+% Note: Removed hyphen from UrlBreaks to prevent soft-hyphen artifacts (U+00AD) in extracted text
+\def\UrlBreaks{\do\.\do\@\do\/\do\\\do\!\do\_\do\|\do\;\do\>\do\]\do\)\do\,\do\?\do\'\do\+\do\=\do\#}
+% Prefer breaking at path separators and colons
+\def\UrlBigBreaks{\do\/\do\:}
+\makeatother
 \usepackage{array}
 \usepackage{calc}
 \usepackage{graphicx}
@@ -55,7 +79,7 @@
 \newcommand{\real}[1]{#1}
 \newcommand{\artifacturl}{https://github.com/billlza/Skybridge-Compass}
 \newcommand{\artifacturlshort}{https://github.com/billlza/Skybridge-Compass}
-\newcommand{\artifacttag}{tdsc-2026-01-0318-ios-sim-fix-\allowbreak{}20260211}
+\newcommand{\artifacttag}{tdsc-2026-01-0318-ios-sim-fix\allowbreak-20260211}
 \newcommand{\artifactsha}{b16fe9386ff0}
 \newcommand{\artifactshafull}{b16fe9386ff047d17ba9a518b2c331f64493971e}
 \newcommand{\artifactzipurl}{\artifacturl/archive/\artifactshafull.zip}
@@ -90,6 +114,7 @@ This document provides extended data tables referenced in the main paper. All da
 \item Tables~\ref{tab:supp-repeatability-latency}--\ref{tab:supp-repeatability-rtt} (Repeatability): Supports Section~\ref{sec:evaluation}. Tables report observed batch count $B$ and (when $B \ge 2$) 95\% confidence intervals across batches; set \texttt{SKYBRIDGE\_BENCH\_BATCHES=3}--\texttt{5} to reproduce multi-batch CIs.
 \item Table~\ref{tab:supp-traffic-padding} (Traffic Padding): Supports Section~\ref{sec:evaluation} (traffic analysis mitigation quantization/overhead)
 \item Table~\ref{tab:supp-realnet-microstudy} (Real-network micro-study): STUN path + 12~kB-class payload measurements across Wi-Fi / hotspot labels (generated from \texttt{Artifacts/realnet\_*}). (Cross-NAT inbound-reachability depends on ISP/upstream equipment and may be infeasible without administrative control; see note below.)
+\item Tables~\ref{tab:supp-message-field-validation}--\ref{tab:artifact-map} (Protocol/Audit Appendices): Wire-format validation rules, suite identifiers, PQC coverage and platform support matrices, key-size references, security event taxonomy, and an implementation-to-file mapping. These materials support auditability and reproducibility claims in main paper Sections~\ref{sec:handshake-state-machine}, \ref{sec:security-model}, and \ref{sec:implementation}.
 \end{itemize}
 
 \input{supp_tables/s1_latency}
@@ -117,7 +142,7 @@ This document provides extended data tables referenced in the main paper. All da
 
 \subsection*{Table~\ref{tab:supp-loopback-wire}: Loopback Wire-Size Baselines}
 
-\begin{table}[!t]
+\begin{table}[!tp]
 \centering
 \caption{Loopback wire-size baselines from pcap capture (N=1000). Wire bytes count full packet lengths observed on the loopback interface; TLS/QUIC/DTLS values are cert-dependent.}
 \label{tab:supp-loopback-wire}
@@ -277,7 +302,7 @@ within a configurable window (default: 5 minutes).
   cause \texttt{sigB} verification to fail.
 \end{itemize}
 
-\begin{table*}[!t]
+\begin{table*}[!tp]
 \centering
 \caption{Message field validation rules.}
 \label{tab:supp-message-field-validation}
@@ -332,7 +357,7 @@ deployments (byte-for-byte deterministic). V2 TLV is an optional
 transcript-hashing format for forward compatibility and is exercised by
 regression tests; it is not used on the wire in v1.
 
-\begin{table*}[!t]
+\begin{table*}[!tp]
 \centering
 \caption{Encoding scope (V1 vs V2).}
 \label{tab:supp-encoding-scope}
@@ -359,7 +384,7 @@ transcript binding. Data-plane AEAD is negotiated separately and is
 fixed to AES-256-GCM in v1. Algorithm suite identifiers use a
 structured 16-bit wire format enabling forward compatibility:
 
-\begin{table*}[!t]
+\begin{table*}[!tp]
 \centering
 \caption{Suite identifier ranges and components.}
 \label{tab:supp-suite-identifiers}
@@ -395,7 +420,7 @@ ML-DSA-65 for PQC/hybrid suites and Ed25519 for classic suites. Secure
 Enclave P-256 ECDSA is used only for optional device proof-of-possession
 and is not used for the main protocol signatures (\texttt{sigA}/\texttt{sigB}).
 
-\begin{table*}[!t]
+\begin{table*}[!tp]
 \centering
 \tiny
 \caption{Post-quantum coverage by policy and established suite (v1). ``PQC confidentiality'' refers to resistance against store-now-decrypt-later adversaries \emph{while long-term KEM private keys remain uncompromised}; v1 does not claim PFS for KEM-based PQC suites.}
@@ -589,7 +614,7 @@ allocation.
 
 \subsection*{Platform Support Matrix}
 
-\begin{table*}[!t]
+\begin{table*}[!tp]
 \centering
 \caption{Platform support matrix.}
 \label{tab:supp-platform-support}
@@ -819,7 +844,7 @@ as \texttt{handshake\_fallback} security events.
 
 \subsection*{ML-DSA Key Sizes}
 
-\begin{table}[!t]
+\begin{table}[!tp]
 \centering
 \caption{ML-DSA-65 Key Sizes (FIPS 204 Compliance).}
 \label{tab:supp-ml-dsa-key-sizes}
@@ -836,7 +861,7 @@ Signature & 3309 B & 3309 B & OK \\
 
 \subsection*{Key Size Reference}
 
-\begin{table*}[!t]
+\begin{table*}[!tp]
 \centering
 \caption{Key size reference.}
 \label{tab:supp-key-size-reference}
@@ -883,7 +908,7 @@ exercised by our current benchmark suite.
 
 \subsection*{Security Event Types}
 
-\begin{table*}[!t]
+\begin{table*}[!tp]
 \centering
 \caption{Security event types.}
 \label{tab:supp-security-event-types}
@@ -990,28 +1015,31 @@ Table~\ref{tab:artifact-map} maps implementation components to source
 files in the artifact repository (\href{\artifacturl}{\artifacturlshort},
 ref=\texttt{\artifacttag}, commit=\texttt{\artifactsha}).
 
-\begin{table}[!t]
+\begin{table}[!h]
 \centering
+\scriptsize
+\setlength{\tabcolsep}{3pt}
+\renewcommand{\arraystretch}{0.95}
 \caption{Implementation artifact map.}
 \label{tab:artifact-map}
-\begin{tabular}{@{}>{\raggedright\arraybackslash}p{0.35\columnwidth}>{\raggedright\arraybackslash\footnotesize}p{0.58\columnwidth}@{}}
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{0.28\columnwidth}>{\raggedright\arraybackslash}p{0.68\columnwidth}@{}}
 \toprule
 Component & File (Lines) \\
 \midrule
-Provider Protocol & {\scriptsize\path{Sources/SkyBridgeCore/P2P/CryptoProviderProtocol.swift}} (L24--113) \\
-Handshake Types & {\scriptsize\path{Sources/SkyBridgeCore/P2P/HandshakeTypes.swift}} (L297--320) \\
-Provider Factory & {\scriptsize\path{Sources/SkyBridgeCore/P2P/CryptoProviderFactory.swift}} (L18--179) \\
-Handshake Driver & {\scriptsize\path{Sources/SkyBridgeCore/P2P/HandshakeDriver.swift}} (L258--338, L1042--1145) \\
-Handshake Context & {\scriptsize\path{Sources/SkyBridgeCore/P2P/HandshakeContext.swift}} (L27--100, L862--933) \\
-Secure Bytes & {\scriptsize\path{Sources/SkyBridgeCore/P2P/SecureBytes.swift}} (L25--99) \\
-Message Signatures & {\scriptsize\path{Sources/SkyBridgeCore/P2P/HandshakeMessages.swift}} (L557--569, L801--821) \\
-Apple PQC Provider & {\scriptsize\path{Sources/SkyBridgeCore/P2P/Providers/ApplePQCProvider.swift}} (L27--152) \\
-Security Events & {\scriptsize\path{Sources/SkyBridgeCore/Security/SecurityEventEmitter.swift}} (L22--136) \\
-SE Signing & {\scriptsize\path{Sources/SkyBridgeCore/P2P/SecureEnclaveSigningCallback.swift}} (L40--94) \\
-Signature Selector & {\scriptsize\path{Sources/SkyBridgeCore/P2P/PreNegotiationSignatureSelector.swift}} (L69--96) \\
-Route-Aware Discovery & {\scriptsize\path{Sources/SkyBridgeCore/P2P/P2PDiscoveryService.swift}} (L278--457) \\
-Connection State Guarding & {\scriptsize\path{Sources/SkyBridgeCore/DeviceDiscovery/UnifiedOnlineDeviceManager.swift}} (L940--989) \\
-Active Transfer Route Selection & {\scriptsize\path{Sources/SkyBridgeCore/FileTransfer/FileTransferManager.swift}} (L104--213) \\
+Provider Protocol & \path{Sources/SkyBridgeCore/P2P/CryptoProviderProtocol.swift} (L24--113) \\
+Handshake Types & \path{Sources/SkyBridgeCore/P2P/HandshakeTypes.swift} (L297--320) \\
+Provider Factory & \path{Sources/SkyBridgeCore/P2P/CryptoProviderFactory.swift} (L18--179) \\
+Handshake Driver & \path{Sources/SkyBridgeCore/P2P/HandshakeDriver.swift} (L258--338, L1042--1145) \\
+Handshake Context & \path{Sources/SkyBridgeCore/P2P/HandshakeContext.swift} (L27--100, L862--933) \\
+Secure Bytes & \path{Sources/SkyBridgeCore/P2P/SecureBytes.swift} (L25--99) \\
+Message Signatures & \path{Sources/SkyBridgeCore/P2P/HandshakeMessages.swift} (L557--569, L801--821) \\
+Apple PQC Provider & \path{Sources/SkyBridgeCore/P2P/Providers/ApplePQCProvider.swift} (L27--152) \\
+Security Events & \path{Sources/SkyBridgeCore/Security/SecurityEventEmitter.swift} (L22--136) \\
+SE Signing & \path{Sources/SkyBridgeCore/P2P/SecureEnclaveSigningCallback.swift} (L40--94) \\
+Signature Selector & \path{Sources/SkyBridgeCore/P2P/PreNegotiationSignatureSelector.swift} (L69--96) \\
+Route-Aware Discovery & \path{Sources/SkyBridgeCore/P2P/P2PDiscoveryService.swift} (L278--457) \\
+Connection State Guarding & \path{Sources/SkyBridgeCore/DeviceDiscovery/UnifiedOnlineDeviceManager.swift} (L940--989) \\
+Active Transfer Route Selection & \path{Sources/SkyBridgeCore/FileTransfer/FileTransferManager.swift} (L104--213) \\
 \bottomrule
 \end{tabular}
 \end{table}
