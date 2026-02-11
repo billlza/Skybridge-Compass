@@ -58,9 +58,45 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 ARTIFACTS_DIR = ROOT_DIR / "Artifacts"
 OUTPUT_DIR = str(ROOT_DIR / "figures")
 
+_MAIN_TEX_CACHE: str | None = None
+
 def _requested_artifact_date() -> str | None:
     v = os.environ.get("ARTIFACT_DATE") or os.environ.get("SKYBRIDGE_ARTIFACT_DATE")
     return v if v else None
+
+def _main_tex_text() -> str:
+    global _MAIN_TEX_CACHE
+    if _MAIN_TEX_CACHE is not None:
+        return _MAIN_TEX_CACHE
+    tex = ROOT_DIR / "Docs" / "TDSC-2026-01-0318_IEEE_Paper_SkyBridge_Compass_patched.tex"
+    try:
+        _MAIN_TEX_CACHE = tex.read_text(encoding="utf-8", errors="ignore") if tex.exists() else ""
+    except Exception:
+        _MAIN_TEX_CACHE = ""
+    return _MAIN_TEX_CACHE
+
+def _tex_newcommand_value(command: str) -> str | None:
+    """
+    Parse a pinned value from the main-paper TeX:
+      \\newcommand{\\<command>}{VALUE}
+    """
+    import re
+    s = _main_tex_text()
+    if not s:
+        return None
+    # Match a *single* TeX backslash. (In regex, that is `\\`; in a raw
+    # Python string that is written as `\\`.)
+    m = re.search(rf"\\newcommand\{{\\{re.escape(command)}\}}\{{([^}}]+)\}}", s)
+    if not m:
+        return None
+    v = (m.group(1) or "").strip()
+    return v if v else None
+
+def _pinned_artifact_date_for_prefix(prefix: str) -> str | None:
+    # Keep figures consistent with the paper-pinned artifact date(s).
+    if prefix == "system_impact":
+        return _tex_newcommand_value("artifactdateSystemImpact") or _tex_newcommand_value("artifactdate")
+    return _tex_newcommand_value("artifactdate")
 
 def _latest_artifact_csv(prefix: str) -> Path:
     candidates = list(ARTIFACTS_DIR.glob(f"{prefix}_*.csv"))
@@ -73,12 +109,14 @@ def _artifact_csv(prefix: str) -> Path:
     Select an artifact CSV by prefix. If ARTIFACT_DATE is set, require
     Artifacts/<prefix>_<ARTIFACT_DATE>.csv to exist (prevents mixing datasets).
     """
-    date = _requested_artifact_date()
+    date = _requested_artifact_date() or _pinned_artifact_date_for_prefix(prefix)
     if date:
         p = ARTIFACTS_DIR / f"{prefix}_{date}.csv"
-        if not p.exists():
-            raise FileNotFoundError(f"Missing required artifact for ARTIFACT_DATE={date}: {p}")
-        return p
+        if p.exists():
+            return p
+        # If the caller explicitly requested a date (env var) or the paper pins
+        # one, fail fast rather than silently mixing datasets.
+        raise FileNotFoundError(f"Missing required artifact for date={date}: {p}")
     return _latest_artifact_csv(prefix)
 
 def _read_csv_dicts(path: Path) -> list[dict[str, str]]:
@@ -309,13 +347,30 @@ def fig_failure_histogram():
         failed_events.append(int(row.get("E_handshakeFailed", 0)))
         downgrade_events.append(int(row.get("E_cryptoDowngrade", 0)))
 
+    # Use a stacked bar so each scenario is visually centered on its tick,
+    # avoiding the "shifted bar" impression when one series is zero.
     x = np.arange(len(scenarios))
-    width = 0.35
+    width = 0.45
 
-    bars1 = ax.bar(x - width/2, failed_events, width, label='handshakeFailed',
-                   color=COLORS['gray1'], edgecolor='black', linewidth=0.5)
-    bars2 = ax.bar(x + width/2, downgrade_events, width, label='cryptoDowngrade',
-                   color=COLORS['gray3'], edgecolor='black', linewidth=0.5)
+    bars1 = ax.bar(
+        x,
+        failed_events,
+        width,
+        label='handshakeFailed',
+        color=COLORS['gray1'],
+        edgecolor='black',
+        linewidth=0.5,
+    )
+    bars2 = ax.bar(
+        x,
+        downgrade_events,
+        width,
+        bottom=failed_events,
+        label='cryptoDowngrade',
+        color=COLORS['gray3'],
+        edgecolor='black',
+        linewidth=0.5,
+    )
 
     ax.set_ylabel('Event Count (N=1000)')
     ax.set_xticks(x)

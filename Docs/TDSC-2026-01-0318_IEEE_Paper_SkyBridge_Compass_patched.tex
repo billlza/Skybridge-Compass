@@ -1290,13 +1290,13 @@ commodity iOS 26+ hardware without modifying the protocol code paths.
 \caption{On-device micro-benchmark on iOS 26.2 (iPhone, N=50). Metrics are reported in milliseconds (ms) as mean and p99 over 50 iterations (no warmup). Artifacts are exported as JSON (schema v2) and include split suite labels (\texttt{kem\_suite}, \texttt{sig\_suite}) for academic clarity. Each ``encapsulate'' measurement includes the sender-side ephemeral generation and encapsulation work for the corresponding KEM/key-agreement.}
 \label{tab:ios-microbench}
 {\setlength{\tabcolsep}{3pt}\small
-\begin{tabular}{@{}>{\raggedright\arraybackslash}p{0.28\textwidth}*{4}{>{\raggedright\arraybackslash}p{0.16\textwidth}}@{}}
+\begin{tabular}{@{}>{\raggedright\arraybackslash}m{0.28\textwidth}*{4}{>{\raggedright\arraybackslash}m{0.16\textwidth}}@{}}
 \toprule
 Configuration &
-KEM encaps.\newline(mean/p99) &
-Sign\newline(mean/p99) &
-Verify\newline(mean/p99) &
-\shortstack[l]{KEM--DEM\\seal+open\\(mean/p99)} \\
+	KEM encaps.\newline(mean/p99) &
+	Sign\newline(mean/p99) &
+	Verify\newline(mean/p99) &
+	KEM--DEM\newline seal+open\newline(mean/p99) \\
 \midrule
 Classic (X25519 + Ed25519) & 0.414 / 0.704 & 0.122 / 0.126 & 0.085 / 0.133 & 0.389 / 0.534 \\
 CryptoKit PQC (ML-KEM-768 + ML-DSA-65) & 0.149 / 0.190 & 1.072 / 2.108 & 0.048 / 0.055 & 0.245 / 0.272 \\
