@@ -2,9 +2,10 @@
 set -euo pipefail
 
 DOCS_DIR="${1:-/Users/bill/Desktop/SkyBridge Compass Pro release/Docs}"
-MAIN="IEEE_Paper_SkyBridge_Compass_patched.tex"
+MAIN="TDSC-2026-01-0318_IEEE_Paper_SkyBridge_Compass_patched.tex"
 SUPP="TDSC-2026-01-0318_supplementary.tex"
 SUPP_LOG="TDSC-2026-01-0318_supplementary.log"
+MAIN_LOG="TDSC-2026-01-0318_IEEE_Paper_SkyBridge_Compass_patched.log"
 
 cd "$DOCS_DIR"
 
@@ -19,7 +20,7 @@ latexmk -g -pdf -interaction=nonstopmode -halt-on-error "$MAIN" >/tmp/skybridge_
 
 echo "== scan logs for desk-reject risks (errors/undefined refs/overfull) =="
 fail=0
-for log in "IEEE_Paper_SkyBridge_Compass_patched.log" "$SUPP_LOG"; do
+for log in "$MAIN_LOG" "$SUPP_LOG"; do
   echo "-- $log --"
   if rg -n "! LaTeX Error|Undefined control sequence|There were undefined references|LaTeX Warning: Reference" "$log"; then
     fail=1
@@ -31,7 +32,7 @@ for log in "IEEE_Paper_SkyBridge_Compass_patched.log" "$SUPP_LOG"; do
 done
 
 echo "== outputs =="
-ls -lh IEEE_Paper_SkyBridge_Compass_patched.pdf TDSC-2026-01-0318_supplementary.pdf
+ls -lh TDSC-2026-01-0318_IEEE_Paper_SkyBridge_Compass_patched.pdf TDSC-2026-01-0318_supplementary.pdf
 
 if [[ "$fail" -ne 0 ]]; then
   echo "AUDIT_FAIL"
@@ -39,5 +40,4 @@ if [[ "$fail" -ne 0 ]]; then
 fi
 
 echo "AUDIT_OK"
-
 
