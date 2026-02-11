@@ -66,7 +66,7 @@ swift test
 
 ## 论文与 PDF 源码位置
 
-- 主论文 LaTeX：`Docs/IEEE_Paper_SkyBridge_Compass_patched.tex`
+- 主论文 LaTeX（投稿版本）：`Docs/TDSC-2026-01-0318_IEEE_Paper_SkyBridge_Compass_patched.tex`
 - Supplementary LaTeX（投稿版本）：`Docs/TDSC-2026-01-0318_supplementary.tex`
 - 一键编译脚本：`./compile_paper.sh`（会自动生成 figures + 编译主论文和 Supplementary）
 
