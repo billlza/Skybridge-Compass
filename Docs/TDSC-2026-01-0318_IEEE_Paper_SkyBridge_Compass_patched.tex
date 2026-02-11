@@ -43,9 +43,9 @@
     pdfkeywords={},
     pdfsubject={}
 }
-\usepackage{xr-hyper}
+\usepackage{xr}
 % Allow main paper to reference Supplementary Table/Figure numbers via \ref{}.
-% Build TDSC-2026-01-0318_supplementary.tex at least once so its .aux exists.
+% Build TDSC supplementary once so TDSC supplementary .aux exists.
 \makeatletter
 \IfFileExists{TDSC-2026-01-0318_supplementary.aux}{\externaldocument{TDSC-2026-01-0318_supplementary}}{}
 \makeatother
@@ -132,18 +132,19 @@
 
 \newcommand{\artifacturl}{https://github.com/billlza/Skybridge-Compass}
 \newcommand{\artifacturlshort}{https://github.com/billlza/Skybridge-Compass}
-\newcommand{\artifacttag}{tdsc-2026-01-0318}
-\newcommand{\artifactsha}{805c83a85d22}
-\newcommand{\artifactshafull}{805c83a85d2279c3913745fdbabf4157ed3e332c}
-\newcommand{\artifactzipurl}{\artifacturl/archive/refs/tags/\artifacttag.zip}
-\newcommand{\artifactzipsha}{c777f428\allowbreak\hspace{0pt}672cec69\allowbreak\hspace{0pt}9fcf905c\allowbreak\hspace{0pt}2e9902d8\allowbreak\hspace{0pt}ce458e8d\allowbreak\hspace{0pt}454d852d\allowbreak\hspace{0pt}4fe05780\allowbreak\hspace{0pt}38d97d2c}
-\newcommand{\artifacttarurl}{\artifacturl/archive/refs/tags/\artifacttag.tar.gz}
-\newcommand{\artifacttarsha}{0ab8b649\allowbreak\hspace{0pt}c937ca53\allowbreak\hspace{0pt}2d37764e\allowbreak\hspace{0pt}bbdc07b6\allowbreak\hspace{0pt}92cfd738\allowbreak\hspace{0pt}d649cfea\allowbreak\hspace{0pt}d80f87d4\allowbreak\hspace{0pt}985f7d61}
+\newcommand{\artifacttag}{tdsc-2026-01-0318-ios-sim-fix-\allowbreak\hspace{0pt}20260211}
+\newcommand{\artifactsha}{b16fe9386ff0}
+\newcommand{\artifactshafull}{b16fe9386ff047d17ba9a518b2c331f64493971e}
+\newcommand{\artifactzipurl}{\artifacturl/archive/\artifactshafull.zip}
+\newcommand{\artifactzipsha}{460813da\allowbreak\hspace{0pt}9ade5b79\allowbreak\hspace{0pt}b333c94a\allowbreak\hspace{0pt}1b76e14e\allowbreak\hspace{0pt}6b522f63\allowbreak\hspace{0pt}0be1a6f0\allowbreak\hspace{0pt}decb9845\allowbreak\hspace{0pt}def3f258}
+\newcommand{\artifacttarurl}{\artifacturl/archive/\artifactshafull.tar.gz}
+\newcommand{\artifacttarsha}{443b8ac9\allowbreak\hspace{0pt}0ffe42f7\allowbreak\hspace{0pt}57d65f1d\allowbreak\hspace{0pt}79cd3d18\allowbreak\hspace{0pt}3b7d7ce5\allowbreak\hspace{0pt}02dd8bcd\allowbreak\hspace{0pt}31cdb016\allowbreak\hspace{0pt}1016f380}
 \newcommand{\artifactdate}{2026-01-23}
+\newcommand{\artifactdateXWing}{2026-01-16}
 \newcommand{\artifactdateSystemImpact}{2026-01-23}
 \newcommand{\artifactcsv}[1]{\texttt{#1\_\artifactdate.csv}}
 \newcommand{\artifactpath}[1]{\texttt{Artifacts/#1\_\artifactdate.csv}}
-\newcommand{\implref}[2]{Implementation reference: \href{\artifacturl}{\artifacturlshort} (tag=\texttt{\artifacttag}, commit=\texttt{\artifactsha}), file: \texttt{#1}, lines: #2.}
+\newcommand{\implref}[2]{Implementation reference: \href{\artifacturl}{\artifacturlshort} (ref=\texttt{\artifacttag}, commit=\texttt{\artifactsha}), file: \texttt{#1}, lines: #2.}
 
 
 \title{SkyBridge Compass: A Crypto-Agile P2P Handshake Framework for Remote Desktop and File Transfer with Auditable Downgrade Policy and Post-Quantum Readiness}
@@ -230,46 +231,46 @@ structured evidence when (and only when) downgrade occurs. We complement
 this design with an actor-isolated handshake driver that enforces
 one-shot completion, timeouts, and sensitive-material zeroization,
 yielding deterministic outcomes under the modeled transport faults.
+Operationally, the strict policy now has two explicit realizations:
+\emph{Compliance Mode} (no classic path at all) and
+\emph{Bootstrap-Assisted Mode} (one-time classic control channel only to
+refresh paired KEM identity keys, followed by mandatory PQC rekey before
+business traffic is released).
 
-\textbf{Security Guarantees (Checklist).}
+\textbf{Verifiable Security Guarantees.}
 To reduce ambiguity in reviewer-facing claims, we state the v1 guarantees
-as a checklist of \emph{verifiable} properties under the threat model in
-Section~\ref{sec:security-model}:
+as a small set of \emph{verifiable} properties under the threat model in
+Section~\ref{sec:security-model}; the Supplementary Materials provide
+additional guarantees and artifact-level evidence pointers.
 {\small
 \begin{itemize}\tightlist
 \item \textbf{Negotiation integrity:} the Responder selects only a suite
   offered by the Initiator and with a matching key share; unknown suite
   IDs are rejected if they appear in \nbcode{keyShares[]} or as
   \texttt{selectedSuite}. \textit{Evidence:} Fig.~\ref{fig:handshake-sequence};
-  Table~\ref{tab:security-contract};
-  \texttt{Handshake\allowbreak\hspace{0pt}Driver\allowbreak\hspace{0pt}Tests}.
+  Table~\ref{tab:security-contract}.
 \item \textbf{Transcript binding:} \texttt{sigB} commits to MessageA and
   the chosen suite (and policy), so any tampering of
   \nbcode{supportedSuites[]}, \nbcode{keyShares[]}, or \texttt{policy}
-  fails verification. \textit{Evidence:} Table~\ref{tab:security-contract};
-  \texttt{Transcript\allowbreak\hspace{0pt}Integrity\allowbreak\hspace{0pt}PropertyTests};
-  \texttt{Protocol\allowbreak\hspace{0pt}Signature\allowbreak\hspace{0pt}RegressionTests}.
-\item \textbf{Downgrade resistance (policy-defined):} \texttt{strictPQC}
-  forbids all fallback; the default policy permits fallback only for a
-  local-only whitelist of capability/provider failures (timeouts and
-  unauthenticated network failures cannot trigger fallback).
+  fails verification. \textit{Evidence:} Table~\ref{tab:security-contract}.
+\item \textbf{Downgrade resistance and auditability (policy-defined):} strict policy is
+  explicit and auditable in two forms: \emph{Compliance Mode} forbids
+  classic establishment entirely; \emph{Bootstrap-Assisted Mode} permits
+  a one-time classic control channel only for paired KEM-key recovery
+  and requires PQC rekey before business traffic. The default policy
+  permits classic fallback only for a local-only whitelist of
+  capability/provider failures (timeouts and unauthenticated
+  network-derived failures cannot trigger default-mode fallback).
+  Every fallback emits a structured \texttt{cryptoDowngrade} event.
   \textit{Evidence:} Fig.~\ref{fig:policy-downgrade}; Fig.~\ref{fig:downgrade-matrix};
-  \texttt{Policy\allowbreak\hspace{0pt}Downgrade\allowbreak\hspace{0pt}BenchTests};
-  Table~\ref{tab:legacy-fallback-preconditions}.
-\item \textbf{Explicit key confirmation:} two Finished frames provide
-  mutual confirmation, preventing half-open sessions (Fig.~\ref{fig:handshake-sequence}).
-  \textit{Evidence:} Table~\ref{tab:failure-mode-robustness};
-  \texttt{Handshake\allowbreak\hspace{0pt}Fault\allowbreak\hspace{0pt}Injection\allowbreak\hspace{0pt}BenchTests}.
-\item \textbf{Auditability of migration decisions:} every fallback emits
-  a structured \texttt{cryptoDowngrade} event with a minimal evidence
-  tuple (Section~\ref{sec:security-model}), enabling post-hoc verification
-  and detection (e.g., Fig.~\ref{fig:event-traces}). \textit{Evidence:}
-  Fig.~\ref{fig:event-traces}; Table~\ref{tab:security-contract}.
-\item \textbf{Non-claims (scope control):} v1 does \emph{not} claim PQC
-  PFS for KEM-to-static-recipient suites, nor tamper-evident audit logs;
-  see Section~\ref{sec:limitations}.
+  Table~\ref{tab:legacy-fallback-preconditions};
+  Fig.~\ref{fig:event-traces}.
 \end{itemize}
 }
+
+We additionally provide explicit key confirmation via two Finished
+frames (Fig.~\ref{fig:handshake-sequence}) and document v1 non-claims and
+limitations in Section~\ref{sec:limitations}.
 
 \subsection{Contributions}\label{a.-contributions}
 
@@ -279,7 +280,9 @@ Contributions:
 \item
   We turn PQC migration from a narrative into an enforceable contract by
   making downgrade and \mbox{legacy-compatibility} decisions explicit,
-  testable, and auditable rather than implicit ``best-effort'' fallback.
+  testable, and auditable rather than implicit ``best-effort'' fallback,
+  including strict-policy separation into Compliance vs
+  Bootstrap-Assisted realizations.
   \textit{Evidence:} Fig.~\ref{fig:downgrade-matrix}; Table~\ref{tab:security-contract};
   \\
   \texttt{PolicyDowngradeBenchTests},\\
@@ -379,7 +382,7 @@ PQC standardization and early deployments highlight size and performance
 costs, along with pressure for hybrid deployments \cite{ref8}, \cite{ref9},
 \cite{ref10}, \cite{ref22}, \cite{ref23}, \cite{ref24}, \cite{ref25}. We
 focus on making downgrade policy and auditability explicit across
-providers, treating Apple's CryptoKit PQC \cite{ref34} as a deployment
+providers, treating Apple's CryptoKit PQC \cite{ref1,ref34} as a deployment
 instance rather than a protocol dependency.
 
 \subsection{Secure State Machine
@@ -424,6 +427,14 @@ SkyBridge Compass & Yes (suite + policy bound) & Yes (explicit policy + events) 
 \bottomrule\noalign{}
 \end{tabular}
 \end{table*}
+
+BaselineBenchRunner measures \emph{time-to-ready} (NWConnection.ready) for
+fresh loopback connections; each sample creates a new connection and
+records the elapsed time from connect start to ready. We report N=1000
+after 10 warmup iterations (warm cache); 0-RTT/session resumption is not
+explicitly enabled and results reflect Network.framework defaults. QUIC
+measurements use ALPN \texttt{sbq} with a single bidirectional stream,
+and no application data is sent (\texttt{BASELINE\_KICKOFF\_BYTES=0}).
 
 Loopback SkyBridge p95 latency is 1.57/\allowbreak 2.76/\allowbreak 7.53~ms for
 classic/\allowbreak liboqs/\allowbreak CryptoKit in our loopback harness; these
@@ -486,15 +497,26 @@ following \textbf{capability set}:
   \textbf{Replay control:} \texttt{handshakeId} is derived from nonces
   and cached to reject duplicates within a window.
 \item
-  \textbf{Downgrade resistance:} timeout-triggered fallback is
-  disallowed; only whitelisted errors may fallback under default policy;
-  strictPQC forbids all fallback.
+  \textbf{Downgrade resistance:} timeout-triggered \emph{default-mode}
+  fallback is disallowed; only whitelisted local capability errors may
+  fallback under default policy. Strict policy offers either Compliance
+  Mode (no classic establishment) or Bootstrap-Assisted Mode (classic
+  control-only bootstrap with mandatory PQC rekey before business data).
 \item
   \textbf{Rate limiting:} per-peer fallback cooldown prevents rapid
   downgrade cycling.
 \item
   \textbf{Legacy gating:} legacy P-256 acceptance requires an
   authenticated channel or an existing trust record.
+\end{itemize}
+
+\textbf{Out-of-Scope (Baseline Claims):}
+\begin{itemize}\tightlist
+\item
+  \textbf{Traffic analysis} from size/timing metadata is not assumed in
+  the baseline threat model. SBP2 is an optional mitigation evaluated
+  separately in Section~\ref{sec:evaluation}, and its overhead/privacy
+  tradeoffs are reported without changing the core security claims.
 \end{itemize}
 
 \textbf{Trust Assumptions:}
@@ -548,10 +570,14 @@ exists, preventing negotiation mismatch. Under the two-attempt strategy
 PQC and classic are not co-offered in a single \texttt{MessageA}; when
 fallback is permitted, the Initiator retries with a classic-only
 \texttt{MessageA} after a whitelist of locally generated capability and
-negotiation failures. Explicit key confirmation uses two small Finished
-frames to avoid half-open state. Full wire-format definitions, field
-validation rules, and encoding rationale appear in the Supplementary
-Materials (Wire Format and Validation Rules).
+negotiation failures. Under strict policy, an optional
+Bootstrap-Assisted recovery path may transiently establish a
+classic-only control channel to refresh paired KEM identity keys, but
+business traffic remains gated until a successful PQC rekey. Explicit
+key confirmation uses two small Finished frames to avoid half-open
+state. Full wire-format definitions, field validation rules, and
+encoding rationale appear in the Supplementary Materials (Wire Format
+and Validation Rules).
 
 \begin{table*}[!t]
 \centering
@@ -575,6 +601,7 @@ Notes
 \midrule
 Attempt 1: PQC-only & PQC available & PQC established & Best available selected \\
 Attempt 1: PQC-only; Attempt 2: classic-only & Classic only (no PQC material) & Classic established & Graceful fallback (evented) \\
+PQC-only (\texttt{strictPQC}, bootstrap-assisted) & Missing/stale paired KEM key & PQC established after rekey & Classic channel is control-only before rekey \\
 PQC-only (\texttt{strictPQC}) & Classic only & Handshake failed & Policy enforced (no fallback) \\
 Classic-only & PQC available & Classic established & Initiator policy respected \\
 \bottomrule
@@ -648,6 +675,15 @@ Classic-only & PQC available & Classic established & Initiator policy respected 
 boundary (dashed) and policy guard (diamond).}
 \label{fig:architecture}
 \end{figure*}
+
+\textbf{Implementation alignment (GitHub HEAD, 2026-02-08).} In the
+current code revision, connection orchestration for the remote
+desktop/file-transfer path is route-aware and authentication-gated:
+local discovery can prefer USB-capable host endpoints, control-channel
+connections are promoted to ``connected'' only after handshake
+authentication, and active file-transfer routing prioritizes live
+authenticated sessions before fallback candidates. These implementation
+surfaces are enumerated in the Supplementary Artifact Map.
 
 \subsection{CryptoProvider
 Protocol}\label{b.-cryptoprovider-protocol}
@@ -723,7 +759,10 @@ We use two orthogonal knobs: provider selection
 (\texttt{preferPQC}/\texttt{requirePQC}) and handshake fallback policy
 (\texttt{default}/\texttt{strictPQC}). In our evaluation, \texttt{default}
 corresponds to prefer-PQC with evented classic fallback permitted, while
-\texttt{strictPQC} corresponds to requiring PQC and forbidding fallback.
+\texttt{strictPQC} corresponds to requiring PQC with either (i)
+Compliance Mode (no classic establishment) or (ii)
+Bootstrap-Assisted Mode (control-only bootstrap plus mandatory PQC
+rekey).
 
 \subsection{KEM-DEM Authenticated Encryption
 Format}\label{e.-kem-dem-authenticated-encryption-format}
@@ -821,7 +860,8 @@ Fig.~\ref{fig:state-machines} illustrates the handshake state machine for both r
   \coordinate (i_mid) at ($(i_est)!0.5!(i_fail)$);
   \node[policy, below=8mm of i_mid] {
     Policy calls on failure edges:\\
-    strictPQC: deny downgrade; emit security event.\\
+    strictPQC (compliance): deny classic establish; emit security event.\\
+    strictPQC (bootstrap-assisted): control-only bootstrap + PQC rekey.\\
     default: follow whitelist/blacklist and cooldown.\\
     all policies: record audit signal and counters.
   };
@@ -854,7 +894,8 @@ Fig.~\ref{fig:state-machines} illustrates the handshake state machine for both r
   \coordinate (r_mid) at ($(r_est)!0.5!(r_fail)$);
   \node[policy, below=8mm of r_mid] {
     Policy calls on failure edges:\\
-    strictPQC: deny downgrade; emit security event.\\
+    strictPQC (compliance): deny classic establish; emit security event.\\
+    strictPQC (bootstrap-assisted): control-only bootstrap + PQC rekey.\\
     default: follow whitelist/blacklist and cooldown.\\
     all policies: record audit signal and counters.
   };
@@ -970,9 +1011,10 @@ Sketches}\label{b.-security-goals-and-proof-sketches}
 
 \textbf{Definitions.}
 \begin{itemize}\tightlist
-\item \textbf{D1 (Forced downgrade / forced fallback).} A downgrade occurs if a session is established with a classic suite when policy requires PQC (\texttt{strictPQC}), or if classic fallback is accepted under the default policy without satisfying the local-only fallback gate (Definition D2) and without emitting the corresponding audit event (Property G8).
-\item \textbf{D2 (Local-only fallback gate).} Fallback is permitted only after (i) the peer identity is verified against the pinned key (paired peers) and (ii) the triggering failure is locally generated capability/instantiation unavailability (whitelist), excluding timeout and any unauthenticated network-derived failure.
+\item \textbf{D1 (Forced downgrade / forced fallback).} A downgrade occurs if a business-capable session is established with a classic suite when strict policy requires PQC, or if classic fallback is accepted under the default policy without satisfying the local-only fallback gate (Definition D2) and without emitting the corresponding audit event (Property G8).
+\item \textbf{D2 (Local-only fallback gate, default policy).} Fallback is permitted only after (i) the peer identity is verified against the pinned key (paired peers) and (ii) the triggering failure is locally generated capability/instantiation unavailability (whitelist), excluding timeout and any unauthenticated network-derived failure.
 \item \textbf{D3 (Audit evidence).} The minimal sufficient evidence set is the tuple \{event type, timestamp, deviceId, suiteId, failure reason code, policy mode, fallback flag, cooldown remaining\} (Property G8).
+\item \textbf{D4 (Bootstrap-Assisted strict recovery gate).} In strict policy, a temporary classic control channel is allowed only for paired KEM-key recovery triggers (\texttt{missingKEM}, \texttt{staleKEMRecovery}); non-control business messages are blocked until PQC rekey succeeds.
 \end{itemize}
 
 We state the core properties as invariants and provide proof sketches
@@ -1034,12 +1076,18 @@ establish a session.\\
 suite identifiers; replay detection caches recent IDs and rejects
 duplicates within the window.
 
-\textbf{Property G5 (Downgrade Resistance under strictPQC):} No fallback
-to classic is allowed under strict policy.\\
+\textbf{Property G5 (Strict-Policy Consistency):} Strict policy never
+permits a business-capable classic session. Compliance Mode has no
+classic path. Bootstrap-Assisted Mode may use a transient classic
+control channel, but business traffic is blocked until PQC rekey
+completes.\\
 \emph{Proof sketch:} \texttt{TwoAttemptHandshakeManager} enforces a
-policy gate before any fallback attempt; strictPQC forbids all fallback
-edges regardless of error type. This is validated by policy downgrade
-benchmarks (Fig.~\ref{fig:policy-downgrade}).
+policy gate before any default-mode fallback attempt; strict compliance
+forbids classic establishment edges. For strict recovery, bootstrap is
+trigger-limited, emits explicit \texttt{handshake\_fallback} events, and
+enforces control-only messaging until PQC rekey succeeds. This is
+validated by policy downgrade benchmarks
+(Fig.~\ref{fig:policy-downgrade}) and bootstrap control-gating tests.
 
 \textbf{Property G6 (Safe Fallback under default policy):} Fallback can
 only occur after peer identity is verified under the pinned key and only
@@ -1093,7 +1141,7 @@ G1 Negotiation integrity & Suite/keyshare validation + transcript-bound \texttt{
 G2 Mutual authentication & Identity pinning + signature verification & Table~\ref{tab:failure-mode-robustness} (wrong signature), Table~\ref{tab:legacy-fallback-preconditions} \\
 G3 Session key secrecy & KEM/DH + HKDF with transcript-bound salt & Property 1, Supplementary Materials (ML-DSA Key Sizes) \\
 G4 Replay resistance & \texttt{handshakeId} cache + nonce binding & Property-Oriented Testing (Section~\ref{sec:evaluation}) \\
-G5 strictPQC no-downgrade & Policy gate in TwoAttemptHandshakeManager & Fig.~\ref{fig:policy-downgrade}, \mbox{PolicyDowngradeBenchTests} \\
+G5 Strict-policy consistency & TwoAttempt policy gate + bootstrap control-only gate + mandatory rekey to PQC & Fig.~\ref{fig:policy-downgrade}, \mbox{PolicyDowngradeBenchTests}, \mbox{BootstrapAssuranceTests} \\
 G6 Default safe fallback & Whitelist/blacklist + local capability gate + cooldown & Fig.~\ref{fig:downgrade-matrix}, Table~\ref{tab:failure-mode-robustness} \\
 G7 Legacy acceptance precondition & LegacyTrustPrecondition & Table~\ref{tab:legacy-fallback-preconditions} \\
 G8 Auditability & Security event emission & Fig.~\ref{fig:failure-histogram}, Table~\ref{tab:audit-signal-fidelity} \\
@@ -1120,7 +1168,7 @@ Materials (Platform Support Matrix).
 
 \subsection{Native PQC Integration}\label{b.-apple-pqc-integration}
 
-The native provider wraps CryptoKit ML-KEM/ML-DSA APIs \cite{ref1} when the
+The native provider wraps CryptoKit ML-KEM/ML-DSA APIs \cite{ref1,ref34} when the
 SDK exposes them, enabling platform-backed PQC suites and HPKE-based
 encapsulation. We treat this as a deployment instance rather than a
 protocol dependency; integration details are provided in the
@@ -1176,26 +1224,36 @@ failures never trigger fallback. This policy is enforced by the
 handshake manager and logged as security events. Detailed error lists
 and type-level enforcement are provided in the Supplementary Materials
 (Two-Attempt Strategy).
+For strict policy deployments, we expose two operator-selectable modes:
+\emph{Compliance Mode} (hard fail when PQC cannot be established) and
+\emph{Bootstrap-Assisted Mode} (allow one temporary classic control
+channel only for paired KEM-key recovery, then require PQC rekey before
+business traffic).
 
 \textbf{Fallback Boundary Conditions (Explicit Scope):}
 \begin{itemize}\tightlist
 \item \emph{We defend against:} (1) Attacker-induced timeout forcing downgrade (blocked by timeout blacklist); (2) Rapid downgrade cycling via repeated failures (5-minute per-peer cooldown); (3) Signature/identity attacks masquerading as capability failures (verification failures are blacklisted).
-\item \emph{We do not defend against:} (1) Attacker persistently blocking PQC traffic for $>$5 minutes (availability vs.\ security trade-off; strictPQC mode provides full protection at cost of connectivity); (2) Legitimate PQC provider failures causing temporary classic fallback (by design, to maintain usability).
-\item \emph{Cooldown rationale:} We set a conservative default of 5 minutes to bound downgrade cycling while limiting availability impact; the cooldown is a tunable policy knob, and strictPQC users requiring zero-downgrade guarantees should disable fallback entirely.
+\item \emph{We do not defend against:} (1) Attacker persistently blocking PQC traffic for $>$5 minutes under default mode (availability vs.\ security trade-off; strict compliance mode provides full protection at cost of connectivity); (2) Legitimate PQC provider failures causing temporary classic fallback under default mode.
+\item \emph{Cooldown rationale:} We set a conservative default of 5 minutes to bound downgrade cycling while limiting availability impact; the cooldown is a tunable policy knob. Operators requiring zero classic establishment can select strict Compliance Mode.
 \end{itemize}
 
 \textbf{Attempt State and Identifiability:}
 \begin{itemize}\tightlist
 \item \emph{Shared across attempts:} pinned identity fingerprint and pinned KEM public keys (trust record), and per-peer fallback cooldown state.
 \item \emph{Not shared across attempts:} nonces, transcript hashes, handshakeId/replay tags, ephemeral key shares, and session keys; each attempt runs a fresh state machine.
-\item \emph{Identifiability:} a passive observer can distinguish a classic fallback attempt from a PQC attempt by wire format. We do not transmit an explicit attempt counter, and strictPQC disables fallback when capability privacy outweighs compatibility.
+\item \emph{Identifiability:} a passive observer can distinguish a classic fallback attempt from a PQC attempt by wire format. We do not transmit an explicit attempt counter; strict Compliance Mode removes classic attempts entirely when capability privacy outweighs compatibility.
 \end{itemize}
 
 \textbf{Security Events:}
 
-Every fallback emits a \texttt{cryptoDowngrade} event with full
+Default-policy classic fallback emits \texttt{cryptoDowngrade} with full
 context (reason, deviceId, cooldown), enabling audit and anomaly
-detection.
+detection. Strict Bootstrap-Assisted recovery emits
+\texttt{handshake\_fallback} events with mode
+\texttt{bootstrap\_assisted}
+and trigger/result fields, so reviewers can distinguish ``strict
+compliance fail-closed'' from ``strict recovery with mandatory PQC
+rekey'' traces.
 
 
 
@@ -1209,7 +1267,7 @@ suppression, legacy precondition enforcement, and auditability) and
 \textbf{cost-centric evidence} (handshake latency, wire overhead,
 provider selection overhead, and data-plane throughput).
 
-\textbf{Environment:} All experiments are run on Apple Silicon (M1/M3 class) with macOS 26.x, where CryptoKit PQC is available when the SDK exposes ML-KEM/ML-DSA types. Build configuration uses Release (\texttt{-O}) with non-essential logging disabled. Timing uses a monotonic clock (\texttt{ContinuousClock}) with N=1000 iterations after 10 warmup runs; reported percentiles (p50/p95/p99) are computed directly from samples.
+\textbf{Environment:} All experiments are run on Apple Silicon (M1/M3 class) with macOS 26.x, where CryptoKit PQC is available when the SDK exposes ML-KEM/ML-DSA types \cite{ref1,ref34}. Build configuration uses Release (\texttt{-O}) with non-essential logging disabled. Timing uses a monotonic clock (\texttt{ContinuousClock}) with N=1000 iterations after 10 warmup runs; reported percentiles (p50/p95/p99) are computed directly from samples.
 
 \textbf{Repeatability:} We support multi-batch repeatability by
 restarting the benchmark test process for each batch. Supplementary
@@ -1270,7 +1328,7 @@ downgrade guarantees.
 \centering
 \caption{Failure-Mode Robustness and Observability. Runs = number of
 iterations per scenario and policy (n=1000). Table reports default
-policy; strictPQC counts are recorded separately in
+policy; strictPQC (Compliance Mode) counts are recorded separately in
 \texttt{fault\_injection\_\artifactdate.csv}. All
 metrics are binary (1 = pass) except event counts. Data from
 \texttt{Artifacts/fault\_injection\_\artifactdate.csv}
@@ -1328,14 +1386,14 @@ scenarios.
 \begin{figure}
 \centering
 \pandocbounded{\includegraphics[keepaspectratio,width=\columnwidth]{figures/fig_policy_downgrade.pdf}}
-\caption{Policy guard enforces strictPQC: fallback events per
+\caption{Policy guard enforces strictPQC Compliance Mode: fallback events per
 1000 runs, macOS 26.x, N=1000 per policy. Error bars show 95\% Wilson binomial CI.}
 \label{fig:policy-downgrade}
 \end{figure}
 
 The plot in Fig.~\ref{fig:policy-downgrade} uses the policy-downgrade
 dataset. File: \texttt{policy\_downgrade\_\artifactdate.csv}. It
-demonstrates that strictPQC never emits fallback events even under
+demonstrates that strictPQC Compliance Mode never emits fallback events even under
 forced PQC-unavailable errors; default policy shows non-zero downgrade
 events.
 
@@ -1349,7 +1407,9 @@ explicit allow/deny semantics, macOS 26.x. Each cell is labeled ALLOW or DENY fo
 
 Fig.~\ref{fig:downgrade-matrix} encodes the explicit downgrade whitelist/blacklist: only
 PQC-unavailability and suite-selection errors may fallback under default
-policy; strictPQC denies all fallback edges.
+policy; strictPQC Compliance Mode denies classic fallback edges
+(Bootstrap-Assisted strict recovery is a separate control-only path with
+mandatory PQC rekey).
 
 \begin{figure}
 \centering
@@ -1482,7 +1542,7 @@ identity fields, framing overhead) for MessageA/MessageB across Classic and PQC 
 \label{fig:message-size-breakdown}
 \end{figure}
 
-Note: X-Wing hybrid KEM adds 32~B to MessageA's keyshare (1120~B vs 1088~B for ML-KEM-768), yielding a measured total handshake size of 12,195~B; detailed field breakdowns are available in Supplementary Table~\ref{tab:supp-message-sizes} (\texttt{MessageA.XWing}/\texttt{MessageB.XWing}).
+Note: X-Wing hybrid KEM adds 32~B to MessageA's keyshare (1120~B vs 1088~B for ML-KEM-768). Measured handshake sizes are reported in Supplementary Table~\ref{tab:supp-message-sizes} (\texttt{MessageA.XWing}/\texttt{MessageB.XWing}).
 
 \textbf{Data-Plane and Provider Selection.}
 Post-handshake symmetric AEAD (AES-256-GCM) throughput reaches 3.7~GB/s for 1~MiB payloads on Apple Silicon, with CPU cost of 0.25~ns/byte. In v1 the data-plane AEAD is fixed to AES-256-GCM and recorded separately from the handshake suite; thus throughput is independent of the negotiated KEM/signature suite. Provider selection overhead is sub-microsecond for cached paths (0.17~$\mu$s p50) and under 6~$\mu$s even for fallback scenarios. Detailed breakdowns are provided in the artifact CSV files.
@@ -1590,7 +1650,7 @@ reorder (10\% reorder, 50 ms, $\pm$20 ms) & 1.0000 & 368--370 & 0 \\
 \item
   \textbf{iOS PQC Availability (iOS < 26):} We do not currently bundle
   liboqs for iOS; therefore PQC suites are only available on iOS 26+
-  devices via CryptoKit PQC. To support reproducible mobile evaluation,
+  devices via CryptoKit PQC \cite{ref34}. To support reproducible mobile evaluation,
   we ship an \emph{on-device} self-test and micro-benchmark harness in the
   iOS app (Settings $\rightarrow$ PQC $\rightarrow$ ``Self-test/Bench''),
   which exports JSON artifacts for inclusion in Supplementary tables.
@@ -1644,8 +1704,8 @@ reorder (10\% reorder, 50 ms, $\pm$20 ms) & 1.0000 & 368--370 & 0 \\
 \item
   \textbf{Traffic Analysis Mitigations:} Reduce two-attempt
   identifiability via optional padding or constant-size framing, while
-  preserving strictPQC semantics for deployments that require
-  zero-downgrade behavior.
+  preserving strict Compliance-Mode semantics for deployments that
+  require zero classic establishment.
 \item
   \textbf{Real-Network End-to-End Evaluation:} Measure handshake
   distributions across diverse access networks (same Wi-Fi, different NAT
@@ -1683,17 +1743,13 @@ structured security event model is designed to make cryptographic
 decisions auditable, supporting both real-time monitoring and
 post-incident analysis.
 
-% === Column balancing for References (IEEEtran-recommended) ===
-% Tune the trigger index if the last page still shows significant imbalance.
-% 39 total references in this draft; start near the midpoint.
-\IEEEtriggeratref{20}
-\IEEEtriggercmd{\enlargethispage{-5in}}
-
 SkyBridge Compass prioritizes deterministic semantics and auditability in
 cryptographic migration. The default policy favors availability and
 explicit, observable downgrade signals, at the cost of attempt
-identifiability on the wire; strictPQC disables fallback for deployments
-that require zero-downgrade behavior and stronger capability privacy.
+identifiability on the wire. Strict policy is now explicit in two
+operator-facing forms: Compliance Mode (fail closed, no classic
+establishment) and Bootstrap-Assisted Mode (recover paired KEM state via
+control-only bootstrap, then rekey to PQC before business traffic).
 
 As post-quantum cryptography transitions from standardization to
 deployment, systems like SkyBridge Compass provide a practical template
@@ -1719,17 +1775,22 @@ This work received no external funding.
 Artifact release:
 \begin{itemize}
 \item URL: \url{\artifacturl}
-\item Tag: \texttt{\artifacttag}
+\item Git ref: \texttt{\artifacttag}
 \item Commit: \texttt{\artifactsha}
-\item Source archive: \href{\artifactzipurl}{\texttt{\artifacttag.zip}}
+\item Source archive: \href{\artifactzipurl}{\texttt{\artifactsha.zip}}
   \par\noindent SHA256=\texttt{\artifactzipsha}
-\item Source archive: \href{\artifacttarurl}{\texttt{\artifacttag.tar.gz}}
+\item Source archive: \href{\artifacttarurl}{\texttt{\artifactsha.tar.gz}}
   \par\noindent SHA256=\texttt{\artifacttarsha}
 \end{itemize}
-See \texttt{Docs/README\_SUBMISSION\_TDSC-2026-01-0318.md} for tag-pinned environment details and CSV schemas.
+See the repository README for environment details and CSV schemas.
 
 \section*{Conflict of Interest}
 The author declares no competing interests.
+
+% === Column balancing for References (IEEEtran-recommended) ===
+% Tuned to avoid an almost-empty trailing references page.
+\IEEEtriggeratref{39}
+\IEEEtriggercmd{\enlargethispage{0.3in}}
 
 \begin{thebibliography}{99}
 \bibitem{ref2} Bluetooth SIG, ``Bluetooth Core Specification v5.4,'' 2023.
@@ -1762,7 +1823,7 @@ The author declares no competing interests.
 
 \bibitem{ref25} L. Ducas et al., ``CRYSTALS---Dilithium: A Lattice-Based Digital Signature Scheme,'' IACR Trans. CHES, vol.~2018, no.~1, pp.~238--268.
 
-\bibitem{ref34} Apple Inc., ``Apple Platform Security,'' Apple Security Guide, May 2024. {[}Online{]}. Available: \url{https://support.apple.com/guide/security/}
+\bibitem{ref34} Apple Inc., ``Quantum-secure cryptography in Apple operating systems,'' Apple Platform Security, Jan.~2026. {[}Online{]}. Available: \url{https://support.apple.com/guide/security/quantum-secure-cryptography-apple-devices-secc7c82e533/web}. Accessed: Feb.~2026.
 
 \bibitem{ref11} D. Beyer et al., ``Software Model Checking,'' in Handbook of Model Checking, Springer, 2018.
 
