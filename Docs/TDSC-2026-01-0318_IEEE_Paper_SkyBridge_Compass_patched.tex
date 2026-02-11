@@ -140,6 +140,7 @@
 \newcommand{\artifacttarurl}{\artifacturl/archive/\artifactshafull.tar.gz}
 \newcommand{\artifacttarsha}{ce84fe61\allowbreak\hspace{0pt}7b7ad6ec\allowbreak\hspace{0pt}76be3188\allowbreak\hspace{0pt}0d8b2b90\allowbreak\hspace{0pt}17d8c673\allowbreak\hspace{0pt}282f9f55\allowbreak\hspace{0pt}c4968ab7\allowbreak\hspace{0pt}e1b917e0}
 \newcommand{\artifactdate}{2026-01-23}
+\newcommand{\artifactdateXWing}{2026-01-16}
 \newcommand{\artifactdateSystemImpact}{2026-01-23}
 \newcommand{\artifactcsv}[1]{\texttt{#1\_\artifactdate.csv}}
 \newcommand{\artifactpath}[1]{\texttt{Artifacts/#1\_\artifactdate.csv}}
@@ -390,7 +391,7 @@ PQC standardization and early deployments highlight size and performance
 costs, along with pressure for hybrid deployments \cite{ref8}, \cite{ref9},
 \cite{ref10}, \cite{ref22}, \cite{ref23}, \cite{ref24}, \cite{ref25}. We
 focus on making downgrade policy and auditability explicit across
-providers, treating Apple's CryptoKit PQC \cite{ref34} as a deployment
+providers, treating Apple's CryptoKit PQC \cite{ref1} as a deployment
 instance rather than a protocol dependency.
 
 \subsection{Secure State Machine
@@ -435,6 +436,14 @@ SkyBridge Compass & Yes (suite + policy bound) & Yes (explicit policy + events) 
 \bottomrule\noalign{}
 \end{tabular}
 \end{table*}
+
+BaselineBenchRunner measures \emph{time-to-ready} (NWConnection.ready) for
+fresh loopback connections; each sample creates a new connection and
+records the elapsed time from connect start to ready. We report N=1000
+after 10 warmup iterations (warm cache); 0-RTT/session resumption is not
+explicitly enabled and results reflect Network.framework defaults. QUIC
+measurements use ALPN \texttt{sbq} with a single bidirectional stream,
+and no application data is sent (\texttt{BASELINE\_KICKOFF\_BYTES=0}).
 
 Loopback SkyBridge p95 latency is 1.57/\allowbreak 2.76/\allowbreak 7.53~ms for
 classic/\allowbreak liboqs/\allowbreak CryptoKit in our loopback harness; these
@@ -508,6 +517,15 @@ following \textbf{capability set}:
 \item
   \textbf{Legacy gating:} legacy P-256 acceptance requires an
   authenticated channel or an existing trust record.
+\end{itemize}
+
+\textbf{Out-of-Scope (Baseline Claims):}
+\begin{itemize}\tightlist
+\item
+  \textbf{Traffic analysis} from size/timing metadata is not assumed in
+  the baseline threat model. SBP2 is an optional mitigation evaluated
+  separately in Section~\ref{sec:evaluation}, and its overhead/privacy
+  tradeoffs are reported without changing the core security claims.
 \end{itemize}
 
 \textbf{Trust Assumptions:}
@@ -1533,7 +1551,7 @@ identity fields, framing overhead) for MessageA/MessageB across Classic and PQC 
 \label{fig:message-size-breakdown}
 \end{figure}
 
-Note: X-Wing hybrid KEM adds 32~B to MessageA's keyshare (1120~B vs 1088~B for ML-KEM-768), yielding a measured total handshake size of 12,195~B; detailed field breakdowns are available in Supplementary Table~\ref{tab:supp-message-sizes} (\texttt{MessageA.XWing}/\texttt{MessageB.XWing}).
+Note: X-Wing hybrid KEM adds 32~B to MessageA's keyshare (1120~B vs 1088~B for ML-KEM-768). Using the X-Wing snapshot (\texttt{\artifactdateXWing}), the measured total handshake size is 12,195~B (\texttt{MessageA.XWing}/\texttt{MessageB.XWing}); this is +32~B versus PQC in the same snapshot, while the additional +161~B vs the 12,002~B baseline reflects earlier framing overhead. Detailed field breakdowns are in Supplementary Table~\ref{tab:supp-message-sizes}.
 
 \textbf{Data-Plane and Provider Selection.}
 Post-handshake symmetric AEAD (AES-256-GCM) throughput reaches 3.7~GB/s for 1~MiB payloads on Apple Silicon, with CPU cost of 0.25~ns/byte. In v1 the data-plane AEAD is fixed to AES-256-GCM and recorded separately from the handshake suite; thus throughput is independent of the negotiated KEM/signature suite. Provider selection overhead is sub-microsecond for cached paths (0.17~$\mu$s p50) and under 6~$\mu$s even for fallback scenarios. Detailed breakdowns are provided in the artifact CSV files.

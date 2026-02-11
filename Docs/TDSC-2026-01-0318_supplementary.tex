@@ -45,6 +45,7 @@
 \newcommand{\artifactzipsha}{12efc5da\allowbreak{}9b1ec2f0\allowbreak{}971d9a0f\allowbreak{}4eaca6b0\allowbreak{}0b6645b5\allowbreak{}f3792f61\allowbreak{}094e6535\allowbreak{}5434b319}
 \newcommand{\artifacttarurl}{\artifacturl/archive/\artifactshafull.tar.gz}
 \newcommand{\artifacttarsha}{ce84fe61\allowbreak{}7b7ad6ec\allowbreak{}76be3188\allowbreak{}0d8b2b90\allowbreak{}17d8c673\allowbreak{}282f9f55\allowbreak{}c4968ab7\allowbreak{}e1b917e0}
+\newcommand{\artifactdateXWing}{2026-01-16}
 \providecommand{\tightlist}{%
 	  \setlength{\itemsep}{0pt}\setlength{\parskip}{0pt}}
 
@@ -104,6 +105,7 @@ This document provides extended data tables referenced in the main paper. All da
 \begin{itemize}
 \item Classic: $293 + 318 + 2 \times 38 = 687$~B
 \item PQC: $6507 + 5419 + 2 \times 38 = 12{,}002$~B
+\item X-Wing (\texttt{\artifactdateXWing} snapshot): $6609 + 5510 + 2 \times 38 = 12{,}195$~B
 \end{itemize}
 
 \subsection*{Table~\ref{tab:supp-loopback-wire}: Loopback Wire-Size Baselines}
@@ -912,9 +914,20 @@ thus X-Wing increases the MessageA keyshare from 1088~B (ML-KEM-768) to
 1120~B (X25519~32~B + ML-KEM-768~1088~B), while MessageB remains
 keyshare-free. We measure X-Wing directly via the native CryptoKit
 provider (wireId 0x0001) and report per-field sizes in Supplementary
-Table~\ref{tab:supp-message-sizes} (\texttt{MessageA.XWing}/\texttt{MessageB.XWing}). The measured
-total handshake size (MessageA + MessageB + 2$\times$Finished) is
-\textbf{12,195~B}.
+Table~\ref{tab:supp-message-sizes} (\texttt{MessageA.XWing}/\texttt{MessageB.XWing}),
+using the X-Wing snapshot dated \texttt{\artifactdateXWing}. The field
+breakdown is:
+\begin{itemize}\tightlist
+\item MessageA.XWing: $3309$ (signature) + $1120$ (keyshare) + $1956$
+  (identity) + $224$ (overhead) $= 6609$~B
+\item MessageB.XWing: $3309$ (signature) + $0$ (keyshare) + $1956$
+  (identity) + $245$ (overhead) $= 5510$~B
+\item Finished: $38$~B
+\end{itemize}
+Total handshake size is \textbf{12,195~B}. Within the same snapshot, the
+PQC baseline is 12,163~B, so X-Wing adds +32~B. The +193~B delta vs the
+12,002~B baseline in the main paper reflects the +32~B keyshare and a
+snapshot delta of +161~B from earlier framing overhead.
 
 \subsection*{Reproducibility}
 

@@ -139,7 +139,25 @@ def _artifact_date_from_main_tex() -> str | None:
         return None
     # \newcommand{\artifactdate}{YYYY-MM-DD}
     import re
-    m = re.search(r"\\newcommand\\{\\artifactdate\\}\\{([^}]+)\\}", s)
+    m = re.search(r"\\newcommand\{\\artifactdate\}\{([^}]+)\}", s)
+    if not m:
+        return None
+    v = (m.group(1) or "").strip()
+    return v if v else None
+
+def _artifact_date_xwing_from_main_tex() -> str | None:
+    """
+    Optional X-Wing snapshot date pinned in the main paper TeX.
+    """
+    tex = PROJECT_ROOT / "Docs" / "TDSC-2026-01-0318_IEEE_Paper_SkyBridge_Compass_patched.tex"
+    if not tex.exists():
+        return None
+    try:
+        s = tex.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return None
+    import re
+    m = re.search(r"\\newcommand\{\\artifactdateXWing\}\{([^}]+)\}", s)
     if not m:
         return None
     v = (m.group(1) or "").strip()
@@ -1048,6 +1066,23 @@ def main():
     latency = parse_handshake_bench(latency_csv) if latency_csv else {}
     rtt = parse_rtt(rtt_csv) if rtt_csv else {}
     msg_sizes = parse_message_sizes(msg_csv) if msg_csv else {}
+    xwing_date = os.environ.get("ARTIFACT_DATE_XWING") or os.environ.get("SKYBRIDGE_ARTIFACT_DATE_XWING")
+    if xwing_date:
+        xwing_date = xwing_date.strip()
+    if not xwing_date:
+        xwing_date = _artifact_date_xwing_from_main_tex()
+    if xwing_date:
+        missing_xwing = not ("MessageA.XWing" in msg_sizes and "MessageB.XWing" in msg_sizes)
+        if missing_xwing:
+            try:
+                xwing_csv = select_artifact_csv("message_sizes", xwing_date, strict=True)
+                xwing_sizes = parse_message_sizes(xwing_csv)
+                for key in ("MessageA.XWing", "MessageB.XWing"):
+                    if key in xwing_sizes:
+                        msg_sizes[key] = xwing_sizes[key]
+                print(f"  -> X-Wing sizes merged from {xwing_csv.name} (ARTIFACT_DATE_XWING={xwing_date})")
+            except FileNotFoundError as exc:
+                print(f"WARNING: X-Wing artifact date {xwing_date} not found ({exc})")
     latency_runs = parse_handshake_bench_runs(latency_csv) if latency_csv else {}
     rtt_runs = parse_rtt_runs(rtt_csv) if rtt_csv else {}
     traffic_rows = parse_traffic_padding(traffic_csv) if traffic_csv else []
