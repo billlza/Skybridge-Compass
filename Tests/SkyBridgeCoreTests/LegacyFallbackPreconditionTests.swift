@@ -194,7 +194,7 @@ final class LegacyFallbackPreconditionTests: XCTestCase {
  /// **Validates: Requirements 11.2**
     func testExistingTrustRecordWithoutLegacyKeyNotAllowed() async throws {
         let testData = Data("test message".utf8)
-        let (publicKey, signature) = try generateP256TestSignature(data: testData)
+        _ = try generateP256TestSignature(data: testData)
         
  // 创建不含 legacy P-256 公钥的 TrustRecord
         let trustRecord = TrustRecord(

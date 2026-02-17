@@ -188,7 +188,6 @@ final class MultiAlgorithmSignatureVerifierPropertyTests: XCTestCase {
     
     func testGetVerificationPublicKeyReturnsCorrectKey() {
         let ed25519Key = Data(repeating: 0x01, count: 32)
-        let p256Key = Data(repeating: 0x02, count: 65)
         let legacyKey = Data(repeating: 0x03, count: 65)
         
  // TrustRecord with all keys

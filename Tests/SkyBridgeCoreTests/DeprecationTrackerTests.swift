@@ -149,12 +149,13 @@ final class DeprecationTrackerTests: XCTestCase {
         #if DEBUG
         let expectation = XCTestExpectation(description: "Concurrent access")
         expectation.expectedFulfillmentCount = 100
+        let tracker = tracker!
         
         let queue = DispatchQueue(label: "test.concurrent", attributes: .concurrent)
         
         for i in 0..<100 {
             queue.async {
-                self.tracker.recordUsage(
+                tracker.recordUsage(
                     api: "ConcurrentAPI.method\(i % 10)()",
                     replacement: "NewAPI.method\(i % 10)()"
                 )
@@ -179,6 +180,7 @@ final class DeprecationTrackerTests: XCTestCase {
 /// 2. Record the usage via DeprecationTracker (Requirement 10.2)
 /// **Validates: Requirements 10.1, 10.2**
 @available(macOS 14.0, iOS 17.0, *)
+@available(*, deprecated, message: "Intentional deprecated API forwarding coverage.")
 final class DeprecatedAPIForwardingTests: XCTestCase {
     
     override func setUp() {
@@ -335,7 +337,7 @@ final class DeprecatedAPIForwardingTests: XCTestCase {
         controller.disconnect()
         
  // Test DeviceTypesSecurityManager
-        let manager = DeviceTypesSecurityManager()
+        _ = DeviceTypesSecurityManager()
         
  // Verify all APIs were recorded
         let records = DeprecationTracker.shared.getUsageRecords()

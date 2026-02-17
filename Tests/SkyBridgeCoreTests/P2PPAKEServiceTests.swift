@@ -158,7 +158,7 @@ final class P2PPAKEServiceTests: XCTestCase {
         let peerId = "responder-device"
         
  // Simulate 3 failed attempts
-        for attempt in 1...P2PConstants.maxPairingAttempts {
+        for _ in 1...P2PConstants.maxPairingAttempts {
             let messageA = try await initiator.initiateExchange(
                 password: correctCode,
                 peerId: peerId

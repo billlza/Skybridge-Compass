@@ -9,6 +9,9 @@
 import Foundation
 import CryptoKit
 import Network
+#if canImport(OQSRAII)
+import OQSRAII
+#endif
 
 // MARK: - SkyBridgeiOSCore
 
@@ -88,9 +91,19 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
     private func loadOrCreateIdentityKey(algorithm: ProtocolSigningAlgorithm) async throws {
         // 尝试从 Keychain 加载
         if let existingKey = try? loadIdentityKeyFromKeychain(algorithm: algorithm) {
-            identityKeyHandle = existingKey.keyHandle
-            identityPublicKey = existingKey.publicKey
-            return
+            if await isIdentityKeyUsable(
+                keyHandle: existingKey.keyHandle,
+                publicKey: existingKey.publicKey,
+                algorithm: algorithm
+            ) {
+                identityKeyHandle = existingKey.keyHandle
+                identityPublicKey = existingKey.publicKey
+                return
+            }
+
+            SkyBridgeLogger.shared.warning(
+                "⚠️ 发现旧/不兼容身份密钥（algorithm=\(algorithm.rawValue)），将自动重建"
+            )
         }
         
         // 创建新密钥
@@ -111,17 +124,13 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
             return (.softwareKey(privateKey.rawRepresentation), publicKey)
             
         case .mlDSA65:
-            #if HAS_APPLE_PQC_SDK
-            if #available(iOS 26.0, macOS 26.0, *) {
-                let privateKey = try MLDSA65.PrivateKey()
-                let publicKey = privateKey.publicKey.rawRepresentation
-                return (.softwareKey(privateKey.integrityCheckedRepresentation), publicKey)
+            guard let provider = cryptoProvider, provider.tier != .classic else {
+                throw SkyBridgeError.handshakeFailed(
+                    reason: "ML-DSA identity key requested without PQC provider"
+                )
             }
-            #endif
-            // Fallback to Ed25519
-            let privateKey = Curve25519.Signing.PrivateKey()
-            let publicKey = privateKey.publicKey.rawRepresentation
-            return (.softwareKey(privateKey.rawRepresentation), publicKey)
+            let keyPair = try await provider.generateKeyPair(for: .signing)
+            return (.softwareKey(keyPair.privateKey.bytes), keyPair.publicKey.bytes)
         }
     }
     
@@ -146,25 +155,51 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
         // 解析存储的数据（格式: privateKey || publicKey）
         switch algorithm {
         case .ed25519:
-            guard keyData.count >= 64 else { return nil }
+            guard keyData.count == 64 else { return nil }
             let privateKeyData = keyData.prefix(32)
             let publicKeyData = keyData.suffix(32)
             return (.softwareKey(Data(privateKeyData)), Data(publicKeyData))
             
         case .mlDSA65:
-            #if HAS_APPLE_PQC_SDK
-            if #available(iOS 26.0, macOS 26.0, *) {
-                guard keyData.count >= 4032 + 1952 else { return nil }
-                let privateKeyData = keyData.prefix(4032)
-                let publicKeyData = keyData.suffix(1952)
-                return (.softwareKey(Data(privateKeyData)), Data(publicKeyData))
-            }
-            #endif
-            // Fallback to Ed25519 format
-            guard keyData.count >= 64 else { return nil }
-            let privateKeyData = keyData.prefix(32)
-            let publicKeyData = keyData.suffix(32)
+            let publicKeyLength = mldsaPublicKeyLength()
+            guard publicKeyLength > 0, keyData.count > publicKeyLength else { return nil }
+            let privateKeyData = keyData.prefix(keyData.count - publicKeyLength)
+            let publicKeyData = keyData.suffix(publicKeyLength)
             return (.softwareKey(Data(privateKeyData)), Data(publicKeyData))
+        }
+    }
+
+    private func mldsaPublicKeyLength() -> Int {
+        #if canImport(OQSRAII)
+        let oqsLength = oqs_raii_mldsa65_public_key_length()
+        if oqsLength > 0 {
+            return oqsLength
+        }
+        #endif
+
+        #if HAS_APPLE_PQC_SDK
+        if #available(iOS 26.0, macOS 26.0, *) {
+            return ApplePQCCryptoProvider.mldsa65PublicKeySize
+        }
+        #endif
+
+        return 1952
+    }
+
+    private func isIdentityKeyUsable(
+        keyHandle: SigningKeyHandle,
+        publicKey: Data,
+        algorithm: ProtocolSigningAlgorithm
+    ) async -> Bool {
+        guard let signatureProvider else { return false }
+        guard signatureProvider.signatureAlgorithm == algorithm else { return false }
+
+        let probe = Data("skybridge.identity.selftest.v1".utf8)
+        do {
+            let signature = try await signatureProvider.sign(probe, key: keyHandle)
+            return try await signatureProvider.verify(probe, signature: signature, publicKey: publicKey)
+        } catch {
+            return false
         }
     }
     

@@ -947,7 +947,7 @@ def tables_to_images_for_word(
             "\\usepackage{multirow}\n"
             "\\usepackage{makecell}\n"
             "\\newcommand{\\real}[1]{#1}\n"
-            f"\\providecommand{{\\artifactdate}}{{{os.environ.get('ARTIFACT_DATE') or os.environ.get('SKYBRIDGE_ARTIFACT_DATE') or '2026-01-16'}}}\n"
+            f"\\providecommand{{\\artifactdate}}{{{os.environ.get('ARTIFACT_DATE') or os.environ.get('SKYBRIDGE_ARTIFACT_DATE') or '2026-01-23'}}}\n"
             "\\providecommand{\\tightlist}{}\n"
             "\\begin{document}\n"
             "\\begin{minipage}{\\linewidth}\\centering\n"
@@ -2394,4 +2394,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

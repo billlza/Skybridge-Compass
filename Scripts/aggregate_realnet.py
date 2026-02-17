@@ -13,8 +13,10 @@ Output:
 Notes:
   - This script is conservative: it only merges rows where STUN summary exists and at least
     one E2E summary row exists for the same <stamp> and <label>.
-  - For paper-style comparisons, we prefer two payload sizes:
-      classic_bytes=827, pqc_bytes=12163
+  - For paper-style comparisons, we use payload-only handshake sizes:
+      classic_bytes=687, pqc_bytes=12002
+    (the transport harness adds a fixed 4-byte length prefix that is not
+    counted in these payload-byte labels).
   - Use ARTIFACT_DATE=YYYY-MM-DD to keep output stable for paper builds.
 """
 
@@ -110,9 +112,13 @@ def main() -> None:
 
     out_date = _env_artifact_date() or pairs[-1][2]  # prefer pinned, else latest stamp
     rows: list[MicroRow] = []
+    skipped_no_success_labels: list[str] = []
 
-    classic_bytes = 827
-    pqc_bytes = 12163
+    classic_bytes = 687
+    pqc_bytes = 12002
+    legacy_classic_bytes = 827
+    legacy_pqc_bytes = 12163
+    used_legacy_payload_map = False
 
     for stun_path, e2e_path, stamp, label in pairs:
         stun = _read_single_row_csv(stun_path)
@@ -127,7 +133,21 @@ def main() -> None:
             by_bytes[b] = r
 
         def get(payload: int, key: str) -> str:
-            return _fmt(by_bytes.get(payload, {}).get(key))
+            nonlocal used_legacy_payload_map
+            direct = _fmt(by_bytes.get(payload, {}).get(key))
+            if direct:
+                return direct
+            if payload == classic_bytes:
+                legacy = _fmt(by_bytes.get(legacy_classic_bytes, {}).get(key))
+                if legacy:
+                    used_legacy_payload_map = True
+                return legacy
+            if payload == pqc_bytes:
+                legacy = _fmt(by_bytes.get(legacy_pqc_bytes, {}).get(key))
+                if legacy:
+                    used_legacy_payload_map = True
+                return legacy
+            return ""
 
         # Prefer p50 total time as a single "user-visible" metric.
         classic_ok = get(classic_bytes, "ok_rate")
@@ -153,6 +173,22 @@ def main() -> None:
                 delta_total_p50 = f"{delta:.3f}"
         except ValueError:
             pass
+
+        # If both payload classes have zero successes, timing percentiles are
+        # undefined and not comparable; omit from paper-facing micro-study rows.
+        classic_ok_num = -1.0
+        pqc_ok_num = -1.0
+        try:
+            if classic_ok:
+                classic_ok_num = float(classic_ok)
+            if pqc_ok:
+                pqc_ok_num = float(pqc_ok)
+        except ValueError:
+            classic_ok_num = -1.0
+            pqc_ok_num = -1.0
+        if classic_ok_num <= 0.0 and pqc_ok_num <= 0.0:
+            skipped_no_success_labels.append(f"{stamp}:{label}")
+            continue
 
         rows.append(MicroRow(
             stamp=stamp,
@@ -211,7 +247,10 @@ def main() -> None:
     lines.append(r"\begin{table*}[!tp]")
     lines.append(r"\centering")
     lines.append(r"\scriptsize")
-    lines.append(r"\caption{Supplementary Table \thetable: Real-network micro-study (STUN path + TCP payload). Each row is one network condition label. STUN metrics capture path RTT/loss and a conservative NAT classification. E2E metrics report success rate and p50 completion time for two payload sizes (classic 687~B vs PQC 12{,}002~B), along with the delta (PQC minus classic). Failure taxonomy is summarized for the PQC size as timeout rate and other failure rate.}")
+    caption_suffix = ""
+    if used_legacy_payload_map:
+        caption_suffix = r" Legacy rows measured with older payload labels (827/12{,}163) are mapped into the canonical classic/PQC columns for backward-compatible aggregation."
+    lines.append(r"\caption{Supplementary Table \thetable: Real-network micro-study (STUN path + TCP payload). Each row is one network condition label. STUN metrics capture path RTT/loss and a conservative NAT classification. E2E metrics report success rate and p50 completion time for two payload sizes (classic 687~B vs PQC 12{,}002~B), along with the delta (PQC minus classic). A fixed 4-byte transport length prefix is excluded from the payload-byte labels. Failure taxonomy is summarized for the PQC size as timeout rate and other failure rate. Labels with zero successful E2E samples on both payload sizes are omitted because timing percentiles are undefined." + caption_suffix + r"}")
     lines.append(r"\label{tab:supp-realnet-microstudy}")
     # Fit wide table within page bounds.
     lines.append(r"\setlength{\tabcolsep}{3pt}")
@@ -246,8 +285,9 @@ def main() -> None:
 
     print(f"Wrote: {csv_out}")
     print(f"Wrote: {tex_out}")
+    if skipped_no_success_labels:
+        print(f"Skipped no-success labels: {', '.join(skipped_no_success_labels)}")
 
 
 if __name__ == "__main__":
     main()
-

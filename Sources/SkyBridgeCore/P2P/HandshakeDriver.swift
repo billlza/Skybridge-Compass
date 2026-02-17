@@ -602,12 +602,13 @@ public actor HandshakeDriver {
 
  // 发送 MessageA（失败时必须 zeroize - 11.5）
         do {
+ // RTT timing must mark the send edge before transport dispatch.
+ // Deterministic in-memory transports can deliver MessageB inline during send().
+            metricsCollector.recordMessageASent()
             let padded = HandshakePadding.wrapIfEnabled(messageA.encoded, label: "MessageA")
             // Handshake frames use HandshakePadding (SBP1). Do not apply TrafficPadding (SBP2) here.
             // Receiver unwraps SBP1 only.
             try await transport.send(to: peer, data: padded)
- // 13.2: 记录 MessageA 发送时间 (Requirement 6.1)
-            metricsCollector.recordMessageASent()
         } catch {
             await ctx.zeroize()
             context = nil

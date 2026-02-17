@@ -59,7 +59,7 @@ internal actor AsyncChannel<T: Sendable> {
     func close() {
         isClosed = true
  // 唤醒所有等待者
-        for waiter in waiters {
+        for _ in waiters {
  // 注意：这里需要发送一个默认值或使用 throwing continuation
  // 为简化，我们假设调用者会检查 isClosed
         }

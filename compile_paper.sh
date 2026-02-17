@@ -82,6 +82,33 @@ check_type3_fonts() {
   fi
 }
 
+check_text_extraction() {
+  local pdf_file="$1"
+  local label="${2:-PDF}"
+
+  if ! command -v pdftotext >/dev/null 2>&1; then
+    echo "ERROR: pdftotext not found; install poppler to enable extraction checks." >&2
+    exit 1
+  fi
+
+  local extracted
+  extracted="$(mktemp)"
+  pdftotext "$pdf_file" "$extracted"
+  if ! python3 - "$extracted" <<'PY'
+import sys
+text = open(sys.argv[1], "r", encoding="utf-8", errors="replace").read()
+bad = [ch for ch in text if ord(ch) in (0xFFFD, 0xFFFE, 0xFFFF)]
+if bad:
+    sys.exit(1)
+PY
+  then
+    echo "ERROR: $label text extraction contains replacement/invalid glyph markers: $pdf_file" >&2
+    rm -f "$extracted"
+    exit 1
+  fi
+  rm -f "$extracted"
+}
+
 run_pdflatex_relaxed() {
   local tex_file="$1"
   pdflatex -interaction=nonstopmode "$tex_file" || true
@@ -124,9 +151,11 @@ fi
 if [[ "$SKIP_CHECKS" -eq 0 ]]; then
     check_latex_log "$DOCS_DIR/${TEX_FILE%.tex}.log" "Main paper"
     check_type3_fonts "$DOCS_DIR/$PDF_FILE" "Main paper"
+    check_text_extraction "$DOCS_DIR/$PDF_FILE" "Main paper"
     if [[ -f "$SUPP_TEX_FILE" ]]; then
         check_latex_log "$DOCS_DIR/${SUPP_TEX_FILE%.tex}.log" "Supplementary"
         check_type3_fonts "$DOCS_DIR/$SUPP_PDF_FILE" "Supplementary"
+        check_text_extraction "$DOCS_DIR/$SUPP_PDF_FILE" "Supplementary"
     fi
 fi
 
@@ -144,7 +173,7 @@ if [ -f "$PDF_FILE" ]; then
     echo "归档文件: $OUT_DIR/$ARCHIVE_NAME"
     echo ""
     echo "当前归档历史:"
-    ls -lt "$OUT_DIR"/*.pdf 2>/dev/null | head -10
+    ls -lt "$OUT_DIR"/*.pdf 2>/dev/null | sed -n '1,10p'
 else
     echo "=== 编译失败 ==="
     exit 1

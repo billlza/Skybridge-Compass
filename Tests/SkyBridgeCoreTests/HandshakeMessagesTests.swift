@@ -75,4 +75,90 @@ final class HandshakeMessagesWireEncodingTests: XCTestCase {
         let sigDataEnd = encoded.index(sigDataStart, offsetBy: message.signature.count)
         XCTAssertEqual(Data(encoded[sigDataStart..<sigDataEnd]), message.signature)
     }
+
+    func testMessageAV2ContributionRoundTrip() throws {
+        let capabilities = CryptoCapabilities(
+            supportedKEM: ["ML-KEM-768"],
+            supportedSignature: ["ML-DSA-65"],
+            supportedAuthProfiles: [AuthProfile.pqc.displayName],
+            supportedAEAD: ["AES-GCM"],
+            pqcAvailable: true,
+            platformVersion: "26.0",
+            providerType: .cryptoKitPQC
+        )
+        let message = HandshakeMessageA(
+            supportedSuites: [.mlkem768MLDSA65FS, .mlkem768MLDSA65],
+            keyShares: [
+                HandshakeKeyShare(suite: .mlkem768MLDSA65FS, shareBytes: Data(repeating: 0x31, count: 1088)),
+                HandshakeKeyShare(suite: .mlkem768MLDSA65, shareBytes: Data(repeating: 0x32, count: 1088))
+            ],
+            clientNonce: Data(repeating: 0x22, count: 32),
+            policy: .default,
+            capabilities: capabilities,
+            signature: Data(repeating: 0xA1, count: 64),
+            identityPublicKey: Data(repeating: 0xB2, count: 32),
+            initiatorContribution: Data(repeating: 0x5A, count: 32)
+        )
+
+        let decoded = try HandshakeMessageA.decode(from: message.encoded)
+        XCTAssertEqual(decoded.supportedSuites, message.supportedSuites)
+        XCTAssertEqual(decoded.initiatorContribution, message.initiatorContribution)
+        XCTAssertEqual(decoded.keyShares.count, 2)
+    }
+
+    func testMessageBV2RejectsMissingResponderContribution() throws {
+        let sealedBox = HPKESealedBox(
+            encapsulatedKey: Data(),
+            nonce: Data(repeating: 0x44, count: 12),
+            ciphertext: Data(repeating: 0x55, count: 16),
+            tag: Data(repeating: 0x66, count: 16)
+        )
+        let message = HandshakeMessageB(
+            selectedSuite: .mlkem768MLDSA65FS,
+            responderShare: Data(),
+            serverNonce: Data(repeating: 0x88, count: 32),
+            encryptedPayload: sealedBox,
+            signature: Data(repeating: 0xC3, count: 64),
+            identityPublicKey: Data(repeating: 0xD4, count: 32)
+        )
+
+        XCTAssertThrowsError(try HandshakeMessageB.decode(from: message.encoded)) { error in
+            guard case HandshakeError.failed(let reason) = error else {
+                XCTFail("Expected HandshakeError.failed")
+                return
+            }
+            guard case .invalidMessageFormat = reason else {
+                XCTFail("Expected invalidMessageFormat")
+                return
+            }
+        }
+    }
+
+    func testMessageADecodeRejectsOversizedPayload() throws {
+        let oversized = Data(repeating: 0x00, count: HandshakeConstants.maxMessageALength + 1)
+        XCTAssertThrowsError(try HandshakeMessageA.decode(from: oversized)) { error in
+            guard case HandshakeError.failed(let reason) = error else {
+                XCTFail("Expected HandshakeError.failed")
+                return
+            }
+            guard case .invalidMessageFormat = reason else {
+                XCTFail("Expected invalidMessageFormat")
+                return
+            }
+        }
+    }
+
+    func testMessageBDecodeRejectsOversizedPayload() throws {
+        let oversized = Data(repeating: 0x00, count: HandshakeConstants.maxMessageBLength + 1)
+        XCTAssertThrowsError(try HandshakeMessageB.decode(from: oversized)) { error in
+            guard case HandshakeError.failed(let reason) = error else {
+                XCTFail("Expected HandshakeError.failed")
+                return
+            }
+            guard case .invalidMessageFormat = reason else {
+                XCTFail("Expected invalidMessageFormat")
+                return
+            }
+        }
+    }
 }

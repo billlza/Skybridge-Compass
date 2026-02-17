@@ -1,0 +1,44 @@
+{
+  "profiles": [
+    {
+      "id": "ideal",
+      "delay_ms": 0,
+      "jitter_ms": 0,
+      "loss_pct": 0.0,
+      "reorder_pct": 0.0
+    },
+    {
+      "id": "mild",
+      "delay_ms": 50,
+      "jitter_ms": 20,
+      "loss_pct": 1.0,
+      "reorder_pct": 0.0
+    },
+    {
+      "id": "moderate",
+      "delay_ms": 100,
+      "jitter_ms": 50,
+      "loss_pct": 3.0,
+      "reorder_pct": 0.0
+    },
+    {
+      "id": "severe",
+      "delay_ms": 200,
+      "jitter_ms": 100,
+      "loss_pct": 5.0,
+      "reorder_pct": 0.0
+    },
+    {
+      "id": "reorder",
+      "delay_ms": 50,
+      "jitter_ms": 20,
+      "loss_pct": 0.0,
+      "reorder_pct": 10.0
+    }
+  ],
+  "suite_payload_bytes": {
+    "classic": 687,
+    "pqc_liboqs": 12002,
+    "pqc_cryptokit": 12002
+  }
+}

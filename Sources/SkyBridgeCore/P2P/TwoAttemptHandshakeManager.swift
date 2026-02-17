@@ -156,13 +156,18 @@ public struct TwoAttemptHandshakeManager: Sendable {
  /// pqcOnly suites 为空 → 直接按 `.pqcProviderUnavailable` 处理
     public static func prepareAttempt(
         strategy: HandshakeAttemptStrategy,
-        cryptoProvider: any CryptoProvider
+        cryptoProvider: any CryptoProvider,
+        pqcOfferMode: HandshakeOfferedSuites.PQCOfferMode = .allAvailable
     ) throws -> AttemptPreparation {
- // 1. 先 build suites
+// 1. 先 build suites
         let buildResult: HandshakeOfferedSuites.BuildResult
         switch strategy {
         case .pqcOnly:
-            buildResult = HandshakeOfferedSuites.build(strategy: strategy, cryptoProvider: cryptoProvider)
+            buildResult = HandshakeOfferedSuites.build(
+                strategy: strategy,
+                cryptoProvider: cryptoProvider,
+                pqcOfferMode: pqcOfferMode
+            )
         case .classicOnly:
             var availableSuites = cryptoProvider.supportedSuites
             let classicSuites = ClassicCryptoProvider().supportedSuites
@@ -241,20 +246,36 @@ public struct TwoAttemptHandshakeManager: Sendable {
         preferPQC: Bool = true,
         policy: HandshakePolicy = .default,
         cryptoProvider: any CryptoProvider,
-        executor: PreparedHandshakeExecutor
+        executor: PreparedHandshakeExecutor,
+        enforceFallbackRateLimit: Bool = true,
+        enablePQCBridgeRetry: Bool = true
     ) async throws -> SessionKeys {
         if policy.requirePQC, !preferPQC {
             throw HandshakeError.failed(.pqcProviderUnavailable)
         }
 
         if preferPQC {
- // 第一次尝试: PQC-only
+// 第一次尝试: PQC-only
             do {
-                let preparation = try prepareAttempt(strategy: .pqcOnly, cryptoProvider: cryptoProvider)
+                let preparation = try prepareAttempt(
+                    strategy: .pqcOnly,
+                    cryptoProvider: cryptoProvider,
+                    pqcOfferMode: enablePQCBridgeRetry ? .preferredSingle : .allAvailable
+                )
                 return try await executor(preparation)
             } catch let error as AttemptPreparationError {
- // PQC 准备失败，尝试 fallback
+// PQC 准备失败，尝试 fallback
                 if case .pqcProviderUnavailable = error {
+                    if enablePQCBridgeRetry,
+                       let bridged = try await attemptPQCBridgeRetry(
+                            deviceId: deviceId,
+                            reason: .pqcProviderUnavailable,
+                            policy: policy,
+                            cryptoProvider: cryptoProvider,
+                            executor: executor
+                       ) {
+                        return bridged
+                    }
                     guard policy.allowClassicFallback else {
                         throw error
                     }
@@ -263,12 +284,25 @@ public struct TwoAttemptHandshakeManager: Sendable {
                         reason: .pqcProviderUnavailable,
                         policy: policy,
                         cryptoProvider: cryptoProvider,
-                        executor: executor
+                        executor: executor,
+                        enforceFallbackRateLimit: enforceFallbackRateLimit
                     )
                 }
                 throw error
             } catch let error as HandshakeError {
- // 检查是否允许 fallback
+// 检查是否允许 fallback
+                if case .failed(let reason) = error {
+                    if enablePQCBridgeRetry,
+                       let bridged = try await attemptPQCBridgeRetry(
+                            deviceId: deviceId,
+                            reason: reason,
+                            policy: policy,
+                            cryptoProvider: cryptoProvider,
+                            executor: executor
+                       ) {
+                        return bridged
+                    }
+                }
                 if case .failed(let reason) = error,
                    shouldAllowFallback(reason) {
                     guard policy.allowClassicFallback else {
@@ -279,7 +313,8 @@ public struct TwoAttemptHandshakeManager: Sendable {
                         reason: reason,
                         policy: policy,
                         cryptoProvider: cryptoProvider,
-                        executor: executor
+                        executor: executor,
+                        enforceFallbackRateLimit: enforceFallbackRateLimit
                     )
                 }
                 throw error
@@ -291,26 +326,78 @@ public struct TwoAttemptHandshakeManager: Sendable {
         }
     }
 
+    private static func shouldAttemptPQCBridgeRetry(_ reason: HandshakeFailureReason) -> Bool {
+        switch reason {
+        case .pqcProviderUnavailable, .suiteNotSupported, .suiteNegotiationFailed:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private static func attemptPQCBridgeRetry(
+        deviceId: String,
+        reason: HandshakeFailureReason,
+        policy: HandshakePolicy,
+        cryptoProvider: any CryptoProvider,
+        executor: PreparedHandshakeExecutor
+    ) async throws -> SessionKeys? {
+        guard shouldAttemptPQCBridgeRetry(reason) else {
+            return nil
+        }
+
+        let bridgePreparation: AttemptPreparation
+        do {
+            bridgePreparation = try prepareAttempt(
+                strategy: .pqcOnly,
+                cryptoProvider: cryptoProvider,
+                pqcOfferMode: .compatRetry
+            )
+        } catch {
+            return nil
+        }
+
+        guard bridgePreparation.offeredSuites.allSatisfy({ !$0.requiresV2EphemeralContribution }) else {
+            return nil
+        }
+
+        SecurityEventEmitter.emitDetached(SecurityEvent(
+            type: .cryptoProviderSelected,
+            severity: .info,
+            message: "Retrying PQC handshake with compatibility suite",
+            context: [
+                "deviceId": deviceId,
+                "reason": String(describing: reason),
+                "strategy": HandshakeAttemptStrategy.pqcOnly.rawValue,
+                "bridgeMode": HandshakeOfferedSuites.PQCOfferMode.compatRetry.rawValue,
+                "policyRequirePQC": policy.requirePQC ? "1" : "0"
+            ]
+        ))
+
+        return try await executor(bridgePreparation)
+    }
+
  /// 尝试 fallback（带限流和事件发射）
     private static func attemptFallback(
         deviceId: String,
         reason: HandshakeFailureReason,
         policy: HandshakePolicy,
         cryptoProvider: any CryptoProvider,
-        executor: PreparedHandshakeExecutor
+        executor: PreparedHandshakeExecutor,
+        enforceFallbackRateLimit: Bool
     ) async throws -> SessionKeys {
         guard policy.allowClassicFallback else {
             throw HandshakeError.failed(reason)
         }
  // 9.3: 检查限流
-        let canFallback = await rateLimiter.canFallback(deviceId: deviceId)
-        guard canFallback else {
-            let cooldown = await rateLimiter.remainingCooldown(deviceId: deviceId)
-            throw AttemptPreparationError.fallbackRateLimited(deviceId: deviceId, cooldownSeconds: cooldown)
+        if enforceFallbackRateLimit {
+            let canFallback = await rateLimiter.canFallback(deviceId: deviceId)
+            guard canFallback else {
+                let cooldown = await rateLimiter.remainingCooldown(deviceId: deviceId)
+                throw AttemptPreparationError.fallbackRateLimited(deviceId: deviceId, cooldownSeconds: cooldown)
+            }
+            await rateLimiter.recordFallback(deviceId: deviceId)
         }
-
- // 记录 fallback
-        await rateLimiter.recordFallback(deviceId: deviceId)
 
  // 9.4: 发射 fallback 事件
         let cooldownSeconds = TwoAttemptHandshakeManager.fallbackCooldownSeconds
@@ -360,57 +447,19 @@ public struct TwoAttemptHandshakeManager: Sendable {
         policy: HandshakePolicy = .default,
         executor: HandshakeExecutor
     ) async throws -> SessionKeys {
-        if policy.requirePQC, !preferPQC {
-            throw HandshakeError.failed(.pqcProviderUnavailable)
-        }
+        let provider = CompatibilityPreparationProvider()
 
-        if preferPQC {
- // 第一次尝试: PQC-only
-            do {
-                let sigAAlgorithm = SignatureAlgorithm.mlDSA65
-                return try await executor(.pqcOnly, sigAAlgorithm)
-            } catch let error as HandshakeError {
- // 检查是否是 PQC 不支持的错误
-                if case .failed(let reason) = error,
-                   isPQCUnavailableError(reason) {
-                    guard policy.allowClassicFallback else {
-                        throw error
-                    }
- // 发射 fallback event
-                    SecurityEventEmitter.emitDetached(SecurityEvent(
-                        type: .cryptoDowngrade,
-                        severity: .warning,
-                        message: "PQC handshake failed, falling back to Classic",
-                        context: [
-                            "downgradeResistance": "policy_gate+no_timeout_fallback+rate_limited",
-                            "policyInTranscript": "1",
-                            "transcriptBinding": "1",
-                            "reason": String(describing: reason),
-                            "deviceId": deviceId,
-                            "cooldownSeconds": String(TwoAttemptHandshakeManager.fallbackCooldownSeconds),
-                            "cooldownRemainingSeconds": String(TwoAttemptHandshakeManager.fallbackCooldownSeconds),
-                            "policyRequirePQC": policy.requirePQC ? "1" : "0",
-                            "policyAllowClassicFallback": policy.allowClassicFallback ? "1" : "0",
-                            "policyMinimumTier": policy.minimumTier.rawValue,
-                            "policyRequireSecureEnclavePoP": policy.requireSecureEnclavePoP ? "1" : "0",
-                            "fromStrategy": HandshakeAttemptStrategy.pqcOnly.rawValue,
-                            "toStrategy": HandshakeAttemptStrategy.classicOnly.rawValue,
-                            "strategy": HandshakeAttemptStrategy.classicOnly.rawValue
-                        ]
-                    ))
-
-
- // 第二次尝试: Classic-only
-                    let sigAAlgorithm = SignatureAlgorithm.ed25519
-                    return try await executor(.classicOnly, sigAAlgorithm)
-                }
-                throw error
-            }
-        } else {
- // 直接使用 Classic
-            let sigAAlgorithm = SignatureAlgorithm.ed25519
-            return try await executor(.classicOnly, sigAAlgorithm)
-        }
+        return try await performHandshakeWithPreparation(
+            deviceId: deviceId,
+            preferPQC: preferPQC,
+            policy: policy,
+            cryptoProvider: provider,
+            executor: { preparation in
+                return try await executor(preparation.strategy, preparation.sigAAlgorithm.wire)
+            },
+            enforceFallbackRateLimit: false,
+            enablePQCBridgeRetry: false
+        )
     }
 
  /// 判断是否是 PQC 不可用错误
@@ -447,11 +496,16 @@ public struct TwoAttemptHandshakeManager: Sendable {
  /// ** 7.2**: 数据来源必须是 cryptoProvider.supportedSuites
     public static func getSuites(
         for strategy: HandshakeAttemptStrategy,
-        cryptoProvider: any CryptoProvider
+        cryptoProvider: any CryptoProvider,
+        pqcOfferMode: HandshakeOfferedSuites.PQCOfferMode = .allAvailable
     ) -> HandshakeOfferedSuites.BuildResult {
         switch strategy {
         case .pqcOnly:
-            return HandshakeOfferedSuites.build(strategy: strategy, cryptoProvider: cryptoProvider)
+            return HandshakeOfferedSuites.build(
+                strategy: strategy,
+                cryptoProvider: cryptoProvider,
+                pqcOfferMode: pqcOfferMode
+            )
         case .classicOnly:
             var availableSuites = cryptoProvider.supportedSuites
             let classicSuites = ClassicCryptoProvider().supportedSuites
@@ -481,3 +535,41 @@ public struct TwoAttemptHandshakeManager: Sendable {
 
 // MARK: - CryptoSuite Extensions
 // Note: allPQCSuites and allClassicSuites are defined in PreNegotiationSignatureSelector.swift
+
+@available(macOS 14.0, iOS 17.0, *)
+private struct CompatibilityPreparationProvider: CryptoProvider, Sendable {
+    let providerName = "CompatibilityPreparationProvider"
+    let tier: CryptoTier = .liboqsPQC
+    let activeSuite: CryptoSuite = .mlkem768MLDSA65
+    let supportedSuites: [CryptoSuite] = [
+        .xwingMLDSA,
+        .mlkem768MLDSA65FS,
+        .mlkem768MLDSA65,
+        .x25519Ed25519,
+        .p256ECDSA
+    ]
+
+    func supportsSuite(_ suite: CryptoSuite) -> Bool {
+        supportedSuites.contains(where: { $0.wireId == suite.wireId })
+    }
+
+    func hpkeSeal(plaintext: Data, recipientPublicKey: Data, info: Data) async throws -> HPKESealedBox {
+        throw CryptoProviderError.notImplemented("CompatibilityPreparationProvider.hpkeSeal")
+    }
+
+    func hpkeOpen(sealedBox: HPKESealedBox, privateKey: SecureBytes, info: Data) async throws -> Data {
+        throw CryptoProviderError.notImplemented("CompatibilityPreparationProvider.hpkeOpen")
+    }
+
+    func sign(data: Data, using keyHandle: SigningKeyHandle) async throws -> Data {
+        throw CryptoProviderError.notImplemented("CompatibilityPreparationProvider.sign")
+    }
+
+    func verify(data: Data, signature: Data, publicKey: Data) async throws -> Bool {
+        throw CryptoProviderError.notImplemented("CompatibilityPreparationProvider.verify")
+    }
+
+    func generateKeyPair(for usage: KeyUsage) async throws -> KeyPair {
+        throw CryptoProviderError.notImplemented("CompatibilityPreparationProvider.generateKeyPair")
+    }
+}

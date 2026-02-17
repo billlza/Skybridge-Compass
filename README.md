@@ -96,20 +96,20 @@ swift test
 论文中标注的 artifact 信息如下（供 reviewer/编辑核对）：
 
 - URL：`https://github.com/billlza/Skybridge-Compass`
-- Git ref：`tdsc-2026-01-0318-ios-sim-fix-20260211-r2`
-- Commit：`e261f0b48ba7234d6ade681f2bf986ede4906bc6`（short=`e261f0b48ba7`）
+- Git ref：`817e11aa5806`
+- Commit：`817e11aa5806621dbf473af3cd3a5461662a2828`（short=`817e11aa5806`）
 
 Source archive checksums（immutability 辅助证据）：
 
-- `e261f0b48ba7.zip`：`SHA256=c4d3553bb1a448f35dfa5556393d3108e2545d226edcffa2aba66c32ce41c91e`
-- `e261f0b48ba7.tar.gz`：`SHA256=976b480c2dab7400bde0e832f1221c7bfb426227ae57a5a78789e1279ea990d1`
+- `817e11aa5806.zip`：`SHA256=05d6961a26ec0f5b57b8821cfc8337dec1ba37ec8deb5f9dd5e7b1c7bdcb2378`
+- `817e11aa5806.tar.gz`：`SHA256=5b9130d64e5217376da98e20286f078fd8693d998796d64d4e503e981f2dea2b`
 
 最小复核流程（需要本机已安装 Xcode/Swift 与 TeXLive；PQC SDK 仅在 macOS 26+ 可用）：
 
 ```bash
 git clone https://github.com/billlza/Skybridge-Compass
 cd Skybridge-Compass
-git checkout tdsc-2026-01-0318-ios-sim-fix-20260211-r2
+git checkout 817e11aa5806621dbf473af3cd3a5461662a2828
 
 git rev-parse HEAD
 git describe --tags --always
@@ -119,6 +119,12 @@ bash ./compile_paper.sh
 
 # 运行论文评测与生成 CSV/图表
 bash Scripts/run_paper_eval.sh
+
+# 可选：导入 iOS on-device microbench JSON（schema v3）并生成主文表格
+RUN_IOS_MICROBENCH_IMPORT=1 bash Scripts/run_paper_eval.sh
+
+# 可选：运行 kernel-level dummynet/netem 对照（需要 sudo）
+RUN_KERNEL_EMULATION=1 bash Scripts/run_paper_eval.sh
 ```
 
 ### Artifact 输出定位（Reviewer 常用）
@@ -167,6 +173,23 @@ ARTIFACT_DATE=2026-01-23 swift Scripts/run_real_network_e2e.swift client \
 ARTIFACT_DATE=2026-01-23 python3 Scripts/aggregate_realnet.py
 ```
 
+注：`run_real_network_e2e.swift` 在传输层使用 `4B length prefix + payload`，其中比较口径统一使用 payload-only 的经典/后量子基准（687B / 12,002B）。
+
+## Kernel-level 网络仿真（dummynet / netem）
+
+跨工具统一 profile 定义在 `Scripts/netem_profiles.json`。常见三档（mild/moderate/severe）在 dummynet 与 netem 都可报告；`reorder` 仅 netem 原生支持，dummynet 行标记为 `n/a`。
+
+```bash
+# macOS (dummynet)
+ARTIFACT_DATE=2026-01-23 TOOL=dummynet bash Scripts/run_network_emulation_kernel.sh
+
+# Linux (netem)
+ARTIFACT_DATE=2026-01-23 TOOL=netem IFACE=eth0 bash Scripts/run_network_emulation_kernel.sh
+
+# 生成 Supplementary 表
+ARTIFACT_DATE=2026-01-23 python3 Scripts/aggregate_kernel_emulation.py
+```
+
 关于 cross-NAT / 入站限制（重要）：
 
 - **IPv4 端口转发前提**：路由器 WAN 必须拿到**可入站的公网 IPv4**。如果 WAN 显示 `0.0.0.0`、或 WAN 是 `192.168.x.x / 10.x / 100.64–127.x`，通常意味着双层 NAT / CGNAT / DS-Lite，**外网无法直达**，会表现为 client 全部 `timeout`（`connect_ms` 为空）。
@@ -180,8 +203,8 @@ ARTIFACT_DATE=2026-01-23 python3 Scripts/aggregate_realnet.py
 
 预期输出（关键点）：
 
-- `git rev-parse HEAD` 应为 `e261f0b48ba7234d6ade681f2bf986ede4906bc6`
-- `git describe --tags --always` 应输出 `tdsc-2026-01-0318-ios-sim-fix-20260211-r2`（或等价形式）
+- `git rev-parse HEAD` 应为 `817e11aa5806621dbf473af3cd3a5461662a2828`
+- `git describe --tags --always` 应包含 `817e11a`（等价短 SHA 形式也可）
 - 生成的 PDF：`Docs/TDSC-2026-01-0318_IEEE_Paper_SkyBridge_Compass_patched.pdf` 与 `Docs/TDSC-2026-01-0318_supplementary.pdf`
 - CSV 输出目录：`Artifacts/`
 

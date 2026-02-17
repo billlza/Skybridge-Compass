@@ -77,8 +77,25 @@ Repeatability (multi-batch) notes:
 System-level impact is generated from a separate artifact set:
 
 ```
-Artifacts/system_impact_2026-01-22.csv → session-level connect/transfer metrics
+Artifacts/system_impact_2026-01-23.csv → session-level connect/transfer metrics
 ```
+
+### System-impact data hygiene (A stage, 2026-02-16)
+
+- Source suite: `SystemImpactBenchTests` (artifact date pinned to `2026-01-23`)
+- Clean-up action: removed one duplicated embedded header row in `Artifacts/system_impact_2026-01-23.csv` (legacy append artifact)
+- Backup retained: `Artifacts/system_impact_2026-01-23.csv.bak_20260216_1430`
+- Final shape: `13,801` lines total (`1` header + `13,800` data rows)
+- Distribution checks:
+  - `ideal`: `1000` rows per suite
+  - `rtt100_j50`: `1000` rows per suite
+  - `rtt50_j20`: `2600` rows per suite (`1MiB=2000`, `10MiB=500`, `100MiB=100`)
+- Duplicate checks:
+  - Duplicate header rows: none (header appears exactly once)
+  - Fully duplicated data rows: none
+
+Data was then written into paper tables via:
+`ARTIFACT_DATE=2026-01-23 SKYBRIDGE_ONLY_SYSTEM_IMPACT_TABLE=1 python3 Scripts/make_tables.py`
 
 ---
 

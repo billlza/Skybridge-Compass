@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 import csv
+import json
+import os
 from pathlib import Path
 
 ARTIFACTS = Path("Artifacts")
@@ -18,10 +20,39 @@ COLORS = {
 }
 
 
-def latest_csv():
+def select_csv():
+    requested_date = (
+        os.environ.get("ARTIFACT_DATE")
+        or os.environ.get("SKYBRIDGE_ARTIFACT_DATE")
+        or ""
+    ).strip()
+    if requested_date:
+        pinned = ARTIFACTS / f"handshake_bench_{requested_date}.csv"
+        if not pinned.exists():
+            raise SystemExit(f"Missing pinned artifact: {pinned}")
+        return pinned
+
     files = sorted(ARTIFACTS.glob("handshake_bench_*.csv"))
     if not files:
         raise SystemExit("No handshake_bench_*.csv found in Artifacts/")
+    return files[-1]
+
+
+def select_claims():
+    requested_date = (
+        os.environ.get("ARTIFACT_DATE")
+        or os.environ.get("SKYBRIDGE_ARTIFACT_DATE")
+        or ""
+    ).strip()
+    if requested_date:
+        pinned = ARTIFACTS / f"claims_{requested_date}.json"
+        if not pinned.exists():
+            raise SystemExit(f"Missing pinned claims artifact: {pinned}")
+        return pinned
+
+    files = sorted(ARTIFACTS.glob("claims_*.json"))
+    if not files:
+        raise SystemExit("No claims_*.json found in Artifacts/")
     return files[-1]
 
 
@@ -44,6 +75,22 @@ def load_aggregate(path: Path):
             "p50": sum(values["p50"]) / len(values["p50"]),
             "p95": sum(values["p95"]) / len(values["p95"]),
             "p99": sum(values["p99"]) / len(values["p99"]),
+        }
+    return aggregates
+
+
+def load_aggregate_from_claims(path: Path):
+    data = json.loads(path.read_text(encoding="utf-8"))
+    latency = data.get("latency", {})
+    aggregates = {}
+    for config in CONFIG_ORDER:
+        row = latency.get(config)
+        if not row:
+            raise SystemExit(f"Missing {config} in {path}")
+        aggregates[config] = {
+            "p50": float(row["p50"]),
+            "p95": float(row["p95"]),
+            "p99": float(row["p99"]),
         }
     return aggregates
 
@@ -106,11 +153,12 @@ def svg_bar_chart(aggregates):
 
 
 def main():
-    csv_path = latest_csv()
-    aggregates = load_aggregate(csv_path)
+    claims_path = select_claims()
+    aggregates = load_aggregate_from_claims(claims_path)
+    source = claims_path
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     OUT_PATH.write_text(svg_bar_chart(aggregates), encoding="utf-8")
-    print(f"Wrote {OUT_PATH}")
+    print(f"Wrote {OUT_PATH} (source: {source})")
 
 
 if __name__ == "__main__":

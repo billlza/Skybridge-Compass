@@ -198,7 +198,7 @@ public struct PreNegotiationSignatureSelector: Sendable {
 extension CryptoSuite {
  /// 所有 PQC suites（用于 Two-Attempt Strategy）
     public static var allPQCSuites: [CryptoSuite] {
-        [.xwingMLDSA, .mlkem768MLDSA65]
+        [.xwingMLDSA, .mlkem768MLDSA65FS, .mlkem768MLDSA65]
     }
     
  /// 所有 Classic suites（用于 Two-Attempt Strategy）
@@ -215,6 +215,12 @@ extension CryptoSuite {
 ///
 /// **Requirements: 9.1**
 public struct HandshakeOfferedSuites: Sendable {
+
+    public enum PQCOfferMode: String, Sendable, Equatable {
+        case allAvailable = "all_available"
+        case preferredSingle = "preferred_single"
+        case compatRetry = "compat_retry"
+    }
     
  /// 构建结果
     public enum BuildResult: Sendable, Equatable {
@@ -246,7 +252,16 @@ public struct HandshakeOfferedSuites: Sendable {
         cryptoProvider: any CryptoProvider
     ) -> BuildResult {
         let availableSuites = cryptoProvider.supportedSuites
-        return build(strategy: strategy, availableSuites: availableSuites)
+        return build(strategy: strategy, availableSuites: availableSuites, pqcOfferMode: .allAvailable)
+    }
+
+    public static func build(
+        strategy: HandshakeAttemptStrategy,
+        cryptoProvider: any CryptoProvider,
+        pqcOfferMode: PQCOfferMode
+    ) -> BuildResult {
+        let availableSuites = cryptoProvider.supportedSuites
+        return build(strategy: strategy, availableSuites: availableSuites, pqcOfferMode: pqcOfferMode)
     }
     
  /// 根据策略构建 offeredSuites（使用提供的 suites 列表）
@@ -264,11 +279,42 @@ public struct HandshakeOfferedSuites: Sendable {
         strategy: HandshakeAttemptStrategy,
         availableSuites: [CryptoSuite]
     ) -> BuildResult {
+        build(strategy: strategy, availableSuites: availableSuites, pqcOfferMode: .allAvailable)
+    }
+
+    public static func build(
+        strategy: HandshakeAttemptStrategy,
+        availableSuites: [CryptoSuite],
+        pqcOfferMode: PQCOfferMode
+    ) -> BuildResult {
         let filtered: [CryptoSuite]
         
         switch strategy {
         case .pqcOnly:
-            filtered = availableSuites.filter { $0.isPQCGroup }
+            let pqcSuites = availableSuites.filter { $0.isPQCGroup }
+            guard !pqcSuites.isEmpty else {
+                return .empty(strategy)
+            }
+            switch pqcOfferMode {
+            case .allAvailable:
+                filtered = pqcSuites
+            case .preferredSingle:
+                if let suite = pqcSuites.first(where: { $0.requiresV2EphemeralContribution }) {
+                    filtered = [suite]
+                } else if let suite = pqcSuites.first {
+                    filtered = [suite]
+                } else {
+                    filtered = []
+                }
+            case .compatRetry:
+                if let suite = pqcSuites.first(where: { !$0.requiresV2EphemeralContribution }) {
+                    filtered = [suite]
+                } else if let suite = pqcSuites.first {
+                    filtered = [suite]
+                } else {
+                    filtered = []
+                }
+            }
         case .classicOnly:
             filtered = availableSuites.filter { !$0.isPQCGroup }
         }

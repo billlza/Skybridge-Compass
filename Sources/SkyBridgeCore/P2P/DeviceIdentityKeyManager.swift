@@ -501,21 +501,22 @@ public actor DeviceIdentityKeyManager {
         for suite: CryptoSuite,
         provider: any CryptoProvider
     ) async throws -> (publicKey: Data, privateKey: SecureBytes) {
-        let cacheKey = KEMCacheKey(suiteWireId: suite.wireId, tier: provider.tier)
+        let storageSuite = suite.canonicalKEMSuite
+        let cacheKey = KEMCacheKey(suiteWireId: storageSuite.wireId, tier: provider.tier)
         if let cached = cachedKEMPublicKeys[cacheKey],
-           let record = try? loadKEMKeyRecord(suiteWireId: suite.wireId, tier: provider.tier),
+           let record = try? loadKEMKeyRecord(suiteWireId: storageSuite.wireId, tier: provider.tier),
            record.publicKey == cached {
             return (publicKey: record.publicKey, privateKey: SecureBytes(data: record.privateKey))
         }
         
-        if let record = try? loadKEMKeyRecord(suiteWireId: suite.wireId, tier: provider.tier) {
+        if let record = try? loadKEMKeyRecord(suiteWireId: storageSuite.wireId, tier: provider.tier) {
             cachedKEMPublicKeys[cacheKey] = record.publicKey
             return (publicKey: record.publicKey, privateKey: SecureBytes(data: record.privateKey))
         }
         
         let keyPair = try await provider.generateKeyPair(for: .keyExchange)
         let record = KEMIdentityKeyRecord(
-            suiteWireId: suite.wireId,
+            suiteWireId: storageSuite.wireId,
             publicKey: keyPair.publicKey.bytes,
             privateKey: keyPair.privateKey.bytes
         )
@@ -529,7 +530,8 @@ public actor DeviceIdentityKeyManager {
         for suite: CryptoSuite,
         provider: any CryptoProvider
     ) async throws -> Data {
-        let cacheKey = KEMCacheKey(suiteWireId: suite.wireId, tier: provider.tier)
+        let storageSuite = suite.canonicalKEMSuite
+        let cacheKey = KEMCacheKey(suiteWireId: storageSuite.wireId, tier: provider.tier)
         if let cached = cachedKEMPublicKeys[cacheKey] {
             return cached
         }
@@ -904,6 +906,8 @@ public actor DeviceIdentityKeyManager {
         switch (suiteWireId, tier) {
         case (0x0101, .nativePQC): return 96
         case (0x0101, .liboqsPQC): return 2400
+        case (0x0102, .nativePQC): return 96
+        case (0x0102, .liboqsPQC): return 2400
         case (0x0001, .nativePQC): return 64  // X-Wing MLKEM seed format
         default: return nil
         }
@@ -912,6 +916,7 @@ public actor DeviceIdentityKeyManager {
     private func expectedKEMPublicKeyLength(suiteWireId: UInt16, tier: CryptoTier) -> Int? {
         switch (suiteWireId, tier) {
         case (0x0101, _): return 1184
+        case (0x0102, _): return 1184
         case (0x0001, .nativePQC): return 1216
         default: return nil
         }

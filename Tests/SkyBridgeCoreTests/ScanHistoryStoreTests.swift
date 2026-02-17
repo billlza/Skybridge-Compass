@@ -1686,7 +1686,7 @@ extension ScanHistoryStoreTests {
         await testStore.reset()
 
  // First, add some small entries
-        for i in 0..<5 {
+        for _ in 0..<5 {
             let result = ScanHistoryTestGenerator.createRandomScanResult(
                 verdict: .safe,
                 scanLevel: .quick

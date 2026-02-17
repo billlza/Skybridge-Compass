@@ -59,6 +59,11 @@
 }
 \makeatother
 \pagestyle{headings}
+\raggedbottom
+
+% Paragraph breaking tuning for narrow IEEE columns.
+\tolerance=1000
+\emergencystretch=1em
 
 % Float-page spacing tuning: reduce inter-float separation slightly to avoid
 % overfull vbox on float-only pages.
@@ -79,14 +84,15 @@
 \newcommand{\real}[1]{#1}
 \newcommand{\artifacturl}{https://github.com/billlza/Skybridge-Compass}
 \newcommand{\artifacturlshort}{https://github.com/billlza/Skybridge-Compass}
-\newcommand{\artifacttag}{tdsc-2026-01-0318-ios-sim-fix\allowbreak-20260211\allowbreak-r2}
-\newcommand{\artifactsha}{e261f0b48ba7}
-\newcommand{\artifactshafull}{e261f0b48ba7234d6ade681f2bf986ede4906bc6}
+\newcommand{\artifacttag}{817e11aa5806}
+\newcommand{\artifactsha}{817e11aa5806}
+\newcommand{\artifactshafull}{817e11aa5806621dbf473af3cd3a5461662a2828}
 \newcommand{\artifactzipurl}{\artifacturl/archive/\artifactshafull.zip}
-\newcommand{\artifactzipsha}{c4d3553b\allowbreak{}b1a448f3\allowbreak{}5dfa5556\allowbreak{}393d3108\allowbreak{}e2545d22\allowbreak{}6edcffa2\allowbreak{}aba66c32\allowbreak{}ce41c91e}
+\newcommand{\artifactzipsha}{05d6961a\allowbreak{}26ec0f5b\allowbreak{}57b8821c\allowbreak{}fc8337de\allowbreak{}c1ba37ec\allowbreak{}8deb5f9d\allowbreak{}d5e7b1c7\allowbreak{}bdcb2378}
 \newcommand{\artifacttarurl}{\artifacturl/archive/\artifactshafull.tar.gz}
-\newcommand{\artifacttarsha}{976b480c\allowbreak{}2dab7400\allowbreak{}bde0e832\allowbreak{}f1221c7b\allowbreak{}fb426227\allowbreak{}ae57a5a7\allowbreak{}8789e127\allowbreak{}9ea990d1}
-\newcommand{\artifactdateXWing}{2026-01-16}
+\newcommand{\artifacttarsha}{5b9130d6\allowbreak{}4e521737\allowbreak{}6da98e20\allowbreak{}286f078f\allowbreak{}d8693d99\allowbreak{}8796d64d\allowbreak{}4e503e98\allowbreak{}1f2dea2b}
+\newcommand{\artifactdateXWing}{2026-01-23}
+\input{generated/claims_macros}
 \providecommand{\tightlist}{%
 	  \setlength{\itemsep}{0pt}\setlength{\parskip}{0pt}}
 
@@ -114,7 +120,13 @@ This document provides extended data tables referenced in the main paper. All da
 \item Tables~\ref{tab:supp-repeatability-latency}--\ref{tab:supp-repeatability-rtt} (Repeatability): Supports Section~\ref{sec:evaluation}. Tables report observed batch count $B$ and (when $B \ge 2$) 95\% confidence intervals across batches; set \texttt{SKYBRIDGE\_BENCH\_BATCHES=3}--\texttt{5} to reproduce multi-batch CIs.
 \item Table~\ref{tab:supp-traffic-padding} (Traffic Padding): Supports Section~\ref{sec:evaluation} (traffic analysis mitigation quantization/overhead)
 \item Table~\ref{tab:supp-realnet-microstudy} (Real-network micro-study): STUN path + 12~kB-class payload measurements across Wi-Fi / hotspot labels (generated from \texttt{Artifacts/realnet\_*}). (Cross-NAT inbound-reachability depends on ISP/upstream equipment and may be infeasible without administrative control; see note below.)
-\item Tables~\ref{tab:supp-message-field-validation}--\ref{tab:artifact-map} (Protocol/Audit Appendices): Wire-format validation rules, suite identifiers, PQC coverage and platform support matrices, key-size references, security event taxonomy, and an implementation-to-file mapping. These materials support auditability and reproducibility claims in main paper Sections~\ref{sec:handshake-state-machine}, \ref{sec:security-model}, and \ref{sec:implementation}.
+\item Table~\ref{tab:supp-ec2-direct} (Dedicated EC2 direct-path validation): external Linux direct TCP run (no tunnel) with \texttt{n=50} per payload for the pinned artifact date.
+\item Table~\ref{tab:supp-kernel-emulation} (Kernel-level emulation cross-check): dummynet/netem comparison under shared profile IDs, supporting Section~\ref{sec:network-conditions}.
+\item Table~\ref{tab:supp-ios-microbench-devices} (iOS microbench metadata): per-device hardware/software/thermal metadata and run configuration for the schema v3 JSON artifacts supporting Table~\ref{tab:ios-microbench}. For the frozen artifact date (\texttt{2026-01-23}), the iOS compatibility-matrix gate passes for the tested iPad/iPhone deployment set (no schema-version incompatibility observed).
+\item Table~\ref{tab:supp-v2-v1-compare} (v1/v2 bridge comparison): liboqs PQC v1 baseline versus v2 FS latency/RTT and payload-byte delta, supporting main-paper Section~\ref{sec:evaluation}.
+\item Tables~\ref{tab:supp-platform-support}--\ref{tab:supp-cross-platform-policy} (Platform/runtime matrix): Apple provider availability plus Android/Ubuntu version-tier suite policy mapping used by negotiation.
+\item Table~\ref{tab:supp-cross-platform-contract} (Cross-platform contract consistency): static source-based checker output across iOS/macOS, Android, and Ubuntu for suite parity, encoding, fallback guardrails, and trust path.
+\item Tables~\ref{tab:supp-message-field-validation}--\ref{tab:artifact-map} (Protocol/Audit Appendices): wire-format validation rules, suite identifiers, PQC coverage and platform support matrices, key-size references, security event taxonomy, and an implementation-to-file mapping. These materials support auditability and reproducibility claims in main paper Sections~\ref{sec:handshake-state-machine}, \ref{sec:security-model}, and \ref{sec:implementation}.
 \end{itemize}
 
 \input{supp_tables/s1_latency}
@@ -131,13 +143,35 @@ This document provides extended data tables referenced in the main paper. All da
 
 \IfFileExists{supp_tables/s9_realnet_microstudy.tex}{\input{supp_tables/s9_realnet_microstudy}}{\noindent\textit{(Real-network micro-study table not present: run \texttt{Scripts/run\_real\_network\_probe.swift} and \texttt{Scripts/run\_real\_network\_e2e.swift}, then \texttt{python3 Scripts/aggregate\_realnet.py}.)}\par}
 
+\begin{table}[!tp]
+\centering
+\scriptsize
+\caption{Dedicated EC2 direct-path validation (external Linux, no tunnel, \texttt{ARTIFACT\_DATE=2026-01-23}). Endpoint: \texttt{54.92.79.99:44444}; harness: \texttt{Scripts/run\_real\_network\_e2e\_linux.py}; \texttt{n=50} per payload.}
+\label{tab:supp-ec2-direct}
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+Payload (B) & Success rate & p50 total (ms) & p95 total (ms) & p99 total (ms) \\
+\midrule
+687   & 1.0000 & 210.391 & 262.526 & 277.580 \\
+12{,}002 & 1.0000 & 225.216 & 334.648 & 349.148 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\IfFileExists{supp_tables/s10_kernel_emulation.tex}{\input{supp_tables/s10_kernel_emulation}}{\noindent\textit{(Kernel-emulation table not present: run \texttt{Scripts/run\_network\_emulation\_kernel.sh}, then \texttt{python3 Scripts/aggregate\_kernel\_emulation.py}.)}\par}
+
+\IfFileExists{supp_tables/s11_ios_microbench_devices.tex}{\input{supp_tables/s11_ios_microbench_devices}}{\noindent\textit{(iOS microbench metadata table not present: export schema-v3 JSON files such as \texttt{ios\_microbench\_2026-01-23\_ipad16\_3.json} and \texttt{ios\_microbench\_2026-01-23\_iphone17\_1.json}, then run \texttt{python3 Scripts/aggregate\_ios\_microbench.py}.)}\par}
+
+\IfFileExists{supp_tables/s12_v2_v1_compare.tex}{\input{supp_tables/s12_v2_v1_compare}}{\noindent\textit{(v1/v2 bridge comparison table not present: run \texttt{Scripts/run\_paper\_eval.sh} to regenerate \texttt{handshake\_bench}, \texttt{handshake\_rtt}, and \texttt{message\_sizes} artifacts.)}\par}
+
 \noindent\textit{Note: Cross-NAT direct inbound tests (no overlay/relay) are not universally feasible. In particular, double-NAT topologies (ISP router/modem upstream) and IPv6 inbound filtering can prevent any inbound reachability even when devices have global IPv6 addresses. In such environments, all client samples time out with empty connect-time fields, and we omit those rows from the main table to avoid conflating ``connectivity unavailable'' with protocol performance.}
 
 \textbf{Wire Size Summary:}
 \begin{itemize}
 \item Classic: $293 + 318 + 2 \times 38 = 687$~B
 \item PQC: $6507 + 5419 + 2 \times 38 = 12{,}002$~B
-\item X-Wing (\texttt{\artifactdateXWing} snapshot): $6609 + 5510 + 2 \times 38 = 12{,}195$~B
+\item X-Wing (\texttt{\artifactdateXWing} snapshot): $6641 + 5419 + 2 \times 38 = 12{,}136$~B
+\item Real-network micro-study payload labels use the payload-only sizes above; the transport harness adds a fixed 4-byte length prefix that is excluded from these labels.
 \end{itemize}
 
 \subsection*{Table~\ref{tab:supp-loopback-wire}: Loopback Wire-Size Baselines}
@@ -172,7 +206,7 @@ payload-only sizes are reported in Table~\ref{tab:supp-message-sizes}.
 
 \subsection*{Table~\ref{tab:supp-repeatability-rtt}: Repeatability Across Batches (RTT)}
 
-\noindent\textit{Interpretation note:} CryptoKit PQC RTT exhibits higher \emph{between-batch} variance than Classic/liboqs in our environment (Apple Silicon, macOS 26.x), so its across-batch 95\% CI can be substantially wider even when each batch uses N=1000 iterations. This reflects run-to-run scheduler/load sensitivity rather than an arithmetic error; raw batch values are directly recorded in \texttt{Artifacts/handshake\_rtt\_<date>.csv}.
+\noindent\textit{Interpretation note:} CryptoKit PQC RTT exhibits higher \emph{between-batch} variance than Classic/liboqs in our environment (Apple Silicon, macOS 26.x), so its across-batch 95\% CI can be substantially wider. Per-batch iteration counts are configuration-dependent in this artifact snapshot (Classic/liboqs N=1000, CryptoKit N=5000). This reflects run-to-run scheduler/load sensitivity rather than an arithmetic error; raw batch values are directly recorded in \texttt{Artifacts/handshake\_rtt\_2026-01-23.csv}.
 
 \input{supp_tables/s6_repeatability_rtt}
 
@@ -181,15 +215,33 @@ payload-only sizes are reported in Table~\ref{tab:supp-message-sizes}.
 All data is generated from the artifact CSV files:
 \begin{itemize}
 \raggedright
-\item \texttt{Artifacts/\allowbreak handshake\_\allowbreak bench\_\allowbreak <date>.csv} (Tables~\ref{tab:supp-latency}, \ref{tab:supp-repeatability-latency})
-\item \texttt{Artifacts/\allowbreak handshake\_\allowbreak rtt\_\allowbreak <date>.csv} (Tables~\ref{tab:supp-rtt}, \ref{tab:supp-repeatability-rtt})
-\item \texttt{Artifacts/\allowbreak message\_\allowbreak sizes\_\allowbreak <date>.csv} (Table~\ref{tab:supp-message-sizes})
-\item \texttt{Artifacts/\allowbreak traffic\_\allowbreak padding\_\allowbreak <date>.csv} (Table~\ref{tab:supp-traffic-padding})
-\item \texttt{Artifacts/\allowbreak traffic\_\allowbreak padding\_\allowbreak sensitivity\_\allowbreak <date>.csv} (Table~\ref{tab:supp-traffic-padding-sensitivity})
-\item \texttt{Artifacts/\allowbreak baseline\_\allowbreak summary\_\allowbreak <timestamp>.csv} (Table~\ref{tab:supp-loopback-wire})
+\item \texttt{Artifacts/\allowbreak handshake\_\allowbreak bench\_2026-01-23.csv} (Tables~\ref{tab:supp-latency}, \ref{tab:supp-repeatability-latency})
+\item \texttt{Artifacts/\allowbreak handshake\_\allowbreak rtt\_2026-01-23.csv} (Tables~\ref{tab:supp-rtt}, \ref{tab:supp-repeatability-rtt})
+\item \texttt{Artifacts/\allowbreak message\_\allowbreak sizes\_2026-01-23.csv} (Table~\ref{tab:supp-message-sizes})
+\item \texttt{Artifacts/\allowbreak traffic\_\allowbreak padding\_2026-01-23.csv} (Table~\ref{tab:supp-traffic-padding})
+\item \texttt{Artifacts/\allowbreak traffic\_\allowbreak padding\_\allowbreak sensitivity\_2026-01-23.csv} (Table~\ref{tab:supp-traffic-padding-sensitivity})
+\item \texttt{Artifacts/\allowbreak network\_\allowbreak emulation\_\allowbreak kernel\_2026-01-23.csv} (Table~\ref{tab:supp-kernel-emulation})
+\item \texttt{Artifacts/\allowbreak ios\_\allowbreak microbench\_2026-01-23.csv} (Table~\ref{tab:ios-microbench}, Table~\ref{tab:supp-ios-microbench-devices})
+\item \texttt{Artifacts/\allowbreak realnet\_\allowbreak microstudy\_2026-01-23.csv} (Table~\ref{tab:supp-realnet-microstudy})
+\item \texttt{Artifacts/\allowbreak baseline\_\allowbreak summary\_*.csv} (Table~\ref{tab:supp-loopback-wire})
 \end{itemize}
 
-These files can be regenerated using \texttt{Scripts/\allowbreak run\_\allowbreak paper\_\allowbreak eval.sh} from the artifact repository; \texttt{Scripts/\allowbreak make\_\allowbreak tables.py} uses the main-paper-pinned \texttt{\string\artifactdate} (or an explicit \texttt{ARTIFACT\_DATE}) to avoid accidentally mixing datasets. System-level impact artifacts (\texttt{system\_impact\_\ldots}) are generated by a separate benchmark suite and are pinned consistently in the main paper via \texttt{\string\artifactdateSystemImpact}.
+Regenerate the benchmark CSVs with
+\texttt{Scripts/\allowbreak run\_\allowbreak paper\_\allowbreak eval.sh}
+from the artifact repository. Then build all paper/supplementary tables with
+\texttt{Scripts/\allowbreak make\_\allowbreak tables.py}, which uses the
+main-paper pinned artifact date (or explicit \texttt{ARTIFACT\_DATE}) to avoid
+mixing datasets across runs. System-level impact artifacts
+(\texttt{system\_impact\_\ldots}) are produced by a dedicated suite, but follow
+the same artifact-date suffix convention used in the main paper.
+
+\subsection*{Evidence Layering for This Revision}
+
+Main-paper claims and all primary figures/tables are anchored to the
+\texttt{2026-01-23} dataset family listed above. Any expanded checks
+introduced during revision are reported as \textbf{additional validation}
+in Supplementary sections and are used to strengthen robustness discussion;
+they do not replace or redefine the main-paper primary statistics.
 
 Artifact release:
 \begin{itemize}\tightlist
@@ -454,11 +506,11 @@ than causing parse failures. This allows older clients to gracefully
 reject unsupported suites during negotiation.
 
 Transport/MTU considerations: handshake messages are length-prefixed and
-carried on reliable control channels (TCP or QUIC streams), so
-fragmentation is handled by the transport layer rather than by the
-handshake format itself. QUIC datagrams are reserved for latency-critical
-media frames; when datagrams are used for other payloads, senders must
-respect the maximum datagram size and chunk accordingly.
+carried on reliable control channels (TCP or QUIC streams). Fragmentation
+and reassembly are handled by transport, not by the handshake format.
+QUIC datagrams are reserved for latency-critical media frames; for other
+payload types, senders must respect the maximum datagram size and chunk
+accordingly.
 
 \subsection*{KEM-DEM Envelope}
 
@@ -616,13 +668,13 @@ allocation.
 
 \begin{table*}[!tp]
 \centering
-\caption{Platform support matrix.}
+\caption{Platform/runtime support matrix (Apple + cross-platform runtime policy).}
 \label{tab:supp-platform-support}
 \begin{tabular}{@{}
-  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.2326}}
-  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.3256}}
-  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.2791}}
-  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.1628}}@{}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.20}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.24}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.28}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.28}}@{}}
 \toprule\noalign{}
 \begin{minipage}[b]{\linewidth}\raggedright
 Platform
@@ -639,15 +691,64 @@ macOS 14--15 & OQSPQCProvider & ML-KEM-768, ML-DSA-65 & liboqs fallback \\
 macOS 14--15 & ClassicProvider & X25519, Ed25519 & If liboqs unavailable \\
 iOS 26+ & ApplePQCProvider & ML-KEM-768, ML-KEM-1024\textsuperscript{1}, ML-DSA-65, ML-DSA-87\textsuperscript{1} & Native CryptoKit \\
 iOS 17--18 & ClassicProvider & X25519, Ed25519 & liboqs not bundled \\
+Android 17+ & Runtime tier policy & X-Wing\textsuperscript{2} $\rightarrow$ ML-KEM-768 (liboqs) $\rightarrow$ X25519 & Prefer hybrid if available; fallback is evented + cooldown-limited \\
+Android 14--16 & Runtime tier policy & ML-KEM-768 (liboqs) $\rightarrow$ X25519 & PQC first, then classic fallback under policy gate \\
+Android 13 and below & Runtime tier policy & X25519, Ed25519 & Classic-only baseline \\
+Ubuntu 24--25 & Runtime tier policy & X-Wing\textsuperscript{2} $\rightarrow$ ML-KEM-768 (liboqs) $\rightarrow$ X25519 & Prefer hybrid if available; per-peer fallback cooldown enforced \\
+Ubuntu 22--23 & Runtime tier policy & ML-KEM-768 (liboqs) $\rightarrow$ X25519 & PQC first, then classic fallback under policy gate \\
+Ubuntu 20--21 & Runtime tier policy & X25519, Ed25519 & Classic-only baseline \\
 \bottomrule
 \end{tabular}
 \end{table*}
 
 \textsuperscript{1} ML-KEM-1024 and ML-DSA-87 are available in CryptoKit
-on Apple 26+ but not currently used by our implementation. X-Wing
-hybrid KEM (wireId 0x0001) is reserved for future use. Secure Enclave
-PQC keys are only available on Apple 26+; earlier versions fall back to
-software PQC and P-256 Secure Enclave PoP.
+on Apple 26+ but not currently used by our implementation.
+\textsuperscript{2} X-Wing (wireId 0x0001) is negotiated only when
+runtime/provider support is available on both peers; otherwise tiered
+fallback selects ML-KEM-768 or classic according to policy.
+
+Compatibility markers \texttt{0x0102} (ML-KEM-768-FS) and \texttt{0x1002}
+(P-256 marker) are parsed in the current Android/Ubuntu snapshot for
+forward compatibility and catalog parity, but remain non-negotiable by
+default until full end-to-end contract support is enabled.
+
+\begin{table}[!tp]
+\centering
+\scriptsize
+\caption{Cross-platform contract-consistency snapshot (\texttt{ARTIFACT\_DATE=2026-01-23}). Generated by \texttt{Scripts/check\_cross\_platform\_interop.py}.}
+\label{tab:supp-cross-platform-contract}
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{0.44\columnwidth}>{\centering\arraybackslash}p{0.10\columnwidth}>{\raggedright\arraybackslash}p{0.32\columnwidth}@{}}
+\toprule
+Check & Result & Notes \\
+\midrule
+Suite catalog parity (IDs 0x0001, 0x0101, 0x0102, 0x1001, 0x1002) & PASS & iOS/macOS, Android, Ubuntu aligned \\
+Wire endianness (UInt16 little-endian fields) & PASS & Encoding/decoding contract aligned \\
+Signature-selection contract (PQC $\rightarrow$ ML-DSA-65, classic $\rightarrow$ Ed25519) & PASS & Cross-platform rule alignment \\
+Timeout-triggered fallback blocked & PASS & Timeout not in default fallback gate \\
+Per-peer fallback cooldown guard & PASS & Explicit cooldown paths present \\
+Trust-pinning path & PASS & Pinned identity-fingerprint path present \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table*}[!tp]
+\centering
+\scriptsize
+\caption{Cross-platform runtime suite-policy matrix used in this revision.}
+\label{tab:supp-cross-platform-policy}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Platform range & Preferred suite order & Fallback policy note \\
+\midrule
+Android 17+ & X-Wing (if supported) $\rightarrow$ ML-KEM-768 (liboqs) $\rightarrow$ X25519 & Classic fallback requires whitelist reason + per-peer cooldown \\
+Android 14--16 & ML-KEM-768 (liboqs) $\rightarrow$ X25519 & PQC-first, classic as controlled fallback \\
+Android 13 and below & X25519 only & Classic-only baseline \\
+Ubuntu 24--25 & X-Wing (if supported) $\rightarrow$ ML-KEM-768 (liboqs) $\rightarrow$ X25519 & Classic fallback requires whitelist reason + per-peer cooldown \\
+Ubuntu 22--23 & ML-KEM-768 (liboqs) $\rightarrow$ X25519 & PQC-first, classic as controlled fallback \\
+Ubuntu 20--21 & X25519 only & Classic-only baseline \\
+\bottomrule
+\end{tabular}
+\end{table*}
 
 \subsection*{Native PQC Integration}
 
@@ -697,9 +798,10 @@ private keys never leave the Secure Enclave.
 keys are only available on macOS 26+ via CryptoKit. On macOS 14--15, PQC
 operations fall back to liboqs (software), and Secure Enclave is used
 only for P-256 ECDSA proof-of-possession keys. When Secure Enclave PQC
-is used, the implementation relies on CryptoKit key types
-\texttt{SecureEnclave.MLDSA*} and \texttt{SecureEnclave.MLKEM*}, which are
-gated by the macOS 26+ SDK and runtime availability checks.
+is enabled, the implementation relies on CryptoKit key types
+\texttt{SecureEnclave.\allowbreak MLDSA*} and
+\texttt{SecureEnclave.\allowbreak MLKEM*}, both gated by macOS 26+ SDK
+and runtime availability checks.
 
 \subsection*{Signing Key Hierarchy}
 
@@ -794,7 +896,8 @@ runtime through \texttt{HandshakeDriver} initialization validation.
 To support interoperability between PQC-capable and classic-only
 devices, we employ a two-attempt strategy: (1) PQC attempt with ML-DSA-65
 signatures, then (2) classic fallback with Ed25519 if the PQC attempt
-fails due to provider unavailability or suite negotiation failure. In
+fails due to provider unavailability or \emph{local pre-send}
+suite-negotiation failure. In
 particular, for a classic-only peer without a pinned PQC KEM public key
 from pairing, the PQC attempt fails locally during \texttt{MessageA}
 construction (no key shares $\rightarrow$ \texttt{suiteNegotiationFailed}),
@@ -817,12 +920,13 @@ Not all failures trigger default-mode classic fallback.
 \begin{itemize}\tightlist
 \item \texttt{pqcProvider\allowbreak Unavailable}
 \item \texttt{suiteNot\allowbreak Supported}
-\item \texttt{suite\allowbreak Negotiation\allowbreak Failed}
+\item \texttt{suite\allowbreak Negotiation\allowbreak Failed} (local pre-send branch only)
 \end{itemize}
 
 \textbf{Blocked:}
 \begin{itemize}\tightlist
 \item \texttt{timeout}
+\item \texttt{suite\allowbreak Negotiation\allowbreak Failed} after remote input / after-send
 \item \texttt{signature\allowbreak Verification\allowbreak Failed}
 \item \texttt{identity\allowbreak Mismatch}
 \item \texttt{replay\allowbreak Detected}
@@ -943,52 +1047,97 @@ Trigger
 X-Wing is a hybrid KEM combining X25519 + ML-KEM-768. In our v1
 handshake, the initiator carries only a KEM ciphertext in MessageA;
 thus X-Wing increases the MessageA keyshare from 1088~B (ML-KEM-768) to
-1120~B (X25519~32~B + ML-KEM-768~1088~B), while MessageB remains
+1216~B in the \texttt{2026-01-23} snapshot, while MessageB remains
 keyshare-free. We measure X-Wing directly via the native CryptoKit
 provider (wireId 0x0001) and report per-field sizes in Supplementary
 Table~\ref{tab:supp-message-sizes} (\texttt{MessageA.XWing}/\texttt{MessageB.XWing}),
 using the X-Wing snapshot dated \texttt{\artifactdateXWing}. The field
 breakdown is:
 \begin{itemize}\tightlist
-\item MessageA.XWing: $3309$ (signature) + $1120$ (keyshare) + $1956$
-  (identity) + $224$ (overhead) $= 6609$~B
+\item MessageA.XWing: $3309$ (signature) + $1216$ (keyshare) + $1956$
+  (identity) + $160$ (overhead) $= 6641$~B
 \item MessageB.XWing: $3309$ (signature) + $0$ (keyshare) + $1956$
-  (identity) + $245$ (overhead) $= 5510$~B
+  (identity) + $154$ (overhead) $= 5419$~B
 \item Finished: $38$~B
 \end{itemize}
-Total handshake size is \textbf{12,195~B}. Within the same snapshot, the
-PQC baseline is 12,163~B, so X-Wing adds +32~B. The +193~B delta vs the
-12,002~B baseline in the main paper reflects the +32~B keyshare and a
-snapshot delta of +161~B from earlier framing overhead.
+Total handshake size is \textbf{12,136~B}. Relative to the payload-only
+baseline (12,002~B), the +134~B delta reflects +128~B X-Wing keyshare
+expansion and +6~B framing overhead in this snapshot.
 
 \subsection*{Reproducibility}
 
 \textbf{Test Commands.}
-One-shot evaluation:
-\texttt{Scripts/\allowbreak run\_\allowbreak paper\_\allowbreak eval.sh}.
-Individual suites:
-\texttt{swift test --filter TestName}.
-Representative suite names:
+\begin{itemize}\tightlist
+\item One-shot evaluation:
+\texttt{Scripts/\allowbreak run\_\allowbreak paper\_\allowbreak eval.sh}
+\item Individual suite run:
+\texttt{swift test} with \texttt{--filter TestName}
+\item Representative suite names:
 \begin{itemize}\tightlist
 \item \texttt{HandshakeBenchmarkTests}
 \item \texttt{HandshakeFaultInjectionBenchTests}
 \item \texttt{PolicyDowngradeBenchTests}
 \item \texttt{MessageSizeSnapshotTests}
 \end{itemize}
-All CSV outputs are date-stamped under \texttt{Artifacts/}. To prevent mixing datasets across runs, set a fixed date suffix:
-\texttt{ARTIFACT\_DATE=YYYY-MM-DD} (or \texttt{SKYBRIDGE\_ARTIFACT\_DATE}).
+\item CSV outputs are date-stamped under \texttt{Artifacts/}. To pin one
+dataset, set
+\texttt{ARTIFACT\_DATE=2026-01-23} or
+\texttt{SKYBRIDGE\_ARTIFACT\_DATE=2026-01-23}.
+\end{itemize}
+
+\textbf{System-impact artifact hygiene (snapshot 2026-01-23).}
+For \texttt{Artifacts/system\_impact\_2026-01-23.csv}, we performed one
+integrity cleanup pass and removed one duplicated embedded header row
+before table generation. Final file summary:
+\begin{itemize}\tightlist
+\item 13{,}801 total lines (1 header + 13{,}800 data rows)
+\item Per-suite row counts consistent with benchmark design:
+\texttt{ideal}=1000, \texttt{rtt100\_j50}=1000,
+\texttt{rtt50\_j20}=2600
+\item No fully duplicated data rows remain
+\end{itemize}
 
 \textbf{Repeatability (Multi-batch).}
-Repeatability tables report observed batch count $B$ and (when $B \ge 2$) mean $\pm$ 95\% confidence intervals across independent batches.
-To reproduce multi-batch CIs, rerun with process restarts:
-\texttt{ARTIFACT\_DATE=YYYY-MM-DD SKYBRIDGE\_BENCH\_BATCHES=3--5 bash Scripts/run\_paper\_eval.sh}.
+Repeatability tables report observed batch count $B$ and
+(when $B \ge 2$) mean $\pm$ 95\% confidence intervals across independent
+batches. To reproduce multi-batch CIs, rerun with process restarts:
+\texttt{ARTIFACT\_DATE=2026-01-23}
+\texttt{SKYBRIDGE\_BENCH\_BATCHES=3--5}
+\texttt{bash Scripts/\allowbreak run\_\allowbreak paper\_\allowbreak eval.sh}.
 
 \textbf{Real-network micro-study (External validity).}
-We provide two lightweight scripts:
-(i) \texttt{Scripts/run\_real\_network\_probe.swift} (STUN RTT + conservative NAT classification),
-and (ii) \texttt{Scripts/run\_real\_network\_e2e.swift} (TCP connect + first-byte + completion timing for a 12~kB-class payload).
-Pin filenames with \texttt{ARTIFACT\_DATE=YYYY-MM-DD}, run them across labels (same Wi-Fi / cross-NAT / hotspot), then aggregate into a Supplementary table via:
-\texttt{python3 Scripts/aggregate\_realnet.py}.
+We use two lightweight scripts:
+\begin{itemize}\tightlist
+\item \texttt{Scripts/\allowbreak run\_\allowbreak real\_\allowbreak network\_\allowbreak probe.swift}:
+STUN RTT + conservative NAT classification
+\item \texttt{Scripts/\allowbreak run\_\allowbreak real\_\allowbreak network\_\allowbreak e2e.swift}:
+TCP connect + first-byte + completion timing for payload-only handshake
+baselines (classic 687~B, PQC 12{,}002~B; transport uses a fixed 4-byte
+length prefix)
+\end{itemize}
+Pin filenames with \texttt{ARTIFACT\_DATE=2026-01-23}, run across labels
+(same Wi-Fi / cross-NAT / hotspot), then aggregate with
+\texttt{python3 Scripts/\allowbreak aggregate\_\allowbreak realnet.py}.
+
+\textbf{iOS on-device microbench import.}
+Run the iOS app path
+\texttt{Settings} $\rightarrow$ \texttt{PQC} $\rightarrow$
+\texttt{Self-test/Bench} (warmup=10, N=1000, B=3). Export:
+\begin{itemize}\tightlist
+\item \texttt{ios\_microbench\_<date>\_ipad16\_3.json}
+\item \texttt{ios\_microbench\_<date>\_iphone17\_1.json}
+\end{itemize}
+Use \texttt{<date>=2026-01-23} for the frozen artifact snapshot.
+Place files under \texttt{Artifacts/}, then run
+\texttt{python3 Scripts/\allowbreak aggregate\_\allowbreak ios\_\allowbreak microbench.py}.
+
+\textbf{Kernel-level emulation cross-check.}
+Run \texttt{Scripts/\allowbreak run\_\allowbreak network\_\allowbreak emulation\_\allowbreak kernel.sh}
+(requires sudo/network-admin capability), then aggregate with
+\texttt{python3 Scripts/\allowbreak aggregate\_\allowbreak kernel\_\allowbreak emulation.py}.
+Shared profile IDs come from
+\texttt{Scripts/\allowbreak netem\_\allowbreak profiles.json}; reorder is
+netem-only and dummynet entries are marked \textit{n/a}.
 
 \textbf{Note on inbound reachability.}
 Some home networks do not provide an inbound-reachable IPv4 address (e.g., double NAT behind an ISP router, CGNAT, DS-Lite, or WAN IPv4 shown as \texttt{0.0.0.0}). In these cases, IPv4 port-forwarding experiments will fail (client samples report \texttt{timeout} with empty \texttt{connect\_ms}). For a true cross-NAT condition without modifying upstream equipment, prefer IPv6 direct connectivity (when available) with an explicit IPv6 firewall allow-rule for TCP \texttt{44444}. If only an overlay/relay path is feasible, label the condition accordingly (e.g., \texttt{cross\_nat\_via\_relay}) and interpret results as overlay-mediated connectivity rather than raw Internet inbound reachability.
@@ -1015,7 +1164,7 @@ Table~\ref{tab:artifact-map} maps implementation components to source
 files in the artifact repository (\href{\artifacturl}{\artifacturlshort},
 ref=\texttt{\artifacttag}, commit=\texttt{\artifactsha}).
 
-\begin{table}[!h]
+\begin{table}[!ht]
 \centering
 \scriptsize
 \setlength{\tabcolsep}{3pt}

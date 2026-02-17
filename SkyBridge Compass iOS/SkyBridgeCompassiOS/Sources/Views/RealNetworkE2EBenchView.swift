@@ -212,7 +212,7 @@ fileprivate func realnetOneClientSample(host: String, port: UInt16, payloadBytes
 
 /// Real-network end-to-end micro-study client (iOS/iPadOS).
 /// Connects to a macOS server and measures connect/first-byte/total time for
-/// two payload sizes: Classic (827 B) vs PQC (12,163 B).
+/// two payload sizes: Classic (687 B) vs PQC (12,002 B).
 @available(iOS 17.0, *)
 struct RealNetworkE2EBenchView: View {
     @State private var label: String = "home_wifi"
@@ -234,8 +234,8 @@ struct RealNetworkE2EBenchView: View {
     @State private var samplesFileURL: URL? = nil
     @State private var summaryFileURL: URL? = nil
 
-    // Fixed payload sizes (paper-aligned)
-    private let payloads: [Int] = [827, 12_163]
+    // Fixed payload sizes (paper-aligned; payload-only handshake bytes)
+    private let payloads: [Int] = [687, 12_002]
 
     var body: some View {
         List {
@@ -264,7 +264,7 @@ struct RealNetworkE2EBenchView: View {
                 HStack {
                     Text("Payload sizes")
                     Spacer()
-                    Text("827 B / 12,163 B")
+                    Text("687 B / 12,002 B")
                         .font(.system(.body, design: .monospaced))
                         .foregroundColor(.secondary)
                 }
@@ -412,7 +412,7 @@ struct RealNetworkE2EBenchView: View {
 
         var sLines: [String] = []
         sLines.reserveCapacity(summaries.count + 1)
-        sLines.append("stamp,label,remote,payload_bytes,samples,ok_count,ok_rate,timeout_count,timeout_rate,connect_failed_count,recv_failed_count,short_read_count,connect_mean_ms,connect_p50_ms,connect_p95_ms,first_mean_ms,first_p50_ms,first_p95_ms,total_mean_ms,total_p50_ms,total_p95_ms")
+        sLines.append("stamp,label,remote,payload_bytes,samples,ok_count,ok_rate,timeout_count,timeout_rate,connect_failed_count,recv_failed_count,short_read_count,connect_mean_ms,connect_p50_ms,connect_p95_ms,connect_p99_ms,first_mean_ms,first_p50_ms,first_p95_ms,first_p99_ms,total_mean_ms,total_p50_ms,total_p95_ms,total_p99_ms")
         for r in summaries {
             sLines.append(r.csvRow)
         }
@@ -476,12 +476,15 @@ struct RealNetworkE2EBenchView: View {
         let connectMean: Double?
         let connectP50: Double?
         let connectP95: Double?
+        let connectP99: Double?
         let firstMean: Double?
         let firstP50: Double?
         let firstP95: Double?
+        let firstP99: Double?
         let totalMean: Double?
         let totalP50: Double?
         let totalP95: Double?
+        let totalP99: Double?
 
         static func from(samples rows: [SampleRow], stamp: String, label: String, remote: String, payloadBytes: Int) -> SummaryRow {
             let okRows = rows.filter { $0.ok }
@@ -513,12 +516,15 @@ struct RealNetworkE2EBenchView: View {
                 connectMean: RealNetworkE2EBenchView.mean(connect),
                 connectP50: RealNetworkE2EBenchView.percentile(connect, 0.50),
                 connectP95: RealNetworkE2EBenchView.percentile(connect, 0.95),
+                connectP99: RealNetworkE2EBenchView.percentile(connect, 0.99),
                 firstMean: RealNetworkE2EBenchView.mean(first),
                 firstP50: RealNetworkE2EBenchView.percentile(first, 0.50),
                 firstP95: RealNetworkE2EBenchView.percentile(first, 0.95),
+                firstP99: RealNetworkE2EBenchView.percentile(first, 0.99),
                 totalMean: RealNetworkE2EBenchView.mean(total),
                 totalP50: RealNetworkE2EBenchView.percentile(total, 0.50),
-                totalP95: RealNetworkE2EBenchView.percentile(total, 0.95)
+                totalP95: RealNetworkE2EBenchView.percentile(total, 0.95),
+                totalP99: RealNetworkE2EBenchView.percentile(total, 0.99)
             )
         }
 
@@ -528,9 +534,9 @@ struct RealNetworkE2EBenchView: View {
                 "\(samples)", "\(okCount)", String(format: "%.4f", okRate),
                 "\(timeoutCount)", String(format: "%.4f", timeoutRate),
                 "\(connectFailedCount)", "\(recvFailedCount)", "\(shortReadCount)",
-                RealNetworkE2EBenchView.fmt(connectMean), RealNetworkE2EBenchView.fmt(connectP50), RealNetworkE2EBenchView.fmt(connectP95),
-                RealNetworkE2EBenchView.fmt(firstMean), RealNetworkE2EBenchView.fmt(firstP50), RealNetworkE2EBenchView.fmt(firstP95),
-                RealNetworkE2EBenchView.fmt(totalMean), RealNetworkE2EBenchView.fmt(totalP50), RealNetworkE2EBenchView.fmt(totalP95)
+                RealNetworkE2EBenchView.fmt(connectMean), RealNetworkE2EBenchView.fmt(connectP50), RealNetworkE2EBenchView.fmt(connectP95), RealNetworkE2EBenchView.fmt(connectP99),
+                RealNetworkE2EBenchView.fmt(firstMean), RealNetworkE2EBenchView.fmt(firstP50), RealNetworkE2EBenchView.fmt(firstP95), RealNetworkE2EBenchView.fmt(firstP99),
+                RealNetworkE2EBenchView.fmt(totalMean), RealNetworkE2EBenchView.fmt(totalP50), RealNetworkE2EBenchView.fmt(totalP95), RealNetworkE2EBenchView.fmt(totalP99)
             ].joined(separator: ",")
         }
     }
@@ -560,4 +566,3 @@ struct RealNetworkE2EBenchView: View {
         return s[max(0, min(idx, s.count - 1))]
     }
 }
-

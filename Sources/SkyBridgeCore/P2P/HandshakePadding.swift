@@ -50,11 +50,14 @@ public struct HandshakePaddingConfig: Sendable {
         let defaults = UserDefaults.standard
         // Also allow reading from app-group defaults (handy if the app is sandboxed / preferences are moved).
         let groupDefaults = UserDefaults(suiteName: "group.com.skybridge.compass")
-        let enabled: Bool
+        var enabled: Bool
         if defaults.object(forKey: enabledKey) == nil {
             enabled = true
         } else {
             enabled = defaults.bool(forKey: enabledKey)
+        }
+        if ProcessInfo.processInfo.environment["SKYBRIDGE_BENCH_DISABLE_HANDSHAKE_PADDING"] == "1" {
+            enabled = false
         }
 
         let modeRaw = (defaults.string(forKey: modeKey) ?? HandshakePaddingMode.bucketed.rawValue)
@@ -195,4 +198,3 @@ public enum HandshakePadding {
         return Data(bytes)
     }
 }
-

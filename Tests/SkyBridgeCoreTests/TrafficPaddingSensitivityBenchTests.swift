@@ -58,7 +58,7 @@ final class TrafficPaddingSensitivityBenchTests: XCTestCase {
 
         // Overwrite each time for determinism.
         var lines: [String] = []
-        lines.append("artifact_date,cap_bytes,label,wraps,unwraps,raw_bytes,padded_bytes,overhead_ratio,over_cap_events,over_cap_rate,unique_buckets,entropy_bits,top_bucket")
+        lines.append("artifact_date,cap_bytes,label,wraps,unwraps,raw_bytes,padded_bytes,overhead_ratio,overhead_all_frames_pct,overhead_padded_only_pct,over_cap_events,over_cap_rate,padded_frames,passthrough_frames,passthrough_rate,unique_buckets,entropy_bits,top_bucket")
 
         for cap in caps {
             ud.set(cap, forKey: "sb_traffic_padding_bucket_cap_bytes")
@@ -96,7 +96,7 @@ final class TrafficPaddingSensitivityBenchTests: XCTestCase {
 
             // Track "cap coverage": how often a label's framed payload exceeds the cap.
             // We define "over cap" as (payloadBytes + SBP2 headerBytes) > capBytes.
-            var capCounters: [String: (wraps: Int, overCap: Int)] = [:]
+            var capCounters: [String: CapCounters] = [:]
 
             for _ in 0..<iterations {
                 try await sendWorkloadBurst(
@@ -137,10 +137,17 @@ final class TrafficPaddingSensitivityBenchTests: XCTestCase {
                 let topBucket = topBucketSummary(st.bucketCounts)
                 let uniqueBuckets = st.bucketCounts.count
                 let entropy = entropyBits(st.bucketCounts)
-                let c = capCounters[key] ?? (wraps: Int(st.wraps), overCap: 0)
+                let c = capCounters[key] ?? CapCounters(wraps: Int(st.wraps))
                 let wrapCount = max(0, c.wraps)
                 let overCap = max(0, c.overCap)
                 let overCapRate = (wrapCount > 0) ? (Double(overCap) / Double(wrapCount)) : 0.0
+                let passthroughRate = (wrapCount > 0) ? (Double(c.passthroughFrames) / Double(wrapCount)) : 0.0
+                let allFramesOverhead = (c.rawBytes > 0)
+                    ? ((Double(c.paddedBytes) / Double(c.rawBytes) - 1.0) * 100.0)
+                    : 0.0
+                let paddedOnlyOverhead = (c.paddedOnlyRawBytes > 0)
+                    ? ((Double(c.paddedOnlyPaddedBytes) / Double(c.paddedOnlyRawBytes) - 1.0) * 100.0)
+                    : 0.0
                 lines.append([
                     artifactDate,
                     "\(cap)",
@@ -150,8 +157,13 @@ final class TrafficPaddingSensitivityBenchTests: XCTestCase {
                     "\(st.rawBytes)",
                     "\(st.paddedBytes)",
                     String(format: "%.4f", ratio),
+                    String(format: "%.4f", allFramesOverhead),
+                    String(format: "%.4f", paddedOnlyOverhead),
                     "\(overCap)",
                     String(format: "%.4f", overCapRate),
+                    "\(c.paddedFrames)",
+                    "\(c.passthroughFrames)",
+                    String(format: "%.4f", passthroughRate),
                     "\(uniqueBuckets)",
                     String(format: "%.3f", entropy),
                     csvEscape(topBucket)
@@ -286,7 +298,7 @@ final class TrafficPaddingSensitivityBenchTests: XCTestCase {
         controlPayloads: [(label: String, data: Data)],
         binarySizes: [(label: String, size: Int)],
         capBytes: Int,
-        capCounters: inout [String: (wraps: Int, overCap: Int)],
+        capCounters: inout [String: CapCounters],
         from transport: LoopbackDiscoveryTransport,
         peer: PeerIdentifier,
         rng: inout XorShift64Star
@@ -376,20 +388,30 @@ final class TrafficPaddingSensitivityBenchTests: XCTestCase {
         _ payload: Data,
         label: String,
         capBytes: Int,
-        capCounters: inout [String: (wraps: Int, overCap: Int)],
+        capCounters: inout [String: CapCounters],
         from transport: LoopbackDiscoveryTransport,
         peer: PeerIdentifier
     ) async throws -> Data {
         // SBP2 header is magic(4) + u32(actualLen)(4)
         let sbp2HeaderLen = 8
-        var entry = capCounters[label] ?? (wraps: 0, overCap: 0)
+        var entry = capCounters[label] ?? CapCounters()
         entry.wraps += 1
-        if payload.count + sbp2HeaderLen > capBytes {
+        let isOverCap = payload.count + sbp2HeaderLen > capBytes
+        if isOverCap {
             entry.overCap += 1
+            entry.passthroughFrames += 1
+        } else {
+            entry.paddedFrames += 1
         }
-        capCounters[label] = entry
+        entry.rawBytes += payload.count
 
         let wrapped = TrafficPadding.wrapIfEnabled(payload, label: label)
+        entry.paddedBytes += wrapped.count
+        if !isOverCap {
+            entry.paddedOnlyRawBytes += payload.count
+            entry.paddedOnlyPaddedBytes += wrapped.count
+        }
+        capCounters[label] = entry
         try await transport.send(to: peer, data: wrapped)
         return wrapped
     }
@@ -428,6 +450,28 @@ final class TrafficPaddingSensitivityBenchTests: XCTestCase {
         let nonce = try AES.GCM.Nonce(data: nonceData)
         let sealed = try AES.GCM.SealedBox(nonce: nonce, ciphertext: cipher, tag: tagData)
         return try AES.GCM.open(sealed, using: key, authenticating: aad)
+    }
+}
+
+private struct CapCounters {
+    var wraps: Int
+    var overCap: Int
+    var paddedFrames: Int
+    var passthroughFrames: Int
+    var rawBytes: Int
+    var paddedBytes: Int
+    var paddedOnlyRawBytes: Int
+    var paddedOnlyPaddedBytes: Int
+
+    init(wraps: Int = 0) {
+        self.wraps = wraps
+        self.overCap = 0
+        self.paddedFrames = 0
+        self.passthroughFrames = 0
+        self.rawBytes = 0
+        self.paddedBytes = 0
+        self.paddedOnlyRawBytes = 0
+        self.paddedOnlyPaddedBytes = 0
     }
 }
 

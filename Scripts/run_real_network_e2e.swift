@@ -16,8 +16,8 @@
 //   swift Scripts/run_real_network_e2e.swift server --bind 0.0.0.0:44444
 //
 //   # Terminal B (client)
-//   ARTIFACT_DATE=2026-01-16 swift Scripts/run_real_network_e2e.swift client \\
-//     --label home_wifi --connect <server_ip>:44444 --samples 50 --bytes 12195
+//   ARTIFACT_DATE=2026-01-23 swift Scripts/run_real_network_e2e.swift client \\
+//     --label home_wifi --connect <server_ip>:44444 --samples 50 --bytes 12002
 //
 // Outputs:
 //   Artifacts/realnet_e2e_samples_<stamp>_<label>.csv
@@ -48,9 +48,9 @@ struct Config {
     var samples: Int = 50
     var timeoutMs: Int = 4000
     /// Payload sizes to test (bytes). For paper runs, we recommend two sizes:
-    /// - 827 B (Classic wire size)
-    /// - 12,163 B (PQC wire size)
-    var payloadBytesList: [Int] = [12_195]
+    /// - 687 B (Classic payload-only handshake bytes)
+    /// - 12,002 B (PQC payload-only handshake bytes)
+    var payloadBytesList: [Int] = [687, 12_002]
 }
 
 enum CLIError: Error {
@@ -95,7 +95,7 @@ func printUsageAndExit(_ msg: String? = nil) -> Never {
 
     Common options:
       --label <name>            Tag this run (default: run)
-      --artifact-date <date>    Pin output filename stamp (e.g., 2026-01-16). If omitted, uses ARTIFACT_DATE env or a timestamp.
+      --artifact-date <date>    Pin output filename stamp (e.g., 2026-01-23). If omitted, uses ARTIFACT_DATE env or a timestamp.
       --out-dir <dir>           Output directory (default: Artifacts)
 
     Client options:
@@ -107,7 +107,7 @@ func printUsageAndExit(_ msg: String? = nil) -> Never {
 
     Example (two-size paper run: classic + PQC):
       swift Scripts/run_real_network_e2e.swift server --bind 0.0.0.0:44444
-      ARTIFACT_DATE=2026-01-16 swift Scripts/run_real_network_e2e.swift client --label home_wifi --connect 10.0.0.8:44444 --samples 50 --bytes 827 --bytes 12163
+      ARTIFACT_DATE=2026-01-23 swift Scripts/run_real_network_e2e.swift client --label home_wifi --connect 10.0.0.8:44444 --samples 50 --bytes 687 --bytes 12002
     """)
     exit(2)
 }
@@ -459,7 +459,7 @@ func runClient(config: Config) async throws {
     func fmt(_ x: Double?) -> String { x.map { String(format: "%.3f", $0) } ?? "" }
 
     // Summary (one row per payload size)
-    let summaryHeader = "stamp,label,remote,payload_bytes,samples,ok_count,ok_rate,timeout_count,timeout_rate,connect_failed_count,recv_failed_count,short_read_count,connect_mean_ms,connect_p50_ms,connect_p95_ms,first_mean_ms,first_p50_ms,first_p95_ms,total_mean_ms,total_p50_ms,total_p95_ms\n"
+    let summaryHeader = "stamp,label,remote,payload_bytes,samples,ok_count,ok_rate,timeout_count,timeout_rate,connect_failed_count,recv_failed_count,short_read_count,connect_mean_ms,connect_p50_ms,connect_p95_ms,connect_p99_ms,first_mean_ms,first_p50_ms,first_p95_ms,first_p99_ms,total_mean_ms,total_p50_ms,total_p95_ms,total_p99_ms\n"
     var summaryLines: [String] = []
     for payloadBytes in config.payloadBytesList {
         let group = samples.filter { $0.payloadBytes == payloadBytes }
@@ -480,9 +480,9 @@ func runClient(config: Config) async throws {
             "\(group.count)", "\(okCount)", String(format: "%.4f", okRate),
             "\(timeoutCount)", String(format: "%.4f", timeoutRate),
             "\(connectFailCount)", "\(recvFailCount)", "\(shortReadCount)",
-            fmt(mean(connectOK)), fmt(percentile(connectOK, 0.50)), fmt(percentile(connectOK, 0.95)),
-            fmt(mean(firstOK)), fmt(percentile(firstOK, 0.50)), fmt(percentile(firstOK, 0.95)),
-            fmt(mean(totalOK)), fmt(percentile(totalOK, 0.50)), fmt(percentile(totalOK, 0.95)),
+            fmt(mean(connectOK)), fmt(percentile(connectOK, 0.50)), fmt(percentile(connectOK, 0.95)), fmt(percentile(connectOK, 0.99)),
+            fmt(mean(firstOK)), fmt(percentile(firstOK, 0.50)), fmt(percentile(firstOK, 0.95)), fmt(percentile(firstOK, 0.99)),
+            fmt(mean(totalOK)), fmt(percentile(totalOK, 0.50)), fmt(percentile(totalOK, 0.95)), fmt(percentile(totalOK, 0.99)),
         ].joined(separator: ",")
         summaryLines.append(row)
     }
@@ -498,6 +498,7 @@ func parseArgs() -> Config {
         printUsageAndExit("Missing mode (server/client)")
     }
     var cfg = Config(mode: mode)
+    var explicitBytes: [Int] = []
     var i = 2
     while i < args.count {
         let a = args[i]
@@ -527,13 +528,13 @@ func parseArgs() -> Config {
             cfg.timeoutMs = n
         case "--bytes":
             i += 1; guard i < args.count, let n = Int(args[i]), n > 0 else { printUsageAndExit("Invalid --bytes") }
-            cfg.payloadBytesList.append(n)
+            explicitBytes.append(n)
         case "--bytes-list":
             i += 1; guard i < args.count else { printUsageAndExit("Missing value for --bytes-list") }
             let parts = args[i].split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             let parsed = parts.compactMap { Int($0) }.filter { $0 > 0 }
             if parsed.isEmpty { printUsageAndExit("Invalid --bytes-list (expected comma-separated ints)") }
-            cfg.payloadBytesList.append(contentsOf: parsed)
+            explicitBytes.append(contentsOf: parsed)
         case "--help", "-h":
             printUsageAndExit(nil)
         default:
@@ -541,8 +542,10 @@ func parseArgs() -> Config {
         }
         i += 1
     }
-    // If user didn't specify bytes explicitly, default is 12,195 B.
-    // If they did specify, `payloadBytesList` may contain the default; dedupe + preserve order.
+    if !explicitBytes.isEmpty {
+        cfg.payloadBytesList = explicitBytes
+    }
+    // Dedupe + preserve order.
     var seen = Set<Int>()
     cfg.payloadBytesList = cfg.payloadBytesList.filter { seen.insert($0).inserted }
     if cfg.mode == .client {
@@ -574,5 +577,3 @@ case .client:
     }
     dispatchMain()
 }
-
-

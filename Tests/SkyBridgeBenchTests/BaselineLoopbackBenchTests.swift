@@ -279,15 +279,9 @@ final class BaselineLoopbackBenchTests: XCTestCase {
 
     private func loadIdentity(path: String, password: String) throws -> SecIdentity {
         let data = try Data(contentsOf: URL(fileURLWithPath: path))
-        var options: [String: Any] = [kSecImportExportPassphrase as String: password]
+        let options: [String: Any] = [kSecImportExportPassphrase as String: password]
         var items: CFArray?
-        var status = SecPKCS12Import(data as CFData, options as CFDictionary, &items)
-        if status != errSecSuccess {
-            if let keychain = try? makeTemporaryKeychain(password: password) {
-                options[kSecImportExportKeychain as String] = keychain
-                status = SecPKCS12Import(data as CFData, options as CFDictionary, &items)
-            }
-        }
+        let status = SecPKCS12Import(data as CFData, options as CFDictionary, &items)
         if status == errSecSuccess,
            let array = items as? [[String: Any]],
            let first = array.first,
@@ -303,22 +297,6 @@ final class BaselineLoopbackBenchTests: XCTestCase {
         throw NSError(domain: "BaselineBenchTests", code: Int(status), userInfo: [
             NSLocalizedDescriptionKey: "PKCS#12 import failed (\(status))"
         ])
-    }
-
-    private func makeTemporaryKeychain(password: String) throws -> SecKeychain {
-        let path = "/tmp/skybridge_baseline_tests_\(UUID().uuidString).keychain-db"
-        let passwordBytes = Array(password.utf8)
-        var keychain: SecKeychain?
-        let status = passwordBytes.withUnsafeBufferPointer { buffer -> OSStatus in
-            let base = buffer.baseAddress?.withMemoryRebound(to: Int8.self, capacity: buffer.count) { $0 }
-            return SecKeychainCreate(path, UInt32(passwordBytes.count), base, false, nil, &keychain)
-        }
-        guard status == errSecSuccess, let created = keychain else {
-            throw NSError(domain: "BaselineBenchTests", code: Int(status), userInfo: [
-                NSLocalizedDescriptionKey: "Temporary keychain creation failed (\(status))"
-            ])
-        }
-        return created
     }
 
     private func loadIdentityFromPEM(p12Path: String) throws -> SecIdentity {
@@ -352,13 +330,11 @@ final class BaselineLoopbackBenchTests: XCTestCase {
             ])
         }
 
-        let keychain = try makeTemporaryKeychain(password: UUID().uuidString)
         let label = "BaselineBenchTests.\(UUID().uuidString)"
         let addKeyQuery: [String: Any] = [
             kSecClass as String: kSecClassKey,
             kSecAttrLabel as String: label,
             kSecValueRef as String: key,
-            kSecUseKeychain as String: keychain,
             kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock
         ]
         SecItemDelete(addKeyQuery as CFDictionary)
@@ -373,7 +349,6 @@ final class BaselineLoopbackBenchTests: XCTestCase {
             kSecClass as String: kSecClassCertificate,
             kSecAttrLabel as String: label,
             kSecValueRef as String: cert,
-            kSecUseKeychain as String: keychain,
             kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock
         ]
         SecItemDelete(addCertQuery as CFDictionary)
@@ -385,7 +360,7 @@ final class BaselineLoopbackBenchTests: XCTestCase {
         }
 
         var identity: SecIdentity?
-        let idStatus = SecIdentityCreateWithCertificate(keychain, cert, &identity)
+        let idStatus = SecIdentityCreateWithCertificate(nil, cert, &identity)
         guard idStatus == errSecSuccess, let created = identity else {
             throw NSError(domain: "BaselineBenchTests", code: Int(idStatus), userInfo: [
                 NSLocalizedDescriptionKey: "Failed to create identity from PEM (\(idStatus))"

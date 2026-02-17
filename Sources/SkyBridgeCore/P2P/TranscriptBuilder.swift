@@ -516,9 +516,7 @@ public struct DeterministicDecoder {
         guard offset + 2 <= data.count else {
             throw TranscriptError.decodingError("Unexpected end of data")
         }
-        let value = data.subdata(in: offset..<offset+2).withUnsafeBytes {
-            $0.load(as: UInt16.self).littleEndian
-        }
+        let value = UInt16(data[offset]) | (UInt16(data[offset + 1]) << 8)
         offset += 2
         return value
     }
@@ -528,9 +526,10 @@ public struct DeterministicDecoder {
         guard offset + 4 <= data.count else {
             throw TranscriptError.decodingError("Unexpected end of data")
         }
-        let value = data.subdata(in: offset..<offset+4).withUnsafeBytes {
-            $0.load(as: UInt32.self).littleEndian
-        }
+        let value = UInt32(data[offset]) |
+            (UInt32(data[offset + 1]) << 8) |
+            (UInt32(data[offset + 2]) << 16) |
+            (UInt32(data[offset + 3]) << 24)
         offset += 4
         return value
     }
@@ -540,8 +539,9 @@ public struct DeterministicDecoder {
         guard offset + 8 <= data.count else {
             throw TranscriptError.decodingError("Unexpected end of data")
         }
-        let value = data.subdata(in: offset..<offset+8).withUnsafeBytes {
-            $0.load(as: UInt64.self).littleEndian
+        var value: UInt64 = 0
+        for index in 0..<8 {
+            value |= UInt64(data[offset + index]) << (UInt64(index) * 8)
         }
         offset += 8
         return value
@@ -549,14 +549,8 @@ public struct DeterministicDecoder {
 
  /// 解码 Int64（小端序）
     public mutating func decodeInt64() throws -> Int64 {
-        guard offset + 8 <= data.count else {
-            throw TranscriptError.decodingError("Unexpected end of data")
-        }
-        let value = data.subdata(in: offset..<offset+8).withUnsafeBytes {
-            $0.load(as: Int64.self).littleEndian
-        }
-        offset += 8
-        return value
+        let bits = try decodeUInt64()
+        return Int64(bitPattern: bits)
     }
 
  /// 解码 Bool
@@ -568,11 +562,7 @@ public struct DeterministicDecoder {
  /// 解码 String
     public mutating func decodeString() throws -> String {
         let length = try decodeUInt32()
-        guard offset + Int(length) <= data.count else {
-            throw TranscriptError.decodingError("Unexpected end of data")
-        }
-        let stringData = data.subdata(in: offset..<offset+Int(length))
-        offset += Int(length)
+        let stringData = try readBytes(count: Int(length))
         guard let string = String(data: stringData, encoding: .utf8) else {
             throw TranscriptError.decodingError("Invalid UTF-8 string")
         }
@@ -582,12 +572,7 @@ public struct DeterministicDecoder {
  /// 解码 Data
     public mutating func decodeData() throws -> Data {
         let length = try decodeUInt32()
-        guard offset + Int(length) <= data.count else {
-            throw TranscriptError.decodingError("Unexpected end of data")
-        }
-        let result = data.subdata(in: offset..<offset+Int(length))
-        offset += Int(length)
-        return result
+        return try readBytes(count: Int(length))
     }
 
  /// 解码 Date
@@ -616,6 +601,16 @@ public struct DeterministicDecoder {
             result.append(try decodeData())
         }
         return result
+    }
+
+    private mutating func readBytes(count: Int) throws -> Data {
+        guard count >= 0, offset + count <= data.count else {
+            throw TranscriptError.decodingError("Unexpected end of data")
+        }
+        let start = offset
+        let end = offset + count
+        offset = end
+        return Data(data[start..<end])
     }
 }
 

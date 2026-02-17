@@ -9,7 +9,20 @@ enum NetworkCondition: String, CaseIterable {
     case severe = "severe_5pct_200ms"
     case reorder = "reorder_10pct"
 
+    var profileId: String {
+        switch self {
+        case .ideal: return "ideal"
+        case .mild: return "mild"
+        case .moderate: return "moderate"
+        case .severe: return "severe"
+        case .reorder: return "reorder"
+        }
+    }
+
     var lossRate: Double {
+        if let cfg = networkProfileConfigs[profileId] {
+            return cfg.lossPct / 100.0
+        }
         switch self {
         case .ideal: return 0.0
         case .mild: return 0.01
@@ -20,6 +33,9 @@ enum NetworkCondition: String, CaseIterable {
     }
 
     var baseLatencyMs: Int {
+        if let cfg = networkProfileConfigs[profileId] {
+            return cfg.delayMs
+        }
         switch self {
         case .ideal: return 0
         case .mild: return 50
@@ -30,6 +46,9 @@ enum NetworkCondition: String, CaseIterable {
     }
 
     var jitterMs: Int {
+        if let cfg = networkProfileConfigs[profileId] {
+            return cfg.jitterMs
+        }
         switch self {
         case .ideal: return 0
         case .mild: return 20
@@ -40,11 +59,51 @@ enum NetworkCondition: String, CaseIterable {
     }
 
     var reorderRate: Double {
+        if let cfg = networkProfileConfigs[profileId] {
+            return cfg.reorderPct / 100.0
+        }
         switch self {
         case .reorder: return 0.10
         default: return 0.0
         }
     }
+}
+
+private struct NetworkProfileConfig {
+    let delayMs: Int
+    let jitterMs: Int
+    let lossPct: Double
+    let reorderPct: Double
+}
+
+private let networkProfileConfigs: [String: NetworkProfileConfig] = loadNetworkProfileConfigs()
+
+private func loadNetworkProfileConfigs() -> [String: NetworkProfileConfig] {
+    let candidates = [
+        "Scripts/netem_profiles.json",
+        "./Scripts/netem_profiles.json",
+    ]
+    for path in candidates {
+        let url = URL(fileURLWithPath: path)
+        guard let data = try? Data(contentsOf: url) else { continue }
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+        guard let profiles = root["profiles"] as? [[String: Any]] else { continue }
+        var out: [String: NetworkProfileConfig] = [:]
+        for item in profiles {
+            guard let id = item["id"] as? String else { continue }
+            let cfg = NetworkProfileConfig(
+                delayMs: Int((item["delay_ms"] as? NSNumber)?.doubleValue ?? 0),
+                jitterMs: Int((item["jitter_ms"] as? NSNumber)?.doubleValue ?? 0),
+                lossPct: (item["loss_pct"] as? NSNumber)?.doubleValue ?? 0.0,
+                reorderPct: (item["reorder_pct"] as? NSNumber)?.doubleValue ?? 0.0
+            )
+            out[id] = cfg
+        }
+        if !out.isEmpty {
+            return out
+        }
+    }
+    return [:]
 }
 
 struct NetworkConditionStats {

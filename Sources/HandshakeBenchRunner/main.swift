@@ -1,5 +1,8 @@
 import Foundation
 import SkyBridgeCore
+#if canImport(Darwin)
+import Darwin
+#endif
 
 @main
 struct HandshakeBenchRunner {
@@ -83,13 +86,26 @@ struct HandshakeBenchRunner {
     }
 
     private actor BenchmarkTransport: DiscoveryTransport {
+        private let deterministicDelivery: Bool
         private var onSend: (@Sendable (PeerIdentifier, Data) async -> Void)?
         private var pending: [(PeerIdentifier, Data)] = []
         private var isDelivering = false
         private var sentMessages: [(PeerIdentifier, Data)] = []
 
-        func setOnSend(_ handler: @escaping @Sendable (PeerIdentifier, Data) async -> Void) {
+        init(deterministicDelivery: Bool = (ProcessInfo.processInfo.environment["SKYBRIDGE_BENCH_DETERMINISTIC_TRANSPORT"] ?? "1") != "0") {
+            self.deterministicDelivery = deterministicDelivery
+        }
+
+        func setOnSend(_ handler: @escaping @Sendable (PeerIdentifier, Data) async -> Void) async {
             onSend = handler
+            if !isDelivering {
+                isDelivering = true
+                if deterministicDelivery {
+                    await flushPending()
+                } else {
+                    Task { await flushPending() }
+                }
+            }
         }
 
         func send(to peer: PeerIdentifier, data: Data) async throws {
@@ -97,7 +113,11 @@ struct HandshakeBenchRunner {
             sentMessages.append((peer, data))
             if !isDelivering {
                 isDelivering = true
-                Task { await flushPending() }
+                if deterministicDelivery {
+                    await flushPending()
+                } else {
+                    Task { await flushPending() }
+                }
             }
         }
 
@@ -106,7 +126,9 @@ struct HandshakeBenchRunner {
         }
 
         private func flushPending() async {
-            await Task.yield()
+            if !deterministicDelivery {
+                await Task.yield()
+            }
             while !pending.isEmpty {
                 let (peer, data) = pending.removeFirst()
                 await onSend?(peer, data)
@@ -347,6 +369,7 @@ struct HandshakeBenchRunner {
         iterations: Int,
         warmup: Int
     ) async throws -> [Double] {
+        elevateBenchmarkQoS()
         var samples: [Double] = []
 
         for _ in 0..<warmup {
@@ -370,6 +393,7 @@ struct HandshakeBenchRunner {
         iterations: Int,
         warmup: Int
     ) async throws -> [Double] {
+        elevateBenchmarkQoS()
         var samples: [Double] = []
 
         for _ in 0..<warmup {
@@ -438,7 +462,7 @@ struct HandshakeBenchRunner {
             await initiatorDriver.handleMessage(data, from: peer)
         }
 
-        let handshakeTask = Task {
+        let handshakeTask = Task(priority: .high) {
             try await initiatorDriver.initiateHandshake(with: context.peer)
         }
 
@@ -594,6 +618,12 @@ struct HandshakeBenchRunner {
             return value
         }
         return defaultValue
+    }
+
+    private static func elevateBenchmarkQoS() {
+        #if canImport(Darwin)
+        _ = pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0)
+        #endif
     }
 
     private static func dateStamp() -> String {

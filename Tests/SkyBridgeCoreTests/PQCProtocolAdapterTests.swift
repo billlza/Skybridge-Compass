@@ -22,7 +22,7 @@ struct PQCKEMRoundTripTests {
         let adapter = PQCProtocolAdapter()
         
  // 跳过如果 PQC 不可用
-        guard await adapter.isPQCAvailable else {
+        guard adapter.isPQCAvailable else {
             return
         }
         
@@ -55,7 +55,7 @@ struct PQCKEMRoundTripTests {
         
         let adapter = PQCProtocolAdapter()
         
-        guard await adapter.isPQCAvailable else {
+        guard adapter.isPQCAvailable else {
             return
         }
         
@@ -83,7 +83,7 @@ struct PQCKEMRoundTripTests {
         
         let adapter = PQCProtocolAdapter()
         
-        guard await adapter.isPQCAvailable else {
+        guard adapter.isPQCAvailable else {
             return
         }
         
@@ -107,7 +107,7 @@ struct PQCDigitalSignatureTests {
  /// 生成随机测试数据
     static func generateRandomData(size: Int) -> Data {
         var data = Data(count: size)
-        _ = data.withUnsafeMutableBytes { ptr in
+        data.withUnsafeMutableBytes { ptr in
             if let baseAddress = ptr.baseAddress {
                 arc4random_buf(baseAddress, size)
             }
@@ -121,7 +121,7 @@ struct PQCDigitalSignatureTests {
         
         let adapter = PQCProtocolAdapter()
         
-        guard await adapter.isPQCAvailable else {
+        guard adapter.isPQCAvailable else {
             return
         }
         
@@ -145,7 +145,7 @@ struct PQCDigitalSignatureTests {
         
         let adapter = PQCProtocolAdapter()
         
-        guard await adapter.isPQCAvailable else {
+        guard adapter.isPQCAvailable else {
             return
         }
         
@@ -166,7 +166,7 @@ struct PQCDigitalSignatureTests {
         
         let adapter = PQCProtocolAdapter()
         
-        guard await adapter.isPQCAvailable else {
+        guard adapter.isPQCAvailable else {
             return
         }
         
@@ -194,7 +194,7 @@ struct PQCDigitalSignatureTests {
         
         let adapter = PQCProtocolAdapter()
         
-        guard await adapter.isPQCAvailable else {
+        guard adapter.isPQCAvailable else {
             return
         }
         
@@ -223,7 +223,7 @@ struct PQCHPKERoundTripTests {
     
     static func generateRandomData(size: Int) -> Data {
         var data = Data(count: size)
-        _ = data.withUnsafeMutableBytes { ptr in
+        data.withUnsafeMutableBytes { ptr in
             if let baseAddress = ptr.baseAddress {
                 arc4random_buf(baseAddress, size)
             }
@@ -237,7 +237,7 @@ struct PQCHPKERoundTripTests {
         
         let adapter = PQCProtocolAdapter()
         
-        guard await adapter.isPQCAvailable else {
+        guard adapter.isPQCAvailable else {
             return
         }
         
@@ -282,7 +282,7 @@ struct PQCHPKERoundTripTests {
         
         let adapter = PQCProtocolAdapter()
         
-        guard await adapter.isPQCAvailable else {
+        guard adapter.isPQCAvailable else {
             return
         }
         

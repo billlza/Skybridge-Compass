@@ -2,6 +2,7 @@ import XCTest
 @testable import SkyBridgeCore
 
 @MainActor
+@available(*, deprecated, message: "Legacy handshake compatibility regression tests.")
 final class P2PHandshakeTests: XCTestCase {
     func testKEMHandshakeStoresSessionKeys() async throws {
         if PQCProviderFactory.currentProvider == "不可用" { return }

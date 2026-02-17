@@ -8,7 +8,7 @@ final class RegistrationSecurityServiceTests: XCTestCase {
  // MARK: - 输入清洗测试
     
     func testSanitizeUsername() async {
-        let service = await RegistrationSecurityService.shared
+        let service = RegistrationSecurityService.shared
         
  // 测试首尾空格去除
         let result1 = service.sanitizeUsername("  testuser  ")
@@ -33,7 +33,7 @@ final class RegistrationSecurityServiceTests: XCTestCase {
     }
     
     func testSanitizeEmail() async {
-        let service = await RegistrationSecurityService.shared
+        let service = RegistrationSecurityService.shared
         
  // 测试首尾空格去除
         let result1 = service.sanitizeEmail("  test@example.com  ")
@@ -45,7 +45,7 @@ final class RegistrationSecurityServiceTests: XCTestCase {
     }
     
     func testSanitizePhoneNumber() async {
-        let service = await RegistrationSecurityService.shared
+        let service = RegistrationSecurityService.shared
         
  // 测试空格去除
         let result1 = service.sanitizePhoneNumber("138 1234 5678")
@@ -65,7 +65,7 @@ final class RegistrationSecurityServiceTests: XCTestCase {
     }
     
     func testSanitizePassword() async {
-        let service = await RegistrationSecurityService.shared
+        let service = RegistrationSecurityService.shared
         
  // 测试首尾空格去除，保留中间字符
         let result1 = service.sanitizePassword("  password123!@#  ")
@@ -79,7 +79,7 @@ final class RegistrationSecurityServiceTests: XCTestCase {
  // MARK: - 用户名验证测试
     
     func testValidateUsername() async {
-        let service = await RegistrationSecurityService.shared
+        let service = RegistrationSecurityService.shared
         
  // 有效用户名
         let valid1 = service.validateUsername("testuser")
@@ -113,7 +113,7 @@ final class RegistrationSecurityServiceTests: XCTestCase {
  // MARK: - 密码强度测试
     
     func testEvaluatePasswordStrength() async {
-        let service = await RegistrationSecurityService.shared
+        let service = RegistrationSecurityService.shared
         
  // 弱密码
         let weak = service.evaluatePasswordStrength("abc123")
@@ -133,7 +133,7 @@ final class RegistrationSecurityServiceTests: XCTestCase {
     }
     
     func testValidatePassword() async {
-        let service = await RegistrationSecurityService.shared
+        let service = RegistrationSecurityService.shared
         
  // 有效密码
         let valid = service.validatePassword("Password1!", minimumStrength: .medium)
@@ -151,7 +151,7 @@ final class RegistrationSecurityServiceTests: XCTestCase {
  // MARK: - 邮箱验证测试
     
     func testValidateEmail() async {
-        let service = await RegistrationSecurityService.shared
+        let service = RegistrationSecurityService.shared
         
  // 有效邮箱
         let valid1 = service.validateEmail("test@example.com")
@@ -174,7 +174,7 @@ final class RegistrationSecurityServiceTests: XCTestCase {
  // MARK: - 手机号验证测试
     
     func testValidatePhoneNumber() async {
-        let service = await RegistrationSecurityService.shared
+        let service = RegistrationSecurityService.shared
         
  // 中国大陆手机号
         let chinaPhone1 = service.validatePhoneNumber("13812345678")
@@ -201,7 +201,7 @@ final class RegistrationSecurityServiceTests: XCTestCase {
  // MARK: - 限流测试
     
     func testRateLimiting() async {
-        let service = await RegistrationSecurityService.shared
+        let service = RegistrationSecurityService.shared
         
  // 创建测试上下文
         let testIP = "test_ip_\(UUID().uuidString)"
@@ -231,7 +231,7 @@ final class RegistrationSecurityServiceTests: XCTestCase {
  // MARK: - 黑名单测试
     
     func testBlacklist() async {
-        let service = await RegistrationSecurityService.shared
+        let service = RegistrationSecurityService.shared
         
         let testIP = "blacklist_test_ip_\(UUID().uuidString)"
         
@@ -257,7 +257,7 @@ final class RegistrationSecurityServiceTests: XCTestCase {
  // MARK: - 统计信息测试
     
     func testStatistics() async {
-        let service = await RegistrationSecurityService.shared
+        let service = RegistrationSecurityService.shared
         
         let stats = await service.getStatistics()
         
@@ -276,7 +276,7 @@ final class RegistrationSecurityServiceTests: XCTestCase {
 final class BehaviorAnalyzerTests: XCTestCase {
     
     func testAnalyzeHumanLikeTrack() async {
-        let analyzer = await BehaviorAnalyzer.shared
+        let analyzer = BehaviorAnalyzer.shared
         
  // 创建模拟人类的轨迹
         var points: [BehaviorAnalyzer.TrackPoint] = []
@@ -309,7 +309,7 @@ final class BehaviorAnalyzerTests: XCTestCase {
     }
     
     func testAnalyzeBotLikeTrack() async {
-        let analyzer = await BehaviorAnalyzer.shared
+        let analyzer = BehaviorAnalyzer.shared
         
  // 创建机器人轨迹（完美直线，匀速）
         var points: [BehaviorAnalyzer.TrackPoint] = []
@@ -343,7 +343,7 @@ final class BehaviorAnalyzerTests: XCTestCase {
     }
     
     func testTrackWithInsufficientPoints() async {
-        let analyzer = await BehaviorAnalyzer.shared
+        let analyzer = BehaviorAnalyzer.shared
         
  // 创建点数不足的轨迹
         let points = [
@@ -373,7 +373,7 @@ final class BehaviorAnalyzerTests: XCTestCase {
 final class InputValidationTests: XCTestCase {
     
     func testChinesePhoneNumbers() async {
-        let service = await RegistrationSecurityService.shared
+        let service = RegistrationSecurityService.shared
         
  // 各运营商号段测试
         let validNumbers = [
@@ -404,7 +404,7 @@ final class InputValidationTests: XCTestCase {
     }
     
     func testInternationalPhoneNumbers() async {
-        let service = await RegistrationSecurityService.shared
+        let service = RegistrationSecurityService.shared
         
  // 有效的国际号码
         let validNumbers = [
@@ -421,7 +421,7 @@ final class InputValidationTests: XCTestCase {
     }
     
     func testPasswordComplexity() async {
-        let service = await RegistrationSecurityService.shared
+        let service = RegistrationSecurityService.shared
         
  // 测试各种密码组合
  // 密码强度评分规则：

@@ -34,6 +34,8 @@ public enum CryptoProviderFactory {
         case mlkem
         case xwing
     }
+
+    private static let hasLiboqsRuntimeSupport: Bool = OQSPQCCryptoProvider.selfTest()
     
     // MARK: - Capability
     
@@ -83,9 +85,7 @@ public enum CryptoProviderFactory {
             hasApplePQC = isApplePQCAvailable()
         }
         
-        // NOTE: 当前工作区的 `Sources/Vendor/liboqs.xcframework` 仅包含 macOS slice（见其 Info.plist）。
-        // iOS 侧暂不集成 liboqs，因此这里固定为 false。
-        let hasLiboqs = false
+        let hasLiboqs = hasLiboqsRuntimeSupport
         
         return Capability(
             hasApplePQC: hasApplePQC,
@@ -159,7 +159,9 @@ public enum CryptoProviderFactory {
                 return makeAppleNativeProvider()
             }
             #endif
-            // NOTE: 若未来为 iOS 构建并集成 liboqs / OQS Provider，可在此处加入 liboqs PQC 回退。
+            if capability.hasLiboqs {
+                return OQSPQCCryptoProvider()
+            }
             return ClassicCryptoProvider()
             
         case .requirePQC:
@@ -168,6 +170,9 @@ public enum CryptoProviderFactory {
                 return makeAppleNativeProvider()
             }
             #endif
+            if capability.hasLiboqs {
+                return OQSPQCCryptoProvider()
+            }
             // 返回一个会抛错的 Provider
             return UnavailablePQCProvider()
             

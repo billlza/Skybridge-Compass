@@ -44,8 +44,7 @@ final class EnhancedPostQuantumCryptoTests: XCTestCase {
             _ = try await crypto.decrypt(encryptedData, using: key2)
             XCTFail("应该抛出解密错误")
         } catch {
- // 预期的错误
-            XCTAssertTrue(true)
+            XCTAssertFalse((error as NSError).localizedDescription.isEmpty)
         }
     }
     
@@ -345,4 +344,3 @@ final class EnhancedPostQuantumCryptoTests: XCTestCase {
         XCTAssertEqual(decrypted, largeData)
     }
 }
-

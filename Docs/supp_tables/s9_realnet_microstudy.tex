@@ -2,7 +2,7 @@
 \begin{table*}[!tp]
 \centering
 \scriptsize
-\caption{Supplementary Table \thetable: Real-network micro-study (STUN path + TCP payload). Each row is one network condition label. STUN metrics capture path RTT/loss and a conservative NAT classification. E2E metrics report success rate and p50 completion time for two payload sizes (classic 687~B vs PQC 12{,}002~B), along with the delta (PQC minus classic). Failure taxonomy is summarized for the PQC size as timeout rate and other failure rate.}
+\caption{Supplementary Table \thetable: Real-network micro-study (STUN path + TCP payload). Each row is one network condition label. STUN metrics capture path RTT/loss and a conservative NAT classification. E2E metrics report success rate and p50 completion time for two payload sizes (classic 687~B vs PQC 12{,}002~B), along with the delta (PQC minus classic). A fixed 4-byte transport length prefix is excluded from the payload-byte labels. Failure taxonomy is summarized for the PQC size as timeout rate and other failure rate. Labels with zero successful E2E samples on both payload sizes are omitted because timing percentiles are undefined.}
 \label{tab:supp-realnet-microstudy}
 \setlength{\tabcolsep}{3pt}
 \resizebox{\textwidth}{!}{%
@@ -10,8 +10,9 @@
 \toprule
 Label & IFace & Exp & Con & NAT & STUN loss & STUN RTT p50/p95 (ms) & ok$_c$ & p50$_c$ (ms) & ok$_p$ & p50$_p$ (ms) & $\Delta$p50 (ms) & PQC fail (to/other) \\
 \midrule
-home\_wifi & wifi & 0 & 0 & unknown & 0.0000 & 64.206/138.442 & 1.0000 & 9.821 & 1.0000 & 16.296 & 6.475 & 0.0000/0.0000 \\
-phone\_hotspot\_5ga\_r18 & wifi & 1 & 1 & unknown & 0.0000 & 103.018/175.414 & 1.0000 & 19.511 & 1.0000 & 27.588 & 8.077 & 0.0000/0.0000 \\
+ec2\_ssh\_tunnel & wifi & 0 & 0 & unknown & 0.1200 & 62.301/64.751 & 1.0000 & 204.607 & 1.0000 & 287.435 & 82.828 & 0.0000/0.0000 \\
+hotspot\_ssh\_tunnel & wifi & 1 & 1 & unknown & 0.3200 & 223.066/426.633 & 1.0000 & 240.546 & 1.0000 & 280.219 & 39.673 & 0.0000/0.0000 \\
+wifi\_direct & wifi & 0 & 0 & unknown & 0.1800 & 166.881/169.392 & 1.0000 & 139.747 & 1.0000 & 165.242 & 25.495 & 0.0000/0.0000 \\
 \bottomrule
 \end{tabular}
 }

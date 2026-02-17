@@ -284,7 +284,6 @@ final class TranscriptIntegrityPropertyTests: XCTestCase {
     
  /// 测试版本协商 - 无共同版本抛出错误
     func testVersionNegotiation_NoCommonVersion_Throws() {
-        let localSupported: [TranscriptVersion] = [.v2]
         let peerSupported: [TranscriptVersion] = [.v1]
         
  // 由于 v1 和 v2 都在 supported 列表中，这个测试需要模拟

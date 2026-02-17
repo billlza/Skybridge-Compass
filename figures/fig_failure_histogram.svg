@@ -24,7 +24,7 @@
 <rect x="602.5" y="360.0" width="68.33333333333333" height="0.0" fill="#f28e2b"/>
 <text x="558.3333333333333" y="386" text-anchor="middle" font-size="12" fill="#333">Ordering Benign</text>
 <rect x="729.1666666666666" y="360.0" width="68.33333333333333" height="0.0" fill="#4e79a7"/>
-<rect x="807.5" y="277.49333333333334" width="68.33333333333333" height="82.50666666666666" fill="#f28e2b"/>
+<rect x="807.5" y="305.02666666666664" width="68.33333333333333" height="54.97333333333336" fill="#f28e2b"/>
 <text x="763.3333333333333" y="386" text-anchor="middle" font-size="12" fill="#333">PQC Unavailable</text>
 <rect x="720" y="46" width="12" height="12" fill="#4e79a7"/>
 <text x="738" y="56" font-size="12" fill="#333">E_handshakeFailed</text>

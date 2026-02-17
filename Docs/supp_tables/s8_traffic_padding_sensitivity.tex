@@ -6,30 +6,30 @@
 \setlength{\tabcolsep}{3pt}
 \caption{Supplementary Table \thetable: SBP2 bucket-cap sensitivity study. We vary the maximum bucket size (cap) and report padding overhead, cap coverage (fraction of frames whose framed payload exceeds the cap), and a privacy proxy (bucket entropy) for representative handshake, control, and data-plane workloads.}
 \label{tab:supp-traffic-padding-sensitivity}
-\begin{tabular}{@{}lrrrrrrrrr@{}}
+\begin{tabular}{@{}lrrrrrrrrrrrr@{}}
 \toprule
-Label & \multicolumn{3}{c}{64\,KiB cap} & \multicolumn{3}{c}{128\,KiB cap} & \multicolumn{3}{c}{256\,KiB cap} \\
-\cmidrule(lr){2-4}\cmidrule(lr){5-7}\cmidrule(lr){8-10}
- & overhead (\%) & $>$cap (\%) & entropy (b) & overhead (\%) & $>$cap (\%) & entropy (b) & overhead (\%) & $>$cap (\%) & entropy (b) \\
+Label & \multicolumn{4}{c}{64\,KiB cap} & \multicolumn{4}{c}{128\,KiB cap} & \multicolumn{4}{c}{256\,KiB cap} \\
+\cmidrule(lr){2-5}\cmidrule(lr){6-9}\cmidrule(lr){10-13}
+ & all (\%) & padded (\%) & $>$cap (\%) & entropy (b) & all (\%) & padded (\%) & $>$cap (\%) & entropy (b) & all (\%) & padded (\%) & $>$cap (\%) & entropy (b) \\
 \midrule
-HS/MessageA & \textit{n/a} & \textit{n/a} & \textit{n/a} & \textit{n/a} & \textit{n/a} & \textit{n/a} & \textit{n/a} & \textit{n/a} & \textit{n/a} \\
-HS/MessageB & \textit{n/a} & \textit{n/a} & \textit{n/a} & \textit{n/a} & \textit{n/a} & \textit{n/a} & \textit{n/a} & \textit{n/a} & \textit{n/a} \\
-HS/Finished & \textit{n/a} & \textit{n/a} & \textit{n/a} & \textit{n/a} & \textit{n/a} & \textit{n/a} & \textit{n/a} & \textit{n/a} & \textit{n/a} \\
-CP/heartbeat & 357\% & 0\% & 0.00 & 357\% & 0\% & 0.00 & 357\% & 0\% & 0.00 \\
-CP/systemCommand & 21\% & 0\% & 0.00 & 21\% & 0\% & 0.00 & 22\% & 0\% & 0.00 \\
-CP/fileTransferRequest & 40\% & 0\% & 0.00 & 40\% & 0\% & 0.00 & 40\% & 0\% & 0.00 \\
-DP/32B & 276\% & 0\% & 0.00 & 276\% & 0\% & 0.00 & 276\% & 0\% & 0.00 \\
-DP/300B & 52\% & 0\% & 0.00 & 52\% & 0\% & 0.00 & 52\% & 0\% & 0.00 \\
-DP/900B & 9\% & 0\% & 0.00 & 9\% & 0\% & 0.00 & 9\% & 0\% & 0.00 \\
-DP/1400B & 43\% & 0\% & 0.00 & 43\% & 0\% & 0.00 & 43\% & 0\% & 0.00 \\
-DP/4KiB & 98\% & 0\% & 0.00 & 98\% & 0\% & 0.00 & 98\% & 0\% & 0.00 \\
-DP/16KiB & 100\% & 0\% & 0.00 & 100\% & 0\% & 0.00 & 100\% & 0\% & 0.00 \\
-DP/rdpMix & 1\% & 79\% & 2.57 & 15\% & 36\% & 1.78 & 36\% & 0\% & 1.47 \\
-DP/fileMix & \textless{}0.1\% & 100\% & 2.58 & 12\% & 64\% & 2.22 & 49\% & 0\% & 0.95 \\
+HS/MessageA & \textit{n/a} & \textit{n/a} & \textit{n/a} & \textit{n/a} & \textit{n/a} & \textit{n/a} & \textit{n/a} & \textit{n/a} & \textit{n/a} & \textit{n/a} & \textit{n/a} & \textit{n/a} \\
+HS/MessageB & \textit{n/a} & \textit{n/a} & \textit{n/a} & \textit{n/a} & \textit{n/a} & \textit{n/a} & \textit{n/a} & \textit{n/a} & \textit{n/a} & \textit{n/a} & \textit{n/a} & \textit{n/a} \\
+HS/Finished & \textit{n/a} & \textit{n/a} & \textit{n/a} & \textit{n/a} & \textit{n/a} & \textit{n/a} & \textit{n/a} & \textit{n/a} & \textit{n/a} & \textit{n/a} & \textit{n/a} & \textit{n/a} \\
+CP/heartbeat & 357\% & 357\% & 0\% & 0.00 & 357\% & 357\% & 0\% & 0.00 & 357\% & 357\% & 0\% & 0.00 \\
+CP/systemCommand & 21\% & 21\% & 0\% & 0.00 & 21\% & 21\% & 0\% & 0.00 & 21\% & 21\% & 0\% & 0.00 \\
+CP/fileTransferRequest & 40\% & 40\% & 0\% & 0.00 & 40\% & 40\% & 0\% & 0.00 & 40\% & 40\% & 0\% & 0.00 \\
+DP/32B & 276\% & 276\% & 0\% & 0.00 & 276\% & 276\% & 0\% & 0.00 & 276\% & 276\% & 0\% & 0.00 \\
+DP/300B & 52\% & 52\% & 0\% & 0.00 & 52\% & 52\% & 0\% & 0.00 & 52\% & 52\% & 0\% & 0.00 \\
+DP/900B & 9\% & 9\% & 0\% & 0.00 & 9\% & 9\% & 0\% & 0.00 & 9\% & 9\% & 0\% & 0.00 \\
+DP/1400B & 43\% & 43\% & 0\% & 0.00 & 43\% & 43\% & 0\% & 0.00 & 43\% & 43\% & 0\% & 0.00 \\
+DP/4KiB & 98\% & 98\% & 0\% & 0.00 & 98\% & 98\% & 0\% & 0.00 & 98\% & 98\% & 0\% & 0.00 \\
+DP/16KiB & 100\% & 100\% & 0\% & 0.00 & 100\% & 100\% & 0\% & 0.00 & 100\% & 100\% & 0\% & 0.00 \\
+DP/rdpMix & 1\% & 7\% & 79\% & 2.57 & 15\% & 32\% & 36\% & 1.78 & 36\% & 36\% & 0\% & 1.47 \\
+DP/fileMix & \textless{}0.1\% & \textit{n/a} & 100\% & 2.58 & 12\% & 56\% & 64\% & 2.22 & 49\% & 49\% & 0\% & 0.95 \\
 \bottomrule
 \end{tabular}
 \vspace{2pt}
 \begin{minipage}{0.98\linewidth}
-\footnotesize\raggedright\textit{Notes:} \textit{n/a} denotes ``not applicable'' (handshake messages are padded by SBP1 rather than SBP2). \texttt{-} denotes ``not observed'' in the sampled protocol trace. The $>$cap rate is computed as the fraction of frames where (payload bytes + SBP2 header) exceeds the configured cap; such frames are passed through without additional bucket padding (beyond the fixed SBP2 header), so overhead may round to near-zero and entropy reflects unquantized size variability for that fraction.
+\footnotesize\raggedright\textit{Notes:} \textit{all} is overhead across all wrapped frames (including passthrough); \textit{padded} is overhead restricted to frames that entered bucket padding. \textit{n/a} denotes ``not applicable'' (handshake messages are padded by SBP1 rather than SBP2) or ``no padded frames observed'' for that cap/label. \texttt{-} denotes ``not observed'' in the sampled protocol trace. The $>$cap rate is computed as the fraction of frames where (payload bytes + SBP2 header) exceeds the configured cap; this can drive \textit{all} toward near-zero while preserving non-zero $>$cap.
 \end{minipage}
 \end{table*}

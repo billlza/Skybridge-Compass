@@ -34,8 +34,7 @@ final class OQSHpkeIntegrationTests: XCTestCase {
                 _ = try await provider.hpkeOpen(recipientPeerId: peer, ciphertext: sealed.ciphertext, encapsulatedKey: sealed.encapsulatedKey, associatedData: badAAD)
                 XCTFail("不同AAD不应成功解封装")
             } catch {
- // 预期失败
-                XCTAssertTrue(true)
+                XCTAssertFalse((error as NSError).localizedDescription.isEmpty)
             }
         }
     }
@@ -51,7 +50,9 @@ final class OQSHpkeIntegrationTests: XCTestCase {
             do {
                 _ = try await provider.hpkeOpen(recipientPeerId: peer, ciphertext: sealed.ciphertext, encapsulatedKey: sealed.encapsulatedKey, associatedData: aad2)
                 XCTFail("不同AAD不应成功解密")
-            } catch { XCTAssertTrue(true) }
+            } catch {
+                XCTAssertFalse((error as NSError).localizedDescription.isEmpty)
+            }
         }
     }
 
@@ -68,7 +69,9 @@ final class OQSHpkeIntegrationTests: XCTestCase {
             do {
                 _ = try await provider.hpkeOpen(recipientPeerId: peer, ciphertext: sealed.ciphertext, encapsulatedKey: sealed.encapsulatedKey, associatedData: aad)
                 XCTFail("篡改封装密钥不应成功解密")
-            } catch { XCTAssertTrue(true) }
+            } catch {
+                XCTAssertFalse((error as NSError).localizedDescription.isEmpty)
+            }
         }
     }
 

@@ -1,0 +1,379 @@
+theory SkyBridge_V2 begin
+
+// Function signature and definition of the equational theory E
+
+functions: SuiteClassic/0, SuitePQCv1/0, SuitePQCv2/0, fst/1, h/1,
+           pair/2, pk/1, sign/2, snd/1, true/0, verify/3
+equations:
+    fst(<x.1, x.2>) = x.1,
+    snd(<x.1, x.2>) = x.2,
+    verify(sign(x.1, x.2), x.1, pk(x.2)) = true
+
+
+
+
+
+
+
+
+
+rule (modulo E) Init_Offer_Default:
+   [ Fr( ~sid ) ]
+  --[
+  Policy( ~sid, 'default' ), OfferIncludes( ~sid, SuiteClassic ),
+  OfferIncludes( ~sid, SuitePQCv1 ), OfferIncludes( ~sid, SuitePQCv2 ),
+  OfferSent( ~sid, 'A' ),
+  FallbackGatePassed( ~sid, 'local_capability_error' )
+  ]->
+   [ St_Default( ~sid ) ]
+
+  /* has exactly the trivial AC variant */
+
+rule (modulo E) Init_Offer_Strict:
+   [ Fr( ~sid ) ]
+  --[
+  Policy( ~sid, 'strictPQC' ), OfferIncludes( ~sid, SuitePQCv1 ),
+  OfferIncludes( ~sid, SuitePQCv2 ), OfferSent( ~sid, 'A' )
+  ]->
+   [ St_Strict( ~sid ) ]
+
+  /* has exactly the trivial AC variant */
+
+rule (modulo E) Neg_Default_Classic:
+   [ St_Default( sid ) ]
+  --[
+  SelectedSuite( sid, SuiteClassic ), SigBOverA( sid, SuiteClassic ),
+  VerifiedSigB( sid, SuiteClassic ), Attempt( sid, SuiteClassic ),
+  DowngradeEvent( sid ), ClassicFallbackAccepted( sid )
+  ]->
+   [ St_HandshakeDone( sid, SuiteClassic ) ]
+
+  /* has exactly the trivial AC variant */
+
+rule (modulo E) Neg_Default_PQCv1:
+   [ St_Default( sid ) ]
+  --[
+  SelectedSuite( sid, SuitePQCv1 ), SigBOverA( sid, SuitePQCv1 ),
+  VerifiedSigB( sid, SuitePQCv1 ), Attempt( sid, SuitePQCv1 ),
+  StaticSecretDerived( sid )
+  ]->
+   [ St_HandshakeDone( sid, SuitePQCv1 ) ]
+
+  /* has exactly the trivial AC variant */
+
+rule (modulo E) Neg_Default_PQCv2:
+   [ St_Default( sid ) ]
+  --[
+  SelectedSuite( sid, SuitePQCv2 ), SigBOverA( sid, SuitePQCv2 ),
+  VerifiedSigB( sid, SuitePQCv2 ), Attempt( sid, SuitePQCv2 ),
+  StaticSecretDerived( sid ), EphemeralSecretDerived( sid ),
+  HybridSecretComposed( sid )
+  ]->
+   [ St_HandshakeDone( sid, SuitePQCv2 ) ]
+
+  /* has exactly the trivial AC variant */
+
+rule (modulo E) Neg_Strict_PQCv1:
+   [ St_Strict( sid ) ]
+  --[
+  SelectedSuite( sid, SuitePQCv1 ), SigBOverA( sid, SuitePQCv1 ),
+  VerifiedSigB( sid, SuitePQCv1 ), Attempt( sid, SuitePQCv1 ),
+  StaticSecretDerived( sid )
+  ]->
+   [ St_HandshakeDone( sid, SuitePQCv1 ) ]
+
+  /* has exactly the trivial AC variant */
+
+rule (modulo E) Neg_Strict_PQCv2:
+   [ St_Strict( sid ) ]
+  --[
+  SelectedSuite( sid, SuitePQCv2 ), SigBOverA( sid, SuitePQCv2 ),
+  VerifiedSigB( sid, SuitePQCv2 ), Attempt( sid, SuitePQCv2 ),
+  StaticSecretDerived( sid ), EphemeralSecretDerived( sid ),
+  HybridSecretComposed( sid )
+  ]->
+   [ St_HandshakeDone( sid, SuitePQCv2 ) ]
+
+  /* has exactly the trivial AC variant */
+
+rule (modulo E) Finished_Phase:
+   [ St_HandshakeDone( sid, sel ) ]
+  --[ FinishedSent( sid, 'B' ), FinishedVerified( sid, 'A' ) ]->
+   [ St_Finished( sid, sel ) ]
+
+  /* has exactly the trivial AC variant */
+
+rule (modulo E) Session_Established:
+   [ St_Finished( sid, sel ) ] --[ SessionEstablished( sid, sel ) ]-> [ ]
+
+  /* has exactly the trivial AC variant */
+
+lemma Exists_DefaultClassicTrace:
+  exists-trace
+  "∃ sid #i #j #k.
+    ((Policy( sid, 'default' ) @ #i) ∧ (DowngradeEvent( sid ) @ #j)) ∧
+    (SessionEstablished( sid, SuiteClassic ) @ #k)"
+/*
+guarded formula characterizing all satisfying traces:
+"∃ sid #i #j #k.
+  (Policy( sid, 'default' ) @ #i) ∧
+  (DowngradeEvent( sid ) @ #j) ∧
+  (SessionEstablished( sid, SuiteClassic ) @ #k)"
+*/
+simplify
+solve( St_Default( sid ) ▶₀ #j )
+  case Init_Offer_Default
+  solve( St_Finished( ~sid, SuiteClassic ) ▶₀ #k )
+    case Finished_Phase
+    solve( Policy( ~sid, 'default' ) @ #i )
+      case Init_Offer_Default
+      SOLVED // trace found
+    qed
+  qed
+qed
+
+lemma Exists_StrictPQCv2Trace:
+  exists-trace
+  "∃ sid #i #j.
+    (Policy( sid, 'strictPQC' ) @ #i) ∧
+    (SessionEstablished( sid, SuitePQCv2 ) @ #j)"
+/*
+guarded formula characterizing all satisfying traces:
+"∃ sid #i #j.
+  (Policy( sid, 'strictPQC' ) @ #i) ∧
+  (SessionEstablished( sid, SuitePQCv2 ) @ #j)"
+*/
+simplify
+solve( St_Finished( sid, SuitePQCv2 ) ▶₀ #j )
+  case Finished_Phase_case_2
+  solve( Policy( ~sid, 'strictPQC' ) @ #i )
+    case Init_Offer_Strict
+    SOLVED // trace found
+  qed
+qed
+
+lemma NoClassicUnderStrictPQC:
+  all-traces
+  "∀ sid #i.
+    (Policy( sid, 'strictPQC' ) @ #i) ⇒
+    (¬(∃ #j. SessionEstablished( sid, SuiteClassic ) @ #j))"
+/*
+guarded formula characterizing all counter-examples:
+"∃ sid #i.
+  (Policy( sid, 'strictPQC' ) @ #i)
+ ∧
+  ∃ #j. (SessionEstablished( sid, SuiteClassic ) @ #j)"
+*/
+simplify
+solve( St_Finished( sid, SuiteClassic ) ▶₀ #j )
+  case Finished_Phase
+  by solve( Policy( ~sid, 'strictPQC' ) @ #i )
+qed
+
+lemma NegotiationIntegrity_SelectedWasOffered:
+  all-traces
+  "∀ sid sel #i.
+    (SelectedSuite( sid, sel ) @ #i) ⇒
+    (∃ #j. OfferIncludes( sid, sel ) @ #j)"
+/*
+guarded formula characterizing all counter-examples:
+"∃ sid sel #i.
+  (SelectedSuite( sid, sel ) @ #i)
+ ∧
+  ∀ #j. (OfferIncludes( sid, sel ) @ #j) ⇒ ⊥"
+*/
+simplify
+solve( SelectedSuite( sid, sel ) @ #i )
+  case Neg_Default_Classic
+  solve( St_Default( sid ) ▶₀ #i )
+    case Init_Offer_Default
+    by contradiction /* from formulas */
+  qed
+next
+  case Neg_Default_PQCv1
+  solve( St_Default( sid ) ▶₀ #i )
+    case Init_Offer_Default
+    by contradiction /* from formulas */
+  qed
+next
+  case Neg_Default_PQCv2
+  solve( St_Default( sid ) ▶₀ #i )
+    case Init_Offer_Default
+    by contradiction /* from formulas */
+  qed
+next
+  case Neg_Strict_PQCv1
+  solve( St_Strict( sid ) ▶₀ #i )
+    case Init_Offer_Strict
+    by contradiction /* from formulas */
+  qed
+next
+  case Neg_Strict_PQCv2
+  solve( St_Strict( sid ) ▶₀ #i )
+    case Init_Offer_Strict
+    by contradiction /* from formulas */
+  qed
+qed
+
+lemma AuthenticationRequiresVerifiedSigB:
+  all-traces
+  "∀ sid sel #i.
+    (SessionEstablished( sid, sel ) @ #i) ⇒
+    (∃ #j. VerifiedSigB( sid, sel ) @ #j)"
+/*
+guarded formula characterizing all counter-examples:
+"∃ sid sel #i.
+  (SessionEstablished( sid, sel ) @ #i)
+ ∧
+  ∀ #j. (VerifiedSigB( sid, sel ) @ #j) ⇒ ⊥"
+*/
+simplify
+solve( St_Finished( sid, sel ) ▶₀ #i )
+  case Finished_Phase_case_1
+  by contradiction /* from formulas */
+next
+  case Finished_Phase_case_2
+  by contradiction /* from formulas */
+next
+  case Finished_Phase_case_3
+  by contradiction /* from formulas */
+next
+  case Finished_Phase_case_4
+  by contradiction /* from formulas */
+next
+  case Finished_Phase_case_5
+  by contradiction /* from formulas */
+qed
+
+lemma ClassicRequiresDowngradeEvent:
+  all-traces
+  "∀ sid #i.
+    (SessionEstablished( sid, SuiteClassic ) @ #i) ⇒
+    (∃ #j. DowngradeEvent( sid ) @ #j)"
+/*
+guarded formula characterizing all counter-examples:
+"∃ sid #i.
+  (SessionEstablished( sid, SuiteClassic ) @ #i)
+ ∧
+  ∀ #j. (DowngradeEvent( sid ) @ #j) ⇒ ⊥"
+*/
+simplify
+solve( St_Finished( sid, SuiteClassic ) ▶₀ #i )
+  case Finished_Phase
+  by contradiction /* from formulas */
+qed
+
+lemma ClassicRequiresFallbackGate:
+  all-traces
+  "∀ sid #i.
+    (SessionEstablished( sid, SuiteClassic ) @ #i) ⇒
+    (∃ #j. FallbackGatePassed( sid, 'local_capability_error' ) @ #j)"
+/*
+guarded formula characterizing all counter-examples:
+"∃ sid #i.
+  (SessionEstablished( sid, SuiteClassic ) @ #i)
+ ∧
+  ∀ #j. (FallbackGatePassed( sid, 'local_capability_error' ) @ #j) ⇒ ⊥"
+*/
+simplify
+solve( St_Finished( sid, SuiteClassic ) ▶₀ #i )
+  case Finished_Phase
+  by contradiction /* from formulas */
+qed
+
+lemma ClassicOnlyUnderDefaultPolicy:
+  all-traces
+  "∀ sid #i.
+    (SessionEstablished( sid, SuiteClassic ) @ #i) ⇒
+    (∃ #j. Policy( sid, 'default' ) @ #j)"
+/*
+guarded formula characterizing all counter-examples:
+"∃ sid #i.
+  (SessionEstablished( sid, SuiteClassic ) @ #i)
+ ∧
+  ∀ #j. (Policy( sid, 'default' ) @ #j) ⇒ ⊥"
+*/
+simplify
+solve( St_Finished( sid, SuiteClassic ) ▶₀ #i )
+  case Finished_Phase
+  by contradiction /* from formulas */
+qed
+
+lemma V2HybridSecretComposition:
+  all-traces
+  "∀ sid #i.
+    (SessionEstablished( sid, SuitePQCv2 ) @ #i) ⇒
+    (∃ #j #k.
+      (StaticSecretDerived( sid ) @ #j) ∧
+      (EphemeralSecretDerived( sid ) @ #k))"
+/*
+guarded formula characterizing all counter-examples:
+"∃ sid #i.
+  (SessionEstablished( sid, SuitePQCv2 ) @ #i)
+ ∧
+  ∀ #j #k.
+   (StaticSecretDerived( sid ) @ #j) ∧ (EphemeralSecretDerived( sid ) @ #k)
+  ⇒
+   ⊥"
+*/
+simplify
+solve( St_Finished( sid, SuitePQCv2 ) ▶₀ #i )
+  case Finished_Phase_case_1
+  by contradiction /* from formulas */
+next
+  case Finished_Phase_case_2
+  by contradiction /* from formulas */
+qed
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/* All wellformedness checks were successful. */
+
+/*
+Generated from:
+Tamarin version 1.10.0
+Maude version 2.7.1
+Git revision: UNKNOWN, branch: UNKNOWN
+Compiled at: 2024-10-30 13:42:18.081591 UTC
+*/
+
+end
+
+==============================================================================
+summary of summaries:
+
+analyzed: skybridge_v2.spthy
+
+  processing time: 0.18s
+  
+  Exists_DefaultClassicTrace (exists-trace): verified (5 steps)
+  Exists_StrictPQCv2Trace (exists-trace): verified (4 steps)
+  NoClassicUnderStrictPQC (all-traces): verified (3 steps)
+  NegotiationIntegrity_SelectedWasOffered (all-traces): verified (12 steps)
+  AuthenticationRequiresVerifiedSigB (all-traces): verified (7 steps)
+  ClassicRequiresDowngradeEvent (all-traces): verified (3 steps)
+  ClassicRequiresFallbackGate (all-traces): verified (3 steps)
+  ClassicOnlyUnderDefaultPolicy (all-traces): verified (3 steps)
+  V2HybridSecretComposition (all-traces): verified (4 steps)
+
+==============================================================================

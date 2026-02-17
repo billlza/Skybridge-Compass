@@ -17,6 +17,7 @@ Outputs:
 import csv
 import os
 import math
+import json
 from pathlib import Path
 from datetime import datetime
 from statistics import stdev
@@ -35,6 +36,11 @@ ORDERED_PERF_CONFIGS = [
     "Classic (X25519 + Ed25519)",
     "liboqs PQC (ML-KEM-768 + ML-DSA-65)",
     "CryptoKit PQC (ML-KEM-768 + ML-DSA-65)",
+]
+
+V2_COMPARE_CONFIGS = [
+    "liboqs PQC (ML-KEM-768 + ML-DSA-65)",
+    "liboqs PQC v2 FS (ML-KEM-768-FS + ML-DSA-65)",
 ]
 
 # Prefer selecting a representative batch based on the highest-variance configuration first.
@@ -68,6 +74,16 @@ SYSTEM_IMPACT_PREFERRED_FILE_BYTES = [
 # Ensure output directories exist
 TABLES_DIR.mkdir(parents=True, exist_ok=True)
 SUPP_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def load_claims(artifact_date: str | None) -> dict | None:
+    if not artifact_date:
+        return None
+    claims_path = ARTIFACTS_DIR / f"claims_{artifact_date}.json"
+    if not claims_path.exists():
+        return None
+    with open(claims_path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 def find_latest_csv(prefix):
     """Find the most recent CSV file with given prefix."""
@@ -345,6 +361,20 @@ def parse_rtt_runs(filepath):
     window = complete[-MAX_REPEATABILITY_BATCHES:]
     return {cfg: [b[cfg] for b in window] for cfg in ORDERED_PERF_CONFIGS}
 
+def parse_v2_compare_latency(filepath):
+    """Parse latency CSV for v1/v2 comparison rows (representative complete batch)."""
+    rows = _filter_to_configs(_read_csv_rows(filepath), V2_COMPARE_CONFIGS)
+    batches = _group_rows_into_batches(rows, _parse_latency_row)
+    representative = _select_representative_batch(batches, V2_COMPARE_CONFIGS, metric='mean')
+    return representative or {}
+
+def parse_v2_compare_rtt(filepath):
+    """Parse RTT CSV for v1/v2 comparison rows (representative complete batch)."""
+    rows = _filter_to_configs(_read_csv_rows(filepath), V2_COMPARE_CONFIGS)
+    batches = _group_rows_into_batches(rows, _parse_rtt_row)
+    representative = _select_representative_batch(batches, V2_COMPARE_CONFIGS, metric='mean')
+    return representative or {}
+
 _T_CRIT_975 = {
     1: 12.706,
     2: 4.303,
@@ -394,10 +424,11 @@ def mean_and_ci(values):
 
 def generate_repeatability_latency_table(latency_runs):
     """Generate supplementary repeatability table for latency (mean ± 95% CI across batches)."""
+    iter_note = iteration_note_from_runs(latency_runs)
     lines = [
         r"\begin{table*}[!tp]",
         r"\centering",
-        r"\caption{Supplementary Table \thetable: Repeatability across independent benchmark batches (latency). Table reports observed batch count $B$. Cells report mean and (when $B \ge 2$) $\pm$ 95\% CI across batches; each batch uses N=1000 iterations after 10 warmup runs.}",
+        rf"\caption{{Supplementary Table \thetable: Repeatability across independent benchmark batches (latency). Table reports observed batch count $B$. Cells report mean and (when $B \ge 2$) $\pm$ 95\% CI across batches; {iter_note}.}}",
         r"\label{tab:supp-repeatability-latency}",
         r"\begin{tabular}{@{}lccccc@{}}",
         r"\toprule",
@@ -443,10 +474,11 @@ def generate_repeatability_latency_table(latency_runs):
 
 def generate_repeatability_rtt_table(rtt_runs):
     """Generate supplementary repeatability table for RTT (mean ± 95% CI across batches)."""
+    iter_note = iteration_note_from_runs(rtt_runs)
     lines = [
         r"\begin{table*}[!tp]",
         r"\centering",
-        r"\caption{Supplementary Table \thetable: Repeatability across independent benchmark batches (RTT). Table reports observed batch count $B$. Cells report mean and (when $B \ge 2$) $\pm$ 95\% CI across batches; each batch uses N=1000 iterations after 10 warmup runs.}",
+        rf"\caption{{Supplementary Table \thetable: Repeatability across independent benchmark batches (RTT). Table reports observed batch count $B$. Cells report mean and (when $B \ge 2$) $\pm$ 95\% CI across batches; {iter_note}.}}",
         r"\label{tab:supp-repeatability-rtt}",
         r"\begin{tabular}{@{}lccccc@{}}",
         r"\toprule",
@@ -515,7 +547,29 @@ def short_config(config):
         return 'CryptoKit PQC'
     return config
 
-def generate_perf_summary_table(latency, rtt, msg_sizes):
+def iteration_note_from_runs(runs_by_config):
+    """Build a caption-friendly N/batch note from parsed run dictionaries."""
+    pairs = []
+    for config in ORDERED_PERF_CONFIGS:
+        runs = runs_by_config.get(config, [])
+        if not runs:
+            continue
+        n_per = runs[0].get('n')
+        if n_per is None:
+            continue
+        pairs.append((short_config(config), int(n_per)))
+
+    if not pairs:
+        return "N=1000 iterations after 10 warmup runs"
+
+    unique_counts = sorted({n for _, n in pairs})
+    if len(unique_counts) == 1:
+        return f"N={unique_counts[0]} iterations after 10 warmup runs"
+
+    detail = ", ".join(f"{name}={n}" for name, n in pairs)
+    return f"configuration-specific N after 10 warmup runs ({detail})"
+
+def generate_perf_summary_table(latency, rtt, msg_sizes, claims=None):
     """Generate the main Performance Summary Table."""
     def message_total(keys, fallback):
         for key in keys:
@@ -552,6 +606,12 @@ def generate_perf_summary_table(latency, rtt, msg_sizes):
         finished_size * 2
     )
 
+    if claims and "wire_size_bytes" in claims:
+        wire = claims["wire_size_bytes"]
+        classic_total = int(wire.get("classic_payload_handshake", classic_total))
+        liboqs_total = int(wire.get("liboqs_payload_handshake", liboqs_total))
+        cryptokit_total = int(wire.get("cryptokit_payload_handshake", cryptokit_total))
+
     # Order: Classic, liboqs, CryptoKit
     configs = [
         ('Classic (X25519 + Ed25519)', 'Classic', classic_total),
@@ -561,11 +621,12 @@ def generate_perf_summary_table(latency, rtt, msg_sizes):
 
     # Throughput (hardcoded as no CSV, from text)
     throughput = {'Classic': 3.7, 'liboqs PQC': 3.7, 'CryptoKit PQC': 3.7}
+    iter_note = iteration_note_from_runs({cfg: [vals] for cfg, vals in latency.items()})
 
     lines = [
         r"\begin{table*}[!t]",
         r"\centering",
-        r"\caption{Performance Summary. All benchmarks on Apple Silicon (M1/M3), macOS 26.x, N=1000 iterations after 10 warmup runs. Wire Size counts payload-only handshake bytes (MessageA + MessageB + 2$\times$Finished); loopback wire sizes including transport overhead are reported separately in Table~\ref{tab:baseline-comparison} and Supplementary Table~\ref{tab:supp-loopback-wire}. Data-plane AEAD is fixed to AES-256-GCM in v1, so throughput is independent of the negotiated handshake suite; throughput measured post-handshake on 1~MiB payloads.}",
+        rf"\caption{{Performance Summary. All benchmarks on Apple Silicon (M1/M3), macOS 26.x, {iter_note}. Wire Size counts payload-only handshake bytes (MessageA + MessageB + 2$\times$Finished); loopback wire sizes including transport overhead are reported separately in Table~\ref{{tab:baseline-comparison}} and Supplementary Table~\ref{{tab:supp-loopback-wire}}. Data-plane AEAD is fixed to AES-256-GCM in v1, so throughput is independent of the negotiated handshake suite; throughput measured post-handshake on 1~MiB payloads.}}",
         r"\label{tab:perf-summary}",
         r"\begin{tabular}{@{}lcccccc@{}}",
         r"\toprule",
@@ -653,6 +714,83 @@ def generate_supp_rtt_table(rtt):
 
     return '\n'.join(lines)
 
+def generate_supp_v2_compare_table(v2_latency, v2_rtt, msg_sizes, claims=None):
+    """Generate supplementary v1/v2 comparison table for liboqs PQC path."""
+    def _message_total(message_keys, fallback):
+        for key in message_keys:
+            if key in msg_sizes:
+                return msg_sizes[key].get('total', fallback)
+        return fallback
+
+    finished = _message_total(["Finished"], 38)
+    v1_total = (
+        _message_total(["MessageA.PQC-liboqs", "MessageA.PQC", "MessageA.PQC-v1"], 6507) +
+        _message_total(["MessageB.PQC-liboqs", "MessageB.PQC", "MessageB.PQC-v1"], 5419) +
+        finished * 2
+    )
+    v2_total = (
+        _message_total(["MessageA.PQC-liboqs-v2fs", "MessageA.PQC-v2"], v1_total + 34) +
+        _message_total(["MessageB.PQC-liboqs-v2fs", "MessageB.PQC-v2"], 5419 + 32) +
+        finished * 2
+    )
+
+    v1_cfg = "liboqs PQC (ML-KEM-768 + ML-DSA-65)"
+    v2_cfg = "liboqs PQC v2 FS (ML-KEM-768-FS + ML-DSA-65)"
+
+    v1_lat = v2_latency.get(v1_cfg, {})
+    v2_lat = v2_latency.get(v2_cfg, {})
+    v1_rtt = v2_rtt.get(v1_cfg, {})
+    v2_rtt = v2_rtt.get(v2_cfg, {})
+
+    def _f(v, digits=2):
+        if v is None:
+            return "--"
+        return f"{v:.{digits}f}"
+
+    if claims and "v2_vs_v1" in claims:
+        v2_claim = claims["v2_vs_v1"]
+        v1_total = int(v2_claim.get("v1_payload_handshake_bytes", v1_total))
+        v2_total = int(v2_claim.get("v2_payload_handshake_bytes", v2_total))
+        delta_mean = float(v2_claim.get("delta_mean_latency_ms", 0.0))
+        delta_p95 = float(v2_claim.get("delta_p95_latency_ms", 0.0))
+        delta_bytes = int(v2_claim.get("delta_payload_handshake_bytes", v2_total - v1_total))
+    else:
+        delta_mean = (v2_lat.get('mean', 0.0) - v1_lat.get('mean', 0.0)) if v1_lat and v2_lat else None
+        delta_p95 = (v2_lat.get('p95', 0.0) - v1_lat.get('p95', 0.0)) if v1_lat and v2_lat else None
+        delta_bytes = v2_total - v1_total
+    if delta_mean is not None and delta_p95 is not None:
+        delta_summary = (
+            f"Observed v2-v1 deltas: mean latency +{_f(delta_mean)} ms, "
+            f"p95 latency +{_f(delta_p95)} ms, payload bytes +{delta_bytes} B."
+        )
+    else:
+        delta_summary = f"Observed payload-byte delta: +{delta_bytes} B."
+
+    lines = [
+        r"\begin{table*}[!tp]",
+        r"\centering",
+        r"\small",
+        rf"\caption{{Supplementary Table \thetable: liboqs PQC v1/v2 bridge comparison (N=1000, warmup=10). v1 uses \texttt{{ML-KEM-768}}; v2 uses \texttt{{ML-KEM-768-FS}} with additional ephemeral contribution composition. {delta_summary}}}",
+        r"\label{tab:supp-v2-v1-compare}",
+        r"\begin{tabular}{@{}lccccc@{}}",
+        r"\toprule",
+        r"Configuration & mean latency (ms) & p95 latency (ms) & p50 RTT (ms) & p95 RTT (ms) & payload handshake (B) \\",
+        r"\midrule",
+        (
+            f"liboqs v1 & {_f(v1_lat.get('mean'))} & {_f(v1_lat.get('p95'))} & "
+            f"{_f(v1_rtt.get('p50'))} & {_f(v1_rtt.get('p95'))} & {v1_total:,} \\\\"
+        ),
+        (
+            f"liboqs v2 FS & {_f(v2_lat.get('mean'))} & {_f(v2_lat.get('p95'))} & "
+            f"{_f(v2_rtt.get('p50'))} & {_f(v2_rtt.get('p95'))} & {v2_total:,} \\\\"
+        ),
+        r"\bottomrule",
+        r"\end{tabular}",
+        r"\end{table*}",
+    ]
+
+    return "\n".join(lines)
+
 def generate_supp_message_sizes_table(msg_sizes):
     """Generate supplementary message sizes breakdown table."""
     order = [
@@ -660,6 +798,8 @@ def generate_supp_message_sizes_table(msg_sizes):
         "MessageB.Classic",
         "MessageA.PQC-liboqs",
         "MessageB.PQC-liboqs",
+        "MessageA.PQC-liboqs-v2fs",
+        "MessageB.PQC-liboqs-v2fs",
         "MessageA.PQC-CryptoKit",
         "MessageB.PQC-CryptoKit",
         "MessageA.XWing",
@@ -730,8 +870,13 @@ def parse_traffic_padding_sensitivity(filepath):
                 "raw_bytes": int(float(r.get("raw_bytes", "0") or 0)),
                 "padded_bytes": int(float(r.get("padded_bytes", "0") or 0)),
                 "overhead_ratio": float(r.get("overhead_ratio", "0") or 0.0),
+                "overhead_all_frames_pct": float(r.get("overhead_all_frames_pct", "0") or 0.0),
+                "overhead_padded_only_pct": float(r.get("overhead_padded_only_pct", "0") or 0.0),
                 "over_cap_events": int(float(r.get("over_cap_events", "0") or 0)),
                 "over_cap_rate": float(r.get("over_cap_rate", "0") or 0.0),
+                "padded_frames": int(float(r.get("padded_frames", "0") or 0)),
+                "passthrough_frames": int(float(r.get("passthrough_frames", "0") or 0)),
+                "passthrough_rate": float(r.get("passthrough_rate", "0") or 0.0),
                 "unique_buckets": int(float(r.get("unique_buckets", "0") or 0)),
                 "entropy_bits": float(r.get("entropy_bits", "0") or 0.0),
                 "top_bucket": r.get("top_bucket", "") or "-",
@@ -837,11 +982,11 @@ def generate_supp_traffic_padding_sensitivity_table(rows):
         r"\setlength{\tabcolsep}{3pt}",
         r"\caption{Supplementary Table \thetable: SBP2 bucket-cap sensitivity study. We vary the maximum bucket size (cap) and report padding overhead, cap coverage (fraction of frames whose framed payload exceeds the cap), and a privacy proxy (bucket entropy) for representative handshake, control, and data-plane workloads.}",
         r"\label{tab:supp-traffic-padding-sensitivity}",
-        r"\begin{tabular}{@{}lrrrrrrrrr@{}}",
+        r"\begin{tabular}{@{}lrrrrrrrrrrrr@{}}",
         r"\toprule",
-        r"Label & \multicolumn{3}{c}{64\,KiB cap} & \multicolumn{3}{c}{128\,KiB cap} & \multicolumn{3}{c}{256\,KiB cap} \\",
-        r"\cmidrule(lr){2-4}\cmidrule(lr){5-7}\cmidrule(lr){8-10}",
-        r" & overhead (\%) & $>$cap (\%) & entropy (b) & overhead (\%) & $>$cap (\%) & entropy (b) & overhead (\%) & $>$cap (\%) & entropy (b) \\",
+        r"Label & \multicolumn{4}{c}{64\,KiB cap} & \multicolumn{4}{c}{128\,KiB cap} & \multicolumn{4}{c}{256\,KiB cap} \\",
+        r"\cmidrule(lr){2-5}\cmidrule(lr){6-9}\cmidrule(lr){10-13}",
+        r" & all (\%) & padded (\%) & $>$cap (\%) & entropy (b) & all (\%) & padded (\%) & $>$cap (\%) & entropy (b) & all (\%) & padded (\%) & $>$cap (\%) & entropy (b) \\",
         r"\midrule",
     ]
 
@@ -850,14 +995,19 @@ def generate_supp_traffic_padding_sensitivity_table(rows):
         for cap in caps:
             r = idx.get((cap, lab))
             if lab.startswith("HS/") and not r:
-                row += [r"\textit{n/a}", r"\textit{n/a}", r"\textit{n/a}"]
+                row += [r"\textit{n/a}", r"\textit{n/a}", r"\textit{n/a}", r"\textit{n/a}"]
                 continue
             if not r or r["raw_bytes"] <= 0:
-                row += ["-", "-", "-"]
+                row += ["-", "-", "-", "-"]
                 continue
-            pct = (r["overhead_ratio"] - 1.0) * 100.0 if r["overhead_ratio"] > 0 else 0.0
+            pct_all = r.get("overhead_all_frames_pct", 0.0)
+            if abs(pct_all) < 1e-12 and r.get("overhead_ratio", 0.0) > 0:
+                pct_all = (r["overhead_ratio"] - 1.0) * 100.0
+            pct_padded = r.get("overhead_padded_only_pct", 0.0)
             over_cap_pct = max(0.0, min(1.0, r.get("over_cap_rate", 0.0))) * 100.0
-            row += [_fmt_overhead_pct(pct), f"{over_cap_pct:.0f}\\%", f"{r['entropy_bits']:.2f}"]
+            padded_frames = int(r.get("padded_frames", 0))
+            padded_cell = _fmt_overhead_pct(pct_padded) if padded_frames > 0 else r"\textit{n/a}"
+            row += [_fmt_overhead_pct(pct_all), padded_cell, f"{over_cap_pct:.0f}\\%", f"{r['entropy_bits']:.2f}"]
         lines.append(" & ".join(row) + r" \\")
 
     lines.extend([
@@ -865,7 +1015,7 @@ def generate_supp_traffic_padding_sensitivity_table(rows):
         r"\end{tabular}",
         r"\vspace{2pt}",
         r"\begin{minipage}{0.98\linewidth}",
-        r"\footnotesize\raggedright\textit{Notes:} \textit{n/a} denotes ``not applicable'' (handshake messages are padded by SBP1 rather than SBP2). \texttt{-} denotes ``not observed'' in the sampled protocol trace. The $>$cap rate is computed as the fraction of frames where (payload bytes + SBP2 header) exceeds the configured cap; such frames are passed through without additional bucket padding (beyond the fixed SBP2 header), so overhead may round to near-zero and entropy reflects unquantized size variability for that fraction.",
+        r"\footnotesize\raggedright\textit{Notes:} \textit{all} is overhead across all wrapped frames (including passthrough); \textit{padded} is overhead restricted to frames that entered bucket padding. \textit{n/a} denotes ``not applicable'' (handshake messages are padded by SBP1 rather than SBP2) or ``no padded frames observed'' for that cap/label. \texttt{-} denotes ``not observed'' in the sampled protocol trace. The $>$cap rate is computed as the fraction of frames where (payload bytes + SBP2 header) exceeds the configured cap; this can drive \textit{all} toward near-zero while preserving non-zero $>$cap.",
         r"\end{minipage}",
         r"\end{table*}",
     ])
@@ -1029,7 +1179,6 @@ def main():
         sys_csv = select_artifact_csv("system_impact", requested_date, strict=True)
         sys_rows = parse_system_impact(sys_csv)
         sys_table = generate_system_impact_table(sys_rows, source_csv_name=sys_csv.name if sys_csv else None)
-        sys_table = generate_system_impact_table(sys_rows, source_csv_name=system_impact_csv.name if system_impact_csv else None)
         sys_path = TABLES_DIR / "system_impact.tex"
         with open(sys_path, "w") as f:
             f.write(f"% Auto-generated by make_tables.py on {datetime.now().isoformat()}\n")
@@ -1079,7 +1228,20 @@ def main():
     # Parse data
     latency = parse_handshake_bench(latency_csv) if latency_csv else {}
     rtt = parse_rtt(rtt_csv) if rtt_csv else {}
+    v2_latency = parse_v2_compare_latency(latency_csv) if latency_csv else {}
+    v2_rtt = parse_v2_compare_rtt(rtt_csv) if rtt_csv else {}
     msg_sizes = parse_message_sizes(msg_csv) if msg_csv else {}
+    claims = load_claims(artifact_date)
+    if not claims:
+        raise SystemExit(
+            f"ERROR: missing claims_{artifact_date}.json; run Scripts/collect_claims.py first "
+            "to enforce single-source numeric consistency."
+        )
+    latency = claims.get("latency", latency)
+    rtt = claims.get("rtt", rtt)
+    v2_latency = claims.get("v2_latency", v2_latency)
+    v2_rtt = claims.get("v2_rtt", v2_rtt)
+    print(f"  -> claims source loaded: claims_{artifact_date}.json")
     xwing_date = os.environ.get("ARTIFACT_DATE_XWING") or os.environ.get("SKYBRIDGE_ARTIFACT_DATE_XWING")
     if xwing_date:
         xwing_date = xwing_date.strip()
@@ -1107,7 +1269,7 @@ def main():
     print("\nGenerating tables...")
 
     # Main Performance Summary Table
-    perf_summary = generate_perf_summary_table(latency, rtt, msg_sizes)
+    perf_summary = generate_perf_summary_table(latency, rtt, msg_sizes, claims=claims)
     perf_path = TABLES_DIR / "perf_summary.tex"
     with open(perf_path, 'w') as f:
         f.write(f"% Auto-generated by make_tables.py on {datetime.now().isoformat()}\n")
@@ -1129,6 +1291,13 @@ def main():
         f.write(f"% Auto-generated by make_tables.py\n\n")
         f.write(supp_rtt)
     print(f"  -> {supp_rtt_path}")
+
+    supp_v2_compare = generate_supp_v2_compare_table(v2_latency, v2_rtt, msg_sizes, claims=claims)
+    supp_v2_compare_path = SUPP_DIR / "s12_v2_v1_compare.tex"
+    with open(supp_v2_compare_path, 'w') as f:
+        f.write(f"% Auto-generated by make_tables.py\n\n")
+        f.write(supp_v2_compare)
+    print(f"  -> {supp_v2_compare_path}")
 
     supp_msg = generate_supp_message_sizes_table(msg_sizes)
     supp_msg_path = SUPP_DIR / "s3_message_sizes.tex"

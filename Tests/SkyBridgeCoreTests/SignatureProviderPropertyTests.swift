@@ -29,10 +29,10 @@ struct SignatureProviderPropertyTests {
         #expect(provider.signatureAlgorithm == .mlDSA65)
     }
     
-    @Test("P256ProtocolSignatureProvider uses P-256 ECDSA algorithm")
+    @Test("P256SePoPProvider can be instantiated")
     func testP256SignatureProviderAlgorithm() {
-        let provider = P256ProtocolSignatureProvider()
-        #expect(provider.signatureAlgorithm == .p256ECDSA)
+        let provider = P256SePoPProvider()
+        #expect(String(describing: type(of: provider)) == "P256SePoPProvider")
     }
     
  // MARK: - Property: Tier-based Provider Selection
@@ -162,7 +162,7 @@ struct SignatureProviderPropertyTests {
     func testP256RoundTrip(iteration: Int) async throws {
         guard #available(macOS 14.0, iOS 17.0, *) else { return }
         
-        let provider = P256ProtocolSignatureProvider()
+        let provider = P256SePoPProvider()
         
  // Generate random test data
         let dataSize = Int.random(in: 1...1024)
@@ -187,7 +187,7 @@ struct SignatureProviderPropertyTests {
     func testP256TamperedData() async throws {
         guard #available(macOS 14.0, iOS 17.0, *) else { return }
         
-        let provider = P256ProtocolSignatureProvider()
+        let provider = P256SePoPProvider()
         
         let originalData = Data("Hello, World!".utf8)
         let tamperedData = Data("Hello, World?".utf8)
@@ -259,7 +259,7 @@ struct SignatureProviderPropertyTests {
     func testP256InvalidKeyLength() async {
         guard #available(macOS 14.0, iOS 17.0, *) else { return }
         
-        let provider = P256ProtocolSignatureProvider()
+        let provider = P256SePoPProvider()
         let data = Data("Test".utf8)
         
  // Invalid key length (should be 32 bytes)

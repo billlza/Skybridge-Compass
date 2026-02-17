@@ -115,12 +115,16 @@ public protocol CryptoProvider: Sendable {
 public extension CryptoProvider {
  /// 默认实现：supportedSuites 返回仅包含 activeSuite
     var supportedSuites: [CryptoSuite] {
-        [activeSuite]
+        if let upgraded = activeSuite.forwardSecureUpgradeSuite,
+           upgraded.wireId != activeSuite.wireId {
+            return [upgraded, activeSuite]
+        }
+        return [activeSuite]
     }
     
  /// 默认实现：仅支持当前 activeSuite
     func supportsSuite(_ suite: CryptoSuite) -> Bool {
-        suite.wireId == activeSuite.wireId
+        suite.providerCompatibilitySuite.wireId == activeSuite.providerCompatibilitySuite.wireId
     }
 
  /// 默认实现：KEM-DEM 使用现有 HPKE 兼容封装
@@ -222,6 +226,7 @@ public struct CryptoSuite: RawRepresentable, Hashable, Sendable {
         switch rawValue {
         case Self.xwingMLDSA.rawValue, "X-Wing+ML-DSA-65": self = .xwingMLDSA
         case Self.mlkem768MLDSA65.rawValue, "ML-KEM-768+ML-DSA-65": self = .mlkem768MLDSA65
+        case Self.mlkem768MLDSA65FS.rawValue, "ML-KEM-768-FS+ML-DSA-65": self = .mlkem768MLDSA65FS
         case Self.x25519Ed25519.rawValue, "X25519+Ed25519": self = .x25519Ed25519
         case Self.p256ECDSA.rawValue, "P-256+ECDSA": self = .p256ECDSA
         default: return nil
@@ -233,6 +238,8 @@ public struct CryptoSuite: RawRepresentable, Hashable, Sendable {
     public static let xwingMLDSA = CryptoSuite(rawValue: "X-Wing", wireId: 0x0001)
     
     public static let mlkem768MLDSA65 = CryptoSuite(rawValue: "ML-KEM-768", wireId: 0x0101)
+
+    public static let mlkem768MLDSA65FS = CryptoSuite(rawValue: "ML-KEM-768-FS", wireId: 0x0102)
     
     public static let x25519Ed25519 = CryptoSuite(rawValue: "X25519", wireId: 0x1001)
     
@@ -248,6 +255,7 @@ public struct CryptoSuite: RawRepresentable, Hashable, Sendable {
         switch wireId {
         case 0x0001: self = .xwingMLDSA
         case 0x0101: self = .mlkem768MLDSA65
+        case 0x0102: self = .mlkem768MLDSA65FS
         case 0x1001: self = .x25519Ed25519
         case 0x1002: self = .p256ECDSA
         default: self = .unknown(wireId)
@@ -291,6 +299,36 @@ public struct CryptoSuite: RawRepresentable, Hashable, Sendable {
  // 按 KEM 判定：wireId 高字节 0x00 (hybrid) 或 0x01 (pure PQC) 为 PQC 组
         let tier = wireId >> 8
         return tier == 0x00 || tier == 0x01
+    }
+
+    public var providerCompatibilitySuite: CryptoSuite {
+        switch wireId {
+        case 0x0102:
+            return .mlkem768MLDSA65
+        default:
+            return self
+        }
+    }
+
+    public var canonicalKEMSuite: CryptoSuite {
+        providerCompatibilitySuite
+    }
+
+    public var forwardSecureUpgradeSuite: CryptoSuite? {
+        switch wireId {
+        case 0x0101:
+            return .mlkem768MLDSA65FS
+        default:
+            return nil
+        }
+    }
+
+    public var requiresV2EphemeralContribution: Bool {
+        wireId == 0x0102
+    }
+
+    public var kdfCompositionLabel: String {
+        requiresV2EphemeralContribution ? "v2-static+ephemeral" : "v1-single"
     }
 }
 
@@ -390,6 +428,10 @@ public struct KeyMaterial: Sendable {
         case (0x0101, .keyExchange, false): return 96    // ML-KEM-768 私钥 (Apple seed format)
         case (0x0101, .signing, true): return 1952       // ML-DSA-65 公钥
         case (0x0101, .signing, false): return 64        // ML-DSA-65 私钥 (Apple seed format)
+        case (0x0102, .keyExchange, true): return 1184   // ML-KEM-768-FS 公钥（复用 ML-KEM-768）
+        case (0x0102, .keyExchange, false): return 96    // ML-KEM-768-FS 私钥（复用 ML-KEM-768）
+        case (0x0102, .signing, true): return 1952       // ML-DSA-65 公钥
+        case (0x0102, .signing, false): return 64        // ML-DSA-65 私钥
         
  // X-Wing + ML-DSA-65 (混合)
         case (0x0001, .keyExchange, true): return 1216   // X25519(32) + ML-KEM-768(1184)

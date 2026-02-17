@@ -9,6 +9,8 @@ options:
 packages:
   WebRTCLocal:
     path: LocalPackages/WebRTCLocal
+  OQSRAIILocal:
+    path: LocalPackages/OQSRAIILocal
 
 targets:
   SkyBridgeCompass-iOS:
@@ -26,6 +28,8 @@ targets:
       - sdk: AppIntents.framework
       - package: WebRTCLocal
         product: WebRTC
+      - package: OQSRAIILocal
+        product: OQSRAII
       - target: SkyBridgeCompass-Widgets
         embed: true
     settings:

@@ -291,7 +291,8 @@ public struct ProtocolIdentityPublicKeys: Sendable, Equatable {
 /// ```
 /// version(1B) || supportedSuitesCount(2B LE) || supportedSuites[] (2B LE each) ||
 /// keySharesCount(2B LE) || keyShares[] (suiteId(2B LE) + shareLen(2B LE) + shareBytes) ||
-/// clientNonce(32B) || capabilities(var) || policy(var) || identityPublicKey(var) || signature(var) || seSignature(var)
+/// clientNonce(32B) || capabilities(var) || policy(var) || identityPublicKey(var) ||
+/// [v2InitiatorContribution(var, only when FS suite is offered)] || signature(var) || seSignature(var)
 /// ```
 public struct HandshakeMessageA: Sendable {
  /// 协议版本
@@ -324,6 +325,9 @@ public struct HandshakeMessageA: Sendable {
  /// Secure Enclave 签名（可选）
     public let secureEnclaveSignature: Data?
 
+ /// v2 可选发起方临时贡献（例如 FS 套件下的 X25519 公钥）
+    public let initiatorContribution: Data?
+
  /// 结构化身份公钥（ 6.2）
  ///
  /// 解析 `identityPublicKey` 字段为 `IdentityPublicKeys` 结构。
@@ -349,7 +353,8 @@ public struct HandshakeMessageA: Sendable {
         capabilities: CryptoCapabilities,
         signature: Data,
         identityPublicKey: Data,
-        secureEnclaveSignature: Data? = nil
+        secureEnclaveSignature: Data? = nil,
+        initiatorContribution: Data? = nil
     ) {
         self.version = version
         self.supportedSuites = supportedSuites
@@ -360,6 +365,7 @@ public struct HandshakeMessageA: Sendable {
         self.signature = signature
         self.identityPublicKey = identityPublicKey
         self.secureEnclaveSignature = secureEnclaveSignature
+        self.initiatorContribution = initiatorContribution
     }
 
  /// 使用结构化身份公钥初始化（ 6.2）
@@ -374,7 +380,8 @@ public struct HandshakeMessageA: Sendable {
         capabilities: CryptoCapabilities,
         signature: Data,
         identityPublicKeys: IdentityPublicKeys,
-        secureEnclaveSignature: Data? = nil
+        secureEnclaveSignature: Data? = nil,
+        initiatorContribution: Data? = nil
     ) {
         self.version = version
         self.supportedSuites = supportedSuites
@@ -385,6 +392,7 @@ public struct HandshakeMessageA: Sendable {
         self.signature = signature
         self.identityPublicKey = identityPublicKeys.encoded
         self.secureEnclaveSignature = secureEnclaveSignature
+        self.initiatorContribution = initiatorContribution
     }
 
  // MARK: - Encoding
@@ -411,6 +419,9 @@ public struct HandshakeMessageA: Sendable {
         let data = HandshakePadding.unwrapIfNeeded(data, label: "HandshakeMessageA.decode")
         guard data.count >= 5 else {
             throw HandshakeError.failed(.invalidMessageFormat("MessageA too short"))
+        }
+        guard data.count <= HandshakeConstants.maxMessageALength else {
+            throw HandshakeError.failed(.invalidMessageFormat("MessageA exceeds maximum length"))
         }
 
         var offset = 0
@@ -520,6 +531,21 @@ public struct HandshakeMessageA: Sendable {
         let identityPublicKey = data[offset..<(offset + Int(idKeyLen))]
         offset += Int(idKeyLen)
 
+ // v2 initiator contribution (only when FS suites are offered)
+        var initiatorContribution: Data?
+        if supportedSuites.contains(where: { $0.requiresV2EphemeralContribution }) {
+            let contributionLen = try HandshakeEncoding.readUInt16LE(from: data, offset: &offset)
+            guard offset + Int(contributionLen) <= data.count else {
+                throw HandshakeError.failed(.invalidMessageFormat("v2 initiator contribution truncated"))
+            }
+            try HandshakeEncoding.validateInitiatorContributionLength(Int(contributionLen), for: supportedSuites)
+            if contributionLen > 0 {
+                let contribution = data[offset..<(offset + Int(contributionLen))]
+                initiatorContribution = Data(contribution)
+            }
+            offset += Int(contributionLen)
+        }
+
  // signature
         let sigLen = try HandshakeEncoding.readUInt16LE(from: data, offset: &offset)
         guard offset + Int(sigLen) <= data.count else {
@@ -550,7 +576,8 @@ public struct HandshakeMessageA: Sendable {
             capabilities: capabilities,
             signature: Data(signature),
             identityPublicKey: Data(identityPublicKey),
-            secureEnclaveSignature: secureEnclaveSignature
+            secureEnclaveSignature: secureEnclaveSignature,
+            initiatorContribution: initiatorContribution
         )
     }
 
@@ -587,6 +614,11 @@ public struct HandshakeMessageA: Sendable {
         data.append(policyData)
         HandshakeEncoding.appendUInt16LE(UInt16(identityPublicKey.count), to: &data)
         data.append(identityPublicKey)
+        if supportedSuites.contains(where: { $0.requiresV2EphemeralContribution }) {
+            let contribution = initiatorContribution ?? Data()
+            HandshakeEncoding.appendUInt16LE(UInt16(contribution.count), to: &data)
+            data.append(contribution)
+        }
         return data
     }
 }
@@ -711,6 +743,9 @@ public struct HandshakeMessageB: Sendable {
         let data = HandshakePadding.unwrapIfNeeded(data, label: "HandshakeMessageB.decode")
         guard data.count >= 5 else {
             throw HandshakeError.failed(.invalidMessageFormat("MessageB too short"))
+        }
+        guard data.count <= HandshakeConstants.maxMessageBLength else {
+            throw HandshakeError.failed(.invalidMessageFormat("MessageB exceeds maximum length"))
         }
 
         var offset = 0
@@ -1034,10 +1069,23 @@ private enum HandshakeEncoding {
         }
     }
 
+    static func validateInitiatorContributionLength(_ length: Int, for supportedSuites: [CryptoSuite]) throws {
+        guard supportedSuites.contains(where: { $0.requiresV2EphemeralContribution }) else {
+            return
+        }
+        if length == 0 {
+            return
+        }
+        guard length == 32 else {
+            throw HandshakeError.failed(.invalidMessageFormat("v2 initiator contribution length mismatch"))
+        }
+    }
+
     static func expectedKeyShareLength(for suite: CryptoSuite) -> Int? {
         switch suite.wireId {
         case 0x0001: return 1120   // X-Wing ciphertext: X25519(32) + ML-KEM-768(1088)
         case 0x0101: return 1088   // ML-KEM-768
+        case 0x0102: return 1088   // ML-KEM-768-FS (same KEM ciphertext as v1)
         case 0x1001: return 32     // X25519
         case 0x1002: return 65     // P-256
         default: return nil
@@ -1045,9 +1093,13 @@ private enum HandshakeEncoding {
     }
 
     static func expectedResponderShareLength(for suite: CryptoSuite) -> Int? {
-        if suite.isPQC {
+        switch suite.wireId {
+        case 0x0102:
+            return 32 // v2: responder ephemeral contribution is mandatory
+        case 0x0001, 0x0101:
             return 0
+        default:
+            return expectedKeyShareLength(for: suite)
         }
-        return expectedKeyShareLength(for: suite)
     }
 }

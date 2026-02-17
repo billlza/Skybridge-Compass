@@ -140,29 +140,26 @@ final class PreNegotiationSignatureSelectorPropertyTests: XCTestCase {
         }
     }
     
- // MARK: - Property 3: Signature Provider Selection
+    // MARK: - Property 3: Signature Provider Selection
     
- /// **Property 3.1**: ML-DSA-65 algorithm should return PQCSignatureProvider
+    /// **Property 3.1**: ML-DSA-65 algorithm should return PQCSignatureProvider
     func testProperty3_1_MLDSA65ReturnsPQCProvider() {
-        let provider = PreNegotiationSignatureSelector.selectProvider(for: SignatureAlgorithm.mlDSA65)
+        let provider = PreNegotiationSignatureSelector.selectProvider(for: ProtocolSigningAlgorithm.mlDSA65)
         XCTAssertEqual(provider.signatureAlgorithm, ProtocolSigningAlgorithm.mlDSA65, "ML-DSA-65 should return PQC provider")
         XCTAssertTrue(provider is PQCSignatureProvider, "Should be PQCSignatureProvider instance")
     }
     
- /// **Property 3.2**: Ed25519 algorithm should return ClassicSignatureProvider
+    /// **Property 3.2**: Ed25519 algorithm should return ClassicSignatureProvider
     func testProperty3_2_Ed25519ReturnsClassicProvider() {
-        let provider = PreNegotiationSignatureSelector.selectProvider(for: SignatureAlgorithm.ed25519)
+        let provider = PreNegotiationSignatureSelector.selectProvider(for: ProtocolSigningAlgorithm.ed25519)
         XCTAssertEqual(provider.signatureAlgorithm, ProtocolSigningAlgorithm.ed25519, "Ed25519 should return Classic provider")
         XCTAssertTrue(provider is ClassicSignatureProvider, "Should be ClassicSignatureProvider instance")
     }
     
- /// **Property 3.3**: P-256 ECDSA algorithm should return ClassicSignatureProvider (fallback)
- /// Note: P-256 is not allowed for protocol signing, so it falls back to Ed25519/Classic
-    func testProperty3_3_P256ECDSAReturnsClassicProviderFallback() {
-        let provider = PreNegotiationSignatureSelector.selectProvider(for: SignatureAlgorithm.p256ECDSA)
- // P-256 falls back to ClassicSignatureProvider (Ed25519) since P-256 is not allowed for protocol signing
-        XCTAssertEqual(provider.signatureAlgorithm, ProtocolSigningAlgorithm.ed25519, "P-256 ECDSA should fallback to Ed25519 provider")
-        XCTAssertTrue(provider is ClassicSignatureProvider, "Should be ClassicSignatureProvider instance (fallback)")
+    /// **Property 3.3**: P-256 ECDSA must be rejected for protocol signing
+    func testProperty3_3_P256ECDSAIsRejectedForProtocolSigning() {
+        let provider = ProtocolSignatureProviderSelector.selectProtocolProvider(for: .p256ECDSA)
+        XCTAssertNil(provider, "P-256 ECDSA should be rejected for protocol signing")
     }
     
  // MARK: - Round-Trip Property: Selection Consistency
@@ -258,13 +255,11 @@ final class PreNegotiationSignatureSelectorPropertyTests: XCTestCase {
     
  // MARK: - Property 2 ( 7.4): offeredSuites-sigAAlgorithm Homogeneity
     
- /// **Property 2.4**: ML-DSA-65 → ALL suites isPQCGroup == true
- /// **Validates: Requirements 1.3, 1.4, 2.1, 2.2, 2.3**
+    /// **Property 2.4**: ML-DSA-65 → ALL suites isPQCGroup == true
+    /// **Validates: Requirements 1.3, 1.4, 2.1, 2.2, 2.3**
     func testProperty2_4_MLDSA65RequiresAllPQCGroupSuites() {
  // When sigAAlgorithm is ML-DSA-65, all offeredSuites must have isPQCGroup == true
-        let sigAAlgorithm = ProtocolSigningAlgorithm.mlDSA65
-        
- // Valid: all PQC suites
+        // Valid: all PQC suites
         for pqcSuite in pqcSuites {
             XCTAssertTrue(pqcSuite.isPQCGroup, 
                 "PQC suite \(pqcSuite.rawValue) should have isPQCGroup == true")
@@ -283,13 +278,11 @@ final class PreNegotiationSignatureSelectorPropertyTests: XCTestCase {
         }
     }
     
- /// **Property 2.5**: Ed25519 → ALL suites isPQCGroup == false
- /// **Validates: Requirements 1.3, 1.4, 2.1, 2.2, 2.3**
+    /// **Property 2.5**: Ed25519 → ALL suites isPQCGroup == false
+    /// **Validates: Requirements 1.3, 1.4, 2.1, 2.2, 2.3**
     func testProperty2_5_Ed25519RequiresAllClassicSuites() {
  // When sigAAlgorithm is Ed25519, all offeredSuites must have isPQCGroup == false
-        let sigAAlgorithm = ProtocolSigningAlgorithm.ed25519
-        
- // Valid: all classic suites
+        // Valid: all classic suites
         for classicSuite in classicSuites {
             XCTAssertFalse(classicSuite.isPQCGroup,
                 "Classic suite \(classicSuite.rawValue) should have isPQCGroup == false")

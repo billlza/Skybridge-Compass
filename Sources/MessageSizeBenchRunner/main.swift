@@ -6,6 +6,7 @@ struct MessageSizeBenchRunner {
     private enum ProviderType: CaseIterable {
         case classic
         case liboqsPQC
+        case liboqsPQCv2FS
         case applePQC
         case appleXWing
 
@@ -15,6 +16,8 @@ struct MessageSizeBenchRunner {
                 return "Classic"
             case .liboqsPQC:
                 return "PQC-liboqs"
+            case .liboqsPQCv2FS:
+                return "PQC-liboqs-v2fs"
             case .applePQC:
                 return "PQC-CryptoKit"
             case .appleXWing:
@@ -26,7 +29,7 @@ struct MessageSizeBenchRunner {
             switch self {
             case .classic:
                 return .default
-            case .liboqsPQC, .applePQC, .appleXWing:
+            case .liboqsPQC, .liboqsPQCv2FS, .applePQC, .appleXWing:
                 return .strictPQC
             }
         }
@@ -35,7 +38,7 @@ struct MessageSizeBenchRunner {
             switch self {
             case .classic:
                 return .seconds(15)
-            case .liboqsPQC, .applePQC, .appleXWing:
+            case .liboqsPQC, .liboqsPQCv2FS, .applePQC, .appleXWing:
                 return .seconds(25)
             }
         }
@@ -88,6 +91,7 @@ struct MessageSizeBenchRunner {
 
             if capability.hasLiboqs {
                 targets.append(.liboqsPQC)
+                targets.append(.liboqsPQCv2FS)
             } else {
                 print("[SIZE] liboqs not available, skipping PQC-liboqs")
             }
@@ -101,7 +105,15 @@ struct MessageSizeBenchRunner {
 
             var breakdowns: [SizeBreakdown] = []
             for target in targets {
-                let (messageA, messageB) = try await captureMessages(providerType: target)
+                print("[SIZE] capturing \(target.label)")
+                let (messageA, messageB): (HandshakeMessageA, HandshakeMessageB)
+                do {
+                    (messageA, messageB) = try await captureMessages(providerType: target)
+                } catch {
+                    throw NSError(domain: "MessageSizeBench", code: 1, userInfo: [
+                        NSLocalizedDescriptionKey: "\(target.label): \(error.localizedDescription)"
+                    ])
+                }
                 breakdowns.append(try breakdown(for: messageA, label: "MessageA.\(target.label)"))
                 breakdowns.append(try breakdown(for: messageB, label: "MessageB.\(target.label)"))
             }
@@ -156,91 +168,207 @@ struct MessageSizeBenchRunner {
     private static func captureMessages(
         providerType: ProviderType
     ) async throws -> (HandshakeMessageA, HandshakeMessageB) {
-        let context = try await prepareBenchmarkContext(providerType: providerType)
-
-        let initiatorTransport = BenchmarkTransport()
-        let responderTransport = BenchmarkTransport()
-
-        let initiatorDriver = try HandshakeDriver(
-            transport: initiatorTransport,
-            cryptoProvider: context.provider,
-            protocolSignatureProvider: context.protocolSignatureProvider,
-            protocolSigningKeyHandle: context.initiatorKeyHandle,
-            sigAAlgorithm: context.sigAAlgorithm,
-            identityPublicKey: context.initiatorIdentityPublicKey,
-            offeredSuites: context.offeredSuites,
-            policy: context.handshakePolicy,
-            cryptoPolicy: context.cryptoPolicy,
-            timeout: context.handshakeTimeout,
-            trustProvider: context.trustProviderInitiator
-        )
-
-        let responderDriver = try HandshakeDriver(
-            transport: responderTransport,
-            cryptoProvider: context.provider,
-            protocolSignatureProvider: context.protocolSignatureProvider,
-            protocolSigningKeyHandle: context.responderKeyHandle,
-            sigAAlgorithm: context.sigAAlgorithm,
-            identityPublicKey: context.responderIdentityPublicKey,
-            offeredSuites: context.offeredSuites,
-            policy: context.handshakePolicy,
-            cryptoPolicy: context.cryptoPolicy,
-            timeout: context.handshakeTimeout,
-            trustProvider: context.trustProviderResponder
-        )
-
-        await initiatorTransport.setOnSend { [responderDriver] peer, data in
-            // If SBP2 is enabled, the sender wraps frames; receiver must unwrap before passing to HandshakeDriver.
-            let unwrapped = TrafficPadding.unwrapIfNeeded(data, label: "rx")
-            await responderDriver.handleMessage(unwrapped, from: peer)
-        }
-        await responderTransport.setOnSend { [initiatorDriver] peer, data in
-            let unwrapped = TrafficPadding.unwrapIfNeeded(data, label: "rx")
-            await initiatorDriver.handleMessage(unwrapped, from: peer)
-        }
-
-        let handshakeTask = Task {
-            try await initiatorDriver.initiateHandshake(with: context.peer)
-        }
-
-        _ = try await withThrowingTaskGroup(of: SessionKeys.self) { group in
-            group.addTask {
-                try await handshakeTask.value
-            }
-            group.addTask {
-                try await Task.sleep(for: context.handshakeTimeout)
-                throw NSError(domain: "MessageSizeBench", code: 1, userInfo: [
-                    NSLocalizedDescriptionKey: "Handshake task timeout"
-                ])
-            }
-            let result = try await group.next()!
-            group.cancelAll()
-            return result
-        }
-
-        let initiatorSent = await initiatorTransport.getSentMessages()
-        let responderSent = await responderTransport.getSentMessages()
-
-        guard let rawA = initiatorSent.first?.1,
-              let rawB = responderSent.first?.1 else {
-            throw NSError(domain: "MessageSizeBench", code: 2, userInfo: [
-                NSLocalizedDescriptionKey: "Missing handshake messages"
-            ])
-        }
-
-        // Size bench is about message payload encoding; unwrap optional framing layers before decode.
-        let unwrappedA = HandshakePadding.unwrapIfNeeded(
-            TrafficPadding.unwrapIfNeeded(rawA, label: "rx"),
-            label: "rx"
-        )
-        let unwrappedB = HandshakePadding.unwrapIfNeeded(
-            TrafficPadding.unwrapIfNeeded(rawB, label: "rx"),
-            label: "rx"
-        )
-
-        let messageA = try HandshakeMessageA.decode(from: unwrappedA)
-        let messageB = try HandshakeMessageB.decode(from: unwrappedB)
+        let messageA = try createSyntheticMessageA(for: providerType)
+        let messageB = try createSyntheticMessageB(for: providerType)
         return (messageA, messageB)
+    }
+
+    private static func createSyntheticMessageA(
+        for providerType: ProviderType
+    ) throws -> HandshakeMessageA {
+        let supportedSuites: [CryptoSuite]
+        let keyShares: [HandshakeKeyShare]
+        let signature: Data
+        let identityPublicKeys: IdentityPublicKeys
+        let policy: HandshakePolicy
+        let capabilities: CryptoCapabilities
+        let initiatorContribution: Data?
+
+        switch providerType {
+        case .classic:
+            supportedSuites = [.x25519Ed25519]
+            keyShares = [HandshakeKeyShare(suite: .x25519Ed25519, shareBytes: Data(repeating: 0xAA, count: 32))]
+            signature = Data(repeating: 0xBB, count: 64)
+            identityPublicKeys = IdentityPublicKeys(
+                protocolPublicKey: Data(repeating: 0xCC, count: 32),
+                protocolAlgorithm: .ed25519,
+                secureEnclavePublicKey: nil
+            )
+            policy = .default
+            capabilities = CryptoCapabilities(
+                supportedKEM: ["X25519"],
+                supportedSignature: ["Ed25519"],
+                supportedAuthProfiles: ["classic"],
+                supportedAEAD: ["AES-256-GCM"],
+                pqcAvailable: false,
+                platformVersion: "macOS",
+                providerType: .classic
+            )
+            initiatorContribution = nil
+
+        case .liboqsPQC, .applePQC:
+            supportedSuites = [.mlkem768MLDSA65]
+            keyShares = [HandshakeKeyShare(suite: .mlkem768MLDSA65, shareBytes: Data(repeating: 0xAA, count: 1088))]
+            signature = Data(repeating: 0xBB, count: 3309)
+            identityPublicKeys = IdentityPublicKeys(
+                protocolPublicKey: Data(repeating: 0xCC, count: 1952),
+                protocolAlgorithm: .mlDSA65,
+                secureEnclavePublicKey: nil
+            )
+            policy = .strictPQC
+            capabilities = CryptoCapabilities(
+                supportedKEM: ["ML-KEM-768"],
+                supportedSignature: ["ML-DSA-65"],
+                supportedAuthProfiles: ["pqc"],
+                supportedAEAD: ["AES-256-GCM"],
+                pqcAvailable: true,
+                platformVersion: "macOS",
+                providerType: providerType == .applePQC ? .cryptoKitPQC : .liboqs
+            )
+            initiatorContribution = nil
+
+        case .liboqsPQCv2FS:
+            supportedSuites = [.mlkem768MLDSA65FS]
+            keyShares = [HandshakeKeyShare(suite: .mlkem768MLDSA65FS, shareBytes: Data(repeating: 0xAA, count: 1088))]
+            signature = Data(repeating: 0xBB, count: 3309)
+            identityPublicKeys = IdentityPublicKeys(
+                protocolPublicKey: Data(repeating: 0xCC, count: 1952),
+                protocolAlgorithm: .mlDSA65,
+                secureEnclavePublicKey: nil
+            )
+            policy = .strictPQC
+            capabilities = CryptoCapabilities(
+                supportedKEM: ["ML-KEM-768-FS"],
+                supportedSignature: ["ML-DSA-65"],
+                supportedAuthProfiles: ["pqc-v2-fs"],
+                supportedAEAD: ["AES-256-GCM"],
+                pqcAvailable: true,
+                platformVersion: "macOS",
+                providerType: .liboqs
+            )
+            initiatorContribution = Data(repeating: 0xAB, count: 32)
+
+        case .appleXWing:
+            supportedSuites = [.xwingMLDSA]
+            keyShares = [HandshakeKeyShare(suite: .xwingMLDSA, shareBytes: Data(repeating: 0xAA, count: 1216))]
+            signature = Data(repeating: 0xBB, count: 3309)
+            identityPublicKeys = IdentityPublicKeys(
+                protocolPublicKey: Data(repeating: 0xCC, count: 1952),
+                protocolAlgorithm: .mlDSA65,
+                secureEnclavePublicKey: nil
+            )
+            policy = .strictPQC
+            capabilities = CryptoCapabilities(
+                supportedKEM: ["X-Wing"],
+                supportedSignature: ["ML-DSA-65"],
+                supportedAuthProfiles: ["hybrid"],
+                supportedAEAD: ["AES-256-GCM"],
+                pqcAvailable: true,
+                platformVersion: "macOS",
+                providerType: .cryptoKitPQC
+            )
+            initiatorContribution = nil
+        }
+
+        return HandshakeMessageA(
+            version: 1,
+            supportedSuites: supportedSuites,
+            keyShares: keyShares,
+            clientNonce: Data(repeating: 0x11, count: 32),
+            policy: policy,
+            capabilities: capabilities,
+            signature: signature,
+            identityPublicKeys: identityPublicKeys,
+            secureEnclaveSignature: nil,
+            initiatorContribution: initiatorContribution
+        )
+    }
+
+    private static func createSyntheticMessageB(
+        for providerType: ProviderType
+    ) throws -> HandshakeMessageB {
+        let selectedSuite: CryptoSuite
+        let responderShare: Data
+        let signature: Data
+        let identityPublicKeys: IdentityPublicKeys
+        let encryptedPayload: HPKESealedBox
+
+        switch providerType {
+        case .classic:
+            selectedSuite = .x25519Ed25519
+            responderShare = Data(repeating: 0xDD, count: 32)
+            signature = Data(repeating: 0xEE, count: 64)
+            identityPublicKeys = IdentityPublicKeys(
+                protocolPublicKey: Data(repeating: 0xFF, count: 32),
+                protocolAlgorithm: .ed25519,
+                secureEnclavePublicKey: nil
+            )
+            encryptedPayload = HPKESealedBox(
+                encapsulatedKey: Data(repeating: 0xAB, count: 32),
+                nonce: Data(repeating: 0xCD, count: 12),
+                ciphertext: Data(repeating: 0x33, count: 64),
+                tag: Data(repeating: 0xEF, count: 16)
+            )
+
+        case .liboqsPQC, .applePQC:
+            selectedSuite = .mlkem768MLDSA65
+            responderShare = Data()
+            signature = Data(repeating: 0xEE, count: 3309)
+            identityPublicKeys = IdentityPublicKeys(
+                protocolPublicKey: Data(repeating: 0xFF, count: 1952),
+                protocolAlgorithm: .mlDSA65,
+                secureEnclavePublicKey: nil
+            )
+            encryptedPayload = HPKESealedBox(
+                encapsulatedKey: Data(),
+                nonce: Data(repeating: 0xCD, count: 12),
+                ciphertext: Data(repeating: 0x33, count: 64),
+                tag: Data(repeating: 0xEF, count: 16)
+            )
+
+        case .liboqsPQCv2FS:
+            selectedSuite = .mlkem768MLDSA65FS
+            responderShare = Data(repeating: 0xDD, count: 32)
+            signature = Data(repeating: 0xEE, count: 3309)
+            identityPublicKeys = IdentityPublicKeys(
+                protocolPublicKey: Data(repeating: 0xFF, count: 1952),
+                protocolAlgorithm: .mlDSA65,
+                secureEnclavePublicKey: nil
+            )
+            encryptedPayload = HPKESealedBox(
+                encapsulatedKey: Data(),
+                nonce: Data(repeating: 0xCD, count: 12),
+                ciphertext: Data(repeating: 0x33, count: 64),
+                tag: Data(repeating: 0xEF, count: 16)
+            )
+
+        case .appleXWing:
+            selectedSuite = .xwingMLDSA
+            responderShare = Data()
+            signature = Data(repeating: 0xEE, count: 3309)
+            identityPublicKeys = IdentityPublicKeys(
+                protocolPublicKey: Data(repeating: 0xFF, count: 1952),
+                protocolAlgorithm: .mlDSA65,
+                secureEnclavePublicKey: nil
+            )
+            encryptedPayload = HPKESealedBox(
+                encapsulatedKey: Data(),
+                nonce: Data(repeating: 0xCD, count: 12),
+                ciphertext: Data(repeating: 0x33, count: 64),
+                tag: Data(repeating: 0xEF, count: 16)
+            )
+        }
+
+        return HandshakeMessageB(
+            version: 1,
+            selectedSuite: selectedSuite,
+            responderShare: responderShare,
+            serverNonce: Data(repeating: 0x22, count: 32),
+            encryptedPayload: encryptedPayload,
+            signature: signature,
+            identityPublicKeys: identityPublicKeys,
+            secureEnclaveSignature: nil
+        )
     }
 
     private static func prepareBenchmarkContext(
@@ -250,7 +378,7 @@ struct MessageSizeBenchRunner {
         switch providerType {
         case .classic:
             provider = ClassicCryptoProvider()
-        case .liboqsPQC:
+        case .liboqsPQC, .liboqsPQCv2FS:
             #if canImport(OQSRAII)
             provider = OQSPQCCryptoProvider()
             #else
@@ -288,10 +416,32 @@ struct MessageSizeBenchRunner {
             #endif
         }
 
-        let strategy: HandshakeAttemptStrategy = (providerType == .classic) ? .classicOnly : .pqcOnly
-        let offeredSuitesResult = TwoAttemptHandshakeManager.getSuites(for: strategy, cryptoProvider: provider)
-        guard case .suites(let offeredSuites) = offeredSuitesResult else {
-            throw HandshakeError.emptyOfferedSuites
+        let offeredSuites: [CryptoSuite]
+        switch providerType {
+        case .classic:
+            let offeredSuitesResult = TwoAttemptHandshakeManager.getSuites(for: .classicOnly, cryptoProvider: provider)
+            guard case .suites(let suites) = offeredSuitesResult else {
+                throw HandshakeError.emptyOfferedSuites
+            }
+            offeredSuites = suites
+        case .liboqsPQC, .applePQC:
+            offeredSuites = [.mlkem768MLDSA65]
+        case .liboqsPQCv2FS:
+            let offeredSuitesResult = TwoAttemptHandshakeManager.getSuites(
+                for: .pqcOnly,
+                cryptoProvider: provider,
+                pqcOfferMode: .preferredSingle
+            )
+            guard case .suites(let suites) = offeredSuitesResult else {
+                throw HandshakeError.emptyOfferedSuites
+            }
+            offeredSuites = suites
+        case .appleXWing:
+            let offeredSuitesResult = TwoAttemptHandshakeManager.getSuites(for: .pqcOnly, cryptoProvider: provider)
+            guard case .suites(let suites) = offeredSuitesResult else {
+                throw HandshakeError.emptyOfferedSuites
+            }
+            offeredSuites = suites
         }
 
         let protocolSignatureProvider = ProtocolSignatureProviderSelector.select(for: provider.tier)
@@ -374,13 +524,26 @@ struct MessageSizeBenchRunner {
             return [:]
         }
 
+        // Keep this bench runner independent from Keychain-backed identity stores.
+        // We only need deterministic, suite-compatible peer KEM material to drive
+        // handshake serialization and measure message sizes.
+        var canonicalKeys: [CryptoSuite: Data] = [:]
         var kemPublicKeys: [CryptoSuite: Data] = [:]
         for suite in pqcSuites {
-            let publicKey = try await DeviceIdentityKeyManager.shared.getKEMPublicKey(
-                for: suite,
-                provider: provider
-            )
+            let canonical = suite.canonicalKEMSuite
+            let publicKey: Data
+            if let existing = canonicalKeys[canonical] {
+                publicKey = existing
+            } else {
+                let keyPair = try await provider.generateKeyPair(for: .keyExchange)
+                publicKey = keyPair.publicKey.bytes
+                canonicalKeys[canonical] = publicKey
+            }
             kemPublicKeys[suite] = publicKey
+            kemPublicKeys[canonical] = kemPublicKeys[canonical] ?? publicKey
+            if let upgraded = canonical.forwardSecureUpgradeSuite {
+                kemPublicKeys[upgraded] = kemPublicKeys[upgraded] ?? publicKey
+            }
         }
         return kemPublicKeys
     }
@@ -428,9 +591,17 @@ struct MessageSizeBenchRunner {
         let artifactsDir = URL(fileURLWithPath: "Artifacts")
         try FileManager.default.createDirectory(at: artifactsDir, withIntermediateDirectories: true)
 
-        let dateFormatter = DateFormatter()
-        dateFormatter.dateFormat = "yyyy-MM-dd"
-        let dateString = dateFormatter.string(from: Date())
+        let env = ProcessInfo.processInfo.environment
+        let dateString: String
+        if let v = env["ARTIFACT_DATE"], !v.isEmpty {
+            dateString = v
+        } else if let v = env["SKYBRIDGE_ARTIFACT_DATE"], !v.isEmpty {
+            dateString = v
+        } else {
+            let dateFormatter = DateFormatter()
+            dateFormatter.dateFormat = "yyyy-MM-dd"
+            dateString = dateFormatter.string(from: Date())
+        }
         let csvPath = artifactsDir.appendingPathComponent("message_sizes_\(dateString).csv")
 
         var content = "message,total_bytes,signature_bytes,keyshare_bytes,identity_bytes,overhead_bytes\n"

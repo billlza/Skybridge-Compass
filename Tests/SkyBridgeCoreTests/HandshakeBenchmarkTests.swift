@@ -4,6 +4,9 @@
 
 import XCTest
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#endif
 @testable import SkyBridgeCore
 
 /// Benchmark tests for handshake latency and throughput measurements.
@@ -16,7 +19,22 @@ final class HandshakeBenchmarkTests: XCTestCase {
  // Paper reference: Section VI.B, Table I (N=1000 iterations)
  // 15.1: Changed from 100 to 1000 iterations for statistical significance
 
-    private static let iterationCount = 1000  // Production benchmark iterations (IEEE paper: N=1000)
+    private static var iterationCount: Int {
+        if let raw = ProcessInfo.processInfo.environment["SKYBRIDGE_BENCH_ITERATIONS"],
+           let parsed = Int(raw),
+           parsed > 0 {
+            return parsed
+        }
+        return 1000
+    }
+    private static var appleIterationCount: Int {
+        if let raw = ProcessInfo.processInfo.environment["SKYBRIDGE_BENCH_APPLE_ITERATIONS"],
+           let parsed = Int(raw),
+           parsed > 0 {
+            return parsed
+        }
+        return iterationCount
+    }
     private static let warmupCount = 10
 
     private var shouldRunBenchmarks: Bool {
@@ -36,7 +54,7 @@ final class HandshakeBenchmarkTests: XCTestCase {
         )
 
         let stats = computeEnhancedStats(samples)
-        reportLatencyStats(configuration: "Classic (X25519 + Ed25519)", stats: stats)
+        reportLatencyStats(configuration: "Classic (X25519 + Ed25519)", stats: stats, iterationCount: Self.iterationCount)
     }
 
     func testHandshakeRTT_Classic() async throws {
@@ -49,7 +67,7 @@ final class HandshakeBenchmarkTests: XCTestCase {
         )
 
         let stats = computeEnhancedStats(samples)
-        reportRTTStats(configuration: "Classic (X25519 + Ed25519)", stats: stats)
+        reportRTTStats(configuration: "Classic (X25519 + Ed25519)", stats: stats, iterationCount: Self.iterationCount)
     }
 
     func testHandshakeLatency_LiboqsPQC() async throws {
@@ -68,7 +86,7 @@ final class HandshakeBenchmarkTests: XCTestCase {
         )
 
         let stats = computeEnhancedStats(samples)
-        reportLatencyStats(configuration: "liboqs PQC (ML-KEM-768 + ML-DSA-65)", stats: stats)
+        reportLatencyStats(configuration: "liboqs PQC (ML-KEM-768 + ML-DSA-65)", stats: stats, iterationCount: Self.iterationCount)
     }
 
     func testHandshakeRTT_LiboqsPQC() async throws {
@@ -87,7 +105,43 @@ final class HandshakeBenchmarkTests: XCTestCase {
         )
 
         let stats = computeEnhancedStats(samples)
-        reportRTTStats(configuration: "liboqs PQC (ML-KEM-768 + ML-DSA-65)", stats: stats)
+        reportRTTStats(configuration: "liboqs PQC (ML-KEM-768 + ML-DSA-65)", stats: stats, iterationCount: Self.iterationCount)
+    }
+
+    func testHandshakeLatency_LiboqsPQCv2FS() async throws {
+        try XCTSkipUnless(shouldRunBenchmarks, "Set SKYBRIDGE_RUN_BENCH=1 to run benchmarks")
+
+        let capability = CryptoProviderFactory.detectCapability()
+        guard capability.hasLiboqs else {
+            throw XCTSkip("liboqs not available on this system")
+        }
+
+        let samples = try await measureHandshakeLatency(
+            providerType: .liboqsPQCv2FS,
+            iterations: Self.iterationCount,
+            warmup: Self.warmupCount
+        )
+
+        let stats = computeEnhancedStats(samples)
+        reportLatencyStats(configuration: "liboqs PQC v2 FS (ML-KEM-768-FS + ML-DSA-65)", stats: stats, iterationCount: Self.iterationCount)
+    }
+
+    func testHandshakeRTT_LiboqsPQCv2FS() async throws {
+        try XCTSkipUnless(shouldRunBenchmarks, "Set SKYBRIDGE_RUN_BENCH=1 to run benchmarks")
+
+        let capability = CryptoProviderFactory.detectCapability()
+        guard capability.hasLiboqs else {
+            throw XCTSkip("liboqs not available on this system")
+        }
+
+        let samples = try await measureHandshakeRTT(
+            providerType: .liboqsPQCv2FS,
+            iterations: Self.iterationCount,
+            warmup: Self.warmupCount
+        )
+
+        let stats = computeEnhancedStats(samples)
+        reportRTTStats(configuration: "liboqs PQC v2 FS (ML-KEM-768-FS + ML-DSA-65)", stats: stats, iterationCount: Self.iterationCount)
     }
 
     #if HAS_APPLE_PQC_SDK
@@ -97,12 +151,12 @@ final class HandshakeBenchmarkTests: XCTestCase {
 
         let samples = try await measureHandshakeLatency(
             providerType: .applePQC,
-            iterations: Self.iterationCount,
+            iterations: Self.appleIterationCount,
             warmup: Self.warmupCount
         )
 
         let stats = computeEnhancedStats(samples)
-        reportLatencyStats(configuration: "CryptoKit PQC (ML-KEM-768 + ML-DSA-65)", stats: stats)
+        reportLatencyStats(configuration: "CryptoKit PQC (ML-KEM-768 + ML-DSA-65)", stats: stats, iterationCount: Self.appleIterationCount)
     }
 
     @available(macOS 26.0, iOS 26.0, *)
@@ -111,12 +165,12 @@ final class HandshakeBenchmarkTests: XCTestCase {
 
         let samples = try await measureHandshakeRTT(
             providerType: .applePQC,
-            iterations: Self.iterationCount,
+            iterations: Self.appleIterationCount,
             warmup: Self.warmupCount
         )
 
         let stats = computeEnhancedStats(samples)
-        reportRTTStats(configuration: "CryptoKit PQC (ML-KEM-768 + ML-DSA-65)", stats: stats)
+        reportRTTStats(configuration: "CryptoKit PQC (ML-KEM-768 + ML-DSA-65)", stats: stats, iterationCount: Self.appleIterationCount)
     }
 
     @available(macOS 26.0, iOS 26.0, *)
@@ -130,7 +184,7 @@ final class HandshakeBenchmarkTests: XCTestCase {
         )
 
         let stats = computeEnhancedStats(samples)
-        reportLatencyStats(configuration: "CryptoKit Hybrid (X-Wing + ML-DSA-65)", stats: stats)
+        reportLatencyStats(configuration: "CryptoKit Hybrid (X-Wing + ML-DSA-65)", stats: stats, iterationCount: Self.appleIterationCount)
     }
 
     @available(macOS 26.0, iOS 26.0, *)
@@ -144,7 +198,7 @@ final class HandshakeBenchmarkTests: XCTestCase {
         )
 
         let stats = computeEnhancedStats(samples)
-        reportRTTStats(configuration: "CryptoKit Hybrid (X-Wing + ML-DSA-65)", stats: stats)
+        reportRTTStats(configuration: "CryptoKit Hybrid (X-Wing + ML-DSA-65)", stats: stats, iterationCount: Self.appleIterationCount)
     }
     #endif
 
@@ -192,6 +246,7 @@ final class HandshakeBenchmarkTests: XCTestCase {
     private enum ProviderType {
         case classic
         case liboqsPQC
+        case liboqsPQCv2FS
         case applePQC
         case appleXWing
     }
@@ -223,6 +278,7 @@ final class HandshakeBenchmarkTests: XCTestCase {
     private static let configurationNames: [ProviderType: String] = [
         .classic: "Classic (X25519 + Ed25519)",
         .liboqsPQC: "liboqs PQC (ML-KEM-768 + ML-DSA-65)",
+        .liboqsPQCv2FS: "liboqs PQC v2 FS (ML-KEM-768-FS + ML-DSA-65)",
         .applePQC: "CryptoKit PQC (ML-KEM-768 + ML-DSA-65)",
         .appleXWing: "CryptoKit Hybrid (X-Wing + ML-DSA-65)"
     ]
@@ -255,7 +311,7 @@ final class HandshakeBenchmarkTests: XCTestCase {
         switch providerType {
         case .classic:
             provider = ClassicCryptoProvider()
-        case .liboqsPQC:
+        case .liboqsPQC, .liboqsPQCv2FS:
             #if canImport(OQSRAII)
             provider = OQSPQCCryptoProvider()
             #else
@@ -283,10 +339,32 @@ final class HandshakeBenchmarkTests: XCTestCase {
             #endif
         }
 
-        let strategy: HandshakeAttemptStrategy = (providerType == .classic) ? .classicOnly : .pqcOnly
-        let offeredSuitesResult = TwoAttemptHandshakeManager.getSuites(for: strategy, cryptoProvider: provider)
-        guard case .suites(let offeredSuites) = offeredSuitesResult else {
-            throw HandshakeError.emptyOfferedSuites
+        let offeredSuites: [CryptoSuite]
+        switch providerType {
+        case .classic:
+            let offeredSuitesResult = TwoAttemptHandshakeManager.getSuites(for: .classicOnly, cryptoProvider: provider)
+            guard case .suites(let suites) = offeredSuitesResult else {
+                throw HandshakeError.emptyOfferedSuites
+            }
+            offeredSuites = suites
+        case .liboqsPQC, .applePQC:
+            offeredSuites = [.mlkem768MLDSA65]
+        case .liboqsPQCv2FS:
+            let offeredSuitesResult = TwoAttemptHandshakeManager.getSuites(
+                for: .pqcOnly,
+                cryptoProvider: provider,
+                pqcOfferMode: .preferredSingle
+            )
+            guard case .suites(let suites) = offeredSuitesResult else {
+                throw HandshakeError.emptyOfferedSuites
+            }
+            offeredSuites = suites
+        case .appleXWing:
+            let offeredSuitesResult = TwoAttemptHandshakeManager.getSuites(for: .pqcOnly, cryptoProvider: provider)
+            guard case .suites(let suites) = offeredSuitesResult else {
+                throw HandshakeError.emptyOfferedSuites
+            }
+            offeredSuites = suites
         }
 
         let protocolSignatureProvider = ProtocolSignatureProviderSelector.select(for: provider.tier)
@@ -368,21 +446,19 @@ final class HandshakeBenchmarkTests: XCTestCase {
         iterations: Int,
         warmup: Int
     ) async throws -> [Double] {
-        var samples: [Double] = []
         let context = try await prepareBenchmarkContext(providerType: providerType)
+        elevateBenchmarkQoS()
+        var samples: [Double] = []
 
- // Warmup
         for _ in 0..<warmup {
             _ = try await performMockHandshake(context: context)
         }
 
- // Measured iterations
         for _ in 0..<iterations {
             let start = ContinuousClock.now
             _ = try await performMockHandshake(context: context)
             let elapsed = ContinuousClock.now - start
 
- // Convert to milliseconds
             let ms = Double(elapsed.components.seconds) * 1000.0 +
                      Double(elapsed.components.attoseconds) / 1_000_000_000_000_000.0
             samples.append(ms)
@@ -398,8 +474,9 @@ final class HandshakeBenchmarkTests: XCTestCase {
         iterations: Int,
         warmup: Int
     ) async throws -> [Double] {
-        var samples: [Double] = []
         let context = try await prepareBenchmarkContext(providerType: providerType)
+        elevateBenchmarkQoS()
+        var samples: [Double] = []
 
         for _ in 0..<warmup {
             _ = try await performMockHandshakeWithMetrics(context: context)
@@ -475,7 +552,7 @@ final class HandshakeBenchmarkTests: XCTestCase {
             await initiatorDriver.handleMessage(data, from: peer)
         }
 
-        let handshakeTask = Task {
+        let handshakeTask = Task(priority: .high) {
             try await initiatorDriver.initiateHandshake(with: context.peer)
         }
 
@@ -560,16 +637,25 @@ final class HandshakeBenchmarkTests: XCTestCase {
     }
 
     private actor BenchmarkTransport: DiscoveryTransport {
+        private let deterministicDelivery: Bool
         private var onSend: (@Sendable (PeerIdentifier, Data) async -> Void)?
         private var pending: [(PeerIdentifier, Data)] = []
         private var isDelivering = false
         private var sentMessages: [(PeerIdentifier, Data)] = []
 
-        func setOnSend(_ handler: @escaping @Sendable (PeerIdentifier, Data) async -> Void) {
+        init(deterministicDelivery: Bool = (ProcessInfo.processInfo.environment["SKYBRIDGE_BENCH_DETERMINISTIC_TRANSPORT"] ?? "1") != "0") {
+            self.deterministicDelivery = deterministicDelivery
+        }
+
+        func setOnSend(_ handler: @escaping @Sendable (PeerIdentifier, Data) async -> Void) async {
             onSend = handler
             if !isDelivering {
                 isDelivering = true
-                Task { await flushPending() }
+                if deterministicDelivery {
+                    await flushPending()
+                } else {
+                    Task { await flushPending() }
+                }
             }
         }
 
@@ -578,7 +664,11 @@ final class HandshakeBenchmarkTests: XCTestCase {
             sentMessages.append((peer, data))
             if !isDelivering {
                 isDelivering = true
-                Task { await flushPending() }
+                if deterministicDelivery {
+                    await flushPending()
+                } else {
+                    Task { await flushPending() }
+                }
             }
         }
 
@@ -587,13 +677,21 @@ final class HandshakeBenchmarkTests: XCTestCase {
         }
 
         private func flushPending() async {
-            await Task.yield()
+            if !deterministicDelivery {
+                await Task.yield()
+            }
             while !pending.isEmpty {
                 let (peer, data) = pending.removeFirst()
                 await onSend?(peer, data)
             }
             isDelivering = false
         }
+    }
+
+    private func elevateBenchmarkQoS() {
+        #if canImport(Darwin)
+        _ = pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0)
+        #endif
     }
 
     private struct PercentileStats {
@@ -675,7 +773,7 @@ final class HandshakeBenchmarkTests: XCTestCase {
         return EnhancedPercentileStats(samples: samples)
     }
 
-    private func reportLatencyStats(configuration: String, stats: PercentileStats) {
+    private func reportLatencyStats(configuration: String, stats: PercentileStats, iterationCount: Int) {
  // Compute enhanced stats for stdDev
  // Note: We need samples to compute stdDev, so we'll use a helper
         SkyBridgeLogger.test.info("""
@@ -687,12 +785,12 @@ final class HandshakeBenchmarkTests: XCTestCase {
             """)
 
  // Write to CSV artifact (without stdDev for legacy PercentileStats)
-        writeToArtifact(configuration: configuration, stats: stats)
+        writeToArtifact(configuration: configuration, stats: stats, iterationCount: iterationCount)
     }
 
  /// Report latency statistics with enhanced stats including stdDev
  /// Requirements: 5.2
-    private func reportLatencyStats(configuration: String, stats: EnhancedPercentileStats) {
+    private func reportLatencyStats(configuration: String, stats: EnhancedPercentileStats, iterationCount: Int) {
         SkyBridgeLogger.test.info("""
             [BENCH] \(configuration):
               mean=\(stats.mean, format: .fixed(precision: 3))ms
@@ -703,10 +801,10 @@ final class HandshakeBenchmarkTests: XCTestCase {
             """)
 
  // Write to CSV artifact with stdDev
-        writeToArtifact(configuration: configuration, stats: stats)
+        writeToArtifact(configuration: configuration, stats: stats, iterationCount: iterationCount)
     }
 
-    private func reportRTTStats(configuration: String, stats: EnhancedPercentileStats) {
+    private func reportRTTStats(configuration: String, stats: EnhancedPercentileStats, iterationCount: Int) {
         SkyBridgeLogger.test.info("""
             [BENCH-RTT] \(configuration):
               mean=\(stats.mean, format: .fixed(precision: 3))ms
@@ -716,10 +814,10 @@ final class HandshakeBenchmarkTests: XCTestCase {
               p99=\(stats.p99, format: .fixed(precision: 3))ms
             """)
 
-        writeRTTArtifact(configuration: configuration, stats: stats)
+        writeRTTArtifact(configuration: configuration, stats: stats, iterationCount: iterationCount)
     }
 
-    private func writeToArtifact(configuration: String, stats: PercentileStats) {
+    private func writeToArtifact(configuration: String, stats: PercentileStats, iterationCount: Int) {
         let dateString = ArtifactDate.current()
 
         let artifactsDir = URL(fileURLWithPath: "Artifacts")
@@ -733,6 +831,7 @@ final class HandshakeBenchmarkTests: XCTestCase {
  // Legacy format without stdDev
                 csvContent = "configuration,p50_ms,p95_ms,p99_ms,mean_ms\n"
             }
+            _ = iterationCount
             csvContent += "\(configuration),\(stats.p50),\(stats.p95),\(stats.p99),\(stats.mean)\n"
 
             if let handle = try? FileHandle(forWritingTo: csvPath) {
@@ -750,7 +849,7 @@ final class HandshakeBenchmarkTests: XCTestCase {
  /// Write enhanced benchmark results to CSV artifact with stdDev column
  /// Requirements: 5.3
  /// 15.1: CSV header includes iteration_count for reproducibility
-    private func writeToArtifact(configuration: String, stats: EnhancedPercentileStats) {
+    private func writeToArtifact(configuration: String, stats: EnhancedPercentileStats, iterationCount: Int) {
         let dateString = ArtifactDate.current()
 
         let artifactsDir = URL(fileURLWithPath: "Artifacts")
@@ -765,7 +864,7 @@ final class HandshakeBenchmarkTests: XCTestCase {
  // 15.1: Added iteration_count column for IEEE paper reproducibility (N=1000)
                 csvContent = "configuration,iteration_count,mean_ms,stddev_ms,p50_ms,p95_ms,p99_ms\n"
             }
-            csvContent += "\(configuration),\(Self.iterationCount),\(stats.mean),\(stats.stdDev),\(stats.p50),\(stats.p95),\(stats.p99)\n"
+            csvContent += "\(configuration),\(iterationCount),\(stats.mean),\(stats.stdDev),\(stats.p50),\(stats.p95),\(stats.p99)\n"
 
             if let handle = try? FileHandle(forWritingTo: csvPath) {
                 handle.seekToEndOfFile()
@@ -779,7 +878,7 @@ final class HandshakeBenchmarkTests: XCTestCase {
         }
     }
 
-    private func writeRTTArtifact(configuration: String, stats: EnhancedPercentileStats) {
+    private func writeRTTArtifact(configuration: String, stats: EnhancedPercentileStats, iterationCount: Int) {
         let dateString = ArtifactDate.current()
 
         let artifactsDir = URL(fileURLWithPath: "Artifacts")
@@ -792,7 +891,7 @@ final class HandshakeBenchmarkTests: XCTestCase {
             if !FileManager.default.fileExists(atPath: csvPath.path) {
                 csvContent = "configuration,iteration_count,mean_ms,stddev_ms,p50_ms,p95_ms,p99_ms\n"
             }
-            csvContent += "\(configuration),\(Self.iterationCount),\(stats.mean),\(stats.stdDev),\(stats.p50),\(stats.p95),\(stats.p99)\n"
+            csvContent += "\(configuration),\(iterationCount),\(stats.mean),\(stats.stdDev),\(stats.p50),\(stats.p95),\(stats.p99)\n"
 
             if let handle = try? FileHandle(forWritingTo: csvPath) {
                 handle.seekToEndOfFile()

@@ -357,10 +357,17 @@ struct PQCSecuritySettingsView: View {
             }
 
             Section("论文 / 学术验证") {
+                NavigationLink(destination: PQCMicroBenchView()) {
+                    Label("PQC Self-test / Microbench", systemImage: "waveform.path.ecg")
+                }
+                Text("原语级 microbench（encap/sign/verify/seal-open）固定为 warmup=10、N=1000、batches=3，导出 schema v3 JSON 到 artifact 管线。")
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
+
                 NavigationLink(destination: RealNetworkE2EBenchView()) {
                     Label("RealNet E2E Micro-Study", systemImage: "antenna.radiowaves.left.and.right")
                 }
-                Text("在 iPhone/iPad 上作为 client，连接到 Mac 上的测试 server，对比 classic(827B) 与 PQC(12,163B) 的端到端时延与失败类型，并导出 CSV 到 Artifacts 管线。")
+                Text("在 iPhone/iPad 上作为 client，连接到 Mac 上的测试 server，对比 classic(687B) 与 PQC(12,002B) 的端到端时延与失败类型，并导出 CSV 到 Artifacts 管线。")
                     .font(.footnote)
                     .foregroundColor(.secondary)
             }

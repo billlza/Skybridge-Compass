@@ -132,6 +132,7 @@ public struct ClassicSignatureProvider: ProtocolSignatureProvider {
 /// PQC 签名 Provider (ML-DSA-65)
 public struct PQCSignatureProvider: ProtocolSignatureProvider {
     public let signatureAlgorithm: ProtocolSigningAlgorithm = .mlDSA65
+    private static let hasLiboqsBackend = OQSPQCCryptoProvider.selfTest()
     
     public init() {}
     
@@ -141,6 +142,10 @@ public struct PQCSignatureProvider: ProtocolSignatureProvider {
             return try await signWithApplePQC(data, key: key)
         }
         #endif
+
+        if Self.hasLiboqsBackend {
+            return try await OQSPQCCryptoProvider().sign(data: data, using: key)
+        }
         
         throw SignatureProviderError.pqcBackendUnavailable(
             "ML-DSA-65 requires iOS 26+ or liboqs integration"
@@ -153,6 +158,10 @@ public struct PQCSignatureProvider: ProtocolSignatureProvider {
             return try await verifyWithApplePQC(data, signature: signature, publicKey: publicKey)
         }
         #endif
+
+        if Self.hasLiboqsBackend {
+            return try await OQSPQCCryptoProvider().verify(data: data, signature: signature, publicKey: publicKey)
+        }
         
         throw SignatureProviderError.pqcBackendUnavailable(
             "ML-DSA-65 verification requires iOS 26+ or liboqs integration"

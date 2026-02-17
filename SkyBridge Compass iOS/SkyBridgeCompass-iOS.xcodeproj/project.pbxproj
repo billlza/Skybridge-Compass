@@ -10,8 +10,10 @@
 		00CAB4BBB733464C1FF2F9A5 /* ClassicProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 45E38BFD2BF770091C5361CA /* ClassicProvider.swift */; };
 		0302341D8E2BB60324D7889A /* P2PModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2DC955A281C23A0B548C5CBD /* P2PModels.swift */; };
 		043295B691923495938B1E3B /* DeviceRowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF7C6732F6E6CFEB1827A01C /* DeviceRowView.swift */; };
+		0A7B6CD70600963118A5C304 /* OQSPQCProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02E072B2ECDBCAC392990BBC /* OQSPQCProvider.swift */; };
 		1229E6052AE2F447BCE7B060 /* FileTransferNetworkService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6DABC391FCB3DF17ACBC9871 /* FileTransferNetworkService.swift */; };
 		175622266915CD82E3A560FD /* SkyBridgeCompass-Widgets.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = C6A172C4D3294DB3396F66BA /* SkyBridgeCompass-Widgets.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		1923527B409D232AEAB6AC07 /* PQCMicroBenchView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A8E37120476F56FA7D07ED15 /* PQCMicroBenchView.swift */; };
 		1A086E4298F673C6F40F71A0 /* DashboardViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8873381462E8906125915730 /* DashboardViewModel.swift */; };
 		1ACF2AAF991D5C3F48E3E825 /* SkyBridgeServerConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A6519191657E3E68CB7FACA /* SkyBridgeServerConfig.swift */; };
 		1B5FEDF47D8BD8ACE762B266 /* SkyBridgeLiveActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 25762A7C3639ADB0F3389B46 /* SkyBridgeLiveActivity.swift */; };
@@ -78,6 +80,7 @@
 		DC81505931CB16753F1F2840 /* SkyBridgeActivityAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0E7F0EB851AACE0E22241F4C /* SkyBridgeActivityAttributes.swift */; };
 		DCC7EFA59EC1E0F77324AAAA /* RemoteDesktopView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F221AF5FD1890E34AED851F /* RemoteDesktopView.swift */; };
 		DFCDB1FD20E80262588BE225 /* CrossNetworkWebRTCManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 37694C400D5C4C8D0BFA8AF3 /* CrossNetworkWebRTCManager.swift */; };
+		E6D2CD92125AAF348588CF6F /* OQSRAII in Frameworks */ = {isa = PBXBuildFile; productRef = EE00C62C33482B8E88952EF2 /* OQSRAII */; };
 		EACA8DF10A61B445DA457502 /* SkyBridgeActivityAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0E7F0EB851AACE0E22241F4C /* SkyBridgeActivityAttributes.swift */; };
 		EE2CFADE97B5CC575F298B16 /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = F20BA2C69C251DBFBCE544C2 /* LaunchScreen.storyboard */; };
 		EF4DA1E1F4F2828008C6E759 /* HandshakePadding.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9ED1003097A3695027F85A78 /* HandshakePadding.swift */; };
@@ -117,8 +120,10 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		02E072B2ECDBCAC392990BBC /* OQSPQCProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OQSPQCProvider.swift; sourceTree = "<group>"; };
 		07133D5293BC5557CCFCF0CF /* PQCVerificationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PQCVerificationView.swift; sourceTree = "<group>"; };
 		0804BBD3F73BEC663FB83BEA /* ApplePQCProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApplePQCProvider.swift; sourceTree = "<group>"; };
+		0B7D6FA64D317615E7792E07 /* OQSRAIILocal */ = {isa = PBXFileReference; lastKnownFileType = folder; name = OQSRAIILocal; path = LocalPackages/OQSRAIILocal; sourceTree = SOURCE_ROOT; };
 		0E7F0EB851AACE0E22241F4C /* SkyBridgeActivityAttributes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkyBridgeActivityAttributes.swift; sourceTree = "<group>"; };
 		1133516DEC9E4E928179444C /* ThemeConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThemeConfiguration.swift; sourceTree = "<group>"; };
 		12AA45BBEEC3FF9E0601549B /* WebRTCSignalingEnvelope.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebRTCSignalingEnvelope.swift; sourceTree = "<group>"; };
@@ -173,6 +178,7 @@
 		A07FEE2A66E383470ED547EB /* AppMessage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppMessage.swift; sourceTree = "<group>"; };
 		A1B96A09303C9AF42591D0D5 /* SignatureProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignatureProvider.swift; sourceTree = "<group>"; };
 		A3AEF34FAD525B93EAF2F1A9 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		A8E37120476F56FA7D07ED15 /* PQCMicroBenchView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PQCMicroBenchView.swift; sourceTree = "<group>"; };
 		A9A378FB908FC087F4E7A9F1 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		AEE0A0FBDCBA4EADCD46F2F4 /* CrossNetworkFileTransferWire.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CrossNetworkFileTransferWire.swift; sourceTree = "<group>"; };
 		B0F56F03506920D8634C60CE /* OfflineMessageQueue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OfflineMessageQueue.swift; sourceTree = "<group>"; };
@@ -219,6 +225,7 @@
 			files = (
 				765FB348742A20A24D373B33 /* AppIntents.framework in Frameworks */,
 				484844AADC672182602C11A4 /* WebRTC in Frameworks */,
+				E6D2CD92125AAF348588CF6F /* OQSRAII in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -249,6 +256,7 @@
 				E4EF1AB2EE5174C61F4EED9A /* BetaBannerView.swift */,
 				60070A78651766A13EBEFD51 /* DeviceDiscoveryView.swift */,
 				BFCA8B7D215CCA4DC093A732 /* FileTransferView.swift */,
+				A8E37120476F56FA7D07ED15 /* PQCMicroBenchView.swift */,
 				07133D5293BC5557CCFCF0CF /* PQCVerificationView.swift */,
 				C00D1D9DA4969F5B4D321487 /* RealNetworkE2EBenchView.swift */,
 				5F221AF5FD1890E34AED851F /* RemoteDesktopView.swift */,
@@ -425,6 +433,7 @@
 		92FDC970131C05A02838C80E /* Packages */ = {
 			isa = PBXGroup;
 			children = (
+				0B7D6FA64D317615E7792E07 /* OQSRAIILocal */,
 				725E41D48A59618B3CC4B80B /* WebRTCLocal */,
 			);
 			name = Packages;
@@ -517,6 +526,7 @@
 			children = (
 				0804BBD3F73BEC663FB83BEA /* ApplePQCProvider.swift */,
 				45E38BFD2BF770091C5361CA /* ClassicProvider.swift */,
+				02E072B2ECDBCAC392990BBC /* OQSPQCProvider.swift */,
 			);
 			path = Providers;
 			sourceTree = "<group>";
@@ -614,6 +624,7 @@
 			name = "SkyBridgeCompass-iOS";
 			packageProductDependencies = (
 				76123964202BD611B7E681E7 /* WebRTC */,
+				EE00C62C33482B8E88952EF2 /* OQSRAII */,
 			);
 			productName = "SkyBridgeCompass-iOS";
 			productReference = EFAF3D9DF476661D0BFB7941 /* SkyBridgeCompass-iOS.app */;
@@ -647,6 +658,7 @@
 			mainGroup = B55949760F23D445644575EB;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
+				D8ECB200A6C3588FB2C19E78 /* XCLocalSwiftPackageReference "LocalPackages/OQSRAIILocal" */,
 				4BF7ADB923E18CDD4BFB1197 /* XCLocalSwiftPackageReference "LocalPackages/WebRTCLocal" */,
 			);
 			preferredProjectObjectVersion = 77;
@@ -725,12 +737,14 @@
 				ACE29943C53B6CA74502AC6C /* LogStore.swift in Sources */,
 				3B75921C9A72DC3981EC2213 /* Models.swift in Sources */,
 				785EE64A0F387A2778916E0A /* NebulaIDGenerator.swift in Sources */,
+				0A7B6CD70600963118A5C304 /* OQSPQCProvider.swift in Sources */,
 				FD62E4E1724B59EAB8A62261 /* OfflineMessageQueue.swift in Sources */,
 				4A56DFFF28B04C42DADE01AF /* P2PConnectionManager.swift in Sources */,
 				A5F09D1504FD77A30A7C0AC5 /* P2PConnectionService.swift in Sources */,
 				D7580047201CE7CD9B9DFEDF /* P2PKEMIdentityKeyStore.swift in Sources */,
 				0302341D8E2BB60324D7889A /* P2PModels.swift in Sources */,
 				F50A2B25D1245272A807810A /* PQCCryptoManager.swift in Sources */,
+				1923527B409D232AEAB6AC07 /* PQCMicroBenchView.swift in Sources */,
 				9D44C501DB642330AF2DBE1F /* PQCVerificationView.swift in Sources */,
 				B42D17CE8B0CE1AA9D0327E1 /* PlatformAdapter.swift in Sources */,
 				D37FF910C3E1961E319469A4 /* QRCodeManager.swift in Sources */,
@@ -1029,12 +1043,20 @@
 			isa = XCLocalSwiftPackageReference;
 			relativePath = LocalPackages/WebRTCLocal;
 		};
+		D8ECB200A6C3588FB2C19E78 /* XCLocalSwiftPackageReference "LocalPackages/OQSRAIILocal" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = LocalPackages/OQSRAIILocal;
+		};
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
 		76123964202BD611B7E681E7 /* WebRTC */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = WebRTC;
+		};
+		EE00C62C33482B8E88952EF2 /* OQSRAII */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = OQSRAII;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
