@@ -126,6 +126,7 @@ This document provides extended data tables referenced in the main paper. All da
 \item Table~\ref{tab:supp-v2-v1-compare} (v1/v2 bridge comparison): liboqs PQC v1 baseline versus v2 FS latency/RTT and payload-byte delta, supporting main-paper Section~\ref{sec:evaluation}.
 \item Tables~\ref{tab:supp-platform-support}--\ref{tab:supp-cross-platform-policy} (Platform/runtime matrix): Apple provider availability plus Android/Ubuntu version-tier suite policy mapping used by negotiation.
 \item Table~\ref{tab:supp-cross-platform-contract} (Cross-platform contract consistency): static source-based checker output across iOS/macOS, Android, and Ubuntu for suite parity, encoding, fallback guardrails, and trust path.
+\item Table~\ref{tab:supp-boundary-stress} (Boundary-stress cases and operator runbook): explicit in-model vs out-of-model classification for pairing social engineering, endpoint compromise classes, and audit-log abuse, with expected event signals and required operator actions.
 \item Tables~\ref{tab:supp-message-field-validation}--\ref{tab:artifact-map} (Protocol/Audit Appendices): wire-format validation rules, suite identifiers, PQC coverage and platform support matrices, key-size references, security event taxonomy, and an implementation-to-file mapping. These materials support auditability and reproducibility claims in main paper Sections~\ref{sec:handshake-state-machine}, \ref{sec:security-model}, and \ref{sec:implementation}.
 \end{itemize}
 
@@ -1041,6 +1042,33 @@ Trigger
 \bottomrule
 \end{tabular}
 \end{table*}
+
+\subsection*{Boundary Stress Cases and Operator Runbook}
+
+\begin{table*}[!tp]
+\centering
+\caption{Boundary-stress cases: model scope, expected audit signals, and operator actions.}
+\label{tab:supp-boundary-stress}
+\begin{tabular}{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 8\tabcolsep) * \real{0.19}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 8\tabcolsep) * \real{0.15}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 8\tabcolsep) * \real{0.26}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 8\tabcolsep) * \real{0.23}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 8\tabcolsep) * \real{0.17}}@{}}
+\toprule
+Boundary-stress case & Model status & Expected signal surface & Required operator action & Claim impact \\
+\midrule
+Pairing social engineering (user pins attacker key) & Out-of-model (pairing assumption failure) & No cryptographic alert at pairing time; later key-change conflicts may appear as \texttt{identityMismatch} & Revoke trust record, require authenticated re-pairing (QR/PIN or equivalent), quarantine previously trusted channel & Authentication claims do not apply until re-pair completes \\
+Endpoint compromise (read-only key/material exposure) & Partially out-of-model (endpoint integrity degraded) & Potential abnormal \texttt{cryptoDowngrade}\allowbreak/\allowbreak\texttt{handshakeFailed} bursts; possible forensics-only detection & Enter strict mode where feasible, rotate affected long-term keys, investigate endpoint posture before restoring trust & Secrecy claims degrade to compromise window assumptions \\
+Endpoint compromise (signing-capable attacker) & Out-of-model for protocol-level peer trust & Handshake-level signatures may still verify; compromise usually inferred from external telemetry & Immediate endpoint quarantine, key revocation/rotation, forced re-pairing for all peers & Mutual-authentication guarantees no longer hold for compromised endpoint \\
+Audit-log injection/truncation attempt on local store & In-model for integrity checking of emitted records; out-of-model for fully privileged host tamper & Hash-chain discontinuity or missing mandatory fields for downgrade events & Treat chain break as incident, preserve evidence snapshot, fail closed for automated compliance checks & Audit replayability claims hold only while logging substrate integrity assumptions hold \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+Rows marked out-of-model are not covered by theorem-level security
+claims in main-paper Section~\ref{sec:security-model}; they are included
+to make deployment response obligations explicit.
 
 \subsection*{X-Wing Wire Size (Measured)}
 

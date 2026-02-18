@@ -1173,6 +1173,12 @@ sessions.
   \texttt{handshake}\allowbreak\texttt{Failed}.
 \end{itemize}
 
+To keep boundary handling operationally explicit, Supplementary
+Table~\ref{tab:supp-boundary-stress} enumerates boundary-stress cases
+(pairing social engineering, endpoint compromise classes, and audit-log
+abuse), their in/out-of-model status, expected event signals, and
+required operator actions.
+
 \subsection{Security Goals, Formal Definitions, and Proof
 Sketches}\label{b.-security-goals-and-proof-sketches}
 
@@ -2236,6 +2242,14 @@ Table~\ref{tab:supp-ec2-direct}.
   observed delay-profile separation is tighter for our current dummynet
   setup than for netem, so delay-scale claims are anchored primarily by
   controlled simulation and netem.
+\item
+  \textbf{Boundary-Stress Residual Risk:} Pairing social engineering and
+  signing-capable endpoint compromise remain outside cryptographic
+  protocol guarantees. Audit evidence improves incident triage but does
+  not by itself restore trust. Our current deployment guidance therefore
+  requires explicit operator runbook actions (quarantine, key rotation,
+  and authenticated re-pairing) as summarized in Supplementary
+  Table~\ref{tab:supp-boundary-stress}.
 \end{enumerate}
 
 \subsection{Future Directions}\label{b.-future-directions}
