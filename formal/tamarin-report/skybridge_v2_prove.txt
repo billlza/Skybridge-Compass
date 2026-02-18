@@ -22,8 +22,7 @@ rule (modulo E) Init_Offer_Default:
   --[
   Policy( ~sid, 'default' ), OfferIncludes( ~sid, SuiteClassic ),
   OfferIncludes( ~sid, SuitePQCv1 ), OfferIncludes( ~sid, SuitePQCv2 ),
-  OfferSent( ~sid, 'A' ),
-  FallbackGatePassed( ~sid, 'local_capability_error' )
+  OfferSent( ~sid, 'A' )
   ]->
    [ St_Default( ~sid ) ]
 
@@ -39,12 +38,50 @@ rule (modulo E) Init_Offer_Strict:
 
   /* has exactly the trivial AC variant */
 
-rule (modulo E) Neg_Default_Classic:
+rule (modulo E) Default_Timeout_Denied:
    [ St_Default( sid ) ]
+  --[ TimeoutObserved( sid ), FallbackDenied( sid, 'timeout' ) ]->
+   [ St_Default_PQCOnly( sid ) ]
+
+  /* has exactly the trivial AC variant */
+
+rule (modulo E) Default_LocalFailure_Eligible:
+   [ St_Default( sid ) ]
+  --[
+  LocalFallbackEligible( sid, 'local_capability_error' ),
+  FallbackGatePassed( sid, 'local_capability_error' )
+  ]->
+   [ St_Default_FallbackCandidate( sid ) ]
+
+  /* has exactly the trivial AC variant */
+
+rule (modulo E) Default_Cooldown_Allows:
+   [ St_Default_FallbackCandidate( sid ) ]
+  --[ CooldownChecked( sid, 'inactive' ), CooldownPermit( sid, 'allow' )
+  ]->
+   [ St_Default_FallbackReady( sid ) ]
+
+  /* has exactly the trivial AC variant */
+
+rule (modulo E) Default_Cooldown_Denies:
+   [ St_Default_FallbackCandidate( sid ) ]
+  --[
+  CooldownChecked( sid, 'active' ), CooldownDenied( sid, 'active_window' )
+  ]->
+   [ St_Default_PQCOnly( sid ) ]
+
+  /* has exactly the trivial AC variant */
+
+rule (modulo E) Neg_Default_Classic:
+   [ St_Default_FallbackReady( sid ) ]
   --[
   SelectedSuite( sid, SuiteClassic ), SigBOverA( sid, SuiteClassic ),
   VerifiedSigB( sid, SuiteClassic ), Attempt( sid, SuiteClassic ),
-  DowngradeEvent( sid ), ClassicFallbackAccepted( sid )
+  DowngradeEvent( sid ),
+  DowngradeEventCtx( sid, 'local_capability_error', 'default',
+                     'cooldown_checked'
+  ),
+  ClassicFallbackAccepted( sid )
   ]->
    [ St_HandshakeDone( sid, SuiteClassic ) ]
 
@@ -63,6 +100,29 @@ rule (modulo E) Neg_Default_PQCv1:
 
 rule (modulo E) Neg_Default_PQCv2:
    [ St_Default( sid ) ]
+  --[
+  SelectedSuite( sid, SuitePQCv2 ), SigBOverA( sid, SuitePQCv2 ),
+  VerifiedSigB( sid, SuitePQCv2 ), Attempt( sid, SuitePQCv2 ),
+  StaticSecretDerived( sid ), EphemeralSecretDerived( sid ),
+  HybridSecretComposed( sid )
+  ]->
+   [ St_HandshakeDone( sid, SuitePQCv2 ) ]
+
+  /* has exactly the trivial AC variant */
+
+rule (modulo E) Neg_Default_PQCv1_AfterFallbackBlock:
+   [ St_Default_PQCOnly( sid ) ]
+  --[
+  SelectedSuite( sid, SuitePQCv1 ), SigBOverA( sid, SuitePQCv1 ),
+  VerifiedSigB( sid, SuitePQCv1 ), Attempt( sid, SuitePQCv1 ),
+  StaticSecretDerived( sid )
+  ]->
+   [ St_HandshakeDone( sid, SuitePQCv1 ) ]
+
+  /* has exactly the trivial AC variant */
+
+rule (modulo E) Neg_Default_PQCv2_AfterFallbackBlock:
+   [ St_Default_PQCOnly( sid ) ]
   --[
   SelectedSuite( sid, SuitePQCv2 ), SigBOverA( sid, SuitePQCv2 ),
   VerifiedSigB( sid, SuitePQCv2 ), Attempt( sid, SuitePQCv2 ),
@@ -96,6 +156,28 @@ rule (modulo E) Neg_Strict_PQCv2:
 
   /* has exactly the trivial AC variant */
 
+rule (modulo E) Strict_Bootstrap_ControlOnly:
+   [ St_Strict( sid ) ]
+  --[
+  BootstrapTrigger( sid, 'missingKEM' ), BootstrapControlChannel( sid ),
+  BusinessTrafficBlocked( sid )
+  ]->
+   [ St_Strict_Bootstrap( sid ) ]
+
+  /* has exactly the trivial AC variant */
+
+rule (modulo E) Strict_Bootstrap_Rekey:
+   [ St_Strict_Bootstrap( sid ) ]
+  --[ PQCRekeyCompleted( sid ) ]->
+   [ St_Strict_Rekeyed( sid ) ]
+
+  /* has exactly the trivial AC variant */
+
+rule (modulo E) Strict_Bootstrap_EnableBusiness:
+   [ St_Strict_Rekeyed( sid ) ] --[ BusinessTrafficEnabled( sid ) ]-> [ ]
+
+  /* has exactly the trivial AC variant */
+
 rule (modulo E) Finished_Phase:
    [ St_HandshakeDone( sid, sel ) ]
   --[ FinishedSent( sid, 'B' ), FinishedVerified( sid, 'A' ) ]->
@@ -121,8 +203,8 @@ guarded formula characterizing all satisfying traces:
   (SessionEstablished( sid, SuiteClassic ) @ #k)"
 */
 simplify
-solve( St_Default( sid ) ▶₀ #j )
-  case Init_Offer_Default
+solve( St_Default_FallbackReady( sid ) ▶₀ #j )
+  case Default_Cooldown_Allows
   solve( St_Finished( ~sid, SuiteClassic ) ▶₀ #k )
     case Finished_Phase
     solve( Policy( ~sid, 'default' ) @ #i )
@@ -145,10 +227,35 @@ guarded formula characterizing all satisfying traces:
 */
 simplify
 solve( St_Finished( sid, SuitePQCv2 ) ▶₀ #j )
-  case Finished_Phase_case_2
+  case Finished_Phase_case_4
   solve( Policy( ~sid, 'strictPQC' ) @ #i )
     case Init_Offer_Strict
     SOLVED // trace found
+  qed
+qed
+
+lemma Exists_StrictBootstrapRecoveryTrace:
+  exists-trace
+  "∃ sid #i #j #k.
+    ((Policy( sid, 'strictPQC' ) @ #i) ∧
+     (BootstrapControlChannel( sid ) @ #j)) ∧
+    (PQCRekeyCompleted( sid ) @ #k)"
+/*
+guarded formula characterizing all satisfying traces:
+"∃ sid #i #j #k.
+  (Policy( sid, 'strictPQC' ) @ #i) ∧
+  (BootstrapControlChannel( sid ) @ #j) ∧
+  (PQCRekeyCompleted( sid ) @ #k)"
+*/
+simplify
+solve( St_Strict( sid ) ▶₀ #j )
+  case Init_Offer_Strict
+  solve( St_Strict_Bootstrap( ~sid ) ▶₀ #k )
+    case Strict_Bootstrap_ControlOnly
+    solve( Policy( ~sid, 'strictPQC' ) @ #i )
+      case Init_Offer_Strict
+      SOLVED // trace found
+    qed
   qed
 qed
 
@@ -185,8 +292,8 @@ guarded formula characterizing all counter-examples:
 simplify
 solve( SelectedSuite( sid, sel ) @ #i )
   case Neg_Default_Classic
-  solve( St_Default( sid ) ▶₀ #i )
-    case Init_Offer_Default
+  solve( St_Default_FallbackReady( sid ) ▶₀ #i )
+    case Default_Cooldown_Allows
     by contradiction /* from formulas */
   qed
 next
@@ -196,9 +303,27 @@ next
     by contradiction /* from formulas */
   qed
 next
+  case Neg_Default_PQCv1_AfterFallbackBlock
+  solve( St_Default_PQCOnly( sid ) ▶₀ #i )
+    case Default_Cooldown_Denies
+    by contradiction /* from formulas */
+  next
+    case Default_Timeout_Denied
+    by contradiction /* from formulas */
+  qed
+next
   case Neg_Default_PQCv2
   solve( St_Default( sid ) ▶₀ #i )
     case Init_Offer_Default
+    by contradiction /* from formulas */
+  qed
+next
+  case Neg_Default_PQCv2_AfterFallbackBlock
+  solve( St_Default_PQCOnly( sid ) ▶₀ #i )
+    case Default_Cooldown_Denies
+    by contradiction /* from formulas */
+  next
+    case Default_Timeout_Denied
     by contradiction /* from formulas */
   qed
 next
@@ -242,6 +367,18 @@ next
   by contradiction /* from formulas */
 next
   case Finished_Phase_case_5
+  by contradiction /* from formulas */
+next
+  case Finished_Phase_case_6
+  by contradiction /* from formulas */
+next
+  case Finished_Phase_case_7
+  by contradiction /* from formulas */
+next
+  case Finished_Phase_case_8
+  by contradiction /* from formulas */
+next
+  case Finished_Phase_case_9
   by contradiction /* from formulas */
 qed
 
@@ -323,6 +460,98 @@ solve( St_Finished( sid, SuitePQCv2 ) ▶₀ #i )
 next
   case Finished_Phase_case_2
   by contradiction /* from formulas */
+next
+  case Finished_Phase_case_3
+  by contradiction /* from formulas */
+next
+  case Finished_Phase_case_4
+  by contradiction /* from formulas */
+qed
+
+lemma TimeoutCannotTriggerClassicFallback:
+  all-traces
+  "∀ sid #i.
+    (TimeoutObserved( sid ) @ #i) ⇒
+    (¬(∃ #j. SessionEstablished( sid, SuiteClassic ) @ #j))"
+/*
+guarded formula characterizing all counter-examples:
+"∃ sid #i.
+  (TimeoutObserved( sid ) @ #i)
+ ∧
+  ∃ #j. (SessionEstablished( sid, SuiteClassic ) @ #j)"
+*/
+simplify
+solve( St_Default( sid ) ▶₀ #i )
+  case Init_Offer_Default
+  by solve( St_Finished( ~sid, SuiteClassic ) ▶₀ #j )
+qed
+
+lemma FallbackRateLimitEnforced:
+  all-traces
+  "∀ sid #i.
+    (SessionEstablished( sid, SuiteClassic ) @ #i) ⇒
+    (∃ #j #k.
+      (CooldownChecked( sid, 'inactive' ) @ #j) ∧
+      (CooldownPermit( sid, 'allow' ) @ #k))"
+/*
+guarded formula characterizing all counter-examples:
+"∃ sid #i.
+  (SessionEstablished( sid, SuiteClassic ) @ #i)
+ ∧
+  ∀ #j #k.
+   (CooldownChecked( sid, 'inactive' ) @ #j) ∧
+   (CooldownPermit( sid, 'allow' ) @ #k)
+  ⇒
+   ⊥"
+*/
+simplify
+solve( St_Finished( sid, SuiteClassic ) ▶₀ #i )
+  case Finished_Phase
+  by contradiction /* from formulas */
+qed
+
+lemma DowngradeEventRequiredWithContext:
+  all-traces
+  "∀ sid #i.
+    (SessionEstablished( sid, SuiteClassic ) @ #i) ⇒
+    (∃ #j.
+      DowngradeEventCtx( sid, 'local_capability_error', 'default',
+                         'cooldown_checked'
+      ) @ #j)"
+/*
+guarded formula characterizing all counter-examples:
+"∃ sid #i.
+  (SessionEstablished( sid, SuiteClassic ) @ #i)
+ ∧
+  ∀ #j.
+   (DowngradeEventCtx( sid, 'local_capability_error', 'default',
+                       'cooldown_checked'
+    ) @ #j)
+  ⇒
+   ⊥"
+*/
+simplify
+solve( St_Finished( sid, SuiteClassic ) ▶₀ #i )
+  case Finished_Phase
+  by contradiction /* from formulas */
+qed
+
+lemma BootstrapControlOnlyUntilPQCRekey:
+  all-traces
+  "∀ sid #i.
+    (BusinessTrafficEnabled( sid ) @ #i) ⇒
+    (∃ #j. (PQCRekeyCompleted( sid ) @ #j) ∧ (#j < #i))"
+/*
+guarded formula characterizing all counter-examples:
+"∃ sid #i.
+  (BusinessTrafficEnabled( sid ) @ #i)
+ ∧
+  ∀ #j. (PQCRekeyCompleted( sid ) @ #j) ⇒ ¬(#j < #i)"
+*/
+simplify
+solve( St_Strict_Rekeyed( sid ) ▶₀ #i )
+  case Strict_Bootstrap_Rekey
+  by contradiction /* from formulas */
 qed
 
 
@@ -364,16 +593,21 @@ summary of summaries:
 
 analyzed: skybridge_v2.spthy
 
-  processing time: 0.18s
+  processing time: 0.19s
   
   Exists_DefaultClassicTrace (exists-trace): verified (5 steps)
   Exists_StrictPQCv2Trace (exists-trace): verified (4 steps)
+  Exists_StrictBootstrapRecoveryTrace (exists-trace): verified (5 steps)
   NoClassicUnderStrictPQC (all-traces): verified (3 steps)
-  NegotiationIntegrity_SelectedWasOffered (all-traces): verified (12 steps)
-  AuthenticationRequiresVerifiedSigB (all-traces): verified (7 steps)
+  NegotiationIntegrity_SelectedWasOffered (all-traces): verified (18 steps)
+  AuthenticationRequiresVerifiedSigB (all-traces): verified (11 steps)
   ClassicRequiresDowngradeEvent (all-traces): verified (3 steps)
   ClassicRequiresFallbackGate (all-traces): verified (3 steps)
   ClassicOnlyUnderDefaultPolicy (all-traces): verified (3 steps)
-  V2HybridSecretComposition (all-traces): verified (4 steps)
+  V2HybridSecretComposition (all-traces): verified (6 steps)
+  TimeoutCannotTriggerClassicFallback (all-traces): verified (3 steps)
+  FallbackRateLimitEnforced (all-traces): verified (3 steps)
+  DowngradeEventRequiredWithContext (all-traces): verified (3 steps)
+  BootstrapControlOnlyUntilPQCRekey (all-traces): verified (3 steps)
 
 ==============================================================================

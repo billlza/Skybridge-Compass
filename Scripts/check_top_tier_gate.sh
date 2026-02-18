@@ -264,6 +264,17 @@ log "Running numeric consistency gate"
 ARTIFACT_DATE="$ARTIFACT_DATE_VALUE" python3 "$NUMERIC_CONSISTENCY_SCRIPT"
 pass_item "numeric consistency gate passed"
 
+CLAIM_GUARDRAIL_SCRIPT="Scripts/check_claim_guardrails.py"
+require_file "$CLAIM_GUARDRAIL_SCRIPT"
+log "Running claim guardrail gate"
+if ! python3 "$CLAIM_GUARDRAIL_SCRIPT" \
+  --artifact-date "$ARTIFACT_DATE_VALUE" \
+  --out-json "Artifacts/claim_guardrails_${ARTIFACT_DATE_VALUE}.json" \
+  --out-md "Artifacts/claim_guardrails_${ARTIFACT_DATE_VALUE}.md"; then
+  fail_item "claim guardrail gate failed"
+fi
+pass_item "claim guardrail gate passed"
+
 IOS_MINOR_MATRIX_SCRIPT="Scripts/check_ios_minor_matrix.py"
 require_file "$IOS_MINOR_MATRIX_SCRIPT"
 log "Running iOS minor-version matrix gate"
@@ -272,6 +283,48 @@ python3 "$IOS_MINOR_MATRIX_SCRIPT" --output "Artifacts/ios_minor_matrix_${ARTIFA
   fail_item "iOS minor-version matrix gate failed"
 fi
 pass_item "iOS minor-version matrix gate passed"
+
+INTEROP_CHECK_SCRIPT="Scripts/check_cross_platform_interop.py"
+INTEROP_AGGREGATE_SCRIPT="Scripts/aggregate_interop_matrix.py"
+require_file "$INTEROP_CHECK_SCRIPT"
+require_file "$INTEROP_AGGREGATE_SCRIPT"
+log "Running cross-platform consistency gate"
+if ! python3 "$INTEROP_CHECK_SCRIPT" \
+  --artifact-date "$ARTIFACT_DATE_VALUE" \
+  --out-json "Artifacts/interop_consistency_${ARTIFACT_DATE_VALUE}.json" \
+  --out-md "Artifacts/interop_consistency_${ARTIFACT_DATE_VALUE}.md"; then
+  fail_item "cross-platform consistency gate failed"
+fi
+pass_item "cross-platform consistency gate passed"
+
+log "Running interop matrix aggregation gate"
+python3 "$INTEROP_AGGREGATE_SCRIPT" --artifact-date "$ARTIFACT_DATE_VALUE"
+
+INTEROP_MATRIX_CSV="Artifacts/interop_cross_platform_${ARTIFACT_DATE_VALUE}.csv"
+INTEROP_MATRIX_TEX="Docs/supp_tables/s13_interop_matrix.tex"
+require_file "$INTEROP_MATRIX_CSV"
+require_file "$INTEROP_MATRIX_TEX"
+if ! python3 - "$INTEROP_MATRIX_CSV" <<'PY'
+import csv
+import sys
+
+path = sys.argv[1]
+with open(path, newline="", encoding="utf-8") as fh:
+    rows = list(csv.DictReader(fh))
+if len(rows) < 3:
+    raise SystemExit(f"insufficient interop rows: {len(rows)}")
+pairs = {(r.get("initiator_platform", ""), r.get("responder_platform", "")) for r in rows}
+if len(pairs) < 3:
+    raise SystemExit(f"insufficient platform-pair coverage: {len(pairs)}")
+measured = [r for r in rows if r.get("evidence_class") == "measured"]
+if not measured:
+    raise SystemExit("missing measured interop rows")
+print("interop_matrix_ok")
+PY
+then
+  fail_item "interop matrix coverage gate failed"
+fi
+pass_item "interop matrix coverage gate passed"
 
 if [[ "${SKYBRIDGE_GATE_SKIP_COMPILE:-0}" == "1" ]]; then
   log "Skipping compile_paper.sh (SKYBRIDGE_GATE_SKIP_COMPILE=1); verifying PDFs exist"

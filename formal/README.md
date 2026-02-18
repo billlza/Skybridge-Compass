@@ -25,6 +25,7 @@ as the first argument.
 
 - `Exists_DefaultClassicTrace`
 - `Exists_StrictPQCv2Trace`
+- `Exists_StrictBootstrapRecoveryTrace`
 
 ### Security lemmas
 
@@ -35,9 +36,16 @@ as the first argument.
 - `ClassicRequiresFallbackGate`
 - `ClassicOnlyUnderDefaultPolicy`
 - `V2HybridSecretComposition`
+- `TimeoutCannotTriggerClassicFallback`
+- `FallbackRateLimitEnforced`
+- `DowngradeEventRequiredWithContext`
+- `BootstrapControlOnlyUntilPQCRekey`
 
 ## Modeling notes
 
-- The model explicitly emits `DowngradeEvent` on default-policy classic fallback.
+- Default-policy classic fallback is reachable only through local-failure eligibility plus cooldown permit.
+- Timeout-triggered fallback is explicitly denied (`FallbackDenied(..., 'timeout')`).
+- Strict bootstrap path is control-only until a `PQCRekeyCompleted` event occurs.
+- Downgrade acceptance emits context-bearing evidence (`DowngradeEventCtx`).
 - v2 FS is modeled as requiring both static and ephemeral contribution events.
 - Pairing storage/platform API details are intentionally abstracted.

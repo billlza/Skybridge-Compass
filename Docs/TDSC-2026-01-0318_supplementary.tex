@@ -126,7 +126,9 @@ This document provides extended data tables referenced in the main paper. All da
 \item Table~\ref{tab:supp-v2-v1-compare} (v1/v2 bridge comparison): liboqs PQC v1 baseline versus v2 FS latency/RTT and payload-byte delta, supporting main-paper Section~\ref{sec:evaluation}.
 \item Tables~\ref{tab:supp-platform-support}--\ref{tab:supp-cross-platform-policy} (Platform/runtime matrix): Apple provider availability plus Android/Ubuntu version-tier suite policy mapping used by negotiation.
 \item Table~\ref{tab:supp-cross-platform-contract} (Cross-platform contract consistency): static source-based checker output across iOS/macOS, Android, and Ubuntu for suite parity, encoding, fallback guardrails, and trust path.
+\item Table~\ref{tab:supp-interop-matrix} (Cross-platform interop matrix): measured external Linux direct/tunnel rows plus static Android/Ubuntu contract-consistency pair rows under a shared artifact date.
 \item Table~\ref{tab:supp-boundary-stress} (Boundary-stress cases and operator runbook): explicit in-model vs out-of-model classification for pairing social engineering, endpoint compromise classes, and audit-log abuse, with expected event signals and required operator actions.
+\item Table~\ref{tab:supp-formal-code-traceability} (Formal-to-code traceability): mapping of theorem-facing lemmas/events to implementation-level enforcement points and artifacts.
 \item Tables~\ref{tab:supp-message-field-validation}--\ref{tab:artifact-map} (Protocol/Audit Appendices): wire-format validation rules, suite identifiers, PQC coverage and platform support matrices, key-size references, security event taxonomy, and an implementation-to-file mapping. These materials support auditability and reproducibility claims in main paper Sections~\ref{sec:handshake-state-machine}, \ref{sec:security-model}, and \ref{sec:implementation}.
 \end{itemize}
 
@@ -164,6 +166,8 @@ Payload (B) & Success rate & p50 total (ms) & p95 total (ms) & p99 total (ms) \\
 \IfFileExists{supp_tables/s11_ios_microbench_devices.tex}{\input{supp_tables/s11_ios_microbench_devices}}{\noindent\textit{(iOS microbench metadata table not present: export schema-v3 JSON files such as \texttt{ios\_microbench\_2026-01-23\_ipad16\_3.json} and \texttt{ios\_microbench\_2026-01-23\_iphone17\_1.json}, then run \texttt{python3 Scripts/aggregate\_ios\_microbench.py}.)}\par}
 
 \IfFileExists{supp_tables/s12_v2_v1_compare.tex}{\input{supp_tables/s12_v2_v1_compare}}{\noindent\textit{(v1/v2 bridge comparison table not present: run \texttt{Scripts/run\_paper\_eval.sh} to regenerate \texttt{handshake\_bench}, \texttt{handshake\_rtt}, and \texttt{message\_sizes} artifacts.)}\par}
+
+\IfFileExists{supp_tables/s13_interop_matrix.tex}{\input{supp_tables/s13_interop_matrix}}{\noindent\textit{(cross-platform interop matrix table not present: run \texttt{python3 Scripts/aggregate\_interop\_matrix.py --artifact-date 2026-01-23} after generating \texttt{interop\_consistency} and \texttt{realnet\_e2e\_summary} artifacts.)}\par}
 
 \noindent\textit{Note: Cross-NAT direct inbound tests (no overlay/relay) are not universally feasible. In particular, double-NAT topologies (ISP router/modem upstream) and IPv6 inbound filtering can prevent any inbound reachability even when devices have global IPv6 addresses. In such environments, all client samples time out with empty connect-time fields, and we omit those rows from the main table to avoid conflating ``connectivity unavailable'' with protocol performance.}
 
@@ -224,6 +228,7 @@ All data is generated from the artifact CSV files:
 \item \texttt{Artifacts/\allowbreak network\_\allowbreak emulation\_\allowbreak kernel\_2026-01-23.csv} (Table~\ref{tab:supp-kernel-emulation})
 \item \texttt{Artifacts/\allowbreak ios\_\allowbreak microbench\_2026-01-23.csv} (Table~\ref{tab:ios-microbench}, Table~\ref{tab:supp-ios-microbench-devices})
 \item \texttt{Artifacts/\allowbreak realnet\_\allowbreak microstudy\_2026-01-23.csv} (Table~\ref{tab:supp-realnet-microstudy})
+\item \texttt{Artifacts/\allowbreak interop\_\allowbreak consistency\_2026-01-23.json} and \texttt{Artifacts/\allowbreak interop\_\allowbreak cross\_\allowbreak platform\_2026-01-23.csv} (Table~\ref{tab:supp-cross-platform-contract}, Table~\ref{tab:supp-interop-matrix})
 \item \texttt{Artifacts/\allowbreak baseline\_\allowbreak summary\_*.csv} (Table~\ref{tab:supp-loopback-wire})
 \end{itemize}
 
@@ -1185,6 +1190,29 @@ compile-fail harness tests correctly produce compile errors.
 (3) Default-mode classic fallback is limited to whitelisted local capability errors, while strict Bootstrap-Assisted recovery is limited to paired KEM-key refresh triggers;
 (4) Legacy P-256 requires authenticated channel or existing TrustRecord;
 (5) All fallback and legacy acceptance events include full audit context.
+
+\subsection*{Formal-to-Code Traceability}
+
+\begin{table*}[!tp]
+\centering
+\scriptsize
+\caption{Formal-to-code traceability for theorem-facing migration guarantees.}
+\label{tab:supp-formal-code-traceability}
+\begin{tabular}{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.24}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.24}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.30}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.22}}@{}}
+\toprule
+Formal claim / lemma & Model events & Implementation anchor & Artifact/check anchor \\
+\midrule
+`TimeoutCannotTriggerClassicFallback` & \texttt{TimeoutObserved} + \texttt{FallbackDenied(timeout)} & \path{Sources/SkyBridgeCore/P2P/TwoAttemptHandshakeManager.swift} (timeout deny path and fallback blacklist) & \path{Artifacts/migration_threat_harness_2026-01-23.csv} (timeout attack rows); Fig.~\ref{fig:downgrade-matrix} \\
+`FallbackRateLimitEnforced` & \texttt{CooldownChecked} + \texttt{CooldownPermit} & \path{Sources/SkyBridgeCore/P2P/TwoAttemptHandshakeManager.swift} (per-peer cooldown gate) & \path{Artifacts/migration_fleet_behavior_2026-01-23.csv}; Table~\ref{tab:migration-fleet-behavior} \\
+`DowngradeEventRequiredWithContext` & \texttt{DowngradeEventCtx} & \path{Sources/SkyBridgeCore/Security/SecurityEventEmitter.swift} + \path{Sources/SkyBridgeCore/P2P/TwoAttemptHandshakeManager.swift} (downgrade event fields) & \path{Artifacts/migration_threat_harness_2026-01-23.csv} (ECR/PCR); Table~\ref{tab:ablation-by-property} \\
+`BootstrapControlOnlyUntilPQCRekey` & \texttt{BootstrapControlChannel}, \texttt{BusinessTrafficBlocked}, \texttt{PQCRekeyCompleted}, \texttt{BusinessTrafficEnabled} & \path{Sources/SkyBridgeCore/P2P/TwoAttemptHandshakeManager.swift} + \path{Sources/SkyBridgeCore/P2P/HandshakeDriver.swift} (strict bootstrap/rekey gating) & \path{formal/skybridge_v2.spthy}; \path{Artifacts/tamarin_skybridge_v2_summary_2026-01-23.txt} \\
+\bottomrule
+\end{tabular}
+\end{table*}
 
 \subsection*{Artifact Map}
 

@@ -6,7 +6,9 @@ begin
 
    Reviewer-facing abstraction:
    - negotiation integrity (selected suite must be offered),
-   - policy-gated classic fallback with explicit downgrade event,
+   - policy-gated classic fallback with explicit timeout deny and cooldown gate,
+   - strict bootstrap control-only recovery until PQC rekey completes,
+   - downgrade events carry minimal replay context,
    - transcript-authenticated acceptance (modeled by VerifiedSigB),
    - explicit key-confirmation events,
    - v2 session establishment requires static + ephemeral contributions.
@@ -29,8 +31,7 @@ rule Init_Offer_Default:
       OfferIncludes(~sid, SuiteClassic),
       OfferIncludes(~sid, SuitePQCv1),
       OfferIncludes(~sid, SuitePQCv2),
-      OfferSent(~sid, 'A'),
-      FallbackGatePassed(~sid, 'local_capability_error')
+      OfferSent(~sid, 'A')
     ]->
   [ St_Default(~sid) ]
 
@@ -43,17 +44,50 @@ rule Init_Offer_Strict:
     ]->
   [ St_Strict(~sid) ]
 
+/* -------------------------------------
+   Default-policy fallback gating semantics
+   ------------------------------------- */
+
+rule Default_Timeout_Denied:
+  [ St_Default(sid) ]
+  --[ TimeoutObserved(sid),
+      FallbackDenied(sid, 'timeout')
+    ]->
+  [ St_Default_PQCOnly(sid) ]
+
+rule Default_LocalFailure_Eligible:
+  [ St_Default(sid) ]
+  --[ LocalFallbackEligible(sid, 'local_capability_error'),
+      FallbackGatePassed(sid, 'local_capability_error')
+    ]->
+  [ St_Default_FallbackCandidate(sid) ]
+
+rule Default_Cooldown_Allows:
+  [ St_Default_FallbackCandidate(sid) ]
+  --[ CooldownChecked(sid, 'inactive'),
+      CooldownPermit(sid, 'allow')
+    ]->
+  [ St_Default_FallbackReady(sid) ]
+
+rule Default_Cooldown_Denies:
+  [ St_Default_FallbackCandidate(sid) ]
+  --[ CooldownChecked(sid, 'active'),
+      CooldownDenied(sid, 'active_window')
+    ]->
+  [ St_Default_PQCOnly(sid) ]
+
 /* -----------------------------------
    Negotiation / transcript acceptance
    ----------------------------------- */
 
 rule Neg_Default_Classic:
-  [ St_Default(sid) ]
+  [ St_Default_FallbackReady(sid) ]
   --[ SelectedSuite(sid, SuiteClassic),
       SigBOverA(sid, SuiteClassic),
       VerifiedSigB(sid, SuiteClassic),
       Attempt(sid, SuiteClassic),
       DowngradeEvent(sid),
+      DowngradeEventCtx(sid, 'local_capability_error', 'default', 'cooldown_checked'),
       ClassicFallbackAccepted(sid)
     ]->
   [ St_HandshakeDone(sid, SuiteClassic) ]
@@ -70,6 +104,28 @@ rule Neg_Default_PQCv1:
 
 rule Neg_Default_PQCv2:
   [ St_Default(sid) ]
+  --[ SelectedSuite(sid, SuitePQCv2),
+      SigBOverA(sid, SuitePQCv2),
+      VerifiedSigB(sid, SuitePQCv2),
+      Attempt(sid, SuitePQCv2),
+      StaticSecretDerived(sid),
+      EphemeralSecretDerived(sid),
+      HybridSecretComposed(sid)
+    ]->
+  [ St_HandshakeDone(sid, SuitePQCv2) ]
+
+rule Neg_Default_PQCv1_AfterFallbackBlock:
+  [ St_Default_PQCOnly(sid) ]
+  --[ SelectedSuite(sid, SuitePQCv1),
+      SigBOverA(sid, SuitePQCv1),
+      VerifiedSigB(sid, SuitePQCv1),
+      Attempt(sid, SuitePQCv1),
+      StaticSecretDerived(sid)
+    ]->
+  [ St_HandshakeDone(sid, SuitePQCv1) ]
+
+rule Neg_Default_PQCv2_AfterFallbackBlock:
+  [ St_Default_PQCOnly(sid) ]
   --[ SelectedSuite(sid, SuitePQCv2),
       SigBOverA(sid, SuitePQCv2),
       VerifiedSigB(sid, SuitePQCv2),
@@ -101,6 +157,28 @@ rule Neg_Strict_PQCv2:
       HybridSecretComposed(sid)
     ]->
   [ St_HandshakeDone(sid, SuitePQCv2) ]
+
+/* -----------------------------------
+   Strict bootstrap-assisted recovery
+   ----------------------------------- */
+
+rule Strict_Bootstrap_ControlOnly:
+  [ St_Strict(sid) ]
+  --[ BootstrapTrigger(sid, 'missingKEM'),
+      BootstrapControlChannel(sid),
+      BusinessTrafficBlocked(sid)
+    ]->
+  [ St_Strict_Bootstrap(sid) ]
+
+rule Strict_Bootstrap_Rekey:
+  [ St_Strict_Bootstrap(sid) ]
+  --[ PQCRekeyCompleted(sid) ]->
+  [ St_Strict_Rekeyed(sid) ]
+
+rule Strict_Bootstrap_EnableBusiness:
+  [ St_Strict_Rekeyed(sid) ]
+  --[ BusinessTrafficEnabled(sid) ]->
+  [ ]
 
 /* ------------------------------
    Explicit key confirmation path
@@ -134,6 +212,13 @@ lemma Exists_StrictPQCv2Trace:
   "Ex sid #i #j.
      Policy(sid, 'strictPQC') @ #i
    & SessionEstablished(sid, SuitePQCv2) @ #j"
+
+lemma Exists_StrictBootstrapRecoveryTrace:
+  exists-trace
+  "Ex sid #i #j #k.
+     Policy(sid, 'strictPQC') @ #i
+   & BootstrapControlChannel(sid) @ #j
+   & PQCRekeyCompleted(sid) @ #k"
 
 /* ------------------------------
    Security lemmas
@@ -175,5 +260,28 @@ lemma V2HybridSecretComposition:
      ==> (Ex #j #k.
             StaticSecretDerived(sid) @ #j
           & EphemeralSecretDerived(sid) @ #k)"
+
+lemma TimeoutCannotTriggerClassicFallback:
+  "All sid #i.
+     TimeoutObserved(sid) @ #i
+     ==> not (Ex #j. SessionEstablished(sid, SuiteClassic) @ #j)"
+
+lemma FallbackRateLimitEnforced:
+  "All sid #i.
+     SessionEstablished(sid, SuiteClassic) @ #i
+     ==> (Ex #j #k.
+            CooldownChecked(sid, 'inactive') @ #j
+          & CooldownPermit(sid, 'allow') @ #k)"
+
+lemma DowngradeEventRequiredWithContext:
+  "All sid #i.
+     SessionEstablished(sid, SuiteClassic) @ #i
+     ==> (Ex #j.
+            DowngradeEventCtx(sid, 'local_capability_error', 'default', 'cooldown_checked') @ #j)"
+
+lemma BootstrapControlOnlyUntilPQCRekey:
+  "All sid #i.
+     BusinessTrafficEnabled(sid) @ #i
+     ==> (Ex #j. PQCRekeyCompleted(sid) @ #j & #j < #i)"
 
 end
