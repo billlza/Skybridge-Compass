@@ -96,20 +96,20 @@ swift test
 论文中标注的 artifact 信息如下（供 reviewer/编辑核对）：
 
 - URL：`https://github.com/billlza/Skybridge-Compass`
-- Git ref：`817e11aa5806`
-- Commit：`817e11aa5806621dbf473af3cd3a5461662a2828`（short=`817e11aa5806`）
+- Git ref：`251a162eb97d`
+- Commit：`251a162eb97d347fd4f160b450f845b141aa142f`（short=`251a162eb97d`）
 
 Source archive checksums（immutability 辅助证据）：
 
-- `817e11aa5806.zip`：`SHA256=05d6961a26ec0f5b57b8821cfc8337dec1ba37ec8deb5f9dd5e7b1c7bdcb2378`
-- `817e11aa5806.tar.gz`：`SHA256=5b9130d64e5217376da98e20286f078fd8693d998796d64d4e503e981f2dea2b`
+- `251a162eb97d.zip`：`SHA256=d851c1ea3a256fde163a2f0f278bbe514b77d4694369c8352c99dbbfceaf6381`
+- `251a162eb97d.tar.gz`：`SHA256=e3630ddcad58f1f5b487aad3e72443f32e1eeea5fa9113603db84c61a9421562`
 
 最小复核流程（需要本机已安装 Xcode/Swift 与 TeXLive；PQC SDK 仅在 macOS 26+ 可用）：
 
 ```bash
 git clone https://github.com/billlza/Skybridge-Compass
 cd Skybridge-Compass
-git checkout 817e11aa5806621dbf473af3cd3a5461662a2828
+git checkout 251a162eb97d347fd4f160b450f845b141aa142f
 
 git rev-parse HEAD
 git describe --tags --always
@@ -203,8 +203,8 @@ ARTIFACT_DATE=2026-01-23 python3 Scripts/aggregate_kernel_emulation.py
 
 预期输出（关键点）：
 
-- `git rev-parse HEAD` 应为 `817e11aa5806621dbf473af3cd3a5461662a2828`
-- `git describe --tags --always` 应包含 `817e11a`（等价短 SHA 形式也可）
+- `git rev-parse HEAD` 应为 `251a162eb97d347fd4f160b450f845b141aa142f`
+- `git describe --tags --always` 应包含 `251a162`（等价短 SHA 形式也可）
 - 生成的 PDF：`Docs/TDSC-2026-01-0318_IEEE_Paper_SkyBridge_Compass_patched.pdf` 与 `Docs/TDSC-2026-01-0318_supplementary.pdf`
 - CSV 输出目录：`Artifacts/`
 
