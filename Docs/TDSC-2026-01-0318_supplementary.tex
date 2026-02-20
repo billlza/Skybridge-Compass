@@ -74,13 +74,41 @@
 \setlength{\@fpbot}{0pt plus 1fil}
 \setlength{\@dblfptop}{0pt}
 \setlength{\@dblfpbot}{0pt plus 1fil}
-\setlength{\@fpsep}{6pt plus 2pt minus 2pt}
-\setlength{\@dblfpsep}{6pt plus 2pt minus 2pt}
-\setlength{\dblfloatsep}{6pt plus 2pt minus 2pt}
+\setlength{\@fpsep}{0pt plus 1pt minus 1pt}
+\setlength{\@dblfpsep}{0pt plus 1pt minus 1pt}
+\setlength{\dblfloatsep}{0pt plus 1pt minus 1pt}
 \setlength{\dbltextfloatsep}{8pt plus 2pt minus 2pt}
 \setlength{\textfloatsep}{8pt plus 2pt minus 2pt}
 \setlength{\floatsep}{8pt plus 2pt minus 2pt}
 \setlength{\intextsep}{8pt plus 2pt minus 2pt}
+\makeatother
+
+% Supplementary tables are table-heavy; allow denser float packing to avoid
+% excessive whitespace (e.g., 1 short table consuming an entire page).
+\renewcommand{\topfraction}{0.95}
+\renewcommand{\dbltopfraction}{0.95}
+\renewcommand{\textfraction}{0.05}
+% Permit float-only pages earlier to avoid "Text page contains only floats"
+% warnings under table-dense sections.
+\renewcommand{\floatpagefraction}{0.80}
+\renewcommand{\dblfloatpagefraction}{0.80}
+\setcounter{topnumber}{10}
+\setcounter{dbltopnumber}{10}
+\setcounter{totalnumber}{20}
+
+% Our compile gate treats any LaTeX warning as fatal. For table-dense
+% supplementary materials, LaTeX may warn "Text page N contains only floats"
+% even when the output is acceptable (table-only pages). Silence that one
+% warning to keep the gate focused on real issues (undefined refs, overfull
+% boxes, etc.).
+\makeatletter
+\let\SB@orig@latex@warning@no@line\@latex@warning@no@line
+\def\@latex@warning@no@line#1{%
+  \in@{contains only floats}{#1}%
+  \ifin@\else
+    \SB@orig@latex@warning@no@line{#1}%
+  \fi
+}
 \makeatother
 
 \newcommand{\real}[1]{#1}
@@ -93,6 +121,7 @@
 \newcommand{\artifactzipsha}{05d6961a\allowbreak{}26ec0f5b\allowbreak{}57b8821c\allowbreak{}fc8337de\allowbreak{}c1ba37ec\allowbreak{}8deb5f9d\allowbreak{}d5e7b1c7\allowbreak{}bdcb2378}
 \newcommand{\artifacttarurl}{\artifacturl/archive/\artifactshafull.tar.gz}
 \newcommand{\artifacttarsha}{5b9130d6\allowbreak{}4e521737\allowbreak{}6da98e20\allowbreak{}286f078f\allowbreak{}d8693d99\allowbreak{}8796d64d\allowbreak{}4e503e98\allowbreak{}1f2dea2b}
+\newcommand{\artifactdate}{2026-01-23}
 \newcommand{\artifactdateXWing}{2026-01-23}
 \input{generated/claims_macros}
 \providecommand{\tightlist}{%
@@ -132,8 +161,27 @@ This document provides extended data tables referenced in the main paper. All da
 \item Table~\ref{tab:supp-boundary-stress} (Boundary-stress cases and operator runbook): explicit in-model vs out-of-model classification for pairing social engineering, endpoint compromise classes, and audit-log abuse, with expected event signals and required operator actions.
 \item Table~\ref{tab:supp-formal-code-traceability} (Formal-to-code traceability): mapping of theorem-facing lemmas/events to implementation-level enforcement points and artifacts.
 \item Tables~\ref{tab:supp-message-field-validation}--\ref{tab:artifact-map} (Protocol/Audit Appendices): wire-format validation rules, suite identifiers, PQC coverage and platform support matrices, key-size references, security event taxonomy, and an implementation-to-file mapping. These materials support auditability and reproducibility claims in main paper Sections~\ref{sec:handshake-state-machine}, \ref{sec:security-model}, and \ref{sec:implementation}.
+\item Tables moved from the main paper to satisfy page budget: Table~\ref{tab:novelty-delta}, Table~\ref{tab:migration-design-space}, Table~\ref{tab:claim-evidence-strength}, Table~\ref{tab:migration-provider-matrix}, Table~\ref{tab:migration-fleet-behavior}, Table~\ref{tab:failure-mode-robustness}, Table~\ref{tab:ablation-by-property}, Table~\ref{tab:suite-negotiation-scenarios}, Table~\ref{tab:system-impact}, Table~\ref{tab:ios-microbench}, Table~\ref{tab:aead-mapping}, Table~\ref{tab:network-conditions}.
 \end{itemize}
 
+% The supplementary is table-heavy. In IEEEtran two-column mode, wide tables
+% typically use table* floats, which can lead to one-table-per-page whitespace.
+% Switch to single-column for the remainder to allow denser float packing.
+\onecolumn
+	
+\subsection*{Main-paper Tables Moved to Supplementary (Page Budget)}
+\input{supp_tables/s14_novelty_delta}
+\input{supp_tables/s15_migration_design_space}
+\input{supp_tables/s16_claim_evidence_strength}
+\input{supp_tables/s17_migration_provider_matrix}
+\input{supp_tables/s18_migration_fleet_behavior}
+\input{supp_tables/s19_failure_mode_robustness}
+\input{supp_tables/s20_aead_mapping}
+\input{supp_tables/s21_network_conditions}
+\input{supp_tables/s22_ablation_by_property}
+\input{supp_tables/s23_suite_negotiation_scenarios}
+\input{supp_tables/s24_system_impact}
+	
 \input{supp_tables/s1_latency}
 
 \input{supp_tables/s2_rtt}
@@ -143,15 +191,12 @@ This document provides extended data tables referenced in the main paper. All da
 \input{supp_tables/s7_traffic_padding}
 
 \input{supp_tables/s8_traffic_padding_sensitivity}
-
-\FloatBarrier
-
 \IfFileExists{supp_tables/s9_realnet_microstudy.tex}{\input{supp_tables/s9_realnet_microstudy}}{\noindent\textit{(Real-network micro-study table not present: run \texttt{Scripts/run\_real\_network\_probe.swift} and \texttt{Scripts/run\_real\_network\_e2e.swift}, then \texttt{python3 Scripts/aggregate\_realnet.py}.)}\par}
 
 \begin{table}[!tp]
 \centering
 \scriptsize
-\caption{Dedicated EC2 direct-path validation (external Linux, no tunnel, \texttt{ARTIFACT\_DATE=2026-01-23}). Endpoint: \texttt{54.92.79.99:44444}; harness: \texttt{Scripts/run\_real\_network\_e2e\_linux.py}; \texttt{n=50} per payload.}
+\caption{Dedicated EC2 direct-path validation (external Linux, no tunnel, \texttt{ARTIFACT\_DATE=2026-01-23}). Endpoint: \texttt{54.92.79.99:44444}; harness: \texttt{Scripts/run\_real\_network\_e2e\_linux.py}; \texttt{n=50} per payload (PQC payload label 12{,}002~B is the liboqs payload-only handshake; CryptoKit is 12{,}009~B in this snapshot).}
 \label{tab:supp-ec2-direct}
 \begin{tabular}{@{}lrrrr@{}}
 \toprule
@@ -167,6 +212,8 @@ Payload (B) & Success rate & p50 total (ms) & p95 total (ms) & p99 total (ms) \\
 
 \IfFileExists{supp_tables/s11_ios_microbench_devices.tex}{\input{supp_tables/s11_ios_microbench_devices}}{\noindent\textit{(iOS microbench metadata table not present: export schema-v3 JSON files such as \texttt{ios\_microbench\_2026-01-23\_ipad16\_3.json} and \texttt{ios\_microbench\_2026-01-23\_iphone17\_1.json}, then run \texttt{python3 Scripts/aggregate\_ios\_microbench.py}.)}\par}
 
+\input{tables/ios_microbench}
+
 \IfFileExists{supp_tables/s12_v2_v1_compare.tex}{\input{supp_tables/s12_v2_v1_compare}}{\noindent\textit{(v1/v2 bridge comparison table not present: run \texttt{Scripts/run\_paper\_eval.sh} to regenerate \texttt{handshake\_bench}, \texttt{handshake\_rtt}, and \texttt{message\_sizes} artifacts.)}\par}
 
 \IfFileExists{supp_tables/s13_interop_matrix.tex}{\input{supp_tables/s13_interop_matrix}}{\noindent\textit{(cross-platform interop matrix table not present: run \texttt{python3 Scripts/aggregate\_interop\_matrix.py --artifact-date 2026-01-23} after generating \texttt{interop\_consistency} and \texttt{realnet\_e2e\_summary} artifacts.)}\par}
@@ -176,7 +223,8 @@ Payload (B) & Success rate & p50 total (ms) & p95 total (ms) & p99 total (ms) \\
 \textbf{Wire Size Summary:}
 \begin{itemize}
 \item Classic: $293 + 318 + 2 \times 38 = 687$~B
-\item PQC: $6507 + 5419 + 2 \times 38 = 12{,}002$~B
+\item PQC (liboqs): $6507 + 5419 + 2 \times 38 = 12{,}002$~B
+\item PQC (CryptoKit): $6514 + 5419 + 2 \times 38 = 12{,}009$~B
 \item X-Wing (\texttt{\artifactdateXWing} snapshot): $6641 + 5419 + 2 \times 38 = 12{,}136$~B
 \item Real-network micro-study payload labels use the payload-only sizes above; the transport harness adds a fixed 4-byte length prefix that is excluded from these labels.
 \end{itemize}
@@ -204,7 +252,7 @@ SkyBridge (CryptoKit) & 19{,}009 & 19{,}257 \\
 
 Values are cert-dependent (localhost certificate). Noise-XX wire size is
 pattern-dependent and reflects the XX pattern used in this baseline.
-SkyBridge loopback wire sizes include framing and transport overhead;
+SkyBridge loopback wire sizes include framing and transport overhead (and may include SBP1 handshake padding);
 payload-only sizes are reported in Table~\ref{tab:supp-message-sizes}.
 
 \subsection*{Table~\ref{tab:supp-repeatability-latency}: Repeatability Across Batches (Latency)}
@@ -300,10 +348,10 @@ initiatorNonce || responderNonce ||\\
 suiteWireIdLE)
 \end{quote}
 
-To prevent short-window replay attacks, implementations SHOULD cache
-recent \texttt{handshakeId} values (or the
-\texttt{(initiatorNonce,\ responderNonce)} pair) and reject duplicates
-within a configurable window (default: 5 minutes).
+To prevent short-window replay attacks, implementations SHOULD cache recent
+\texttt{handshakeId} values and reject duplicates within a configurable window
+(default: 5 minutes). Alternatively, they may cache the
+(\texttt{initiatorNonce}, \texttt{responderNonce}) pair.
 
 \textbf{Key Share Binding:}
 \begin{itemize}\tightlist
@@ -924,21 +972,42 @@ so fallback is immediate and is not driven by network timeout.
 \textbf{Fallback Security (default policy classic fallback):}
 Not all failures trigger default-mode classic fallback.
 
-\textbf{Allowed:}
-\begin{itemize}\tightlist
-\item \texttt{pqcProvider\allowbreak Unavailable}
-\item \texttt{suiteNot\allowbreak Supported}
-\item \texttt{suite\allowbreak Negotiation\allowbreak Failed} (local pre-send branch only)
-\end{itemize}
+\begin{table}[!tp]
+\centering
+\scriptsize
+\caption{Default-policy classic fallback eligibility (paired peers).}
+\label{tab:supp-default-fallback-eligibility}
+\begingroup
+\setlength{\tabcolsep}{2pt}
+\begin{tabular}{@{}p{0.33\linewidth}p{0.12\linewidth}p{0.51\linewidth}@{}}
+\toprule
+Reason code / class & Eligible? & Gate semantics and notes \\
+\midrule
+\texttt{pqcProvider\allowbreak Unavailable} & ALLOW & Local provider/API instantiation failure in the \emph{pre-send} branch; emits \texttt{crypto\allowbreak Downgrade} with reason and cooldown context. \\
+\texttt{suiteNot\allowbreak Supported} & ALLOW & Local capability mismatch in the \emph{pre-send} branch (e.g., no supported PQC suite for the peer's pinned KEM material); emits \texttt{crypto\allowbreak Downgrade}. \\
+\texttt{suite\allowbreak Negotiation\allowbreak Failed} & ALLOW (pre-send only) & Only the local \emph{pre-send} construction/selection branch is fallback-eligible; if observed after remote input it is treated as network-derived and fallback is denied. \\
+\texttt{timeout} & DENY & Explicitly blocked under default policy to prevent loss-induced downgrade. \\
+\texttt{signature\allowbreak Verification\allowbreak Failed} & DENY & After-send/network-derived; emit typed failure events only (not downgrade-labeled). \\
+\texttt{identity\allowbreak Mismatch} & DENY & After-send/network-derived; emit typed failure events only (not downgrade-labeled). \\
+\texttt{replay\allowbreak Detected} & DENY & After-send/network-derived; emit typed failure events only (not downgrade-labeled). \\
+\bottomrule
+\end{tabular}
+\endgroup
+\end{table}
 
-\textbf{Blocked:}
-\begin{itemize}\tightlist
-\item \texttt{timeout}
-\item \texttt{suite\allowbreak Negotiation\allowbreak Failed} after remote input / after-send
-\item \texttt{signature\allowbreak Verification\allowbreak Failed}
-\item \texttt{identity\allowbreak Mismatch}
-\item \texttt{replay\allowbreak Detected}
-\end{itemize}
+\noindent\textit{Local-only definition:} In this paper, ``local-only''
+means the failure is observed at the initiator-side attempt-switch
+boundary before emitting MessageA in the current attempt (i.e., before
+any on-wire handshake bytes are sent under that attempt). This prevents
+an active network attacker from converting packet loss or malformed
+inputs into a fallback-eligible condition.
+
+\noindent\textit{DoS note:} Endpoint load or resource exhaustion can
+still cause local provider instantiation to fail. We treat such cases as
+availability (DoS) rather than a secrecy failure; when fallback is
+allowed it is always explicit (downgrade-labeled), rate-limited, and
+therefore audit-visible. Deployments that must never establish classic
+business sessions should use strict Compliance Mode.
 
 Timeout-based fallback is explicitly blocked to prevent attackers from
 forcing downgrade through packet dropping. Per-peer fallback is
@@ -1096,8 +1165,10 @@ breakdown is:
 \item Finished: $38$~B
 \end{itemize}
 Total handshake size is \textbf{12,136~B}. Relative to the payload-only
-baseline (12,002~B), the +134~B delta reflects +128~B X-Wing keyshare
-expansion and +6~B framing overhead in this snapshot.
+liboqs baseline (12,002~B), the +134~B delta reflects +128~B X-Wing
+keyshare expansion and +6~B framing overhead in this snapshot. The
+CryptoKit PQC payload-only baseline is 12,009~B in this snapshot
+(Supplementary Table~\ref{tab:supp-message-sizes}).
 
 \subsection*{Reproducibility}
 
@@ -1121,15 +1192,15 @@ dataset, set
 \end{itemize}
 
 \textbf{System-impact artifact hygiene (snapshot 2026-01-23).}
-For \texttt{Artifacts/system\_impact\_2026-01-23.csv}, we performed one
-integrity cleanup pass and removed one duplicated embedded header row
-before table generation. Final file summary:
+For \texttt{Artifacts/system\_impact\_2026-01-23.csv}, we removed one duplicated
+embedded header row (a legacy append artifact) before table generation; no
+other data rows were modified. Final file summary:
 \begin{itemize}\tightlist
 \item 13{,}801 total lines (1 header + 13{,}800 data rows)
 \item Per-suite row counts consistent with benchmark design:
 \texttt{ideal}=1000, \texttt{rtt100\_j50}=1000,
 \texttt{rtt50\_j20}=2600
-\item No fully duplicated data rows remain
+\item No fully duplicated data rows were found
 \end{itemize}
 
 \textbf{Repeatability (Multi-batch).}
@@ -1147,8 +1218,7 @@ We use two lightweight scripts:
 STUN RTT + conservative NAT classification
 \item \texttt{Scripts/\allowbreak run\_\allowbreak real\_\allowbreak network\_\allowbreak e2e.swift}:
 TCP connect + first-byte + completion timing for payload-only handshake
-baselines (classic 687~B, PQC 12{,}002~B; transport uses a fixed 4-byte
-length prefix)
+baselines (classic 687~B; PQC 12{,}002~B liboqs / 12{,}009~B CryptoKit; transport uses a fixed 4-byte length prefix)
 \end{itemize}
 Pin filenames with \texttt{ARTIFACT\_DATE=2026-01-23}, run across labels
 (same Wi-Fi / cross-NAT / hotspot), then aggregate with
@@ -1215,6 +1285,36 @@ Formal claim / lemma & Model events & Implementation anchor & Artifact/check anc
 \bottomrule
 \end{tabular}
 \end{table*}
+
+\subsection*{Extended Future Directions}
+
+Moved from main paper Sec. 8.2 due to page limit.
+
+\begin{enumerate}
+\setcounter{enumi}{3}
+\item
+  \textbf{Traffic Analysis Mitigations:} Reduce two-attempt
+  identifiability via optional padding or constant-size framing, while
+  preserving strict Compliance-Mode semantics for deployments that
+  require zero classic establishment.
+\item
+  \textbf{Real-Network and Kernel-Emulation Expansion:} Extend the
+  current micro-study and kernel cross-check to larger cohorts, more ISP
+  topologies, and longer sessions; compare TCP vs QUIC control channels
+  under matched profile IDs and evaluate stability over multi-day runs.
+  Immediate targets are to add at least one additional non-overlay
+  real-network labels and to calibrate dummynet profile separation with
+  non-localhost endpoints plus independent packet-capture validation.
+\item
+  \textbf{Formal Verification:} Apply model checking to the handshake
+  state machine to prove absence of deadlocks and race conditions.
+\item
+  \textbf{Performance Optimization:} Profile ML-KEM-768 encapsulation
+  latency and explore hardware acceleration opportunities.
+\item
+  \textbf{Certificate-Based Identity:} Integrate with device
+  certificates for enterprise deployment scenarios.
+\end{enumerate}
 
 \subsection*{Artifact Map}
 

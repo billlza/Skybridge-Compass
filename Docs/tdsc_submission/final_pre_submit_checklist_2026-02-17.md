@@ -49,3 +49,25 @@
 cd "/Users/bill/Desktop/SkyBridge Compass Pro release"
 ARTIFACT_DATE=2026-01-23 bash Scripts/check_top_tier_gate.sh
 ```
+
+## G. Recheck After Manuscript Edits (2026-02-18)
+- [x] Visual PDF scan (rendered pages): no clipped/overlapping content; tables and figures remain legible in grayscale.
+- [x] Top-tier academic gate rerun:
+  - Command: `ARTIFACT_DATE=2026-01-23 bash Scripts/check_top_tier_gate.sh`
+  - Result: `Top-tier gate completed successfully`.
+- [x] Submission confusion cleanup: moved legacy named PDF out of submission folder:
+  - `Docs/tdsc_submission/TDSC-2026-01-0318_paper.pdf` -> `Docs/tdsc_submission/_legacy/`
+- [x] Latest archived build (post-edit): `out/paper_20260219_084938.pdf`
+- [x] Page-budget reduction: main manuscript reduced from 21 pages to 19 pages by moving reviewer-facing tables to supplementary and replacing them with compact bullets + pointers.
+  - Main PDF now: `Docs/TDSC-2026-01-0318_IEEE_Paper_SkyBridge_Compass_patched.pdf` (19 pages)
+  - Supplement now: `Docs/TDSC-2026-01-0318_supplementary.pdf` (21 pages)
+
+## H. Recheck After Supplementary Float Packing (2026-02-19)
+- [x] Supplementary layout tightened (reduced 1-table-per-page whitespace).
+- [x] Top-tier academic gate rerun:
+  - Command: `ARTIFACT_DATE=2026-01-23 bash Scripts/check_top_tier_gate.sh`
+  - Result: `Top-tier gate completed successfully`.
+- [x] Latest archived build (post-edit): `out/paper_20260219_111257.pdf`
+- [x] Current page counts:
+  - Main PDF: `Docs/TDSC-2026-01-0318_IEEE_Paper_SkyBridge_Compass_patched.pdf` (19 pages)
+  - Supplementary PDF: `Docs/TDSC-2026-01-0318_supplementary.pdf` (16 pages)

@@ -1,0 +1,50 @@
+\begin{table*}[!t]
+\centering
+\caption{Failure-Mode Robustness and Observability. Runs = number of
+iterations per scenario and policy (n=1000). Table reports default
+policy; strictPQC (Compliance Mode) counts are recorded separately in
+\texttt{fault\_injection\_\artifactdate.csv}. All
+metrics are binary (1 = pass) except event counts. Data from
+\texttt{Artifacts/fault\_injection\_\artifactdate.csv}
+produced by \mbox{HandshakeFaultInjectionBenchTests}; semantic checks from
+\mbox{HandshakeDriverTests}.}
+\label{tab:failure-mode-robustness}
+\begin{tabular}{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 12\tabcolsep) * \real{0.1186}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 12\tabcolsep) * \real{0.0508}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 12\tabcolsep) * \real{0.0763}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 12\tabcolsep) * \real{0.1356}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 12\tabcolsep) * \real{0.1780}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 12\tabcolsep) * \real{0.2203}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 12\tabcolsep) * \real{0.2203}}@{}}
+\toprule\noalign{}
+\begin{minipage}[b]{\linewidth}\raggedright
+Failure Mode
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Runs
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+No\\Unexp.\\Error
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+No\\Double\\Resume
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Zero\\Verified
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+$E_{\texttt{handshakeFailed}}$
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+$E_{\texttt{cryptoDowngrade}}$
+\end{minipage} \\
+\midrule
+Out-of-order & 1000 & 1 & 1 & 1 & 0 & 0 \\
+Duplicate & 1000 & 1 & 1 & 1 & 0 & 0 \\
+Drop & 1000 & 1 & 1 & 1 & 1000 & 0 \\
+Delay within timeout & 1000 & 1 & 1 & 1 & 0 & 0 \\
+Delay exceed timeout & 1000 & 1 & 1 & 1 & 1000 & 0 \\
+Corrupt header & 1000 & 1 & 1 & 1 & 1000 & 0 \\
+Corrupt payload & 1000 & 1 & 1 & 1 & 1000 & 0 \\
+Wrong signature & 1000 & 1 & 1 & 1 & 1000 & 0 \\
+Concurrent cancel & 1000 & 1 & 1 & 1 & 1000 & 0 \\
+Concurrent timeout & 1000 & 1 & 1 & 1 & 1000 & 0 \\
+\bottomrule
+\end{tabular}
+\end{table*}
+

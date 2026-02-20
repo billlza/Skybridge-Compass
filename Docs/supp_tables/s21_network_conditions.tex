@@ -1,0 +1,22 @@
+\begin{table}[!t]
+\centering
+\footnotesize
+\setlength{\tabcolsep}{3pt}
+\caption{Controlled in-process network simulation results (N=10{,}000 per condition, max retries=2). Completion and latency ranges span classic/liboqs/CryptoKit suites.}
+\label{tab:network-conditions}
+\begin{tabular}{@{}
+  p{0.42\linewidth}
+  >{\centering\arraybackslash}p{0.16\linewidth}
+  >{\centering\arraybackslash}p{0.18\linewidth}
+  >{\centering\arraybackslash}p{0.16\linewidth}@{}}
+\toprule
+Condition & Completion & p95 latency & hand\allowbreak shake\\Failed \\
+(loss/\allowbreak RTT/\allowbreak jitter/\allowbreak reorder) & (min) & (ms, range) & /10k (max) \\
+\midrule
+mild (1\%, 50 ms, $\pm$20 ms) & 1.0000 & 251--253 & 0 \\
+moderate (3\%, 100 ms, $\pm$50 ms) & 1.0000 & 529--532 & 0 \\
+severe (5\%, 200 ms, $\pm$100 ms) & 0.9989 & 1031--1033 & 11 \\
+reorder (10\% reorder, 50 ms, $\pm$20 ms) & 1.0000 & 368--370 & 0 \\
+\bottomrule
+\end{tabular}
+\end{table}

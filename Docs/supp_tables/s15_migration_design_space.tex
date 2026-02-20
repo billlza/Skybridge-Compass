@@ -1,0 +1,19 @@
+\begin{table*}[!t]
+\centering
+\scriptsize
+\caption{PQC migration design space (trigger origin vs evidence strength).}
+\label{tab:migration-design-space}
+\begin{tabular}{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.20}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.27}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.24}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.29}}@{}}
+\toprule
+Approach class & Fallback trigger origin (typical) & Evidence strength (typical) & Migration-security implication \\
+\midrule
+TLS/QUIC deployment defaults & Handshake/protocol errors are explicit, but migration fallback causes are largely implementation-defined in surrounding system glue & Transcript integrity is strong; system-level fallback evidence schema is not standardized & Protocol-correct deployments can still be migration-unsafe operationally if timeout/network-derived fallback is admitted in implementation policy \\
+Noise-style fixed patterns & Usually fixed-pattern negotiation; migration/fallback behavior delegated to application framework & No built-in migration audit schema; evidence externalized to application logs & Strong AKE pattern semantics, but migration policy enforceability and replayable downgrade evidence are out of scope \\
+SkyBridge migration contract (this work) & Local-only whitelist for fallback; timeout/network-derived causes are fallback-ineligible by definition & Structured, replayable downgrade evidence (D3 fields) plus deterministic policy decision semantics & Enforceable migration gate with operator-auditable downgrade decisions under active suppression model \\
+\bottomrule
+\end{tabular}
+\end{table*}

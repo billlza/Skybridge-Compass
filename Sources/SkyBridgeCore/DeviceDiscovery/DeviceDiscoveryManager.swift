@@ -957,16 +957,37 @@ public class DeviceDiscoveryManager: BaseManager {
                                     logger.error("❌ PQC required by policy but no PQC provider available on this device. peer=\(peer.deviceId, privacy: .public)")
                                     return
                                 }
-                                if peerHasClassicGroup {
-                                    selection = .classicOnly
-                                    cryptoProvider = CryptoProviderFactory.make(policy: selection)
-                                    sigAAlgorithm = .ed25519
-                                    offeredSuites = cryptoProvider.supportedSuites.filter { !$0.isPQCGroup }
-                                    logger.info("🧩 inboundFallback(classic): peer advertises PQC but local PQC unavailable; falling back to classic handshake. peer=\(peer.deviceId, privacy: .public)")
-                                } else {
-                                    logger.error("❌ Peer offered PQC-only suites but local PQC unavailable; cannot continue. peer=\(peer.deviceId, privacy: .public)")
-                                    return
-                                }
+	                                if peerHasClassicGroup {
+	                                    selection = .classicOnly
+	                                    cryptoProvider = CryptoProviderFactory.make(policy: selection)
+	                                    sigAAlgorithm = .ed25519
+	                                    offeredSuites = cryptoProvider.supportedSuites.filter { !$0.isPQCGroup }
+	                                    // Make responder-side capability fallback auditable (no silent downgrade in telemetry).
+	                                    SecurityEventEmitter.emitDetached(SecurityEvent(
+	                                        type: .cryptoDowngrade,
+	                                        severity: .warning,
+	                                        message: "Inbound handshake: peer advertises PQC but local PQC unavailable; falling back to Classic",
+	                                        context: [
+	                                            "reason": "pqcProviderUnavailable",
+	                                            "direction": "responder_inbound",
+	                                            "deviceId": peer.deviceId,
+	                                            "policyInTranscript": "1",
+	                                            "transcriptBinding": "1",
+	                                            "downgradeResistance": "policy_gate+no_timeout_fallback+rate_limited",
+	                                            "policyRequirePQC": effectivePolicy.requirePQC ? "1" : "0",
+	                                            "policyAllowClassicFallback": effectivePolicy.allowClassicFallback ? "1" : "0",
+	                                            "policyMinimumTier": effectivePolicy.minimumTier.rawValue,
+	                                            "policyRequireSecureEnclavePoP": effectivePolicy.requireSecureEnclavePoP ? "1" : "0",
+	                                            "fromStrategy": HandshakeAttemptStrategy.pqcOnly.rawValue,
+	                                            "toStrategy": HandshakeAttemptStrategy.classicOnly.rawValue,
+	                                            "strategy": HandshakeAttemptStrategy.classicOnly.rawValue
+	                                        ]
+	                                    ))
+	                                    logger.info("🧩 inboundFallback(classic): peer advertises PQC but local PQC unavailable; falling back to classic handshake. peer=\(peer.deviceId, privacy: .public)")
+	                                } else {
+	                                    logger.error("❌ Peer offered PQC-only suites but local PQC unavailable; cannot continue. peer=\(peer.deviceId, privacy: .public)")
+	                                    return
+	                                }
                             } else {
                                 sigAAlgorithm = .mlDSA65
                                 offeredSuites = localPQCSuites

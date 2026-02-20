@@ -1,0 +1,25 @@
+\begin{table*}[!t]
+\centering
+\scriptsize
+\caption{Provider/back-end migration-threat matrix (N=1000 per row). Data source: \texttt{Artifacts/\allowbreak migration\_threat\_provider\_matrix\_\artifactdate.csv} produced by \texttt{MigrationThreatProviderMatrixBenchTests}.}
+\label{tab:migration-provider-matrix}
+\begin{tabular}{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.10}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.10}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.14}}
+  >{\centering\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.07}}
+  >{\centering\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.07}}
+  >{\centering\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.07}}
+  >{\centering\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.07}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.38}}@{}}
+\toprule
+Provider & Policy & Scenario & FDR & SDR & ECR & PCR & Interpretation \\
+\midrule
+liboqs & default & timeout attack & 0.00 & 0.00 & 1.00 & 1.00 & Timeout suppression does not create a classic edge \\
+liboqs & strictPQC & timeout attack & 0.00 & 0.00 & 1.00 & 1.00 & Strict mode remains fail-closed under timeout suppression \\
+liboqs & default & local unavailability & 1.00 & 0.00 & 1.00 & 1.00 & Local whitelist fallback is explicit and fully evidenced \\
+classic & default & PQC provider unavailable & 1.00 & 0.00 & 1.00 & 1.00 & No-PQC backend path still emits replayable downgrade evidence \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
