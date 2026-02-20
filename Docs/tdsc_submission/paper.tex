@@ -281,8 +281,9 @@ adversary cannot create a classic downgrade edge by suppression; (D3)
 any policy-allowed downgrade action emits a minimal replayable evidence
 tuple sufficient to re-derive ``what happened and why'' under the pinned
 trust record and policy mode. The policy-bound, deterministic state
-machine ensures evidence corresponds to the actual decision path, and we
-validate this end-to-end under fault injection and active suppression.
+machine ensures evidence corresponds to the actual decision path and is
+validated under fault injection and timeout suppression
+(Table~\ref{tab:migration-threat-harness}).
 
 The core
 idea is to treat crypto agility as a layered
@@ -395,7 +396,7 @@ Contributions:
 \item
   \textbf{C1: Formalized auditable migration contract.}
   We formalize an auditable migration contract spanning four
-  implementation-facing requirements (suite/provider migration, policy
+  mechanism-level requirements (suite/provider migration, policy
   non-bypass, deterministic fault semantics, auditable evidence) and
   define four experiment families (authentication, negotiation,
   downgrade, hybrid forward secrecy). We state theorem/proposition
@@ -409,8 +410,8 @@ Contributions:
   We introduce a forward-secrecy-oriented v2 suite that composes a
   static KEM secret with an additional ephemeral contribution while
   retaining v1 interop through policy-controlled bridge negotiation.
-  This provides stronger post-compromise secrecy semantics than v1 but
-  is not claimed as full ephemeral-ephemeral PFS.
+  v1 remains default for bridge compatibility with provisioned KEM
+  identity keys; v2 is an opt-in upgrade (not full PFS).
   \textit{Evidence:} Fig.~\ref{fig:handshake-sequence};
   Supplementary Table~\ref{tab:supp-v2-v1-compare};
   \texttt{HandshakeV2PFSTests};
@@ -2105,9 +2106,7 @@ Supplementary Table~\ref{tab:supp-interop-matrix}.
   hybrid composition (static KEM secret + ephemeral contribution) to
   strengthen post-compromise secrecy versus v1, but legacy v1
   deployments remain static-recipient KEM and do not provide equivalent
-  FS semantics. v1 favors bridge compatibility with paired long-term KEM
-  identity keys; v2 is available as an incremental upgrade and is
-  evaluated in Supplementary Table~\ref{tab:supp-v2-v1-compare}.
+  FS semantics (Supplementary Table~\ref{tab:supp-v2-v1-compare}).
 \item
   \textbf{Cross-Platform Interoperability and Generalization Boundaries:}
   The migration contract and wire format are designed to be portable,
