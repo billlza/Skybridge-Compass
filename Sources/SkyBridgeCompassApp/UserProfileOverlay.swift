@@ -198,7 +198,7 @@ struct UserProfileOverlay: View {
  // 星云ID行
             InfoRow(
                 title: "星云ID",
-                content: authModel.currentSession?.userIdentifier ?? "未知",
+                content: authModel.displayedNebulaId,
                 showCopyButton: true,
                 copyAction: copyUserID
             )
@@ -572,7 +572,8 @@ struct UserProfileOverlay: View {
     }
 
     private func copyUserID() {
-        if let userID = authModel.currentSession?.userIdentifier {
+        if authModel.currentSession != nil {
+            let userID = authModel.displayedNebulaId
             let pasteboard = NSPasteboard.general
             pasteboard.clearContents()
             pasteboard.setString(userID, forType: .string)

@@ -154,7 +154,7 @@ struct UserProfileView: View {
                     .foregroundColor(.primary)
 
                 HStack {
-                    Text(authModel.currentSession?.userIdentifier ?? "未知")
+                    Text(authModel.displayedNebulaId)
                         .font(.body)
                         .foregroundColor(.secondary)
                         .padding(.horizontal, 12)
@@ -320,7 +320,8 @@ struct UserProfileView: View {
 
  /// 复制用户ID
     private func copyUserID() {
-        if let userID = authModel.currentSession?.userIdentifier {
+        if authModel.currentSession != nil {
+            let userID = authModel.displayedNebulaId
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(userID, forType: .string)
 
@@ -405,32 +406,40 @@ struct UserProfileView: View {
                     return
                 }
 
- // 调用星云服务更新用户信息
-                let updatedUserInfo = try await NebulaService.shared.updateUserProfile(
-                    userId: currentSession.userIdentifier,
-                    displayName: hasDisplayNameChange ? editedDisplayName : nil,
-                    imageData: selectedImageData,
-                    accessToken: currentSession.accessToken
-                )
-
-                await MainActor.run {
- // 更新本地会话信息
-                    let updatedSession = AuthSession(
+                let updatedSession: AuthSession
+                if isSupabaseUser(session: currentSession) {
+                    // Supabase 用户：将头像与 display_name 写入 Supabase（跨端可见）
+                    updatedSession = try await updateSupabaseProfile(
+                        session: currentSession,
+                        displayName: hasDisplayNameChange ? editedDisplayName : nil,
+                        imageData: selectedImageData
+                    )
+                } else {
+                    // 非 Supabase 用户：沿用 NebulaService 的既有实现
+                    let updatedUserInfo = try await NebulaService.shared.updateUserProfile(
+                        userId: currentSession.userIdentifier,
+                        displayName: hasDisplayNameChange ? editedDisplayName : nil,
+                        imageData: selectedImageData,
+                        accessToken: currentSession.accessToken
+                    )
+                    updatedSession = AuthSession(
                         accessToken: currentSession.accessToken,
                         refreshToken: currentSession.refreshToken,
                         userIdentifier: currentSession.userIdentifier,
                         displayName: updatedUserInfo.displayName,
                         issuedAt: currentSession.issuedAt
                     )
+                }
 
+                await MainActor.run {
                     SkyBridgeLogger.ui.debugOnly("🔄 [UserProfileView] 准备更新用户会话信息")
                     SkyBridgeLogger.ui.debugOnly("   原昵称: \(currentSession.displayName)")
-                    SkyBridgeLogger.ui.debugOnly("   新昵称: \(updatedUserInfo.displayName)")
+                    SkyBridgeLogger.ui.debugOnly("   新昵称: \(updatedSession.displayName)")
 
  // 如果有头像更新，缓存新头像
                     if hasAvatarChange, let imageData = selectedImageData, let image = NSImage(data: imageData) {
                         AvatarCacheManager.shared.cacheAvatar(image, for: currentSession.userIdentifier)
-                        SkyBridgeLogger.ui.debugOnly("   头像已缓存: \(updatedUserInfo.avatar ?? "无")")
+                        SkyBridgeLogger.ui.debugOnly("   头像已缓存")
                     }
 
  // 通过AuthenticationService更新会话 - 只设置一次
@@ -448,9 +457,9 @@ struct UserProfileView: View {
                     isUploading = false
 
                     SkyBridgeLogger.ui.debugOnly("✅ 用户信息更新成功")
-                    SkyBridgeLogger.ui.debugOnly("   新昵称: \(updatedUserInfo.displayName)")
+                    SkyBridgeLogger.ui.debugOnly("   新昵称: \(updatedSession.displayName)")
                     if hasAvatarChange {
-                        SkyBridgeLogger.ui.debugOnly("   头像已更新: \(updatedUserInfo.avatar ?? "无")")
+                        SkyBridgeLogger.ui.debugOnly("   头像已更新")
                     }
 
  // 关闭编辑界面
@@ -466,6 +475,66 @@ struct UserProfileView: View {
                 }
             }
         }
+    }
+
+    /// 检查是否为 Supabase 用户（可跨端同步 metadata/avatar_url）
+    private func isSupabaseUser(session: AuthSession) -> Bool {
+        guard SupabaseConfiguration.shared.isConfigured else { return false }
+        guard session.accessToken != "pending_verification" else { return false }
+        return SupabaseService.shared.isSupabaseAccessToken(session.accessToken)
+    }
+
+    /// 使用 Supabase API 更新用户资料（display_name + avatar_url）
+    private func updateSupabaseProfile(
+        session: AuthSession,
+        displayName: String?,
+        imageData: Data?
+    ) async throws -> AuthSession {
+        var activeSession = session
+
+        // Best-effort: refresh token if possible.
+        if let refreshToken = session.refreshToken {
+            do {
+                let refreshed = try await SupabaseService.shared.refreshAccessToken(refreshToken)
+                activeSession = refreshed
+                await MainActor.run {
+                    authModel.currentSession = refreshed
+                    do {
+                        try AuthenticationService.shared.updateSession(refreshed)
+                    } catch {
+                        SkyBridgeLogger.ui.error("❌ [UserProfileView] 刷新会话写入失败: \(error.localizedDescription, privacy: .private)")
+                    }
+                }
+            } catch {
+                SkyBridgeLogger.ui.debugOnly("⚠️ [UserProfileView] 令牌刷新失败，使用现有令牌: \(error.localizedDescription)")
+            }
+        }
+
+        if let imageData {
+            _ = try await SupabaseService.shared.uploadAvatarToStorage(
+                userId: activeSession.userIdentifier,
+                imageData: imageData,
+                accessToken: activeSession.accessToken
+            )
+        }
+
+        if let displayName, !displayName.isEmpty, displayName != activeSession.displayName {
+            _ = try await SupabaseService.shared.updateUserProfile(
+                displayName: displayName,
+                phoneNumber: nil,
+                email: nil,
+                accessToken: activeSession.accessToken
+            )
+            activeSession = AuthSession(
+                accessToken: activeSession.accessToken,
+                refreshToken: activeSession.refreshToken,
+                userIdentifier: activeSession.userIdentifier,
+                displayName: displayName,
+                issuedAt: activeSession.issuedAt
+            )
+        }
+
+        return activeSession
     }
 }
 

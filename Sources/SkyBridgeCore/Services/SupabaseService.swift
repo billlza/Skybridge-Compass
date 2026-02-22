@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import OSLog
 
 // 由于AuthSession定义在同一个模块中，不需要额外导入
 // AuthSession类型在Models.swift中定义，作为public类型可以直接使用
@@ -329,18 +330,42 @@ public final class SupabaseService: BaseManager {
                 throw SupabaseError.invalidResponse
             }
             
-            if httpResponse.statusCode == 200 {
+            if (200...299).contains(httpResponse.statusCode) {
                 SkyBridgeLogger.ui.debugOnly("✅ [SupabaseService] 注册成功，解析响应数据")
-                
- // 尝试解析注册响应
+
+                // Supabase may return either:
+                // - Auth response with access_token (email confirmation disabled), or
+                // - Sign-up response without session (email confirmation required).
+                if let authResponse = try? JSONDecoder().decode(SupabaseAuthResponse.self, from: respData),
+                   !authResponse.accessToken.isEmpty,
+                   !authResponse.user.id.isEmpty {
+                    let preferredDisplayName =
+                        authResponse.user.preferredDisplayName
+                        ?? authResponse.user.email
+                        ?? authResponse.user.phone
+                        ?? "用户"
+
+                    SkyBridgeLogger.ui.debugOnly("✅ [SupabaseService] 注册返回会话（无需邮箱验证）")
+                    SkyBridgeLogger.ui.debugOnly("   用户ID: \(authResponse.user.id)")
+                    SkyBridgeLogger.ui.debugOnly("   邮箱: \(authResponse.user.email ?? "无")")
+
+                    return AuthSession(
+                        accessToken: authResponse.accessToken,
+                        refreshToken: authResponse.refreshToken,
+                        userIdentifier: authResponse.user.id,
+                        displayName: preferredDisplayName,
+                        issuedAt: Date()
+                    )
+                }
+
+                // 尝试解析注册响应（需要邮箱验证，access_token 缺失）
                 do {
                     let signUpResponse = try JSONDecoder().decode(SupabaseSignUpResponse.self, from: respData)
-                    SkyBridgeLogger.ui.debugOnly("✅ [SupabaseService] 注册响应解析成功")
+                    SkyBridgeLogger.ui.debugOnly("✅ [SupabaseService] 注册响应解析成功（待邮箱验证）")
                     SkyBridgeLogger.ui.debugOnly("   用户ID: \(signUpResponse.id)")
                     SkyBridgeLogger.ui.debugOnly("   邮箱: \(signUpResponse.email ?? "无")")
                     SkyBridgeLogger.ui.debugOnly("   确认邮件发送时间: \(signUpResponse.confirmationSentAt ?? "无")")
-                    
- // 注册成功但需要邮箱验证，返回一个特殊的会话
+
                     return AuthSession(
                         accessToken: "pending_verification", // 临时令牌，表示等待验证
                         refreshToken: nil,
@@ -603,8 +628,9 @@ public final class SupabaseService: BaseManager {
             }
             
             SkyBridgeLogger.ui.debugOnly("📡 [SupabaseService] 收到上传响应，状态码: \(httpResponse.statusCode)")
-            
-            if httpResponse.statusCode == 200 {
+
+            // Supabase Storage may return 200/201/204 depending on create/upsert semantics.
+            if (200...299).contains(httpResponse.statusCode) {
  // 构建公开访问URL
                 let avatarUrl = "\(config.url.absoluteString)/storage/v1/object/public/\(bucketName)/\(fileName)"
                 
@@ -613,6 +639,13 @@ public final class SupabaseService: BaseManager {
                 
  // 更新用户metadata中的avatar_url
                 try await updateUserAvatarUrl(userId: userId, avatarUrl: avatarUrl, accessToken: accessToken)
+
+                // Best-effort: mirror into profiles table for cross-platform clients that read profile rows.
+                do {
+                    try await updateProfilesAvatarUrl(userId: userId, avatarUrl: avatarUrl, accessToken: accessToken)
+                } catch {
+                    SkyBridgeLogger.ui.debugOnly("ℹ️ [SupabaseService] profiles.avatar_url 写入失败（忽略）: \(error.localizedDescription)")
+                }
                 
                 return avatarUrl
             } else {
@@ -665,7 +698,7 @@ public final class SupabaseService: BaseManager {
             throw SupabaseError.networkError(URLError(.badServerResponse))
         }
         
-        if httpResponse.statusCode == 200 {
+        if httpResponse.statusCode == 200 || httpResponse.statusCode == 204 {
             SkyBridgeLogger.ui.debugOnly("✅ [SupabaseService] 用户avatar_url已更新到metadata")
         } else {
             SkyBridgeLogger.ui.error("❌ [SupabaseService] 更新avatar_url失败，状态码: \(httpResponse.statusCode)")
@@ -708,9 +741,15 @@ public final class SupabaseService: BaseManager {
             if httpResponse.statusCode == 200 {
                 if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                    let userMetadata = json["user_metadata"] as? [String: Any],
-                   let avatarUrl = userMetadata["avatar_url"] as? String {
-                    SkyBridgeLogger.ui.debugOnly("✅ [SupabaseService] 找到用户头像URL: \(avatarUrl)")
-                    return avatarUrl
+                   let avatarUrlRaw = userMetadata["avatar_url"] as? String {
+                    let normalized: String
+                    if avatarUrlRaw.hasPrefix("/") {
+                        normalized = "\(config.url.absoluteString)\(avatarUrlRaw)"
+                    } else {
+                        normalized = avatarUrlRaw
+                    }
+                    SkyBridgeLogger.ui.debugOnly("✅ [SupabaseService] 找到用户头像URL: \(normalized)")
+                    return normalized
                 } else {
                     SkyBridgeLogger.ui.debugOnly("ℹ️ [SupabaseService] 用户未设置头像")
                     return nil
@@ -722,6 +761,126 @@ public final class SupabaseService: BaseManager {
         } catch {
             SkyBridgeLogger.ui.error("❌ [SupabaseService] 获取头像URL失败: \(error.localizedDescription, privacy: .private)")
             return nil
+        }
+    }
+
+    /// 获取用户 NebulaID（优先读取 user_metadata.nebula_id，必要时回退到 profiles/users 表）
+    /// - Parameters:
+    ///   - userId: Supabase 用户ID（UUID）
+    ///   - accessToken: 访问令牌
+    /// - Returns: NebulaID（NEBULA-YYYY-...），若未设置则返回 nil
+    public func getUserNebulaId(userId: String, accessToken: String) async throws -> String? {
+        guard let config = configuration else {
+            throw SupabaseError.configurationMissing
+        }
+
+        SkyBridgeLogger.ui.debugOnly("🔍 [SupabaseService] 获取用户 NebulaID")
+        SkyBridgeLogger.ui.debugOnly("   用户ID: \(userId)")
+
+        // 1) Prefer Auth user_metadata (cross-device, simplest)
+        let authEndpoint = config.url.appendingPathComponent("auth/v1/user")
+        var request = URLRequest(url: authEndpoint)
+        request.httpMethod = "GET"
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue(config.anonKey, forHTTPHeaderField: "apikey")
+
+        do {
+            let (data, response) = try await urlSession.data(for: request)
+            guard let httpResponse = response as? HTTPURLResponse else {
+                throw SupabaseError.networkError(URLError(.badServerResponse))
+            }
+            if httpResponse.statusCode == 200,
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let userMetadata = json["user_metadata"] as? [String: Any] {
+                if let raw = (userMetadata["nebula_id"] as? String) ?? (userMetadata["nebulaId"] as? String) {
+                    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !trimmed.isEmpty {
+                        return trimmed
+                    }
+                }
+            }
+        } catch {
+            // Best-effort; fall through to PostgREST lookups.
+        }
+
+        func fetchNebulaIdFromTable(_ table: String) async -> String? {
+            let endpoint = config.url.appendingPathComponent("rest/v1/\(table)")
+            guard var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false) else {
+                return nil
+            }
+            components.queryItems = [
+                URLQueryItem(name: "select", value: "nebula_id"),
+                URLQueryItem(name: "id", value: "eq.\(userId)"),
+                URLQueryItem(name: "limit", value: "1")
+            ]
+            guard let requestURL = components.url else { return nil }
+
+            var req = URLRequest(url: requestURL)
+            req.httpMethod = "GET"
+            req.setValue("application/json", forHTTPHeaderField: "Accept")
+            req.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+            req.setValue(config.anonKey, forHTTPHeaderField: "apikey")
+
+            guard let (data, response) = try? await urlSession.data(for: req),
+                  let http = response as? HTTPURLResponse,
+                  http.statusCode == 200,
+                  let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]],
+                  let first = arr.first,
+                  let raw = first["nebula_id"] as? String else {
+                return nil
+            }
+
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+
+        // 2) profiles row (recommended schema)
+        if let nid = await fetchNebulaIdFromTable("profiles") {
+            return nid
+        }
+
+        // 3) users table (legacy macOS parity)
+        if let nid = await fetchNebulaIdFromTable("users") {
+            return nid
+        }
+
+        return nil
+    }
+
+    /// Best-effort: update `profiles.avatar_url` for cross-platform clients that read the profiles row.
+    private func updateProfilesAvatarUrl(userId: String, avatarUrl: String, accessToken: String) async throws {
+        guard let config = configuration else {
+            throw SupabaseError.configurationMissing
+        }
+
+        let endpoint = config.url.appendingPathComponent("rest/v1/profiles")
+        guard var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false) else {
+            throw SupabaseError.invalidResponse
+        }
+        components.queryItems = [URLQueryItem(name: "id", value: "eq.\(userId)")]
+        guard let requestURL = components.url else {
+            throw SupabaseError.invalidResponse
+        }
+
+        var request = URLRequest(url: requestURL)
+        request.httpMethod = "PATCH"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue(config.anonKey, forHTTPHeaderField: "apikey")
+        request.setValue("return=minimal", forHTTPHeaderField: "Prefer")
+
+        let updateData: [String: Any] = [
+            "avatar_url": avatarUrl,
+            "updated_at": ISO8601DateFormatter().string(from: Date())
+        ]
+        request.httpBody = try JSONSerialization.data(withJSONObject: updateData)
+
+        let (_, response) = try await urlSession.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw SupabaseError.networkError(URLError(.badServerResponse))
+        }
+        if httpResponse.statusCode != 200 && httpResponse.statusCode != 204 {
+            throw SupabaseError.httpStatus(code: httpResponse.statusCode, message: nil)
         }
     }
     
@@ -850,12 +1009,18 @@ public final class SupabaseService: BaseManager {
                     SkyBridgeLogger.ui.debugOnly("   用户ID: \(authResponse.user.id)")
                     SkyBridgeLogger.ui.debugOnly("   邮箱: \(authResponse.user.email ?? "无")")
                     SkyBridgeLogger.ui.debugOnly("   访问令牌: \(String(authResponse.accessToken.prefix(10)))...")
+
+                    let preferredDisplayName =
+                        authResponse.user.preferredDisplayName
+                        ?? authResponse.user.email
+                        ?? authResponse.user.phone
+                        ?? "用户"
                     
                     return AuthSession(
                         accessToken: authResponse.accessToken,
                         refreshToken: authResponse.refreshToken,
                         userIdentifier: authResponse.user.id,
-                        displayName: authResponse.user.email ?? "用户",
+                        displayName: preferredDisplayName,
                         issuedAt: Date()
                     )
                 } catch {
@@ -946,13 +1111,28 @@ private struct SupabaseUser: Codable {
     let id: String
     let email: String?
     let phone: String?
-    let createdAt: String
-    
+    let createdAt: String?
+    let userMetadata: [String: AnyCodable]?
+
     enum CodingKeys: String, CodingKey {
         case id
         case email
         case phone
         case createdAt = "created_at"
+        case userMetadata = "user_metadata"
+    }
+
+    fileprivate var preferredDisplayName: String? {
+        func read(_ key: String) -> String? {
+            guard let raw = userMetadata?[key]?.value as? String else { return nil }
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+
+        // Supabase user_metadata keys (cross-platform parity):
+        // - display_name (SkyBridge primary)
+        // - full_name / name (OIDC common)
+        return read("display_name") ?? read("full_name") ?? read("name")
     }
 }
 
@@ -1081,12 +1261,18 @@ extension SupabaseService {
             if httpResponse.statusCode == 200 {
                 let authResponse = try JSONDecoder().decode(SupabaseAuthResponse.self, from: data)
                 SkyBridgeLogger.ui.debugOnly("✅ [SupabaseService] 令牌刷新成功")
-                
+
+                let preferredDisplayName =
+                    authResponse.user.preferredDisplayName
+                    ?? authResponse.user.email
+                    ?? authResponse.user.phone
+                    ?? "用户"
+
                 return AuthSession(
                     accessToken: authResponse.accessToken,
                     refreshToken: authResponse.refreshToken,
                     userIdentifier: authResponse.user.id,
-                    displayName: authResponse.user.email ?? "用户",
+                    displayName: preferredDisplayName,
                     issuedAt: Date()
                 )
             } else {

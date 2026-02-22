@@ -296,9 +296,10 @@ struct LiquidGlassUserArea: View {
     
  /// 获取简短的用户ID显示
     private func getShortUserID() -> String {
-        guard let userID = authModel.currentSession?.userIdentifier else {
+        guard authModel.currentSession != nil else {
             return "未知ID"
         }
+        let userID = authModel.displayedNebulaId
         
         if userID.count > 12 {
             let prefix = String(userID.prefix(8))

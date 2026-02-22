@@ -64,6 +64,7 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
     @Published var errorMessage: String?
     @Published var selectedMethod: LoginMethod = .apple
     @Published var isGuestMode = false
+    @Published var supabaseNebulaId: String?
 
  // Apple登录状态
     @Published var appleAuthorizationState: ASAuthorizationAppleIDProvider.CredentialState = .notFound
@@ -112,6 +113,15 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
 
  /// 当前设备指纹（懒加载）
     private var deviceFingerprint: String?
+
+    /// 用于 UI 展示的“星云ID”（优先使用 Supabase user_metadata.nebula_id）
+    var displayedNebulaId: String {
+        if let value = supabaseNebulaId?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !value.isEmpty {
+            return value
+        }
+        return currentSession?.userIdentifier ?? "未知"
+    }
 
  // MARK: - 初始化
 
@@ -1063,6 +1073,7 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
  /// 进入游客模式
     func enterGuestMode() {
         isGuestMode = true
+        supabaseNebulaId = nil
         currentSession = AuthSession(
             accessToken: "guest_token",
             refreshToken: nil,
@@ -1078,6 +1089,7 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
     func signOut() {
         authService.signOut()
         currentSession = nil
+        supabaseNebulaId = nil
         isGuestMode = false
         clearAllFields()
     }
@@ -1116,6 +1128,7 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
 
  // 登录成功后，尝试从Supabase加载用户头像
             await loadUserAvatarAfterLogin(session: session)
+            await loadUserNebulaIdAfterLogin(session: session)
 
             await MainActor.run {
                 SkyBridgeLogger.ui.debugOnly("🔄 [AuthenticationViewModel] 更新UI状态")
@@ -1180,6 +1193,33 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
         } catch {
  // 头像加载失败不影响登录流程，只记录日志
             SkyBridgeLogger.ui.error("⚠️ [AuthenticationViewModel] 头像加载失败: \(error.localizedDescription, privacy: .private)")
+        }
+    }
+
+    /// 登录成功后加载用户 NebulaID（跨端一致：Supabase user_metadata.nebula_id）
+    private func loadUserNebulaIdAfterLogin(session: AuthSession) async {
+        // 跳过待验证状态的会话
+        guard session.accessToken != "pending_verification" else { return }
+
+        // 非 Supabase 会话：不覆盖（保持原 userIdentifier 语义）
+        guard SupabaseService.shared.isSupabaseAccessToken(session.accessToken) else {
+            await MainActor.run {
+                self.supabaseNebulaId = nil
+            }
+            return
+        }
+
+        do {
+            let nebulaId = try await SupabaseService.shared.getUserNebulaId(
+                userId: session.userIdentifier,
+                accessToken: session.accessToken
+            )
+            await MainActor.run {
+                self.supabaseNebulaId = nebulaId
+            }
+        } catch {
+            // 不阻塞登录流程
+            SkyBridgeLogger.ui.debugOnly("ℹ️ [AuthenticationViewModel] NebulaID 加载失败（忽略）: \(error.localizedDescription)")
         }
     }
 
@@ -1352,14 +1392,51 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
         SkyBridgeLogger.ui.debugOnly("   原显示名称: \(session.displayName)")
         SkyBridgeLogger.ui.debugOnly("   新显示名称: \(displayName)")
 
- // 调用NebulaService更新显示名称
+        // Supabase 用户：优先写入 Supabase user_metadata（跨端可见）
+        if SupabaseConfiguration.shared.isConfigured,
+           session.accessToken != "pending_verification",
+           SupabaseService.shared.isSupabaseAccessToken(session.accessToken) {
+            var activeSession = session
+            if let refreshToken = session.refreshToken {
+                // Best-effort refresh for 403/expired tokens
+                if let refreshed = try? await SupabaseService.shared.refreshAccessToken(refreshToken) {
+                    activeSession = refreshed
+                    currentSession = refreshed
+                    try? AuthenticationService.shared.updateSession(refreshed)
+                }
+            }
+
+            _ = try await SupabaseService.shared.updateUserProfile(
+                displayName: displayName,
+                phoneNumber: nil,
+                email: nil,
+                accessToken: activeSession.accessToken
+            )
+
+            let updatedSession = AuthSession(
+                accessToken: activeSession.accessToken,
+                refreshToken: activeSession.refreshToken,
+                userIdentifier: activeSession.userIdentifier,
+                displayName: displayName,
+                issuedAt: activeSession.issuedAt
+            )
+            currentSession = updatedSession
+            do {
+                try AuthenticationService.shared.updateSession(updatedSession)
+            } catch {
+                SkyBridgeLogger.ui.error("❌ [AuthenticationViewModel] 会话写入失败: \(error.localizedDescription, privacy: .private)")
+            }
+            SkyBridgeLogger.ui.debugOnly("✅ [AuthenticationViewModel] 显示名称更新成功(Supabase): \(displayName)")
+            return
+        }
+
+        // 非 Supabase 用户：沿用 NebulaService
         let updatedUserInfo = try await NebulaService.shared.updateDisplayName(
             userId: session.userIdentifier,
             displayName: displayName,
             accessToken: session.accessToken
         )
 
- // 更新本地会话信息
         let updatedSession = AuthSession(
             accessToken: session.accessToken,
             refreshToken: session.refreshToken,
@@ -1389,7 +1466,34 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
         SkyBridgeLogger.ui.debugOnly("   用户ID: \(session.userIdentifier)")
         SkyBridgeLogger.ui.debugOnly("   图片大小: \(imageData.count) bytes")
 
- // 调用NebulaService上传头像
+        // Supabase 用户：优先上传到 Supabase Storage 并写入 avatar_url（跨端可见）
+        if SupabaseConfiguration.shared.isConfigured,
+           session.accessToken != "pending_verification",
+           SupabaseService.shared.isSupabaseAccessToken(session.accessToken) {
+            var activeSession = session
+            if let refreshToken = session.refreshToken {
+                if let refreshed = try? await SupabaseService.shared.refreshAccessToken(refreshToken) {
+                    activeSession = refreshed
+                    currentSession = refreshed
+                    try? AuthenticationService.shared.updateSession(refreshed)
+                }
+            }
+
+            let avatarUrl = try await SupabaseService.shared.uploadAvatarToStorage(
+                userId: activeSession.userIdentifier,
+                imageData: imageData,
+                accessToken: activeSession.accessToken
+            )
+
+            if let image = NSImage(data: imageData) {
+                AvatarCacheManager.shared.cacheAvatar(image, for: activeSession.userIdentifier)
+            }
+
+            SkyBridgeLogger.ui.debugOnly("✅ [AuthenticationViewModel] 头像上传成功(Supabase): \(avatarUrl)")
+            return
+        }
+
+        // 非 Supabase 用户：沿用 NebulaService 上传头像
         let avatarUrl = try await NebulaService.shared.uploadAvatar(
             userId: session.userIdentifier,
             imageData: imageData,
