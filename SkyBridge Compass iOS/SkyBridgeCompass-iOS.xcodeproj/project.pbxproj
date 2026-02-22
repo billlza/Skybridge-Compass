@@ -325,7 +325,7 @@
 				0E7F0EB851AACE0E22241F4C /* SkyBridgeActivityAttributes.swift */,
 			);
 			name = LiveActivities;
-			path = SkyBridgeCompassiOS/Sources/LiveActivities;
+			path = LiveActivities;
 			sourceTree = "<group>";
 		};
 		246F49E019C595ACECDDCFB1 /* Trust */ = {
@@ -510,7 +510,6 @@
 		B55949760F23D445644575EB = {
 			isa = PBXGroup;
 			children = (
-				1F533AD5F0CCB737717CFEFA /* LiveActivities */,
 				92FDC970131C05A02838C80E /* Packages */,
 				FD919CD6A1AD0CEA831170C9 /* Resources */,
 				6D412A097F84B30E664CA7DC /* Sources */,
