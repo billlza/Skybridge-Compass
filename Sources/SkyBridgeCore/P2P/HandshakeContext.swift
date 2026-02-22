@@ -247,7 +247,8 @@ public actor HandshakeContext {
         identityPublicKey: Data,
         policy: HandshakePolicy = .default,
         secureEnclaveKeyHandle: SigningKeyHandle? = nil,
-        offeredSuites: [CryptoSuite]? = nil
+        offeredSuites: [CryptoSuite]? = nil,
+        extensionsRaw: Data = Data()
     ) async throws -> HandshakeMessageA {
         guard !isZeroized else {
             throw HandshakeError.contextZeroized
@@ -314,6 +315,7 @@ public actor HandshakeContext {
             capabilities: localCapabilities,
             signature: Data(),
             identityPublicKey: identityPublicKey,
+            extensionsRaw: extensionsRaw,
             initiatorContribution: initiatorContribution
         )
 
@@ -364,6 +366,7 @@ public actor HandshakeContext {
             capabilities: messageA.capabilities,
             signature: signature,
             identityPublicKey: messageA.identityPublicKey,
+            extensionsRaw: messageA.extensionsRaw,
             secureEnclaveSignature: seSignature,
             initiatorContribution: messageA.initiatorContribution
         )

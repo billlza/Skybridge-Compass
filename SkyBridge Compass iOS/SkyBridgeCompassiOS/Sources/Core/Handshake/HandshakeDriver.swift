@@ -36,6 +36,182 @@ struct DefaultHandshakeTrustProvider: HandshakeTrustProvider, Sendable {
     func trustedSecureEnclavePublicKey(for deviceId: String) async -> Data? { nil }
 }
 
+// MARK: - SOA Metadata / Arbiter
+
+@available(iOS 17.0, *)
+public struct HandshakeSOAMetadata: Sendable, Equatable {
+    public let initiatorPeerId: Data // 32 bytes
+    public let targetPeerId: Data // 32 bytes
+    public let attemptId: Data // 16 bytes
+
+    public init(initiatorPeerId: Data, targetPeerId: Data, attemptId: Data) throws {
+        guard initiatorPeerId.count == HandshakeSOAExtension.initiatorPeerIdLength else {
+            throw HandshakeError.failed(.invalidMessageFormat("SOA initiatorPeerId must be 32 bytes"))
+        }
+        guard targetPeerId.count == HandshakeSOAExtension.targetPeerIdLength else {
+            throw HandshakeError.failed(.invalidMessageFormat("SOA targetPeerId must be 32 bytes"))
+        }
+        guard attemptId.count == HandshakeSOAExtension.attemptIdLength else {
+            throw HandshakeError.failed(.invalidMessageFormat("SOA attemptId must be 16 bytes"))
+        }
+        self.initiatorPeerId = initiatorPeerId
+        self.targetPeerId = targetPeerId
+        self.attemptId = attemptId
+    }
+
+    public var extensionRaw: Data {
+        (try? HandshakeSOAExtension(
+            initiatorPeerId: initiatorPeerId,
+            targetPeerId: targetPeerId,
+            attemptId: attemptId
+        ).encodedTLV) ?? Data()
+    }
+}
+
+@available(iOS 17.0, *)
+public actor PeerSessionArbiter {
+    public static let shared = PeerSessionArbiter()
+
+    public enum RegisterDecision: Sendable {
+        case accepted
+        case alreadyConnected
+        case alreadyInProgress
+    }
+
+    public enum IncomingDecision: Sendable {
+        case accept
+        case rejectAlreadyConnected
+        case rejectBinding
+        case rejectRateLimited
+        case rejectLocalWinner
+        case acceptAndSupersedeLocal(winnerPeerId: Data, winnerAttemptId: Data)
+    }
+
+    public struct OutgoingAttempt: Sendable {
+        public let pairKey: Data
+        public let initiatorPeerId: Data
+        public let attemptId: Data
+        public let startedAt: Date
+        public let onSuperseded: @Sendable (Data, Data) async -> Void
+    }
+
+    private let pendingWindowSeconds: TimeInterval = 10
+    private let supersedeRateLimit: Int = 3
+    private let supersedeRateWindowSeconds: TimeInterval = 60
+
+    private var outgoingByPair: [Data: OutgoingAttempt] = [:]
+    private var establishedPairs: Set<Data> = []
+    private var supersedeTimestampsByPair: [Data: [Date]] = [:]
+
+    public func registerOutgoing(_ attempt: OutgoingAttempt) -> RegisterDecision {
+        if establishedPairs.contains(attempt.pairKey) {
+            return .alreadyConnected
+        }
+        if let existing = outgoingByPair[attempt.pairKey],
+           Date().timeIntervalSince(existing.startedAt) <= pendingWindowSeconds {
+            return .alreadyInProgress
+        }
+        outgoingByPair[attempt.pairKey] = attempt
+        return .accepted
+    }
+
+    public func clearOutgoing(pairKey: Data, attemptId: Data?) {
+        guard let existing = outgoingByPair[pairKey] else { return }
+        if let attemptId, existing.attemptId != attemptId { return }
+        outgoingByPair.removeValue(forKey: pairKey)
+    }
+
+    public func markEstablished(pairKey: Data) {
+        establishedPairs.insert(pairKey)
+        outgoingByPair.removeValue(forKey: pairKey)
+    }
+
+    public func clearEstablished(pairKey: Data) {
+        establishedPairs.remove(pairKey)
+    }
+
+    public func evaluateIncoming(
+        pairKey: Data,
+        remoteInitiatorPeerId: Data,
+        remoteAttemptId: Data,
+        targetPeerId: Data,
+        expectedRemotePeerId: Data,
+        localPeerId: Data
+    ) -> IncomingDecision {
+        if establishedPairs.contains(pairKey) {
+            return .rejectAlreadyConnected
+        }
+        guard targetPeerId == localPeerId, remoteInitiatorPeerId == expectedRemotePeerId else {
+            return .rejectBinding
+        }
+
+        guard let local = outgoingByPair[pairKey] else {
+            return .accept
+        }
+
+        if Date().timeIntervalSince(local.startedAt) > pendingWindowSeconds {
+            outgoingByPair.removeValue(forKey: pairKey)
+            return .accept
+        }
+
+        if !canSupersede(pairKey: pairKey) {
+            return .rejectRateLimited
+        }
+
+        let remoteWins = isRemoteWinner(
+            localInitiatorPeerId: local.initiatorPeerId,
+            localAttemptId: local.attemptId,
+            remoteInitiatorPeerId: remoteInitiatorPeerId,
+            remoteAttemptId: remoteAttemptId
+        )
+
+        if remoteWins {
+            recordSupersede(pairKey: pairKey)
+            outgoingByPair.removeValue(forKey: pairKey)
+            Task { await local.onSuperseded(remoteInitiatorPeerId, remoteAttemptId) }
+            return .acceptAndSupersedeLocal(winnerPeerId: remoteInitiatorPeerId, winnerAttemptId: remoteAttemptId)
+        }
+
+        return .rejectLocalWinner
+    }
+
+    public nonisolated static func pairKey(localPeerId: Data, remotePeerId: Data) -> Data {
+        if localPeerId.lexicographicallyPrecedes(remotePeerId) {
+            return localPeerId + remotePeerId
+        }
+        return remotePeerId + localPeerId
+    }
+
+    private func isRemoteWinner(
+        localInitiatorPeerId: Data,
+        localAttemptId: Data,
+        remoteInitiatorPeerId: Data,
+        remoteAttemptId: Data
+    ) -> Bool {
+        if remoteInitiatorPeerId == localInitiatorPeerId {
+            return remoteAttemptId.lexicographicallyPrecedes(localAttemptId)
+        }
+        return remoteInitiatorPeerId.lexicographicallyPrecedes(localInitiatorPeerId)
+    }
+
+    private func canSupersede(pairKey: Data) -> Bool {
+        let now = Date()
+        let recent = (supersedeTimestampsByPair[pairKey] ?? []).filter {
+            now.timeIntervalSince($0) <= supersedeRateWindowSeconds
+        }
+        supersedeTimestampsByPair[pairKey] = recent
+        return recent.count < supersedeRateLimit
+    }
+
+    private func recordSupersede(pairKey: Data) {
+        let now = Date()
+        let recent = (supersedeTimestampsByPair[pairKey] ?? []).filter {
+            now.timeIntervalSince($0) <= supersedeRateWindowSeconds
+        }
+        supersedeTimestampsByPair[pairKey] = recent + [now]
+    }
+}
+
 // MARK: - HandshakeDriver
 
 /// 握手驱动器 Actor
@@ -96,6 +272,24 @@ public actor HandshakeDriver {
     
     /// sigA 使用的签名算法
     private let sigAAlgorithm: ProtocolSigningAlgorithm
+
+    /// 可选 SOA 元数据（initiator）
+    private let soaMetadata: HandshakeSOAMetadata?
+
+    /// 本地 SOA peer id（32B）
+    private let localSOAPeerId: Data?
+
+    /// 期望远端 SOA peer id（32B）
+    private let expectedRemoteSOAPeerId: Data?
+
+    /// 会话仲裁器
+    private let sessionArbiter: PeerSessionArbiter
+
+    /// 当前尝试 pair key
+    private var soaPairKey: Data?
+
+    /// 当前尝试 attempt id
+    private var soaAttemptId: Data?
     
     // MARK: - Initialization
     
@@ -109,7 +303,11 @@ public actor HandshakeDriver {
         identityPublicKey: Data,
         policy: HandshakePolicy = .default,
         timeout: Duration = HandshakeConstants.defaultTimeout,
-        trustProvider: (any HandshakeTrustProvider)? = nil
+        trustProvider: (any HandshakeTrustProvider)? = nil,
+        soaMetadata: HandshakeSOAMetadata? = nil,
+        localSOAPeerId: Data? = nil,
+        expectedRemoteSOAPeerId: Data? = nil,
+        sessionArbiter: PeerSessionArbiter = .shared
     ) {
         self.transport = transport
         self.cryptoProvider = cryptoProvider
@@ -120,6 +318,10 @@ public actor HandshakeDriver {
         self.policy = policy
         self.timeout = timeout
         self.trustProvider = trustProvider ?? DefaultHandshakeTrustProvider()
+        self.soaMetadata = soaMetadata
+        self.localSOAPeerId = localSOAPeerId
+        self.expectedRemoteSOAPeerId = expectedRemoteSOAPeerId
+        self.sessionArbiter = sessionArbiter
     }
     
     // MARK: - Public API
@@ -131,6 +333,38 @@ public actor HandshakeDriver {
         }
         
         currentPeer = peer
+
+        let outboundSOA = resolveOutboundSOAMetadata(for: peer)
+        if let outboundSOA {
+            let pairKey = PeerSessionArbiter.pairKey(
+                localPeerId: outboundSOA.initiatorPeerId,
+                remotePeerId: outboundSOA.targetPeerId
+            )
+            let decision = await sessionArbiter.registerOutgoing(.init(
+                pairKey: pairKey,
+                initiatorPeerId: outboundSOA.initiatorPeerId,
+                attemptId: outboundSOA.attemptId,
+                startedAt: Date(),
+                onSuperseded: { [weak self] winnerPeerId, winnerAttemptId in
+                    await self?.handleSupersededByConcurrentAttempt(
+                        winnerPeerId: winnerPeerId,
+                        winnerAttemptId: winnerAttemptId
+                    )
+                }
+            ))
+            switch decision {
+            case .accepted:
+                soaPairKey = pairKey
+                soaAttemptId = outboundSOA.attemptId
+            case .alreadyConnected:
+                throw HandshakeError.failed(.peerRejected("already_connected"))
+            case .alreadyInProgress:
+                throw HandshakeError.alreadyInProgress
+            }
+        } else {
+            soaPairKey = nil
+            soaAttemptId = nil
+        }
         
         // 创建握手上下文
         let peerKEMPublicKeys = await trustProvider.trustedKEMPublicKeys(for: peer.deviceId)
@@ -148,10 +382,15 @@ public actor HandshakeDriver {
         // 构建 MessageA
         let messageA: HandshakeMessageA
         do {
-            messageA = try await ctx.buildMessageA()
+            messageA = try await ctx.buildMessageA(
+                extensionsRaw: outboundSOA?.extensionRaw ?? Data()
+            )
         } catch {
             await ctx.zeroize()
             context = nil
+            if let pairKey = soaPairKey {
+                await sessionArbiter.clearOutgoing(pairKey: pairKey, attemptId: soaAttemptId)
+            }
             throw error
         }
         
@@ -170,6 +409,9 @@ public actor HandshakeDriver {
         } catch {
             await ctx.zeroize()
             context = nil
+            if let pairKey = soaPairKey {
+                await sessionArbiter.clearOutgoing(pairKey: pairKey, attemptId: soaAttemptId)
+            }
             await transitionToFailed(.transportError(error.localizedDescription))
             throw HandshakeError.failed(.transportError(error.localizedDescription))
         }
@@ -259,6 +501,10 @@ public actor HandshakeDriver {
             // 取消超时任务
             timeoutTask?.cancel()
             timeoutTask = nil
+
+            if let pairKey = soaPairKey {
+                await sessionArbiter.clearOutgoing(pairKey: pairKey, attemptId: soaAttemptId)
+            }
             
             finishOnce(with: .failure(HandshakeError.failed(.cancelled)))
             
@@ -300,6 +546,46 @@ public actor HandshakeDriver {
             } catch {
                 await handleHandshakeError(error, context: ctx)
                 return
+            }
+
+            if let soa = messageA.soaExtension,
+               let localPeerId = localSOAPeerId {
+                let expectedRemotePeerId = expectedRemoteSOAPeerId ?? Self.canonicalPeerIdBytes(from: peer.deviceId)
+                let pairKey = PeerSessionArbiter.pairKey(
+                    localPeerId: localPeerId,
+                    remotePeerId: soa.initiatorPeerId
+                )
+                let decision = await sessionArbiter.evaluateIncoming(
+                    pairKey: pairKey,
+                    remoteInitiatorPeerId: soa.initiatorPeerId,
+                    remoteAttemptId: soa.attemptId,
+                    targetPeerId: soa.targetPeerId,
+                    expectedRemotePeerId: expectedRemotePeerId,
+                    localPeerId: localPeerId
+                )
+                switch decision {
+                case .accept:
+                    soaPairKey = pairKey
+                case .acceptAndSupersedeLocal:
+                    soaPairKey = pairKey
+                case .rejectAlreadyConnected:
+                    await transitionToFailed(.peerRejected("already_connected"))
+                    return
+                case .rejectBinding:
+                    await transitionToFailed(.invalidMessageFormat("SOA binding check failed"))
+                    return
+                case .rejectRateLimited:
+                    await transitionToFailed(.peerRejected("soa_rate_limited"))
+                    return
+                case .rejectLocalWinner:
+                    let winnerPeer = hexString(localPeerId)
+                    let winnerAttempt = hexString(soaAttemptId ?? Data())
+                    await transitionToFailed(.supersededByConcurrentAttempt(
+                        winnerPeerId: winnerPeer,
+                        winnerAttemptId: winnerAttempt
+                    ))
+                    return
+                }
             }
             
             // 构建 MessageB
@@ -526,6 +812,9 @@ public actor HandshakeDriver {
             }
             
             state = .established(sessionKeys: sessionKeys)
+            if let pairKey = soaPairKey {
+                await sessionArbiter.markEstablished(pairKey: pairKey)
+            }
             finishOnce(with: .success(sessionKeys))
             
         default:
@@ -534,6 +823,9 @@ public actor HandshakeDriver {
     }
     
     private func transitionToFailed(_ reason: HandshakeFailureReason, negotiatedSuite: CryptoSuite? = nil) async {
+        if let pairKey = soaPairKey {
+            await sessionArbiter.clearOutgoing(pairKey: pairKey, attemptId: soaAttemptId)
+        }
         state = .failed(reason: reason)
         finishOnce(with: .failure(HandshakeError.failed(reason)))
     }
@@ -574,6 +866,64 @@ public actor HandshakeDriver {
         }
         
         await transitionToFailed(.cryptoError(error.localizedDescription), negotiatedSuite: negotiatedSuite)
+    }
+
+    private func resolveOutboundSOAMetadata(for peer: PeerIdentifier) -> HandshakeSOAMetadata? {
+        if let soaMetadata {
+            return soaMetadata
+        }
+        guard let localSOAPeerId,
+              localSOAPeerId.count == HandshakeSOAExtension.initiatorPeerIdLength else {
+            return nil
+        }
+        let remotePeerId = expectedRemoteSOAPeerId ?? Self.canonicalPeerIdBytes(from: peer.deviceId)
+        guard remotePeerId.count == HandshakeSOAExtension.targetPeerIdLength else { return nil }
+        let attemptId = Self.randomAttemptId()
+        return try? HandshakeSOAMetadata(
+            initiatorPeerId: localSOAPeerId,
+            targetPeerId: remotePeerId,
+            attemptId: attemptId
+        )
+    }
+
+    private func handleSupersededByConcurrentAttempt(
+        winnerPeerId: Data,
+        winnerAttemptId: Data
+    ) async {
+        guard case .idle = state else {
+            if let ctx = context {
+                await ctx.zeroize()
+                context = nil
+            }
+            timeoutTask?.cancel()
+            timeoutTask = nil
+            let reason = HandshakeFailureReason.supersededByConcurrentAttempt(
+                winnerPeerId: hexString(winnerPeerId),
+                winnerAttemptId: hexString(winnerAttemptId)
+            )
+            state = .failed(reason: reason)
+            finishOnce(with: .failure(HandshakeError.failed(reason)))
+            return
+        }
+    }
+
+    private nonisolated static func canonicalPeerIdBytes(from raw: String) -> Data {
+        let normalized = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return Data(SHA256.hash(data: Data(normalized.utf8)))
+    }
+
+    private nonisolated static func randomAttemptId() -> Data {
+        var bytes = [UInt8](repeating: 0, count: HandshakeSOAExtension.attemptIdLength)
+        if SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) != errSecSuccess {
+            for idx in bytes.indices {
+                bytes[idx] = UInt8.random(in: UInt8.min...UInt8.max)
+            }
+        }
+        return Data(bytes)
+    }
+
+    private nonisolated func hexString(_ data: Data) -> String {
+        data.map { String(format: "%02x", $0) }.joined()
     }
 }
 
@@ -672,7 +1022,7 @@ public actor HandshakeContext {
     
     // MARK: - MessageA Building (Initiator)
     
-    public func buildMessageA() async throws -> HandshakeMessageA {
+    public func buildMessageA(extensionsRaw: Data = Data()) async throws -> HandshakeMessageA {
         guard !isZeroized else {
             throw HandshakeError.contextZeroized
         }
@@ -732,7 +1082,8 @@ public actor HandshakeContext {
             policy: policy,
             capabilities: capabilities,
             signature: Data(),
-            identityPublicKeys: identityKeys
+            identityPublicKeys: identityKeys,
+            extensionsRaw: extensionsRaw
         )
         
         // 计算 transcriptA（与 macOS 一致：SHA256(MessageA.transcriptBytes)）
@@ -755,7 +1106,8 @@ public actor HandshakeContext {
             policy: unsigned.policy,
             capabilities: unsigned.capabilities,
             signature: signature,
-            identityPublicKeys: identityKeys
+            identityPublicKeys: identityKeys,
+            extensionsRaw: unsigned.extensionsRaw
         )
     }
     

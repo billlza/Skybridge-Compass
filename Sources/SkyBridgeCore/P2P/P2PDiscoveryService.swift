@@ -974,6 +974,9 @@ public class P2PDiscoveryService: BaseManager {
         listener?.cancel()
         listener = nil
         isAdvertising = false
+        Task {
+            await ServiceAdvertiserCenter.shared.stopAdvertising("_skybridge._tcp")
+        }
     }
 
  // MARK: - Bonjour 浏览结果处理
@@ -1047,6 +1050,21 @@ public class P2PDiscoveryService: BaseManager {
         return value
     }
 
+    private func extractSOAFlag(from result: NWBrowser.Result) -> Bool {
+        guard case .bonjour(let txtRecord) = result.metadata else {
+            return false
+        }
+        let dict = BonjourTXTParser.parse(txtRecord)
+        return normalizeSOAFlag(dict["hs_soa"] ?? dict["HS_SOA"])
+    }
+
+    private func normalizeSOAFlag(_ value: String?) -> Bool {
+        guard let raw = value?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), !raw.isEmpty else {
+            return false
+        }
+        return raw == "1" || raw == "true" || raw == "yes"
+    }
+
     private func isStrongUniqueIdentifier(_ value: String?) -> Bool {
         guard let value else { return false }
         return value.hasPrefix("id:") || value.hasPrefix("fp:")
@@ -1070,6 +1088,7 @@ public class P2PDiscoveryService: BaseManager {
         let (ipv4, ipv6, port) = extractNetworkInfo(from: result)
         let bonjourUniqueIdentifier = bonjourIdentifier(from: result.endpoint)
         let strongIdentity = extractStrongIdentity(from: result)
+        let supportsSOA = extractSOAFlag(from: result)
 
  // 根据服务类型推断设备类型（纯 UI 用，不影响连接逻辑）
         var detectedDeviceType = ""
@@ -1093,7 +1112,7 @@ public class P2PDiscoveryService: BaseManager {
             name: deviceName + detectedDeviceType,
             ipv4: ipv4,
             ipv6: ipv6,
-            services: [serviceType],
+            services: supportsSOA ? [serviceType, "hs_soa"] : [serviceType],
             portMap: [serviceType: port],
             connectionTypes: [.wifi], // 网络发现的设备默认为 Wi-Fi
             uniqueIdentifier: preferredUniqueIdentifier(
@@ -1145,6 +1164,9 @@ public class P2PDiscoveryService: BaseManager {
                 existingDevice.services.append(serviceType)
                 existingDevice.portMap[serviceType] = port
             }
+            if supportsSOA, !existingDevice.services.contains("hs_soa") {
+                existingDevice.services.append("hs_soa")
+            }
             if let newDeviceId = strongIdentity.deviceId, !newDeviceId.isEmpty {
                 existingDevice.deviceId = newDeviceId
             }
@@ -1178,7 +1200,8 @@ public class P2PDiscoveryService: BaseManager {
     private func addDiscoveredDeviceAsync(from result: NWBrowser.Result, serviceType: String) {
         let bonjourUniqueIdentifier = bonjourIdentifier(from: result.endpoint)
         let strongIdentity = extractStrongIdentity(from: result)
-        Task.detached { [serviceType, bonjourUniqueIdentifier, strongIdentity] in
+        let supportsSOA = extractSOAFlag(from: result)
+        Task.detached { [serviceType, bonjourUniqueIdentifier, strongIdentity, supportsSOA] in
             let deviceName = P2P_ExtractDeviceName(result)
             let (ipv4, ipv6) = P2P_ExtractNetworkAddrs(result)
             let port = 0
@@ -1199,7 +1222,7 @@ public class P2PDiscoveryService: BaseManager {
                 name: deviceName + detectedDeviceType,
                 ipv4: ipv4,
                 ipv6: ipv6,
-                services: [serviceType],
+                services: supportsSOA ? [serviceType, "hs_soa"] : [serviceType],
                 portMap: [serviceType: port],
                 connectionTypes: [.wifi],
                 uniqueIdentifier: {
@@ -1234,6 +1257,9 @@ public class P2PDiscoveryService: BaseManager {
                     if !existing.services.contains(serviceType) {
                         existing.services.append(serviceType)
                         existing.portMap[serviceType] = port
+                    }
+                    if supportsSOA, !existing.services.contains("hs_soa") {
+                        existing.services.append("hs_soa")
                     }
                     if let newDeviceId = strongIdentity.deviceId, !newDeviceId.isEmpty {
                         existing.deviceId = newDeviceId
@@ -1369,6 +1395,77 @@ public class P2PDiscoveryService: BaseManager {
         }
     }
 
+    private func resolveInboundPeerIdentifier(for endpoint: NWEndpoint) -> String {
+        let fallback = Self.fallbackPeerIdentifier(for: endpoint)
+        switch endpoint {
+        case .hostPort(let host, _):
+            let hostText = String(describing: host).lowercased()
+            if let match = discoveredDevices.first(where: {
+                ($0.ipv4?.lowercased() == hostText) || ($0.ipv6?.lowercased() == hostText)
+            }) {
+                if let deviceId = match.deviceId?.trimmingCharacters(in: .whitespacesAndNewlines), !deviceId.isEmpty {
+                    return "id:\(deviceId)"
+                }
+                if let unique = match.uniqueIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines), !unique.isEmpty {
+                    return unique
+                }
+            }
+            return fallback
+        case .service(let name, _, let domain, _):
+            let normalizedName = name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let normalizedDomain = (domain.isEmpty ? "local." : domain).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if let match = discoveredDevices.first(where: { device in
+                let cleaned = device.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                return cleaned == normalizedName || cleaned.contains(normalizedName)
+            }) {
+                if let deviceId = match.deviceId?.trimmingCharacters(in: .whitespacesAndNewlines), !deviceId.isEmpty {
+                    return "id:\(deviceId)"
+                }
+                if let unique = match.uniqueIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines), !unique.isEmpty {
+                    return unique
+                }
+            }
+            return "bonjour:\(normalizedName)@\(normalizedDomain)"
+        default:
+            return fallback
+        }
+    }
+
+    private nonisolated static func fallbackPeerIdentifier(for endpoint: NWEndpoint) -> String {
+        switch endpoint {
+        case .service(let name, _, let domain, _):
+            let resolvedDomain = domain.isEmpty ? "local." : domain
+            return "bonjour:\(name)@\(resolvedDomain)"
+        case .hostPort(let host, _):
+            return "host:\(host)"
+        default:
+            return endpoint.debugDescription
+        }
+    }
+
+    private nonisolated static func canonicalSOAIdentityString(_ raw: String) -> String {
+        var normalized = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if normalized.hasPrefix("id:") {
+            normalized.removeFirst(3)
+        }
+        return normalized
+    }
+
+    private nonisolated static func soaPeerIdBytes(from raw: String) -> Data {
+        let canonical = canonicalSOAIdentityString(raw)
+        return Data(SHA256.hash(data: Data(canonical.utf8)))
+    }
+
+    private nonisolated static func localSOAPeerIdBytes() async -> Data {
+        if #available(macOS 14.0, iOS 17.0, *) {
+            let snapshot = await SelfIdentityProvider.shared.snapshot()
+            if !snapshot.deviceId.isEmpty {
+                return soaPeerIdBytes(from: snapshot.deviceId)
+            }
+        }
+        return soaPeerIdBytes(from: Host.current().localizedName ?? "mac-local")
+    }
+
  /// 统一的入站控制包模型，JSON使用Base64承载二进制字段
     private struct SecurePacket: Codable {
         enum PacketType: String, Codable { case message, keyExchange, heartbeat }
@@ -1456,7 +1553,22 @@ public class P2PDiscoveryService: BaseManager {
         func packetSenderId(_ packet: SecurePacket) -> String { String(packet.timestamp) }
 
         let transport = DirectHandshakeTransport(connection: connection)
-        let peer = PeerIdentifier(deviceId: "ios-\(connection.endpoint.debugDescription)")
+        let resolvedPeerId = await MainActor.run { [weak self] in
+            self?.resolveInboundPeerIdentifier(for: connection.endpoint) ?? Self.fallbackPeerIdentifier(for: connection.endpoint)
+        }
+        let localSOAPeerId = await Self.localSOAPeerIdBytes()
+        let expectedRemoteSOAPeerId = Self.soaPeerIdBytes(from: resolvedPeerId)
+        let inboundPairKey = PeerSessionArbiter.pairKey(
+            localPeerId: localSOAPeerId,
+            remotePeerId: expectedRemoteSOAPeerId
+        )
+        defer {
+            Task {
+                await PeerSessionArbiter.shared.clearEstablished(pairKey: inboundPairKey)
+                await PeerSessionArbiter.shared.clearOutgoing(pairKey: inboundPairKey, attemptId: nil)
+            }
+        }
+        let peer = PeerIdentifier(deviceId: resolvedPeerId)
         var driver: HandshakeDriver?
 
         logger.info("🤝 入站连接：启用 HandshakeDriver 兼容通道（iOS 互通） state=\(String(describing: connection.state), privacy: .public)")
@@ -1585,7 +1697,9 @@ public class P2PDiscoveryService: BaseManager {
                                 sigAAlgorithm: sigAAlgorithm,
                                 identityPublicKey: identityPublicKeyWire,
                                 offeredSuites: offeredSuites,
-                                policy: policy
+                                policy: policy,
+                                localSOAPeerId: localSOAPeerId,
+                                expectedRemoteSOAPeerId: expectedRemoteSOAPeerId
                             )
                             logger.info("🤝 入站 HandshakeDriver 初始化完成: sigA=\(sigAAlgorithm.rawValue, privacy: .public) provider=\(String(describing: type(of: cryptoProvider)), privacy: .public)")
                         } catch {
@@ -2120,7 +2234,7 @@ public class P2PDiscoveryService: BaseManager {
             address: address,
             port: UInt16(portInt),
             osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
-            capabilities: [],
+            capabilities: Array(Set(d.services)).sorted(),
             publicKey: Data(), // 公钥在 P2PSecurityManager.establishSessionKey 握手时获取
             lastSeen: Date(),
             endpoints: endpoints,

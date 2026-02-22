@@ -125,6 +125,8 @@ public struct TwoAttemptHandshakeManager: Sendable {
         case .missingPeerKEMPublicKey:
             // Not a downgrade edge in the paper whitelist. Treat as provisioning/bootstrap signal.
             return false
+        case .supersededByConcurrentAttempt:
+            return false
         case .timeout, .signatureVerificationFailed,
              .replayDetected, .keyConfirmationFailed,
              .suiteSignatureMismatch, .identityMismatch,
@@ -334,6 +336,8 @@ public struct TwoAttemptHandshakeManager: Sendable {
         case .missingPeerKEMPublicKey:
             // Distinguish from "pqc unavailable": it's "missing peer provisioning".
             return false
+        case .supersededByConcurrentAttempt:
+            return false
         case .timeout, .cancelled, .peerRejected, .cryptoError, .transportError,
              .versionMismatch, .signatureVerificationFailed, .invalidMessageFormat,
              .identityMismatch, .replayDetected, .secureEnclavePoPRequired,
@@ -357,4 +361,3 @@ public struct TwoAttemptHandshakeManager: Sendable {
         return list.contains(where: { $0.id == deviceId })
     }
 }
-

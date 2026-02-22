@@ -2,6 +2,9 @@ import Foundation
 import Network
 import CryptoKit
 import os
+#if canImport(Security)
+import Security
+#endif
 
 // MARK: - 设备类型枚举
 public enum P2PDeviceType: String, Codable, CaseIterable, Sendable {
@@ -499,6 +502,8 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
     private let bootstrapAssistedHandshakeLock = OSAllocatedUnfairLock<Bool>(initialState: false)
     @available(macOS 14.0, iOS 17.0, *)
     private let lastPairingIdentityExchangeSentAtLock = OSAllocatedUnfairLock<Date?>(initialState: nil)
+    @available(macOS 14.0, iOS 17.0, *)
+    private let soaPairKeyLock = OSAllocatedUnfairLock<Data?>(initialState: nil)
     private var metricsTask: Task<Void, Never>?
 
     private var receiveTask: Task<Void, Never>?
@@ -568,6 +573,11 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         if #available(macOS 14.0, iOS 17.0, *) {
             handshakeDriverLock.withLock { $0 = nil }
             sessionKeysLock.withLock { $0 = nil }
+            let stalePairKey = soaPairKeyLock.withLock { state -> Data? in
+                let current = state
+                state = nil
+                return current
+            }
             metricsLock.withLock { state in
                 state.lastBandwidthSampleAt = nil
                 state.lastPingSentAt = nil
@@ -576,6 +586,12 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             }
             rekeyInProgressLock.withLock { $0 = false }
             bootstrapAssistedHandshakeLock.withLock { $0 = false }
+            if let stalePairKey {
+                Task {
+                    await PeerSessionArbiter.shared.clearEstablished(pairKey: stalePairKey)
+                    await PeerSessionArbiter.shared.clearOutgoing(pairKey: stalePairKey, attemptId: nil)
+                }
+            }
         }
         connection.cancel()
         status = .disconnected
@@ -608,9 +624,16 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             let keys = try await performHandshake()
             sessionKeysLock.withLock { $0 = keys }
             handshakeDriverLock.withLock { $0 = nil }
+            if shouldUseSOA() {
+                let pairKey = await currentSOAPairKey()
+                soaPairKeyLock.withLock { $0 = pairKey }
+            } else {
+                soaPairKeyLock.withLock { $0 = nil }
+            }
             await MainActor.run { self.status = .authenticated }
             startMetricsIfNeeded()
         } catch {
+            soaPairKeyLock.withLock { $0 = nil }
             await MainActor.run { self.status = .failed }
             throw error
         }
@@ -705,6 +728,9 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         }
 
         handshakeDriverLock.withLock { $0 = nil }
+        let shouldAdvertiseSOA = shouldUseSOA()
+        let localSOAPeerId: Data? = shouldAdvertiseSOA ? await localSOAPeerIdBytes() : nil
+        let expectedRemoteSOAPeerId: Data? = shouldAdvertiseSOA ? remoteSOAPeerIdBytes(for: handshakePeer.deviceId) : nil
 
         return try await TwoAttemptHandshakeManager.performHandshakeWithPreparation(
             deviceId: handshakePeer.deviceId,
@@ -733,6 +759,19 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
                 sePoPPublicKey: nil
             ).asWire().encoded
 
+            let outboundSOA: HandshakeSOAMetadata? = {
+                guard shouldAdvertiseSOA,
+                      let localSOAPeerId,
+                      let expectedRemoteSOAPeerId else {
+                    return nil
+                }
+                return try? HandshakeSOAMetadata(
+                    initiatorPeerId: localSOAPeerId,
+                    targetPeerId: expectedRemoteSOAPeerId,
+                    attemptId: Self.randomAttemptIdBytes()
+                )
+            }()
+
             let driver = try HandshakeDriver(
                 transport: transport,
                 cryptoProvider: cryptoProvider,
@@ -742,7 +781,10 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
                 identityPublicKey: identityPublicKeyWire,
                 offeredSuites: preparation.offeredSuites,
                 policy: policy,
-                cryptoPolicy: .default
+                cryptoPolicy: .default,
+                soaMetadata: outboundSOA,
+                localSOAPeerId: localSOAPeerId,
+                expectedRemoteSOAPeerId: expectedRemoteSOAPeerId
             )
             self.handshakeDriverLock.withLock { $0 = driver }
             return try await driver.initiateHandshake(with: self.handshakePeer)
@@ -940,6 +982,67 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             displayName: fallback.displayName,
             address: fallback.address
         )
+    }
+
+    @available(macOS 14.0, iOS 17.0, *)
+    private func shouldUseSOA() -> Bool {
+        device.capabilities.contains("hs_soa")
+    }
+
+    @available(macOS 14.0, iOS 17.0, *)
+    private func localSOAPeerIdBytes() async -> Data {
+        let snapshot = await SelfIdentityProvider.shared.snapshot()
+        if !snapshot.deviceId.isEmpty {
+            return Self.soaPeerIdBytes(from: snapshot.deviceId)
+        }
+        return Self.soaPeerIdBytes(from: Host.current().localizedName ?? "mac-local")
+    }
+
+    @available(macOS 14.0, iOS 17.0, *)
+    private func remoteSOAPeerIdBytes(for peerId: String) -> Data {
+        Self.soaPeerIdBytes(from: peerId)
+    }
+
+    @available(macOS 14.0, iOS 17.0, *)
+    private func currentSOAPairKey() async -> Data {
+        let local = await localSOAPeerIdBytes()
+        let remote = remoteSOAPeerIdBytes(for: handshakePeer.deviceId)
+        return PeerSessionArbiter.pairKey(localPeerId: local, remotePeerId: remote)
+    }
+
+    private nonisolated static func soaPeerIdBytes(from raw: String) -> Data {
+        let canonical = canonicalSOAIdentityString(raw)
+        return Data(SHA256.hash(data: Data(canonical.utf8)))
+    }
+
+    private nonisolated static func canonicalSOAIdentityString(_ raw: String) -> String {
+        var normalized = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if normalized.hasPrefix("id:") {
+            normalized.removeFirst(3)
+        }
+        if normalized.hasPrefix("recent:") {
+            normalized.removeFirst("recent:".count)
+        }
+        if normalized.hasPrefix("mac:bonjour:") {
+            normalized.removeFirst("mac:".count)
+        }
+        return normalized
+    }
+
+    private nonisolated static func randomAttemptIdBytes() -> Data {
+        var bytes = [UInt8](repeating: 0, count: HandshakeSOAExtension.attemptIdLength)
+        #if canImport(Security)
+        if SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) != errSecSuccess {
+            for idx in bytes.indices {
+                bytes[idx] = UInt8.random(in: UInt8.min...UInt8.max)
+            }
+        }
+        #else
+        for idx in bytes.indices {
+            bytes[idx] = UInt8.random(in: UInt8.min...UInt8.max)
+        }
+        #endif
+        return Data(bytes)
     }
 
     private func trustLookupCandidates(primary: String, persistent: String?) -> [String] {

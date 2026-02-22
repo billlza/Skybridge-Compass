@@ -134,6 +134,8 @@ public struct TwoAttemptHandshakeManager: Sendable {
             return false
         case .identityMismatch:
             return false
+        case .supersededByConcurrentAttempt:
+            return false
  // 其他错误也不允许降级
         case .cancelled, .cryptoError, .transportError,
              .versionMismatch, .invalidMessageFormat, .secureEnclavePoPRequired,
@@ -480,7 +482,8 @@ public struct TwoAttemptHandshakeManager: Sendable {
         case .cancelled, .peerRejected, .cryptoError, .transportError,
              .versionMismatch, .signatureVerificationFailed, .invalidMessageFormat,
              .identityMismatch, .replayDetected, .secureEnclavePoPRequired,
-             .secureEnclaveSignatureInvalid, .keyConfirmationFailed, .suiteSignatureMismatch:
+             .secureEnclaveSignatureInvalid, .keyConfirmationFailed, .suiteSignatureMismatch,
+             .supersededByConcurrentAttempt:
  // 其他错误不允许降级
             return false
         }

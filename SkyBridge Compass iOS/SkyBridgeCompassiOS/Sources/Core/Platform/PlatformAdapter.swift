@@ -238,7 +238,11 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
     // MARK: - Handshake API
     
     /// 创建握手驱动器
-    public func createHandshakeDriver(transport: any DiscoveryTransport) throws -> HandshakeDriver {
+    public func createHandshakeDriver(
+        transport: any DiscoveryTransport,
+        localSOAPeerId: Data? = nil,
+        expectedRemoteSOAPeerId: Data? = nil
+    ) throws -> HandshakeDriver {
         guard isInitialized,
               let provider = cryptoProvider,
               let sigProvider = signatureProvider,
@@ -254,7 +258,9 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
             identityKeyHandle: keyHandle,
             sigAAlgorithm: sigProvider.signatureAlgorithm,
             identityPublicKey: publicKey,
-            policy: handshakePolicy
+            policy: handshakePolicy,
+            localSOAPeerId: localSOAPeerId,
+            expectedRemoteSOAPeerId: expectedRemoteSOAPeerId
         )
     }
     
@@ -263,6 +269,9 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
         deviceId: String,
         transport: any DiscoveryTransport,
         preferPQC: Bool = true,
+        soaMetadata: HandshakeSOAMetadata? = nil,
+        localSOAPeerId: Data? = nil,
+        expectedRemoteSOAPeerId: Data? = nil,
         onDriverCreated: (@Sendable (HandshakeDriver) async -> Void)? = nil
     ) async throws -> SessionKeys {
         guard isInitialized,
@@ -304,7 +313,10 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
                 identityKeyHandle: keyHandle,
                 sigAAlgorithm: preparation.sigAAlgorithm,
                 identityPublicKey: publicKey,
-                policy: self.handshakePolicy
+                policy: self.handshakePolicy,
+                soaMetadata: soaMetadata,
+                localSOAPeerId: localSOAPeerId,
+                expectedRemoteSOAPeerId: expectedRemoteSOAPeerId
             )
 
             if let onDriverCreated {

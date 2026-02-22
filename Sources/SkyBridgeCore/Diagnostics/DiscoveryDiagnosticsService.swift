@@ -570,6 +570,8 @@ public enum HandshakeErrorLocalizer {
             
         case .suiteNotSupported:
             return "不支持的加密套件 - 请更新应用"
+        case .supersededByConcurrentAttempt:
+            return "检测到并发连接，本次连接已被新尝试取代"
         }
     }
     
@@ -606,6 +608,8 @@ public enum HandshakeErrorLocalizer {
             
         case .secureEnclavePoPRequired, .secureEnclaveSignatureInvalid:
             return "请确保两台设备都支持 Secure Enclave，或调整安全策略设置"
+        case .supersededByConcurrentAttempt:
+            return "这是并发连接仲裁行为，请稍后重试或在另一端取消重复发起"
             
         default:
             return nil
@@ -643,4 +647,3 @@ public enum HandshakeErrorLocalizer {
         return simplified.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
-

@@ -45,6 +45,7 @@ public class P2PConnectionManager: ObservableObject {
     private var reconnectTasks: [String: Task<Void, Never>] = [:]
     private var reconnectAttempts: [String: Int] = [:]
     private var lastKnownDevices: [String: DiscoveredDevice] = [:]
+    private var pairKeyByDeviceId: [String: Data] = [:]
     
     /// Prevent pairing identity exchange ping-pong loops.
     private var lastPairingIdentityExchangeSentAt: [String: Date] = [:]
@@ -274,6 +275,9 @@ public class P2PConnectionManager: ObservableObject {
         let limit = max(1, SettingsManager.instance.maxConcurrentConnections)
         guard connectingCount < limit else {
             throw P2PError.tooManyConcurrentConnections
+        }
+        if sessionKeys[device.id] != nil || connections[device.id] != nil {
+            throw P2PError.alreadyConnected
         }
         connectingCount += 1
         defer { connectingCount -= 1 }
@@ -510,6 +514,7 @@ public class P2PConnectionManager: ObservableObject {
         handshakeDrivers.removeValue(forKey: device.id)
         inboundLegacyBootstrapPeers.remove(device.id)
         await transport?.removeConnection(for: device.id)
+        await releaseArbiterState(for: device.id)
         
         // 更新活动连接列表
         activeConnections.removeAll { $0.device.id == device.id }
@@ -568,7 +573,11 @@ public class P2PConnectionManager: ObservableObject {
         
         // 创建握手驱动器（响应方角色）
         do {
-            let driver = try skyBridgeCore.createHandshakeDriver(transport: transport!)
+            let driver = try skyBridgeCore.createHandshakeDriver(
+                transport: transport!,
+                localSOAPeerId: localSOAPeerIdBytes(),
+                expectedRemoteSOAPeerId: soaPeerIdBytes(for: peerId)
+            )
             handshakeDrivers[peerId] = driver
             
             // 开始接收消息
@@ -664,6 +673,9 @@ public class P2PConnectionManager: ObservableObject {
         reconnectAttempts.removeValue(forKey: peerId)
         connectionStatusByDeviceId[peerId] = .failed
         connectionErrorByDeviceId[peerId] = reason
+        Task { @MainActor in
+            await self.releaseArbiterState(for: peerId)
+        }
     }
     
     /// 处理收到的消息
@@ -723,6 +735,10 @@ public class P2PConnectionManager: ObservableObject {
         switch state {
         case .established(let keys):
             setSessionKeys(keys, for: peerId)
+            pairKeyByDeviceId[peerId] = PeerSessionArbiter.pairKey(
+                localPeerId: localSOAPeerIdBytes(),
+                remotePeerId: soaPeerIdBytes(for: peerId)
+            )
             handshakeDrivers.removeValue(forKey: peerId)
             rekeyInProgress.remove(peerId)
             currentHandshakeState = "握手成功 (Suite: \(keys.negotiatedSuite.rawValue))"
@@ -768,7 +784,11 @@ public class P2PConnectionManager: ObservableObject {
             } else {
                 try await skyBridgeCore.initialize(policy: previousPolicy)
                 guard let transport else { throw P2PError.connectionFailed }
-                let driver = try skyBridgeCore.createHandshakeDriver(transport: transport)
+                let driver = try skyBridgeCore.createHandshakeDriver(
+                    transport: transport,
+                    localSOAPeerId: localSOAPeerIdBytes(),
+                    expectedRemoteSOAPeerId: soaPeerIdBytes(for: peerId)
+                )
                 handshakeDrivers[peerId] = driver
             }
         } catch {
@@ -821,7 +841,11 @@ public class P2PConnectionManager: ObservableObject {
 
         let previousPolicy = effectiveSelectionPolicy(enforcePQC: pqcManager.enforcePQCHandshake)
         try await skyBridgeCore.initialize(policy: .classicOnly)
-        let classicDriver = try skyBridgeCore.createHandshakeDriver(transport: transport)
+        let classicDriver = try skyBridgeCore.createHandshakeDriver(
+            transport: transport,
+            localSOAPeerId: localSOAPeerIdBytes(),
+            expectedRemoteSOAPeerId: soaPeerIdBytes(for: peerId)
+        )
         handshakeDrivers[peerId] = classicDriver
         inboundLegacyBootstrapPeers.insert(peerId)
 
@@ -1080,6 +1104,7 @@ public class P2PConnectionManager: ObservableObject {
             activeConnections.removeAll { $0.device.id == device.id }
             heartbeatTasks[device.id]?.cancel()
             heartbeatTasks.removeValue(forKey: device.id)
+            await releaseArbiterState(for: device.id)
             scheduleReconnectIfNeeded(deviceId: device.id)
             
         case .cancelled:
@@ -1097,6 +1122,7 @@ public class P2PConnectionManager: ObservableObject {
             SkyBridgeLogger.shared.warning("⏹️ 连接已取消/断开: \(device.name) user=\(wasUser)")
             heartbeatTasks[device.id]?.cancel()
             heartbeatTasks.removeValue(forKey: device.id)
+            await releaseArbiterState(for: device.id)
             if !wasUser {
                 scheduleReconnectIfNeeded(deviceId: device.id)
             }
@@ -1281,6 +1307,84 @@ public class P2PConnectionManager: ObservableObject {
             await LiveActivityManager.shared.setConnected(deviceName: name, cryptoSuite: keys.negotiatedSuite.rawValue)
         }
     }
+
+    private func shouldUseSOA(for device: DiscoveredDevice) -> Bool {
+        device.capabilities.contains("hs_soa") || device.advertisedCapabilities.contains("hs_soa")
+    }
+
+    private func localSOAPeerIdBytes() -> Data {
+        #if canImport(UIKit)
+        if let vendor = UIDevice.current.identifierForVendor?.uuidString {
+            return canonicalPeerIdBytes(from: vendor)
+        }
+        #endif
+        let key = "p2p.local_peer_id_fallback.v1"
+        let existing = UserDefaults.standard.string(forKey: key) ?? ""
+        if !existing.isEmpty {
+            return canonicalPeerIdBytes(from: existing)
+        }
+        let generated = UUID().uuidString.lowercased()
+        UserDefaults.standard.set(generated, forKey: key)
+        return canonicalPeerIdBytes(from: generated)
+    }
+
+    private func soaPeerIdBytes(for peerId: String) -> Data {
+        canonicalPeerIdBytes(from: canonicalPeerIdentifier(peerId))
+    }
+
+    private func canonicalPeerIdentifier(_ peerId: String) -> String {
+        let normalized = peerId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if normalized.hasPrefix("id:") {
+            return String(normalized.dropFirst(3))
+        }
+
+        if normalized.hasPrefix("host:") {
+            let host = String(normalized.dropFirst(5))
+            if let matched = discoveryManager.discoveredDevices.first(where: {
+                $0.ipAddress?.lowercased() == host && $0.id.lowercased().hasPrefix("id:")
+            }) {
+                return canonicalPeerIdentifier(matched.id)
+            }
+        }
+
+        if normalized.hasPrefix("bonjour:"),
+           let matched = discoveryManager.discoveredDevices.first(where: {
+               guard $0.id.lowercased().hasPrefix("id:"),
+                     let bonjourName = $0.bonjourServiceName?.lowercased() else {
+                   return false
+               }
+               return normalized.contains(bonjourName)
+           }) {
+            return canonicalPeerIdentifier(matched.id)
+        }
+
+        if let known = lastKnownDevices[peerId]?.id, known.lowercased().hasPrefix("id:") {
+            return canonicalPeerIdentifier(known)
+        }
+
+        return normalized
+    }
+
+    private func canonicalPeerIdBytes(from canonicalId: String) -> Data {
+        let digest = SHA256.hash(data: Data(canonicalId.utf8))
+        return Data(digest)
+    }
+
+    private func randomAttemptIdBytes() -> Data {
+        var bytes = [UInt8](repeating: 0, count: HandshakeSOAExtension.attemptIdLength)
+        if SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) != errSecSuccess {
+            for idx in bytes.indices {
+                bytes[idx] = UInt8.random(in: UInt8.min...UInt8.max)
+            }
+        }
+        return Data(bytes)
+    }
+
+    private func releaseArbiterState(for deviceId: String) async {
+        guard let pairKey = pairKeyByDeviceId.removeValue(forKey: deviceId) else { return }
+        await PeerSessionArbiter.shared.clearEstablished(pairKey: pairKey)
+        await PeerSessionArbiter.shared.clearOutgoing(pairKey: pairKey, attemptId: nil)
+    }
     
     /// 执行 PQC 握手（使用完整的 HandshakeDriver 协议）
     private func performPQCHandshake(
@@ -1307,14 +1411,32 @@ public class P2PConnectionManager: ObservableObject {
             transport = NWConnectionTransport()
         }
         await transport!.setConnection(connection, for: device.id)
-        
+
         do {
+            let localPeerId = localSOAPeerIdBytes()
+            let remotePeerId = soaPeerIdBytes(for: device.id)
+            pairKeyByDeviceId[device.id] = PeerSessionArbiter.pairKey(
+                localPeerId: localPeerId,
+                remotePeerId: remotePeerId
+            )
+            let outboundSOA: HandshakeSOAMetadata? = {
+                guard shouldUseSOA(for: device) else { return nil }
+                return try? HandshakeSOAMetadata(
+                    initiatorPeerId: localPeerId,
+                    targetPeerId: remotePeerId,
+                    attemptId: randomAttemptIdBytes()
+                )
+            }()
+
             // 让握手驱动器可接收来自 startReceiving 的消息
             let peerId = device.id
             let keys = try await skyBridgeCore.performHandshake(
                 deviceId: peerId,
                 transport: transport!,
                 preferPQC: preferPQC,
+                soaMetadata: outboundSOA,
+                localSOAPeerId: localPeerId,
+                expectedRemoteSOAPeerId: remotePeerId,
                 onDriverCreated: { driver in
                     // Swift 6 并发：避免在并发回调里捕获/引用 `self`（即使是 weak self）
                     await MainActor.run {
@@ -1497,6 +1619,7 @@ public enum P2PError: Error, LocalizedError {
     case encryptionFailed
     case decryptionFailed
     case tooManyConcurrentConnections
+    case alreadyConnected
     
     public var errorDescription: String? {
         switch self {
@@ -1509,6 +1632,7 @@ public enum P2PError: Error, LocalizedError {
         case .encryptionFailed: return "加密失败"
         case .decryptionFailed: return "解密失败"
         case .tooManyConcurrentConnections: return "连接过于频繁，请稍后再试（已达到并发上限）"
+        case .alreadyConnected: return "设备已建立连接"
         }
     }
 }

@@ -283,6 +283,76 @@ public struct ProtocolIdentityPublicKeys: Sendable, Equatable {
     }
 }
 
+// MARK: - MessageA Extensions (SOA)
+
+public struct HandshakeSOAExtension: Sendable, Equatable {
+    public static let tlvType: UInt16 = 0x0001
+    public static let soaVersion: UInt8 = 1
+    public static let initiatorPeerIdLength = 32
+    public static let targetPeerIdLength = 32
+    public static let attemptIdLength = 16
+    public static let valueLength = 1 + initiatorPeerIdLength + targetPeerIdLength + attemptIdLength
+
+    public let version: UInt8
+    public let initiatorPeerId: Data
+    public let targetPeerId: Data
+    public let attemptId: Data
+
+    public init(
+        version: UInt8 = HandshakeSOAExtension.soaVersion,
+        initiatorPeerId: Data,
+        targetPeerId: Data,
+        attemptId: Data
+    ) throws {
+        guard initiatorPeerId.count == Self.initiatorPeerIdLength else {
+            throw HandshakeError.failed(.invalidMessageFormat("SOA initiatorPeerId must be 32 bytes"))
+        }
+        guard targetPeerId.count == Self.targetPeerIdLength else {
+            throw HandshakeError.failed(.invalidMessageFormat("SOA targetPeerId must be 32 bytes"))
+        }
+        guard attemptId.count == Self.attemptIdLength else {
+            throw HandshakeError.failed(.invalidMessageFormat("SOA attemptId must be 16 bytes"))
+        }
+        self.version = version
+        self.initiatorPeerId = initiatorPeerId
+        self.targetPeerId = targetPeerId
+        self.attemptId = attemptId
+    }
+
+    public var encodedValue: Data {
+        var value = Data()
+        value.append(version)
+        value.append(initiatorPeerId)
+        value.append(targetPeerId)
+        value.append(attemptId)
+        return value
+    }
+
+    public var encodedTLV: Data {
+        var tlv = Data()
+        HandshakeEncoding.appendUInt16LE(Self.tlvType, to: &tlv)
+        HandshakeEncoding.appendUInt16LE(UInt16(Self.valueLength), to: &tlv)
+        tlv.append(encodedValue)
+        return tlv
+    }
+
+    public static func decodeValue(_ value: Data) throws -> HandshakeSOAExtension {
+        guard value.count == Self.valueLength else {
+            throw HandshakeError.failed(.invalidMessageFormat("SOA TLV value length mismatch"))
+        }
+        let version = value[0]
+        let initiatorPeerId = value[1..<(1 + Self.initiatorPeerIdLength)]
+        let targetPeerId = value[(1 + Self.initiatorPeerIdLength)..<(1 + Self.initiatorPeerIdLength + Self.targetPeerIdLength)]
+        let attemptId = value.suffix(Self.attemptIdLength)
+        return try HandshakeSOAExtension(
+            version: version,
+            initiatorPeerId: Data(initiatorPeerId),
+            targetPeerId: Data(targetPeerId),
+            attemptId: Data(attemptId)
+        )
+    }
+}
+
 // MARK: - HandshakeMessageA
 
 /// 握手消息 A（发起方 -> 响应方）
@@ -295,6 +365,8 @@ public struct ProtocolIdentityPublicKeys: Sendable, Equatable {
 /// [v2InitiatorContribution(var, only when FS suite is offered)] || signature(var) || seSignature(var)
 /// ```
 public struct HandshakeMessageA: Sendable {
+    private static let extensionContainerMagic = Data([0x53, 0x4F, 0x41, 0x31]) // "SOA1"
+
  /// 协议版本
     public let version: UInt8
 
@@ -322,11 +394,19 @@ public struct HandshakeMessageA: Sendable {
  /// 使用 `identityPublicKeys` 属性获取结构化数据
     public let identityPublicKey: Data
 
+ /// 可选扩展区原始字节（TLV 容器，保留未知扩展 passthrough）
+    public let extensionsRaw: Data
+
  /// Secure Enclave 签名（可选）
     public let secureEnclaveSignature: Data?
 
  /// v2 可选发起方临时贡献（例如 FS 套件下的 X25519 公钥）
     public let initiatorContribution: Data?
+
+ /// 已知 SOA 扩展（若存在且可解析）
+    public var soaExtension: HandshakeSOAExtension? {
+        decodeSOAExtension(from: extensionsRaw)
+    }
 
  /// 结构化身份公钥（ 6.2）
  ///
@@ -353,6 +433,7 @@ public struct HandshakeMessageA: Sendable {
         capabilities: CryptoCapabilities,
         signature: Data,
         identityPublicKey: Data,
+        extensionsRaw: Data = Data(),
         secureEnclaveSignature: Data? = nil,
         initiatorContribution: Data? = nil
     ) {
@@ -364,6 +445,7 @@ public struct HandshakeMessageA: Sendable {
         self.capabilities = capabilities
         self.signature = signature
         self.identityPublicKey = identityPublicKey
+        self.extensionsRaw = extensionsRaw
         self.secureEnclaveSignature = secureEnclaveSignature
         self.initiatorContribution = initiatorContribution
     }
@@ -380,6 +462,7 @@ public struct HandshakeMessageA: Sendable {
         capabilities: CryptoCapabilities,
         signature: Data,
         identityPublicKeys: IdentityPublicKeys,
+        extensionsRaw: Data = Data(),
         secureEnclaveSignature: Data? = nil,
         initiatorContribution: Data? = nil
     ) {
@@ -391,6 +474,7 @@ public struct HandshakeMessageA: Sendable {
         self.capabilities = capabilities
         self.signature = signature
         self.identityPublicKey = identityPublicKeys.encoded
+        self.extensionsRaw = extensionsRaw
         self.secureEnclaveSignature = secureEnclaveSignature
         self.initiatorContribution = initiatorContribution
     }
@@ -546,6 +630,23 @@ public struct HandshakeMessageA: Sendable {
             offset += Int(contributionLen)
         }
 
+ // optional extensions container
+        var extensionsRaw = Data()
+        if offset + Self.extensionContainerMagic.count + 2 <= data.count {
+            let maybeMagic = data[offset..<(offset + Self.extensionContainerMagic.count)]
+            if maybeMagic.elementsEqual(Self.extensionContainerMagic) {
+                offset += Self.extensionContainerMagic.count
+                let extLen = try HandshakeEncoding.readUInt16LE(from: data, offset: &offset)
+                guard offset + Int(extLen) <= data.count else {
+                    throw HandshakeError.failed(.invalidMessageFormat("Extensions truncated"))
+                }
+                if extLen > 0 {
+                    extensionsRaw = Data(data[offset..<(offset + Int(extLen))])
+                }
+                offset += Int(extLen)
+            }
+        }
+
  // signature
         let sigLen = try HandshakeEncoding.readUInt16LE(from: data, offset: &offset)
         guard offset + Int(sigLen) <= data.count else {
@@ -576,6 +677,7 @@ public struct HandshakeMessageA: Sendable {
             capabilities: capabilities,
             signature: Data(signature),
             identityPublicKey: Data(identityPublicKey),
+            extensionsRaw: extensionsRaw,
             secureEnclaveSignature: secureEnclaveSignature,
             initiatorContribution: initiatorContribution
         )
@@ -619,7 +721,29 @@ public struct HandshakeMessageA: Sendable {
             HandshakeEncoding.appendUInt16LE(UInt16(contribution.count), to: &data)
             data.append(contribution)
         }
+        if !extensionsRaw.isEmpty {
+            data.append(Self.extensionContainerMagic)
+            HandshakeEncoding.appendUInt16LE(UInt16(extensionsRaw.count), to: &data)
+            data.append(extensionsRaw)
+        }
         return data
+    }
+
+    private func decodeSOAExtension(from raw: Data) -> HandshakeSOAExtension? {
+        guard !raw.isEmpty else { return nil }
+        var offset = 0
+        while offset + 4 <= raw.count {
+            let type = UInt16(raw[offset]) | (UInt16(raw[offset + 1]) << 8)
+            let len = UInt16(raw[offset + 2]) | (UInt16(raw[offset + 3]) << 8)
+            offset += 4
+            guard offset + Int(len) <= raw.count else { return nil }
+            let value = Data(raw[offset..<(offset + Int(len))])
+            offset += Int(len)
+            if type == HandshakeSOAExtension.tlvType {
+                return try? HandshakeSOAExtension.decodeValue(value)
+            }
+        }
+        return nil
     }
 }
 

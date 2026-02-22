@@ -545,7 +545,7 @@ public class DeviceDiscoveryManager: ObservableObject {
         // TXT 记录（用于系统信息/能力/端口展示）
         let txtRecord = extractTXTRecord(from: result)
         // 设备主键：使用“物理身份 key”（忽略 serviceType），避免同一设备多服务重复展示
-        let id = stableDeviceId(from: endpoint)
+        let id = stableDeviceId(from: endpoint, txtRecord: txtRecord)
         
         // 解析 TXT 记录
         let platform = detectPlatform(from: txtRecord, serviceType: serviceType, name: bonjourName)
@@ -585,6 +585,9 @@ public class DeviceDiscoveryManager: ObservableObject {
         let advertisedCaps = parseCapabilities(from: txtRecord)
         var unionCaps = Set(advertisedCaps)
         unionCaps.formUnion(capabilitiesInferred(from: serviceType))
+        if (txtRecord["hs_soa"] ?? txtRecord["HS_SOA"]) == "1" {
+            unionCaps.insert("hs_soa")
+        }
 
         // 端口：优先 TXT 端口字段（便于 UI 展示）；连接时可直接使用 .service 不依赖端口
         var portMap: [String: UInt16] = [:]
@@ -632,7 +635,16 @@ public class DeviceDiscoveryManager: ObservableObject {
 
     /// 生成尽可能稳定的设备 id：
     /// - 使用 Bonjour 实例名 + domain（忽略 serviceType），确保同一设备多个服务只展示一次
-    private func stableDeviceId(from endpoint: NWEndpoint) -> String {
+    private func stableDeviceId(from endpoint: NWEndpoint, txtRecord: [String: String]) -> String {
+        if let strongId = txtValue(
+            txtRecord,
+            "deviceId", "deviceID", "device_id",
+            "uniqueId", "unique_id",
+            "uuid", "id"
+        ), !strongId.isEmpty {
+            return "id:\(strongId.lowercased())"
+        }
+
         if case .service(let name, _, let domain, _) = endpoint {
             let d = domain.isEmpty ? "local." : domain
             return "bonjour:\(name)@\(d)"
@@ -1079,6 +1091,7 @@ public class DeviceDiscoveryManager: ObservableObject {
         
         // 协议版本
         record["version"] = "1"
+        record["hs_soa"] = "1"
         
         // 设备 ID（用于与 macOS 端对齐的稳定主键；不要截断，避免碰撞）
         #if canImport(UIKit)

@@ -341,7 +341,7 @@ public actor ServiceAdvertiserCenter {
         txtRecord: NWTXTRecord? = nil,
         connectionHandler: (@Sendable (NWConnection) -> Void)? = nil,
         stateHandler: (@Sendable (NWListener.State) -> Void)? = nil
-    ) throws -> UInt16 {
+    ) async throws -> UInt16 {
         if let existing = listeners[serviceType] {
             existing.cancel()
             listeners.removeValue(forKey: serviceType)
@@ -358,8 +358,14 @@ public actor ServiceAdvertiserCenter {
         }
         let listener = try NWListener(using: parameters)
 
-        // 默认携带基础 TXT（iOS 端用于显示系统版本等）
-        let finalTXT = txtRecord ?? makeDefaultTXTRecord()
+        // 默认携带基础 TXT（iOS 端用于显示系统版本等）；若调用方提供 TXT，则在此基础上覆盖/补充。
+        let baseTXT = await makeDefaultTXTRecord()
+        var finalTXT = baseTXT
+        if let txtRecord {
+            for (key, value) in txtRecord.dictionary {
+                finalTXT[key] = value
+            }
+        }
         let service = NWListener.Service(name: serviceName, type: serviceType, domain: "local.", txtRecord: finalTXT)
         listener.service = service
         if let ch = connectionHandler {
@@ -390,11 +396,11 @@ public actor ServiceAdvertiserCenter {
         txtRecord: NWTXTRecord? = nil,
         connectionHandler: (@Sendable (NWConnection) -> Void)? = nil,
         stateHandler: (@Sendable (NWListener.State) -> Void)? = nil
-    ) throws -> UInt16 {
+    ) async throws -> UInt16 {
         if isAdvertising(serviceType) {
             return UInt16(listeners[serviceType]?.port?.rawValue ?? 0)
         }
-        return try startAdvertising(
+        return try await startAdvertising(
             serviceName: serviceName,
             serviceType: serviceType,
             txtRecord: txtRecord,
@@ -403,11 +409,39 @@ public actor ServiceAdvertiserCenter {
         )
     }
 
-    private func makeDefaultTXTRecord() -> NWTXTRecord {
+    private func makeDefaultTXTRecord() async -> NWTXTRecord {
         var record = NWTXTRecord()
         record["platform"] = "macos"
         record["osVersion"] = ProcessInfo.processInfo.operatingSystemVersionString
         record["name"] = Host.current().localizedName ?? "Mac"
+
+        if #available(macOS 14.0, *) {
+            let snap = await SelfIdentityProvider.shared.snapshot()
+            if !snap.deviceId.isEmpty {
+                record["deviceId"] = snap.deviceId
+                record["uniqueId"] = snap.deviceId
+            }
+            if !snap.pubKeyFP.isEmpty {
+                record["pubKeyFP"] = snap.pubKeyFP
+            }
+        }
+
+        // Best-effort: advertise crypto suites/capabilities for cross-platform peers.
+        // This does not change the handshake protocol; it only improves discovery UX and peer filtering.
+        let provider = CryptoProviderFactory.make(policy: .preferPQC)
+        let classic = ClassicCryptoProvider()
+        var suiteIds: [UInt16] = []
+        suiteIds.append(contentsOf: provider.supportedSuites.map { $0.wireId })
+        suiteIds.append(contentsOf: classic.supportedSuites.map { $0.wireId })
+        var seen = Set<UInt16>()
+        let uniqueSuites = suiteIds.filter { seen.insert($0).inserted }
+        if !uniqueSuites.isEmpty {
+            record["cryptoSuites"] = uniqueSuites.map { String(format: "%04x", $0) }.joined(separator: ",")
+        }
+
+        // Capabilities are optional strings used by non-Apple clients for UI hints.
+        record["capabilities"] = "file,rdview,rdcontrol,clipboard"
+        record["hs_soa"] = "1"
         return record
     }
 

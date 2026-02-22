@@ -55,7 +55,7 @@ public enum HandshakeState: Sendable {
 // MARK: - HandshakeFailureReason
 
 /// 握手失败原因
-public enum HandshakeFailureReason: Sendable, Equatable {
+public enum HandshakeFailureReason: Error, LocalizedError, Sendable, Equatable {
  /// 超时
     case timeout
     
@@ -107,6 +107,50 @@ public enum HandshakeFailureReason: Sendable, Equatable {
     
  /// Suite 不支持
     case suiteNotSupported
+
+ /// 并发连接仲裁中被淘汰
+    case supersededByConcurrentAttempt(winnerPeerId: String, winnerAttemptId: String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .timeout:
+            return "Handshake timed out"
+        case .peerRejected(let message):
+            return message.isEmpty ? "Peer rejected handshake" : "Peer rejected handshake: \(message)"
+        case .cryptoError(let reason):
+            return "Cryptographic error: \(reason)"
+        case .transportError(let reason):
+            return "Transport error: \(reason)"
+        case .cancelled:
+            return "Handshake cancelled"
+        case .versionMismatch(let local, let remote):
+            return "Version mismatch (local: \(local), remote: \(remote))"
+        case .suiteNegotiationFailed:
+            return "Suite negotiation failed"
+        case .signatureVerificationFailed:
+            return "Signature verification failed"
+        case .invalidMessageFormat(let reason):
+            return "Invalid message format: \(reason)"
+        case .identityMismatch(let expected, let actual):
+            return "Identity mismatch (expected: \(expected), actual: \(actual))"
+        case .replayDetected:
+            return "Replay detected"
+        case .secureEnclavePoPRequired:
+            return "Secure Enclave proof-of-possession required"
+        case .secureEnclaveSignatureInvalid:
+            return "Secure Enclave signature invalid"
+        case .keyConfirmationFailed:
+            return "Finished MAC verification failed"
+        case .suiteSignatureMismatch(let selectedSuite, let sigAAlgorithm):
+            return "Suite/signature mismatch (suite: \(selectedSuite), sigA: \(sigAAlgorithm))"
+        case .pqcProviderUnavailable:
+            return "PQC provider unavailable"
+        case .suiteNotSupported:
+            return "Suite not supported"
+        case .supersededByConcurrentAttempt(let winnerPeerId, let winnerAttemptId):
+            return "Superseded by concurrent attempt (winner: \(winnerPeerId), attempt: \(winnerAttemptId))"
+        }
+    }
 }
 
 // MARK: - HandshakeRole

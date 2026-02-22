@@ -436,6 +436,9 @@ public class DeviceDiscoveryManager: BaseManager {
         logger.info("📡 停止广播服务")
         listener?.cancel()
         listener = nil
+        Task {
+            await ServiceAdvertiserCenter.shared.stopAdvertising("_skybridge._tcp")
+        }
     }
 
  /// 处理浏览器状态更新
@@ -701,6 +704,29 @@ public class DeviceDiscoveryManager: BaseManager {
         return token.lowercased()
     }
 
+    nonisolated private static func canonicalSOAIdentityString(_ raw: String) -> String {
+        var normalized = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if normalized.hasPrefix("id:") {
+            normalized.removeFirst(3)
+        }
+        return normalized
+    }
+
+    nonisolated private static func soaPeerIdBytes(from raw: String) -> Data {
+        let canonical = canonicalSOAIdentityString(raw)
+        return Data(SHA256.hash(data: Data(canonical.utf8)))
+    }
+
+    nonisolated private static func localSOAPeerIdBytes() async -> Data {
+        if #available(macOS 14.0, iOS 17.0, *) {
+            let snapshot = await SelfIdentityProvider.shared.snapshot()
+            if !snapshot.deviceId.isEmpty {
+                return soaPeerIdBytes(from: snapshot.deviceId)
+            }
+        }
+        return soaPeerIdBytes(from: Host.current().localizedName ?? "mac-local")
+    }
+
     nonisolated private static func consumeInboundHandshakeOrControlChannel(_ connection: NWConnection) async {
         let logger = Logger(subsystem: "com.skybridge.Compass", category: "InboundHandshake")
 
@@ -763,6 +789,18 @@ public class DeviceDiscoveryManager: BaseManager {
         // Use a stable peer id string aligned with iOS discovery (bonjour:<name>@<domain>) when possible.
         // This improves trust/pairing UX and ensures trust lookups don't churn across reconnects.
         let peerDeviceId = stablePeerIdentifier(for: connection.endpoint)
+        let localSOAPeerId = await localSOAPeerIdBytes()
+        let expectedRemoteSOAPeerId = soaPeerIdBytes(from: peerDeviceId)
+        let inboundPairKey = PeerSessionArbiter.pairKey(
+            localPeerId: localSOAPeerId,
+            remotePeerId: expectedRemoteSOAPeerId
+        )
+        defer {
+            Task {
+                await PeerSessionArbiter.shared.clearEstablished(pairKey: inboundPairKey)
+                await PeerSessionArbiter.shared.clearOutgoing(pairKey: inboundPairKey, attemptId: nil)
+            }
+        }
         let peer = PeerIdentifier(deviceId: peerDeviceId)
 
         // 关键：入站 responder 不能硬编码 Classic。
@@ -1022,7 +1060,9 @@ public class DeviceDiscoveryManager: BaseManager {
                                 sigAAlgorithm: sigAAlgorithm,
                                 identityPublicKey: identityPublicKeyWire,
                                 offeredSuites: offeredSuites,
-                                policy: effectivePolicy
+                                policy: effectivePolicy,
+                                localSOAPeerId: localSOAPeerId,
+                                expectedRemoteSOAPeerId: expectedRemoteSOAPeerId
                             )
                             logger.info("🤝 入站 HandshakeDriver 初始化完成: sigA=\(sigAAlgorithm.rawValue, privacy: .public) provider=\(String(describing: type(of: cryptoProvider)), privacy: .public)")
                         } catch {

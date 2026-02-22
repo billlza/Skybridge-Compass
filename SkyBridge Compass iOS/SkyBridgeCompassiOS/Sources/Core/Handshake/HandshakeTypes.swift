@@ -39,7 +39,7 @@ public enum HandshakeState: Sendable {
 // MARK: - HandshakeFailureReason
 
 /// 握手失败原因
-public enum HandshakeFailureReason: Error, Sendable {
+public enum HandshakeFailureReason: Error, LocalizedError, Sendable {
     case timeout
     case cancelled
     case peerRejected(String)
@@ -60,6 +60,50 @@ public enum HandshakeFailureReason: Error, Sendable {
     case missingPeerKEMPublicKey(suite: String)
     case suiteNotSupported
     case suiteNegotiationFailed
+    case supersededByConcurrentAttempt(winnerPeerId: String, winnerAttemptId: String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .timeout:
+            return "握手超时：对端未及时响应。"
+        case .cancelled:
+            return "握手已取消。"
+        case .peerRejected(let reason):
+            return reason.isEmpty ? "对端拒绝连接请求。" : "对端拒绝连接：\(reason)"
+        case .cryptoError(let message):
+            return "密码学处理失败：\(message)"
+        case .transportError(let message):
+            return "传输层错误：\(message)"
+        case .versionMismatch(let local, let remote):
+            return "协议版本不兼容（本地 v\(local)，对端 v\(remote)）。"
+        case .signatureVerificationFailed:
+            return "签名验证失败：无法确认对端身份。"
+        case .invalidMessageFormat(let reason):
+            return "握手消息格式无效：\(reason)"
+        case .identityMismatch(let expected, let actual):
+            return "设备身份不匹配（期望 \(expected)，实际 \(actual)）。"
+        case .replayDetected:
+            return "检测到重放攻击，握手已中止。"
+        case .secureEnclavePoPRequired:
+            return "连接策略要求 Secure Enclave 证明，但当前设备未满足。"
+        case .secureEnclaveSignatureInvalid:
+            return "Secure Enclave 签名校验失败。"
+        case .keyConfirmationFailed:
+            return "密钥确认失败，安全信道建立未完成。"
+        case .suiteSignatureMismatch(let selectedSuite, let sigAAlgorithm):
+            return "加密套件与签名算法不匹配（suite=\(selectedSuite), sigA=\(sigAAlgorithm)）。"
+        case .pqcProviderUnavailable:
+            return "后量子密码 provider 不可用。"
+        case .missingPeerKEMPublicKey(let suite):
+            return "缺少对端 KEM 公钥（\(suite)），无法执行 PQC 握手。"
+        case .suiteNotSupported:
+            return "对端请求的加密套件不受支持。"
+        case .suiteNegotiationFailed:
+            return "无法协商共同加密套件。"
+        case .supersededByConcurrentAttempt(let winnerPeerId, let winnerAttemptId):
+            return "本次握手已被并发连接仲裁淘汰（winner=\(winnerPeerId), attempt=\(winnerAttemptId)）。"
+        }
+    }
 }
 
 // MARK: - Paper-aligned Security Events (iOS target-local)
@@ -140,7 +184,7 @@ public actor SecurityEventEmitter {
 // MARK: - HandshakeError
 
 /// 握手错误
-public enum HandshakeError: Error, Sendable {
+public enum HandshakeError: Error, LocalizedError, Sendable {
     case alreadyInProgress
     case noSigningCapability
     case failed(HandshakeFailureReason)
@@ -149,6 +193,27 @@ public enum HandshakeError: Error, Sendable {
     case providerAlgorithmMismatch(provider: String, algorithm: String)
     case signatureAlgorithmMismatch(algorithm: String, keyHandleType: String)
     case contextZeroized
+
+    public var errorDescription: String? {
+        switch self {
+        case .alreadyInProgress:
+            return "握手已在进行中。"
+        case .noSigningCapability:
+            return "缺少可用签名能力（未配置协议签名密钥）。"
+        case .failed(let reason):
+            return reason.errorDescription ?? "握手失败。"
+        case .emptyOfferedSuites:
+            return "offeredSuites 不能为空。"
+        case .homogeneityViolation(let message):
+            return "offeredSuites 同质性校验失败：\(message)"
+        case .providerAlgorithmMismatch(let provider, let algorithm):
+            return "provider 与算法不匹配（provider=\(provider), algorithm=\(algorithm)）。"
+        case .signatureAlgorithmMismatch(let algorithm, let keyHandleType):
+            return "签名算法与密钥类型不匹配（algorithm=\(algorithm), keyHandle=\(keyHandleType)）。"
+        case .contextZeroized:
+            return "握手上下文已清理，无法继续。"
+        }
+    }
 }
 
 // MARK: - HandshakePolicy
