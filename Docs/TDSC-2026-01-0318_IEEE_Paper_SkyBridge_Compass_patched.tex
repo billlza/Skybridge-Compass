@@ -818,7 +818,9 @@ current code revision, connection orchestration for the remote
 desktop/file-transfer path is route-aware and authentication-gated:
 local discovery can prefer USB-capable host endpoints, control-channel
 connections are promoted to ``connected'' only after handshake
-authentication, and active file-transfer routing prioritizes live
+authentication, discovery advertisements expose an explicit
+\texttt{hs\_soa} capability bit for optional SOA negotiation, and active
+file-transfer routing prioritizes live
 authenticated sessions before fallback candidates. These implementation
 surfaces are enumerated in the Supplementary Artifact Map.
 
@@ -1054,6 +1056,32 @@ Fig.~\ref{fig:state-machines} illustrates the handshake state machine for both r
 \label{fig:state-machines}
 \end{figure}
 
+\subsection{Simultaneous-Open Arbitration (SOA)}\label{soa-arbitration}
+
+To remove nondeterminism when both peers initiate concurrently, we use
+an optional MessageA extension (SOA TLV) without adding handshake
+round-trips. The extension carries
+\texttt{soaVersion(1B),\allowbreak initiatorPeerId(32B),\allowbreak targetPeerId(32B),\allowbreak attemptId(16B)}.
+Arbitration compares the tuple
+\((\texttt{initiatorPeerId},\allowbreak \texttt{attemptId})\) with
+lexicographic \emph{byte} ordering (not string ordering); the smaller
+tuple wins.
+
+Compatibility is capability-gated (\texttt{hs\_soa=1} in discovery TXT).
+If absent, peers stay on the legacy MessageA path. The parser keeps
+\texttt{extensionsRaw} bytes (including unknown TLVs) and transcript/hash
+binding is computed over the original encoded bytes, so decode/re-encode
+normalization cannot desynchronize signatures. A local outgoing attempt
+is superseded only after: (i) MessageA signature verification succeeds,
+(ii) \texttt{targetPeerId==localPeerId}, (iii)
+\texttt{initiatorPeerId==expectedRemotePeerId}, and (iv) the same
+canonical \texttt{pairKey} is selected. Runtime controls combine
+\texttt{single-flight} (one pending winner per \texttt{pairKey}),
+\texttt{established guard} (new attempts return
+\texttt{already\_connected}), and bounded supersede rate
+(3 attempts / 60 s). The pending arbitration window is 10 s; established
+guard is released immediately on disconnect.
+
 \subsection{Double-Resume
 Prevention}\label{d.-double-resume-prevention}
 
@@ -1077,6 +1105,9 @@ For Signature A, the initiator signs \texttt{SkyBridge-A}, protocol
 version, canonical suite/key-share set, client nonce, capabilities,
 policy, and initiator identity key. Optional Secure Enclave binding
 uses \texttt{SkyBridge-SE-A}.
+When SOA extensions are present, the signature/transcript includes the
+raw extension container bytes (unknown TLVs preserved as-is), not a
+decoded/re-encoded structure.
 
 \textbf{Signature B (MessageB):} The Responder signs a transcript that
 commits to MessageA:
@@ -1150,6 +1181,13 @@ Table~\ref{tab:supp-v2-v1-compare}).
   Devices remain uncompromised (no root or malware control) during
   handshake execution.
 \end{itemize}
+
+Under concurrent-open threat conditions, the attacker may inject or
+replay MessageA variants to try to force cancellation of a valid local
+attempt. The SOA path treats such attempts as unauthenticated control
+input until signature verification and peer-binding checks complete;
+therefore cancellation is only admissible for authenticated, correctly
+bound attempts within the same canonical \texttt{pairKey}.
 
 \textbf{If assumptions fail:}
 \begin{itemize}\tightlist
@@ -1723,6 +1761,33 @@ distributions are recorded in \texttt{Artifacts/\allowbreak fault\_injection\_\a
 Downgrade events are quantified separately in the policy bench (Fig.~\ref{fig:policy-downgrade})
 to avoid conflating fallback behavior with transport corruption
 scenarios.
+
+\textbf{SOA Arbitration and Compatibility Stress.}
+We add a focused SOA regression bench (\texttt{SOAInteroperability\allowbreak BenchTests},
+\texttt{N=100} per scenario) covering simultaneous-open convergence,
+forged-target rejection, established-guard release, supersede rate
+limiting, and legacy/new MessageA interoperability.
+Table~\ref{tab:soa-interop} summarizes the results; raw rows are stored
+in \path{Artifacts/soa_interop_2026-02-22.csv}.
+
+\begin{table*}[!t]
+\centering
+\caption{SOA arbitration and compatibility stress results
+(\texttt{ARTIFACT\_DATE=2026-02-22}, \texttt{N=100} per row).}
+\label{tab:soa-interop}
+\begin{tabular}{@{}p{0.24\linewidth}p{0.52\linewidth}ccc@{}}
+\toprule
+Scenario & Check focus & N & Pass & Pass rate \\
+\midrule
+Simultaneous open single-flight & Deterministic winner via byte-ordered \((\texttt{initiatorPeerId},\texttt{attemptId})\) & 100 & 100 & 1.00 \\
+Forged target binding guard & Reject unauthenticated cancellation trigger (\texttt{targetPeerId} mismatch) & 100 & 100 & 1.00 \\
+Established guard release & \texttt{already\_connected} while established; immediate reconnect after release & 100 & 100 & 1.00 \\
+Supersede rate limit & Bound supersede to 3/60s; 4th attempt rejected & 100 & 100 & 1.00 \\
+Legacy MessageA compatibility & Missing SOA extension remains valid legacy path & 100 & 100 & 1.00 \\
+Extension passthrough + transcript binding & Unknown TLVs preserved in \texttt{extensionsRaw}; SOA-only wire delta \(=91\) B, no extra RTT & 100 & 100 & 1.00 \\
+\bottomrule
+\end{tabular}
+\end{table*}
 
 \begin{figure}
 \centering
