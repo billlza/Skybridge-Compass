@@ -486,7 +486,10 @@ struct DeviceDetailSheet: View {
         isConnecting = true
         Task {
             do {
-                try await P2PConnectionManager.instance.connect(to: device)
+                try await P2PConnectionManager.instance.connect(
+                    to: device,
+                    allowUntrustedClassicBootstrapOnMissingPeerKEM: true
+                )
             isConnecting = false
             dismiss()
             } catch {

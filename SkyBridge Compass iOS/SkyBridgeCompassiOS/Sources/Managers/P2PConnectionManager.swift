@@ -270,7 +270,12 @@ public class P2PConnectionManager: ObservableObject {
     }
     
     /// 连接到设备
-    public func connect(to device: DiscoveredDevice) async throws {
+    /// - Parameter allowUntrustedClassicBootstrapOnMissingPeerKEM:
+    ///   当 strictPQC 因缺少对端 KEM 公钥而失败时，是否允许一次性 classic bootstrap（仅用于交换 KEM identity key）。
+    public func connect(
+        to device: DiscoveredDevice,
+        allowUntrustedClassicBootstrapOnMissingPeerKEM: Bool = false
+    ) async throws {
         // 并发限制（来自 Settings）
         let limit = max(1, SettingsManager.instance.maxConcurrentConnections)
         guard connectingCount < limit else {
@@ -382,15 +387,23 @@ public class P2PConnectionManager: ObservableObject {
             if let hs = error as? HandshakeError,
                case .failed(.missingPeerKEMPublicKey(let suite)) = hs,
                pqcManager.enforcePQCHandshake,
-               TrustedDeviceStore.shared.isTrusted(deviceId: device.id) {
+               (TrustedDeviceStore.shared.isTrusted(deviceId: device.id)
+                || allowUntrustedClassicBootstrapOnMissingPeerKEM) {
                 
-                SkyBridgeLogger.shared.warning("🧩 strictPQC bootstrap: trusted peer but missing KEM key (suite=\(suite)). Performing one-time Classic bootstrap to provision trust, then rekey to PQC.")
+                let bootstrapReason = TrustedDeviceStore.shared.isTrusted(deviceId: device.id)
+                    ? "trusted_peer_missing_kem_key"
+                    : "explicit_untrusted_bootstrap_path"
+                SkyBridgeLogger.shared.warning(
+                    "🧩 strictPQC bootstrap: missing KEM key (suite=\(suite), reason=\(bootstrapReason)). " +
+                    "Performing one-time Classic bootstrap to provision trust, then rekey to PQC."
+                )
                 SecurityEventEmitter.emitDetached(SecurityEvent(
                     type: .legacyBootstrap,
                     severity: .warning,
                     message: "strictPQC bootstrap: missing peer KEM public key; establishing one-time Classic channel to provision KEM keys then rekey to PQC",
                     context: [
                         "reason": "missingPeerKEMPublicKey",
+                        "bootstrapReason": bootstrapReason,
                         "suite": suite,
                         "peer": device.id,
                         // Paper terminology alignment:

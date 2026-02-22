@@ -125,7 +125,10 @@ public class DashboardViewModel: ObservableObject {
     
     /// 快速连接到设备
     public func quickConnect(to device: DiscoveredDevice) async throws {
-        try await P2PConnectionManager.instance.connect(to: device)
+        try await P2PConnectionManager.instance.connect(
+            to: device,
+            allowUntrustedClassicBootstrapOnMissingPeerKEM: true
+        )
     }
     
     /// 断开设备连接
