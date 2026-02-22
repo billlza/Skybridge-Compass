@@ -1619,6 +1619,7 @@ public class P2PDiscoveryService: BaseManager {
                         var cryptoProvider: any CryptoProvider = CryptoProviderFactory.make(policy: .classicOnly)
                         var sigAAlgorithm: ProtocolSigningAlgorithm = .ed25519
                         var offeredSuites: [CryptoSuite] = cryptoProvider.supportedSuites.filter { !$0.isPQCGroup }
+                        var effectivePolicy = policy
 
                         if peerHasPQCGroup {
                             selection = policy.requirePQC ? .requirePQC : .preferPQC
@@ -1636,6 +1637,12 @@ public class P2PDiscoveryService: BaseManager {
 	                                    cryptoProvider = CryptoProviderFactory.make(policy: selection)
 	                                    sigAAlgorithm = .ed25519
 	                                    offeredSuites = cryptoProvider.supportedSuites.filter { !$0.isPQCGroup }
+                                        effectivePolicy = HandshakePolicy(
+                                            requirePQC: false,
+                                            allowClassicFallback: false,
+                                            minimumTier: .classic,
+                                            requireSecureEnclavePoP: policy.requireSecureEnclavePoP
+                                        )
 	                                    // Make responder-side capability fallback auditable (no silent downgrade in telemetry).
 	                                    SecurityEventEmitter.emitDetached(SecurityEvent(
 	                                        type: .cryptoDowngrade,
@@ -1672,6 +1679,12 @@ public class P2PDiscoveryService: BaseManager {
                             cryptoProvider = CryptoProviderFactory.make(policy: selection)
                             sigAAlgorithm = .ed25519
                             offeredSuites = cryptoProvider.supportedSuites.filter { !$0.isPQCGroup }
+                            effectivePolicy = HandshakePolicy(
+                                requirePQC: false,
+                                allowClassicFallback: false,
+                                minimumTier: .classic,
+                                requireSecureEnclavePoP: policy.requireSecureEnclavePoP
+                            )
                         }
 
                         let keyManager = DeviceIdentityKeyManager.shared
@@ -1697,7 +1710,7 @@ public class P2PDiscoveryService: BaseManager {
                                 sigAAlgorithm: sigAAlgorithm,
                                 identityPublicKey: identityPublicKeyWire,
                                 offeredSuites: offeredSuites,
-                                policy: policy,
+                                policy: effectivePolicy,
                                 localSOAPeerId: localSOAPeerId,
                                 expectedRemoteSOAPeerId: expectedRemoteSOAPeerId
                             )
