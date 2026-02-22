@@ -420,7 +420,8 @@ public class P2PConnectionManager: ObservableObject {
                         connection: connection,
                         device: device,
                         preferPQC: false,
-                        selectionPolicyOverride: .classicOnly
+                        selectionPolicyOverride: .classicOnly,
+                        allowSOA: false
                     )
                     
                     // 2) Exchange KEM identity keys over the authenticated channel.
@@ -1404,7 +1405,8 @@ public class P2PConnectionManager: ObservableObject {
         connection: NWConnection,
         device: DiscoveredDevice,
         preferPQC: Bool,
-        selectionPolicyOverride: CryptoProviderFactory.SelectionPolicy? = nil
+        selectionPolicyOverride: CryptoProviderFactory.SelectionPolicy? = nil,
+        allowSOA: Bool = true
     ) async throws {
         SkyBridgeLogger.shared.info("🔐 开始 PQC 握手...")
         currentHandshakeState = "握手中..."
@@ -1433,7 +1435,7 @@ public class P2PConnectionManager: ObservableObject {
                 remotePeerId: remotePeerId
             )
             let outboundSOA: HandshakeSOAMetadata? = {
-                guard shouldUseSOA(for: device) else { return nil }
+                guard allowSOA, shouldUseSOA(for: device) else { return nil }
                 return try? HandshakeSOAMetadata(
                     initiatorPeerId: localPeerId,
                     targetPeerId: remotePeerId,
