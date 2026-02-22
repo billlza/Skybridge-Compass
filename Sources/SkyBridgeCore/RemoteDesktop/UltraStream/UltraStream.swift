@@ -867,7 +867,8 @@ public final class UltraStreamReceiver {
             width: header.width,
             height: header.height,
             chunkIndex: 0,
-            chunkCount: header.chunkCount,
+            // Handshake packet is sent as a single chunk and encrypted with (chunkIndex=0, chunkCount=1) AAD.
+            chunkCount: 1,
             payloadLength: 0
         )
         let aad = headerForAAD.aadData()
@@ -1014,7 +1015,9 @@ public final class UltraStreamReceiver {
             width: header.width,
             height: header.height,
             chunkIndex: 0,
-            chunkCount: header.chunkCount,
+            // Sender encrypts the *whole-frame* payload with (chunkIndex=0, chunkCount=0) AAD,
+            // then slices ciphertext into chunks. Keep receiver AAD aligned.
+            chunkCount: 0,
             payloadLength: 0
         )
         
