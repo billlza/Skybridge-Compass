@@ -11,6 +11,8 @@ enum HelperInstaller {
     private static let logger = Logger(subsystem: SkyBridgeLogger.subsystem, category: "HelperInstaller")
     /// Helper 的标识符（与 launchd plist 中的 Label 一致）
     static let helperServiceName = "com.skybridge.PowerMetricsHelper"
+    /// SMAppService.daemon(plistName:) 需要完整 plist 文件名（含扩展名）
+    private static let helperPlistName = "com.skybridge.PowerMetricsHelper.plist"
 
     /// 存储最后一次错误信息
     private static var lastError: String?
@@ -45,8 +47,8 @@ enum HelperInstaller {
         }
 
         // 使用 SMAppService 查询状态（daemon 用于特权 Helper）
-        // plistName 是 launchd plist 的文件名（不含扩展名）
-        let service = SMAppService.daemon(plistName: helperServiceName)
+        // plistName 需要传入完整文件名（含 .plist）
+        let service = SMAppService.daemon(plistName: helperPlistName)
         return service.status == SMAppService.Status.enabled
     }
 
@@ -70,7 +72,7 @@ enum HelperInstaller {
         }
 
         // 创建 SMAppService 实例（daemon 用于特权 Helper）
-        let service = SMAppService.daemon(plistName: helperServiceName)
+        let service = SMAppService.daemon(plistName: helperPlistName)
 
         // 检查当前状态
         switch service.status {
@@ -353,7 +355,7 @@ enum HelperInstaller {
     /// 卸载 Helper
     static func uninstallHelper() -> Bool {
         // 创建 SMAppService 实例（daemon 用于特权 Helper）
-        let service = SMAppService.daemon(plistName: helperServiceName)
+        let service = SMAppService.daemon(plistName: helperPlistName)
 
         // 检查当前状态
         if service.status == SMAppService.Status.notFound {
