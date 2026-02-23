@@ -1,9 +1,5 @@
-use axum::{
-    routing::get,
-    Json,
-    Router,
-};
 use axum::http::{HeaderName, HeaderValue, Method, StatusCode};
+use axum::{Json, Router, routing::get};
 use serde::Serialize;
 use std::{net::SocketAddr, time::Duration};
 use tower_http::{
@@ -15,6 +11,7 @@ use tower_http::{
     timeout::TimeoutLayer,
     trace::TraceLayer,
 };
+use tracing::warn;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
@@ -30,13 +27,28 @@ async fn main() {
     // CORS Layer to allow frontend access
     // SECURITY: Do not use allow_origin(Any) in production.
     // Restrict to explicit origins (default: localhost dev).
-    let allowed_origin = std::env::var("SKYBRIDGE_WEB_ORIGIN")
+    let allowed_origins_raw = std::env::var("SKYBRIDGE_WEB_ORIGIN")
         .unwrap_or_else(|_| "http://localhost:3000".to_string());
-    let allowed_origin = allowed_origin
-        .parse::<HeaderValue>()
-        .unwrap_or_else(|_| HeaderValue::from_static("http://localhost:3000"));
+    let mut allowed_origins: Vec<HeaderValue> = Vec::new();
+    for origin in allowed_origins_raw.split(',') {
+        let origin = origin.trim();
+        if origin.is_empty() {
+            continue;
+        }
+        if origin == "*" {
+            warn!("SKYBRIDGE_WEB_ORIGIN includes '*', which is insecure; ignoring");
+            continue;
+        }
+        match origin.parse::<HeaderValue>() {
+            Ok(v) => allowed_origins.push(v),
+            Err(_) => warn!("Invalid CORS origin in SKYBRIDGE_WEB_ORIGIN: {}", origin),
+        }
+    }
+    if allowed_origins.is_empty() {
+        allowed_origins.push(HeaderValue::from_static("http://localhost:3000"));
+    }
     let cors = CorsLayer::new()
-        .allow_origin(allowed_origin)
+        .allow_origin(allowed_origins)
         .allow_methods([Method::GET])
         .allow_headers([axum::http::header::CONTENT_TYPE]);
 
@@ -51,7 +63,10 @@ async fn main() {
         .layer(TraceLayer::new_for_http())
         .layer(CompressionLayer::new())
         .layer(RequestBodyLimitLayer::new(1024 * 1024)) // 1MB
-        .layer(TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, Duration::from_secs(10)))
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            Duration::from_secs(10),
+        ))
         .layer(CatchPanicLayer::new())
         .layer(cors);
 
@@ -98,7 +113,7 @@ async fn get_status() -> Json<SystemStatus> {
 async fn shutdown_signal() {
     #[cfg(unix)]
     {
-        use tokio::signal::unix::{signal, SignalKind};
+        use tokio::signal::unix::{SignalKind, signal};
         let mut term = signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {},
