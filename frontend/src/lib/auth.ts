@@ -32,6 +32,9 @@ export interface PasswordStrength {
   color: string
 }
 
+const SUPABASE_NOT_CONFIGURED =
+  '系统未配置 Supabase（缺少 NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY）'
+
 // ============================================================================
 // 辅助函数
 // ============================================================================
@@ -193,6 +196,8 @@ export function isDisposableEmail(email: string): boolean {
  */
 export async function signInWithEmail(email: string, password: string): Promise<AuthResult> {
   try {
+    if (!supabase) return { session: null, error: SUPABASE_NOT_CONFIGURED }
+
     const { data, error } = await supabase.auth.signInWithPassword({
       email: email.trim().toLowerCase(),
       password,
@@ -222,6 +227,8 @@ export async function signUpWithEmail(
   displayName?: string
 ): Promise<AuthResult> {
   try {
+    if (!supabase) return { session: null, error: SUPABASE_NOT_CONFIGURED }
+
     // 验证邮箱格式
     if (!isValidEmail(email)) {
       return { session: null, error: '请输入有效的邮箱地址' }
@@ -288,6 +295,8 @@ export async function signUpWithEmail(
  */
 export async function sendPhoneOTP(phone: string): Promise<{ success: boolean; error: string | null }> {
   try {
+    if (!supabase) return { success: false, error: SUPABASE_NOT_CONFIGURED }
+
     if (!isValidPhoneNumber(phone)) {
       return { success: false, error: '请输入有效的手机号码' }
     }
@@ -312,6 +321,8 @@ export async function sendPhoneOTP(phone: string): Promise<{ success: boolean; e
  */
 export async function verifyPhoneOTP(phone: string, token: string): Promise<AuthResult> {
   try {
+    if (!supabase) return { session: null, error: SUPABASE_NOT_CONFIGURED }
+
     const { data, error } = await supabase.auth.verifyOtp({
       phone: phone.replace(/[\s\-()]/g, ''),
       token,
@@ -338,6 +349,8 @@ export async function verifyPhoneOTP(phone: string, token: string): Promise<Auth
  */
 export async function signInWithApple(): Promise<AuthResult> {
   try {
+    if (!supabase) return { session: null, error: SUPABASE_NOT_CONFIGURED }
+
     const { error } = await supabase.auth.signInWithOAuth({
       provider: 'apple',
       options: {
@@ -362,6 +375,8 @@ export async function signInWithApple(): Promise<AuthResult> {
  */
 export async function refreshAccessToken(): Promise<AuthResult> {
   try {
+    if (!supabase) return { session: null, error: SUPABASE_NOT_CONFIGURED }
+
     const { data, error } = await supabase.auth.refreshSession()
 
     if (error) {
@@ -384,6 +399,8 @@ export async function refreshAccessToken(): Promise<AuthResult> {
  */
 export async function resetPassword(email: string): Promise<{ success: boolean; error: string | null }> {
   try {
+    if (!supabase) return { success: false, error: SUPABASE_NOT_CONFIGURED }
+
     if (!isValidEmail(email)) {
       return { success: false, error: '请输入有效的邮箱地址' }
     }
@@ -408,6 +425,8 @@ export async function resetPassword(email: string): Promise<{ success: boolean; 
  */
 export async function signOut(): Promise<{ success: boolean; error: string | null }> {
   try {
+    if (!supabase) return { success: true, error: null }
+
     const { error } = await supabase.auth.signOut()
     if (error) {
       return { success: false, error: translateAuthError(error) }
@@ -423,6 +442,8 @@ export async function signOut(): Promise<{ success: boolean; error: string | nul
  */
 export async function getCurrentSession(): Promise<AuthSession | null> {
   try {
+    if (!supabase) return null
+
     const { data } = await supabase.auth.getSession()
     if (data.session && data.session.user) {
       return toAuthSession(data.session, data.session.user)
@@ -438,6 +459,8 @@ export async function getCurrentSession(): Promise<AuthSession | null> {
  */
 export async function getCurrentUser(): Promise<User | null> {
   try {
+    if (!supabase) return null
+
     const { data } = await supabase.auth.getUser()
     return data.user
   } catch {
@@ -459,6 +482,8 @@ export async function updateUserProfile(updates: {
   avatarUrl?: string
 }): Promise<{ success: boolean; error: string | null }> {
   try {
+    if (!supabase) return { success: false, error: SUPABASE_NOT_CONFIGURED }
+
     const { error } = await supabase.auth.updateUser({
       data: {
         display_name: updates.displayName,
@@ -483,6 +508,8 @@ export async function updateUserProfile(updates: {
  */
 export async function getUserAvatarUrl(): Promise<string | null> {
   try {
+    if (!supabase) return null
+
     const { data } = await supabase.auth.getUser()
     return data.user?.user_metadata?.avatar_url || null
   } catch {
@@ -518,11 +545,17 @@ function translateAuthError(error: AuthError): string {
  * 监听认证状态变化
  */
 export function onAuthStateChange(callback: (session: AuthSession | null) => void) {
-  return supabase.auth.onAuthStateChange((event, session) => {
+  if (!supabase) {
+    return { data: { subscription: { unsubscribe: () => {} } } }
+  }
+
+  const { data } = supabase.auth.onAuthStateChange((event, session) => {
     if (session && session.user) {
       callback(toAuthSession(session, session.user))
     } else {
       callback(null)
     }
   })
+
+  return { data: { subscription: data.subscription } }
 }

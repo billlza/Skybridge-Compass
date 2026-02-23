@@ -17,12 +17,33 @@ const SUSPICIOUS_PATTERNS = [
   /data:text\/html/i,   // Data URI XSS
 ];
 
+function isTrustedProxyHeaders(): boolean {
+  const v = process.env.SKYBRIDGE_TRUST_PROXY_HEADERS;
+  if (v === undefined) return process.env.NODE_ENV === 'production';
+  return v === '1' || v === 'true';
+}
+
+function normalizeIp(ip: string | null): string | undefined {
+  if (!ip) return;
+  const trimmed = ip.trim();
+  if (!trimmed) return;
+  // Very small sanity filter: accept typical IPv4/IPv6 strings only.
+  // (Avoid treating arbitrary attacker strings as "IPs" for rate limiting.)
+  if (/^[0-9a-fA-F:.]+$/.test(trimmed)) return trimmed;
+  return;
+}
+
 function getClientIP(request: NextRequest): string {
   // Prefer platform-provided headers (Cloudflare/Vercel) when present.
-  const cfIP = request.headers.get('cf-connecting-ip');
-  const realIP = request.headers.get('x-real-ip');
+  if (!isTrustedProxyHeaders()) return 'unknown';
+  const cfIP = normalizeIp(request.headers.get('cf-connecting-ip'));
+  if (cfIP) return cfIP;
+  const realIP = normalizeIp(request.headers.get('x-real-ip'));
+  if (realIP) return realIP;
   const forwarded = request.headers.get('x-forwarded-for');
-  return cfIP || realIP || forwarded?.split(',')[0]?.trim() || 'unknown';
+  const firstForwarded = normalizeIp(forwarded?.split(',')[0]?.trim() ?? null);
+  if (firstForwarded) return firstForwarded;
+  return 'unknown';
 }
 
 function isRateLimited(ip: string): boolean {
@@ -64,8 +85,9 @@ function createCspNonce(): string {
 }
 
 function buildCsp(nonce: string): string {
-  // Keep this CSP compatible with Next.js App Router by providing a nonce that
-  // Next can attach to its inlined scripts during render.
+  // Keep CSP compatible with Next.js: we provide a per-request nonce for
+  // scripts (XSS defense-in-depth). Note that many UI libs use inline styles
+  // (e.g., animations), so we intentionally allow inline styles.
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
   let supabaseOrigin: string | undefined;
   let supabaseWssOrigin: string | undefined;
@@ -97,7 +119,7 @@ function buildCsp(nonce: string): string {
     "object-src 'none'",
     `script-src 'self' 'nonce-${nonce}'`,
     "script-src-attr 'none'",
-    `style-src 'self' 'nonce-${nonce}'`,
+    "style-src 'self' 'unsafe-inline'",
     `connect-src ${connectSrc.join(' ')}`,
     `img-src ${imgSrc.join(' ')}`,
     "font-src 'self' data:",
@@ -112,7 +134,9 @@ export function proxy(request: NextRequest) {
   const url = request.url;
 
   // 1. 限流检查
-  if (isRateLimited(ip)) {
+  // If we cannot determine a stable client identity, don't apply IP-based rate
+  // limiting (otherwise everyone shares the same "unknown" bucket).
+  if (ip !== 'unknown' && isRateLimited(ip)) {
     console.warn(`[Security] Rate limit exceeded for IP: ${ip}`);
     return new NextResponse('Too Many Requests', { 
       status: 429,
@@ -138,8 +162,10 @@ export function proxy(request: NextRequest) {
 
   // IMPORTANT: Next.js extracts the nonce from the *request* headers during
   // render, so we forward the CSP header to the app via request headers.
+  const requestId = request.headers.get('x-request-id') || crypto.randomUUID();
   const requestHeaders = new Headers(request.headers);
   requestHeaders.set('content-security-policy', csp);
+  requestHeaders.set('x-request-id', requestId);
 
   // 4. 添加安全追踪头
   const response = NextResponse.next({
@@ -147,7 +173,7 @@ export function proxy(request: NextRequest) {
       headers: requestHeaders,
     },
   });
-  response.headers.set('X-Request-ID', crypto.randomUUID());
+  response.headers.set('X-Request-ID', requestId);
   response.headers.set('Content-Security-Policy', csp);
   
   return response;

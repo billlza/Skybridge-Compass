@@ -23,6 +23,12 @@ export default function AuthCallbackPage() {
         const params = new URLSearchParams(window.location.search)
         const code = params.get('code')
 
+        if (!supabase) {
+          setStatus('error')
+          setMessage('系统未配置 Supabase，请联系管理员')
+          return
+        }
+
         if (code) {
           const { error: exchangeError } = await supabase.auth.exchangeCodeForSession(code)
           if (exchangeError) {
@@ -103,4 +109,3 @@ export default function AuthCallbackPage() {
     </div>
   )
 }
-

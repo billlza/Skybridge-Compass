@@ -27,6 +27,11 @@ export default function ResetPasswordPage() {
   useEffect(() => {
     const ensureSession = async () => {
       try {
+        if (!supabase) {
+          setError('系统未配置 Supabase，请联系管理员')
+          return
+        }
+
         const params = new URLSearchParams(window.location.search)
         const code = params.get('code')
         if (code) {
@@ -78,6 +83,11 @@ export default function ResetPasswordPage() {
     setIsLoading(true)
 
     try {
+      if (!supabase) {
+        setError('系统未配置 Supabase，请联系管理员')
+        return
+      }
+
       const { error } = await supabase.auth.updateUser({
         password,
       })
@@ -252,4 +262,3 @@ export default function ResetPasswordPage() {
     </div>
   )
 }
-

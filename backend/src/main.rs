@@ -1,17 +1,31 @@
 use axum::{
     routing::get,
-    Router,
     Json,
+    Router,
 };
-use serde::{Serialize};
-use std::net::SocketAddr;
-use tower_http::cors::{CorsLayer};
-use axum::http::HeaderValue;
+use axum::http::{HeaderName, HeaderValue, Method, StatusCode};
+use serde::Serialize;
+use std::{net::SocketAddr, time::Duration};
+use tower_http::{
+    catch_panic::CatchPanicLayer,
+    compression::CompressionLayer,
+    cors::CorsLayer,
+    limit::RequestBodyLimitLayer,
+    request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
+    timeout::TimeoutLayer,
+    trace::TraceLayer,
+};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
 async fn main() {
-    // Initialize tracing (optional but good for debugging)
-    // tracing_subscriber::fmt::init();
+    // Structured logs (set `RUST_LOG=debug` etc to tune verbosity).
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    let _ = tracing_subscriber::registry()
+        .with(filter)
+        .with(tracing_subscriber::fmt::layer())
+        .try_init();
 
     // CORS Layer to allow frontend access
     // SECURITY: Do not use allow_origin(Any) in production.
@@ -23,13 +37,22 @@ async fn main() {
         .unwrap_or_else(|_| HeaderValue::from_static("http://localhost:3000"));
     let cors = CorsLayer::new()
         .allow_origin(allowed_origin)
-        .allow_methods([axum::http::Method::GET])
+        .allow_methods([Method::GET])
         .allow_headers([axum::http::header::CONTENT_TYPE]);
 
     // Build our application with a route
+    let x_request_id = HeaderName::from_static("x-request-id");
     let app = Router::new()
         .route("/", get(root))
         .route("/api/status", get(get_status))
+        // Safety/stability middleware (defense-in-depth)
+        .layer(PropagateRequestIdLayer::new(x_request_id.clone()))
+        .layer(SetRequestIdLayer::new(x_request_id, MakeRequestUuid))
+        .layer(TraceLayer::new_for_http())
+        .layer(CompressionLayer::new())
+        .layer(RequestBodyLimitLayer::new(1024 * 1024)) // 1MB
+        .layer(TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, Duration::from_secs(10)))
+        .layer(CatchPanicLayer::new())
         .layer(cors);
 
     // Run it
@@ -45,7 +68,10 @@ async fn main() {
     let addr: SocketAddr = format!("{bind_host}:{bind_port}").parse().unwrap();
     println!("listening on {}", addr);
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .unwrap();
 }
 
 async fn root() -> &'static str {
@@ -67,4 +93,21 @@ async fn get_status() -> Json<SystemStatus> {
         active_sessions: 0,
         transfer_tasks: 0,
     })
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut term = signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {},
+            _ = term.recv() => {},
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
