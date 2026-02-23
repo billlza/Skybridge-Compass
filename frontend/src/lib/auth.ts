@@ -51,12 +51,75 @@ function toAuthSession(session: Session, user: User): AuthSession {
 
 /**
  * 生成 NebulaID（与 Mac 应用 NebulaIDGenerator 对齐）
- * 格式: NB-{timestamp}-{random}
+ * 格式: NEBULA-{year}-{base36_id_12}
  */
 function generateNebulaId(): string {
-  const timestamp = Date.now().toString(36).toUpperCase()
-  const random = Math.random().toString(36).substring(2, 8).toUpperCase()
-  return `NB-${timestamp}-${random}`
+  // Snowflake-like bit layout (64-bit):
+  // [timestamp: 41 | datacenter: 5 | worker: 5 | sequence: 12]
+  // Epoch matches macOS/iOS: 2025-01-01 00:00:00 UTC (ms)
+  const EPOCH = BigInt(1735689600000)
+  const SEQUENCE_BITS = BigInt(12)
+  const WORKER_BITS = BigInt(5)
+  const DATACENTER_BITS = BigInt(5)
+
+  const WORKER_SHIFT = SEQUENCE_BITS
+  const DATACENTER_SHIFT = SEQUENCE_BITS + WORKER_BITS
+  const TIMESTAMP_SHIFT = SEQUENCE_BITS + WORKER_BITS + DATACENTER_BITS
+
+  const MAX_SEQUENCE = (BigInt(1) << SEQUENCE_BITS) - BigInt(1)
+
+  // Keep defaults aligned with macOS/iOS generator defaults (1,1)
+  const DATACENTER_ID = BigInt(1)
+  const WORKER_ID = BigInt(1)
+
+  // Module-level state (shared across calls in the same tab/runtime)
+  const g = globalThis as unknown as {
+    __skybridge_nebula_last_ts?: bigint
+    __skybridge_nebula_seq?: bigint
+  }
+
+  const now = BigInt(Date.now())
+  const lastTs = g.__skybridge_nebula_last_ts ?? BigInt(0)
+  let ts = now
+  let seq = g.__skybridge_nebula_seq ?? BigInt(0)
+
+  if (ts < lastTs) {
+    // Match "do not crash" behavior on web: clamp to last timestamp.
+    ts = lastTs
+  }
+
+  if (ts === lastTs) {
+    seq = (seq + BigInt(1)) & MAX_SEQUENCE
+    if (seq === BigInt(0)) {
+      // Wait until next millisecond (best-effort, same as macOS logic)
+      let next = BigInt(Date.now())
+      while (next <= ts) next = BigInt(Date.now())
+      ts = next
+    }
+  } else {
+    seq = BigInt(0)
+  }
+
+  g.__skybridge_nebula_last_ts = ts
+  g.__skybridge_nebula_seq = seq
+
+  const adjusted = ts - EPOCH
+  const rawId =
+    (adjusted << TIMESTAMP_SHIFT) |
+    (DATACENTER_ID << DATACENTER_SHIFT) |
+    (WORKER_ID << WORKER_SHIFT) |
+    seq
+
+  const year = new Date().getFullYear()
+
+  // macOS/iOS uses Swift `padding(toLength: 12, withPad: "0", startingAt: 0)`:
+  // - Right-pads with "0" to length 12 (if shorter)
+  // - Truncates to length 12 (if longer)
+  let base36 = rawId.toString(36).toUpperCase()
+  if (base36.length < 12) base36 = base36.padEnd(12, '0')
+  if (base36.length > 12) base36 = base36.slice(0, 12)
+
+  return `NEBULA-${year}-${base36}`
 }
 
 /**
@@ -463,4 +526,3 @@ export function onAuthStateChange(callback: (session: AuthSession | null) => voi
     }
   })
 }
-

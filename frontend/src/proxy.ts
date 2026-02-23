@@ -55,8 +55,58 @@ function hasSuspiciousContent(url: string): boolean {
   return SUSPICIOUS_PATTERNS.some(pattern => pattern.test(url));
 }
 
-// Next.js 16+: `middleware.ts` file convention is deprecated in favor of `proxy.ts`.
-// This file must export either a default function or a named `proxy` function.
+function createCspNonce(): string {
+  // CSP nonces should be base64. Use WebCrypto for Edge runtime compatibility.
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  let binary = '';
+  for (const b of bytes) binary += String.fromCharCode(b);
+  return btoa(binary);
+}
+
+function buildCsp(nonce: string): string {
+  // Keep this CSP compatible with Next.js App Router by providing a nonce that
+  // Next can attach to its inlined scripts during render.
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  let supabaseOrigin: string | undefined;
+  let supabaseWssOrigin: string | undefined;
+
+  if (supabaseUrl) {
+    try {
+      supabaseOrigin = new URL(supabaseUrl).origin;
+      supabaseWssOrigin = supabaseOrigin.replace(/^https:/, 'wss:');
+    } catch {
+      // Ignore invalid URL; CSP will fall back to 'self' only.
+    }
+  }
+
+  const connectSrc = ["'self'"];
+  const imgSrc = ["'self'", 'data:', 'blob:'];
+  if (supabaseOrigin) {
+    connectSrc.push(supabaseOrigin);
+    imgSrc.push(supabaseOrigin);
+  }
+  if (supabaseWssOrigin) {
+    connectSrc.push(supabaseWssOrigin);
+  }
+
+  const directives = [
+    "default-src 'self'",
+    "base-uri 'none'",
+    "form-action 'self'",
+    "frame-ancestors 'none'",
+    "object-src 'none'",
+    `script-src 'self' 'nonce-${nonce}'`,
+    "script-src-attr 'none'",
+    `style-src 'self' 'nonce-${nonce}'`,
+    `connect-src ${connectSrc.join(' ')}`,
+    `img-src ${imgSrc.join(' ')}`,
+    "font-src 'self' data:",
+  ];
+
+  return directives.join('; ');
+}
+
+// Next.js Proxy entrypoint (Next.js 16+): this file must be named `proxy.ts`.
 export function proxy(request: NextRequest) {
   const ip = getClientIP(request);
   const url = request.url;
@@ -83,9 +133,22 @@ export function proxy(request: NextRequest) {
     return new NextResponse('Bad Request', { status: 400 });
   }
 
+  const nonce = createCspNonce();
+  const csp = buildCsp(nonce);
+
+  // IMPORTANT: Next.js extracts the nonce from the *request* headers during
+  // render, so we forward the CSP header to the app via request headers.
+  const requestHeaders = new Headers(request.headers);
+  requestHeaders.set('content-security-policy', csp);
+
   // 4. 添加安全追踪头
-  const response = NextResponse.next();
+  const response = NextResponse.next({
+    request: {
+      headers: requestHeaders,
+    },
+  });
   response.headers.set('X-Request-ID', crypto.randomUUID());
+  response.headers.set('Content-Security-Policy', csp);
   
   return response;
 }

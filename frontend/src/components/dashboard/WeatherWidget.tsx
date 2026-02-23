@@ -5,7 +5,7 @@ export default function WeatherWidget() {
     <div className="glass-panel p-8 rounded-3xl relative overflow-hidden col-span-full">
       {/* Background Gradient & Stars */}
       <div className="absolute inset-0 bg-gradient-to-br from-indigo-900/30 to-purple-900/30 -z-10" />
-      <div className="absolute inset-0 opacity-30" style={{ backgroundImage: 'radial-gradient(white 1px, transparent 1px)', backgroundSize: '50px 50px' }}></div>
+      <div className="absolute inset-0 opacity-30 bg-[radial-gradient(white_1px,transparent_1px)] [background-size:50px_50px]"></div>
 
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-8 z-10 relative">
         
@@ -61,7 +61,6 @@ export default function WeatherWidget() {
     </div>
   );
 }
-
 
 
 

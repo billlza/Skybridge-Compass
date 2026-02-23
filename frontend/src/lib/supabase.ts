@@ -1,14 +1,20 @@
 /**
  * Supabase 客户端配置
  * SkyBridge Compass Pro 跨平台统一配置
- * 与 Mac/iOS/Android 应用共享同一 Supabase 项目
+ * 与 SkyBridge 其他端保持账户与后端环境一致
  */
 
 import { createClient, SupabaseClient } from '@supabase/supabase-js'
 
 // Supabase 配置 - 与 Mac 应用保持一致
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || 'https://hloqytmhjludmuhwyyzb.supabase.co'
-const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || 'sb_publishable_SonH4HoPQBQxHG_1KQZH-A_Om5mY6RR'
+const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL
+const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+
+if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
+  throw new Error('Missing Supabase env: NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY')
+}
+
+const isBrowser = typeof window !== 'undefined'
 
 // 创建 Supabase 客户端单例
 export const supabase: SupabaseClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
@@ -16,12 +22,9 @@ export const supabase: SupabaseClient = createClient(SUPABASE_URL, SUPABASE_ANON
     autoRefreshToken: true,
     persistSession: true,
     detectSessionInUrl: true,
+    flowType: 'pkce',
+    // Reduce long-lived token exposure compared to localStorage.
+    // NOTE: Still accessible to XSS; CSP + safe rendering are required.
+    storage: isBrowser ? window.sessionStorage : undefined,
   },
 })
-
-// 导出配置供其他模块使用
-export const supabaseConfig = {
-  url: SUPABASE_URL,
-  anonKey: SUPABASE_ANON_KEY,
-}
-
