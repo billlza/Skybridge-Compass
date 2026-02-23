@@ -13,4 +13,4 @@ services:
       - key: RUST_LOG
         value: info
       - key: SKYBRIDGE_WEB_ORIGIN
-        value: https://frontend-h3s4sv5nw-li-ziang-s-projects.vercel.app
+        value: https://frontend-li-ziang-s-projects.vercel.app
