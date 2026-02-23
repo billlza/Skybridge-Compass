@@ -711,7 +711,8 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
     private func performHandshakeAttempt(
         policy: HandshakePolicy,
         selectionPolicy: CryptoProviderFactory.SelectionPolicy,
-        preferPQC: Bool
+        preferPQC: Bool,
+        allowSOA: Bool = true
     ) async throws -> SessionKeys {
         let baseProvider = CryptoProviderFactory.make(policy: selectionPolicy)
 
@@ -728,9 +729,14 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         }
 
         handshakeDriverLock.withLock { $0 = nil }
-        let shouldAdvertiseSOA = shouldUseSOA()
+        let shouldAdvertiseSOA = allowSOA && shouldUseSOA()
         let localSOAPeerId: Data? = shouldAdvertiseSOA ? await localSOAPeerIdBytes() : nil
-        let expectedRemoteSOAPeerId: Data? = shouldAdvertiseSOA ? remoteSOAPeerIdBytes(for: handshakePeer.deviceId) : nil
+        let expectedRemoteSOAPeerId: Data?
+        if shouldAdvertiseSOA {
+            expectedRemoteSOAPeerId = remoteSOAPeerIdBytes(for: handshakePeer.deviceId)
+        } else {
+            expectedRemoteSOAPeerId = nil
+        }
 
         return try await TwoAttemptHandshakeManager.performHandshakeWithPreparation(
             deviceId: handshakePeer.deviceId,
@@ -822,7 +828,11 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         guard !requiredPQCSuites.isEmpty else { return nil }
 
         let diag = await resolveSuiteNegotiationTrustDiagnostic()
-        let missingWireIds = requiredPQCSuites.map(\.wireId).filter { !diag.kemSuiteWireIds.contains($0) }
+        let requiredCanonicalWireIds = Set(requiredPQCSuites.map { $0.canonicalKEMSuite.wireId })
+        let knownCanonicalWireIds = canonicalizedSuiteWireIds(diag.kemSuiteWireIds)
+        let missingWireIds = requiredCanonicalWireIds
+            .subtracting(knownCanonicalWireIds)
+            .sorted()
 
         switch trigger {
         case .missingKEM:
@@ -855,11 +865,46 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             minimumTier: .classic,
             requireSecureEnclavePoP: strictPolicy.requireSecureEnclavePoP
         )
-        let classicKeys = try await performHandshakeAttempt(
-            policy: bootstrapPolicy,
-            selectionPolicy: .classicOnly,
-            preferPQC: false
-        )
+        let classicKeys: SessionKeys = try await {
+            let maxAttempts = 2
+            var lastError: Error?
+            for attempt in 1...maxAttempts {
+                do {
+                    // Bootstrap channel is intentionally classic-only and SOA-disabled.
+                    // This avoids SOA identity alias mismatches (host:/bonjour:/id:) during recovery retries.
+                    return try await performHandshakeAttempt(
+                        policy: bootstrapPolicy,
+                        selectionPolicy: .classicOnly,
+                        preferPQC: false,
+                        allowSOA: false
+                    )
+                } catch {
+                    lastError = error
+                    let shouldRetry: Bool = {
+                        guard let hs = error as? HandshakeError,
+                              case .failed(let reason) = hs else {
+                            return false
+                        }
+                        switch reason {
+                        case .keyConfirmationFailed, .timeout:
+                            return true
+                        default:
+                            return false
+                        }
+                    }()
+
+                    guard shouldRetry, attempt < maxAttempts else {
+                        throw error
+                    }
+
+                    SkyBridgeLogger.p2p.warning(
+                        "⚠️ strictPQC bootstrap classic attempt failed; retrying once on same channel. peer=\(self.handshakePeer.deviceId, privacy: .public) attempt=\(attempt, privacy: .public) reason=\(error.localizedDescription, privacy: .public)"
+                    )
+                    try? await Task.sleep(for: .milliseconds(250))
+                }
+            }
+            throw lastError ?? P2PConnectionError.disconnected
+        }()
 
         sessionKeysLock.withLock { $0 = classicKeys }
         handshakeDriverLock.withLock { $0 = nil }
@@ -879,11 +924,46 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         SkyBridgeLogger.p2p.info(
             "🔁 strictPQC bootstrap: peer KEM keys received, rekeying to PQC. peer=\(self.handshakePeer.deviceId, privacy: .public)"
         )
-        let rekeyed = try await performHandshakeAttempt(
-            policy: strictPolicy,
-            selectionPolicy: strictSelection,
-            preferPQC: true
-        )
+        let rekeyed: SessionKeys = try await {
+            let maxAttempts = 2
+            var lastError: Error?
+            for attempt in 1...maxAttempts {
+                do {
+                    // Keep bootstrap rekey SOA-disabled to avoid identity alias drift
+                    // across host:/bonjour:/id: forms after classic bootstrap.
+                    return try await performHandshakeAttempt(
+                        policy: strictPolicy,
+                        selectionPolicy: strictSelection,
+                        preferPQC: true,
+                        allowSOA: false
+                    )
+                } catch {
+                    lastError = error
+                    let shouldRetry: Bool = {
+                        guard let hs = error as? HandshakeError,
+                              case .failed(let reason) = hs else {
+                            return false
+                        }
+                        switch reason {
+                        case .keyConfirmationFailed, .timeout:
+                            return true
+                        default:
+                            return false
+                        }
+                    }()
+
+                    guard shouldRetry, attempt < maxAttempts else {
+                        throw error
+                    }
+
+                    SkyBridgeLogger.p2p.warning(
+                        "⚠️ strictPQC bootstrap rekey attempt failed; retrying once. peer=\(self.handshakePeer.deviceId, privacy: .public) attempt=\(attempt, privacy: .public) reason=\(error.localizedDescription, privacy: .public)"
+                    )
+                    try? await Task.sleep(for: .milliseconds(250))
+                }
+            }
+            throw lastError ?? P2PConnectionError.disconnected
+        }()
         handshakeDriverLock.withLock { $0 = nil }
         
         // Notify UI that rekey succeeded, updating the displayed crypto kind
@@ -999,14 +1079,19 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
     }
 
     @available(macOS 14.0, iOS 17.0, *)
-    private func remoteSOAPeerIdBytes(for peerId: String) -> Data {
-        Self.soaPeerIdBytes(from: peerId)
+    private func remoteSOAPeerIdBytes(for peerId: String) -> Data? {
+        guard let strongIdentity = Self.strongSOARemoteIdentity(peerId) else {
+            return nil
+        }
+        return Self.soaPeerIdBytes(from: strongIdentity)
     }
 
     @available(macOS 14.0, iOS 17.0, *)
-    private func currentSOAPairKey() async -> Data {
+    private func currentSOAPairKey() async -> Data? {
         let local = await localSOAPeerIdBytes()
-        let remote = remoteSOAPeerIdBytes(for: handshakePeer.deviceId)
+        guard let remote = remoteSOAPeerIdBytes(for: handshakePeer.deviceId) else {
+            return nil
+        }
         return PeerSessionArbiter.pairKey(localPeerId: local, remotePeerId: remote)
     }
 
@@ -1027,6 +1112,15 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             normalized.removeFirst("mac:".count)
         }
         return normalized
+    }
+
+    private nonisolated static func strongSOARemoteIdentity(_ raw: String) -> String? {
+        let canonical = canonicalSOAIdentityString(raw)
+        guard !canonical.isEmpty else { return nil }
+        guard UUID(uuidString: canonical.uppercased()) != nil else {
+            return nil
+        }
+        return canonical
     }
 
     private nonisolated static func randomAttemptIdBytes() -> Data {
@@ -1374,7 +1468,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         requiredSuites: [CryptoSuite],
         timeoutSeconds: TimeInterval
     ) async -> Bool {
-        let requiredWireIds = Set(requiredSuites.map(\.wireId))
+        let requiredWireIds = Set(requiredSuites.map { $0.canonicalKEMSuite.wireId })
         guard !requiredWireIds.isEmpty else { return true }
 
         let deadline = Date().addingTimeInterval(timeoutSeconds)
@@ -1390,7 +1484,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
     private func hasRequiredPeerKEMPublicKeys(requiredWireIds: Set<UInt16>) async -> Bool {
         let candidates = trustLookupCandidates(primary: handshakePeer.deviceId, persistent: device.persistentDeviceId)
 
-        let trustSuites: Set<UInt16> = await MainActor.run {
+        let trustSuitesRaw: Set<UInt16> = await MainActor.run {
             let trust = TrustSyncService.shared
             var availableUnion: Set<UInt16> = []
 
@@ -1411,18 +1505,28 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
 
             return availableUnion
         }
+        let trustSuites = canonicalizedSuiteWireIds(trustSuitesRaw)
 
         if requiredWireIds.isSubset(of: trustSuites) {
             return true
         }
 
-        let cachedSuites = Set(await PeerKEMBootstrapStore.shared.availableSuiteWireIds(forCandidates: candidates))
+        let cachedSuitesRaw = await PeerKEMBootstrapStore.shared.availableSuiteWireIds(forCandidates: candidates)
+        let cachedSuites = canonicalizedSuiteWireIds(cachedSuitesRaw)
         if requiredWireIds.isSubset(of: cachedSuites) {
             return true
         }
 
         let combined = trustSuites.union(cachedSuites)
         return requiredWireIds.isSubset(of: combined)
+    }
+
+    private func canonicalizedSuiteWireIds<S: Sequence>(_ suiteWireIds: S) -> Set<UInt16> where S.Element == UInt16 {
+        var canonical: Set<UInt16> = []
+        for wireId in suiteWireIds {
+            canonical.insert(CryptoSuite(wireId: wireId).canonicalKEMSuite.wireId)
+        }
+        return canonical
     }
 
     // MARK: - Framing IO (4-byte big-endian length)

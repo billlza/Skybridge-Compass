@@ -628,44 +628,64 @@ public actor DeviceIdentityKeyManager {
  /// 创建新的身份密钥
     private func createNewIdentityKey() async throws -> DeviceIdentityKeyInfo {
         let deviceId = await getDeviceId()
-        let useSecureEnclave = isSecureEnclaveAvailable()
-        
- // 构建密钥属性
-        var attributes: [String: Any] = [
-            kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
-            kSecAttrKeySizeInBits as String: 256,
-            kSecAttrApplicationTag as String: KeychainConstants.signingKeyTag.utf8Data,
-            kSecPrivateKeyAttrs as String: [
-                kSecAttrIsPermanent as String: true,
-                kSecAttrApplicationTag as String: KeychainConstants.signingKeyTag.utf8Data
-            ] as [String: Any]
-        ]
-        
- // 如果 Secure Enclave 可用，使用它
-        if useSecureEnclave {
-            var error: Unmanaged<CFError>?
-            guard let access = SecAccessControlCreateWithFlags(
-                kCFAllocatorDefault,
-                kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
-                .privateKeyUsage,
-                &error
-            ) else {
-                throw DeviceIdentityKeyError.secureEnclaveNotAvailable
-            }
-            
-            attributes[kSecAttrTokenID as String] = kSecAttrTokenIDSecureEnclave
-            attributes[kSecPrivateKeyAttrs as String] = [
-                kSecAttrIsPermanent as String: true,
+        var useSecureEnclave = isSecureEnclaveAvailable()
+
+        func makeKeyAttributes(useSecureEnclave: Bool) throws -> [String: Any] {
+            var attributes: [String: Any] = [
+                kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
+                kSecAttrKeySizeInBits as String: 256,
                 kSecAttrApplicationTag as String: KeychainConstants.signingKeyTag.utf8Data,
-                kSecAttrAccessControl as String: access
-            ] as [String: Any]
+                kSecPrivateKeyAttrs as String: [
+                    kSecAttrIsPermanent as String: true,
+                    kSecAttrApplicationTag as String: KeychainConstants.signingKeyTag.utf8Data
+                ] as [String: Any]
+            ]
+
+            if useSecureEnclave {
+                var error: Unmanaged<CFError>?
+                guard let access = SecAccessControlCreateWithFlags(
+                    kCFAllocatorDefault,
+                    kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+                    .privateKeyUsage,
+                    &error
+                ) else {
+                    throw DeviceIdentityKeyError.secureEnclaveNotAvailable
+                }
+
+                attributes[kSecAttrTokenID as String] = kSecAttrTokenIDSecureEnclave
+                attributes[kSecPrivateKeyAttrs as String] = [
+                    kSecAttrIsPermanent as String: true,
+                    kSecAttrApplicationTag as String: KeychainConstants.signingKeyTag.utf8Data,
+                    kSecAttrAccessControl as String: access
+                ] as [String: Any]
+            }
+
+            return attributes
         }
-        
- // 生成密钥对
-        var error: Unmanaged<CFError>?
-        guard let privateKey = SecKeyCreateRandomKey(attributes as CFDictionary, &error) else {
-            let errorDesc = error?.takeRetainedValue().localizedDescription ?? "Unknown error"
-            throw DeviceIdentityKeyError.keyGenerationFailed(errorDesc)
+
+        func createPrivateKey(using attributes: [String: Any]) throws -> SecKey {
+            var error: Unmanaged<CFError>?
+            guard let privateKey = SecKeyCreateRandomKey(attributes as CFDictionary, &error) else {
+                let cfErr = error?.takeRetainedValue()
+                let errorDesc = cfErr?.localizedDescription ?? "Unknown error"
+                throw DeviceIdentityKeyError.keyGenerationFailed(errorDesc)
+            }
+            return privateKey
+        }
+
+        let privateKey: SecKey
+        do {
+            privateKey = try createPrivateKey(using: try makeKeyAttributes(useSecureEnclave: useSecureEnclave))
+        } catch {
+            if useSecureEnclave, shouldFallbackIdentityKeyToSoftware(error: error) {
+                SkyBridgeLogger.p2p.warning(
+                    "⚠️ Identity key Secure Enclave creation failed (likely missing entitlement); falling back to software keychain key."
+                )
+                useSecureEnclave = false
+                privateKey = try createPrivateKey(using: try makeKeyAttributes(useSecureEnclave: false))
+            } else {
+                throw error
+            }
         }
         
  // 获取公钥
@@ -674,6 +694,7 @@ public actor DeviceIdentityKeyManager {
         }
         
  // 导出公钥数据
+        var error: Unmanaged<CFError>?
         guard let publicKeyData = SecKeyCopyExternalRepresentation(publicKey, &error) as Data? else {
             let errorDesc = error?.takeRetainedValue().localizedDescription ?? "Unknown error"
             throw DeviceIdentityKeyError.keyGenerationFailed(errorDesc)
@@ -695,6 +716,13 @@ public actor DeviceIdentityKeyManager {
         
         SkyBridgeLogger.p2p.info("Created new device identity key: \(keyInfo.shortId), Secure Enclave: \(useSecureEnclave)")
         return keyInfo
+    }
+
+    private func shouldFallbackIdentityKeyToSoftware(error: Error) -> Bool {
+        guard case DeviceIdentityKeyError.keyGenerationFailed = error else {
+            return false
+        }
+        return true
     }
     
  /// 加载现有密钥

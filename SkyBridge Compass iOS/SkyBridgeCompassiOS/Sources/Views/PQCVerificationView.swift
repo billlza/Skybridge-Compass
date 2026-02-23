@@ -344,7 +344,10 @@ struct PQCVerificationView: View {
                 try? await Task.sleep(for: .milliseconds(400)) // 等待对端回包并写入 KEMTrustStore
                 
                 // 3) 立刻 rekey：preferPQC=true（此时 initiator 已具备 peer KEM public key）
-                try await P2PConnectionManager.instance.rekeyToPreferPQC(deviceId: device.id)
+                try await P2PConnectionManager.instance.rekeyToPreferPQC(
+                    deviceId: device.id,
+                    allowSOA: false
+                )
                 
                 withAnimation {
                     verificationStep = .codeVerification

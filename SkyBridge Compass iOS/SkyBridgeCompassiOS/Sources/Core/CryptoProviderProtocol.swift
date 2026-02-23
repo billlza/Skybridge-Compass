@@ -103,11 +103,15 @@ public protocol CryptoProvider: Sendable {
 
 public extension CryptoProvider {
     var supportedSuites: [CryptoSuite] {
-        [activeSuite]
+        if let upgraded = activeSuite.forwardSecureUpgradeSuite,
+           upgraded.wireId != activeSuite.wireId {
+            return [upgraded, activeSuite]
+        }
+        return [activeSuite]
     }
     
     func supportsSuite(_ suite: CryptoSuite) -> Bool {
-        supportedSuites.contains { $0.wireId == suite.wireId }
+        suite.providerCompatibilitySuite.wireId == activeSuite.providerCompatibilitySuite.wireId
     }
     
     func kemDemSeal(plaintext: Data, recipientPublicKey: Data, info: Data) async throws -> HPKESealedBox {

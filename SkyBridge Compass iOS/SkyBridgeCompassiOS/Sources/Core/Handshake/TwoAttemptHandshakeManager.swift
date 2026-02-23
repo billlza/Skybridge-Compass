@@ -125,6 +125,9 @@ public struct TwoAttemptHandshakeManager: Sendable {
         case .missingPeerKEMPublicKey:
             // Not a downgrade edge in the paper whitelist. Treat as provisioning/bootstrap signal.
             return false
+        case .unknownSuite:
+            // Unknown suite must fail closed and never become a downgrade trigger.
+            return false
         case .supersededByConcurrentAttempt:
             return false
         case .timeout, .signatureVerificationFailed,
@@ -335,6 +338,8 @@ public struct TwoAttemptHandshakeManager: Sendable {
             return true
         case .missingPeerKEMPublicKey:
             // Distinguish from "pqc unavailable": it's "missing peer provisioning".
+            return false
+        case .unknownSuite:
             return false
         case .supersededByConcurrentAttempt:
             return false

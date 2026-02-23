@@ -29,30 +29,85 @@ public enum CryptoTier: String, Sendable, Codable, Equatable {
 // MARK: - CryptoSuite
 
 /// 加密套件（与 macOS Wire 格式完全一致）
-public enum CryptoSuite: String, Sendable, Codable, Equatable, Hashable {
+public enum CryptoSuite: Sendable, Codable, Equatable, Hashable {
     /// ML-KEM-768 + ML-DSA-65（纯 PQC）
-    case mlkem768 = "ML-KEM-768"
+    case mlkem768
+
+    /// ML-KEM-768-FS + ML-DSA-65（前向安全增强变体）
+    case mlkem768fs
     
     /// X-Wing: X25519 + ML-KEM-768（混合）
-    case xwing = "X-Wing"
+    case xwing
     
     /// X25519 + Ed25519（经典）
-    case x25519Ed25519 = "X25519-Ed25519"
+    case x25519Ed25519
     
     /// X25519（经典 KEM）
-    case x25519 = "X25519"
+    case x25519
     
     /// P-256（经典，兼容）
-    case p256 = "P-256"
+    case p256
+
+    /// 未知套件（前向兼容：解析保真，不做静默映射）
+    case unknown(UInt16)
+
+    public var rawValue: String {
+        switch self {
+        case .mlkem768:
+            return "ML-KEM-768"
+        case .mlkem768fs:
+            return "ML-KEM-768-FS"
+        case .xwing:
+            return "X-Wing"
+        case .x25519Ed25519:
+            return "X25519-Ed25519"
+        case .x25519:
+            return "X25519"
+        case .p256:
+            return "P-256"
+        case .unknown(let wireId):
+            return "unknown-\(wireId)"
+        }
+    }
+
+    public init?(rawValue: String) {
+        switch rawValue {
+        case "ML-KEM-768":
+            self = .mlkem768
+        case "ML-KEM-768-FS":
+            self = .mlkem768fs
+        case "X-Wing":
+            self = .xwing
+        case "X25519-Ed25519":
+            self = .x25519Ed25519
+        case "X25519":
+            self = .x25519
+        case "P-256":
+            self = .p256
+        default:
+            guard rawValue.hasPrefix("unknown-") else { return nil }
+            let suffix = String(rawValue.dropFirst("unknown-".count))
+            if let value = UInt16(suffix) {
+                self = .unknown(value)
+            } else if suffix.hasPrefix("0x"),
+                      let value = UInt16(suffix.dropFirst(2), radix: 16) {
+                self = .unknown(value)
+            } else {
+                return nil
+            }
+        }
+    }
     
     /// Wire ID（用于协议编码）
     public var wireId: UInt16 {
         switch self {
         case .xwing: return 0x0001      // Hybrid: X-Wing
         case .mlkem768: return 0x0101   // PQC: ML-KEM-768
+        case .mlkem768fs: return 0x0102 // PQC: ML-KEM-768-FS
         case .x25519Ed25519: return 0x1001  // Classic: X25519+Ed25519
         case .x25519: return 0x1001     // Classic: X25519
         case .p256: return 0x1002       // Classic: P-256
+        case .unknown(let wireId): return wireId
         }
     }
     
@@ -61,17 +116,29 @@ public enum CryptoSuite: String, Sendable, Codable, Equatable, Hashable {
         switch wireId {
         case 0x0001: self = .xwing
         case 0x0101: self = .mlkem768
+        case 0x0102: self = .mlkem768fs
         case 0x1001: self = .x25519Ed25519
         case 0x1002: self = .p256
-        default: self = .x25519Ed25519  // 默认回退
+        default: self = .unknown(wireId)
         }
+    }
+
+    public var isKnown: Bool {
+        if case .unknown = self {
+            return false
+        }
+        return true
     }
     
     /// 是否是 PQC 套件
     public var isPQC: Bool {
         switch self {
         case .mlkem768: return true
+        case .mlkem768fs: return true
         case .xwing: return true
+        case .unknown(let wireId):
+            let tier = wireId >> 8
+            return tier == 0x00 || tier == 0x01
         default: return false
         }
     }
@@ -88,12 +155,29 @@ public enum CryptoSuite: String, Sendable, Codable, Equatable, Hashable {
     
     /// 所有 PQC 套件
     public static var allPQCSuites: [CryptoSuite] {
-        [.mlkem768, .xwing]
+        [.mlkem768, .mlkem768fs, .xwing]
     }
     
     /// 所有 Classic 套件
     public static var allClassicSuites: [CryptoSuite] {
         [.x25519, .x25519Ed25519, .p256]
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let raw = try container.decode(String.self)
+        guard let suite = CryptoSuite(rawValue: raw) else {
+            throw DecodingError.dataCorruptedError(
+                in: container,
+                debugDescription: "Unknown CryptoSuite raw value: \(raw)"
+            )
+        }
+        self = suite
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
     }
 }
 
@@ -104,8 +188,35 @@ public extension CryptoSuite {
     static let xwingMLDSA: CryptoSuite = .xwing
     /// macOS Core naming: ML-KEM-768 + ML-DSA-65
     static let mlkem768MLDSA65: CryptoSuite = .mlkem768
+    /// macOS Core naming: ML-KEM-768-FS + ML-DSA-65
+    static let mlkem768MLDSA65FS: CryptoSuite = .mlkem768fs
     /// macOS Core naming: P-256 + ECDSA (legacy)
     static let p256ECDSA: CryptoSuite = .p256
+
+    /// 是否需要 v2 临时贡献字段（仅 ML-KEM-768-FS）
+    var requiresV2EphemeralContribution: Bool {
+        self == .mlkem768fs
+    }
+
+    /// Provider 兼容套件（用于 FS 与非 FS 视为同一 KEM 提供者族）
+    var providerCompatibilitySuite: CryptoSuite {
+        canonicalKEMSuite
+    }
+
+    /// 前向安全升级套件（由 v1 升级到 v2）
+    var forwardSecureUpgradeSuite: CryptoSuite? {
+        self == .mlkem768 ? .mlkem768fs : nil
+    }
+
+    /// KEM 规范化套件（FS 与非 FS 共享同一长期 KEM identity key）
+    var canonicalKEMSuite: CryptoSuite {
+        requiresV2EphemeralContribution ? .mlkem768 : self
+    }
+
+    /// KDF 组合标签（与 macOS SkyBridgeCore 对齐，用于防止跨版本 KDF 混淆）
+    var kdfCompositionLabel: String {
+        requiresV2EphemeralContribution ? "v2-static+ephemeral" : "v1-single"
+    }
 }
 
 // MARK: - KeyUsage
@@ -515,4 +626,3 @@ public struct HandshakeKeyShare: Sendable, Equatable {
         self.shareBytes = shareBytes
     }
 }
-

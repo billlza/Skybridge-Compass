@@ -1651,32 +1651,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             }
         }
 
-        // NWConnection.receive(...) 可能出现短读（即使设置了 minimumIncompleteLength），
-        // 直接假设 “data.count == length” 会导致不稳定的 InboundReceiveError error 1。
-        // 因此这里使用 receiveExactly 逐步拼装，直到满足长度或遇到 EOF。
-        func receiveSome(max: Int) async throws -> Data {
-            enum InboundReceiveError: Error { case eof }
-            return try await withCheckedThrowingContinuation { (c: CheckedContinuation<Data, Error>) in
-                connection.receive(minimumIncompleteLength: 1, maximumLength: max) { data, _, isComplete, err in
-                    if let err { c.resume(throwing: err); return }
-                    if let data, !data.isEmpty { c.resume(returning: data); return }
-                    if isComplete { c.resume(throwing: InboundReceiveError.eof); return }
-                    // No data but not complete: treat as EOF-ish for safety.
-                    c.resume(throwing: InboundReceiveError.eof)
-                }
-            }
-        }
-
-        func receiveExactly(_ length: Int) async throws -> Data {
-            var buffer = Data()
-            buffer.reserveCapacity(length)
-            while buffer.count < length {
-                let remaining = length - buffer.count
-                let chunk = try await receiveSome(max: min(65536, remaining))
-                buffer.append(chunk)
-            }
-            return buffer
-        }
+        let framedReader = FramedReader.nwConnection(connection)
 
         let transport = DirectHandshakeTransport(connection: connection)
 
@@ -1684,15 +1659,14 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         // This avoids churn across reconnects and improves trust/pairing semantics.
         let peerDeviceId = stablePeerIdentifier(for: connection.endpoint)
         let localSOAPeerId = await localSOAPeerIdBytes()
-        let expectedRemoteSOAPeerId = soaPeerIdBytes(from: peerDeviceId)
-        let inboundPairKey = PeerSessionArbiter.pairKey(
-            localPeerId: localSOAPeerId,
-            remotePeerId: expectedRemoteSOAPeerId
-        )
+        var expectedRemoteSOAPeerId: Data?
+        var inboundPairKey: Data?
         defer {
-            Task {
-                await PeerSessionArbiter.shared.clearEstablished(pairKey: inboundPairKey)
-                await PeerSessionArbiter.shared.clearOutgoing(pairKey: inboundPairKey, attemptId: nil)
+            if let pairKey = inboundPairKey {
+                Task {
+                    await PeerSessionArbiter.shared.clearEstablished(pairKey: pairKey)
+                    await PeerSessionArbiter.shared.clearOutgoing(pairKey: pairKey, attemptId: nil)
+                }
             }
         }
         let peer = PeerIdentifier(deviceId: peerDeviceId)
@@ -1855,12 +1829,14 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         logger.info("🤝 入站连接：启用 HandshakeDriver 兼容通道（iOS 互通） state=\(String(describing: connection.state), privacy: .public)")
 
         do {
-            while connection.state == .ready {
+            while true {
+                if case .failed = connection.state { break }
+                if case .cancelled = connection.state { break }
                 logger.debug("📥 等待入站帧（读取 4B length header）… state=\(String(describing: connection.state), privacy: .public)")
-                let lenData = try await receiveExactly(4)
-                let totalLen = lenData.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+                let lenData = try await framedReader.receiveExactly(4)
+                let totalLen = lenData.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self).bigEndian }
                 guard totalLen > 0 && totalLen < 1_048_576 else { break }
-                let payload = try await receiveExactly(Int(totalLen))
+                let payload = try await framedReader.receiveExactly(Int(totalLen))
                 logger.debug("📥 入站帧: \(payload.count, privacy: .public) bytes")
                 // Phase C2: optional traffic padding (SBP2)
                 let trafficUnwrapped = TrafficPadding.unwrapIfNeeded(payload, label: "rx")
@@ -2091,6 +2067,15 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                 // 从而选择 sigAAlgorithm / provider / identity key。
                 if driver == nil {
                     if let messageA = try? HandshakeMessageA.decode(from: frame) {
+                        let soaBinding = InboundHandshakeAdapter.bindSOAState(
+                            from: messageA,
+                            localPeerId: localSOAPeerId
+                        )
+                        expectedRemoteSOAPeerId = soaBinding.expectedRemotePeerId
+                        inboundPairKey = soaBinding.pairKey
+                        if soaBinding.usedAuthenticatedInitiator {
+                            logger.info("🧩 inboundSOA: binding to MessageA initiatorPeerId (endpointId=\(peer.deviceId, privacy: .public))")
+                        }
                         let peerHasPQCGroup = messageA.supportedSuites.contains { $0.isPQCGroup }
                         let peerHasClassicGroup = messageA.supportedSuites.contains { !$0.isPQCGroup }
                         let compatibilityModeEnabled = UserDefaults.standard.bool(forKey: "Settings.EnableCompatibilityMode")
@@ -2298,7 +2283,9 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         } catch {
             // 连接被对端关闭 / 读取不足在真实网络环境下很常见（例如对端取消、并发探测连接等）。
             // 这里降级为 debug，避免污染正常日志与论文采集数据。
-            if let ns = error as NSError?, ns.domain == "SkyBridgeInbound", ns.code == -1 {
+            if let framedError = error as? FramedReaderError, framedError == .peerClosed {
+                logger.debug("ℹ️ 入站控制通道结束（peer closed）")
+            } else if let ns = error as NSError?, ns.domain == "SkyBridgeInbound", ns.code == -1 {
                 logger.debug("ℹ️ 入站控制通道结束（EOF/short read）: \(ns.localizedDescription, privacy: .public)")
             } else {
                 logger.debug("ℹ️ 入站控制通道结束: \(error.localizedDescription, privacy: .public)")

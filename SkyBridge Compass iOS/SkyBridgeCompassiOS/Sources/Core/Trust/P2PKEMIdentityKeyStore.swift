@@ -14,8 +14,9 @@ public actor P2PKEMIdentityKeyStore {
         for suite: CryptoSuite,
         provider: any CryptoProvider
     ) async throws -> (publicKey: Data, privateKey: SecureBytes) {
-        let pubId = "p2p.kem.public.\(suite.wireId)"
-        let privId = "p2p.kem.private.\(suite.wireId)"
+        let storageSuite = suite.canonicalKEMSuite
+        let pubId = "p2p.kem.public.\(storageSuite.wireId)"
+        let privId = "p2p.kem.private.\(storageSuite.wireId)"
 
         if let priv = try? keychain.loadPrivateKey(identifier: privId),
            let pub = try? keychain.loadPublicKey(identifier: pubId) {

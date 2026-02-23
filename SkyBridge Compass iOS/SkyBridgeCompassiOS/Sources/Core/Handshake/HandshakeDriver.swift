@@ -550,7 +550,9 @@ public actor HandshakeDriver {
 
             if let soa = messageA.soaExtension,
                let localPeerId = localSOAPeerId {
-                let expectedRemotePeerId = expectedRemoteSOAPeerId ?? Self.canonicalPeerIdBytes(from: peer.deviceId)
+                // SOA binding must be driven by authenticated MessageA fields.
+                // If caller did not pre-bind a remote peer id, bind to initiatorPeerId after signature verification.
+                let expectedRemotePeerId = expectedRemoteSOAPeerId ?? soa.initiatorPeerId
                 let pairKey = PeerSessionArbiter.pairKey(
                     localPeerId: localPeerId,
                     remotePeerId: soa.initiatorPeerId
@@ -868,20 +870,20 @@ public actor HandshakeDriver {
         await transitionToFailed(.cryptoError(error.localizedDescription), negotiatedSuite: negotiatedSuite)
     }
 
-    private func resolveOutboundSOAMetadata(for peer: PeerIdentifier) -> HandshakeSOAMetadata? {
+    private func resolveOutboundSOAMetadata(for _: PeerIdentifier) -> HandshakeSOAMetadata? {
         if let soaMetadata {
             return soaMetadata
         }
         guard let localSOAPeerId,
-              localSOAPeerId.count == HandshakeSOAExtension.initiatorPeerIdLength else {
+              localSOAPeerId.count == HandshakeSOAExtension.initiatorPeerIdLength,
+              let expectedRemoteSOAPeerId,
+              expectedRemoteSOAPeerId.count == HandshakeSOAExtension.targetPeerIdLength else {
             return nil
         }
-        let remotePeerId = expectedRemoteSOAPeerId ?? Self.canonicalPeerIdBytes(from: peer.deviceId)
-        guard remotePeerId.count == HandshakeSOAExtension.targetPeerIdLength else { return nil }
         let attemptId = Self.randomAttemptId()
         return try? HandshakeSOAMetadata(
             initiatorPeerId: localSOAPeerId,
-            targetPeerId: remotePeerId,
+            targetPeerId: expectedRemoteSOAPeerId,
             attemptId: attemptId
         )
     }
@@ -905,11 +907,6 @@ public actor HandshakeDriver {
             finishOnce(with: .failure(HandshakeError.failed(reason)))
             return
         }
-    }
-
-    private nonisolated static func canonicalPeerIdBytes(from raw: String) -> Data {
-        let normalized = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return Data(SHA256.hash(data: Data(normalized.utf8)))
     }
 
     private nonisolated static func randomAttemptId() -> Data {
@@ -947,6 +944,12 @@ public actor HandshakeContext {
     /// 临时密钥对
     private var ephemeralPrivateKey: SecureBytes?
     private var ephemeralPublicKey: Data?
+
+    /// v2 发起方临时贡献私钥（X25519）
+    private var v2InitiatorContributionPrivateKey: SecureBytes?
+
+    /// v2 响应方缓存的发起方临时贡献公钥（X25519）
+    private var v2PeerInitiatorContribution: Data?
 
     /// 对端 keyShares（按套件）
     private var peerKeyShares: [CryptoSuite: Data] = [:]
@@ -1019,6 +1022,22 @@ public actor HandshakeContext {
         }
         return nil
     }
+
+    private func peerKEMPublicKey(for suite: CryptoSuite) -> Data? {
+        if let direct = peerKEMPublicKeys[suite] {
+            return direct
+        }
+        let canonical = suite.canonicalKEMSuite
+        if canonical.wireId != suite.wireId,
+           let canonicalKey = peerKEMPublicKeys[canonical] {
+            return canonicalKey
+        }
+        if canonical.wireId == CryptoSuite.mlkem768.wireId,
+           let upgraded = peerKEMPublicKeys[.mlkem768fs] {
+            return upgraded
+        }
+        return nil
+    }
     
     // MARK: - MessageA Building (Initiator)
     
@@ -1036,13 +1055,17 @@ public actor HandshakeContext {
         
         // 确定支持的套件（v1: 先按当前 provider 的 activeSuite；TwoAttemptHandshakeManager 会控制优先级）
         let suite = cryptoProvider.activeSuite
+        guard suite.isKnown else {
+            emitUnknownSuiteRejected(wireId: suite.wireId, stage: "buildMessageA.activeSuite")
+            throw HandshakeError.failed(.unknownSuite(wireId: suite.wireId))
+        }
         let supportedSuites = [suite]
         negotiatedSuite = suite
         
         // 创建 KeyShare（与 supportedSuites 绑定）
         let keyShares: [HandshakeKeyShare]
         if suite.isPQC {
-            guard let peerKEM = peerKEMPublicKeys[suite] else {
+            guard let peerKEM = peerKEMPublicKey(for: suite) else {
                 throw HandshakeError.failed(.missingPeerKEMPublicKey(suite: suite.rawValue))
             }
             guard let kemProvider = provider(for: suite) else {
@@ -1060,6 +1083,16 @@ public actor HandshakeContext {
             ephemeralPublicKey = keyPair.publicKey.bytes
             keyShares = [HandshakeKeyShare(suite: suite, shareBytes: keyPair.publicKey.bytes)]
         }
+
+        let initiatorContribution: Data?
+        if supportedSuites.contains(where: { $0.requiresV2EphemeralContribution }) {
+            initiatorContribution = try generateV2InitiatorContribution()
+        } else {
+            v2InitiatorContributionPrivateKey?.zeroize()
+            v2InitiatorContributionPrivateKey = nil
+            initiatorContribution = nil
+        }
+
         self.sentSupportedSuites = supportedSuites
         self.sentKeyShares = Dictionary(uniqueKeysWithValues: keyShares.map { ($0.suite, $0.shareBytes) })
         
@@ -1083,7 +1116,8 @@ public actor HandshakeContext {
             capabilities: capabilities,
             signature: Data(),
             identityPublicKeys: identityKeys,
-            extensionsRaw: extensionsRaw
+            extensionsRaw: extensionsRaw,
+            initiatorContribution: initiatorContribution
         )
         
         // 计算 transcriptA（与 macOS 一致：SHA256(MessageA.transcriptBytes)）
@@ -1107,7 +1141,8 @@ public actor HandshakeContext {
             capabilities: unsigned.capabilities,
             signature: signature,
             identityPublicKeys: identityKeys,
-            extensionsRaw: unsigned.extensionsRaw
+            extensionsRaw: unsigned.extensionsRaw,
+            initiatorContribution: unsigned.initiatorContribution
         )
     }
     
@@ -1144,6 +1179,14 @@ public actor HandshakeContext {
         peerKeyShares = Dictionary(uniqueKeysWithValues: messageA.keyShares.map { ($0.suite, $0.shareBytes) })
         
         // 选择套件：按发起方优先级，从 offered 列表中选择本端支持的首个套件
+        if let unknown = messageA.supportedSuites.first(where: { !$0.isKnown }) {
+            emitUnknownSuiteRejected(wireId: unknown.wireId, stage: "processMessageA.supportedSuites")
+            throw HandshakeError.failed(.unknownSuite(wireId: unknown.wireId))
+        }
+        if let unknownKeyShare = messageA.keyShares.first(where: { !$0.suite.isKnown }) {
+            emitUnknownSuiteRejected(wireId: unknownKeyShare.suite.wireId, stage: "processMessageA.keyShares")
+            throw HandshakeError.failed(.unknownSuite(wireId: unknownKeyShare.suite.wireId))
+        }
         var selectedSuite: CryptoSuite?
         for suite in messageA.supportedSuites {
             if provider(for: suite) != nil {
@@ -1159,6 +1202,14 @@ public actor HandshakeContext {
         guard peerKeyShares[suite] != nil else {
             throw HandshakeError.failed(.suiteNegotiationFailed)
         }
+        if suite.requiresV2EphemeralContribution {
+            guard let contribution = messageA.initiatorContribution else {
+                throw HandshakeError.failed(.invalidMessageFormat("Missing v2 initiator contribution"))
+            }
+            v2PeerInitiatorContribution = contribution
+        } else {
+            v2PeerInitiatorContribution = nil
+        }
         negotiatedSuite = suite
         
         // 保存 transcript hash
@@ -1173,7 +1224,7 @@ public actor HandshakeContext {
                 throw HandshakeError.failed(.suiteNegotiationFailed)
             }
             let local = try await P2PKEMIdentityKeyStore.shared.getOrCreateIdentityKey(
-                for: suite,
+                for: suite.canonicalKEMSuite,
                 provider: suiteProvider
             )
             let sharedSecret = try await suiteProvider.kemDecapsulate(
@@ -1203,10 +1254,31 @@ public actor HandshakeContext {
         
         let encryptedPayload: HPKESealedBox
         let sharedSecret: SecureBytes
+        let responderShare: Data
 
         if suite.isPQC {
-            guard let payloadSecret = kemSharedSecrets[suite] else {
+            guard let staticSecret = kemSharedSecrets[suite] else {
                 throw HandshakeError.failed(.cryptoError("Missing KEM shared secret for \(suite.rawValue) (responder)"))
+            }
+            let payloadSecret: SecureBytes
+            if suite.requiresV2EphemeralContribution {
+                guard let initiatorContribution = v2PeerInitiatorContribution else {
+                    throw HandshakeError.failed(.invalidMessageFormat("Missing v2 initiator contribution"))
+                }
+                let responderContribution = try deriveResponderV2Contribution(
+                    initiatorContribution: initiatorContribution
+                )
+                responderShare = responderContribution.publicKey
+                payloadSecret = try composeV2SharedSecret(
+                    staticSecret: staticSecret,
+                    ephemeralSecret: responderContribution.sharedSecret,
+                    suite: suite
+                )
+                responderContribution.sharedSecret.zeroize()
+                staticSecret.zeroize()
+            } else {
+                responderShare = Data()
+                payloadSecret = staticSecret
             }
             let payloadPlaintext = try CryptoCapabilities.fromProvider(provider(for: suite) ?? cryptoProvider).deterministicEncode()
             encryptedPayload = try sealPayloadWithSharedSecret(
@@ -1217,6 +1289,7 @@ public actor HandshakeContext {
             )
             sharedSecret = payloadSecret
             kemSharedSecrets.removeValue(forKey: suite)
+            v2PeerInitiatorContribution = nil
         } else {
             guard let peerShare = peerKeyShares[suite] else {
                 throw HandshakeError.failed(.suiteNegotiationFailed)
@@ -1232,6 +1305,7 @@ public actor HandshakeContext {
             )
             encryptedPayload = sealResult.sealedBox
             sharedSecret = sealResult.sharedSecret
+            responderShare = encryptedPayload.encapsulatedKey
         }
         
         // 创建身份公钥结构
@@ -1245,7 +1319,6 @@ public actor HandshakeContext {
         var signatureData = Data("SkyBridge-B".utf8)
         signatureData.append(transcriptHashA ?? Data())
         HandshakeEncoding.appendUInt16LE(suite.wireId, to: &signatureData)
-        let responderShare = encryptedPayload.encapsulatedKey
         HandshakeEncoding.appendUInt16LE(UInt16(responderShare.count), to: &signatureData)
         signatureData.append(responderShare)
         signatureData.append(localNonce!)
@@ -1305,12 +1378,26 @@ public actor HandshakeContext {
         }
         
         // Anti-Downgrade: 必须是我们在 MessageA 里发过的 suite
+        guard messageB.selectedSuite.isKnown else {
+            emitUnknownSuiteRejected(wireId: messageB.selectedSuite.wireId, stage: "processMessageB.selectedSuite")
+            throw HandshakeError.failed(.unknownSuite(wireId: messageB.selectedSuite.wireId))
+        }
         guard sentSupportedSuites.contains(where: { $0.wireId == messageB.selectedSuite.wireId }) else {
             throw HandshakeError.failed(.suiteNegotiationFailed)
         }
         // 并且必须有对应 keyShare（我们持有该 suite 的私钥）
         guard sentKeyShares[messageB.selectedSuite] != nil else {
             throw HandshakeError.failed(.suiteNegotiationFailed)
+        }
+        if messageB.selectedSuite.requiresV2EphemeralContribution {
+            guard messageB.responderShare.count == 32 else {
+                throw HandshakeError.failed(.invalidMessageFormat("v2 responder contribution missing"))
+            }
+        } else {
+            // responderShare 必须与 sealedBox.encapsulatedKey 一致（避免不一致输入）
+            guard messageB.responderShare == messageB.encryptedPayload.encapsulatedKey else {
+                throw HandshakeError.failed(.invalidMessageFormat("Responder share mismatch"))
+            }
         }
         
         negotiatedSuite = messageB.selectedSuite
@@ -1323,19 +1410,37 @@ public actor HandshakeContext {
             guard let payloadSecret = kemSharedSecrets[messageB.selectedSuite] else {
                 throw HandshakeError.failed(.cryptoError("Missing KEM shared secret for \(messageB.selectedSuite.rawValue) (initiator)"))
             }
+            let sessionSecret: SecureBytes
+            if messageB.selectedSuite.requiresV2EphemeralContribution {
+                let ephemeralSecret = try deriveInitiatorV2SharedSecret(
+                    responderContribution: messageB.responderShare
+                )
+                sessionSecret = try composeV2SharedSecret(
+                    staticSecret: payloadSecret,
+                    ephemeralSecret: ephemeralSecret,
+                    suite: messageB.selectedSuite
+                )
+                ephemeralSecret.zeroize()
+                payloadSecret.zeroize()
+                v2InitiatorContributionPrivateKey?.zeroize()
+                v2InitiatorContributionPrivateKey = nil
+            } else {
+                sessionSecret = payloadSecret
+                v2InitiatorContributionPrivateKey?.zeroize()
+                v2InitiatorContributionPrivateKey = nil
+            }
             _ = try openPayloadWithSharedSecret(
                 messageB.encryptedPayload,
-                sharedSecret: payloadSecret,
+                sharedSecret: sessionSecret,
                 info: Data("handshake-payload".utf8)
             )
             kemSharedSecrets.removeValue(forKey: messageB.selectedSuite)
-            return try deriveSessionKeys(sharedSecret: payloadSecret)
+            defer { sessionSecret.zeroize() }
+            return try deriveSessionKeys(sharedSecret: sessionSecret)
         }
-        
-        // responderShare 必须与 sealedBox.encapsulatedKey 一致（避免不一致输入）
-        guard messageB.responderShare == messageB.encryptedPayload.encapsulatedKey else {
-            throw HandshakeError.failed(.invalidMessageFormat("Responder share mismatch"))
-        }
+
+        v2InitiatorContributionPrivateKey?.zeroize()
+        v2InitiatorContributionPrivateKey = nil
         
         guard let privateKey = ephemeralPrivateKey else {
             throw HandshakeError.failed(.cryptoError("Missing initiator ephemeral private key"))
@@ -1355,6 +1460,63 @@ public actor HandshakeContext {
         defer { sharedSecret.zeroize() }
         
         return try deriveSessionKeys(sharedSecret: sharedSecret)
+    }
+
+    private func generateV2InitiatorContribution() throws -> Data {
+        let privateKey = Curve25519.KeyAgreement.PrivateKey()
+        v2InitiatorContributionPrivateKey = SecureBytes(data: privateKey.rawRepresentation)
+        return privateKey.publicKey.rawRepresentation
+    }
+
+    private func deriveResponderV2Contribution(
+        initiatorContribution: Data
+    ) throws -> (publicKey: Data, sharedSecret: SecureBytes) {
+        guard initiatorContribution.count == 32 else {
+            throw HandshakeError.failed(.invalidMessageFormat("Invalid v2 initiator contribution length"))
+        }
+        let initiatorPublic = try Curve25519.KeyAgreement.PublicKey(rawRepresentation: initiatorContribution)
+        let responderPrivate = Curve25519.KeyAgreement.PrivateKey()
+        let shared = try responderPrivate.sharedSecretFromKeyAgreement(with: initiatorPublic)
+        let sharedData = shared.withUnsafeBytes { Data($0) }
+        return (publicKey: responderPrivate.publicKey.rawRepresentation, sharedSecret: SecureBytes(data: sharedData))
+    }
+
+    private func deriveInitiatorV2SharedSecret(
+        responderContribution: Data
+    ) throws -> SecureBytes {
+        guard responderContribution.count == 32 else {
+            throw HandshakeError.failed(.invalidMessageFormat("Invalid v2 responder contribution length"))
+        }
+        guard let privateKeyData = v2InitiatorContributionPrivateKey?.noCopyData() else {
+            throw HandshakeError.failed(.cryptoError("Missing v2 initiator private contribution"))
+        }
+        let initiatorPrivate = try Curve25519.KeyAgreement.PrivateKey(rawRepresentation: privateKeyData)
+        let responderPublic = try Curve25519.KeyAgreement.PublicKey(rawRepresentation: responderContribution)
+        let shared = try initiatorPrivate.sharedSecretFromKeyAgreement(with: responderPublic)
+        let sharedData = shared.withUnsafeBytes { Data($0) }
+        return SecureBytes(data: sharedData)
+    }
+
+    private func composeV2SharedSecret(
+        staticSecret: SecureBytes,
+        ephemeralSecret: SecureBytes,
+        suite: CryptoSuite
+    ) throws -> SecureBytes {
+        var ikm = Data("SkyBridge-v2-compose|".utf8)
+        ikm.append(staticSecret.noCopyData())
+        ikm.append(ephemeralSecret.noCopyData())
+        let inputKey = SymmetricKey(data: ikm)
+        let salt = transcriptHashA ?? Data("SkyBridge-v2-salt".utf8)
+        var info = Data("SkyBridge-v2-static+ephemeral".utf8)
+        var wireId = suite.wireId.littleEndian
+        info.append(Data(bytes: &wireId, count: MemoryLayout<UInt16>.size))
+        let derived = HKDF<SHA256>.deriveKey(
+            inputKeyMaterial: inputKey,
+            salt: salt,
+            info: info,
+            outputByteCount: 32
+        )
+        return SecureBytes(data: derived.withUnsafeBytes { Data($0) })
     }
 
     // MARK: - KEM Payload Helpers (PQC suites)
@@ -1440,8 +1602,10 @@ public actor HandshakeContext {
         }
         
         var kdfInfo = Data("SkyBridge-KDF".utf8)
+        kdfInfo.append(0x01)
         var suiteWireId = suite.wireId.littleEndian
         kdfInfo.append(Data(bytes: &suiteWireId, count: MemoryLayout<UInt16>.size))
+        kdfInfo.append(Data(suite.kdfCompositionLabel.utf8))
         kdfInfo.append(transcriptA)
         kdfInfo.append(transcriptB)
         kdfInfo.append(clientNonce)
@@ -1483,6 +1647,13 @@ public actor HandshakeContext {
         ephemeralPrivateKey?.zeroize()
         ephemeralPrivateKey = nil
         ephemeralPublicKey = nil
+        for (_, secret) in kemSharedSecrets {
+            secret.zeroize()
+        }
+        kemSharedSecrets.removeAll()
+        v2InitiatorContributionPrivateKey?.zeroize()
+        v2InitiatorContributionPrivateKey = nil
+        v2PeerInitiatorContribution = nil
         peerKeyShares.removeAll()
         sentSupportedSuites.removeAll()
         sentKeyShares.removeAll()
@@ -1491,5 +1662,20 @@ public actor HandshakeContext {
         localNonce = nil
         peerNonce = nil
         isZeroized = true
+    }
+
+    private nonisolated func emitUnknownSuiteRejected(wireId: UInt16, stage: String) {
+        let wireHex = String(format: "0x%04X", wireId)
+        SecurityEventEmitter.emitDetached(SecurityEvent(
+            type: .handshakeFailed,
+            severity: .warning,
+            message: "suite_rejected_unknown",
+            context: [
+                "reason": "suite_rejected_unknown",
+                "wireId": wireHex,
+                "stage": stage,
+                "fallbackEligible": "0"
+            ]
+        ))
     }
 }

@@ -27,6 +27,8 @@
 		<string>_skybridge-transfer._tcp</string>
 		<string>_skybridge-remote._tcp</string>
 	</array>
+	<key>NSSupportsLiveActivities</key>
+	<true/>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
 	<key>UISupportedInterfaceOrientations</key>

@@ -44,10 +44,17 @@ public final class LiveActivityManager: ObservableObject {
     // MARK: - Public API
     
     /// 启动灵动岛活动
-    public func startActivity() async {
+    @discardableResult
+    public func startActivity() async -> Bool {
         guard ActivityAuthorizationInfo().areActivitiesEnabled else {
             SkyBridgeLogger.shared.warning("⚠️ Live Activities 未启用")
-            return
+            return false
+        }
+
+        let supportsLiveActivities = (Bundle.main.object(forInfoDictionaryKey: "NSSupportsLiveActivities") as? Bool) ?? false
+        guard supportsLiveActivities else {
+            SkyBridgeLogger.shared.error("❌ 当前 Target 未启用 NSSupportsLiveActivities，已跳过 Live Activity 启动")
+            return false
         }
         
         // 如果已有活动，先结束
@@ -70,8 +77,10 @@ public final class LiveActivityManager: ObservableObject {
             
             // 监听活动状态
             startObservingActivity(activity)
+            return true
         } catch {
             SkyBridgeLogger.shared.error("❌ 启动灵动岛活动失败: \(error.localizedDescription)")
+            return false
         }
     }
     

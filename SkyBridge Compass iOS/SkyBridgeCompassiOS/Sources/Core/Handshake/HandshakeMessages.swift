@@ -362,6 +362,9 @@ public struct HandshakeMessageA: Sendable {
 
     /// 可选扩展区原始字节（TLV 容器，保留未知扩展 passthrough）
     public let extensionsRaw: Data
+
+    /// v2 可选发起方临时贡献（例如 FS 套件下的 X25519 公钥）
+    public let initiatorContribution: Data?
     
     /// Secure Enclave 签名（可选）
     public let secureEnclaveSignature: Data?
@@ -391,6 +394,7 @@ public struct HandshakeMessageA: Sendable {
         signature: Data,
         identityPublicKey: Data,
         extensionsRaw: Data = Data(),
+        initiatorContribution: Data? = nil,
         secureEnclaveSignature: Data? = nil
     ) {
         self.version = version
@@ -402,6 +406,7 @@ public struct HandshakeMessageA: Sendable {
         self.signature = signature
         self.identityPublicKey = identityPublicKey
         self.extensionsRaw = extensionsRaw
+        self.initiatorContribution = initiatorContribution
         self.secureEnclaveSignature = secureEnclaveSignature
     }
     
@@ -416,6 +421,7 @@ public struct HandshakeMessageA: Sendable {
         signature: Data,
         identityPublicKeys: IdentityPublicKeys,
         extensionsRaw: Data = Data(),
+        initiatorContribution: Data? = nil,
         secureEnclaveSignature: Data? = nil
     ) {
         self.version = version
@@ -427,6 +433,7 @@ public struct HandshakeMessageA: Sendable {
         self.signature = signature
         self.identityPublicKey = identityPublicKeys.encoded
         self.extensionsRaw = extensionsRaw
+        self.initiatorContribution = initiatorContribution
         self.secureEnclaveSignature = secureEnclaveSignature
     }
     
@@ -481,7 +488,12 @@ public struct HandshakeMessageA: Sendable {
         supportedSuites.reserveCapacity(Int(supportedCount))
         for _ in 0..<supportedCount {
             let suiteId = try HandshakeEncoding.readUInt16LE(from: data, offset: &offset)
-            supportedSuites.append(CryptoSuite(wireId: suiteId))
+            let suite = CryptoSuite(wireId: suiteId)
+            guard suite.isKnown else {
+                emitUnknownSuiteRejectedAudit(wireId: suiteId, stage: "decode.messageA.supportedSuites")
+                throw HandshakeError.failed(.unknownSuite(wireId: suiteId))
+            }
+            supportedSuites.append(suite)
         }
         
         // keyShares
@@ -507,6 +519,10 @@ public struct HandshakeMessageA: Sendable {
             offset += Int(shareLen)
             
             let suite = CryptoSuite(wireId: suiteId)
+            guard suite.isKnown else {
+                emitUnknownSuiteRejectedAudit(wireId: suiteId, stage: "decode.messageA.keyShares")
+                throw HandshakeError.failed(.unknownSuite(wireId: suiteId))
+            }
             try HandshakeEncoding.validateKeyShareLength(shareBytes.count, for: suite)
             keyShares.append(HandshakeKeyShare(suite: suite, shareBytes: Data(shareBytes)))
         }
@@ -579,6 +595,21 @@ public struct HandshakeMessageA: Sendable {
                 offset += Int(extLen)
             }
         }
+
+        // v2 initiator contribution (only when FS suites are offered)
+        var initiatorContribution: Data?
+        if supportedSuites.contains(where: { $0.requiresV2EphemeralContribution }) {
+            let contributionLen = try HandshakeEncoding.readUInt16LE(from: data, offset: &offset)
+            guard offset + Int(contributionLen) <= data.count else {
+                throw HandshakeError.failed(.invalidMessageFormat("v2 initiator contribution truncated"))
+            }
+            try HandshakeEncoding.validateInitiatorContributionLength(Int(contributionLen), for: supportedSuites)
+            if contributionLen > 0 {
+                let contribution = data[offset..<(offset + Int(contributionLen))]
+                initiatorContribution = Data(contribution)
+            }
+            offset += Int(contributionLen)
+        }
         
         // signature
         let sigLen = try HandshakeEncoding.readUInt16LE(from: data, offset: &offset)
@@ -611,6 +642,7 @@ public struct HandshakeMessageA: Sendable {
             signature: Data(signature),
             identityPublicKey: Data(identityPublicKey),
             extensionsRaw: extensionsRaw,
+            initiatorContribution: initiatorContribution,
             secureEnclaveSignature: secureEnclaveSignature
         )
     }
@@ -652,6 +684,11 @@ public struct HandshakeMessageA: Sendable {
             data.append(Self.extensionContainerMagic)
             HandshakeEncoding.appendUInt16LE(UInt16(extensionsRaw.count), to: &data)
             data.append(extensionsRaw)
+        }
+        if supportedSuites.contains(where: { $0.requiresV2EphemeralContribution }) {
+            let contribution = initiatorContribution ?? Data()
+            HandshakeEncoding.appendUInt16LE(UInt16(contribution.count), to: &data)
+            data.append(contribution)
         }
         return data
     }
@@ -795,6 +832,10 @@ public struct HandshakeMessageB: Sendable {
         // selectedSuiteWireId
         let suiteWireId = try HandshakeEncoding.readUInt16LE(from: data, offset: &offset)
         let selectedSuite = CryptoSuite(wireId: suiteWireId)
+        guard selectedSuite.isKnown else {
+            emitUnknownSuiteRejectedAudit(wireId: suiteWireId, stage: "decode.messageB.selectedSuite")
+            throw HandshakeError.failed(.unknownSuite(wireId: suiteWireId))
+        }
         
         // responderShare
         let shareLen = try HandshakeEncoding.readUInt16LE(from: data, offset: &offset)
@@ -1057,6 +1098,22 @@ private func makeSecureEnclavePreimage(domain: String, signaturePreimage: Data) 
     return data
 }
 
+private func emitUnknownSuiteRejectedAudit(wireId: UInt16, stage: String) {
+    guard #available(iOS 17.0, *) else { return }
+    let wireHex = String(format: "0x%04X", wireId)
+    SecurityEventEmitter.emitDetached(SecurityEvent(
+        type: .handshakeFailed,
+        severity: .warning,
+        message: "suite_rejected_unknown",
+        context: [
+            "reason": "suite_rejected_unknown",
+            "wireId": wireHex,
+            "stage": stage,
+            "fallbackEligible": "0"
+        ]
+    ))
+}
+
 // MARK: - HandshakeEncoding
 
 enum HandshakeEncoding {
@@ -1111,11 +1168,24 @@ enum HandshakeEncoding {
             throw HandshakeError.failed(.invalidMessageFormat("ResponderShare length mismatch"))
         }
     }
+
+    static func validateInitiatorContributionLength(_ length: Int, for supportedSuites: [CryptoSuite]) throws {
+        guard supportedSuites.contains(where: { $0.requiresV2EphemeralContribution }) else {
+            return
+        }
+        if length == 0 {
+            return
+        }
+        guard length == 32 else {
+            throw HandshakeError.failed(.invalidMessageFormat("v2 initiator contribution length mismatch"))
+        }
+    }
     
     static func expectedKeyShareLength(for suite: CryptoSuite) -> Int? {
         switch suite.wireId {
         case 0x0001: return 1120   // X-Wing ciphertext: X25519(32) + ML-KEM-768(1088)
         case 0x0101: return 1088   // ML-KEM-768
+        case 0x0102: return 1088   // ML-KEM-768-FS（KEM 密文长度与 v1 相同）
         case 0x1001: return 32     // X25519
         case 0x1002: return 65     // P-256
         default: return nil
@@ -1123,9 +1193,13 @@ enum HandshakeEncoding {
     }
 
     static func expectedResponderShareLength(for suite: CryptoSuite) -> Int? {
-        if suite.isPQC {
+        switch suite.wireId {
+        case 0x0102:
+            return 32 // v2: responder ephemeral contribution is mandatory
+        case 0x0001, 0x0101:
             return 0
+        default:
+            return expectedKeyShareLength(for: suite)
         }
-        return expectedKeyShareLength(for: suite)
     }
 }

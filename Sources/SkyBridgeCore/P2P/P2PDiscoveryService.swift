@@ -1521,26 +1521,7 @@ public class P2PDiscoveryService: BaseManager {
             }
         }
 
-        func receiveFixed(_ length: Int) async throws -> Data {
-            enum InboundReceiveError: Error {
-                case eof
-                case shortRead(expected: Int, actual: Int)
-            }
-            return try await withCheckedThrowingContinuation { (c: CheckedContinuation<Data, Error>) in
-                connection.receive(minimumIncompleteLength: length, maximumLength: length) { data, _, _, err in
-                    if let err { c.resume(throwing: err) }
-                    else if let data {
-                        if data.count == length {
-                            c.resume(returning: data)
-                        } else {
-                            c.resume(throwing: InboundReceiveError.shortRead(expected: length, actual: data.count))
-                        }
-                    } else {
-                        c.resume(throwing: InboundReceiveError.eof)
-                    }
-                }
-            }
-        }
+        let framedReader = FramedReader.nwConnection(connection)
 
         func sendAck(_ code: UInt8) async throws {
             try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
@@ -1557,15 +1538,14 @@ public class P2PDiscoveryService: BaseManager {
             self?.resolveInboundPeerIdentifier(for: connection.endpoint) ?? Self.fallbackPeerIdentifier(for: connection.endpoint)
         }
         let localSOAPeerId = await Self.localSOAPeerIdBytes()
-        let expectedRemoteSOAPeerId = Self.soaPeerIdBytes(from: resolvedPeerId)
-        let inboundPairKey = PeerSessionArbiter.pairKey(
-            localPeerId: localSOAPeerId,
-            remotePeerId: expectedRemoteSOAPeerId
-        )
+        var expectedRemoteSOAPeerId: Data?
+        var inboundPairKey: Data?
         defer {
-            Task {
-                await PeerSessionArbiter.shared.clearEstablished(pairKey: inboundPairKey)
-                await PeerSessionArbiter.shared.clearOutgoing(pairKey: inboundPairKey, attemptId: nil)
+            if let pairKey = inboundPairKey {
+                Task {
+                    await PeerSessionArbiter.shared.clearEstablished(pairKey: pairKey)
+                    await PeerSessionArbiter.shared.clearOutgoing(pairKey: pairKey, attemptId: nil)
+                }
             }
         }
         let peer = PeerIdentifier(deviceId: resolvedPeerId)
@@ -1574,12 +1554,14 @@ public class P2PDiscoveryService: BaseManager {
         logger.info("🤝 入站连接：启用 HandshakeDriver 兼容通道（iOS 互通） state=\(String(describing: connection.state), privacy: .public)")
 
         do {
-            while connection.state == .ready {
-                let lenData = try await receiveFixed(4)
-                let totalLen = lenData.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+            while true {
+                if case .failed = connection.state { break }
+                if case .cancelled = connection.state { break }
+                let lenData = try await framedReader.receiveExactly(4)
+                let totalLen = lenData.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self).bigEndian }
                 guard totalLen > 0 && totalLen < 1_048_576 else { break }
 
-                let payload = try await receiveFixed(Int(totalLen))
+                let payload = try await framedReader.receiveExactly(Int(totalLen))
                 let unwrapped = TrafficPadding.unwrapIfNeeded(payload, label: "rx")
 
                 if let packet = try? JSONDecoder().decode(SecurePacket.self, from: unwrapped) {
@@ -1609,6 +1591,15 @@ public class P2PDiscoveryService: BaseManager {
                 // 从而选择本机可用的 (sigAAlgorithm / provider / offeredSuites) 组合。
                 if driver == nil {
                     if let messageA = try? HandshakeMessageA.decode(from: unwrapped) {
+                        let soaBinding = InboundHandshakeAdapter.bindSOAState(
+                            from: messageA,
+                            localPeerId: localSOAPeerId
+                        )
+                        expectedRemoteSOAPeerId = soaBinding.expectedRemotePeerId
+                        inboundPairKey = soaBinding.pairKey
+                        if soaBinding.usedAuthenticatedInitiator {
+                            logger.info("🧩 inboundSOA: binding to MessageA initiatorPeerId (endpointId=\(peer.deviceId, privacy: .public))")
+                        }
                         let peerHasPQCGroup = messageA.supportedSuites.contains { $0.isPQCGroup }
                         let peerHasClassicGroup = messageA.supportedSuites.contains { !$0.isPQCGroup }
                         let compatibilityModeEnabled = UserDefaults.standard.bool(forKey: "Settings.EnableCompatibilityMode")
@@ -1725,10 +1716,18 @@ public class P2PDiscoveryService: BaseManager {
                     }
                 }
 
-                guard let driver else { continue }
-                await driver.handleMessage(unwrapped, from: peer)
-                let st = await driver.getCurrentState()
+                guard let activeDriver = driver else { continue }
+                await activeDriver.handleMessage(unwrapped, from: peer)
+                let st = await activeDriver.getCurrentState()
                 logger.debug("🤝 HandshakeDriver state: \(String(describing: st), privacy: .public)")
+
+                if case .failed(let reason) = st {
+                    logger.warning(
+                        "⚠️ 入站握手失败，等待同连接重试: peer=\(peer.deviceId, privacy: .public) reason=\(String(describing: reason), privacy: .public)"
+                    )
+                    driver = nil
+                    continue
+                }
 
                 if !didMarkEstablished, case .established = st {
                     didMarkEstablished = true
@@ -1740,7 +1739,11 @@ public class P2PDiscoveryService: BaseManager {
                 }
             }
         } catch {
-            logger.debug("ℹ️ 入站控制通道结束: \(error.localizedDescription, privacy: .public)")
+            if let framedError = error as? FramedReaderError, framedError == .peerClosed {
+                logger.debug("ℹ️ 入站控制通道结束（peer closed）")
+            } else {
+                logger.debug("ℹ️ 入站控制通道结束: \(error.localizedDescription, privacy: .public)")
+            }
         }
     }
 

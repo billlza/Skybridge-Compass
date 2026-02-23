@@ -158,8 +158,12 @@ struct SkyBridgeCompassApp: App {
         }
 
         // 启动 Live Activity
-        await liveActivity.startActivity()
-        SkyBridgeLogger.shared.info("✅ 灵动岛 Live Activity 已启动")
+        let started = await liveActivity.startActivity()
+        if started {
+            SkyBridgeLogger.shared.info("✅ 灵动岛 Live Activity 已启动")
+        } else {
+            SkyBridgeLogger.shared.warning("ℹ️ 灵动岛 Live Activity 未启动（请检查系统开关或 Info.plist 配置）")
+        }
     }
 
     private func applyDiscoverySettings() {

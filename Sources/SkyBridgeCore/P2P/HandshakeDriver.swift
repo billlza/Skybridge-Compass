@@ -886,7 +886,9 @@ public actor HandshakeDriver {
 
             if let soa = messageA.soaExtension,
                let localPeerId = localSOAPeerId {
-                let expectedRemotePeerId = expectedRemoteSOAPeerId ?? Self.canonicalPeerIdBytes(from: peer.deviceId)
+                // SOA binding must come from authenticated MessageA fields.
+                // Endpoint-derived peer identifiers are routing hints only.
+                let expectedRemotePeerId = expectedRemoteSOAPeerId ?? soa.initiatorPeerId
                 let pairKey = PeerSessionArbiter.pairKey(
                     localPeerId: localPeerId,
                     remotePeerId: soa.initiatorPeerId
@@ -1219,6 +1221,11 @@ public actor HandshakeDriver {
             return
         case .waitingFinished(_, let sessionKeys, let expectingFrom):
             guard verifyFinished(finished, sessionKeys: sessionKeys, expectingFrom: expectingFrom) else {
+                let expectedDirection: HandshakeFinished.Direction = (expectingFrom == .initiator) ? .initiatorToResponder : .responderToInitiator
+                let transcriptPrefix = hexString(Data(sessionKeys.transcriptHash.prefix(8)))
+                SkyBridgeLogger.p2p.error(
+                    "❌ Finished MAC verify failed: peer=\(peer.deviceId, privacy: .public) suite=\(sessionKeys.negotiatedSuite.rawValue, privacy: .public) expectedDirection=\(expectedDirection.rawValue, privacy: .public) gotDirection=\(finished.direction.rawValue, privacy: .public) transcriptHashPrefix=\(transcriptPrefix, privacy: .public)"
+                )
                 await transitionToFailed(.keyConfirmationFailed, negotiatedSuite: sessionKeys.negotiatedSuite)
                 return
             }
@@ -1478,20 +1485,20 @@ public actor HandshakeDriver {
         await transitionToFailed(.cryptoError(error.localizedDescription), negotiatedSuite: negotiatedSuite)
     }
 
-    private func resolveOutboundSOAMetadata(for peer: PeerIdentifier) -> HandshakeSOAMetadata? {
+    private func resolveOutboundSOAMetadata(for _: PeerIdentifier) -> HandshakeSOAMetadata? {
         if let soaMetadata {
             return soaMetadata
         }
         guard let localSOAPeerId,
-              localSOAPeerId.count == HandshakeSOAExtension.initiatorPeerIdLength else {
+              localSOAPeerId.count == HandshakeSOAExtension.initiatorPeerIdLength,
+              let expectedRemoteSOAPeerId,
+              expectedRemoteSOAPeerId.count == HandshakeSOAExtension.targetPeerIdLength else {
             return nil
         }
-        let remotePeerId = expectedRemoteSOAPeerId ?? Self.canonicalPeerIdBytes(from: peer.deviceId)
-        guard remotePeerId.count == HandshakeSOAExtension.targetPeerIdLength else { return nil }
         let attemptId = Self.randomAttemptId()
         return try? HandshakeSOAMetadata(
             initiatorPeerId: localSOAPeerId,
-            targetPeerId: remotePeerId,
+            targetPeerId: expectedRemoteSOAPeerId,
             attemptId: attemptId
         )
     }
@@ -1515,11 +1522,6 @@ public actor HandshakeDriver {
             finishOnce(with: .failure(HandshakeError.failed(reason)))
             return
         }
-    }
-
-    private nonisolated static func canonicalPeerIdBytes(from raw: String) -> Data {
-        let normalized = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return Data(SHA256.hash(data: Data(normalized.utf8)))
     }
 
     private nonisolated static func randomAttemptId() -> Data {

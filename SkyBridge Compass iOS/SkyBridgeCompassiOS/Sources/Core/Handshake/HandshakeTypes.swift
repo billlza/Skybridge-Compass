@@ -60,6 +60,7 @@ public enum HandshakeFailureReason: Error, LocalizedError, Sendable {
     case missingPeerKEMPublicKey(suite: String)
     case suiteNotSupported
     case suiteNegotiationFailed
+    case unknownSuite(wireId: UInt16)
     case supersededByConcurrentAttempt(winnerPeerId: String, winnerAttemptId: String)
 
     public var errorDescription: String? {
@@ -100,6 +101,8 @@ public enum HandshakeFailureReason: Error, LocalizedError, Sendable {
             return "对端请求的加密套件不受支持。"
         case .suiteNegotiationFailed:
             return "无法协商共同加密套件。"
+        case .unknownSuite(let wireId):
+            return String(format: "收到未知加密套件（wireId=0x%04X），握手已拒绝。", wireId)
         case .supersededByConcurrentAttempt(let winnerPeerId, let winnerAttemptId):
             return "本次握手已被并发连接仲裁淘汰（winner=\(winnerPeerId), attempt=\(winnerAttemptId)）。"
         }

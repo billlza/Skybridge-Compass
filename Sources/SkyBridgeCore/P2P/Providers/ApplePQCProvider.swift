@@ -538,6 +538,16 @@ public struct AppleXWingCryptoProvider: CryptoProvider, Sendable {
     
     public init() {}
 
+    public static func selfTest() -> Bool {
+        do {
+            let _ = try XWingMLKEM768X25519.PrivateKey.generate()
+            let _ = try MLDSA65.PrivateKey()
+            return true
+        } catch {
+            return false
+        }
+    }
+
     private static func hkdfSalt(info: Data) -> Data {
         var data = Data(hkdfSaltLabel.utf8)
         data.append(info)

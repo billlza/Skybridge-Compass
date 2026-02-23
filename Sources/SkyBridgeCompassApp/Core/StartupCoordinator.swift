@@ -195,29 +195,22 @@ public class StartupCoordinator: ObservableObject {
         logger.debug("📁 文件系统服务初始化完成")
     }
     
- /// 初始化设备发现服务
+    /// 初始化设备发现服务
     private func initializeDeviceDiscovery() async {
         logger.info("🔍 开始初始化设备发现服务")
-        
- // 启动设备发现管理器
-        let deviceDiscoveryManager = DeviceDiscoveryManager()
+
+        // 修复：避免在启动阶段创建“临时”发现管理器实例。
+        // 临时实例释放后会留下无效 listener handler，导致 iOS 连接后握手超时。
+        // 这里统一收敛到单例 P2PNetworkManager，并强制重绑 _skybridge._tcp 监听器。
+        await ServiceAdvertiserCenter.shared.stopAdvertising("_skybridge._tcp")
+
+        // 启动 P2P 网络管理器（使用单例）
         do {
-            try await deviceDiscoveryManager.start()
-            logger.info("✅ 设备发现管理器启动成功")
-        } catch {
-            logger.error("❌ 设备发现管理器启动失败: \(error)")
-        }
-        
- // 启动设备发现服务
-        let deviceDiscoveryService = DeviceDiscoveryService()
-        await deviceDiscoveryService.startDiscovery()
-        logger.info("✅ 设备发现服务启动成功")
-        
- // 启动P2P网络管理器（使用单例）
-        do {
-            try await P2PNetworkManager.shared.start()
+            if !P2PNetworkManager.shared.isStarted {
+                try await P2PNetworkManager.shared.start()
+            }
             await P2PNetworkManager.shared.startDiscovery()
-            logger.info("✅ P2P网络管理器启动成功")
+            logger.info("✅ P2P网络管理器启动成功（监听器已重绑）")
         } catch {
             logger.error("❌ P2P网络管理器启动失败: \(error)")
         }
