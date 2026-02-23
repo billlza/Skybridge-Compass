@@ -117,12 +117,13 @@ public final class HardwareMonitorService: ObservableObject {
     // MARK: - Private Methods - Collection
 
     private func collectMetrics() async {
+        let unifiedSnapshot = await UnifiedMetricsBackend.shared.collectSnapshot(force: false)
         let cpu = configuration.monitorCPU ? collectCPUMetrics() : .zero
         let memory = configuration.monitorMemory ? collectMemoryMetrics() : .zero
-        let gpu = configuration.monitorGPU ? collectGPUMetrics() : .zero
+        let gpu = configuration.monitorGPU ? collectGPUMetrics(from: unifiedSnapshot) : .zero
         let network = configuration.monitorNetwork ? collectNetworkMetrics() : .zero
         let disk = configuration.monitorDisk ? collectDiskMetrics() : .zero
-        let thermal = configuration.monitorThermal ? collectThermalMetrics() : .normal
+        let thermal = configuration.monitorThermal ? collectThermalMetrics(from: unifiedSnapshot) : .normal
 
         let snapshot = SystemMetricsSnapshot(
             cpu: cpu,
@@ -244,26 +245,15 @@ public final class HardwareMonitorService: ObservableObject {
 
     // MARK: - GPU Metrics
 
-    private func collectGPUMetrics() -> GPUMetrics {
-        // 使用 IOKit 获取 GPU 信息
-        // 注意: Apple Silicon 的 GPU 信息有限
-
-        let gpuName = "Apple Silicon GPU"
-        let rendererUtil: Double = 0
-        let tilerUtil: Double = 0
-        let deviceUtil: Double = 0
-        let vramUsed: UInt64 = 0
-        let vramTotal: UInt64 = 0
-
-        // Metal 设备信息需要在 SkyBridgeUI 层获取
-        // 这里返回基本信息
-
+    private func collectGPUMetrics(from snapshot: UnifiedMetricsSnapshot) -> GPUMetrics {
+        let deviceUtil = snapshot.gpuUsageState.availability == .unavailable ? 0 : snapshot.gpuUsage
+        let vramTotal = ProcessInfo.processInfo.physicalMemory
         return GPUMetrics(
-            gpuName: gpuName,
-            rendererUtilization: rendererUtil,
-            tilerUtilization: tilerUtil,
+            gpuName: "Apple Silicon GPU",
+            rendererUtilization: 0,
+            tilerUtilization: 0,
             deviceUtilization: deviceUtil,
-            vramUsed: vramUsed,
+            vramUsed: 0,
             vramTotal: vramTotal,
             isIntegrated: true
         )
@@ -362,14 +352,12 @@ public final class HardwareMonitorService: ObservableObject {
 
     // MARK: - Thermal Metrics
 
-    private func collectThermalMetrics() -> ThermalMetrics {
-        let state = ProcessInfo.processInfo.thermalState
-
+    private func collectThermalMetrics(from snapshot: UnifiedMetricsSnapshot) -> ThermalMetrics {
         return ThermalMetrics(
-            thermalState: HardwareThermalState.from(state),
-            cpuTemperature: nil, // 需要 SMC 访问
-            gpuTemperature: nil,
-            fanSpeed: nil
+            thermalState: HardwareThermalState.from(ProcessInfo.processInfo.thermalState),
+            cpuTemperature: snapshot.cpuTemperatureState.availability == .unavailable ? nil : snapshot.cpuTemperature,
+            gpuTemperature: snapshot.gpuTemperatureState.availability == .unavailable ? nil : snapshot.gpuTemperature,
+            fanSpeed: snapshot.fanState.availability == .unavailable ? nil : snapshot.fanRPMs.first
         )
     }
 

@@ -361,9 +361,28 @@ let package = Package(
                 .linkedFramework("SwiftUI")
             ]
         ),
+        .target(
+            name: "PrivateSensorBridgeC",
+            dependencies: [],
+            path: "Sources/PrivateSensorBridgeC",
+            publicHeadersPath: "include",
+            linkerSettings: [
+                .linkedFramework("IOKit"),
+                .linkedFramework("CoreFoundation")
+            ]
+        ),
+        .target(
+            name: "PrivateSensorBridge",
+            dependencies: ["PrivateSensorBridgeC"],
+            path: "Sources/PrivateSensorBridge",
+            linkerSettings: [
+                .linkedFramework("IOKit"),
+                .linkedFramework("CoreFoundation")
+            ]
+        ),
         .executableTarget(
             name: "PowerMetricsHelper",
-            dependencies: [],
+            dependencies: ["PrivateSensorBridge"],
             path: "Sources/PowerMetricsHelper",
             exclude: ["Info.plist", "com.skybridge.PowerMetricsHelper.plist"], // 排除 plist 文件，它们由系统管理
             linkerSettings: [

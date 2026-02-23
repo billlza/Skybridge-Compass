@@ -2,6 +2,8 @@ import Foundation
 @preconcurrency import Combine
 import SwiftUI
 import AuthenticationServices
+import LocalAuthentication
+import Security
 import SkyBridgeCore
 
 /// 现代化登录视图模型，遵循Apple 2025设计规范和最佳实践
@@ -1544,7 +1546,13 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
         SkyBridgeLogger.ui.debugOnly("✅ [AuthenticationViewModel] 强制重新认证完成，用户需要重新登录")
     }
 
- // MARK: - KeyChain 凭据管理
+// MARK: - KeyChain 凭据管理
+
+    private func makeNonInteractiveAuthContext() -> LAContext {
+        let context = LAContext()
+        context.interactionNotAllowed = true
+        return context
+    }
 
  /// 保存登录凭据到KeyChain
     private func saveCredentials() {
@@ -1555,18 +1563,25 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
 
  // 保存密码到KeyChain（敏感信息）
         let passwordData = emailPassword.data(using: .utf8) ?? Data()
+        let context = makeNonInteractiveAuthContext()
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrAccount as String: emailAddress,
             kSecAttrService as String: "SkyBridgeCompass_EmailLogin",
-            kSecValueData as String: passwordData
+            kSecUseAuthenticationContext as String: context,
         ]
-
- // 先删除已存在的项目
-        SecItemDelete(query as CFDictionary)
-
- // 添加新的项目
-        let status = SecItemAdd(query as CFDictionary, nil)
+        let updateAttrs: [String: Any] = [
+            kSecValueData as String: passwordData,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock
+        ]
+        var status = SecItemUpdate(query as CFDictionary, updateAttrs as CFDictionary)
+        if status == errSecItemNotFound {
+            var addQuery = query
+            addQuery.removeValue(forKey: kSecUseAuthenticationContext as String)
+            addQuery[kSecValueData as String] = passwordData
+            addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
+            status = SecItemAdd(addQuery as CFDictionary, nil)
+        }
         if status == errSecSuccess {
             SkyBridgeLogger.ui.debugOnly("✅ [AuthenticationViewModel] 凭据保存成功")
         } else {
@@ -1581,13 +1596,15 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
             emailAddress = savedEmail
 
  // 从KeyChain加载密码
+            let context = makeNonInteractiveAuthContext()
             let query: [String: Any] = [
                 kSecClass as String: kSecClassGenericPassword,
                 kSecAttrAccount as String: savedEmail,
                 kSecAttrService as String: "SkyBridgeCompass_EmailLogin",
                 kSecReturnData as String: true,
-                kSecMatchLimit as String: kSecMatchLimitOne
-            ]
+                kSecMatchLimit as String: kSecMatchLimitOne,
+                kSecUseAuthenticationContext as String: context,
+                ]
 
             var result: AnyObject?
             let status = SecItemCopyMatching(query as CFDictionary, &result)
@@ -1611,11 +1628,13 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
 
  // 清除KeyChain中的密码
         if !emailAddress.isEmpty {
+            let context = makeNonInteractiveAuthContext()
             let query: [String: Any] = [
                 kSecClass as String: kSecClassGenericPassword,
                 kSecAttrAccount as String: emailAddress,
-                kSecAttrService as String: "SkyBridgeCompass_EmailLogin"
-            ]
+                kSecAttrService as String: "SkyBridgeCompass_EmailLogin",
+                kSecUseAuthenticationContext as String: context,
+                ]
 
             let status = SecItemDelete(query as CFDictionary)
             if status == errSecSuccess {

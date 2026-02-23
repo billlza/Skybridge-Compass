@@ -7,64 +7,70 @@ public class SimpleSystemMonitor {
     
  // MARK: - 私有属性
     
- /// 上次CPU测量时间
-    private var lastCPUTime: TimeInterval = 0
-    
- /// 上次CPU使用率
-    private var lastCPUUsage: Double = 0
+    private var lastCPUTicks: (user: UInt64, system: UInt64, idle: UInt64, nice: UInt64)?
     
  // MARK: - 公共方法
     
  /// 获取CPU使用率 - 使用ProcessInfo的简化方式
  /// - Returns: CPU使用率百分比 (0.0-100.0)
     public func getCPUUsage() -> Double {
-        let currentTime = ProcessInfo.processInfo.systemUptime
-        
- // 如果距离上次测量时间太短，返回缓存值
-        if currentTime - lastCPUTime < 0.5 {
-            return lastCPUUsage
+        var info = host_cpu_load_info()
+        var count = mach_msg_type_number_t(MemoryLayout<host_cpu_load_info>.size / MemoryLayout<integer_t>.size)
+
+        let result = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                host_statistics(mach_host_self(), HOST_CPU_LOAD_INFO, $0, &count)
+            }
         }
-        
- // 使用系统负载作为CPU使用率的近似值
-        let loadAverage = getSystemLoad()
-        let cpuCount = ProcessInfo.processInfo.processorCount
-        
- // 将负载平均值转换为CPU使用率百分比
-        let usage = loadAverage.isEmpty ? 0.0 : min(loadAverage[0] / Double(cpuCount) * 100.0, 100.0)
-        
-        lastCPUTime = currentTime
-        lastCPUUsage = usage
-        
-        return max(0.0, usage)
+
+        guard result == KERN_SUCCESS else { return 0.0 }
+
+        let currentTicks = (
+            user: UInt64(info.cpu_ticks.0),
+            system: UInt64(info.cpu_ticks.1),
+            idle: UInt64(info.cpu_ticks.2),
+            nice: UInt64(info.cpu_ticks.3)
+        )
+
+        defer { lastCPUTicks = currentTicks }
+
+        guard let previous = lastCPUTicks else {
+            let total = Double(currentTicks.user + currentTicks.system + currentTicks.idle + currentTicks.nice)
+            guard total > 0 else { return 0.0 }
+            return Double(currentTicks.user + currentTicks.system + currentTicks.nice) / total * 100.0
+        }
+
+        let du = Double(max(0, currentTicks.user &- previous.user))
+        let ds = Double(max(0, currentTicks.system &- previous.system))
+        let di = Double(max(0, currentTicks.idle &- previous.idle))
+        let dn = Double(max(0, currentTicks.nice &- previous.nice))
+        let total = du + ds + di + dn
+        guard total > 0 else { return 0.0 }
+        return min(max((du + ds + dn) / total * 100.0, 0.0), 100.0)
     }
     
  /// 获取内存使用情况 - 使用ProcessInfo的简化方式
  /// - Returns: 内存使用信息元组 (已使用字节数, 总内存字节数, 使用百分比)
     public func getMemoryUsage() -> (used: Int64, total: Int64, percentage: Double) {
- // 获取物理内存总量
         let totalMemory = Int64(ProcessInfo.processInfo.physicalMemory)
-        
- // 使用简单的方式估算内存使用
-        var info = mach_task_basic_info()
-        var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size)/4
-        
-        let kerr: kern_return_t = withUnsafeMutablePointer(to: &info) {
-            $0.withMemoryRebound(to: integer_t.self, capacity: 1) {
-                task_info(mach_task_self_,
-                         task_flavor_t(MACH_TASK_BASIC_INFO),
-                         $0,
-                         &count)
+        var stats = vm_statistics64()
+        var count = mach_msg_type_number_t(MemoryLayout<vm_statistics64_data_t>.size / MemoryLayout<integer_t>.size)
+
+        let status = withUnsafeMutablePointer(to: &stats) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                host_statistics64(mach_host_self(), HOST_VM_INFO64, $0, &count)
             }
         }
-        
-        if kerr == KERN_SUCCESS {
-            let usedMemory = Int64(info.resident_size)
-            let percentage = totalMemory > 0 ? Double(usedMemory) / Double(totalMemory) * 100.0 : 0.0
-            return (usedMemory, totalMemory, min(max(percentage, 0.0), 100.0))
+
+        guard status == KERN_SUCCESS else {
+            return (0, totalMemory, 0)
         }
-        
- // 如果获取失败，返回默认值
-        return (0, totalMemory, 0.0)
+
+        let pageSize = Int64(getpagesize())
+        let usedPages = Int64(stats.active_count + stats.wire_count + stats.compressor_page_count)
+        let usedMemory = usedPages * pageSize
+        let percentage = totalMemory > 0 ? Double(usedMemory) / Double(totalMemory) * 100.0 : 0.0
+        return (usedMemory, totalMemory, min(max(percentage, 0.0), 100.0))
     }
     
  /// 获取系统负载

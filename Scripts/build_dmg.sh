@@ -91,6 +91,13 @@ log_step() {
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 }
 
+extract_helper_version() {
+    local bin_path="$1"
+    if [[ -x "$bin_path" ]]; then
+        strings "$bin_path" 2>/dev/null | grep -m1 'SKYBRIDGE_HELPER_VERSION=' | cut -d= -f2 || true
+    fi
+}
+
 select_identity() {
     local dev_id
     local apple_dev
@@ -119,8 +126,15 @@ if [[ "$SKIP_BUILD" == false ]]; then
     cd "$PROJECT_ROOT"
 
     log_info "检测 Apple PQC SDK 可用性（用于 HAS_APPLE_PQC_SDK）..."
+    HOST_OS_VER="$(sw_vers -productVersion 2>/dev/null || echo "")"
     SDK_VER="$(xcrun --sdk macosx --show-sdk-version 2>/dev/null || echo "")"
+    HOST_MAJOR="$(echo "$HOST_OS_VER" | awk -F. '{print $1}')"
     SDK_MAJOR="$(echo "$SDK_VER" | awk -F. '{print $1}')"
+    log_info "Host macOS 版本: ${HOST_OS_VER:-unknown}"
+    log_info "Xcode macOS SDK 版本: ${SDK_VER:-unknown}"
+    if [[ -n "$HOST_OS_VER" && -n "$SDK_VER" && "$HOST_OS_VER" != "$SDK_VER" ]]; then
+        log_info "提示：Host 与 SDK 版本不同是常见情况（例如 Host 26.3 + SDK 26.2）。编译能力按 SDK 判定。"
+    fi
     if [[ -n "$SDK_MAJOR" && "$SDK_MAJOR" -ge 26 ]]; then
         export SKYBRIDGE_ENABLE_APPLE_PQC_SDK=1
         log_info "检测到 macOS SDK ${SDK_VER}（>=26），启用 Apple PQC 编译条件"
@@ -174,6 +188,10 @@ HELPER_PLIST="$APP_BUNDLE/Contents/Library/LaunchDaemons/com.skybridge.PowerMetr
 HELPER_BIN="$APP_BUNDLE/Contents/Library/LaunchDaemons/com.skybridge.PowerMetricsHelper/com.skybridge.PowerMetricsHelper"
 if [[ -f "$HELPER_PLIST" && -x "$HELPER_BIN" ]]; then
     log_success "检测到 PowerMetricsHelper 与 launchd plist"
+    APP_HELPER_VERSION="$(extract_helper_version "$HELPER_BIN")"
+    if [[ -n "${APP_HELPER_VERSION:-}" ]]; then
+        log_info "App 内 Helper 版本: ${APP_HELPER_VERSION}"
+    fi
 else
     log_info "未检测到完整 PowerMetricsHelper（高级监控功能可能不可用）"
 fi
@@ -312,3 +330,26 @@ codesign -dvv "$APP_BUNDLE" 2>&1 | grep -E "(Authority|Identifier|TeamIdentifier
 
 echo ""
 log_success "所有步骤完成！"
+
+echo ""
+echo "🧩 Helper 版本摘要:"
+APP_HELPER_VERSION="$(extract_helper_version "$HELPER_BIN")"
+if [[ -n "${APP_HELPER_VERSION:-}" ]]; then
+    echo "  - App Bundle Helper: ${APP_HELPER_VERSION}"
+else
+    echo "  - App Bundle Helper: unknown"
+fi
+
+INSTALLED_HELPER_BIN="/Library/PrivilegedHelperTools/com.skybridge.PowerMetricsHelper"
+INSTALLED_HELPER_VERSION="$(extract_helper_version "$INSTALLED_HELPER_BIN")"
+if [[ -n "$INSTALLED_HELPER_VERSION" ]]; then
+    echo "  - Installed Helper (/Library): ${INSTALLED_HELPER_VERSION}"
+fi
+
+RUNNING_INFO="$(launchctl print system/com.skybridge.PowerMetricsHelper 2>/dev/null || true)"
+RUNNING_PATH="$(echo "$RUNNING_INFO" | awk -F'= ' '/path =/{print $2; exit}')"
+RUNNING_PID="$(echo "$RUNNING_INFO" | awk -F'= ' '/pid =/{print $2; exit}')"
+if [[ -n "$RUNNING_PATH" ]]; then
+    RUNNING_VERSION="$(extract_helper_version "$RUNNING_PATH")"
+    echo "  - Running Helper: pid=${RUNNING_PID:-unknown} path=$RUNNING_PATH version=${RUNNING_VERSION:-unknown}"
+fi

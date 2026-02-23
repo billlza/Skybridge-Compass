@@ -16,6 +16,10 @@ enum HelperInstaller {
 
     /// 存储最后一次错误信息
     private static var lastError: String?
+    private static var lastInstallAttemptAt: Date = .distantPast
+    private static var lastUninstallAttemptAt: Date = .distantPast
+    private static let installCooldown: TimeInterval = 30
+    private static let uninstallCooldown: TimeInterval = 15
 
     private struct HelperPaths {
         let bundlePath: String
@@ -55,6 +59,13 @@ enum HelperInstaller {
     /// 安装 Helper（注册到系统）
     /// Helper 必须已内嵌在 App bundle 的 Contents/Library/LaunchDaemons/ 目录
     static func installHelper() -> Bool {
+        let now = Date()
+        if now.timeIntervalSince(lastInstallAttemptAt) < installCooldown {
+            logger.info("⏱️ 安装请求命中冷却窗口，跳过重复安装")
+            return isHelperInstalled()
+        }
+        lastInstallAttemptAt = now
+
         let paths = resolveHelperPaths()
         if !paths.isPackagedApp {
             let errorMsg = """
@@ -354,6 +365,13 @@ enum HelperInstaller {
 
     /// 卸载 Helper
     static func uninstallHelper() -> Bool {
+        let now = Date()
+        if now.timeIntervalSince(lastUninstallAttemptAt) < uninstallCooldown {
+            logger.info("⏱️ 卸载请求命中冷却窗口，跳过重复卸载")
+            return true
+        }
+        lastUninstallAttemptAt = now
+
         // 创建 SMAppService 实例（daemon 用于特权 Helper）
         let service = SMAppService.daemon(plistName: helperPlistName)
 

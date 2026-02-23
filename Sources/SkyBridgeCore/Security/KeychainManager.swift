@@ -1,6 +1,7 @@
 import Foundation
 import Security
 import CryptoKit
+import LocalAuthentication
 import OSLog
 
 /// KeychainManager - 安全的密钥存储管理器
@@ -14,6 +15,11 @@ import OSLog
 public actor KeychainManager {
     public static let shared = KeychainManager()
     private let logger = Logger(subsystem: "com.skybridge.compass", category: "KeychainManager")
+
+    private var interactiveUnlockCompleted = false
+    private var lastInteractiveUnlockFailureAt: Date = .distantPast
+    private let interactiveUnlockCooldown: TimeInterval = 12 * 60 * 60
+
     private init() {}
 
     private nonisolated static var useInMemoryKeychain: Bool {
@@ -25,6 +31,77 @@ public actor KeychainManager {
     private nonisolated(unsafe) static var inMemoryStore: [String: Data] = [:]
     private nonisolated static let inMemoryLock = NSLock()
 
+    private nonisolated func makeNonInteractiveAuthContext() -> LAContext {
+        let context = LAContext()
+        context.interactionNotAllowed = true
+        return context
+    }
+
+    private nonisolated static func performInteractiveUnlockProbe() -> OSStatus {
+        let context = LAContext()
+        context.interactionNotAllowed = false
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecReturnAttributes as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+            kSecUseAuthenticationContext as String: context,
+        ]
+        var item: CFTypeRef?
+        return SecItemCopyMatching(query as CFDictionary, &item)
+    }
+
+    /// 启动时调用：最多触发一次交互式解锁，后续全部静默读取。
+    public func prepareInteractiveUnlockIfNeeded() async -> Bool {
+        if Self.useInMemoryKeychain { return true }
+        if interactiveUnlockCompleted { return true }
+
+        let now = Date()
+        if now.timeIntervalSince(lastInteractiveUnlockFailureAt) < interactiveUnlockCooldown {
+            logger.info("跳过交互式 Keychain 解锁（冷却中）")
+            return false
+        }
+
+        let status = Self.performInteractiveUnlockProbe()
+        switch status {
+        case errSecSuccess, errSecItemNotFound:
+            interactiveUnlockCompleted = true
+            logger.info("Keychain 交互式解锁准备完成")
+            return true
+        default:
+            lastInteractiveUnlockFailureAt = now
+            logger.error("Keychain 交互式解锁失败: \(status)")
+            return false
+        }
+    }
+
+    private nonisolated func upsertGenericPassword(
+        service: String,
+        account: String,
+        data: Data,
+        accessibility: CFString = kSecAttrAccessibleAfterFirstUnlock
+    ) -> OSStatus {
+        let context = makeNonInteractiveAuthContext()
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecUseAuthenticationContext as String: context,
+        ]
+        let updateAttrs: [String: Any] = [
+            kSecValueData as String: data,
+            kSecAttrAccessible as String: accessibility
+        ]
+        let updateStatus = SecItemUpdate(query as CFDictionary, updateAttrs as CFDictionary)
+        if updateStatus == errSecSuccess { return errSecSuccess }
+        if updateStatus != errSecItemNotFound { return updateStatus }
+
+        var addQuery = query
+        addQuery.removeValue(forKey: kSecUseAuthenticationContext as String)
+        addQuery[kSecValueData as String] = data
+        addQuery[kSecAttrAccessible as String] = accessibility
+        return SecItemAdd(addQuery as CFDictionary, nil)
+    }
+
  // MARK: - Keychain 基础操作（nonisolated - Keychain 本身线程安全）
 
     public nonisolated func importKey(data: Data, service: String, account: String) -> Bool {
@@ -35,15 +112,7 @@ public actor KeychainManager {
             Self.inMemoryLock.unlock()
             return true
         }
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
-            kSecValueData as String: data
-        ]
-        SecItemDelete(query as CFDictionary)
-        let status = SecItemAdd(query as CFDictionary, nil)
+        let status = upsertGenericPassword(service: service, account: account, data: data)
         if status != errSecSuccess { logger.error("Key 导入失败: \(status)") }
         return status == errSecSuccess
     }
@@ -56,12 +125,14 @@ public actor KeychainManager {
             Self.inMemoryLock.unlock()
             return data
         }
+        let context = makeNonInteractiveAuthContext()
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
             kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
+            kSecMatchLimit as String: kSecMatchLimitOne,
+            kSecUseAuthenticationContext as String: context,
         ]
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
@@ -83,15 +154,7 @@ public actor KeychainManager {
             Self.inMemoryLock.unlock()
             return true
         }
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: "SkyBridge.SymmetricKey",
-            kSecAttrAccount as String: account,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
-            kSecValueData as String: data
-        ]
-        SecItemDelete(query as CFDictionary)
-        let status = SecItemAdd(query as CFDictionary, nil)
+        let status = upsertGenericPassword(service: "SkyBridge.SymmetricKey", account: account, data: data)
         if status != errSecSuccess { logger.error("对称密钥存储失败: \(status)") }
         return status == errSecSuccess
     }
@@ -104,12 +167,14 @@ public actor KeychainManager {
             Self.inMemoryLock.unlock()
             return data.map { SymmetricKey(data: $0) }
         }
+        let context = makeNonInteractiveAuthContext()
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: "SkyBridge.SymmetricKey",
             kSecAttrAccount as String: account,
             kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
+            kSecMatchLimit as String: kSecMatchLimitOne,
+            kSecUseAuthenticationContext as String: context,
         ]
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
@@ -207,15 +272,7 @@ public actor KeychainManager {
         }
  // 若已存在且内容一致，避免重复写入，减少冗余项
         if let existing = loadKeyData(service: service, account: account), existing == data { return true }
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
-            kSecValueData as String: data
-        ]
-        SecItemDelete(query as CFDictionary)
-        let status = SecItemAdd(query as CFDictionary, nil)
+        let status = upsertGenericPassword(service: service, account: account, data: data)
         if status != errSecSuccess { logger.error("Keychain 写入失败: \(status)") }
         return status == errSecSuccess
     }
@@ -229,12 +286,14 @@ public actor KeychainManager {
             Self.inMemoryLock.unlock()
             return data
         }
+        let context = makeNonInteractiveAuthContext()
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
             kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
+            kSecMatchLimit as String: kSecMatchLimitOne,
+            kSecUseAuthenticationContext as String: context,
         ]
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
@@ -248,31 +307,34 @@ public actor KeychainManager {
  ///
  /// nonisolated - Keychain 扫描和删除操作是系统级线程安全的
     public nonisolated func deduplicate(servicePrefix: String) {
+        let context = makeNonInteractiveAuthContext()
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecMatchLimit as String: kSecMatchLimitAll,
             kSecReturnAttributes as String: true,
-            kSecReturnData as String: true
+            kSecReturnPersistentRef as String: true,
+            kSecUseAuthenticationContext as String: context,
         ]
         var itemsRef: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &itemsRef)
         guard status == errSecSuccess, let items = itemsRef as? [[String: Any]] else { return }
  // 分组并清理
-        var grouped: [String: [(attrs: [String: Any], data: Data)]] = [:]
+        var grouped: [String: [[String: Any]]] = [:]
         for it in items {
             guard let svc = it[kSecAttrService as String] as? String, svc.hasPrefix(servicePrefix),
-                  let acc = it[kSecAttrAccount as String] as? String,
-                  let data = it[kSecValueData as String] as? Data else { continue }
-            grouped[svc + "|" + acc, default: []].append((it, data))
+                  let acc = it[kSecAttrAccount as String] as? String else { continue }
+            grouped[svc + "|" + acc, default: []].append(it)
         }
         for (_, arr) in grouped where arr.count > 1 {
- // 保留第一条，删除其他重复项
-            for dup in arr.dropFirst() {
-                let del: [String: Any] = [
-                    kSecClass as String: kSecClassGenericPassword,
-                    kSecAttrService as String: dup.attrs[kSecAttrService as String] as? String ?? "",
-                    kSecAttrAccount as String: dup.attrs[kSecAttrAccount as String] as? String ?? ""
-                ]
+ // 保留最近修改的一条，删除其余重复项（按 persistent ref 精确删除，避免误删全部）
+            let sorted = arr.sorted { lhs, rhs in
+                let lhsDate = (lhs[kSecAttrModificationDate as String] as? Date) ?? (lhs[kSecAttrCreationDate as String] as? Date) ?? .distantPast
+                let rhsDate = (rhs[kSecAttrModificationDate as String] as? Date) ?? (rhs[kSecAttrCreationDate as String] as? Date) ?? .distantPast
+                return lhsDate > rhsDate
+            }
+            for dup in sorted.dropFirst() {
+                guard let persistentRef = dup[kSecValuePersistentRef as String] as? Data else { continue }
+                let del: [String: Any] = [kSecValuePersistentRef as String: persistentRef]
                 SecItemDelete(del as CFDictionary)
             }
         }
@@ -321,10 +383,12 @@ extension KeychainManager {
             Self.inMemoryLock.unlock()
             return
         }
+        let context = makeNonInteractiveAuthContext()
         let del: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: "SkyBridge.Auth",
-            kSecAttrAccount as String: "AppleUserID"
+            kSecAttrAccount as String: "AppleUserID",
+            kSecUseAuthenticationContext as String: context,
         ]
         SecItemDelete(del as CFDictionary)
     }

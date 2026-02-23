@@ -136,16 +136,20 @@ public class StartupCoordinator: ObservableObject {
  // 加载应用配置和用户偏好设置
         try? await Task.sleep(nanoseconds: 150_000_000)
         logger.debug("⚙️ 配置管理器初始化完成")
- // 在启动早期执行一次 Keychain 去重，避免遗留冗余项影响后续读写性能
-        KeychainManager.shared.deduplicate(servicePrefix: "SkyBridge.")
     }
     
  /// 初始化安全服务
     private func initializeSecurityServices() async {
- // 初始化加密服务、认证管理等
+// 初始化加密服务、认证管理等
         try? await Task.sleep(nanoseconds: 200_000_000)
+
+        // 启动阶段最多触发一次交互式解锁，后续所有后台读取保持静默失败。
+        let unlocked = await KeychainManager.shared.prepareInteractiveUnlockIfNeeded()
+        if !unlocked {
+            logger.warning("🔐 Keychain 启动解锁未完成，后台读取将保持静默失败并进入冷却")
+        }
         
- // 初始化本机强身份（用于设备发现的本机判定）
+// 初始化本机强身份（用于设备发现的本机判定）
         await SelfIdentityProvider.shared.loadOrCreate()
         logger.debug("🆔 本机强身份初始化完成")
         

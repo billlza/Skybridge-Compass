@@ -230,9 +230,9 @@ public class ThermalManager: BaseManager {
             currentCPUTemperature = cpuTemp
             currentGPUTemperature = gpuTemp
         } else {
- // 回退到原有方法
-            cpuTemp = await readAppleSiliconCPUTemperature()
-            gpuTemp = await readAppleSiliconGPUTemperature()
+            let sampled = await readAppleSiliconTemperatures()
+            cpuTemp = sampled.cpu
+            gpuTemp = sampled.gpu
         
  // 更新温度数据
         currentCPUTemperature = cpuTemp
@@ -274,98 +274,12 @@ public class ThermalManager: BaseManager {
         }
     }
     
- /// 读取Apple Silicon CPU温度
-    private func readAppleSiliconCPUTemperature() async -> Double {
- // 尝试使用powermetrics获取真实温度数据
-        if let realTemp = await readAppleSiliconTemperatureFromPowerMetrics(type: "CPU") {
-            return realTemp
-        }
-        
- // 如果无法获取真实数据，使用基于系统热状态的估算温度
-        return estimateTemperatureFromThermalState(for: .cpu)
-    }
-    
- /// 读取Apple Silicon GPU温度
-    private func readAppleSiliconGPUTemperature() async -> Double {
- // 尝试使用powermetrics获取真实温度数据
-        if let realTemp = await readAppleSiliconTemperatureFromPowerMetrics(type: "GPU") {
-            return realTemp
-        }
-        
- // 如果无法获取真实数据，使用基于系统热状态的估算温度
-        return estimateTemperatureFromThermalState(for: .gpu)
-    }
-    
- /// 从powermetrics读取Apple Silicon温度数据
-    private func readAppleSiliconTemperatureFromPowerMetrics(type: String) async -> Double? {
-        return await withCheckedContinuation { continuation in
- // 使用后台队列执行系统命令，避免阻塞主线程
-            DispatchQueue.global(qos: .utility).async {
- // 添加超时保护，避免powermetrics命令卡死
-                let timeoutTask = DispatchWorkItem {
-                    continuation.resume(returning: nil)
-                }
-                
-                DispatchQueue.global().asyncAfter(deadline: .now() + 2.0, execute: timeoutTask)
-                
-                let task = Process()
-                let pipe = Pipe()
-                
- // Apple Silicon使用优化的powermetrics命令
-                task.launchPath = "/usr/bin/powermetrics"
-                task.arguments = ["-n", "1", "-s", "thermal", "--show-process-coalition"]
-                task.standardOutput = pipe
-                task.standardError = Pipe()
-                
-                do {
-                    try task.run()
-                    
- // 设置较短的等待时间，避免长时间阻塞
-                    task.waitUntilExit()
-                    
-                    let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                    let output = String(data: data, encoding: .utf8) ?? ""
-                    
-                    timeoutTask.cancel()
-                    
- // parseAppleSiliconTemperature 是 @MainActor，需要在主线程调用
-                    Task { @MainActor in
-                        if let temperature = self.parseAppleSiliconTemperature(from: output, type: type) {
-                            continuation.resume(returning: temperature)
-                        } else {
-                            continuation.resume(returning: nil)
-                        }
-                    }
-                } catch {
- // 命令执行失败，返回nil使用估算温度
-                    timeoutTask.cancel()
-                    continuation.resume(returning: nil)
-                }
-            }
-        }
-    }
-    
- /// 解析Apple Silicon温度输出
-    private func parseAppleSiliconTemperature(from output: String, type: String) -> Double? {
-        let lines = output.components(separatedBy: .newlines)
-        
-        for line in lines {
- // 查找温度相关的行
-            if line.contains("Thermal pressure") || line.contains("CPU die temperature") || line.contains("GPU die temperature") {
- // 提取温度数值
-                let components = line.components(separatedBy: .whitespaces)
-                for component in components {
-                    if component.hasSuffix("°C") || component.hasSuffix("C") {
-                        let tempString = component.replacingOccurrences(of: "°C", with: "").replacingOccurrences(of: "C", with: "")
-                        if let temp = Double(tempString) {
-                            return temp
-                        }
-                    }
-                }
-            }
-        }
-        
-        return nil
+ /// 读取Apple Silicon CPU/GPU温度（统一后端一次采样）
+    private func readAppleSiliconTemperatures() async -> (cpu: Double, gpu: Double) {
+        let snapshot = await UnifiedMetricsBackend.shared.collectSnapshot(force: false)
+        let cpu = snapshot.cpuTemperatureState.availability == .unavailable ? 0.0 : snapshot.cpuTemperature
+        let gpu = snapshot.gpuTemperatureState.availability == .unavailable ? 0.0 : snapshot.gpuTemperature
+        return (cpu: cpu, gpu: gpu)
     }
     
  /// 设置Apple Silicon热状态通知
@@ -441,31 +355,6 @@ public class ThermalManager: BaseManager {
             thermalStateChangeCallback?(newThermalState)
             isThrottling = newThermalState == .serious || newThermalState == .critical
         }
-    }
-    
- /// 基于系统热状态估算温度
-    private func estimateTemperatureFromThermalState(for component: TemperatureComponent) -> Double {
-        let processInfo = ProcessInfo.processInfo
-        let thermalState = processInfo.thermalState
-        
- // 根据系统热状态和组件类型估算合理的温度范围
-        let baseTemp: Double
-        let variation: Double = Double.random(in: -3.0...3.0)
-        
-        switch thermalState {
-        case .nominal:
-            baseTemp = component == .cpu ? 45.0 : 40.0
-        case .fair:
-            baseTemp = component == .cpu ? 65.0 : 60.0
-        case .serious:
-            baseTemp = component == .cpu ? 80.0 : 75.0
-        case .critical:
-            baseTemp = component == .cpu ? 95.0 : 90.0
-        @unknown default:
-            baseTemp = component == .cpu ? 50.0 : 45.0
-        }
-        
-        return baseTemp + variation
     }
     
  /// 添加温度到历史记录
@@ -612,12 +501,6 @@ public struct PerformanceAdjustment {
     public let renderScale: Float      // 渲染缩放比例
     public let frameRateLimit: Int?    // 帧率限制
     public let qualityReduction: Int   // 质量降低级别 (0-3)
-}
-
-/// 温度组件类型
-private enum TemperatureComponent {
-    case cpu
-    case gpu
 }
 
 /// Apple Silicon专用热管理配置

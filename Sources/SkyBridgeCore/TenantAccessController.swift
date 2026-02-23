@@ -1,6 +1,7 @@
 import Foundation
 import Combine
 import Security
+import LocalAuthentication
 import os.log
 
 /// 统一管理租户权限标记的结构体，确保所有功能调用都有明确授权。
@@ -103,6 +104,12 @@ public final class TenantAccessController: Sendable {
     private var currentSession: AuthSession?
 
     private init() {}
+
+    private func makeNonInteractiveAuthContext() -> LAContext {
+        let context = LAContext()
+        context.interactionNotAllowed = true
+        return context
+    }
 
  /// 绑定认证会话，用于后续API调用的身份验证。
     public func bindAuthentication(session: AuthSession) async {
@@ -255,17 +262,25 @@ public final class TenantAccessController: Sendable {
 
     private func storePasswordAsync(_ password: String, for tenant: TenantDescriptor) async throws {
         let passwordData = Data(password.utf8)
+        let context = makeNonInteractiveAuthContext()
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: keychainService,
-            kSecAttrAccount as String: tenant.passwordKey
+            kSecAttrAccount as String: tenant.passwordKey,
+            kSecUseAuthenticationContext as String: context,
         ]
-        SecItemDelete(query as CFDictionary)
-
-        var attributes = query
-        attributes[kSecValueData as String] = passwordData
-        attributes[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
-        let status = SecItemAdd(attributes as CFDictionary, nil)
+        let updateAttrs: [String: Any] = [
+            kSecValueData as String: passwordData,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock
+        ]
+        var status = SecItemUpdate(query as CFDictionary, updateAttrs as CFDictionary)
+        if status == errSecItemNotFound {
+            var add = query
+            add.removeValue(forKey: kSecUseAuthenticationContext as String)
+            add[kSecValueData as String] = passwordData
+            add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
+            status = SecItemAdd(add as CFDictionary, nil)
+        }
         
         if status != errSecSuccess {
             throw TenantAccessError.keychain(status)
@@ -274,17 +289,25 @@ public final class TenantAccessController: Sendable {
 
     private func storePassword(_ password: String, for tenant: TenantDescriptor) throws {
         let passwordData = Data(password.utf8)
+        let context = makeNonInteractiveAuthContext()
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: keychainService,
-            kSecAttrAccount as String: tenant.passwordKey
+            kSecAttrAccount as String: tenant.passwordKey,
+            kSecUseAuthenticationContext as String: context,
         ]
-        SecItemDelete(query as CFDictionary)
-
-        var attributes = query
-        attributes[kSecValueData as String] = passwordData
-        attributes[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
-        let status = SecItemAdd(attributes as CFDictionary, nil)
+        let updateAttrs: [String: Any] = [
+            kSecValueData as String: passwordData,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock
+        ]
+        var status = SecItemUpdate(query as CFDictionary, updateAttrs as CFDictionary)
+        if status == errSecItemNotFound {
+            var add = query
+            add.removeValue(forKey: kSecUseAuthenticationContext as String)
+            add[kSecValueData as String] = passwordData
+            add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
+            status = SecItemAdd(add as CFDictionary, nil)
+        }
         guard status == errSecSuccess else {
             throw TenantAccessError.keychain(status)
         }
@@ -293,12 +316,15 @@ public final class TenantAccessController: Sendable {
     private func retrievePasswordAsync(for tenant: TenantDescriptor) async throws -> String {
         return try await withCheckedThrowingContinuation { continuation in
             Task.detached {
+                let context = LAContext()
+                context.interactionNotAllowed = true
                 var query: [String: Any] = [
                     kSecClass as String: kSecClassGenericPassword,
                     kSecAttrService as String: self.keychainService,
                     kSecAttrAccount as String: tenant.passwordKey,
-                    kSecReturnData as String: true
-                ]
+                    kSecReturnData as String: true,
+                    kSecUseAuthenticationContext as String: context,
+                        ]
                 query[kSecMatchLimit as String] = kSecMatchLimitOne
                 var item: CFTypeRef?
                 let status = SecItemCopyMatching(query as CFDictionary, &item)
@@ -315,11 +341,13 @@ public final class TenantAccessController: Sendable {
     }
 
     private func retrievePassword(for tenant: TenantDescriptor) throws -> String {
+        let context = makeNonInteractiveAuthContext()
         var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: keychainService,
             kSecAttrAccount as String: tenant.passwordKey,
-            kSecReturnData as String: true
+            kSecReturnData as String: true,
+            kSecUseAuthenticationContext as String: context,
         ]
         query[kSecMatchLimit as String] = kSecMatchLimitOne
         var item: CFTypeRef?

@@ -29,20 +29,153 @@ public struct SystemMonitorView: View {
     
  // MARK: - 辅助方法
     
- /// 获取热状态描述
-    private func thermalStateDescription(_ state: ProcessInfo.ThermalState) -> String {
-        switch state {
-        case .nominal:
-            return LocalizationManager.shared.localizedString("thermal.nominal")
-        case .fair:
-            return LocalizationManager.shared.localizedString("thermal.fair")
-        case .serious:
-            return LocalizationManager.shared.localizedString("thermal.serious")
-        case .critical:
-            return LocalizationManager.shared.localizedString("thermal.critical")
-        @unknown default:
+    private var showDiagnostics: Bool {
+        #if DEBUG
+            true
+        #else
+            let env = ProcessInfo.processInfo.environment["SKYBRIDGE_MONITOR_DIAGNOSTICS"] ?? ""
+            return env == "1" || env.lowercased() == "true" || env.lowercased() == "yes"
+        #endif
+    }
+
+    private func metricReasonText(_ reason: MetricUnavailableReason?) -> String {
+        switch reason {
+        case .unsupported:
+            return LocalizationManager.shared.localizedString("monitor.metric.reason.unsupported")
+        case .permissionDenied:
+            return LocalizationManager.shared.localizedString("monitor.metric.reason.permissionDenied")
+        case .notProvidedByOS:
+            return LocalizationManager.shared.localizedString("monitor.metric.reason.notProvidedByOS")
+        case .helperUnavailable:
+            return LocalizationManager.shared.localizedString("monitor.metric.reason.helperUnavailable")
+        case .helperOutdated:
+            return LocalizationManager.shared.localizedString("monitor.metric.reason.helperOutdated")
+        case .parsingFailed:
+            return LocalizationManager.shared.localizedString("monitor.metric.reason.parsingFailed")
+        case .sampling:
+            return LocalizationManager.shared.localizedString("monitor.metric.reason.sampling")
+        case .requiresExpertMode:
+            return LocalizationManager.shared.localizedString("monitor.metric.reason.requiresExpertMode")
+        case .temporarilyInitializing:
+            return LocalizationManager.shared.localizedString("monitor.metric.reason.temporarilyInitializing")
+        case .none:
+            return LocalizationManager.shared.localizedString("monitor.metric.reason.notProvidedByOS")
+        }
+    }
+
+    private func metricSourceText(_ source: MetricSource?) -> String {
+        switch source {
+        case .kernelAPI:
+            return LocalizationManager.shared.localizedString("monitor.metric.source.kernelAPI")
+        case .ioAccelerator:
+            return LocalizationManager.shared.localizedString("monitor.metric.source.ioAccelerator")
+        case .smc:
+            return LocalizationManager.shared.localizedString("monitor.metric.source.smc")
+        case .iohid:
+            return LocalizationManager.shared.localizedString("monitor.metric.source.iohid")
+        case .ioreport:
+            return LocalizationManager.shared.localizedString("monitor.metric.source.ioreport")
+        case .powermetrics:
+            return LocalizationManager.shared.localizedString("monitor.metric.source.powermetrics")
+        case .processInfoThermalState:
+            return LocalizationManager.shared.localizedString("monitor.metric.source.processInfoThermalState")
+        case .none:
             return LocalizationManager.shared.localizedString("common.unknown")
         }
+    }
+
+    private var modeSelection: Binding<MonitoringMode> {
+        Binding(
+            get: { systemPerformanceMonitor?.monitoringMode ?? .standardPublic },
+            set: { mode in
+                systemPerformanceMonitor?.setMonitoringMode(mode)
+            }
+        )
+    }
+
+    private func modeLabel(_ mode: MonitoringMode) -> String {
+        switch mode {
+        case .standardPublic:
+            return LocalizationManager.shared.localizedString("monitor.mode.standard")
+        case .expertPrivate:
+            return LocalizationManager.shared.localizedString("monitor.mode.expert")
+        }
+    }
+
+    private func unavailableText(for state: MetricState) -> String {
+        let reason = metricReasonText(state.reason)
+        let template = LocalizationManager.shared.localizedString("monitor.metric.unavailableWithReason")
+        return String(format: template, reason)
+    }
+
+    private func formatNumericMetric(_ valueText: String?, state: MetricState) -> String {
+        switch state.availability {
+        case .available:
+            return valueText ?? unavailableText(for: state)
+        case .stale:
+            if let valueText {
+                return "\(valueText) \(LocalizationManager.shared.localizedString("monitor.metric.staleSuffix"))"
+            }
+            return LocalizationManager.shared.localizedString("monitor.metric.stale")
+        case .unavailable:
+            return unavailableText(for: state)
+        }
+    }
+
+    private func formatTemperature(_ value: Double, state: MetricState) -> String {
+        let valueText = value > 0 ? "\(String(format: "%.1f", value))°C" : nil
+        return formatNumericMetric(valueText, state: state)
+    }
+
+    private func formatPower(_ value: Double, state: MetricState) -> String {
+        let valueText = value > 0 ? "\(String(format: "%.1f", value))W" : nil
+        return formatNumericMetric(valueText, state: state)
+    }
+
+    private func formatPercent(_ value: Double, state: MetricState) -> String {
+        let valueText = value >= 0 ? "\(String(format: "%.1f", value))%" : nil
+        return formatNumericMetric(valueText, state: state)
+    }
+
+    private func formatFanRPM(_ fans: [Int], state: MetricState) -> String {
+        let valueText = fans.isEmpty ? nil : "\(fans.first ?? 0) RPM"
+        return formatNumericMetric(valueText, state: state)
+    }
+
+    private func compactMetricText(_ valueText: String?, state: MetricState) -> String {
+        switch state.availability {
+        case .available:
+            return valueText ?? LocalizationManager.shared.localizedString("monitor.metric.availability.unavailable")
+        case .stale:
+            if let valueText {
+                return "\(valueText) \(LocalizationManager.shared.localizedString("monitor.metric.staleSuffix"))"
+            }
+            return LocalizationManager.shared.localizedString("monitor.metric.availability.stale")
+        case .unavailable:
+            return LocalizationManager.shared.localizedString("monitor.metric.availability.unavailable")
+        }
+    }
+
+    private func formatPercentCompact(_ value: Double, state: MetricState) -> String {
+        compactMetricText("\(String(format: "%.1f", value))%", state: state)
+    }
+
+    private func metricDiagnosticText(_ state: MetricState) -> String {
+        let availability = LocalizationManager.shared.localizedString("monitor.metric.availability.\(state.availability.rawValue)")
+        let source = metricSourceText(state.source)
+        let reason = metricReasonText(state.reason)
+        let age = metricAgeText(sampledAt: state.sampledAt)
+        if state.availability == .unavailable {
+            return "\(availability) · \(source) · \(reason) · \(age)"
+        }
+        return "\(availability) · \(source) · \(age)"
+    }
+
+    private func metricAgeText(sampledAt: Date?) -> String {
+        guard let sampledAt else { return LocalizationManager.shared.localizedString("common.unknown") }
+        let age = max(0, Int(Date().timeIntervalSince(sampledAt)))
+        let template = LocalizationManager.shared.localizedString("monitor.metric.age.seconds")
+        return String(format: template, age)
     }
     
  // MARK: - 监控控制视图主体
@@ -80,10 +213,12 @@ public struct SystemMonitorView: View {
                 }
             }
             
- // 高级监控提示（XPC Helper 未连接时显示）
+// 高级监控提示（XPC Helper 未连接时显示）
             advancedMonitoringNotice
+
+            monitoringModeCard
             
- // ✅ 自动开始监控（无需手动点击）
+// ✅ 自动开始监控（无需手动点击）
             if systemPerformanceMonitor != nil && isMonitoring {
  // 系统概览卡片
                 systemOverviewCard
@@ -93,6 +228,10 @@ public struct SystemMonitorView: View {
                 
  // 系统状态指示器
                 systemStatusIndicators
+
+                if showDiagnostics {
+                    diagnosticsCard
+                }
             } else {
  // 等待监控启动
                 VStack(spacing: 16) {
@@ -142,7 +281,7 @@ public struct SystemMonitorView: View {
  // 高级监控提示
     @ViewBuilder
     private var advancedMonitoringNotice: some View {
- // 根据是否已安装 Helper 显示提示，避免在视图构建期间做 XPC 调用
+// 根据是否已安装 Helper 显示提示，避免在视图构建期间做 XPC 调用
             if !helperInstalled {
                 HStack(alignment: .center, spacing: 12) {
                     Image(systemName: "shield.lefthalf.filled")
@@ -175,6 +314,25 @@ public struct SystemMonitorView: View {
                         .fill(.ultraThinMaterial)
                 )
             }
+    }
+
+    @ViewBuilder
+    private var monitoringModeCard: some View {
+        HStack(spacing: 12) {
+            Text(LocalizationManager.shared.localizedString("monitor.mode.title"))
+                .font(.caption)
+                .foregroundColor(.secondary)
+            Picker(LocalizationManager.shared.localizedString("monitor.mode.title"), selection: modeSelection) {
+                Text(modeLabel(.standardPublic)).tag(MonitoringMode.standardPublic)
+                Text(modeLabel(.expertPrivate)).tag(MonitoringMode.expertPrivate)
+            }
+            .pickerStyle(.segmented)
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(.ultraThinMaterial)
+        )
     }
     
  /// 系统概览卡片
@@ -224,7 +382,7 @@ public struct SystemMonitorView: View {
                     Text("GPU")
                         .font(.caption)
                         .foregroundColor(.secondary)
-                        Text("\(String(format: "%.1f", monitor.gpuUsage))%")
+                        Text(formatPercentCompact(monitor.gpuUsage, state: monitor.gpuUsageState))
                         .font(.title3)
                         .fontWeight(.medium)
                 }
@@ -289,7 +447,7 @@ public struct SystemMonitorView: View {
                 HStack {
                         Text("温度:")
                     Spacer()
-                        Text("\(String(format: "%.1f", monitor.cpuTemperature))°C")
+                        Text(formatTemperature(monitor.cpuTemperature, state: monitor.cpuTemperatureState))
                 }
                 
  // 系统负载平均值
@@ -366,21 +524,19 @@ public struct SystemMonitorView: View {
                 HStack {
                     Text("使用率:")
                     Spacer()
-                        Text("\(String(format: "%.1f", monitor.gpuUsage))%")
+                        Text(formatPercent(monitor.gpuUsage, state: monitor.gpuUsageState))
                 }
                 
                 HStack {
                     Text("温度:")
                     Spacer()
-                        Text("\(String(format: "%.1f", monitor.gpuTemperature))°C")
+                        Text(formatTemperature(monitor.gpuTemperature, state: monitor.gpuTemperatureState))
                 }
                 
- // GPU功耗通过温度估算（如果需要更精确需要其他API）
-                    let estimatedPower = max(5.0, (monitor.gpuTemperature - 40.0) * 0.2)
                 HStack {
-                        Text("功耗 (估算):")
+                        Text("功耗:")
                     Spacer()
-                        Text("\(String(format: "%.1f", estimatedPower))W")
+                        Text(formatPower(monitor.gpuPower, state: monitor.gpuPowerState))
                     }
                 }
                 .font(.caption)
@@ -403,32 +559,22 @@ public struct SystemMonitorView: View {
  // ✅ 使用SystemPerformanceMonitor的真实风扇和温度数据
             if let monitor = systemPerformanceMonitor {
             VStack(alignment: .leading, spacing: 4) {
- // 风扇转速
-                    if !monitor.fanSpeed.isEmpty {
-                        HStack {
-                            Text("风扇转速:")
-                            Spacer()
-                            Text("\(monitor.fanSpeed.first ?? 0) RPM")
-                        }
-                    } else {
                 HStack {
                     Text("风扇转速:")
                     Spacer()
-                            Text("未检测到")
-                                .foregroundColor(.secondary)
-                        }
-                    }
+                        Text(formatFanRPM(monitor.fanSpeed, state: monitor.fanState))
+                }
                     
                     HStack {
                         Text("CPU温度:")
                         Spacer()
-                        Text("\(String(format: "%.1f", monitor.cpuTemperature))°C")
+                        Text(formatTemperature(monitor.cpuTemperature, state: monitor.cpuTemperatureState))
                 }
                 
                 HStack {
                         Text("GPU温度:")
                     Spacer()
-                        Text("\(String(format: "%.1f", monitor.gpuTemperature))°C")
+                        Text(formatTemperature(monitor.gpuTemperature, state: monitor.gpuTemperatureState))
                 }
                 
                 HStack {
@@ -489,6 +635,59 @@ public struct SystemMonitorView: View {
                     .fontWeight(.medium)
             }
         }
+        .padding()
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(.ultraThinMaterial)
+        )
+    }
+
+    private var diagnosticsCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(LocalizationManager.shared.localizedString("monitor.diagnostics.title"))
+                .font(.headline)
+                .fontWeight(.semibold)
+            if let monitor = systemPerformanceMonitor {
+                HStack {
+                    Text(LocalizationManager.shared.localizedString("monitor.mode.title"))
+                    Spacer()
+                    Text(modeLabel(monitor.monitoringMode))
+                }
+                if let info = monitor.helperServiceInfo {
+                    HStack {
+                        Text("Helper")
+                        Spacer()
+                        Text("v\(info.helperVersion) / p\(info.protocolVersion)")
+                    }
+                }
+                HStack {
+                    Text("GPU使用率")
+                    Spacer()
+                    Text(metricDiagnosticText(monitor.gpuUsageState))
+                }
+                HStack {
+                    Text("GPU功耗")
+                    Spacer()
+                    Text(metricDiagnosticText(monitor.gpuPowerState))
+                }
+                HStack {
+                    Text("CPU温度")
+                    Spacer()
+                    Text(metricDiagnosticText(monitor.cpuTemperatureState))
+                }
+                HStack {
+                    Text("GPU温度")
+                    Spacer()
+                    Text(metricDiagnosticText(monitor.gpuTemperatureState))
+                }
+                HStack {
+                    Text("风扇")
+                    Spacer()
+                    Text(metricDiagnosticText(monitor.fanState))
+                }
+            }
+        }
+        .font(.caption)
         .padding()
         .background(
             RoundedRectangle(cornerRadius: 12)
@@ -649,6 +848,15 @@ public struct SystemMonitorView: View {
     
  /// 更新热状态
     private func updateThermalStatus(monitor: SystemPerformanceMonitor) {
+        let tempStates = [monitor.cpuTemperatureState, monitor.gpuTemperatureState]
+        if tempStates.allSatisfy({ $0.availability == .unavailable }) {
+            thermalStatus = LocalizationManager.shared.localizedString("monitor.metric.availability.unavailable")
+            return
+        }
+        if tempStates.allSatisfy({ $0.availability == .stale }) {
+            thermalStatus = LocalizationManager.shared.localizedString("monitor.metric.availability.stale")
+            return
+        }
         let maxTemp = max(monitor.cpuTemperature, monitor.gpuTemperature)
         
         switch maxTemp {

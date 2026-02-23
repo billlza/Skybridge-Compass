@@ -22,6 +22,54 @@ function log() {
   echo "[package] $1"
 }
 
+function codesign_target() {
+  local target="$1"
+  if [[ ! -e "${target}" ]]; then
+    return 0
+  fi
+
+  if [[ "${IS_ADHOC_SIGNING}" -eq 0 ]]; then
+    codesign --force --sign "${SIGN_IDENTITY}" --options runtime --timestamp "${target}" >/dev/null 2>&1
+  else
+    # 对 ad-hoc 场景先移除旧签名，清掉 runtime/library validation 标志，
+    # 避免加载第三方 Framework 时触发 Team ID 校验失败。
+    codesign --remove-signature "${target}" >/dev/null 2>&1 || true
+    codesign --force --sign - "${target}" >/dev/null 2>&1
+  fi
+}
+
+function resign_embedded_code() {
+  log "统一重签名嵌入式代码（避免 Team ID 不一致导致 dyld 拒载）"
+
+  if [[ -d "${MACOS_DIR}" ]]; then
+    while IFS= read -r -d '' app_bin; do
+      codesign_target "${app_bin}" || true
+    done < <(find "${MACOS_DIR}" -type f -perm -111 -print0)
+  fi
+
+  if [[ -d "${FW_DIR}" ]]; then
+    while IFS= read -r -d '' bin; do
+      codesign_target "${bin}" || true
+    done < <(find "${FW_DIR}" -type f \( -name "*.dylib" -o -name "*.so" -o -perm -111 \) -print0)
+
+    while IFS= read -r -d '' framework; do
+      codesign_target "${framework}" || true
+    done < <(find "${FW_DIR}" -type d -name "*.framework" -print0)
+  fi
+
+  if [[ -d "${RES_DIR}" ]]; then
+    while IFS= read -r -d '' bundle; do
+      codesign_target "${bundle}" || true
+    done < <(find "${RES_DIR}" -type d -name "*.bundle" -print0)
+  fi
+
+  if [[ -d "${CONTENTS_DIR}/Library/LaunchDaemons" ]]; then
+    while IFS= read -r -d '' helper_bin; do
+      codesign_target "${helper_bin}" || true
+    done < <(find "${CONTENTS_DIR}/Library/LaunchDaemons" -type f -perm -111 -print0)
+  fi
+}
+
 function select_identity() {
   local dev_id
   local apple_dev
@@ -48,6 +96,16 @@ FW_DIR="${CONTENTS_DIR}/Frameworks"
 SIGN_IDENTITY="${IDENTITY:-$(select_identity)}"
 SKIP_BUILD="${SKIP_BUILD:-0}"
 BUILD_DESTINATION="${BUILD_DESTINATION:-platform=macOS,arch=arm64}"
+IS_ADHOC_SIGNING=0
+if [[ -z "${SIGN_IDENTITY}" || "${SIGN_IDENTITY}" == "-" ]]; then
+  IS_ADHOC_SIGNING=1
+fi
+
+if [[ "${IS_ADHOC_SIGNING}" -eq 1 ]]; then
+  log "签名模式: ad-hoc"
+else
+  log "签名模式: certificate (${SIGN_IDENTITY})"
+fi
 
 # 中文注释：可执行文件与资源 bundle 名称（来自 Xcode 构建输出）
 EXECUTABLE="SkyBridgeCompassApp"
@@ -225,7 +283,7 @@ if [[ -x "${HELPER_BIN_PATH}" ]]; then
   fi
 
   # Helper bundle 在 LaunchDaemons 目录，需显式签名，否则主 App 深度签名可能不会覆盖到它
-  if [[ -n "${SIGN_IDENTITY}" ]]; then
+  if [[ "${IS_ADHOC_SIGNING}" -eq 0 ]]; then
     codesign --force --sign "${SIGN_IDENTITY}" --timestamp "${HELPER_DST_DIR}" >/dev/null 2>&1 || {
       log "警告：Helper 显式签名失败，后续将依赖主 App 深度签名"
     }
@@ -237,17 +295,22 @@ else
 fi
 
 # 优先使用正式证书签名；未配置证书时回退 ad-hoc
-if [[ -n "${SIGN_IDENTITY}" ]]; then
+if [[ "${IS_ADHOC_SIGNING}" -eq 0 ]]; then
   log "使用证书签名：${SIGN_IDENTITY}"
-  codesign --force --deep --sign "${SIGN_IDENTITY}" --options runtime --timestamp "${APP_DIR}" >/dev/null 2>&1 || {
+  resign_embedded_code
+  codesign --force --sign "${SIGN_IDENTITY}" --options runtime --timestamp "${APP_DIR}" >/dev/null 2>&1 || {
     echo "警告：证书签名失败，回退 ad-hoc 签名。" >&2
-    codesign --force --deep --sign - "${APP_DIR}" >/dev/null 2>&1 || {
+    SIGN_IDENTITY="-"
+    IS_ADHOC_SIGNING=1
+    resign_embedded_code
+    codesign --force --sign - "${APP_DIR}" >/dev/null 2>&1 || {
       echo "警告：codesign 签名失败，但可在开发机上运行（未 notarize）。" >&2
     }
   }
 else
   log "未检测到可用证书，使用 ad-hoc 签名"
-  codesign --force --deep --sign - "${APP_DIR}" >/dev/null 2>&1 || {
+  resign_embedded_code
+  codesign --force --sign - "${APP_DIR}" >/dev/null 2>&1 || {
     echo "警告：codesign 签名失败，但可在开发机上运行（未 notarize）。" >&2
   }
 fi
