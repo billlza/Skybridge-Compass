@@ -338,6 +338,8 @@ enum HelperInstaller {
         <dict>
             <key>Label</key>
             <string>\(helperServiceName)</string>
+            <key>BundleProgram</key>
+            <string>Contents/Library/LaunchDaemons/\(helperServiceName)/\(helperServiceName)</string>
             <key>MachServices</key>
             <dict>
                 <key>\(helperServiceName)</key>

@@ -196,9 +196,33 @@ if [[ -x "${HELPER_BIN_PATH}" ]]; then
   
   # 拷贝 launchd plist 文件到 LaunchDaemons 目录
   cp "${HELPER_SRC_DIR}/${HELPER_NAME}.plist" "${CONTENTS_DIR}/Library/LaunchDaemons/"
+  HELPER_PLIST_PATH="${CONTENTS_DIR}/Library/LaunchDaemons/${HELPER_NAME}.plist"
   
   # 拷贝 Info.plist 到 Helper bundle 目录
   cp "${HELPER_SRC_DIR}/Info.plist" "${HELPER_DST_DIR}/"
+
+  # fail-fast：校验 launchd plist 至少包含 Program / ProgramArguments / BundleProgram 之一
+  HELPER_PROGRAM_VALUE=$(/usr/libexec/PlistBuddy -c 'Print :Program' "${HELPER_PLIST_PATH}" 2>/dev/null || true)
+  HELPER_PROGRAM_ARG0=$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' "${HELPER_PLIST_PATH}" 2>/dev/null || true)
+  HELPER_BUNDLE_PROGRAM_VALUE=$(/usr/libexec/PlistBuddy -c 'Print :BundleProgram' "${HELPER_PLIST_PATH}" 2>/dev/null || true)
+
+  if [[ -z "${HELPER_PROGRAM_VALUE}" && -z "${HELPER_PROGRAM_ARG0}" && -z "${HELPER_BUNDLE_PROGRAM_VALUE}" ]]; then
+    echo "错误：${HELPER_PLIST_PATH} 缺少 Program/ProgramArguments/BundleProgram，SMAppService 将无法注册 Helper。" >&2
+    exit 1
+  fi
+
+  # 如果使用 BundleProgram，校验其对应的 app 内可执行文件存在且可执行
+  if [[ -n "${HELPER_BUNDLE_PROGRAM_VALUE}" ]]; then
+    HELPER_BUNDLE_PROGRAM_PATH="${APP_DIR}/${HELPER_BUNDLE_PROGRAM_VALUE#/}"
+    if [[ ! -e "${HELPER_BUNDLE_PROGRAM_PATH}" ]]; then
+      echo "错误：BundleProgram 指向的文件不存在：${HELPER_BUNDLE_PROGRAM_PATH}" >&2
+      exit 1
+    fi
+    if [[ ! -x "${HELPER_BUNDLE_PROGRAM_PATH}" ]]; then
+      echo "错误：BundleProgram 指向的文件不可执行：${HELPER_BUNDLE_PROGRAM_PATH}" >&2
+      exit 1
+    fi
+  fi
 
   # Helper bundle 在 LaunchDaemons 目录，需显式签名，否则主 App 深度签名可能不会覆盖到它
   if [[ -n "${SIGN_IDENTITY}" ]]; then
