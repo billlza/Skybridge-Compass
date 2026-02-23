@@ -31,6 +31,17 @@ Notes:
    - Frontend: `http://localhost:3000`
    - Backend: `http://localhost:8080/api/status`
 
+## Option C — Render (backend)
+
+This repo includes a Render Blueprint at `render.yaml` (targets branch `official-website`).
+
+1. Push the latest code to GitHub (Render deploys from Git).
+2. In Render Dashboard: **New** → **Blueprint**.
+3. Select repo `billlza/Skybridge-Compass` and branch `official-website`.
+4. Set/confirm env vars:
+   - `SKYBRIDGE_WEB_ORIGIN` = your frontend origin (e.g. `https://YOUR_DOMAIN` or your Vercel URL)
+5. Apply and monitor deploy logs.
+
 ## Runtime verification (recommended)
 
 - Check headers/CSP:
