@@ -641,7 +641,9 @@ public struct HandshakeMessageA: Sendable {
                     throw HandshakeError.failed(.invalidMessageFormat("Extensions truncated"))
                 }
                 if extLen > 0 {
-                    extensionsRaw = Data(data[offset..<(offset + Int(extLen))])
+                    let raw = Data(data[offset..<(offset + Int(extLen))])
+                    try validateTLVContainer(raw)
+                    extensionsRaw = raw
                 }
                 offset += Int(extLen)
             }
@@ -702,6 +704,9 @@ public struct HandshakeMessageA: Sendable {
         encodedWithoutSignature()
     }
 
+    /// Canonical MessageA payload encoding:
+    /// version -> suites -> keyShares -> nonce -> capabilities -> policy -> identity -> v2 contribution -> extensionsRaw
+    /// Unknown TLVs are preserved as raw bytes in `extensionsRaw` and emitted without normalization.
     func encodedWithoutSignature() -> Data {
         var data = Data()
         data.append(version)
@@ -731,19 +736,39 @@ public struct HandshakeMessageA: Sendable {
 
     private func decodeSOAExtension(from raw: Data) -> HandshakeSOAExtension? {
         guard !raw.isEmpty else { return nil }
-        var offset = 0
-        while offset + 4 <= raw.count {
-            let type = UInt16(raw[offset]) | (UInt16(raw[offset + 1]) << 8)
-            let len = UInt16(raw[offset + 2]) | (UInt16(raw[offset + 3]) << 8)
-            offset += 4
-            guard offset + Int(len) <= raw.count else { return nil }
-            let value = Data(raw[offset..<(offset + Int(len))])
-            offset += Int(len)
+        guard let tlvs = try? Self.parseTLVContainer(raw) else { return nil }
+        for (type, value) in tlvs {
             if type == HandshakeSOAExtension.tlvType {
                 return try? HandshakeSOAExtension.decodeValue(value)
             }
         }
         return nil
+    }
+
+    private static func validateTLVContainer(_ raw: Data) throws {
+        _ = try parseTLVContainer(raw)
+    }
+
+    private static func parseTLVContainer(_ raw: Data) throws -> [(UInt16, Data)] {
+        var result: [(UInt16, Data)] = []
+        result.reserveCapacity(4)
+
+        var offset = 0
+        while offset < raw.count {
+            guard offset + 4 <= raw.count else {
+                throw HandshakeError.failed(.invalidMessageFormat("Extensions TLV header truncated"))
+            }
+            let type = UInt16(raw[offset]) | (UInt16(raw[offset + 1]) << 8)
+            let len = UInt16(raw[offset + 2]) | (UInt16(raw[offset + 3]) << 8)
+            offset += 4
+            guard offset + Int(len) <= raw.count else {
+                throw HandshakeError.failed(.invalidMessageFormat("Extensions TLV value truncated"))
+            }
+            let value = Data(raw[offset..<(offset + Int(len))])
+            offset += Int(len)
+            result.append((type, value))
+        }
+        return result
     }
 }
 
