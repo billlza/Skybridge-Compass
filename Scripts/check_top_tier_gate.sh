@@ -275,6 +275,39 @@ if ! python3 "$CLAIM_GUARDRAIL_SCRIPT" \
 fi
 pass_item "claim guardrail gate passed"
 
+WIRE_CANON_SCRIPT="Scripts/check_wire_canonicalization.sh"
+require_file "$WIRE_CANON_SCRIPT"
+log "Running wire canonicalization gate"
+bash "$WIRE_CANON_SCRIPT"
+pass_item "wire canonicalization gate passed"
+
+log "Running SOA binding alias regression gate"
+swift test --filter SkyBridgeCoreTests.SOABindingAliasRegressionTests
+SKYBRIDGE_RUN_SOA_BENCH=1 SKYBRIDGE_SOA_ITERATIONS=100 swift test --filter SkyBridgeCoreTests.SOAInteroperabilityBenchTests
+pass_item "SOA binding alias regression gate passed"
+
+UNKNOWN_SUITE_GATE_SCRIPT="Scripts/check_unknown_suite_fallback_gate.py"
+require_file "$UNKNOWN_SUITE_GATE_SCRIPT"
+log "Running unknown-suite fallback deny gate"
+if ! python3 "$UNKNOWN_SUITE_GATE_SCRIPT"; then
+  fail_item "unknown-suite fallback deny gate failed"
+fi
+pass_item "unknown-suite fallback deny gate passed"
+
+SNAPSHOT_CONTRACT="Docs/artifact_snapshots.toml"
+CLAIM_MANIFEST="Docs/claim_manifest.yaml"
+CLAIM_TRACEABILITY_SCRIPT="Scripts/check_claim_traceability.py"
+require_file "$SNAPSHOT_CONTRACT"
+require_file "$CLAIM_MANIFEST"
+require_file "$CLAIM_TRACEABILITY_SCRIPT"
+log "Running claim traceability gate"
+if ! python3 "$CLAIM_TRACEABILITY_SCRIPT" \
+  --out-json "Artifacts/claim_traceability_${ARTIFACT_DATE_VALUE}.json" \
+  --out-md "Artifacts/claim_traceability_${ARTIFACT_DATE_VALUE}.md"; then
+  fail_item "claim traceability gate failed"
+fi
+pass_item "claim traceability gate passed"
+
 IOS_MINOR_MATRIX_SCRIPT="Scripts/check_ios_minor_matrix.py"
 require_file "$IOS_MINOR_MATRIX_SCRIPT"
 log "Running iOS minor-version matrix gate"

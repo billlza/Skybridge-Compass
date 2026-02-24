@@ -1,0 +1,21 @@
+[[snapshots]]
+id = "primary-2026-01-23"
+artifact_date = "2026-01-23"
+tier = "primary"
+git_commit = "b967ca6268e9ccca248e26ad894fcae062c0fe5e"
+os = "macOS 14+ (Apple Silicon)"
+toolchain = "Swift 6.2.1; Python 3.11"
+dataset_path = "Artifacts/handshake_bench_2026-01-23.csv"
+dataset_sha256 = "8300eb80d4da5b5f3589eefab61f56dc0b3dafbe6c0ff746c21e82282e7476ac"
+notes = "Primary frozen benchmark snapshot used by main-paper quantitative claims."
+
+[[snapshots]]
+id = "secondary-2026-02-24-boundary"
+artifact_date = "2026-02-24"
+tier = "secondary"
+git_commit = "b967ca6268e9ccca248e26ad894fcae062c0fe5e"
+os = "macOS 14+ (Apple Silicon)"
+toolchain = "Swift 6.2.1; Python 3.11"
+dataset_path = "Artifacts/boundary_stress_2026-02-24.csv"
+dataset_sha256 = "8b8b6cc6e906545a595afa1a3fae069bccf2b2a000fc6778125f49d2b7f6bf25"
+notes = "Secondary supplementary-only boundary stress evidence snapshot."
