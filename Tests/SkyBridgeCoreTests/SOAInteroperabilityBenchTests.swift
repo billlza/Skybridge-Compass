@@ -94,7 +94,8 @@ final class SOAInteroperabilityBenchTests: XCTestCase {
                 remoteAttemptId: loserAttempt,
                 targetPeerId: localWinnerPeer,
                 expectedRemotePeerId: remoteLoserPeer,
-                localPeerId: localWinnerPeer
+                localPeerId: localWinnerPeer,
+                authenticationState: .authenticated
             )
             let loserDecision = await loserArbiter.evaluateIncoming(
                 pairKey: pairKey,
@@ -102,7 +103,8 @@ final class SOAInteroperabilityBenchTests: XCTestCase {
                 remoteAttemptId: winnerAttempt,
                 targetPeerId: remoteLoserPeer,
                 expectedRemotePeerId: localWinnerPeer,
-                localPeerId: remoteLoserPeer
+                localPeerId: remoteLoserPeer,
+                authenticationState: .authenticated
             )
 
             let winnerKeepsAttempt: Bool
@@ -155,7 +157,8 @@ final class SOAInteroperabilityBenchTests: XCTestCase {
                 remoteAttemptId: Self.fixedAttemptId(index: idx, salt: 0x22),
                 targetPeerId: forgedTarget,
                 expectedRemotePeerId: expectedRemotePeerId,
-                localPeerId: localPeerId
+                localPeerId: localPeerId,
+                authenticationState: .authenticated
             )
 
             if case .rejectBinding = decision {
@@ -245,7 +248,8 @@ final class SOAInteroperabilityBenchTests: XCTestCase {
                     remoteAttemptId: Self.fixedAttemptId(index: idx * 10 + round, salt: 0x42),
                     targetPeerId: localPeerId,
                     expectedRemotePeerId: remotePeerId,
-                    localPeerId: localPeerId
+                    localPeerId: localPeerId,
+                    authenticationState: .authenticated
                 )
                 decisions.append(decision)
             }

@@ -899,7 +899,8 @@ public actor HandshakeDriver {
                     remoteAttemptId: soa.attemptId,
                     targetPeerId: soa.targetPeerId,
                     expectedRemotePeerId: expectedRemotePeerId,
-                    localPeerId: localPeerId
+                    localPeerId: localPeerId,
+                    authenticationState: .authenticated
                 )
                 switch decision {
                 case .accept:
@@ -916,12 +917,11 @@ public actor HandshakeDriver {
                     await transitionToFailed(.peerRejected(message: "soa_rate_limited"))
                     return
                 case .rejectLocalWinner:
-                    let winnerPeer = hexString(localPeerId)
-                    let winnerAttempt = hexString(soaAttemptId ?? Data())
-                    await transitionToFailed(.supersededByConcurrentAttempt(
-                        winnerPeerId: winnerPeer,
-                        winnerAttemptId: winnerAttempt
-                    ))
+                    let reason = PeerSessionArbiter.supersededFailureReason(
+                        winnerPeerId: localPeerId,
+                        winnerAttemptId: soaAttemptId ?? Data()
+                    )
+                    await transitionToFailed(reason)
                     return
                 }
             }
@@ -1514,9 +1514,9 @@ public actor HandshakeDriver {
             }
             timeoutTask?.cancel()
             timeoutTask = nil
-            let reason = HandshakeFailureReason.supersededByConcurrentAttempt(
-                winnerPeerId: hexString(winnerPeerId),
-                winnerAttemptId: hexString(winnerAttemptId)
+            let reason = PeerSessionArbiter.supersededFailureReason(
+                winnerPeerId: winnerPeerId,
+                winnerAttemptId: winnerAttemptId
             )
             state = .failed(reason: reason)
             finishOnce(with: .failure(HandshakeError.failed(reason)))

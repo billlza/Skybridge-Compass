@@ -15,6 +15,14 @@ public struct InboundSOABinding: Sendable {
 public enum InboundHandshakeAdapter {
     public static func bindSOAState(
         from messageA: HandshakeMessageA,
+        localPeerIdentifier: String
+    ) -> InboundSOABinding {
+        let localPeerId = PeerSessionArbiter.soaPeerId(from: localPeerIdentifier)
+        return bindSOAState(from: messageA, localPeerId: localPeerId)
+    }
+
+    public static func bindSOAState(
+        from messageA: HandshakeMessageA,
         localPeerId: Data
     ) -> InboundSOABinding {
         guard let soa = messageA.soaExtension else {
