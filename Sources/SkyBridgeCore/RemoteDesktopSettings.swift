@@ -90,6 +90,7 @@ public enum ResolutionSetting: String, CaseIterable, Codable, Sendable {
     case resolution1920x1080 = "1920x1080"
     case resolution2560x1440 = "2560x1440"
     case resolution3840x2160 = "3840x2160"
+    case resolution5120x2880 = "5120x2880"
     case custom = "custom"
     
     public var displayName: String {
@@ -101,6 +102,7 @@ public enum ResolutionSetting: String, CaseIterable, Codable, Sendable {
         case .resolution1920x1080: return "1920 × 1080 (Full HD)"
         case .resolution2560x1440: return "2560 × 1440 (2K)"
         case .resolution3840x2160: return "3840 × 2160 (4K)"
+        case .resolution5120x2880: return "5120 × 2880 (5K)"
         case .custom: return "自定义"
         }
     }
@@ -114,6 +116,7 @@ public enum ResolutionSetting: String, CaseIterable, Codable, Sendable {
         case .resolution1920x1080: return (1920, 1080)
         case .resolution2560x1440: return (2560, 1440)
         case .resolution3840x2160: return (3840, 2160)
+        case .resolution5120x2880: return (5120, 2880)
         }
     }
 }

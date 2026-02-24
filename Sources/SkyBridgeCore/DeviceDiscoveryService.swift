@@ -319,6 +319,10 @@ public final class DeviceDiscoveryService: ObservableObject {
                 // Auto stop/start here causes disruptive churn (re-advertise, reconnect loops, repeated handshakes).
                 // Keep discovery running; only do a lightweight refresh if we're currently not scanning.
                 SkyBridgeLogger.discovery.debugOnly("🔄 应用恢复活跃（保持设备发现常驻，不重启）")
+                guard self.settingsManager.autoScanOnStartup else {
+                    SkyBridgeLogger.discovery.debugOnly("⏸ 自动扫描开关已关闭，跳过恢复扫描")
+                    return
+                }
                 if !self.isScanning {
                     await self.start(force: true)
                 }
@@ -364,8 +368,12 @@ public final class DeviceDiscoveryService: ObservableObject {
             Task { @MainActor in
                 guard let self = self else { return }
                 SkyBridgeLogger.discovery.debugOnly("🌅 系统已唤醒，延迟重启设备发现...")
+                guard self.settingsManager.autoScanOnStartup else {
+                    SkyBridgeLogger.discovery.debugOnly("⏸ 自动扫描开关已关闭，系统唤醒后不自动扫描")
+                    return
+                }
 
- // 延迟重启，等待网络恢复
+// 延迟重启，等待网络恢复
                 try? await Task.sleep(nanoseconds: 3_000_000_000) // 3秒
 
                 await self.start()
@@ -503,6 +511,10 @@ public final class DeviceDiscoveryService: ObservableObject {
 
         SkyBridgeLogger.discovery.debugOnly("🔍 DeviceDiscoveryService: 开始设备发现 (强制: \(force))")
         logger.info("开始设备发现")
+        NetworkActivityLogStore.shared.record(
+            category: "discovery",
+            message: "start discovery force=\(force)"
+        )
 
  // 🔄 仅被动发现：禁止任何主动端口/NWConnection可达性探测
         let passive = SettingsManager.shared.discoveryPassiveMode
@@ -700,6 +712,7 @@ public final class DeviceDiscoveryService: ObservableObject {
 
     public func stop() {
         SkyBridgeLogger.discovery.debugOnly("⏹️ DeviceDiscoveryService: 停止设备发现")
+        NetworkActivityLogStore.shared.record(category: "discovery", message: "stop discovery")
 
  // 记录扫描结束时间，用于冷却控制
         lastScanEndTime = Date()

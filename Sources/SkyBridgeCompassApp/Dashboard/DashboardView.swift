@@ -179,6 +179,7 @@ public struct DashboardView: View {
                     .animation(.spring(response: 0.6, dampingFraction: 0.8), value: showingUserProfileOverlay)
             }
         }
+        .tint(themeConfiguration.accentColor)
         .animation(themeConfiguration.springAnimation, value: themeConfiguration.currentTheme)
         .animation(themeConfiguration.easeAnimation, value: themeConfiguration.backgroundIntensity)
         .animation(themeConfiguration.easeAnimation, value: themeConfiguration.glassOpacity)
@@ -317,7 +318,7 @@ public struct DashboardView: View {
                 portMap: od.portMap,
                 connectionTypes: od.connectionTypes,
                 uniqueIdentifier: od.uniqueIdentifier,
-                signalStrength: nil,
+                signalStrength: od.signalStrength,
                 source: od.sources.first ?? .unknown,
                 isLocalDevice: od.isLocalDevice,
                 deviceId: nil,
@@ -435,4 +436,3 @@ public struct DashboardView: View {
         if let o = windowDeminiObserver { center.removeObserver(o) }
     }
 }
-

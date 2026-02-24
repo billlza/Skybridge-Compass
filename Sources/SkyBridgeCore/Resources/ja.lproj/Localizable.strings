@@ -337,6 +337,8 @@
 "action.resetNetworkSettings" = "ネットワーク設定をリセット";
 "action.resetToDefaults" = "デフォルトにリセット";
 "action.resetMonitorData" = "モニターデータをリセット";
+"action.exportMonitorData" = "監視データをエクスポート";
+"action.clearMonitorHistory" = "監視履歴をクリア";
 
 "unit.dbm" = "dBm";
 "unit.count.short" = "件";
@@ -470,13 +472,21 @@
 "settings.fileTransfer.defaultPath" = "デフォルト転送パス:";
 "settings.fileTransfer.maxConcurrentTransfers" = "最大同時転送:";
 "settings.fileTransfer.bufferSize" = "転送バッファサイズ:";
+"settings.fileTransfer.chunkSize" = "チャンクサイズ:";
+"settings.fileTransfer.rateLimit" = "転送速度制限:";
+"settings.fileTransfer.rateLimit.unlimited" = "無制限";
+"settings.fileTransfer.pathFallback.title" = "保存先を更新しました";
+"settings.fileTransfer.pathFallback.message" = "設定されたパスが利用できないため、次のパスへ自動変更しました: %@";
 "settings.fileTransfer.options.title" = "転送オプション";
 "settings.fileTransfer.options.showNotification" = "転送完了時に通知を表示";
 "settings.fileTransfer.options.autoRetryFailed" = "失敗した転送を自動再試行";
+"settings.fileTransfer.options.resumeEnabled" = "レジューム転送を有効化（失敗時に再試行）";
 "settings.fileTransfer.options.keepHistory" = "転送履歴を保持";
 "settings.fileTransfer.options.keepAwake" = "転送中にシステムをスリープさせない";
 "settings.fileTransfer.security.title" = "セキュリティ設定";
 "settings.fileTransfer.security.enableEncrypt" = "転送暗号化を有効化";
+"settings.security.certificateValidation.alwaysOn" = "証明書検証は常に有効です";
+"settings.security.certificateValidation.alwaysOn.detail" = "このバージョンでは厳格な証明書検証を常時適用します。";
 "settings.fileTransfer.security.verifyIntegrity" = "ファイル整合性を検証";
 "settings.fileTransfer.security.scanVirus" = "転送ファイルをウイルススキャン";
 "settings.fileTransfer.security.algorithm" = "暗号アルゴリズム:";
@@ -506,6 +516,7 @@
 "settings.videoTransfer.enableAdaptiveBitrate.help" = "ネットワーク状況に応じてビットレートを自動調整";
 "settings.videoTransfer.compressionQuality" = "圧縮品質:";
 
+"settings.remote.qualityPerformance.title" = "画質とパフォーマンス";
 "settings.remote.display.title" = "表示設定";
 "settings.remote.display.videoQuality" = "動画品質:";
 "settings.remote.display.compressionLevel" = "圧縮レベル:";
@@ -539,10 +550,15 @@
 "settings.systemMonitor.display.temperature" = "温度情報を表示";
 "settings.systemMonitor.display.fanSpeed" = "ファン回転数を表示";
 "settings.systemMonitor.display.chartType" = "グラフ種類:";
+"settings.systemMonitor.display.noneEnabled" = "表示する監視指標がありません";
+"settings.systemMonitor.display.noneEnabled.detail" = "CPU・メモリ・温度・ファンのいずれかを有効にしてください。";
 "settings.systemMonitor.alerts.title" = "アラート設定";
 "settings.systemMonitor.alerts.cpuThreshold" = "CPUアラート閾値:";
 "settings.systemMonitor.alerts.memoryThreshold" = "メモリアラート閾値:";
 "settings.systemMonitor.alerts.diskThreshold" = "ディスクアラート閾値:";
+"settings.systemMonitor.alerts.temperatureThreshold" = "温度アラート閾値:";
+"settings.systemMonitor.alerts.fanSpeedThreshold" = "ファン回転数アラート閾値:";
+"settings.systemMonitor.alerts.thermalThrottling" = "サーマルスロットリング警報を有効化";
 "settings.systemMonitor.alerts.enableSound" = "サウンドアラートを有効化";
 "settings.systemMonitor.alerts.enableNotificationCenter" = "通知センターを有効化";
 "settings.systemMonitor.advanced.title" = "詳細オプション";
@@ -550,6 +566,8 @@
 "settings.systemMonitor.advanced.exportData" = "モニタデータをエクスポート";
 "settings.systemMonitor.advanced.enableRemoteMonitoring" = "リモート監視を有効化";
 "settings.systemMonitor.advanced.samplingPrecision" = "サンプリング精度:";
+"settings.systemMonitor.unsupported" = "未対応";
+"settings.systemMonitor.unsupported.detail" = "この項目は現在のバージョンで監視パイプラインに未接続です。";
 
 "fileTransfer.connectionStatus" = "接続状態";
 "status.transferring" = "転送中";

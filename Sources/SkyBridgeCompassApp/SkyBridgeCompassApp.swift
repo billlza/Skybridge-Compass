@@ -340,10 +340,15 @@ struct SkyBridgeCompassApp: App {
  // 第1层：天气系统轻量刷新（延迟 600ms）
                 try? await Task.sleep(nanoseconds: 600_000_000)
                 await WeatherIntegrationManager.shared.refresh()
- // 第2层：设备发现（延迟 1200ms）
+                // 第2层：设备发现（延迟 1200ms）
                 try? await Task.sleep(nanoseconds: 600_000_000)
-                await UnifiedOnlineDeviceManager.shared.startDiscoveryAsync()
- // 初始化 CloudKit 服务
+                let shouldAutoScan = await MainActor.run {
+                    SettingsManager.shared.autoScanOnStartup
+                }
+                if shouldAutoScan {
+                    await UnifiedOnlineDeviceManager.shared.startDiscoveryAsync()
+                }
+// 初始化 CloudKit 服务
                 await CloudKitService.shared.checkAccountStatus()
  // 第3层：文件传输设置应用（延迟 1800ms）
                 try? await Task.sleep(nanoseconds: 600_000_000)

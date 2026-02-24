@@ -28,8 +28,10 @@ public class FileTransferManager: BaseManager {
     private var maxConcurrentTransfers = 3
     private var compressionEnabled: Bool = true
     private var encryptionEnabled: Bool = true
+    private var maxTransferSpeedBytesPerSecond: Double?
     private var receiveBaseDirectory: URL?
     private var transferQueue = DispatchQueue(label: "file.transfer.queue", qos: .userInitiated)
+    private var transferRateLimitStates: [String: TransferRateLimitState] = [:]
 
     /// Last time we observed meaningful transfer activity (start/progress/finish).
     /// Used for a short UI grace period so the dashboard can show a visible "connected" signal even for fast transfers.
@@ -86,19 +88,73 @@ public class FileTransferManager: BaseManager {
         maxConcurrentTransfers: Int? = nil,
         chunkSize: Int? = nil,
         enableCompression: Bool? = nil,
-        enableEncryption: Bool? = nil
+        enableEncryption: Bool? = nil,
+        maxTransferSpeedBytesPerSecond: Double? = nil
     ) {
         if let maxConcurrentTransfers { self.maxConcurrentTransfers = max(1, maxConcurrentTransfers) }
         if let chunkSize { self.chunkSize = min(maxChunkSizeBytes, max(64 * 1024, chunkSize)) }
         if let enableCompression { self.compressionEnabled = enableCompression }
         if let enableEncryption { self.encryptionEnabled = enableEncryption }
-        logger.info("⚙️ 传输设置已更新：并发=\(self.maxConcurrentTransfers), 块=\(self.chunkSize), 压缩=\(self.compressionEnabled), 加密=\(self.encryptionEnabled)")
+        if let maxTransferSpeedBytesPerSecond {
+            self.maxTransferSpeedBytesPerSecond = maxTransferSpeedBytesPerSecond > 0 ? maxTransferSpeedBytesPerSecond : nil
+        }
+        logger.info("⚙️ 传输设置已更新：并发=\(self.maxConcurrentTransfers), 块=\(self.chunkSize), 压缩=\(self.compressionEnabled), 加密=\(self.encryptionEnabled), 限速=\(self.currentSpeedLimitDescription(), privacy: .public)")
     }
 
- /// 设置接收文件的基础目录
+    /// 设置接收文件的基础目录
     public func setReceiveBaseDirectory(_ url: URL?) {
-        receiveBaseDirectory = url
-        logger.info("📂 接收目录已更新: \(url?.path ?? "默认Downloads/SkyBridge")")
+        receiveBaseDirectory = resolvedWritableReceiveDirectory(from: url)
+        logger.info("📂 接收目录已更新: \(self.receiveBaseDirectory?.path ?? Self.defaultReceiveDirectory().path)")
+    }
+
+    private struct TransferRateLimitState {
+        var windowStart: Date
+        var bytesInWindow: Int64
+    }
+
+    private func currentSpeedLimitDescription() -> String {
+        guard let limit = maxTransferSpeedBytesPerSecond, limit > 0 else {
+            return "不限速"
+        }
+
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useKB, .useMB, .useGB]
+        formatter.countStyle = .file
+        return "\(formatter.string(fromByteCount: Int64(limit)))/s"
+    }
+
+    private func applySpeedLimitIfNeeded(for transferId: String, transferredBytes: Int) async {
+        guard transferredBytes > 0 else { return }
+        guard let limit = maxTransferSpeedBytesPerSecond, limit > 0 else { return }
+
+        let now = Date()
+        var state = transferRateLimitStates[transferId] ?? TransferRateLimitState(windowStart: now, bytesInWindow: 0)
+
+        if now.timeIntervalSince(state.windowStart) >= 1.0 {
+            state.windowStart = now
+            state.bytesInWindow = 0
+        }
+
+        state.bytesInWindow += Int64(transferredBytes)
+        let elapsed = max(Date().timeIntervalSince(state.windowStart), 0.000_001)
+        let expectedDuration = Double(state.bytesInWindow) / limit
+
+        if expectedDuration > elapsed {
+            let sleepSeconds = expectedDuration - elapsed
+            if sleepSeconds > 0 {
+                do {
+                    try await Task.sleep(nanoseconds: UInt64(min(sleepSeconds, 5.0) * 1_000_000_000))
+                } catch {
+                    return
+                }
+            }
+        }
+
+        transferRateLimitStates[transferId] = state
+    }
+
+    private func clearSpeedLimitState(for transferId: String) {
+        transferRateLimitStates.removeValue(forKey: transferId)
     }
 
     /// Sends a file to the currently active P2P peer.
@@ -974,7 +1030,10 @@ public class FileTransferManager: BaseManager {
         startOffset: Int64 = 0
     ) async throws {
         let fileHandle = try FileHandle(forReadingFrom: url)
-        defer { fileHandle.closeFile() }
+        defer {
+            fileHandle.closeFile()
+            clearSpeedLimitState(for: transfer.id)
+        }
 
         var sentBytes: Int64 = startOffset
         let totalBytes = transfer.fileSize
@@ -1021,8 +1080,9 @@ public class FileTransferManager: BaseManager {
                 size: chunkData.count
             )
 
- // 发送文件块
+            // 发送文件块
             try await sendFileChunk(chunk, to: connection)
+            await applySpeedLimitIfNeeded(for: transfer.id, transferredBytes: payload.count)
 
             sentBytes += Int64(chunkData.count)
             chunkIndex += 1
@@ -1050,7 +1110,10 @@ public class FileTransferManager: BaseManager {
         }
 
         let fileHandle = try FileHandle(forWritingTo: url)
-        defer { fileHandle.closeFile() }
+        defer {
+            fileHandle.closeFile()
+            clearSpeedLimitState(for: transfer.id)
+        }
 
  // 移动到断点位置（如果存在）
         if startOffset > 0 {
@@ -1071,6 +1134,7 @@ public class FileTransferManager: BaseManager {
 
  // 接收文件块
             let chunk = try await receiveFileChunk(from: connection)
+            await applySpeedLimitIfNeeded(for: transfer.id, transferredBytes: chunk.data.count)
 
  // 写入文件
             fileHandle.seek(toFileOffset: UInt64(receivedBytes))
@@ -1269,15 +1333,42 @@ public class FileTransferManager: BaseManager {
         return (type: type, length: Int(length))
     }
 
- /// 获取接收文件路径
+    /// 获取接收文件路径
     private func getReceiveFilePath(for fileName: String) -> URL {
-        let baseDir = receiveBaseDirectory ?? FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first!.appendingPathComponent("SkyBridge")
+        let baseDir = receiveBaseDirectory ?? Self.defaultReceiveDirectory()
         let skyBridgeFolder = baseDir
 
- // 创建文件夹
+        // 创建文件夹
         try? FileManager.default.createDirectory(at: skyBridgeFolder, withIntermediateDirectories: true)
 
         return skyBridgeFolder.appendingPathComponent(fileName)
+    }
+
+    private static func defaultReceiveDirectory() -> URL {
+        let base = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads")
+        return base.appendingPathComponent("SkyBridge", isDirectory: true)
+    }
+
+    private func resolvedWritableReceiveDirectory(from preferred: URL?) -> URL {
+        if let preferred, ensureWritableDirectory(at: preferred) {
+            return preferred
+        }
+
+        let fallback = Self.defaultReceiveDirectory()
+        _ = ensureWritableDirectory(at: fallback)
+        return fallback
+    }
+
+    @discardableResult
+    private func ensureWritableDirectory(at url: URL) -> Bool {
+        do {
+            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+            return FileManager.default.isWritableFile(atPath: url.path)
+        } catch {
+            logger.warning("⚠️ 无法使用接收目录 \(url.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            return false
+        }
     }
 
     // MARK: - External (non-NWConnection) transfers (WebRTC DataChannel)

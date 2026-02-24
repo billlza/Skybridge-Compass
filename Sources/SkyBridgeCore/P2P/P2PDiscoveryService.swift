@@ -87,6 +87,7 @@ public class P2PDiscoveryService: BaseManager {
     public enum ConnectionRoutePreference: Sendable {
         case automatic
         case preferUSB
+        case managedRelayOnly
     }
 
     private enum InterfacePreference: String {
@@ -252,19 +253,19 @@ public class P2PDiscoveryService: BaseManager {
         }
     }
 
- /// 停止扫描设备
+    /// 停止扫描设备
     public func stopScanning() {
-        guard isScanning else { return }
+        if isScanning {
+            logger.info("⏹️ 停止扫描设备")
+            isScanning = false
+            isDiscovering = false
 
-        logger.info("⏹️ 停止扫描设备")
-        isScanning = false
-        isDiscovering = false
-
- // 取消所有浏览器
-        for browser in browsers {
-            browser.cancel()
+            // 取消所有浏览器
+            for browser in browsers {
+                browser.cancel()
+            }
+            browsers.removeAll()
         }
-        browsers.removeAll()
 
         connections.values.forEach { $0.cancel() }
         connections.removeAll()
@@ -277,7 +278,10 @@ public class P2PDiscoveryService: BaseManager {
 
     /// 连接到指定设备（优先 Bonjour 服务名，失败时自动回退到 host:port）
     public func connectToDevice(_ device: DiscoveredDevice) async throws {
-        try await connectToDevice(device, routePreference: .automatic)
+        let preferredRoute: ConnectionRoutePreference = SettingsManager.shared.enableP2PDirectConnection
+            ? .automatic
+            : .managedRelayOnly
+        try await connectToDevice(device, routePreference: preferredRoute)
     }
 
     /// 连接到指定设备（可指定路由偏好，例如 USB 优先）。
@@ -286,6 +290,10 @@ public class P2PDiscoveryService: BaseManager {
         routePreference: ConnectionRoutePreference
     ) async throws {
         logger.info("尝试连接到设备: \(device.name)")
+        NetworkActivityLogStore.shared.record(
+            category: "p2p",
+            message: "connect start device=\(device.name) route=\(String(describing: routePreference))"
+        )
         let deviceKey = device.id.uuidString
         connections[deviceKey]?.cancel()
         connections.removeValue(forKey: deviceKey)
@@ -294,6 +302,7 @@ public class P2PDiscoveryService: BaseManager {
         }
 
         let preferUSBRoute = routePreference == .preferUSB || device.connectionTypes.contains(.usb)
+        let disableDirectRoute = routePreference == .managedRelayOnly
         let primaryServiceType = "_skybridge._tcp"
         let connectableServiceTypes = normalizedConnectableServiceTypes(from: device.services)
         let preferredServiceType = connectableServiceTypes.contains(primaryServiceType) ? primaryServiceType : connectableServiceTypes.first
@@ -352,7 +361,9 @@ public class P2PDiscoveryService: BaseManager {
         let hostFallbackEndpoints = makeHostFallbackEndpoints(device: device, portValue: portValue)
 
         var endpointAttempts: [NWEndpoint] = []
-        if preferUSBRoute {
+        if disableDirectRoute {
+            endpointAttempts.append(contentsOf: bonjourEndpointAttempts)
+        } else if preferUSBRoute {
             endpointAttempts.append(contentsOf: hostFallbackEndpoints)
             endpointAttempts.append(contentsOf: bonjourEndpointAttempts)
         } else {
@@ -385,6 +396,11 @@ public class P2PDiscoveryService: BaseManager {
         }
 
         guard !endpointAttempts.isEmpty else {
+            NetworkActivityLogStore.shared.record(
+                category: "p2p",
+                message: "connect failed device=\(device.name) reason=no_connectable_endpoint",
+                level: "WARN"
+            )
             throw P2PDiscoveryError.noConnectableEndpoint
         }
 
@@ -437,6 +453,10 @@ public class P2PDiscoveryService: BaseManager {
                         }
 
                         logger.info("✅ 成功连接到设备: \(device.name)")
+                        NetworkActivityLogStore.shared.record(
+                            category: "p2p",
+                            message: "connect success device=\(device.name) endpoint=\(endpoint.debugDescription)"
+                        )
                         connectionStatus = .connected
                         return
                     } catch {
@@ -453,6 +473,11 @@ public class P2PDiscoveryService: BaseManager {
         }
 
         connectionStatus = .failed
+        NetworkActivityLogStore.shared.record(
+            category: "p2p",
+            message: "connect failed device=\(device.name) reason=\(lastError?.localizedDescription ?? "cancelled")",
+            level: "WARN"
+        )
         throw lastError ?? P2PDiscoveryError.connectionCancelled
     }
 

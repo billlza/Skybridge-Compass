@@ -534,14 +534,25 @@ public struct EnhancedDeviceDiscoveryView: View {
     }
 
     private var filteredOnlineDevicesNonLocal: [OnlineDevice] {
-        if searchText.isEmpty {
-            return onlineNonLocalDevices
-        } else {
-            return onlineNonLocalDevices.filter {
-                $0.name.localizedCaseInsensitiveContains(searchText) ||
-                $0.ipv4?.contains(searchText) == true ||
-                $0.ipv6?.contains(searchText) == true
+        let settings = SettingsManager.shared
+        let base = onlineNonLocalDevices.filter { device in
+            if settings.hideOfflineDevices && device.connectionStatus == .offline {
+                return false
             }
+            if settings.showConnectableDevicesOnly && !device.isConnectable {
+                return false
+            }
+            return true
+        }
+
+        if searchText.isEmpty {
+            return base
+        }
+
+        return base.filter {
+            $0.name.localizedCaseInsensitiveContains(searchText) ||
+            $0.ipv4?.contains(searchText) == true ||
+            $0.ipv6?.contains(searchText) == true
         }
     }
 
@@ -889,6 +900,7 @@ public struct EnhancedDeviceDiscoveryView: View {
         let isConnecting: Bool
         let onConnect: () -> Void
         @EnvironmentObject var themeConfiguration: ThemeConfiguration
+        @StateObject private var settingsManager = SettingsManager.shared
 
         init(device: OnlineDevice, isConnecting: Bool = false, onConnect: @escaping () -> Void) {
             self.device = device
@@ -897,19 +909,19 @@ public struct EnhancedDeviceDiscoveryView: View {
         }
 
         var body: some View {
-            HStack(spacing: 16) {
+            HStack(spacing: settingsManager.compactMode ? 10 : 16) {
  // 设备图标
                 Image(systemName: deviceIcon)
-                    .font(.system(size: 32))
+                    .font(.system(size: settingsManager.compactMode ? 24 : 32))
                     .foregroundColor(statusColor)
-                    .frame(width: 50, height: 50)
+                    .frame(width: settingsManager.compactMode ? 40 : 50, height: settingsManager.compactMode ? 40 : 50)
                     .background(statusColor.opacity(0.1))
                     .cornerRadius(10)
 
-                VStack(alignment: .leading, spacing: 6) {
+                VStack(alignment: .leading, spacing: settingsManager.compactMode ? 4 : 6) {
                     HStack(spacing: 8) {
                         Text(device.name)
-                            .font(.headline)
+                            .font(settingsManager.compactMode ? .subheadline : .headline)
 
  // 本机标签
                         if device.isLocalDevice {
@@ -930,14 +942,14 @@ public struct EnhancedDeviceDiscoveryView: View {
                         }
                     }
 
-                    if let ipv4 = device.ipv4 {
+                    if settingsManager.showDeviceDetails, let ipv4 = device.ipv4 {
                         Text("IP: \(ipv4)")
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
 
  // 连接类型标签
-                    if !device.connectionTypes.isEmpty {
+                    if settingsManager.showDeviceDetails && !device.connectionTypes.isEmpty {
                         HStack(spacing: 6) {
                             ForEach(Array(device.connectionTypes.sorted(by: { $0.rawValue < $1.rawValue })), id: \.self) { type in
                                 HStack(spacing: 3) {
@@ -955,13 +967,23 @@ public struct EnhancedDeviceDiscoveryView: View {
                         }
                     }
 
- // 连接状态
-                    Text(device.connectionStatus.rawValue)
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
+                    if settingsManager.showConnectionStats {
+                        Text(device.connectionStatus.rawValue)
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+
+                    if settingsManager.showDeviceRSSI, let signal = device.signalStrength {
+                        Text("RSSI: \(Int(signal))%")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
 
                     // Crypto/guard summary (best-effort)
-                    if let kind = device.lastCryptoKind, let suite = device.lastCryptoSuite, device.connectionStatus == .connected {
+                    if settingsManager.showConnectionStats,
+                       let kind = device.lastCryptoKind,
+                       let suite = device.lastCryptoSuite,
+                       device.connectionStatus == .connected {
                         Text("\(kind) · \(suite) · \(device.guardStatus ?? "守护中")")
                         .font(.caption2)
                         .foregroundColor(.secondary)
@@ -983,7 +1005,7 @@ public struct EnhancedDeviceDiscoveryView: View {
                     }
                 }
             }
-            .padding(16)
+            .padding(settingsManager.compactMode ? 10 : 16)
             .background(themeConfiguration.cardBackgroundMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
@@ -1498,7 +1520,12 @@ public struct EnhancedDeviceDiscoveryView: View {
             if !discoveredCandidates.contains(where: { isSameConnectTarget($0, fallback) }) {
                 discoveredCandidates.append(fallback)
             }
-            let routePreference: P2PDiscoveryService.ConnectionRoutePreference = preferUSBRoute ? .preferUSB : .automatic
+            let routePreference: P2PDiscoveryService.ConnectionRoutePreference = {
+                if !SettingsManager.shared.enableP2PDirectConnection {
+                    return .managedRelayOnly
+                }
+                return preferUSBRoute ? .preferUSB : .automatic
+            }()
 
             do {
                 var lastError: Error?
@@ -1571,7 +1598,7 @@ public struct EnhancedDeviceDiscoveryView: View {
             portMap: device.portMap,
             connectionTypes: device.connectionTypes,
             uniqueIdentifier: device.uniqueIdentifier,
-            signalStrength: nil,
+            signalStrength: device.signalStrength,
             source: .skybridgeBonjour,
             isLocalDevice: device.isLocalDevice,
             deviceId: mappedDeviceId ?? inferredDeviceId,

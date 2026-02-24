@@ -1,6 +1,8 @@
 import Foundation
+import Combine
 import os.log
 import UserNotifications
+import Darwin
 
 /// 系统性能监控器（统一真实值后端）
 ///
@@ -16,6 +18,8 @@ public final class SystemPerformanceMonitor: ObservableObject {
     @Published public private(set) var gpuUsage: Double = 0
     @Published public private(set) var gpuPower: Double = 0
     @Published public private(set) var memoryUsage: Double = 0
+    @Published public private(set) var diskUsage: Double = 0
+    @Published public private(set) var networkThroughputMbps: Double = 0
     @Published public private(set) var cpuTemperature: Double = 0
     @Published public private(set) var gpuTemperature: Double = 0
     @Published public private(set) var fanSpeed: [Int] = []
@@ -33,18 +37,33 @@ public final class SystemPerformanceMonitor: ObservableObject {
     @Published public private(set) var helperServiceInfo: PowerMetricsServiceInfo?
     @Published public private(set) var isInitialized: Bool = false
     @Published public private(set) var isMonitoring: Bool = false
+    @Published public private(set) var historyPoints: [SystemMonitorHistoryPoint] = []
 
     private let logger = Logger(subsystem: "SkyBridgeCore.Performance", category: "SystemPerformanceMonitor")
 
     private var monitoringTimer: Timer?
     private var startupDelayTimer: Timer?
     private var monitoringInterval: TimeInterval = 2.0
+    private var settingsCancellables = Set<AnyCancellable>()
 
     private var notificationThresholds = NotificationThresholds()
     private var lastNotificationTime: Date = .distantPast
     private let notificationCooldown: TimeInterval = 300
     private var notificationAuthChecked = false
     private var notificationAuthGranted = false
+    private var enableAutoRefresh = true
+    private var enablePerformanceAlerts = true
+    private var enableSystemNotifications = true
+    private var enableSoundAlerts = false
+    private var enableTemperatureMonitoring = true
+    private var enableFanSpeedMonitoring = true
+    private var enableThermalThrottlingAlert = true
+    private var enableRemoteMonitoring = false
+    private var historyRetentionDays = 7
+    private var historyPointBudget = 300
+    private var optimizeMemoryUsage = true
+
+    private var previousNetworkSample: (inBytes: UInt64, outBytes: UInt64, timestamp: Date)?
 
     private var lastDiagnosticLogAt: Date = .distantPast
     private var lastDiagnosticSignature = ""
@@ -52,6 +71,9 @@ public final class SystemPerformanceMonitor: ObservableObject {
     public init() {
         let storedModeRaw = UserDefaults.standard.string(forKey: MonitoringMode.userDefaultsKey)
         self.monitoringMode = storedModeRaw.flatMap { MonitoringMode(rawValue: $0) } ?? .standardPublic
+        applySettings(SettingsManager.shared)
+        setupSettingsObservers()
+        setupHistoryNotifications()
         logger.info("SystemPerformanceMonitor initialized, mode=\(self.monitoringMode.rawValue, privacy: .public)")
     }
 
@@ -78,20 +100,13 @@ public final class SystemPerformanceMonitor: ObservableObject {
         logger.info("SystemPerformanceMonitor stopped")
     }
 
-    public func updateMonitoringInterval(basedOnLoad load: Double) {
-        let newInterval: TimeInterval
-        switch load {
-        case 80...:
-            newInterval = 1.0
-        case 50...:
-            newInterval = 1.5
-        default:
-            newInterval = 2.0
-        }
-
-        guard newInterval != monitoringInterval else { return }
+    public func updateMonitoringInterval(basedOnLoad _: Double) {
+        let previous = monitoringInterval
+        applySettings(SettingsManager.shared)
+        let newInterval = monitoringInterval
         monitoringInterval = newInterval
-        if isMonitoring {
+        guard newInterval != previous else { return }
+        if isMonitoring && enableAutoRefresh {
             startMonitoringTimer()
         }
     }
@@ -110,6 +125,183 @@ public final class SystemPerformanceMonitor: ObservableObject {
         setMonitoringMode(monitoringMode == .standardPublic ? .expertPrivate : .standardPublic)
     }
 
+    private func setupSettingsObservers() {
+        let settingsManager = SettingsManager.shared
+
+        settingsManager.$systemMonitorRefreshInterval.sink { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.applySettings(settingsManager)
+                self.applyAutoRefreshState()
+            }
+        }.store(in: &settingsCancellables)
+
+        settingsManager.$enableAutoRefresh.sink { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.applySettings(settingsManager)
+                self.applyAutoRefreshState()
+            }
+        }.store(in: &settingsCancellables)
+
+        settingsManager.$enablePerformanceAlerts.sink { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.applySettings(settingsManager)
+            }
+        }.store(in: &settingsCancellables)
+
+        settingsManager.$enableSystemNotifications.sink { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.applySettings(settingsManager)
+            }
+        }.store(in: &settingsCancellables)
+
+        settingsManager.$enableSoundAlerts.sink { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.applySettings(settingsManager)
+            }
+        }.store(in: &settingsCancellables)
+
+        settingsManager.$cpuThreshold.sink { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.applySettings(settingsManager)
+            }
+        }.store(in: &settingsCancellables)
+
+        settingsManager.$memoryThreshold.sink { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.applySettings(settingsManager)
+            }
+        }.store(in: &settingsCancellables)
+
+        settingsManager.$diskThreshold.sink { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.applySettings(settingsManager)
+            }
+        }.store(in: &settingsCancellables)
+
+        settingsManager.$temperatureThreshold.sink { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.applySettings(settingsManager)
+            }
+        }.store(in: &settingsCancellables)
+
+        settingsManager.$fanSpeedThreshold.sink { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.applySettings(settingsManager)
+            }
+        }.store(in: &settingsCancellables)
+
+        settingsManager.$enableTemperatureMonitoring.sink { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.applySettings(settingsManager)
+            }
+        }.store(in: &settingsCancellables)
+
+        settingsManager.$enableFanSpeedMonitoring.sink { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.applySettings(settingsManager)
+            }
+        }.store(in: &settingsCancellables)
+
+        settingsManager.$enableThermalThrottlingAlert.sink { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.applySettings(settingsManager)
+            }
+        }.store(in: &settingsCancellables)
+
+        settingsManager.$maxHistoryPoints.sink { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.applySettings(settingsManager)
+            }
+        }.store(in: &settingsCancellables)
+
+        settingsManager.$systemMonitorRetentionDays.sink { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.applySettings(settingsManager)
+            }
+        }.store(in: &settingsCancellables)
+
+        settingsManager.$systemMonitorSamplingPrecision.sink { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.applySettings(settingsManager)
+                self.applyAutoRefreshState()
+            }
+        }.store(in: &settingsCancellables)
+
+        settingsManager.$optimizeMemoryUsage.sink { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.applySettings(settingsManager)
+            }
+        }.store(in: &settingsCancellables)
+
+        settingsManager.$enableRemoteMonitoring.sink { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.applySettings(settingsManager)
+            }
+        }.store(in: &settingsCancellables)
+    }
+
+    private func setupHistoryNotifications() {
+        NotificationCenter.default.publisher(for: .systemMonitorClearHistory)
+            .sink { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.clearHistory()
+                }
+            }
+            .store(in: &settingsCancellables)
+
+        NotificationCenter.default.publisher(for: .systemMonitorExport)
+            .sink { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.exportHistorySnapshot()
+                }
+            }
+            .store(in: &settingsCancellables)
+    }
+
+    private func applySettings(_ settingsManager: SettingsManager) {
+        let precisionMultiplier: Double
+        switch settingsManager.systemMonitorSamplingPrecision {
+        case .low:
+            precisionMultiplier = 2.0
+        case .normal:
+            precisionMultiplier = 1.0
+        case .high:
+            precisionMultiplier = 0.5
+        }
+        monitoringInterval = max(0.5, settingsManager.systemMonitorRefreshInterval * precisionMultiplier)
+        enableAutoRefresh = settingsManager.enableAutoRefresh
+        enablePerformanceAlerts = settingsManager.enablePerformanceAlerts
+        enableSystemNotifications = settingsManager.enableSystemNotifications
+        enableSoundAlerts = settingsManager.enableSoundAlerts
+        enableTemperatureMonitoring = settingsManager.enableTemperatureMonitoring
+        enableFanSpeedMonitoring = settingsManager.enableFanSpeedMonitoring
+        enableThermalThrottlingAlert = settingsManager.enableThermalThrottlingAlert
+        enableRemoteMonitoring = settingsManager.enableRemoteMonitoring
+        historyRetentionDays = max(1, settingsManager.systemMonitorRetentionDays)
+        optimizeMemoryUsage = settingsManager.optimizeMemoryUsage
+        let baseBudget = Int(max(50, settingsManager.maxHistoryPoints))
+        historyPointBudget = optimizeMemoryUsage ? min(baseBudget, 120) : baseBudget
+        notificationThresholds.cpuUsage = settingsManager.cpuThreshold
+        notificationThresholds.memoryUsage = settingsManager.memoryThreshold
+        notificationThresholds.diskUsage = settingsManager.diskThreshold
+        notificationThresholds.cpuTemperature = settingsManager.temperatureThreshold
+        notificationThresholds.fanSpeedRPM = settingsManager.fanSpeedThreshold
+        trimHistory()
+    }
+
+    private func applyAutoRefreshState() {
+        guard isMonitoring else { return }
+        if enableAutoRefresh {
+            startMonitoringTimer()
+        } else {
+            monitoringTimer?.invalidate()
+            monitoringTimer = nil
+        }
+    }
+
     private func initializeIfNeeded() {
         guard !isInitialized else { return }
         isInitialized = true
@@ -122,11 +314,18 @@ public final class SystemPerformanceMonitor: ObservableObject {
     private func startBackendCollection() async {
         await collectPerformanceData(force: true)
         isMonitoring = true
-        startMonitoringTimer()
+        if enableAutoRefresh {
+            startMonitoringTimer()
+        }
         logger.info("SystemPerformanceMonitor started")
     }
 
     private func startMonitoringTimer() {
+        guard enableAutoRefresh else {
+            monitoringTimer?.invalidate()
+            monitoringTimer = nil
+            return
+        }
         monitoringTimer?.invalidate()
         monitoringTimer = Timer.scheduledTimer(withTimeInterval: monitoringInterval, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
@@ -144,6 +343,8 @@ public final class SystemPerformanceMonitor: ObservableObject {
     private func applySnapshot(_ snapshot: UnifiedMetricsSnapshot) {
         cpuUsage = snapshot.cpuUsage
         memoryUsage = snapshot.memoryUsage
+        diskUsage = sampleDiskUsagePercent()
+        networkThroughputMbps = sampleNetworkThroughputMbps()
         loadAverage1Min = snapshot.loadAvg1
         loadAverage5Min = snapshot.loadAvg5
         loadAverage15Min = snapshot.loadAvg15
@@ -162,6 +363,21 @@ public final class SystemPerformanceMonitor: ObservableObject {
 
         monitoringMode = snapshot.mode
         helperServiceInfo = snapshot.serviceInfo
+
+        appendHistoryPoint(from: snapshot)
+        if enableRemoteMonitoring {
+            NotificationCenter.default.post(
+                name: Notification.Name("SystemMonitor.RemoteSnapshotUpdated"),
+                object: nil,
+                userInfo: [
+                    "timestamp": Date(),
+                    "cpu": cpuUsage,
+                    "memory": memoryUsage,
+                    "disk": diskUsage,
+                    "network": networkThroughputMbps
+                ]
+            )
+        }
 
         updateMonitoringInterval(basedOnLoad: snapshot.cpuUsage)
         logMetricDiagnostics(snapshot: snapshot)
@@ -187,7 +403,124 @@ public final class SystemPerformanceMonitor: ObservableObject {
         }
     }
 
+    private func appendHistoryPoint(from snapshot: UnifiedMetricsSnapshot) {
+        let now = Date()
+        historyPoints.append(
+            SystemMonitorHistoryPoint(
+                timestamp: now,
+                cpuUsage: snapshot.cpuUsage,
+                memoryUsage: snapshot.memoryUsage,
+                diskUsage: diskUsage,
+                networkThroughputMbps: networkThroughputMbps,
+                temperature: cpuTemperature,
+                fanSpeed: Double(fanSpeed.first ?? 0)
+            )
+        )
+        trimHistory()
+    }
+
+    private func trimHistory() {
+        if historyPointBudget > 0, historyPoints.count > historyPointBudget {
+            historyPoints.removeFirst(historyPoints.count - historyPointBudget)
+        }
+
+        let cutoff = Date().addingTimeInterval(-Double(historyRetentionDays) * 86_400)
+        historyPoints.removeAll { $0.timestamp < cutoff }
+    }
+
+    private func clearHistory() {
+        historyPoints.removeAll()
+        previousNetworkSample = nil
+        logger.info("SystemPerformanceMonitor history cleared")
+    }
+
+    private func exportHistorySnapshot() {
+        let payload: [String: Any] = [
+            "timestamp": ISO8601DateFormatter().string(from: Date()),
+            "cpuUsage": cpuUsage,
+            "memoryUsage": memoryUsage,
+            "diskUsage": diskUsage,
+            "networkThroughputMbps": networkThroughputMbps,
+            "history": historyPoints.map {
+                [
+                    "timestamp": ISO8601DateFormatter().string(from: $0.timestamp),
+                    "cpuUsage": $0.cpuUsage,
+                    "memoryUsage": $0.memoryUsage,
+                    "diskUsage": $0.diskUsage,
+                    "networkThroughputMbps": $0.networkThroughputMbps,
+                    "temperature": $0.temperature,
+                    "fanSpeed": $0.fanSpeed
+                ]
+            }
+        ]
+
+        do {
+            let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyyMMdd_HHmmss"
+            let filename = "system_monitor_export_\(formatter.string(from: Date())).json"
+            let desktopURL = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Desktop", isDirectory: true)
+                .appendingPathComponent(filename)
+            try data.write(to: desktopURL, options: .atomic)
+            logger.info("SystemPerformanceMonitor history exported: \(desktopURL.path, privacy: .public)")
+        } catch {
+            logger.error("SystemPerformanceMonitor export failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private func sampleDiskUsagePercent() -> Double {
+        do {
+            let attrs = try FileManager.default.attributesOfFileSystem(forPath: NSHomeDirectory())
+            let total = (attrs[.systemSize] as? NSNumber)?.doubleValue ?? 0
+            let free = (attrs[.systemFreeSize] as? NSNumber)?.doubleValue ?? 0
+            guard total > 0 else { return diskUsage }
+            return max(0, min(100, (1.0 - (free / total)) * 100))
+        } catch {
+            return diskUsage
+        }
+    }
+
+    private func sampleNetworkThroughputMbps() -> Double {
+        var bytesIn: UInt64 = 0
+        var bytesOut: UInt64 = 0
+        var mib = [CTL_NET, PF_ROUTE, 0, 0, NET_RT_IFLIST2, 0]
+        var len: size_t = 0
+        let now = Date()
+
+        guard sysctl(&mib, 6, nil, &len, nil, 0) >= 0 else { return networkThroughputMbps }
+        let buffer = UnsafeMutablePointer<Int8>.allocate(capacity: len)
+        defer { buffer.deallocate() }
+        guard sysctl(&mib, 6, buffer, &len, nil, 0) >= 0 else { return networkThroughputMbps }
+
+        var offset = 0
+        while offset < len {
+            let header = buffer.advanced(by: offset).withMemoryRebound(to: if_msghdr.self, capacity: 1) { $0.pointee }
+            if header.ifm_type == RTM_IFINFO2 {
+                let ifInfo = buffer.advanced(by: offset).withMemoryRebound(to: if_msghdr2.self, capacity: 1) { $0.pointee }
+                bytesIn += ifInfo.ifm_data.ifi_ibytes
+                bytesOut += ifInfo.ifm_data.ifi_obytes
+            }
+            offset += Int(header.ifm_msglen)
+        }
+
+        let current = (inBytes: bytesIn, outBytes: bytesOut, timestamp: now)
+        defer { previousNetworkSample = current }
+
+        guard let previous = previousNetworkSample else { return 0 }
+        let elapsed = now.timeIntervalSince(previous.timestamp)
+        guard elapsed > 0 else { return networkThroughputMbps }
+
+        let inDiff = bytesIn >= previous.inBytes ? bytesIn - previous.inBytes : 0
+        let outDiff = bytesOut >= previous.outBytes ? bytesOut - previous.outBytes : 0
+        let bytesPerSecond = Double(inDiff + outDiff) / elapsed
+        let mbps = bytesPerSecond * 8 / (1024 * 1024)
+        return max(0, mbps)
+    }
+
     private func checkAndSendNotifications() async {
+        guard enablePerformanceAlerts, enableSystemNotifications else { return }
+
         let sinceLast = Date().timeIntervalSince(lastNotificationTime)
         guard sinceLast >= notificationCooldown else { return }
 
@@ -197,18 +530,26 @@ public final class SystemPerformanceMonitor: ObservableObject {
         if cpuUsage >= notificationThresholds.cpuUsage {
             title = "⚠️ CPU负载过高"
             body = String(format: "当前CPU使用率: %.1f%%", cpuUsage)
-        } else if gpuUsageState.availability == .available, gpuUsage >= notificationThresholds.gpuUsage {
-            title = "⚠️ GPU负载过高"
-            body = String(format: "当前GPU使用率: %.1f%%", gpuUsage)
-        } else if cpuTemperatureState.availability == .available, cpuTemperature >= notificationThresholds.cpuTemperature {
-            title = "🌡️ CPU温度过高"
-            body = String(format: "当前CPU温度: %.1f°C", cpuTemperature)
-        } else if gpuTemperatureState.availability == .available, gpuTemperature >= notificationThresholds.gpuTemperature {
-            title = "🌡️ GPU温度过高"
-            body = String(format: "当前GPU温度: %.1f°C", gpuTemperature)
         } else if memoryUsage >= notificationThresholds.memoryUsage {
             title = "💾 内存使用过高"
             body = String(format: "当前内存使用率: %.1f%%", memoryUsage)
+        } else if diskUsage >= notificationThresholds.diskUsage {
+            title = "💽 磁盘使用率过高"
+            body = String(format: "当前磁盘使用率: %.1f%%", diskUsage)
+        } else if enableTemperatureMonitoring,
+                  cpuTemperatureState.availability == .available,
+                  cpuTemperature >= notificationThresholds.cpuTemperature {
+            title = "🌡️ CPU温度过高"
+            body = String(format: "当前CPU温度: %.1f°C", cpuTemperature)
+        } else if enableFanSpeedMonitoring,
+                  fanState.availability == .available,
+                  Double(fanSpeed.first ?? 0) >= notificationThresholds.fanSpeedRPM {
+            title = "🌀 风扇转速过高"
+            body = String(format: "当前风扇转速: %.0f RPM", Double(fanSpeed.first ?? 0))
+        } else if enableThermalThrottlingAlert,
+                  ProcessInfo.processInfo.thermalState.rawValue >= ProcessInfo.ThermalState.serious.rawValue {
+            title = "🔥 检测到热节流风险"
+            body = "系统热状态达到严重级别，请降低负载或改善散热。"
         }
 
         guard !title.isEmpty else { return }
@@ -238,7 +579,7 @@ public final class SystemPerformanceMonitor: ObservableObject {
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
-        content.sound = .default
+        content.sound = enableSoundAlerts ? .default : nil
 
         let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
         try? await center.add(request)
@@ -246,9 +587,20 @@ public final class SystemPerformanceMonitor: ObservableObject {
 }
 
 private struct NotificationThresholds {
-    let cpuUsage: Double = 85
-    let gpuUsage: Double = 90
-    let cpuTemperature: Double = 85
-    let gpuTemperature: Double = 90
-    let memoryUsage: Double = 85
+    var cpuUsage: Double = 85
+    var cpuTemperature: Double = 85
+    var memoryUsage: Double = 85
+    var diskUsage: Double = 90
+    var fanSpeedRPM: Double = 4000
+}
+
+public struct SystemMonitorHistoryPoint: Identifiable, Sendable {
+    public let id = UUID()
+    public let timestamp: Date
+    public let cpuUsage: Double
+    public let memoryUsage: Double
+    public let diskUsage: Double
+    public let networkThroughputMbps: Double
+    public let temperature: Double
+    public let fanSpeed: Double
 }

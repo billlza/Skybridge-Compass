@@ -327,9 +327,15 @@ public final class WiFiManager: BaseManager {
  /// 处理扫描到的网络
     private func processScannedNetworks(_ networks: Set<CWNetwork>) async {
         let currentSSID = wifiInterface?.ssid()
+        let includeHiddenNetworks = SettingsManager.shared.showHiddenNetworks
         
         let wifiNetworks = networks.compactMap { network -> WiFiNetwork? in
-            guard let ssid = network.ssid, !ssid.isEmpty else { return nil }
+            let rawSSID = network.ssid?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let isHidden = rawSSID == nil || rawSSID?.isEmpty == true
+            guard includeHiddenNetworks || !isHidden else { return nil }
+            let ssid = rawSSID?.isEmpty == false
+                ? rawSSID!
+                : "Hidden Network (\(network.bssid ?? "unknown"))"
             
             let security = mapSecurityType(network)
             let isConnected = ssid == currentSSID

@@ -416,7 +416,9 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                 connectionTypes: device.connectionTypes,
                 services: device.services,
                 portMap: device.portMap,
-                source: DeviceSource.skybridgeBonjour
+                source: DeviceSource.skybridgeBonjour,
+                signalStrength: device.signalStrength,
+                isConnectable: !device.services.isEmpty || !device.portMap.isEmpty
             )
         }
 
@@ -450,7 +452,9 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                 connectionTypes: [.usb],
                 services: [],
                 portMap: [:],
-                source: DeviceSource.skybridgeUSB
+                source: DeviceSource.skybridgeUSB,
+                signalStrength: nil,
+                isConnectable: true
             )
         }
 
@@ -487,6 +491,8 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                 services: [],
                 portMap: [:],
                 source: DeviceSource.skybridgeCloud,
+                signalStrength: nil,
+                isConnectable: true,
                 isAuthorized: true
             )
         }
@@ -524,6 +530,8 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         services: [String],
         portMap: [String: Int],
         source: DeviceSource,
+        signalStrength: Double? = nil,
+        isConnectable: Bool = true,
         isAuthorized: Bool = false
     ) {
  // 检查是否已存在
@@ -547,7 +555,9 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                 connectionStatus: existingDevice.connectionStatus,
                 lastConnectedAt: existingDevice.lastConnectedAt,
                 isLocalDevice: false,
-                isAuthorized: isAuthorized || existingDevice.isAuthorized
+                isAuthorized: isAuthorized || existingDevice.isAuthorized,
+                signalStrength: signalStrength,
+                isConnectable: isConnectable
             ))
             let upgradedIdentifier = preferredIdentifier(current: existingDevice.uniqueIdentifier, incoming: identifier)
             if upgradedIdentifier != existingDevice.uniqueIdentifier {
@@ -595,7 +605,9 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                         connectionStatus: existingDevice.connectionStatus,
                         lastConnectedAt: existingDevice.lastConnectedAt,
                         isLocalDevice: false,
-                        isAuthorized: isAuthorized || existingDevice.isAuthorized
+                        isAuthorized: isAuthorized || existingDevice.isAuthorized,
+                        signalStrength: signalStrength,
+                        isConnectable: isConnectable
                     ))
                     let upgradedIdentifier = preferredIdentifier(current: existingDevice.uniqueIdentifier, incoming: identifier)
                     if upgradedIdentifier != existingDevice.uniqueIdentifier {
@@ -643,7 +655,9 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                         deviceType: deviceType,
                         sources: [source]
                     ),
-                    isAuthorized: isAuthorized
+                    isAuthorized: isAuthorized,
+                    signalStrength: signalStrength,
+                    isConnectable: isConnectable
                 )
 
                 deviceMap[identifier] = newDevice
@@ -767,10 +781,19 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
  // 更新最后发现时间
         merged.lastSeen = Date()
 
- // 更新授权状态
+        // 更新授权状态
         if new.isAuthorized {
             merged.isAuthorized = true
         }
+
+        if let newSignal = new.signalStrength {
+            if let existingSignal = merged.signalStrength {
+                merged.signalStrength = max(existingSignal, newSignal)
+            } else {
+                merged.signalStrength = newSignal
+            }
+        }
+        merged.isConnectable = merged.isConnectable || new.isConnectable
 
         return merged
     }
@@ -797,7 +820,9 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
             lastCryptoSuite: device.lastCryptoSuite,
             guardStatus: device.guardStatus,
             isLocalDevice: device.isLocalDevice,
-            isAuthorized: device.isAuthorized
+            isAuthorized: device.isAuthorized,
+            signalStrength: device.signalStrength,
+            isConnectable: device.isConnectable
         )
     }
 
@@ -997,6 +1022,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                 return nil
             }
         )
+        let settings = SettingsManager.shared
 
  // 过滤设备:
  // 1. 本机(始终显示)
@@ -1014,16 +1040,25 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                 }
             }
 
-            return device.isLocalDevice ||
+            let keepForRecency = device.isLocalDevice ||
                 device.connectionStatus == .online ||
                 device.connectionStatus == .connected ||
                 now.timeIntervalSince(device.lastSeen) < 60 ||
                 device.lastConnectedAt != nil ||
                 device.isAuthorized
+
+            guard keepForRecency else { return false }
+            if settings.hideOfflineDevices, !device.isLocalDevice, device.connectionStatus == .offline {
+                return false
+            }
+            if settings.showConnectableDevicesOnly, !device.isLocalDevice, !device.isConnectable {
+                return false
+            }
+            return true
         }
 
  // 排序: 本机 > 已连接 > 在线 > 离线
-        onlineDevices = filteredDevices.sorted { lhs, rhs in
+        let sortedDevices = filteredDevices.sorted { lhs, rhs in
             if lhs.isLocalDevice != rhs.isLocalDevice {
                 return lhs.isLocalDevice
             }
@@ -1035,7 +1070,10 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
             return lhs.name < rhs.name
         }
 
- // 更新统计
+        let optimizeMemory = SettingsManager.shared.optimizeMemoryUsage
+        onlineDevices = optimizeMemory ? Array(sortedDevices.prefix(120)) : sortedDevices
+
+// 更新统计
         updateDeviceStats()
 
         logger.debug("📊 设备列表更新: \(self.onlineDevices.count) 台在线")
@@ -1660,6 +1698,8 @@ public struct OnlineDevice: Identifiable, Hashable, Sendable {
     public var guardStatus: String?
     public var isLocalDevice: Bool
     public var isAuthorized: Bool
+    public var signalStrength: Double? = nil
+    public var isConnectable: Bool = true
 
     public static func == (lhs: OnlineDevice, rhs: OnlineDevice) -> Bool {
         lhs.id == rhs.id
@@ -1787,7 +1827,7 @@ extension OnlineDevice: Codable {
         case connectionTypes, services, portMap, uniqueIdentifier, sources
         case discoveredAt, lastSeen, connectionStatus, lastConnectedAt
         case lastCryptoKind, lastCryptoSuite, guardStatus
-        case isLocalDevice, isAuthorized
+        case isLocalDevice, isAuthorized, signalStrength, isConnectable
     }
 
     public init(from decoder: Decoder) throws {
@@ -1814,6 +1854,8 @@ extension OnlineDevice: Codable {
         guardStatus = try container.decodeIfPresent(String.self, forKey: .guardStatus)
         isLocalDevice = try container.decode(Bool.self, forKey: .isLocalDevice)
         isAuthorized = try container.decode(Bool.self, forKey: .isAuthorized)
+        signalStrength = try container.decodeIfPresent(Double.self, forKey: .signalStrength)
+        isConnectable = try container.decodeIfPresent(Bool.self, forKey: .isConnectable) ?? true
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -1840,5 +1882,7 @@ extension OnlineDevice: Codable {
         try container.encodeIfPresent(guardStatus, forKey: .guardStatus)
         try container.encode(isLocalDevice, forKey: .isLocalDevice)
         try container.encode(isAuthorized, forKey: .isAuthorized)
+        try container.encodeIfPresent(signalStrength, forKey: .signalStrength)
+        try container.encode(isConnectable, forKey: .isConnectable)
     }
 }

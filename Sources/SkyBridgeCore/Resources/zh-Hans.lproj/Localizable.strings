@@ -387,6 +387,8 @@
 "action.resetNetworkSettings" = "重置网络设置";
 "action.resetToDefaults" = "重置为默认";
 "action.resetMonitorData" = "重置监控数据";
+"action.exportMonitorData" = "导出监控数据";
+"action.clearMonitorHistory" = "清除监控历史";
 
 "unit.dbm" = "dBm";
 "unit.count.short" = "数量";
@@ -526,13 +528,21 @@
 "settings.fileTransfer.defaultPath" = "默认传输路径:";
 "settings.fileTransfer.maxConcurrentTransfers" = "最大并发传输:";
 "settings.fileTransfer.bufferSize" = "传输缓冲区大小:";
+"settings.fileTransfer.chunkSize" = "分片大小:";
+"settings.fileTransfer.rateLimit" = "传输速率限制:";
+"settings.fileTransfer.rateLimit.unlimited" = "不限速";
+"settings.fileTransfer.pathFallback.title" = "已切换默认保存位置";
+"settings.fileTransfer.pathFallback.message" = "原默认路径不可用，已自动回退到：%@";
 "settings.fileTransfer.options.title" = "传输选项";
 "settings.fileTransfer.options.showNotification" = "传输完成后显示通知";
 "settings.fileTransfer.options.autoRetryFailed" = "自动重试失败的传输";
+"settings.fileTransfer.options.resumeEnabled" = "启用断点续传（失败自动重试）";
 "settings.fileTransfer.options.keepHistory" = "保持传输历史记录";
 "settings.fileTransfer.options.keepAwake" = "传输时保持系统唤醒";
 "settings.fileTransfer.security.title" = "安全设置";
 "settings.fileTransfer.security.enableEncrypt" = "启用传输加密";
+"settings.security.certificateValidation.alwaysOn" = "证书校验始终开启";
+"settings.security.certificateValidation.alwaysOn.detail" = "当前版本固定启用严格证书校验，无法关闭。";
 "settings.fileTransfer.security.verifyIntegrity" = "验证文件完整性";
 "settings.fileTransfer.security.scanVirus" = "扫描传输文件病毒";
 "settings.fileTransfer.security.algorithm" = "加密算法:";
@@ -562,6 +572,7 @@
 "settings.videoTransfer.enableAdaptiveBitrate.help" = "根据网络状况自动调整比特率";
 "settings.videoTransfer.compressionQuality" = "压缩质量:";
 
+"settings.remote.qualityPerformance.title" = "画质与性能";
 "settings.remote.display.title" = "显示设置";
 "settings.remote.display.videoQuality" = "视频质量:";
 "settings.remote.display.compressionLevel" = "压缩级别:";
@@ -595,10 +606,15 @@
 "settings.systemMonitor.display.temperature" = "显示温度信息";
 "settings.systemMonitor.display.fanSpeed" = "显示风扇转速";
 "settings.systemMonitor.display.chartType" = "图表类型:";
+"settings.systemMonitor.display.noneEnabled" = "已关闭所有监控指标显示";
+"settings.systemMonitor.display.noneEnabled.detail" = "请至少启用一项 CPU、内存、温度或风扇显示。";
 "settings.systemMonitor.alerts.title" = "警报设置";
 "settings.systemMonitor.alerts.cpuThreshold" = "CPU警报阈值:";
 "settings.systemMonitor.alerts.memoryThreshold" = "内存警报阈值:";
 "settings.systemMonitor.alerts.diskThreshold" = "磁盘警报阈值:";
+"settings.systemMonitor.alerts.temperatureThreshold" = "温度警报阈值:";
+"settings.systemMonitor.alerts.fanSpeedThreshold" = "风扇转速警报阈值:";
+"settings.systemMonitor.alerts.thermalThrottling" = "启用热节流警报";
 "settings.systemMonitor.alerts.enableSound" = "启用声音警报";
 "settings.systemMonitor.alerts.enableNotificationCenter" = "启用通知中心";
 "settings.systemMonitor.advanced.title" = "高级选项";
@@ -606,6 +622,8 @@
 "settings.systemMonitor.advanced.exportData" = "导出监控数据";
 "settings.systemMonitor.advanced.enableRemoteMonitoring" = "启用远程监控";
 "settings.systemMonitor.advanced.samplingPrecision" = "采样精度:";
+"settings.systemMonitor.unsupported" = "暂未生效";
+"settings.systemMonitor.unsupported.detail" = "当前版本尚未接入该配置项的监控链路。";
 
 "fileTransfer.connectionStatus" = "连接状态";
 "status.transferring" = "传输中";

@@ -125,54 +125,71 @@ final class DashboardViewModel: ObservableObject {
         #endif
 
         tenantController.bootstrap()
+        let shouldAutoScan = SettingsManager.shared.autoScanOnStartup
 
- // 启动系统指标监控
+// 启动系统指标监控
         systemMetricsService.startMonitoring()
 
- // 检查设备发现服务是否已启动，避免重复初始化
-        if !discoveryService.isScanning {
+        if shouldAutoScan {
+            // 检查设备发现服务是否已启动，避免重复初始化
+            if !discoveryService.isScanning {
+                #if DEBUG
+                SkyBridgeLogger.ui.debugOnly("🔍 [DashboardViewModel] 启动设备发现服务")
+                #endif
+                await discoveryService.start()
+            } else {
+                #if DEBUG
+                SkyBridgeLogger.ui.debugOnly("🔍 [DashboardViewModel] 设备发现服务已在运行")
+                #endif
+            }
+
+            // 启动连接管理器以支持USB设备扫描
             #if DEBUG
-            SkyBridgeLogger.ui.debugOnly("🔍 [DashboardViewModel] 启动设备发现服务")
+            SkyBridgeLogger.ui.debugOnly("🔌 [DashboardViewModel] 启动连接管理器")
             #endif
-            await discoveryService.start()
+            connectionManager.scanAvailableConnections()  // 触发USB设备扫描
+
+            // 检查P2P服务是否已启动
+            if !p2pDiscoveryService.isAdvertising {
+                // 启动P2P广播服务（由系统分配端口，避免撞车）
+                await MainActor.run { p2pDiscoveryService.startAdvertising() }
+                #if DEBUG
+                SkyBridgeLogger.ui.debugOnly("✅ P2P广播已启动")
+                #endif
+            } else {
+                #if DEBUG
+                SkyBridgeLogger.ui.debugOnly("🔍 [DashboardViewModel] P2P广播服务已在运行")
+                #endif
+            }
+
+            // 检查P2P发现是否已启动
+            if !p2pDiscoveryService.isDiscovering {
+                #if DEBUG
+                SkyBridgeLogger.ui.debugOnly("🔍 [DashboardViewModel] 启动P2P设备发现")
+                #endif
+                // 将设置中的兼容模式与 companion‑link 开关注入到P2P发现服务
+                p2pDiscoveryService.enableCompatibilityMode = SettingsManager.shared.enableCompatibilityMode
+                p2pDiscoveryService.enableCompanionLink = SettingsManager.shared.enableCompanionLink
+                p2pDiscoveryService.startDiscovery()
+            } else {
+                #if DEBUG
+                SkyBridgeLogger.ui.debugOnly("🔍 [DashboardViewModel] P2P设备发现已在运行")
+                #endif
+            }
+
+            // 🆕 启动统一设备管理器
+            #if DEBUG
+            SkyBridgeLogger.ui.debugOnly("🌐 [DashboardViewModel] 启动统一在线设备管理器")
+            #endif
+            unifiedDeviceManager.startDiscovery()
         } else {
             #if DEBUG
-            SkyBridgeLogger.ui.debugOnly("🔍 [DashboardViewModel] 设备发现服务已在运行")
+            SkyBridgeLogger.ui.debugOnly("⏸ [DashboardViewModel] 启动自动扫描已关闭，跳过自动发现链路")
             #endif
-        }
-
- // 启动连接管理器以支持USB设备扫描
-        #if DEBUG
-        SkyBridgeLogger.ui.debugOnly("🔌 [DashboardViewModel] 启动连接管理器")
-        #endif
-        connectionManager.scanAvailableConnections()  // 触发USB设备扫描
-
- // 检查P2P服务是否已启动
-        if !p2pDiscoveryService.isAdvertising {
- // 启动P2P广播服务（由系统分配端口，避免撞车）
-            await MainActor.run { p2pDiscoveryService.startAdvertising() }
-            #if DEBUG
-            SkyBridgeLogger.ui.debugOnly("✅ P2P广播已启动")
-            #endif
-        } else {
-            #if DEBUG
-            SkyBridgeLogger.ui.debugOnly("🔍 [DashboardViewModel] P2P广播服务已在运行")
-            #endif
-        }
-
- // 检查P2P发现是否已启动
-        if !p2pDiscoveryService.isDiscovering {
-            #if DEBUG
-            SkyBridgeLogger.ui.debugOnly("🔍 [DashboardViewModel] 启动P2P设备发现")
-            #endif
- // 将设置中的兼容模式与 companion‑link 开关注入到P2P发现服务
-            p2pDiscoveryService.enableCompatibilityMode = SettingsManager.shared.enableCompatibilityMode
-            p2pDiscoveryService.enableCompanionLink = SettingsManager.shared.enableCompanionLink
-            p2pDiscoveryService.startDiscovery()
-        } else {
-            #if DEBUG
-            SkyBridgeLogger.ui.debugOnly("🔍 [DashboardViewModel] P2P设备发现已在运行")
-            #endif
+            discoveryService.stop()
+            p2pDiscoveryService.stopDiscovery()
+            unifiedDeviceManager.stopDiscovery()
+            discoveryStatus = LocalizationManager.shared.localizedString("settings.general.autoScan") + "：OFF"
         }
 
         // 启动文件传输入站监听（iOS ↔ macOS 互传的最小闭环）
@@ -233,14 +250,8 @@ final class DashboardViewModel: ObservableObject {
  // 启动P2P设备发现（仅启动发现，不启动广播）
  // p2pDiscoveryService.startDiscovery() // 已在上面检查并启动
 
- // 🆕 启动统一设备管理器
-        #if DEBUG
-        SkyBridgeLogger.ui.debugOnly("🌐 [DashboardViewModel] 启动统一在线设备管理器")
-        #endif
-        unifiedDeviceManager.startDiscovery()
-
- // 🆕 订阅统一设备列表
- // 🔧 优化：添加节流和去重，减少不必要的状态更新
+// 🆕 订阅统一设备列表
+// 🔧 优化：添加节流和去重，减少不必要的状态更新
         unifiedDeviceManager.$onlineDevices
             .removeDuplicates()  // 只在设备列表真正改变时更新
             .throttle(for: .milliseconds(100), scheduler: DispatchQueue.main, latest: true)  // 100ms节流

@@ -1,6 +1,7 @@
 import SwiftUI
 import Combine
 import os.log
+import Charts
 
 /// ✅ 系统监控视图 - 使用SystemPerformanceMonitor真实性能数据
 /// 应用启动后自动开始监控（等待CPU负载平稳）
@@ -9,9 +10,10 @@ public struct SystemMonitorView: View {
     
  // MARK: - 状态管理
     
- /// ✅ 使用SystemPerformanceMonitor获取真实性能数据
+    /// ✅ 使用SystemPerformanceMonitor获取真实性能数据
     @State private var systemPerformanceMonitor: SystemPerformanceMonitor?
     @State private var performanceModeManager: PerformanceModeManager?
+    @StateObject private var settingsManager = SettingsManager.shared
     
     @State private var isMonitoring = false
     @State private var systemLoad: Double = 0.0
@@ -30,11 +32,14 @@ public struct SystemMonitorView: View {
  // MARK: - 辅助方法
     
     private var showDiagnostics: Bool {
+        if settingsManager.showDebugInfo {
+            return true
+        }
         #if DEBUG
-            true
+        return true
         #else
-            let env = ProcessInfo.processInfo.environment["SKYBRIDGE_MONITOR_DIAGNOSTICS"] ?? ""
-            return env == "1" || env.lowercased() == "true" || env.lowercased() == "yes"
+        let env = ProcessInfo.processInfo.environment["SKYBRIDGE_MONITOR_DIAGNOSTICS"] ?? ""
+        return env == "1" || env.lowercased() == "true" || env.lowercased() == "yes"
         #endif
     }
 
@@ -220,14 +225,21 @@ public struct SystemMonitorView: View {
             
 // ✅ 自动开始监控（无需手动点击）
             if systemPerformanceMonitor != nil && isMonitoring {
+                if hasEnabledMonitorDisplayMetric {
  // 系统概览卡片
-                systemOverviewCard
-                
+                    systemOverviewCard
+
  // 详细监控数据
-                detailMonitoringCards
-                
- // 系统状态指示器
-                systemStatusIndicators
+                    detailMonitoringCards
+
+                    if settingsManager.showTrendIndicators {
+                        systemTrendChartCard
+// 系统状态指示器
+                        systemStatusIndicators
+                    }
+                } else {
+                    monitorDisplayDisabledStateCard
+                }
 
                 if showDiagnostics {
                     diagnosticsCard
@@ -334,6 +346,31 @@ public struct SystemMonitorView: View {
                 .fill(.ultraThinMaterial)
         )
     }
+
+    private var hasEnabledMonitorDisplayMetric: Bool {
+        settingsManager.showMonitorCPU ||
+        settingsManager.showMonitorMemory ||
+        settingsManager.showMonitorDisk ||
+        settingsManager.showMonitorNetwork ||
+        settingsManager.showMonitorTemperature ||
+        settingsManager.showMonitorFanSpeed
+    }
+
+    private var monitorDisplayDisabledStateCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(LocalizationManager.shared.localizedString("settings.systemMonitor.display.noneEnabled"))
+                .font(.headline)
+            Text(LocalizationManager.shared.localizedString("settings.systemMonitor.display.noneEnabled.detail"))
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding()
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(.ultraThinMaterial)
+        )
+    }
     
  /// 系统概览卡片
     private var systemOverviewCard: some View {
@@ -357,46 +394,76 @@ public struct SystemMonitorView: View {
             HStack(spacing: 20) {
  // ✅ 使用SystemPerformanceMonitor的真实数据
                 if let monitor = systemPerformanceMonitor {
+                    if settingsManager.showMonitorCPU {
  // CPU使用率
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("CPU")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        Text("\(String(format: "%.1f", monitor.cpuUsage))%")
-                        .font(.title3)
-                        .fontWeight(.medium)
-                }
-                
- // 内存使用率
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("内存")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        Text("\(String(format: "%.1f", monitor.memoryUsage))%")
-                        .font(.title3)
-                        .fontWeight(.medium)
-                }
-                
- // GPU使用率
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("GPU")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        Text(formatPercentCompact(monitor.gpuUsage, state: monitor.gpuUsageState))
-                        .font(.title3)
-                        .fontWeight(.medium)
-                }
-                
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("CPU")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            Text("\(String(format: "%.1f", monitor.cpuUsage))%")
+                                .font(.title3)
+                                .fontWeight(.medium)
+                        }
+                    }
+
+                    if settingsManager.showMonitorMemory {
+// 内存使用率
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("内存")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            Text("\(String(format: "%.1f", monitor.memoryUsage))%")
+                                .font(.title3)
+                                .fontWeight(.medium)
+                        }
+                    }
+
+                    if settingsManager.showMonitorDisk {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("磁盘")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            Text("\(String(format: "%.1f", monitor.diskUsage))%")
+                                .font(.title3)
+                                .fontWeight(.medium)
+                        }
+                    }
+
+                    if settingsManager.showMonitorNetwork {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("网络")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            Text("\(String(format: "%.2f", monitor.networkThroughputMbps)) Mbps")
+                                .font(.title3)
+                                .fontWeight(.medium)
+                        }
+                    }
+
+                    if settingsManager.showMonitorTemperature || settingsManager.showMonitorFanSpeed {
+// GPU使用率
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("GPU")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            Text(formatPercentCompact(monitor.gpuUsage, state: monitor.gpuUsageState))
+                                .font(.title3)
+                                .fontWeight(.medium)
+                        }
+                    }
+
+                    if settingsManager.showMonitorCPU {
  // 系统负载（归一化为百分比）
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("系统负载")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        let cpuCount = Double(ProcessInfo.processInfo.activeProcessorCount)
-                        let normalized = (monitor.loadAverage1Min / max(cpuCount, 1.0)) * 100.0
-                        Text("\(String(format: "%.1f", min(max(normalized, 0.0), 100.0)))%")
-                        .font(.title3)
-                        .fontWeight(.medium)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("系统负载")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            let cpuCount = Double(ProcessInfo.processInfo.activeProcessorCount)
+                            let normalized = (monitor.loadAverage1Min / max(cpuCount, 1.0)) * 100.0
+                            Text("\(String(format: "%.1f", min(max(normalized, 0.0), 100.0)))%")
+                                .font(.title3)
+                                .fontWeight(.medium)
+                        }
                     }
                 }
             }
@@ -414,17 +481,31 @@ public struct SystemMonitorView: View {
             GridItem(.flexible()),
             GridItem(.flexible())
         ], spacing: 16) {
+            if settingsManager.showMonitorCPU {
  // CPU详细信息
-            cpuDetailCard
-            
- // 内存详细信息
-            memoryDetailCard
-            
- // GPU详细信息
-            gpuDetailCard
-            
+                cpuDetailCard
+            }
+
+            if settingsManager.showMonitorMemory {
+// 内存详细信息
+                memoryDetailCard
+            }
+
+            if settingsManager.showMonitorDisk {
+                diskDetailCard
+            }
+
+            if settingsManager.showMonitorNetwork {
+                networkDetailCard
+            }
+
+            if settingsManager.showMonitorTemperature || settingsManager.showMonitorFanSpeed {
+// GPU详细信息
+                gpuDetailCard
+
  // 温度和风扇信息
-            thermalDetailCard
+                thermalDetailCard
+            }
         }
     }
     
@@ -510,6 +591,64 @@ public struct SystemMonitorView: View {
                 .fill(.ultraThinMaterial)
         )
     }
+
+    private var diskDetailCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("磁盘详情")
+                .font(.headline)
+                .fontWeight(.semibold)
+
+            if let monitor = systemPerformanceMonitor {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text("使用率:")
+                        Spacer()
+                        Text("\(String(format: "%.1f", monitor.diskUsage))%")
+                    }
+                    HStack {
+                        Text("告警阈值:")
+                        Spacer()
+                        Text("\(Int(settingsManager.diskThreshold))%")
+                    }
+                }
+                .font(.caption)
+            }
+        }
+        .padding()
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(.ultraThinMaterial)
+        )
+    }
+
+    private var networkDetailCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("网络详情")
+                .font(.headline)
+                .fontWeight(.semibold)
+
+            if let monitor = systemPerformanceMonitor {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text("吞吐:")
+                        Spacer()
+                        Text("\(String(format: "%.2f", monitor.networkThroughputMbps)) Mbps")
+                    }
+                    HStack {
+                        Text("刷新:")
+                        Spacer()
+                        Text("\(String(format: "%.1f", settingsManager.systemMonitorRefreshInterval))s")
+                    }
+                }
+                .font(.caption)
+            }
+        }
+        .padding()
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(.ultraThinMaterial)
+        )
+    }
     
  /// GPU详细卡片
     private var gpuDetailCard: some View {
@@ -559,24 +698,28 @@ public struct SystemMonitorView: View {
  // ✅ 使用SystemPerformanceMonitor的真实风扇和温度数据
             if let monitor = systemPerformanceMonitor {
             VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text("风扇转速:")
-                    Spacer()
-                        Text(formatFanRPM(monitor.fanSpeed, state: monitor.fanState))
-                }
-                    
-                    HStack {
-                        Text("CPU温度:")
-                        Spacer()
-                        Text(formatTemperature(monitor.cpuTemperature, state: monitor.cpuTemperatureState))
-                }
-                
-                HStack {
-                        Text("GPU温度:")
-                    Spacer()
-                        Text(formatTemperature(monitor.gpuTemperature, state: monitor.gpuTemperatureState))
-                }
-                
+                    if settingsManager.showMonitorFanSpeed {
+                        HStack {
+                            Text("风扇转速:")
+                            Spacer()
+                            Text(formatFanRPM(monitor.fanSpeed, state: monitor.fanState))
+                        }
+                    }
+
+                    if settingsManager.showMonitorTemperature {
+                        HStack {
+                            Text("CPU温度:")
+                            Spacer()
+                            Text(formatTemperature(monitor.cpuTemperature, state: monitor.cpuTemperatureState))
+                        }
+
+                        HStack {
+                            Text("GPU温度:")
+                            Spacer()
+                            Text(formatTemperature(monitor.gpuTemperature, state: monitor.gpuTemperatureState))
+                        }
+                    }
+
                 HStack {
                     Text("热状态:")
                     Spacer()
@@ -640,6 +783,84 @@ public struct SystemMonitorView: View {
             RoundedRectangle(cornerRadius: 12)
                 .fill(.ultraThinMaterial)
         )
+    }
+
+    @ViewBuilder
+    private var systemTrendChartCard: some View {
+        if let monitor = systemPerformanceMonitor, !monitor.historyPoints.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(LocalizationManager.shared.localizedString("settings.systemMonitor.display.chartType"))
+                    .font(.headline)
+                    .fontWeight(.semibold)
+
+                switch settingsManager.systemMonitorChartType {
+                case .line:
+                    Chart(monitor.historyPoints.suffix(120)) { point in
+                        if settingsManager.showMonitorCPU {
+                            LineMark(x: .value("Time", point.timestamp), y: .value("CPU", point.cpuUsage))
+                                .foregroundStyle(.red)
+                        }
+                        if settingsManager.showMonitorMemory {
+                            LineMark(x: .value("Time", point.timestamp), y: .value("Memory", point.memoryUsage))
+                                .foregroundStyle(.blue)
+                        }
+                        if settingsManager.showMonitorDisk {
+                            LineMark(x: .value("Time", point.timestamp), y: .value("Disk", point.diskUsage))
+                                .foregroundStyle(.orange)
+                        }
+                        if settingsManager.showMonitorNetwork {
+                            LineMark(x: .value("Time", point.timestamp), y: .value("Network", point.networkThroughputMbps))
+                                .foregroundStyle(.green)
+                        }
+                    }
+                case .bar:
+                    Chart(monitor.historyPoints.suffix(60)) { point in
+                        if settingsManager.showMonitorCPU {
+                            BarMark(x: .value("Time", point.timestamp), y: .value("CPU", point.cpuUsage))
+                                .foregroundStyle(.red.opacity(0.7))
+                        }
+                        if settingsManager.showMonitorMemory {
+                            BarMark(x: .value("Time", point.timestamp), y: .value("Memory", point.memoryUsage))
+                                .foregroundStyle(.blue.opacity(0.7))
+                        }
+                        if settingsManager.showMonitorDisk {
+                            BarMark(x: .value("Time", point.timestamp), y: .value("Disk", point.diskUsage))
+                                .foregroundStyle(.orange.opacity(0.7))
+                        }
+                        if settingsManager.showMonitorNetwork {
+                            BarMark(x: .value("Time", point.timestamp), y: .value("Network", point.networkThroughputMbps))
+                                .foregroundStyle(.green.opacity(0.7))
+                        }
+                    }
+                case .area:
+                    Chart(monitor.historyPoints.suffix(120)) { point in
+                        if settingsManager.showMonitorCPU {
+                            AreaMark(x: .value("Time", point.timestamp), y: .value("CPU", point.cpuUsage))
+                                .foregroundStyle(.red.opacity(0.25))
+                        }
+                        if settingsManager.showMonitorMemory {
+                            AreaMark(x: .value("Time", point.timestamp), y: .value("Memory", point.memoryUsage))
+                                .foregroundStyle(.blue.opacity(0.25))
+                        }
+                        if settingsManager.showMonitorDisk {
+                            AreaMark(x: .value("Time", point.timestamp), y: .value("Disk", point.diskUsage))
+                                .foregroundStyle(.orange.opacity(0.25))
+                        }
+                        if settingsManager.showMonitorNetwork {
+                            AreaMark(x: .value("Time", point.timestamp), y: .value("Network", point.networkThroughputMbps))
+                                .foregroundStyle(.green.opacity(0.25))
+                        }
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(height: 220)
+            .padding()
+            .background(
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(.ultraThinMaterial)
+            )
+        }
     }
 
     private var diagnosticsCard: some View {
@@ -886,11 +1107,17 @@ public struct SystemMonitorView: View {
             healthScore -= 5
         }
         
- // 根据内存使用率扣分
+// 根据内存使用率扣分
         if monitor.memoryUsage > 85 {
             healthScore -= 20
         } else if monitor.memoryUsage > 70 {
             healthScore -= 10
+        }
+
+        if monitor.diskUsage > settingsManager.diskThreshold {
+            healthScore -= 15
+        } else if monitor.diskUsage > 80 {
+            healthScore -= 8
         }
         
  // 根据GPU使用率扣分

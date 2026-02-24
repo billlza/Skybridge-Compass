@@ -360,6 +360,8 @@
 "action.resetNetworkSettings" = "Reset Network Settings";
 "action.resetToDefaults" = "Reset to Defaults";
 "action.resetMonitorData" = "Reset Monitor Data";
+"action.exportMonitorData" = "Export Monitor Data";
+"action.clearMonitorHistory" = "Clear Monitor History";
 
 "unit.dbm" = "dBm";
 "unit.count.short" = "count";
@@ -499,13 +501,21 @@
 "settings.fileTransfer.defaultPath" = "Default transfer path:";
 "settings.fileTransfer.maxConcurrentTransfers" = "Max concurrent transfers:";
 "settings.fileTransfer.bufferSize" = "Transfer buffer size:";
+"settings.fileTransfer.chunkSize" = "Chunk size:";
+"settings.fileTransfer.rateLimit" = "Transfer rate limit:";
+"settings.fileTransfer.rateLimit.unlimited" = "Unlimited";
+"settings.fileTransfer.pathFallback.title" = "Default save path updated";
+"settings.fileTransfer.pathFallback.message" = "The configured path is unavailable. Fallback path: %@";
 "settings.fileTransfer.options.title" = "Transfer Options";
 "settings.fileTransfer.options.showNotification" = "Show notification when transfer completes";
 "settings.fileTransfer.options.autoRetryFailed" = "Auto retry failed transfers";
+"settings.fileTransfer.options.resumeEnabled" = "Enable resumable transfer (retry on failure)";
 "settings.fileTransfer.options.keepHistory" = "Keep transfer history";
 "settings.fileTransfer.options.keepAwake" = "Keep system awake during transfer";
 "settings.fileTransfer.security.title" = "Security Settings";
 "settings.fileTransfer.security.enableEncrypt" = "Enable transfer encryption";
+"settings.security.certificateValidation.alwaysOn" = "Certificate validation is always enabled";
+"settings.security.certificateValidation.alwaysOn.detail" = "This version always enforces strict certificate validation.";
 "settings.fileTransfer.security.verifyIntegrity" = "Verify file integrity";
 "settings.fileTransfer.security.scanVirus" = "Scan transferred files for viruses";
 "settings.fileTransfer.security.algorithm" = "Encryption Algorithm:";
@@ -535,6 +545,7 @@
 "settings.videoTransfer.enableAdaptiveBitrate.help" = "Adjust bitrate automatically based on network conditions";
 "settings.videoTransfer.compressionQuality" = "Compression Quality:";
 
+"settings.remote.qualityPerformance.title" = "Quality & Performance";
 "settings.remote.display.title" = "Display Settings";
 "settings.remote.display.videoQuality" = "Video Quality:";
 "settings.remote.display.compressionLevel" = "Compression Level:";
@@ -568,10 +579,15 @@
 "settings.systemMonitor.display.temperature" = "Show temperature";
 "settings.systemMonitor.display.fanSpeed" = "Show fan speed";
 "settings.systemMonitor.display.chartType" = "Chart Type:";
+"settings.systemMonitor.display.noneEnabled" = "All monitor metrics are hidden";
+"settings.systemMonitor.display.noneEnabled.detail" = "Enable at least one of CPU, memory, temperature, or fan speed.";
 "settings.systemMonitor.alerts.title" = "Alert Settings";
 "settings.systemMonitor.alerts.cpuThreshold" = "CPU alert threshold:";
 "settings.systemMonitor.alerts.memoryThreshold" = "Memory alert threshold:";
 "settings.systemMonitor.alerts.diskThreshold" = "Disk alert threshold:";
+"settings.systemMonitor.alerts.temperatureThreshold" = "Temperature alert threshold:";
+"settings.systemMonitor.alerts.fanSpeedThreshold" = "Fan speed alert threshold:";
+"settings.systemMonitor.alerts.thermalThrottling" = "Enable thermal throttling alerts";
 "settings.systemMonitor.alerts.enableSound" = "Enable sound alerts";
 "settings.systemMonitor.alerts.enableNotificationCenter" = "Enable Notification Center";
 "settings.systemMonitor.advanced.title" = "Advanced Options";
@@ -579,6 +595,8 @@
 "settings.systemMonitor.advanced.exportData" = "Export monitoring data";
 "settings.systemMonitor.advanced.enableRemoteMonitoring" = "Enable remote monitoring";
 "settings.systemMonitor.advanced.samplingPrecision" = "Sampling precision:";
+"settings.systemMonitor.unsupported" = "Not active";
+"settings.systemMonitor.unsupported.detail" = "This option is not wired to the monitoring pipeline in this release.";
 
 "fileTransfer.connectionStatus" = "Connection Status";
 "status.transferring" = "Transferring";

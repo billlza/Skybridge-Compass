@@ -9,6 +9,7 @@ public struct DeviceManagementView: View {
     @StateObject private var bluetoothManager = BluetoothManager()
     @StateObject private var airplayManager = AirPlayManager()
     @StateObject private var permissionManager = DevicePermissionManager()
+    @StateObject private var settingsManager = SettingsManager.shared
     
  // 状态变量
     @State private var selectedTab: DeviceTab = .all
@@ -16,7 +17,6 @@ public struct DeviceManagementView: View {
     @State private var showingDeviceSettings = false
     @State private var searchText = ""
     @State private var sortOption: SortOption = .name
-    @State private var showOfflineDevices = true
     @State private var showingDetails = false
     @State private var selectedP2PDevice: P2PDevice?
     @StateObject private var p2pManager = P2PNetworkManager.shared
@@ -178,32 +178,34 @@ public struct DeviceManagementView: View {
                 Divider()
                 
  // 统计信息
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("设备统计")
-                        .font(.headline)
-                    
-                    HStack {
-                        Text("WiFi:")
-                        Spacer()
-                        Text("\(wifiManager.availableNetworks.count)")
-                            .fontWeight(.medium)
+                if settingsManager.showConnectionStats {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("设备统计")
+                            .font(.headline)
+
+                        HStack {
+                            Text("WiFi:")
+                            Spacer()
+                            Text("\(wifiManager.availableNetworks.count)")
+                                .fontWeight(.medium)
+                        }
+
+                        HStack {
+                            Text("蓝牙:")
+                            Spacer()
+                            Text("\(bluetoothManager.discoveredDevices.count)")
+                                .fontWeight(.medium)
+                        }
+
+                        HStack {
+                            Text("AirPlay:")
+                            Spacer()
+                            Text("\(airplayManager.discoveredDevices.count)")
+                                .fontWeight(.medium)
+                        }
                     }
-                    
-                    HStack {
-                        Text("蓝牙:")
-                        Spacer()
-                        Text("\(bluetoothManager.discoveredDevices.count)")
-                            .fontWeight(.medium)
-                    }
-                    
-                    HStack {
-                        Text("AirPlay:")
-                        Spacer()
-                        Text("\(airplayManager.discoveredDevices.count)")
-                            .fontWeight(.medium)
-                    }
+                    .padding(.horizontal)
                 }
-                .padding(.horizontal)
                 
                 Spacer()
             }
@@ -238,11 +240,17 @@ public struct DeviceManagementView: View {
                 .pickerStyle(MenuPickerStyle())
                 .frame(width: 120)
                 
- // 显示离线设备开关
-                Toggle("显示离线", isOn: $showOfflineDevices)
+// 显示离线设备开关
+                Toggle(
+                    "显示离线",
+                    isOn: Binding(
+                        get: { !settingsManager.hideOfflineDevices },
+                        set: { settingsManager.hideOfflineDevices = !$0 }
+                    )
+                )
                     .toggleStyle(SwitchToggleStyle())
             }
-            .padding()
+            .padding(settingsManager.compactMode ? 10 : 16)
             .background(Color(.windowBackgroundColor))
             
             Divider()
@@ -260,7 +268,7 @@ public struct DeviceManagementView: View {
                             .padding(.horizontal)
                     }
                 }
-                .padding(.vertical)
+                .padding(.vertical, settingsManager.compactMode ? 8 : 12)
             }
         }
     }
@@ -271,19 +279,20 @@ public struct DeviceManagementView: View {
         let onConnect: () -> Void
         let onDisconnect: () -> Void
         let onDetails: () -> Void
+        @StateObject private var settingsManager = SettingsManager.shared
         
         var body: some View {
-            HStack(spacing: 16) {
+            HStack(spacing: settingsManager.compactMode ? 10 : 16) {
  // 设备图标
  // 设备行图标统一使用通用符号视图，避免出现蓝牙等符号缺失
                 SystemSymbolIcon(name: device.iconName, color: device.statusColor, size: 20)
-                    .frame(width: 32, height: 32)
+                    .frame(width: settingsManager.compactMode ? 24 : 32, height: settingsManager.compactMode ? 24 : 32)
                 
  // 设备信息
                 VStack(alignment: .leading, spacing: 4) {
                     HStack {
                         Text(device.displayName)
-                            .font(.headline)
+                            .font(settingsManager.compactMode ? .subheadline : .headline)
                         
                         if device.isConnected {
                             Image(systemName: "checkmark.circle.fill")
@@ -292,11 +301,13 @@ public struct DeviceManagementView: View {
                         }
                     }
                     
-                    Text(device.typeDescription)
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
+                    if settingsManager.showDeviceDetails {
+                        Text(device.typeDescription)
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                    }
                     
-                    if let signalInfo = device.signalInfo {
+                    if settingsManager.showDeviceRSSI, let signalInfo = device.signalInfo {
                         HStack {
                             Text(signalInfo)
                                 .font(.caption)
@@ -327,7 +338,7 @@ public struct DeviceManagementView: View {
                     .controlSize(.small)
                 }
             }
-            .padding()
+            .padding(settingsManager.compactMode ? 10 : 14)
             .background(Color(.controlBackgroundColor))
             .cornerRadius(12)
         }
@@ -362,8 +373,13 @@ public struct DeviceManagementView: View {
         }
         
  // 应用离线设备过滤
-        if !showOfflineDevices {
+        if settingsManager.hideOfflineDevices {
             devices = devices.filter { $0.isOnline }
+        }
+
+ // 应用可连接设备过滤
+        if settingsManager.showConnectableDevicesOnly {
+            devices = devices.filter { $0.isConnectable }
         }
         
  // 应用排序

@@ -395,6 +395,11 @@ public actor DeviceIdentityKeyManager {
  ///
  /// **Requirements: 2.3, 2.5**
     public func getSecureEnclaveKeyHandle() async throws -> SigningKeyHandle? {
+        guard shouldUseSecureEnclaveForSigning() else {
+            SkyBridgeLogger.p2p.info("Secure Enclave signing disabled by settings, using software fallback path")
+            return nil
+        }
+
  // 首先尝试从新 tag 加载
         if let secKey = try? getSEPoPKeyReference() {
             return .secureEnclaveRef(secKey)
@@ -625,10 +630,17 @@ public actor DeviceIdentityKeyManager {
     
  // MARK: - Private Methods
     
- /// 创建新的身份密钥
+    /// 创建新的身份密钥
     private func createNewIdentityKey() async throws -> DeviceIdentityKeyInfo {
         let deviceId = await getDeviceId()
-        var useSecureEnclave = isSecureEnclaveAvailable()
+        let preferSecureEnclave = shouldUseSecureEnclaveForSigning()
+        var useSecureEnclave = preferSecureEnclave && isSecureEnclaveAvailable()
+        if preferSecureEnclave && !useSecureEnclave {
+            SkyBridgeLogger.p2p.warning("Secure Enclave signing requested but unavailable, falling back to software key")
+        }
+        if !preferSecureEnclave {
+            SkyBridgeLogger.p2p.info("Secure Enclave signing disabled by settings, generating software key")
+        }
 
         func makeKeyAttributes(useSecureEnclave: Bool) throws -> [String: Any] {
             var attributes: [String: Any] = [
@@ -723,6 +735,14 @@ public actor DeviceIdentityKeyManager {
             return false
         }
         return true
+    }
+
+    private func shouldUseSecureEnclaveForSigning() -> Bool {
+        let defaults = UserDefaults.standard
+        if defaults.object(forKey: "Settings.UseSecureEnclaveMLDSA") == nil {
+            return true
+        }
+        return defaults.bool(forKey: "Settings.UseSecureEnclaveMLDSA")
     }
     
  /// 加载现有密钥

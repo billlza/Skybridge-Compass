@@ -16,6 +16,7 @@ public struct DeviceDiscoveryPanelView: View {
 
     @State private var searchTask: Task<Void, Never>?
     @State private var showDiagnosticsPanel = false
+    @StateObject private var settingsManager = SettingsManager.shared
 
     private let logger = Logger(subsystem: "com.skybridge.SkyBridgeCompassApp", category: "DeviceDiscoveryPanel")
 
@@ -52,16 +53,18 @@ public struct DeviceDiscoveryPanelView: View {
                     }
                 }
 
-                // 诊断按钮
-                Button(action: { showDiagnosticsPanel.toggle() }) {
-                    Image(systemName: "stethoscope")
-                        .font(.system(size: 14))
-                }
-                .buttonStyle(.borderless)
-                .help(LocalizationManager.shared.localizedString("discovery.diagnostics.title"))
-                .popover(isPresented: $showDiagnosticsPanel, arrowEdge: .bottom) {
-                    DiscoveryDiagnosticsView()
-                        .frame(width: 450, height: 500)
+                if settingsManager.showDebugInfo {
+                    // 诊断按钮
+                    Button(action: { showDiagnosticsPanel.toggle() }) {
+                        Image(systemName: "stethoscope")
+                            .font(.system(size: 14))
+                    }
+                    .buttonStyle(.borderless)
+                    .help(LocalizationManager.shared.localizedString("discovery.diagnostics.title"))
+                    .popover(isPresented: $showDiagnosticsPanel, arrowEdge: .bottom) {
+                        DiscoveryDiagnosticsView()
+                            .frame(width: 450, height: 500)
+                    }
                 }
             }
 
@@ -215,7 +218,7 @@ public struct DeviceDiscoveryPanelView: View {
                 portMap: od.portMap,
                 connectionTypes: od.connectionTypes,
                 uniqueIdentifier: od.uniqueIdentifier,
-                signalStrength: nil,
+                signalStrength: od.signalStrength,
                 source: od.sources.first ?? .unknown,
                 isLocalDevice: od.isLocalDevice,
                 deviceId: nil,
@@ -246,4 +249,3 @@ public struct DeviceDiscoveryPanelView: View {
         logger.info("连接设备操作完成: \(device.name)")
     }
 }
-

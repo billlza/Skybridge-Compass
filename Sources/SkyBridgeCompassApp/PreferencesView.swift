@@ -357,8 +357,18 @@ struct NetworkPreferencesView: View {
                 Toggle("启用连接加密", isOn: $settingsManager.enableConnectionEncryption)
                     .help("对连接数据进行加密")
 
-                Toggle("验证证书", isOn: $settingsManager.verifyCertificates)
-                    .help("验证服务器SSL证书")
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "lock.shield")
+                        .foregroundColor(.blue)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("证书校验始终开启")
+                            .font(.subheadline)
+                        Text("当前版本固定启用严格证书校验，不可关闭。")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .help("验证服务器SSL证书")
             }
 
             Section("自定义服务") {

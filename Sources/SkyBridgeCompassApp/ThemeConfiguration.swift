@@ -1,5 +1,7 @@
 import SwiftUI
 import Foundation
+import Combine
+import SkyBridgeCore
 
 // MARK: - 主题配置类
 // 遵循macOS最佳实践，使用@MainActor确保线程安全
@@ -15,9 +17,13 @@ class ThemeConfiguration: ObservableObject {
     @Published var backgroundIntensity: Double = 0.6
     @Published var glassOpacity: Double = 0.8
     @Published var customBackgroundImagePath: String?
+    @Published var accentColor: Color = .blue
+
+    private var cancellables = Set<AnyCancellable>()
     
     private init() {
         loadThemeSettings()
+        bindAccentColor()
     }
     
  // MARK: - 主题枚举
@@ -219,6 +225,25 @@ class ThemeConfiguration: ObservableObject {
         backgroundIntensity = defaults.object(forKey: "BackgroundIntensity") as? Double ?? 1.0
         glassOpacity = defaults.object(forKey: "GlassOpacity") as? Double ?? 0.8
         customBackgroundImagePath = defaults.object(forKey: "CustomBackgroundImagePath") as? String
+    }
+
+    private func bindAccentColor() {
+        accentColor = SettingsManager.shared.themeColor
+
+        SettingsManager.shared.$themeColor
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] color in
+                self?.accentColor = color
+            }
+            .store(in: &cancellables)
+
+        NotificationCenter.default.publisher(for: NSNotification.Name("ThemeColorChanged"))
+            .compactMap { $0.userInfo?["color"] as? Color }
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] color in
+                self?.accentColor = color
+            }
+            .store(in: &cancellables)
     }
 }
 

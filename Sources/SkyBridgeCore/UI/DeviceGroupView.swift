@@ -10,9 +10,10 @@ struct DeviceGroupView: View {
     let onConnect: (DiscoveredDevice) -> Void
     let onDisconnect: (DiscoveredDevice) -> Void
     let getConnectionStatus: (DiscoveredDevice) -> ConnectionStatus
+    @StateObject private var settingsManager = SettingsManager.shared
     
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: settingsManager.compactMode ? 6 : 8) {
  // 分组头部
             groupHeader
             
@@ -43,9 +44,11 @@ struct DeviceGroupView: View {
                         .font(.headline)
                         .foregroundColor(.primary)
                     
-                    Text("\(group.devices.count) 台设备")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                    if settingsManager.showConnectionStats {
+                        Text("\(group.devices.count) 台设备")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
                 }
                 
                 Spacer()
@@ -67,14 +70,14 @@ struct DeviceGroupView: View {
                         .cornerRadius(8)
                 }
             }
-            .padding(16)
+            .padding(settingsManager.compactMode ? 12 : 16)
         }
         .buttonStyle(PlainButtonStyle())
     }
     
  /// 设备列表
     private var deviceList: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: settingsManager.compactMode ? 6 : 8) {
             ForEach(group.devices) { device in
                 DeviceCardView(
                     device: device,
@@ -89,8 +92,8 @@ struct DeviceGroupView: View {
                 )
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.bottom, 16)
+        .padding(.horizontal, settingsManager.compactMode ? 12 : 16)
+        .padding(.bottom, settingsManager.compactMode ? 12 : 16)
     }
     
  // MARK: - 计算属性

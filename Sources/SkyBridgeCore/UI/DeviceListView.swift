@@ -9,6 +9,7 @@ public struct DeviceListView: View {
     @StateObject private var deviceDiscovery = DeviceDiscoveryManagerOptimized() // 高性能设备发现（2025年优化版）
     @StateObject private var connectionManager = ConnectionManager()
     @StateObject private var deviceFilterManager = DeviceFilterManager()
+    @StateObject private var settingsManager = SettingsManager.shared
     @State private var selectedDevice: DiscoveredDevice?
     @State private var showingConnectionOptions = false
     @State private var isScanning = false
@@ -167,15 +168,15 @@ public struct DeviceListView: View {
                 .disabled(!isScanning)
             }
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 12)
+        .padding(.horizontal, settingsManager.compactMode ? 14 : 20)
+        .padding(.vertical, settingsManager.compactMode ? 8 : 12)
         .background(Color.clear)
     }
     
  /// 设备分组列表
     private var deviceGroupList: some View {
         ScrollView {
-            LazyVStack(spacing: 16) {
+            LazyVStack(spacing: settingsManager.compactMode ? 12 : 16) {
                 ForEach(deviceFilterManager.deviceGroups, id: \.type) { group in
                     DeviceGroupView(
                         group: group,
@@ -194,8 +195,8 @@ public struct DeviceListView: View {
                     )
                 }
             }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 16)
+            .padding(.horizontal, settingsManager.compactMode ? 14 : 20)
+            .padding(.vertical, settingsManager.compactMode ? 12 : 16)
         }
         .refreshable {
             await refreshDevicesAsync()
@@ -273,6 +274,7 @@ struct DeviceCardView: View {
     
  // 设备类型检测器
     @StateObject private var deviceTypeDetector = DeviceTypeDetector()
+    @StateObject private var settingsManager = SettingsManager.shared
     @State private var detailedDeviceInfo: DeviceTypeDetector.DetailedDeviceInfo?
     
     init(device: DiscoveredDevice, connectionStatus: ConnectionStatus, onConnect: @escaping () -> Void, onDisconnect: @escaping () -> Void, showDeviceType: Bool = false) {
@@ -332,20 +334,20 @@ struct DeviceCardView: View {
     }
     
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: settingsManager.compactMode ? 8 : 12) {
  // 设备信息头部
             HStack {
  // 设备图标 - 使用检测到的设备类型图标
                 Image(systemName: deviceIcon)
-                    .font(.title2)
+                    .font(settingsManager.compactMode ? .body : .title2)
                     .foregroundColor(deviceIconColor)
-                    .frame(width: 32, height: 32)
+                    .frame(width: settingsManager.compactMode ? 24 : 32, height: settingsManager.compactMode ? 24 : 32)
                 
                 VStack(alignment: .leading, spacing: 2) {
                     HStack {
  // 显示设备名称，优先使用检测到的显示名称
                         Text(displayDeviceName)
-                            .font(.headline)
+                            .font(settingsManager.compactMode ? .subheadline : .headline)
                             .foregroundColor(.primary)
                         
  // 设备类型标签（如果启用显示）
@@ -364,21 +366,23 @@ struct DeviceCardView: View {
                         }
                     }
                     
+                    if settingsManager.showDeviceDetails {
  // IP地址和制造商信息
-                    HStack {
-                        Text(device.ipv4 ?? device.ipv6 ?? "未知地址")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                        
+                        HStack {
+                            Text(device.ipv4 ?? device.ipv6 ?? "未知地址")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+
  // 显示制造商信息
-                        if let deviceInfo = detailedDeviceInfo, 
-                           deviceInfo.manufacturer != .unknown {
-                            Text("•")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                            Text(deviceInfo.manufacturer.displayName)
-                                .font(.caption)
-                                .foregroundColor(.secondary)
+                            if let deviceInfo = detailedDeviceInfo,
+                               deviceInfo.manufacturer != .unknown {
+                                Text("•")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                Text(deviceInfo.manufacturer.displayName)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
                         }
                     }
                 }
@@ -390,7 +394,7 @@ struct DeviceCardView: View {
             }
             
  // 设备详细信息和能力
-            if let deviceInfo = detailedDeviceInfo, !deviceInfo.capabilities.isEmpty {
+            if settingsManager.showDeviceDetails, let deviceInfo = detailedDeviceInfo, !deviceInfo.capabilities.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("设备能力")
                         .font(.caption)
@@ -414,7 +418,7 @@ struct DeviceCardView: View {
             }
             
  // 可用服务（如果有）
-            if !device.services.isEmpty {
+            if settingsManager.showDeviceDetails, !device.services.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("可用服务")
                         .font(.caption)
@@ -463,22 +467,30 @@ struct DeviceCardView: View {
                 Spacer()
                 
  // 显示更多统计信息
-                HStack(spacing: 8) {
-                    if !device.services.isEmpty {
-                        Text("服务: \(device.services.count)")
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                    }
-                    
-                    if let deviceInfo = detailedDeviceInfo, !deviceInfo.capabilities.isEmpty {
-                        Text("能力: \(deviceInfo.capabilities.count)")
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
+                if settingsManager.showConnectionStats || (settingsManager.showDeviceRSSI && device.signalStrength != nil) {
+                    HStack(spacing: 8) {
+                        if settingsManager.showConnectionStats, !device.services.isEmpty {
+                            Text("服务: \(device.services.count)")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+
+                        if settingsManager.showConnectionStats, let deviceInfo = detailedDeviceInfo, !deviceInfo.capabilities.isEmpty {
+                            Text("能力: \(deviceInfo.capabilities.count)")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+
+                        if settingsManager.showDeviceRSSI, let strength = device.signalStrength {
+                            Text("RSSI \(Int(strength))%")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
                     }
                 }
             }
         }
-        .padding(16)
+        .padding(settingsManager.compactMode ? 10 : 16)
         .background(Color(NSColor.controlBackgroundColor))
         .cornerRadius(12)
         .shadow(color: Color.black.opacity(0.1), radius: 2, x: 0, y: 1)

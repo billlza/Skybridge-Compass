@@ -5,6 +5,7 @@ import SkyBridgeCore
 public struct OnlineDeviceRow: View {
     let device: OnlineDevice
     let onConnect: () -> Void
+    @StateObject private var settingsManager = SettingsManager.shared
     
     public init(device: OnlineDevice, onConnect: @escaping () -> Void) {
         self.device = device
@@ -12,13 +13,13 @@ public struct OnlineDeviceRow: View {
     }
     
     public var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: settingsManager.compactMode ? 8 : 12) {
             HStack {
  // 设备图标
                 Image(systemName: deviceIcon)
-                    .font(.title2)
+                    .font(settingsManager.compactMode ? .body : .title2)
                     .foregroundColor(deviceColor)
-                    .frame(width: 32, height: 32)
+                    .frame(width: settingsManager.compactMode ? 24 : 32, height: settingsManager.compactMode ? 24 : 32)
                 
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 8) {
@@ -45,9 +46,11 @@ public struct OnlineDeviceRow: View {
                         }
                     }
                     
-                    Text(device.ipv4 ?? device.ipv6 ?? LocalizationManager.shared.localizedString("device.noIP"))
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                    if settingsManager.showDeviceDetails {
+                        Text(device.ipv4 ?? device.ipv6 ?? LocalizationManager.shared.localizedString("device.noIP"))
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
                 }
                 
                 Spacer()
@@ -58,14 +61,16 @@ public struct OnlineDeviceRow: View {
                     .fill(statusColor)
                     .frame(width: 8, height: 8)
                     
-                    Text(device.connectionStatus.rawValue)
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
+                    if settingsManager.showConnectionStats {
+                        Text(device.connectionStatus.rawValue)
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
                 }
             }
             
  // 连接类型标签
-            if !device.connectionTypes.isEmpty {
+            if settingsManager.showDeviceDetails && !device.connectionTypes.isEmpty {
                 HStack(spacing: 6) {
                     ForEach(Array(device.connectionTypes.sorted(by: { $0.rawValue < $1.rawValue })), id: \.self) { connectionType in
                         HStack(spacing: 4) {
@@ -84,25 +89,34 @@ public struct OnlineDeviceRow: View {
             }
             
  // 设备信息
-            HStack {
- // 设备来源
-                HStack(spacing: 4) {
-                    Image(systemName: "antenna.radiowaves.left.and.right")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+            if settingsManager.showConnectionStats || settingsManager.showDeviceRSSI {
+                HStack {
+                    if settingsManager.showConnectionStats {
+                        HStack(spacing: 4) {
+                            Image(systemName: "antenna.radiowaves.left.and.right")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            
+                            Text(device.sources.map { $0.rawValue }.joined(separator: ", "))
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+
+                    if settingsManager.showDeviceRSSI, let signal = device.signalStrength {
+                        Text("RSSI \(Int(signal))%")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
                     
-                    Text(device.sources.map { $0.rawValue }.joined(separator: ", "))
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-                
-                Spacer()
-                
- // 服务数量
-                if !device.services.isEmpty {
-                    Text("\(device.services.count) \(LocalizationManager.shared.localizedString("device.servicesCount"))")
-                        .font(.caption)
-                        .foregroundColor(.white)
+                    Spacer()
+                    
+                    // 服务数量
+                    if settingsManager.showConnectionStats && !device.services.isEmpty {
+                        Text("\(device.services.count) \(LocalizationManager.shared.localizedString("device.servicesCount"))")
+                            .font(.caption)
+                            .foregroundColor(.white)
+                    }
                 }
             }
             
@@ -127,7 +141,7 @@ public struct OnlineDeviceRow: View {
                 .disabled(device.connectionStatus == .connected)
             }
         }
-        .padding(16)
+        .padding(settingsManager.compactMode ? 10 : 16)
         .background(
             RoundedRectangle(cornerRadius: 12)
                 .fill(Color(red: 20/255, green: 25/255, blue: 45/255))
@@ -186,4 +200,3 @@ public struct OnlineDeviceRow: View {
         return Color.white.opacity(0.1)
     }
 }
-

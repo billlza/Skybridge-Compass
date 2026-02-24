@@ -34,6 +34,8 @@ public struct SettingsView: View {
     @State private var showingResetAlert = false
     @State private var showingExportDialog = false
     @State private var showingImportDialog = false
+    @State private var showingTransferPathFallbackAlert = false
+    @State private var transferPathFallbackMessage = ""
     @State private var newCustomServiceType = ""
     
  // MARK: - 设置标签页
@@ -182,9 +184,22 @@ public struct SettingsView: View {
                     }
                 }
             case .failure(_):
- // 导入失败处理
+// 导入失败处理
                 SkyBridgeLogger.ui.error("导入设置失败")
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("FileTransferReceivePathFallback"))) { notification in
+            let fallbackPath = notification.userInfo?["path"] as? String ?? settingsManager.defaultTransferPath
+            transferPathFallbackMessage = String(
+                format: localizationManager.localizedString("settings.fileTransfer.pathFallback.message"),
+                fallbackPath
+            )
+            showingTransferPathFallbackAlert = true
+        }
+        .alert(localizationManager.localizedString("settings.fileTransfer.pathFallback.title"), isPresented: $showingTransferPathFallbackAlert) {
+            Button(localizationManager.localizedString("action.ok"), role: .cancel) {}
+        } message: {
+            Text(transferPathFallbackMessage)
         }
     }
     
@@ -316,25 +331,19 @@ public struct SettingsView: View {
                 settingsSection(localizationManager.localizedString("settings.general.preferences")) {
                     VStack(alignment: .leading, spacing: 12) {
                         Toggle(localizationManager.localizedString("settings.general.autoScan"), isOn: $settingsManager.autoScanOnStartup)
-                            .onChange(of: settingsManager.autoScanOnStartup) { _, newValue in
- // 保存到UserDefaults
-                                UserDefaults.standard.set(newValue, forKey: "AutoScanOnStartup")
-                            }
                         
                         Toggle(localizationManager.localizedString("settings.general.systemNotifications"), isOn: $settingsManager.showSystemNotifications)
                             .onChange(of: settingsManager.showSystemNotifications) { _, newValue in
- // 请求通知权限
+// 请求通知权限
                                 if newValue {
                                     requestNotificationPermission()
                                 }
-                                UserDefaults.standard.set(newValue, forKey: "ShowSystemNotifications")
                             }
                         
                         Toggle(localizationManager.localizedString("settings.general.darkMode"), isOn: $settingsManager.useDarkMode)
                             .onChange(of: settingsManager.useDarkMode) { _, newValue in
- // 应用主题模式
+// 应用主题模式
                                 applyThemeMode(newValue ? "dark" : "light")
-                                UserDefaults.standard.set(newValue, forKey: "UseDarkMode")
                             }
                         
                         HStack {
@@ -348,9 +357,8 @@ public struct SettingsView: View {
                             .pickerStyle(MenuPickerStyle())
                             .frame(width: 100)
                             .onChange(of: settingsManager.scanInterval) { _, newValue in
- // 更新扫描定时器
+// 更新扫描定时器
                                 updateScanInterval(newValue)
-                                UserDefaults.standard.set(newValue, forKey: "ScanInterval")
                             }
                         }
                     }
@@ -359,37 +367,15 @@ public struct SettingsView: View {
                 settingsSection(localizationManager.localizedString("settings.general.interface")) {
                     VStack(alignment: .leading, spacing: 12) {
                         Toggle(localizationManager.localizedString("settings.general.showDeviceDetails"), isOn: $settingsManager.showDeviceDetails)
-                            .onChange(of: settingsManager.showDeviceDetails) { _, _ in
-                                UserDefaults.standard.set(settingsManager.showDeviceDetails, forKey: "ShowDeviceDetails")
- // 通知其他组件更新显示模式
-                                NotificationCenter.default.post(name: NSNotification.Name("DeviceDisplayModeChanged"), object: nil)
-                            }
                         
                         Toggle(localizationManager.localizedString("settings.general.showConnectionStats"), isOn: $settingsManager.showConnectionStats)
-                            .onChange(of: settingsManager.showConnectionStats) { _, _ in
-                                UserDefaults.standard.set(settingsManager.showConnectionStats, forKey: "ShowConnectionStats")
-                                NotificationCenter.default.post(name: NSNotification.Name("ConnectionStatsDisplayChanged"), object: nil)
-                            }
                         
                         Toggle(localizationManager.localizedString("settings.general.compactMode"), isOn: $settingsManager.compactMode)
-                            .onChange(of: settingsManager.compactMode) { _, _ in
-                                UserDefaults.standard.set(settingsManager.compactMode, forKey: "CompactMode")
- // 实际切换布局模式
-                                switchLayoutMode(isCompact: settingsManager.compactMode)
-                            }
                         
                         HStack {
                             Text(localizationManager.localizedString("settings.general.themeColor"))
                             ColorPicker("", selection: $settingsManager.themeColor)
                                 .frame(width: 50)
-                                .onChange(of: settingsManager.themeColor) { _, newColor in
- // 实际应用主题色彩
-                                    applyThemeColor(newColor)
- // 保存颜色到UserDefaults
-                                    if let colorData = try? NSKeyedArchiver.archivedData(withRootObject: NSColor(newColor), requiringSecureCoding: false) {
-                                        UserDefaults.standard.set(colorData, forKey: "ThemeColor")
-                                    }
-                                }
                         }
                     }
                 }
@@ -562,7 +548,7 @@ public struct SettingsView: View {
                         }
                         
                         Toggle(localizationManager.localizedString("settings.network.connection.enableEncryption"), isOn: $settingsManager.enableConnectionEncryption)
-                        Toggle(localizationManager.localizedString("settings.network.connection.verifyCertificates"), isOn: $settingsManager.verifyCertificates)
+                        strictCertificateValidationNotice
                     }
                 }
             }
@@ -1163,20 +1149,36 @@ public struct SettingsView: View {
         }
         .padding(.vertical, 4)
     }
+
+    private var strictCertificateValidationNotice: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "lock.shield")
+                .foregroundColor(.blue)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(localizationManager.localizedString("settings.security.certificateValidation.alwaysOn"))
+                    .font(.subheadline)
+                Text(localizationManager.localizedString("settings.security.certificateValidation.alwaysOn.detail"))
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            Spacer()
+        }
+        .padding(.vertical, 4)
+    }
     
  // MARK: - 文件传输设置
     private var fileTransferSettings: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
- // 视频传输配置部分
-                videoTransferConfigurationSection
-                
                 settingsSection(localizationManager.localizedString("settings.fileTransfer.config.title")) {
                     VStack(alignment: .leading, spacing: 12) {
                         HStack {
                             Text(localizationManager.localizedString("settings.fileTransfer.defaultPath"))
                             TextField(localizationManager.localizedString("unit.path"), text: $settingsManager.defaultTransferPath)
                                 .textFieldStyle(.roundedBorder)
+                                .onSubmit {
+                                    applyDefaultTransferPathFromSettings()
+                                }
                             Button(localizationManager.localizedString("action.select")) {
                                 let panel = NSOpenPanel()
                                 panel.canChooseDirectories = true
@@ -1185,7 +1187,7 @@ public struct SettingsView: View {
                                 panel.begin { response in
                                     if response == .OK, let url = panel.url {
                                         settingsManager.defaultTransferPath = url.path
-                                        ftBridge.updateReceiveDirectory(url)
+                                        applyDefaultTransferPathFromSettings()
                                     }
                                 }
                             }
@@ -1200,7 +1202,7 @@ public struct SettingsView: View {
                         }
                         
                         HStack {
-                            Text(localizationManager.localizedString("settings.fileTransfer.bufferSize"))
+                            Text(localizationManager.localizedString("settings.fileTransfer.chunkSize"))
                             Picker("", selection: $settingsManager.transferBufferSize) {
                                 Text("64KB").tag(65536)
                                 Text("128KB").tag(131072)
@@ -1211,13 +1213,29 @@ public struct SettingsView: View {
                             .pickerStyle(MenuPickerStyle())
                             .frame(width: 100)
                         }
+
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                Text(localizationManager.localizedString("settings.fileTransfer.rateLimit"))
+                                Spacer()
+                                if settingsManager.transferSpeedLimitMBps <= 0 {
+                                    Text(localizationManager.localizedString("settings.fileTransfer.rateLimit.unlimited"))
+                                        .foregroundColor(.secondary)
+                                } else {
+                                    Text("\(settingsManager.transferSpeedLimitMBps, specifier: "%.0f") MB/s")
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+
+                            Slider(value: $settingsManager.transferSpeedLimitMBps, in: 0...500, step: 5)
+                        }
                     }
                 }
                 
                 settingsSection(localizationManager.localizedString("settings.fileTransfer.options.title")) {
                     VStack(alignment: .leading, spacing: 12) {
                         Toggle(localizationManager.localizedString("settings.fileTransfer.options.showNotification"), isOn: $settingsManager.showSystemNotifications)
-                        Toggle(localizationManager.localizedString("settings.fileTransfer.options.autoRetryFailed"), isOn: $settingsManager.autoRetryFailedTransfers)
+                        Toggle(localizationManager.localizedString("settings.fileTransfer.options.resumeEnabled"), isOn: $settingsManager.autoRetryFailedTransfers)
                         Toggle(localizationManager.localizedString("settings.fileTransfer.options.keepHistory"), isOn: $settingsManager.keepTransferHistory)
                         Toggle(localizationManager.localizedString("settings.fileTransfer.options.keepAwake"), isOn: $settingsManager.keepSystemAwakeDuringTransfer)
                         
@@ -1233,7 +1251,7 @@ public struct SettingsView: View {
                 settingsSection(localizationManager.localizedString("settings.fileTransfer.security.title")) {
                     VStack(alignment: .leading, spacing: 12) {
                         Toggle(localizationManager.localizedString("settings.fileTransfer.security.enableEncrypt"), isOn: $settingsManager.enableConnectionEncryption)
-                        Toggle(localizationManager.localizedString("settings.fileTransfer.security.verifyIntegrity"), isOn: $settingsManager.verifyCertificates)
+                        strictCertificateValidationNotice
                         Toggle(localizationManager.localizedString("settings.fileTransfer.security.scanVirus"), isOn: $settingsManager.scanTransferFilesForVirus)
                         
                         HStack {
@@ -1278,7 +1296,7 @@ public struct SettingsView: View {
  // MARK: - 视频传输配置部分
     
     private var videoTransferConfigurationSection: some View {
-        settingsSection(localizationManager.localizedString("settings.videoTransfer.title")) {
+        settingsSection(localizationManager.localizedString("settings.remote.qualityPerformance.title")) {
             VStack(alignment: .leading, spacing: 16) {
  // 当前配置状态显示 - 增强版本，包含实时状态指示器
                 HStack {
@@ -1588,20 +1606,10 @@ public struct SettingsView: View {
     private var remoteDesktopSettings: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
+                videoTransferConfigurationSection
+
                 settingsSection(localizationManager.localizedString("settings.remote.display.title")) {
                     VStack(alignment: .leading, spacing: 12) {
-                        HStack {
-                            Text(localizationManager.localizedString("settings.remote.display.videoQuality"))
-                            Picker("", selection: $remoteDesktopSettingsManager.settings.displaySettings.videoQuality) {
-                                Text(localizationManager.localizedString("quality.low")).tag(VideoQuality.low)
-                                Text(localizationManager.localizedString("quality.medium")).tag(VideoQuality.medium)
-                                Text(localizationManager.localizedString("quality.high")).tag(VideoQuality.high)
-                                Text(localizationManager.localizedString("quality.ultra")).tag(VideoQuality.ultra)
-                            }
-                            .pickerStyle(MenuPickerStyle())
-                            .frame(width: 100)
-                        }
-                        
                         HStack {
                             Text(localizationManager.localizedString("settings.remote.display.compressionLevel"))
                             Slider(
@@ -1613,21 +1621,6 @@ public struct SettingsView: View {
                                 .foregroundColor(.secondary)
                                 .frame(width: 20)
                         }
-                        
-                        HStack {
-                            Text(localizationManager.localizedString("settings.remote.display.refreshRate"))
-                            Picker("", selection: $remoteDesktopSettingsManager.settings.displaySettings.refreshRate) {
-                                Text("30 Hz").tag(RefreshRate.hz30)
-                                Text("60 Hz").tag(RefreshRate.hz60)
-                                Text("75 Hz").tag(RefreshRate.hz75)
-                                Text("120 Hz").tag(RefreshRate.hz120)
-                                Text("144 Hz").tag(RefreshRate.hz144)
-                            }
-                            .pickerStyle(MenuPickerStyle())
-                            .frame(width: 100)
-                        }
-                        
-                        Toggle(localizationManager.localizedString("settings.remote.network.enableAdaptiveQuality"), isOn: $remoteDesktopSettingsManager.settings.networkSettings.enableAdaptiveQuality)
                         Toggle(localizationManager.localizedString("settings.remote.display.fullScreenMode"), isOn: $remoteDesktopSettingsManager.settings.displaySettings.fullScreenMode)
                     }
                 }
@@ -1702,7 +1695,7 @@ public struct SettingsView: View {
  // 添加设置操作按钮
                 HStack {
                     Button(localizationManager.localizedString("action.resetToDefaults")) {
-                        remoteDesktopSettingsManager.resetToDefaults()
+                        resetRemoteDesktopSettingsToDefaults()
                     }
                     .buttonStyle(.bordered)
                     
@@ -1715,6 +1708,9 @@ public struct SettingsView: View {
                 }
                 .padding(.top, 20)
             }
+        }
+        .onAppear {
+            hydrateVideoQualityFromRemoteDesktopSettings()
         }
     }
     
@@ -1738,45 +1734,54 @@ public struct SettingsView: View {
                             .pickerStyle(MenuPickerStyle())
                             .frame(width: 80)
                         }
-                        
+
                         Toggle(localizationManager.localizedString("settings.systemMonitor.config.enableRealtime"), isOn: $settingsManager.enableAutoRefresh)
                         Toggle(localizationManager.localizedString("settings.systemMonitor.config.enableHistory"), isOn: $settingsManager.showTrendIndicators)
-                        Toggle(localizationManager.localizedString("settings.systemMonitor.config.enablePerformanceAlerts"), isOn: $settingsManager.enableSystemNotifications)
-                        
+                        Toggle(localizationManager.localizedString("settings.systemMonitor.config.enablePerformanceAlerts"), isOn: $settingsManager.enablePerformanceAlerts)
+
                         HStack {
                             Text(localizationManager.localizedString("settings.systemMonitor.config.retentionDays"))
-                            TextField(localizationManager.localizedString("unit.days.short"), value: Binding(
-                                get: { Int(settingsManager.maxHistoryPoints / 24) }, // 假设每小时一个点，转换为天数
-                                set: { settingsManager.maxHistoryPoints = Double($0 * 24) }
-                            ), format: .number)
+                            TextField(
+                                localizationManager.localizedString("unit.days.short"),
+                                value: $settingsManager.systemMonitorRetentionDays,
+                                format: .number
+                            )
                                 .textFieldStyle(.roundedBorder)
                                 .frame(width: 60)
                         }
+
+                        HStack {
+                            Text(localizationManager.localizedString("settings.systemMonitor.config.enableHistory"))
+                            Slider(value: $settingsManager.maxHistoryPoints, in: 50...2000, step: 50)
+                            Text("\(Int(settingsManager.maxHistoryPoints))")
+                                .foregroundColor(.secondary)
+                                .frame(width: 50)
+                        }
                     }
                 }
-                
+
                 settingsSection(localizationManager.localizedString("settings.systemMonitor.display.title")) {
                     VStack(alignment: .leading, spacing: 12) {
-                        Toggle(localizationManager.localizedString("settings.systemMonitor.display.cpu"), isOn: $settingsManager.showDeviceDetails)
-                        Toggle(localizationManager.localizedString("settings.systemMonitor.display.memory"), isOn: $settingsManager.showConnectionStats)
-                        Toggle(localizationManager.localizedString("settings.systemMonitor.display.disk"), isOn: $settingsManager.showTrendIndicators)
-                        Toggle(localizationManager.localizedString("settings.systemMonitor.display.network"), isOn: $settingsManager.enableSystemNotifications)
-                        Toggle(localizationManager.localizedString("settings.systemMonitor.display.temperature"), isOn: $settingsManager.showDebugInfo)
-                        Toggle(localizationManager.localizedString("settings.systemMonitor.display.fanSpeed"), isOn: $settingsManager.enableVerboseLogging)
-                        
+                        Toggle(localizationManager.localizedString("settings.systemMonitor.display.cpu"), isOn: $settingsManager.showMonitorCPU)
+                        Toggle(localizationManager.localizedString("settings.systemMonitor.display.memory"), isOn: $settingsManager.showMonitorMemory)
+                        Toggle(localizationManager.localizedString("settings.systemMonitor.display.disk"), isOn: $settingsManager.showMonitorDisk)
+                        Toggle(localizationManager.localizedString("settings.systemMonitor.display.network"), isOn: $settingsManager.showMonitorNetwork)
+                        Toggle(localizationManager.localizedString("settings.systemMonitor.display.temperature"), isOn: $settingsManager.showMonitorTemperature)
+                        Toggle(localizationManager.localizedString("settings.systemMonitor.display.fanSpeed"), isOn: $settingsManager.showMonitorFanSpeed)
+
                         HStack {
                             Text(localizationManager.localizedString("settings.systemMonitor.display.chartType"))
-                            Picker("", selection: $settingsManager.logLevel) {
-                                Text(localizationManager.localizedString("chart.line")).tag("Info")
-                                Text(localizationManager.localizedString("chart.bar")).tag("Warning")
-                                Text(localizationManager.localizedString("chart.area")).tag("Debug")
+                            Picker("", selection: $settingsManager.systemMonitorChartType) {
+                                Text(localizationManager.localizedString("chart.line")).tag(SettingsManager.SystemMonitorChartType.line)
+                                Text(localizationManager.localizedString("chart.bar")).tag(SettingsManager.SystemMonitorChartType.bar)
+                                Text(localizationManager.localizedString("chart.area")).tag(SettingsManager.SystemMonitorChartType.area)
                             }
                             .pickerStyle(MenuPickerStyle())
                             .frame(width: 100)
                         }
                     }
                 }
-                
+
                 settingsSection(localizationManager.localizedString("settings.systemMonitor.alerts.title")) {
                     VStack(alignment: .leading, spacing: 12) {
                         HStack {
@@ -1794,7 +1799,29 @@ public struct SettingsView: View {
                                 .foregroundColor(.secondary)
                                 .frame(width: 40)
                         }
-                        
+
+                        Toggle(localizationManager.localizedString("settings.systemMonitor.display.temperature"), isOn: $settingsManager.enableTemperatureMonitoring)
+
+                        HStack {
+                            Text(localizationManager.localizedString("settings.systemMonitor.alerts.temperatureThreshold"))
+                            Slider(value: $settingsManager.temperatureThreshold, in: 60...95, step: 5)
+                                .disabled(!settingsManager.enableTemperatureMonitoring)
+                            Text("\(Int(settingsManager.temperatureThreshold))°C")
+                                .foregroundColor(.secondary)
+                                .frame(width: 50)
+                        }
+
+                        Toggle(localizationManager.localizedString("settings.systemMonitor.display.fanSpeed"), isOn: $settingsManager.enableFanSpeedMonitoring)
+
+                        HStack {
+                            Text(localizationManager.localizedString("settings.systemMonitor.alerts.fanSpeedThreshold"))
+                            Slider(value: $settingsManager.fanSpeedThreshold, in: 2000...8000, step: 200)
+                                .disabled(!settingsManager.enableFanSpeedMonitoring)
+                            Text("\(Int(settingsManager.fanSpeedThreshold)) RPM")
+                                .foregroundColor(.secondary)
+                                .frame(width: 80)
+                        }
+
                         HStack {
                             Text(localizationManager.localizedString("settings.systemMonitor.alerts.diskThreshold"))
                             Slider(value: $settingsManager.diskThreshold, in: 70...95, step: 5)
@@ -1802,40 +1829,46 @@ public struct SettingsView: View {
                                 .foregroundColor(.secondary)
                                 .frame(width: 40)
                         }
-                        
+
                         Toggle(localizationManager.localizedString("settings.systemMonitor.alerts.enableSound"), isOn: $settingsManager.enableSoundAlerts)
                         Toggle(localizationManager.localizedString("settings.systemMonitor.alerts.enableNotificationCenter"), isOn: $settingsManager.enableSystemNotifications)
                     }
                 }
-                
+
                 settingsSection(localizationManager.localizedString("settings.systemMonitor.advanced.title")) {
                     VStack(alignment: .leading, spacing: 12) {
-                        Toggle(localizationManager.localizedString("settings.systemMonitor.advanced.enableVerboseLogging"), isOn: $settingsManager.enableVerboseLogging)
-                        Toggle(localizationManager.localizedString("settings.systemMonitor.advanced.exportData"), isOn: $settingsManager.saveNetworkLogs)
-                        Toggle(localizationManager.localizedString("settings.systemMonitor.advanced.enableRemoteMonitoring"), isOn: $settingsManager.enableBackgroundScanning)
-                        
+                        Toggle(localizationManager.localizedString("settings.systemMonitor.alerts.thermalThrottling"), isOn: $settingsManager.enableThermalThrottlingAlert)
+                        Toggle(localizationManager.localizedString("settings.systemMonitor.advanced.enableRemoteMonitoring"), isOn: $settingsManager.enableRemoteMonitoring)
+
                         HStack {
                             Text(localizationManager.localizedString("settings.systemMonitor.advanced.samplingPrecision"))
-                            Picker("", selection: $settingsManager.logLevel) {
-                                Text(localizationManager.localizedString("precision.low")).tag("Error")
-                                Text(localizationManager.localizedString("precision.normal")).tag("Info")
-                                Text(localizationManager.localizedString("precision.high")).tag("Debug")
+                            Picker("", selection: $settingsManager.systemMonitorSamplingPrecision) {
+                                Text(localizationManager.localizedString("precision.low")).tag(SettingsManager.SystemMonitorSamplingPrecision.low)
+                                Text(localizationManager.localizedString("precision.normal")).tag(SettingsManager.SystemMonitorSamplingPrecision.normal)
+                                Text(localizationManager.localizedString("precision.high")).tag(SettingsManager.SystemMonitorSamplingPrecision.high)
                             }
                             .pickerStyle(MenuPickerStyle())
                             .frame(width: 80)
                         }
-                        
-                        Button(localizationManager.localizedString("action.resetMonitorData")) {
- // 重置监控数据的逻辑
-                            Task { @MainActor in
-                                settingsManager.cpuThreshold = 80.0
-                                settingsManager.memoryThreshold = 80.0
-                                settingsManager.diskThreshold = 90.0
-                                settingsManager.systemMonitorRefreshInterval = 1.0
-                                settingsManager.maxHistoryPoints = 300.0
+
+                        HStack {
+                            Button(localizationManager.localizedString("action.exportMonitorData")) {
+                                NotificationCenter.default.post(name: .systemMonitorExport, object: nil)
                             }
+                            .buttonStyle(.bordered)
+
+                            Button(localizationManager.localizedString("action.clearMonitorHistory")) {
+                                NotificationCenter.default.post(name: .systemMonitorClearHistory, object: nil)
+                            }
+                            .buttonStyle(.bordered)
+
+                            Spacer()
+
+                            Button(localizationManager.localizedString("action.resetMonitorData")) {
+                                settingsManager.resetSystemMonitorSettingsToDefaults()
+                            }
+                            .buttonStyle(.bordered)
                         }
-                        .buttonStyle(.bordered)
                     }
                 }
             }
@@ -1952,34 +1985,133 @@ public struct SettingsView: View {
         return formatter.string(fromByteCount: totalSize)
     }
     
- /// 切换布局模式
-    private func switchLayoutMode(isCompact: Bool) {
- // 发送通知给主界面切换布局
-        NotificationCenter.default.post(
-            name: NSNotification.Name("LayoutModeChanged"),
-            object: nil,
-            userInfo: ["isCompact": isCompact]
-        )
-    }
-    
- /// 应用主题色彩
-    private func applyThemeColor(_ color: Color) {
- // 更新全局主题色彩
-        NotificationCenter.default.post(
-            name: NSNotification.Name("ThemeColorChanged"),
-            object: nil,
-            userInfo: ["color": color]
-        )
+    private func applyDefaultTransferPathFromSettings() {
+        let path = settingsManager.defaultTransferPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !path.isEmpty else {
+            ftBridge.updateReceiveDirectory(nil)
+            return
+        }
+
+        let expandedPath = (path as NSString).expandingTildeInPath
+        ftBridge.updateReceiveDirectory(URL(fileURLWithPath: expandedPath, isDirectory: true))
     }
     
  /// 应用远程桌面设置
     private func applyRemoteDesktopSettings() {
         Task { @MainActor in
- // 保存设置到持久化存储
+            syncVideoQualityToRemoteDesktopSettings()
             remoteDesktopSettingsManager.saveSettings()
             
  // 注意：设置将在下次创建新会话时自动应用
  // 如需立即应用到现有会话，请使用各会话的 applySettings 方法
+        }
+    }
+
+    private func resetRemoteDesktopSettingsToDefaults() {
+        Task { @MainActor in
+            videoSettingsManager.resetToDefaults()
+            remoteDesktopSettingsManager.resetToDefaults()
+            syncVideoQualityToRemoteDesktopSettings()
+            remoteDesktopSettingsManager.saveSettings()
+        }
+    }
+
+    private func syncVideoQualityToRemoteDesktopSettings() {
+        remoteDesktopSettingsManager.settings.displaySettings.resolution = remoteResolution(from: videoSettingsManager.selectedResolution)
+        remoteDesktopSettingsManager.settings.displaySettings.refreshRate = remoteRefreshRate(from: videoSettingsManager.selectedFrameRate)
+        remoteDesktopSettingsManager.settings.displaySettings.videoQuality = remoteVideoQuality(from: videoSettingsManager.compressionQuality)
+        remoteDesktopSettingsManager.settings.displaySettings.enableHardwareAcceleration = videoSettingsManager.enableHardwareAcceleration
+        remoteDesktopSettingsManager.settings.displaySettings.enableAppleSiliconOptimization = videoSettingsManager.enableAppleSiliconOptimization
+        remoteDesktopSettingsManager.settings.networkSettings.enableAdaptiveQuality = videoSettingsManager.enableAdaptiveBitrate
+    }
+
+    private func hydrateVideoQualityFromRemoteDesktopSettings() {
+        let displaySettings = remoteDesktopSettingsManager.settings.displaySettings
+        let networkSettings = remoteDesktopSettingsManager.settings.networkSettings
+
+        if let mappedResolution = videoResolution(from: displaySettings.resolution) {
+            videoSettingsManager.selectedResolution = mappedResolution
+        }
+        videoSettingsManager.selectedFrameRate = videoFrameRate(from: displaySettings.refreshRate)
+        videoSettingsManager.compressionQuality = compressionQuality(from: displaySettings.videoQuality)
+        videoSettingsManager.enableHardwareAcceleration = displaySettings.enableHardwareAcceleration
+        videoSettingsManager.enableAppleSiliconOptimization = displaySettings.enableAppleSiliconOptimization
+        videoSettingsManager.enableAdaptiveBitrate = networkSettings.enableAdaptiveQuality
+    }
+
+    private func remoteResolution(from resolution: VideoResolution) -> ResolutionSetting {
+        switch resolution {
+        case .hd1080p:
+            return .resolution1920x1080
+        case .qhd2k:
+            return .resolution2560x1440
+        case .uhd4k:
+            return .resolution3840x2160
+        case .apple5k:
+            return .resolution5120x2880
+        }
+    }
+
+    private func videoResolution(from resolution: ResolutionSetting) -> VideoResolution? {
+        switch resolution {
+        case .resolution2560x1440:
+            return .qhd2k
+        case .resolution3840x2160:
+            return .uhd4k
+        case .resolution5120x2880:
+            return .apple5k
+        case .resolution1024x768, .resolution1280x720, .resolution1366x768, .resolution1920x1080:
+            return .hd1080p
+        case .auto, .custom:
+            return nil
+        }
+    }
+
+    private func remoteRefreshRate(from frameRate: VideoFrameRate) -> RefreshRate {
+        switch frameRate {
+        case .fps30:
+            return .hz30
+        case .fps60:
+            return .hz60
+        case .fps120:
+            return .hz120
+        }
+    }
+
+    private func videoFrameRate(from refreshRate: RefreshRate) -> VideoFrameRate {
+        switch refreshRate {
+        case .hz30:
+            return .fps30
+        case .hz60, .hz75:
+            return .fps60
+        case .hz120, .hz144:
+            return .fps120
+        }
+    }
+
+    private func remoteVideoQuality(from compressionQuality: VideoCompressionQuality) -> VideoQuality {
+        switch compressionQuality {
+        case .none:
+            return .ultra
+        case .fast:
+            return .low
+        case .balanced:
+            return .medium
+        case .maximum:
+            return .high
+        }
+    }
+
+    private func compressionQuality(from videoQuality: VideoQuality) -> VideoCompressionQuality {
+        switch videoQuality {
+        case .low:
+            return .fast
+        case .medium:
+            return .balanced
+        case .high:
+            return .maximum
+        case .ultra:
+            return .none
         }
     }
     

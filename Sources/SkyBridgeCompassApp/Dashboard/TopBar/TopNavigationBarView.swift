@@ -8,6 +8,7 @@ public struct TopNavigationBarView: View {
     @EnvironmentObject var appModel: DashboardViewModel
     @EnvironmentObject var themeConfiguration: ThemeConfiguration
     @ObservedObject private var unifiedDeviceManager = UnifiedOnlineDeviceManager.shared
+    @StateObject private var settingsManager = SettingsManager.shared
 
     @Binding var showManualConnectSheet: Bool
     @Binding var manualIP: String
@@ -109,7 +110,7 @@ public struct TopNavigationBarView: View {
                 .frame(width: 8, height: 8)
                 .animation(themeConfiguration.easeAnimation, value: isActuallyConnected)
 
-            if isActuallyConnected, let detail = connectionDetailText, !detail.isEmpty {
+            if settingsManager.showConnectionStats, isActuallyConnected, let detail = connectionDetailText, !detail.isEmpty {
                 Text(LocalizationManager.shared.localizedString("device.status.connected") + " · " + detail)
                     .font(.caption)
                     .foregroundColor(themeConfiguration.secondaryTextColor)
@@ -226,7 +227,7 @@ public struct TopNavigationBarView: View {
         } label: {
             Image(systemName: "paintbrush.fill")
                 .font(.title3)
-                .foregroundColor(themeConfiguration.currentTheme.primaryColor)
+                .foregroundColor(themeConfiguration.accentColor)
                 .padding(8)
                 .background(themeConfiguration.cardBackgroundColor, in: Circle())
                 .overlay(

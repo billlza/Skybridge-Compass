@@ -40,6 +40,24 @@ public struct SettingsExportData: Codable {
     public let enableNetworkMonitoring: Bool
     public let enableDiskMonitoring: Bool
     public let monitoringInterval: TimeInterval
+    public let showTrendIndicators: Bool?
+    public let maxHistoryPoints: Double?
+    public let systemMonitorRetentionDays: Int?
+    public let enablePerformanceAlerts: Bool?
+    public let temperatureThreshold: Double?
+    public let enableTemperatureMonitoring: Bool?
+    public let enableFanSpeedMonitoring: Bool?
+    public let fanSpeedThreshold: Double?
+    public let enableThermalThrottlingAlert: Bool?
+    public let showMonitorCPU: Bool?
+    public let showMonitorMemory: Bool?
+    public let showMonitorTemperature: Bool?
+    public let showMonitorFanSpeed: Bool?
+    public let showMonitorDisk: Bool?
+    public let showMonitorNetwork: Bool?
+    public let systemMonitorChartType: String?
+    public let systemMonitorSamplingPrecision: String?
+    public let enableRemoteMonitoring: Bool?
 
  // 元数据
     public let exportDate: Date
@@ -217,14 +235,37 @@ public class SettingsManager: ObservableObject, Sendable {
     @Published public var showTrendIndicators: Bool = true
     @Published public var enableSoundAlerts: Bool = false
     @Published public var maxHistoryPoints: Double = 300.0
+    @Published public var systemMonitorRetentionDays: Int = 7
 
-    // 系统监控：性能警报（原 SystemMonitorSettingsView 里存在但 SettingsManager 未持久化的字段）
+    public enum SystemMonitorChartType: String, CaseIterable, Codable {
+        case line
+        case bar
+        case area
+    }
+
+    public enum SystemMonitorSamplingPrecision: String, CaseIterable, Codable {
+        case low
+        case normal
+        case high
+    }
+
+    @Published public var systemMonitorChartType: SystemMonitorChartType = .line
+    @Published public var systemMonitorSamplingPrecision: SystemMonitorSamplingPrecision = .normal
+    @Published public var enableRemoteMonitoring: Bool = false
+
+    // 系统监控：性能警报与显示控制
     @Published public var enablePerformanceAlerts: Bool = true
     @Published public var temperatureThreshold: Double = 80.0
     @Published public var enableTemperatureMonitoring: Bool = true
     @Published public var enableFanSpeedMonitoring: Bool = true
     @Published public var fanSpeedThreshold: Double = 4000.0
     @Published public var enableThermalThrottlingAlert: Bool = true
+    @Published public var showMonitorCPU: Bool = true
+    @Published public var showMonitorMemory: Bool = true
+    @Published public var showMonitorTemperature: Bool = true
+    @Published public var showMonitorFanSpeed: Bool = true
+    @Published public var showMonitorDisk: Bool = true
+    @Published public var showMonitorNetwork: Bool = true
 
  // MARK: - 文件传输设置
     @Published public var defaultTransferPath: String = "~/Downloads"
@@ -233,6 +274,8 @@ public class SettingsManager: ObservableObject, Sendable {
     @Published public var keepTransferHistory: Bool = true
     @Published public var keepSystemAwakeDuringTransfer: Bool = false
     @Published public var scanTransferFilesForVirus: Bool = false
+ /// 文件传输速率限制（MB/s），0 表示不限速
+    @Published public var transferSpeedLimitMBps: Double = 0
     @Published public var encryptionAlgorithm: String = "AES-256"
  /// 文件扫描级别：Quick/Standard/Deep
     @Published public var scanLevel: FileScanService.ScanLevel = .standard
@@ -248,6 +291,7 @@ public class SettingsManager: ObservableObject, Sendable {
     private init() {
         loadSettings()
         setupObservers()
+        applyRuntimeSettingsSnapshot()
     }
 
  // MARK: - 生命周期管理方法
@@ -333,6 +377,24 @@ public class SettingsManager: ObservableObject, Sendable {
         enablePQCHybridTLS = false
 
  // 系统监控设置
+        resetSystemMonitorSettingsToDefaults()
+
+ // 文件传输设置
+        defaultTransferPath = "~/Downloads"
+        transferBufferSize = 131072
+        autoRetryFailedTransfers = true
+        keepTransferHistory = true
+        keepSystemAwakeDuringTransfer = false
+        scanTransferFilesForVirus = false
+        transferSpeedLimitMBps = 0
+        encryptionAlgorithm = "AES-256"
+        scanLevel = .standard
+
+        applyRuntimeSettingsSnapshot()
+        SkyBridgeLogger.ui.debugOnly("🔄 所有设置已重置为默认值")
+    }
+
+    public func resetSystemMonitorSettingsToDefaults() {
         systemMonitorRefreshInterval = 1.0
         enableSystemNotifications = true
         cpuThreshold = 80.0
@@ -342,24 +404,50 @@ public class SettingsManager: ObservableObject, Sendable {
         showTrendIndicators = true
         enableSoundAlerts = false
         maxHistoryPoints = 300.0
+        systemMonitorRetentionDays = 7
+        systemMonitorChartType = .line
+        systemMonitorSamplingPrecision = .normal
+        enableRemoteMonitoring = false
         enablePerformanceAlerts = true
         temperatureThreshold = 80.0
         enableTemperatureMonitoring = true
         enableFanSpeedMonitoring = true
         fanSpeedThreshold = 4000.0
         enableThermalThrottlingAlert = true
+        showMonitorCPU = true
+        showMonitorMemory = true
+        showMonitorTemperature = true
+        showMonitorFanSpeed = true
+        showMonitorDisk = true
+        showMonitorNetwork = true
+    }
 
- // 文件传输设置
-        defaultTransferPath = "~/Downloads"
-        transferBufferSize = 131072
-        autoRetryFailedTransfers = true
-        keepTransferHistory = true
-        keepSystemAwakeDuringTransfer = false
-        scanTransferFilesForVirus = false
-        encryptionAlgorithm = "AES-256"
-        scanLevel = .standard
+    public func applyRuntimeSettingsSnapshot() {
+        enforceStrictCertificateValidationIfNeeded(context: "runtime snapshot")
 
-        SkyBridgeLogger.ui.debugOnly("🔄 所有设置已重置为默认值")
+        NotificationCenter.default.post(
+            name: NSNotification.Name("LayoutModeChanged"),
+            object: nil,
+            userInfo: ["isCompact": compactMode]
+        )
+        NotificationCenter.default.post(name: NSNotification.Name("DeviceDisplayModeChanged"), object: nil)
+        NotificationCenter.default.post(name: NSNotification.Name("ConnectionStatsDisplayChanged"), object: nil)
+        NotificationCenter.default.post(
+            name: NSNotification.Name("ThemeDidChange"),
+            object: nil,
+            userInfo: ["isDarkMode": useDarkMode, "themeColor": themeColor]
+        )
+        NotificationCenter.default.post(
+            name: NSNotification.Name("ThemeColorChanged"),
+            object: nil,
+            userInfo: ["color": themeColor]
+        )
+
+        NetworkActivityLogStore.shared.setEnabled(saveNetworkLogs)
+
+        Task { @MainActor in
+            FileTransferSettingsBridge.shared.apply()
+        }
     }
 
  /// 导出设置到文件
@@ -430,6 +518,22 @@ public class SettingsManager: ObservableObject, Sendable {
             "showTrendIndicators": showTrendIndicators,
             "enableSoundAlerts": enableSoundAlerts,
             "maxHistoryPoints": maxHistoryPoints,
+            "systemMonitorRetentionDays": systemMonitorRetentionDays,
+            "systemMonitorChartType": systemMonitorChartType.rawValue,
+            "systemMonitorSamplingPrecision": systemMonitorSamplingPrecision.rawValue,
+            "enableRemoteMonitoring": enableRemoteMonitoring,
+            "enablePerformanceAlerts": enablePerformanceAlerts,
+            "temperatureThreshold": temperatureThreshold,
+            "enableTemperatureMonitoring": enableTemperatureMonitoring,
+            "enableFanSpeedMonitoring": enableFanSpeedMonitoring,
+            "fanSpeedThreshold": fanSpeedThreshold,
+            "enableThermalThrottlingAlert": enableThermalThrottlingAlert,
+            "showMonitorCPU": showMonitorCPU,
+            "showMonitorMemory": showMonitorMemory,
+            "showMonitorTemperature": showMonitorTemperature,
+            "showMonitorFanSpeed": showMonitorFanSpeed,
+            "showMonitorDisk": showMonitorDisk,
+            "showMonitorNetwork": showMonitorNetwork,
 
  // 文件传输设置
             "defaultTransferPath": defaultTransferPath,
@@ -438,6 +542,7 @@ public class SettingsManager: ObservableObject, Sendable {
             "keepTransferHistory": keepTransferHistory,
             "keepSystemAwakeDuringTransfer": keepSystemAwakeDuringTransfer,
             "scanTransferFilesForVirus": scanTransferFilesForVirus,
+            "transferSpeedLimitMBps": transferSpeedLimitMBps,
             "encryptionAlgorithm": encryptionAlgorithm,
             "scanLevel": scanLevel.rawValue,
 
@@ -582,7 +687,10 @@ public class SettingsManager: ObservableObject, Sendable {
         if let value = settings["connectionTimeout"] as? Int { connectionTimeout = value }
         if let value = settings["retryCount"] as? Int { retryCount = value }
         if let value = settings["enableConnectionEncryption"] as? Bool { enableConnectionEncryption = value }
-        if let value = settings["verifyCertificates"] as? Bool { verifyCertificates = value }
+        if let value = settings["verifyCertificates"] as? Bool {
+            verifyCertificates = value
+            enforceStrictCertificateValidationIfNeeded(context: "legacy import")
+        }
         if let value = settings["customServiceTypes"] as? [String] { customServiceTypes = value }
 
  // 设备设置
@@ -625,6 +733,28 @@ public class SettingsManager: ObservableObject, Sendable {
         if let value = settings["showTrendIndicators"] as? Bool { showTrendIndicators = value }
         if let value = settings["enableSoundAlerts"] as? Bool { enableSoundAlerts = value }
         if let value = settings["maxHistoryPoints"] as? Double { maxHistoryPoints = value }
+        if let value = settings["systemMonitorRetentionDays"] as? Int { systemMonitorRetentionDays = max(1, value) }
+        if let value = settings["systemMonitorChartType"] as? String,
+           let chartType = SystemMonitorChartType(rawValue: value) {
+            systemMonitorChartType = chartType
+        }
+        if let value = settings["systemMonitorSamplingPrecision"] as? String,
+           let samplingPrecision = SystemMonitorSamplingPrecision(rawValue: value) {
+            systemMonitorSamplingPrecision = samplingPrecision
+        }
+        if let value = settings["enableRemoteMonitoring"] as? Bool { enableRemoteMonitoring = value }
+        if let value = settings["enablePerformanceAlerts"] as? Bool { enablePerformanceAlerts = value }
+        if let value = settings["temperatureThreshold"] as? Double { temperatureThreshold = value }
+        if let value = settings["enableTemperatureMonitoring"] as? Bool { enableTemperatureMonitoring = value }
+        if let value = settings["enableFanSpeedMonitoring"] as? Bool { enableFanSpeedMonitoring = value }
+        if let value = settings["fanSpeedThreshold"] as? Double { fanSpeedThreshold = value }
+        if let value = settings["enableThermalThrottlingAlert"] as? Bool { enableThermalThrottlingAlert = value }
+        if let value = settings["showMonitorCPU"] as? Bool { showMonitorCPU = value }
+        if let value = settings["showMonitorMemory"] as? Bool { showMonitorMemory = value }
+        if let value = settings["showMonitorTemperature"] as? Bool { showMonitorTemperature = value }
+        if let value = settings["showMonitorFanSpeed"] as? Bool { showMonitorFanSpeed = value }
+        if let value = settings["showMonitorDisk"] as? Bool { showMonitorDisk = value }
+        if let value = settings["showMonitorNetwork"] as? Bool { showMonitorNetwork = value }
 
  // 文件传输设置
         if let value = settings["defaultTransferPath"] as? String { defaultTransferPath = value }
@@ -633,8 +763,13 @@ public class SettingsManager: ObservableObject, Sendable {
         if let value = settings["keepTransferHistory"] as? Bool { keepTransferHistory = value }
         if let value = settings["keepSystemAwakeDuringTransfer"] as? Bool { keepSystemAwakeDuringTransfer = value }
         if let value = settings["scanTransferFilesForVirus"] as? Bool { scanTransferFilesForVirus = value }
+        if let value = settings["transferSpeedLimitMBps"] as? Double { transferSpeedLimitMBps = value }
+        if let value = settings["transferSpeedLimitMBps"] as? Int { transferSpeedLimitMBps = Double(value) }
         if let value = settings["encryptionAlgorithm"] as? String { encryptionAlgorithm = value }
         if let value = settings["scanLevel"] as? String, let level = FileScanService.ScanLevel(rawValue: value) { scanLevel = level }
+
+        enforceStrictCertificateValidationIfNeeded(context: "legacy import payload")
+        applyRuntimeSettingsSnapshot()
     }
 
  /// 验证导入的设置数据
@@ -713,8 +848,31 @@ public class SettingsManager: ObservableObject, Sendable {
 
  // 系统监控设置
         systemMonitorRefreshInterval = settingsData.monitoringInterval
- // 注意：其他监控设置需要添加到SettingsManager
+        if let value = settingsData.showTrendIndicators { showTrendIndicators = value }
+        if let value = settingsData.maxHistoryPoints { maxHistoryPoints = value }
+        if let value = settingsData.systemMonitorRetentionDays { systemMonitorRetentionDays = max(1, value) }
+        if let value = settingsData.systemMonitorChartType, let chartType = SystemMonitorChartType(rawValue: value) {
+            systemMonitorChartType = chartType
+        }
+        if let value = settingsData.systemMonitorSamplingPrecision, let samplingPrecision = SystemMonitorSamplingPrecision(rawValue: value) {
+            systemMonitorSamplingPrecision = samplingPrecision
+        }
+        if let value = settingsData.enableRemoteMonitoring { enableRemoteMonitoring = value }
+        if let value = settingsData.enablePerformanceAlerts { enablePerformanceAlerts = value }
+        if let value = settingsData.temperatureThreshold { temperatureThreshold = value }
+        if let value = settingsData.enableTemperatureMonitoring { enableTemperatureMonitoring = value }
+        if let value = settingsData.enableFanSpeedMonitoring { enableFanSpeedMonitoring = value }
+        if let value = settingsData.fanSpeedThreshold { fanSpeedThreshold = value }
+        if let value = settingsData.enableThermalThrottlingAlert { enableThermalThrottlingAlert = value }
+        if let value = settingsData.showMonitorCPU { showMonitorCPU = value }
+        if let value = settingsData.showMonitorMemory { showMonitorMemory = value }
+        if let value = settingsData.showMonitorTemperature { showMonitorTemperature = value }
+        if let value = settingsData.showMonitorFanSpeed { showMonitorFanSpeed = value }
+        if let value = settingsData.showMonitorDisk { showMonitorDisk = value }
+        if let value = settingsData.showMonitorNetwork { showMonitorNetwork = value }
 
+        enforceStrictCertificateValidationIfNeeded(context: "structured import payload")
+        applyRuntimeSettingsSnapshot()
         logger.info("设置导入完成，来源版本: \(settingsData.appVersion)，导出时间: \(settingsData.exportDate)")
     }
 
@@ -826,6 +984,13 @@ public class SettingsManager: ObservableObject, Sendable {
     }
 
  // MARK: - 私有辅助方法
+
+    private func enforceStrictCertificateValidationIfNeeded(context: String) {
+        guard !verifyCertificates else { return }
+        logger.warning("检测到已关闭证书校验（\(context, privacy: .public)），已迁移为严格校验")
+        verifyCertificates = true
+        userDefaults.set(true, forKey: "Settings.VerifyCertificates")
+    }
 
  /// 计算缓存大小
     private func calculateCacheSize() -> Int64 {
@@ -1046,6 +1211,7 @@ public class SettingsManager: ObservableObject, Sendable {
         retryCount = userDefaults.integer(forKey: "Settings.RetryCount", defaultValue: 3)
         enableConnectionEncryption = userDefaults.bool(forKey: "Settings.EnableConnectionEncryption", defaultValue: true)
         verifyCertificates = userDefaults.bool(forKey: "Settings.VerifyCertificates", defaultValue: true)
+        enforceStrictCertificateValidationIfNeeded(context: "load settings")
         discoveryPassiveMode = userDefaults.bool(forKey: "Settings.DiscoveryPassiveMode", defaultValue: true)
         requireAuthorizationForConnection = userDefaults.bool(forKey: "Settings.RequireAuthorizationForConnection", defaultValue: true)
         enableWiFiAwareDiscovery = userDefaults.bool(forKey: "Settings.EnableWiFiAwareDiscovery", defaultValue: true)
@@ -1114,12 +1280,22 @@ public class SettingsManager: ObservableObject, Sendable {
         showTrendIndicators = userDefaults.bool(forKey: "Settings.ShowTrendIndicators", defaultValue: true)
         enableSoundAlerts = userDefaults.bool(forKey: "Settings.EnableSoundAlerts", defaultValue: false)
         maxHistoryPoints = userDefaults.double(forKey: "Settings.MaxHistoryPoints", defaultValue: 300.0)
+        systemMonitorRetentionDays = userDefaults.integer(forKey: "Settings.SystemMonitorRetentionDays", defaultValue: 7)
+        systemMonitorChartType = SystemMonitorChartType(rawValue: userDefaults.string(forKey: "Settings.SystemMonitorChartType") ?? "") ?? .line
+        systemMonitorSamplingPrecision = SystemMonitorSamplingPrecision(rawValue: userDefaults.string(forKey: "Settings.SystemMonitorSamplingPrecision") ?? "") ?? .normal
+        enableRemoteMonitoring = userDefaults.bool(forKey: "Settings.EnableRemoteMonitoring", defaultValue: false)
         enablePerformanceAlerts = userDefaults.bool(forKey: "Settings.EnablePerformanceAlerts", defaultValue: true)
         temperatureThreshold = userDefaults.double(forKey: "Settings.TemperatureThreshold", defaultValue: 80.0)
         enableTemperatureMonitoring = userDefaults.bool(forKey: "Settings.EnableTemperatureMonitoring", defaultValue: true)
         enableFanSpeedMonitoring = userDefaults.bool(forKey: "Settings.EnableFanSpeedMonitoring", defaultValue: true)
         fanSpeedThreshold = userDefaults.double(forKey: "Settings.FanSpeedThreshold", defaultValue: 4000.0)
         enableThermalThrottlingAlert = userDefaults.bool(forKey: "Settings.EnableThermalThrottlingAlert", defaultValue: true)
+        showMonitorCPU = userDefaults.bool(forKey: "Settings.ShowMonitorCPU", defaultValue: true)
+        showMonitorMemory = userDefaults.bool(forKey: "Settings.ShowMonitorMemory", defaultValue: true)
+        showMonitorTemperature = userDefaults.bool(forKey: "Settings.ShowMonitorTemperature", defaultValue: true)
+        showMonitorFanSpeed = userDefaults.bool(forKey: "Settings.ShowMonitorFanSpeed", defaultValue: true)
+        showMonitorDisk = userDefaults.bool(forKey: "Settings.ShowMonitorDisk", defaultValue: true)
+        showMonitorNetwork = userDefaults.bool(forKey: "Settings.ShowMonitorNetwork", defaultValue: true)
 
  // 文件传输设置
         defaultTransferPath = userDefaults.string(forKey: "Settings.DefaultTransferPath") ?? "~/Downloads"
@@ -1128,6 +1304,7 @@ public class SettingsManager: ObservableObject, Sendable {
         keepTransferHistory = userDefaults.bool(forKey: "Settings.KeepTransferHistory", defaultValue: true)
         keepSystemAwakeDuringTransfer = userDefaults.bool(forKey: "Settings.KeepSystemAwakeDuringTransfer", defaultValue: false)
         scanTransferFilesForVirus = userDefaults.bool(forKey: "Settings.ScanTransferFilesForVirus", defaultValue: false)
+        transferSpeedLimitMBps = userDefaults.double(forKey: "Settings.TransferSpeedLimitMBps", defaultValue: 0)
         encryptionAlgorithm = userDefaults.string(forKey: "Settings.EncryptionAlgorithm") ?? "AES-256"
         scanLevel = FileScanService.ScanLevel(rawValue: userDefaults.string(forKey: "Settings.ScanLevel") ?? "") ?? .standard
         enableZeroCopyBGRA = userDefaults.bool(forKey: "Settings.EnableZeroCopyBGRA", defaultValue: false)
@@ -1156,14 +1333,21 @@ public class SettingsManager: ObservableObject, Sendable {
 
         $showDeviceDetails.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.ShowDeviceDetails")
+            NotificationCenter.default.post(name: NSNotification.Name("DeviceDisplayModeChanged"), object: nil)
         }.store(in: &settingsCancellables)
 
         $showConnectionStats.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.ShowConnectionStats")
+            NotificationCenter.default.post(name: NSNotification.Name("ConnectionStatsDisplayChanged"), object: nil)
         }.store(in: &settingsCancellables)
 
         $compactMode.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.CompactMode")
+            NotificationCenter.default.post(
+                name: NSNotification.Name("LayoutModeChanged"),
+                object: nil,
+                userInfo: ["isCompact": value]
+            )
         }.store(in: &settingsCancellables)
 
         // Theme color persistence (namespaced + legacy compatibility)
@@ -1177,6 +1361,11 @@ public class SettingsManager: ObservableObject, Sendable {
             if let hex = Self.hexRGBA(from: value) {
                 self.userDefaults.set(hex, forKey: "Settings.ThemeColorHex")
             }
+            NotificationCenter.default.post(
+                name: NSNotification.Name("ThemeColorChanged"),
+                object: nil,
+                userInfo: ["color": value]
+            )
         }.store(in: &settingsCancellables)
 
  // 设备列表排序权重观察者
@@ -1218,6 +1407,10 @@ public class SettingsManager: ObservableObject, Sendable {
 
         $scanTransferFilesForVirus.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.ScanTransferFilesForVirus")
+        }.store(in: &settingsCancellables)
+
+        $transferSpeedLimitMBps.sink { [weak self] value in
+            self?.userDefaults.set(max(0, value), forKey: "Settings.TransferSpeedLimitMBps")
         }.store(in: &settingsCancellables)
 
         $scanLevel.sink { [weak self] value in
@@ -1281,7 +1474,16 @@ public class SettingsManager: ObservableObject, Sendable {
         }.store(in: &settingsCancellables)
 
         $verifyCertificates.sink { [weak self] value in
-            self?.userDefaults.set(value, forKey: "Settings.VerifyCertificates")
+            guard let self else { return }
+            if !value {
+                self.logger.warning("检测到证书校验被关闭请求，已强制保持严格校验")
+                self.userDefaults.set(true, forKey: "Settings.VerifyCertificates")
+                if self.verifyCertificates != true {
+                    self.verifyCertificates = true
+                }
+                return
+            }
+            self.userDefaults.set(true, forKey: "Settings.VerifyCertificates")
         }.store(in: &settingsCancellables)
 
         $customServiceTypes.sink { [weak self] value in
@@ -1344,6 +1546,7 @@ public class SettingsManager: ObservableObject, Sendable {
 
         $saveNetworkLogs.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.SaveNetworkLogs")
+            NetworkActivityLogStore.shared.setEnabled(value)
         }.store(in: &settingsCancellables)
 
         $logLevel.sink { [weak self] value in
@@ -1463,6 +1666,18 @@ public class SettingsManager: ObservableObject, Sendable {
         $maxHistoryPoints.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.MaxHistoryPoints")
         }.store(in: &settingsCancellables)
+        $systemMonitorRetentionDays.sink { [weak self] value in
+            self?.userDefaults.set(max(1, value), forKey: "Settings.SystemMonitorRetentionDays")
+        }.store(in: &settingsCancellables)
+        $systemMonitorChartType.sink { [weak self] value in
+            self?.userDefaults.set(value.rawValue, forKey: "Settings.SystemMonitorChartType")
+        }.store(in: &settingsCancellables)
+        $systemMonitorSamplingPrecision.sink { [weak self] value in
+            self?.userDefaults.set(value.rawValue, forKey: "Settings.SystemMonitorSamplingPrecision")
+        }.store(in: &settingsCancellables)
+        $enableRemoteMonitoring.sink { [weak self] value in
+            self?.userDefaults.set(value, forKey: "Settings.EnableRemoteMonitoring")
+        }.store(in: &settingsCancellables)
 
         $enablePerformanceAlerts.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.EnablePerformanceAlerts")
@@ -1481,6 +1696,24 @@ public class SettingsManager: ObservableObject, Sendable {
         }.store(in: &settingsCancellables)
         $enableThermalThrottlingAlert.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.EnableThermalThrottlingAlert")
+        }.store(in: &settingsCancellables)
+        $showMonitorCPU.sink { [weak self] value in
+            self?.userDefaults.set(value, forKey: "Settings.ShowMonitorCPU")
+        }.store(in: &settingsCancellables)
+        $showMonitorMemory.sink { [weak self] value in
+            self?.userDefaults.set(value, forKey: "Settings.ShowMonitorMemory")
+        }.store(in: &settingsCancellables)
+        $showMonitorTemperature.sink { [weak self] value in
+            self?.userDefaults.set(value, forKey: "Settings.ShowMonitorTemperature")
+        }.store(in: &settingsCancellables)
+        $showMonitorFanSpeed.sink { [weak self] value in
+            self?.userDefaults.set(value, forKey: "Settings.ShowMonitorFanSpeed")
+        }.store(in: &settingsCancellables)
+        $showMonitorDisk.sink { [weak self] value in
+            self?.userDefaults.set(value, forKey: "Settings.ShowMonitorDisk")
+        }.store(in: &settingsCancellables)
+        $showMonitorNetwork.sink { [weak self] value in
+            self?.userDefaults.set(value, forKey: "Settings.ShowMonitorNetwork")
         }.store(in: &settingsCancellables)
 
  // 健康提醒阈值观察者

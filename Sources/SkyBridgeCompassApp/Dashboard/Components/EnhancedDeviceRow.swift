@@ -5,6 +5,7 @@ import SkyBridgeCore
 public struct EnhancedDeviceRow: View {
     let device: DiscoveredDevice
     let onConnect: () -> Void
+    @StateObject private var settingsManager = SettingsManager.shared
     
     public init(device: DiscoveredDevice, onConnect: @escaping () -> Void) {
         self.device = device
@@ -12,22 +13,24 @@ public struct EnhancedDeviceRow: View {
     }
     
     public var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: settingsManager.compactMode ? 8 : 12) {
             HStack {
  // 设备图标
                 Image(systemName: deviceIcon)
-                    .font(.title2)
+                    .font(settingsManager.compactMode ? .body : .title2)
                     .foregroundColor(deviceColor)
-                    .frame(width: 32, height: 32)
+                    .frame(width: settingsManager.compactMode ? 24 : 32, height: settingsManager.compactMode ? 24 : 32)
                 
                 VStack(alignment: .leading, spacing: 4) {
                     Text(device.name)
                         .font(.headline)
                         .foregroundColor(.white)
                     
-                    Text(device.ipv4 ?? device.ipv6 ?? LocalizationManager.shared.localizedString("device.unknownIP"))
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                    if settingsManager.showDeviceDetails {
+                        Text(device.ipv4 ?? device.ipv6 ?? LocalizationManager.shared.localizedString("device.unknownIP"))
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
                 }
                 
                 Spacer()
@@ -39,7 +42,7 @@ public struct EnhancedDeviceRow: View {
             }
             
  // 连接类型标签（新增）
-            if !device.connectionTypes.isEmpty {
+            if settingsManager.showDeviceDetails && !device.connectionTypes.isEmpty {
                 HStack(spacing: 6) {
                     ForEach(Array(device.connectionTypes.sorted(by: { $0.rawValue < $1.rawValue })), id: \.self) { connectionType in
                         HStack(spacing: 4) {
@@ -58,16 +61,28 @@ public struct EnhancedDeviceRow: View {
             }
             
  // 设备信息
-            HStack {
-                Label(LocalizationManager.shared.localizedString("device.services"), systemImage: "info.circle")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                
-                Spacer()
-                
-                Text("\(device.services.count) \(LocalizationManager.shared.localizedString("device.servicesCount"))")
-                    .font(.caption)
-                    .foregroundColor(.white)
+            if settingsManager.showConnectionStats || settingsManager.showDeviceRSSI {
+                HStack {
+                    if settingsManager.showConnectionStats {
+                        Label(LocalizationManager.shared.localizedString("device.services"), systemImage: "info.circle")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+
+                    if settingsManager.showDeviceRSSI, let signal = device.signalStrength {
+                        Text("RSSI \(Int(signal))%")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    
+                    Spacer()
+                    
+                    if settingsManager.showConnectionStats {
+                        Text("\(device.services.count) \(LocalizationManager.shared.localizedString("device.servicesCount"))")
+                            .font(.caption)
+                            .foregroundColor(.white)
+                    }
+                }
             }
             
  // 连接按钮
@@ -88,7 +103,7 @@ public struct EnhancedDeviceRow: View {
             }
             .buttonStyle(PlainButtonStyle())
         }
-        .padding(16)
+        .padding(settingsManager.compactMode ? 10 : 16)
         .background(
             RoundedRectangle(cornerRadius: 12)
                 .fill(Color(red: 20/255, green: 25/255, blue: 45/255))
@@ -148,4 +163,3 @@ public struct EnhancedDeviceRow: View {
         (device.ipv4 != nil || device.ipv6 != nil) ? .green : .red
     }
 }
-
