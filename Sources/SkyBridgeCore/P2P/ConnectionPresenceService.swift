@@ -16,7 +16,7 @@ public final class ConnectionPresenceService: ObservableObject {
         public let id: String // peerId (e.g. bonjour:<name>@local.)
         public let displayName: String
         public let address: String? // IP/Host address for file transfer
-        public let cryptoKind: String // ApplePQC / Hybrid / Classic (user-facing category)
+        public let cryptoKind: String // X-Wing / Apple PQC / liboqs / Classic (user-facing category)
         public let suite: String // e.g. ML-KEM-768, X-Wing, X25519
         public let connectedAt: Date
         
@@ -118,5 +118,4 @@ public final class ConnectionPresenceService: ObservableObject {
         logger.info("⏹️ presence disconnected: peer=\(peerId, privacy: .public)")
     }
 }
-
 

@@ -149,10 +149,11 @@ public struct TopNavigationBarView: View {
         guard let connectedPeer else {
             return nil
         }
-        if let kind = connectedPeer.lastCryptoKind, let suite = connectedPeer.lastCryptoSuite {
-            return "\(kind) · \(suite) · \(connectedPeer.guardStatus ?? "守护中")"
-        }
-        return connectedPeer.name
+        return ConnectionCryptoPresentation.detailText(
+            kind: connectedPeer.lastCryptoKind,
+            suite: connectedPeer.lastCryptoSuite,
+            guardStatus: connectedPeer.guardStatus ?? "守护中"
+        ) ?? connectedPeer.name
     }
 
  // 实时FPS展示小控件（位于顶部导航栏中间）

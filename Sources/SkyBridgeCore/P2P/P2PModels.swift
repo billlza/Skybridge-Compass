@@ -669,15 +669,12 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
                 "🔐 Session assurance: \(assurance.rawValue, privacy: .public) suite=\(sessionKeys.negotiatedSuite.rawValue, privacy: .public) requirePQC=\(policy.requirePQC, privacy: .public) bootstrapAssisted=\(usedBootstrapAssistedPath, privacy: .public)"
             )
             
-            // PQC UI Fix: Immediately update presence service with negotiated suite
-            // This ensures UI shows "ApplePQC" immediately if negotiated, or "Classic" if not yet upgraded.
             await MainActor.run {
                 let suite = sessionKeys.negotiatedSuite
-                let cryptoKind: String = {
-                    if suite.isPQCGroup { return "ApplePQC" }
-                    if suite.isHybrid { return "Hybrid" }
-                    return "Classic"
-                }()
+                let cryptoKind = ConnectionCryptoPresentation.modeLabel(
+                    kind: nil,
+                    suite: suite.rawValue
+                ) ?? suite.rawValue
                 
                 // Use explicit logging to confirm UI update
                 SkyBridgeLogger.p2p.info("✅ Handshake Success. Updating UI Presence: \(cryptoKind) / \(suite.rawValue)")
@@ -966,13 +963,11 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         }()
         handshakeDriverLock.withLock { $0 = nil }
         
-        // Notify UI that rekey succeeded, updating the displayed crypto kind
         let suite = rekeyed.negotiatedSuite
-        let cryptoKind: String = {
-            if suite.isHybrid { return "Hybrid" }
-            if suite.isPQCGroup { return "ApplePQC" }
-            return "Classic"
-        }()
+        let cryptoKind = ConnectionCryptoPresentation.modeLabel(
+            kind: nil,
+            suite: suite.rawValue
+        ) ?? suite.rawValue
         await MainActor.run {
             ConnectionPresenceService.shared.markConnected(
                 peerId: self.handshakePeer.deviceId,

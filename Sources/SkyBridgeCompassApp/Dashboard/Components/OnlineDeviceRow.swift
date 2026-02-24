@@ -62,7 +62,7 @@ public struct OnlineDeviceRow: View {
                     .frame(width: 8, height: 8)
                     
                     if settingsManager.showConnectionStats {
-                        Text(device.connectionStatus.rawValue)
+                        Text(statusText)
                             .font(.caption2)
                             .foregroundColor(.secondary)
                     }
@@ -126,7 +126,7 @@ public struct OnlineDeviceRow: View {
                     HStack {
                         Image(systemName: device.connectionStatus == .connected ? "link" : "link.circle")
                             .font(.caption)
-                        Text(device.connectionStatus == .connected ? LocalizationManager.shared.localizedString("device.status.connected") : LocalizationManager.shared.localizedString("device.action.connect"))
+                        Text(device.connectionStatus == .connected ? connectedStatusText : LocalizationManager.shared.localizedString("device.action.connect"))
                             .font(.caption.weight(.medium))
                     }
                     .foregroundColor(.white)
@@ -150,6 +150,25 @@ public struct OnlineDeviceRow: View {
                         .stroke(statusBorderColor, lineWidth: device.isLocalDevice ? 2 : 1)
                 )
         )
+    }
+
+    private var baseConnectedText: String {
+        LocalizationManager.shared.localizedString("device.status.connected")
+    }
+
+    private var connectedStatusText: String {
+        ConnectionCryptoPresentation.connectedStatusText(
+            kind: device.lastCryptoKind,
+            suite: device.lastCryptoSuite,
+            baseConnectedText: baseConnectedText
+        )
+    }
+
+    private var statusText: String {
+        guard device.connectionStatus == .connected else {
+            return device.connectionStatus.rawValue
+        }
+        return connectedStatusText
     }
     
     private func connectionTypeColor(for type: DeviceConnectionType) -> Color {

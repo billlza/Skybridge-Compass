@@ -1702,9 +1702,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         let endpointDescriptionForPresence = stableEndpointLabel(for: connection.endpoint)
 
         func cryptoKind(for suite: CryptoSuite) -> String {
-            if suite.isHybrid { return "Hybrid" }
-            if suite.isPQCGroup { return "ApplePQC" }
-            return "Classic"
+            ConnectionCryptoPresentation.modeLabel(kind: nil, suite: suite.rawValue) ?? suite.rawValue
         }
 
         func displayNameFromPeerId(_ peerId: String) -> String {

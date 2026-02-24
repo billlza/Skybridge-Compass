@@ -968,7 +968,7 @@ public struct EnhancedDeviceDiscoveryView: View {
                     }
 
                     if settingsManager.showConnectionStats {
-                        Text(device.connectionStatus.rawValue)
+                        Text(statusText)
                             .font(.caption2)
                             .foregroundColor(.secondary)
                     }
@@ -979,12 +979,9 @@ public struct EnhancedDeviceDiscoveryView: View {
                             .foregroundColor(.secondary)
                     }
 
-                    // Crypto/guard summary (best-effort)
                     if settingsManager.showConnectionStats,
-                       let kind = device.lastCryptoKind,
-                       let suite = device.lastCryptoSuite,
-                       device.connectionStatus == .connected {
-                        Text("\(kind) · \(suite) · \(device.guardStatus ?? "守护中")")
+                       let detail = connectionDetailText {
+                        Text(detail)
                         .font(.caption2)
                         .foregroundColor(.secondary)
                     }
@@ -1010,6 +1007,26 @@ public struct EnhancedDeviceDiscoveryView: View {
             .overlay(
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .stroke(device.isLocalDevice ? Color.blue : themeConfiguration.borderColor, lineWidth: device.isLocalDevice ? 2 : 1)
+            )
+        }
+
+        private var statusText: String {
+            guard device.connectionStatus == .connected else {
+                return device.connectionStatus.rawValue
+            }
+            return ConnectionCryptoPresentation.connectedStatusText(
+                kind: device.lastCryptoKind,
+                suite: device.lastCryptoSuite,
+                baseConnectedText: device.connectionStatus.rawValue
+            )
+        }
+
+        private var connectionDetailText: String? {
+            guard device.connectionStatus == .connected else { return nil }
+            return ConnectionCryptoPresentation.detailText(
+                kind: device.lastCryptoKind,
+                suite: device.lastCryptoSuite,
+                guardStatus: device.guardStatus ?? "守护中"
             )
         }
 

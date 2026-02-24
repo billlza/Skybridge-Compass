@@ -349,16 +349,18 @@ final class DashboardViewModel: ObservableObject {
                 if let rekey = rekeyStatusByPeerId[newest.id] {
                     self.connectionDetail = "Rekey 中 · \(rekey.fromKind)·\(rekey.fromSuite) → \(rekey.toKind)·\(rekey.toSuite)"
                 } else {
-                    self.connectionDetail = "\(newest.cryptoKind) · \(newest.suite) · 守护中"
+                    self.connectionDetail = ConnectionCryptoPresentation.detailText(
+                        kind: newest.cryptoKind,
+                        suite: newest.suite,
+                        guardStatus: "守护中"
+                    ) ?? newest.displayName
                 }
             } else if let newestUnified = unifiedLinkedPeers.sorted(by: { ($0.lastConnectedAt ?? .distantPast) > ($1.lastConnectedAt ?? .distantPast) }).first {
-                if let kind = newestUnified.lastCryptoKind,
-                   let suite = newestUnified.lastCryptoSuite {
-                    let guardStatus = newestUnified.guardStatus ?? "守护中"
-                    self.connectionDetail = "\(kind) · \(suite) · \(guardStatus)"
-                } else {
-                    self.connectionDetail = newestUnified.name
-                }
+                self.connectionDetail = ConnectionCryptoPresentation.detailText(
+                    kind: newestUnified.lastCryptoKind,
+                    suite: newestUnified.lastCryptoSuite,
+                    guardStatus: newestUnified.guardStatus ?? "守护中"
+                ) ?? newestUnified.name
             } else {
                 self.connectionDetail = nil
             }
