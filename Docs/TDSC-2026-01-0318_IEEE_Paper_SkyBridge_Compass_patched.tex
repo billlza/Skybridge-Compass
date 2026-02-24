@@ -277,7 +277,8 @@ typically pushed into application glue, making downgrade decisions hard
 to specify, prove, or audit post hoc. Our contract makes migration
 semantics part of the security surface: (D2) timeout and other
 network-derived failures are never fallback-eligible, so an active
-adversary cannot create a classic downgrade edge by suppression; (D3)
+adversary, under this default-policy gate and threat model, cannot
+create a classic downgrade edge by suppression; (D3)
 any policy-allowed downgrade action emits a minimal replayable evidence
 tuple sufficient to re-derive ``what happened and why'' under the pinned
 trust record and policy mode. The policy-bound, deterministic state

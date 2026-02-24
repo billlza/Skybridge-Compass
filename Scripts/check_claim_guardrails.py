@@ -118,6 +118,75 @@ def required_phrase_checks(main_text: str, main_file: Path) -> List[Violation]:
     return violations
 
 
+def check_claim_manifest_contract(path: Path) -> List[Violation]:
+    violations: List[Violation] = []
+    if not path.exists():
+        violations.append(
+            Violation(
+                rule="missing_claim_manifest",
+                file=str(path),
+                line=1,
+                text="",
+                detail="claim manifest file is missing",
+            )
+        )
+        return violations
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        violations.append(
+            Violation(
+                rule="claim_manifest_parse_error",
+                file=str(path),
+                line=1,
+                text="",
+                detail=f"claim manifest must be JSON-compatible YAML: {exc}",
+            )
+        )
+        return violations
+
+    claims = payload.get("claims")
+    if not isinstance(claims, list) or not claims:
+        violations.append(
+            Violation(
+                rule="empty_claim_manifest",
+                file=str(path),
+                line=1,
+                text="",
+                detail="claim manifest must define a non-empty `claims` list",
+            )
+        )
+        return violations
+
+    for idx, claim in enumerate(claims, start=1):
+        scope = str(claim.get("scope", "")).strip() if isinstance(claim, dict) else ""
+        assumptions = claim.get("assumptions") if isinstance(claim, dict) else None
+
+        if not scope:
+            violations.append(
+                Violation(
+                    rule="missing_claim_scope",
+                    file=str(path),
+                    line=idx,
+                    text="",
+                    detail="each claim must declare non-empty `scope`",
+                )
+            )
+        if not isinstance(assumptions, list) or not assumptions or any(not str(a).strip() for a in assumptions):
+            violations.append(
+                Violation(
+                    rule="missing_claim_assumptions",
+                    file=str(path),
+                    line=idx,
+                    text="",
+                    detail="each claim must declare non-empty `assumptions` list",
+                )
+            )
+
+    return violations
+
+
 def build_markdown_report(artifact_date: str, violations: List[Violation], checked_files: List[Path]) -> str:
     status = "PASS" if not violations else "FAIL"
     out: List[str] = []
@@ -152,12 +221,13 @@ def main() -> int:
         "--files",
         nargs="+",
         default=[
-            "Docs/tdsc_submission/paper.tex",
+            "Docs/TDSC-2026-01-0318_IEEE_Paper_SkyBridge_Compass_patched.tex",
             "Docs/TDSC-2026-01-0318_supplementary.tex",
         ],
     )
     parser.add_argument("--out-json")
     parser.add_argument("--out-md")
+    parser.add_argument("--claim-manifest", default="Docs/claim_manifest.yaml")
     args = parser.parse_args()
 
     checked_files = [Path(f) for f in args.files]
@@ -180,6 +250,8 @@ def main() -> int:
     if main_file.exists():
         main_text = main_file.read_text(encoding="utf-8", errors="ignore")
         violations.extend(required_phrase_checks(main_text, main_file))
+
+    violations.extend(check_claim_manifest_contract(Path(args.claim_manifest)))
 
     out_json = Path(args.out_json or f"Artifacts/claim_guardrails_{args.artifact_date}.json")
     out_md = Path(args.out_md or f"Artifacts/claim_guardrails_{args.artifact_date}.md")
