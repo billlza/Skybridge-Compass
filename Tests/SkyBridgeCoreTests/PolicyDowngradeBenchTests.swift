@@ -59,7 +59,7 @@ final class PolicyDowngradeBenchTests: XCTestCase {
                 ) { strategy, _ in
                     let count = await attemptCounter.next()
                     if count == 1 {
-                        throw HandshakeError.failed(.suiteNotSupported)
+                        throw HandshakeError.failed(.suiteNegotiationFailed)
                     }
                     if strategy == .classicOnly {
                         await tracker.recordClassicAttempt()

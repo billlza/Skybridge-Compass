@@ -314,7 +314,7 @@ final class iOSHandshakeEntryAlignmentPropertyTests: XCTestCase {
     
  /// **Feature: iOS Handshake Entry Alignment, Property 4: Fallback Whitelist/Blacklist**
  ///
- /// - Whitelist errors allow fallback: pqcProviderUnavailable, suiteNotSupported, suiteNegotiationFailed
+ /// - Whitelist errors allow fallback: pqcProviderUnavailable, suiteNegotiationFailed
  /// - Blacklist errors forbid fallback: timeout, invalidMessageFormat, signatureVerificationFailed
  ///
  /// **Validates: Requirements 4.3, 4.4, 4.5**
@@ -322,12 +322,12 @@ final class iOSHandshakeEntryAlignmentPropertyTests: XCTestCase {
  // Whitelist errors (should allow fallback)
         let whitelistErrors: [HandshakeFailureReason] = [
             .pqcProviderUnavailable,
-            .suiteNotSupported,
             .suiteNegotiationFailed
         ]
         
  // Blacklist errors (should NOT allow fallback)
         let blacklistErrors: [HandshakeFailureReason] = [
+            .suiteNotSupported,
             .timeout,
             .invalidMessageFormat("test"),
             .signatureVerificationFailed,
@@ -373,7 +373,6 @@ final class iOSHandshakeEntryAlignmentPropertyTests: XCTestCase {
     func testProperty4_2_FallbackOccursForWhitelist() async throws {
         let whitelistErrors: [HandshakeFailureReason] = [
             .pqcProviderUnavailable,
-            .suiteNotSupported,
             .suiteNegotiationFailed
         ]
         
@@ -417,6 +416,7 @@ final class iOSHandshakeEntryAlignmentPropertyTests: XCTestCase {
  /// **Validates: Requirements 4.3, 4.4, 4.5**
     func testProperty4_3_NoFallbackForBlacklist() async throws {
         let blacklistErrors: [HandshakeFailureReason] = [
+            .suiteNotSupported,
             .timeout,
             .signatureVerificationFailed,
             .keyConfirmationFailed,

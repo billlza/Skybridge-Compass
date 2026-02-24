@@ -235,8 +235,8 @@ final class ProtocolSignatureRegressionTests: XCTestCase {
         XCTAssertTrue(TwoAttemptHandshakeManager.isPQCUnavailableError(.pqcProviderUnavailable),
             "pqcProviderUnavailable SHOULD trigger fallback")
         
-        XCTAssertTrue(TwoAttemptHandshakeManager.isPQCUnavailableError(.suiteNotSupported),
-            "suiteNotSupported SHOULD trigger fallback")
+        XCTAssertFalse(TwoAttemptHandshakeManager.isPQCUnavailableError(.suiteNotSupported),
+            "suiteNotSupported MUST be blocked from fallback")
         
         XCTAssertTrue(TwoAttemptHandshakeManager.isPQCUnavailableError(.suiteNegotiationFailed),
             "suiteNegotiationFailed SHOULD trigger fallback")

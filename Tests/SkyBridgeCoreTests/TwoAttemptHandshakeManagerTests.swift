@@ -160,10 +160,10 @@ final class TwoAttemptHandshakeManagerTests: XCTestCase {
         XCTAssertTrue(result, "pqcProviderUnavailable should trigger fallback")
     }
     
- /// Test suiteNotSupported DOES trigger fallback
-    func testIsPQCUnavailableError_SuiteNotSupported_ReturnsTrue() {
+ /// Test suiteNotSupported is blocked and does NOT trigger fallback
+    func testIsPQCUnavailableError_SuiteNotSupported_ReturnsFalse() {
         let result = TwoAttemptHandshakeManager.isPQCUnavailableError(.suiteNotSupported)
-        XCTAssertTrue(result, "suiteNotSupported should trigger fallback")
+        XCTAssertFalse(result, "suiteNotSupported should be blocked from fallback")
     }
     
  /// Test suiteNegotiationFailed DOES trigger fallback

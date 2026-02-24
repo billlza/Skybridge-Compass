@@ -118,14 +118,16 @@ public struct TwoAttemptHandshakeManager: Sendable {
 
  /// 判断是否允许 fallback
  ///
-/// ** 9.2**: 实现 fallback 条件白名单/黑名单（downgrade resistance）
- /// - 允许原因白名单：pqcProviderUnavailable, suiteNotSupported, suiteNegotiationFailed
+ /// ** 9.2**: 实现 fallback 条件白名单/黑名单（downgrade resistance）
+ /// - 允许原因白名单：pqcProviderUnavailable, suiteNegotiationFailed
  /// - 禁止原因黑名单：timeout, suiteSignatureMismatch, signatureVerificationFailed, 认证失败
     private static func shouldAllowFallback(_ reason: HandshakeFailureReason) -> Bool {
  // 白名单：明确的 PQC 不支持错误
         switch reason {
-        case .pqcProviderUnavailable, .suiteNotSupported, .suiteNegotiationFailed:
+        case .pqcProviderUnavailable, .suiteNegotiationFailed:
             return true
+        case .suiteNotSupported:
+            return false
  // 黑名单：安全相关错误，不允许降级
         case .timeout, .signatureVerificationFailed,
              .replayDetected, .keyConfirmationFailed:
@@ -330,8 +332,10 @@ public struct TwoAttemptHandshakeManager: Sendable {
 
     private static func shouldAttemptPQCBridgeRetry(_ reason: HandshakeFailureReason) -> Bool {
         switch reason {
-        case .pqcProviderUnavailable, .suiteNotSupported, .suiteNegotiationFailed:
+        case .pqcProviderUnavailable, .suiteNegotiationFailed:
             return true
+        case .suiteNotSupported:
+            return false
         default:
             return false
         }
@@ -473,11 +477,14 @@ public struct TwoAttemptHandshakeManager: Sendable {
  /// - Returns: 是否是 PQC 不可用错误
     public static func isPQCUnavailableError(_ reason: HandshakeFailureReason) -> Bool {
         switch reason {
-        case .pqcProviderUnavailable, .suiteNotSupported, .suiteNegotiationFailed:
+        case .pqcProviderUnavailable, .suiteNegotiationFailed:
  // 明确的 PQC 不支持错误，允许降级
             return true
+        case .suiteNotSupported:
+ // unknown/unsupported suite MUST be blocked and never fallback-eligible
+            return false
         case .timeout:
- // 超时不允许降级（防止攻击者用丢包强制降级）
+// 超时不允许降级（防止攻击者用丢包强制降级）
             return false
         case .cancelled, .peerRejected, .cryptoError, .transportError,
              .versionMismatch, .signatureVerificationFailed, .invalidMessageFormat,

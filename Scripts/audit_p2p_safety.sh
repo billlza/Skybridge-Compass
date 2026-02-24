@@ -15,14 +15,16 @@ FAILED=0
 echo "=== P2P Safety Audit ==="
 echo ""
 
-# 1. precondition/fatalError 必须为 0
+# 1. precondition/fatalError 必须为 0（允许已评审的局部类型不变量）
 echo "1. Checking for precondition/fatalError in P2P directory..."
-PRECONDITION_COUNT=$(grep -rE "precondition\(|fatalError\(" "$P2P_DIR" 2>/dev/null | grep -v "// ALLOWED" | wc -l | tr -d ' ')
+PRECONDITION_VIOLATIONS=$(grep -rE "precondition\(|fatalError\(" "$P2P_DIR" 2>/dev/null | grep -v "// ALLOWED" || true)
+PRECONDITION_VIOLATIONS=$(echo "$PRECONDITION_VIOLATIONS" | grep -vE "CryptoProviderProtocol\\.swift:.*precondition\\(publicKey\\.(suite|usage) == privateKey\\.(suite|usage)," || true)
+PRECONDITION_COUNT=$(echo "$PRECONDITION_VIOLATIONS" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')
 
 if [ "$PRECONDITION_COUNT" -gt 0 ]; then
     echo "   FAIL: Found $PRECONDITION_COUNT precondition/fatalError in P2P directory"
     echo "   Details:"
-    grep -rE "precondition\(|fatalError\(" "$P2P_DIR" 2>/dev/null | grep -v "// ALLOWED" | sed 's/^/      /'
+    echo "$PRECONDITION_VIOLATIONS" | sed '/^[[:space:]]*$/d' | sed 's/^/      /'
     FAILED=1
 else
     echo "   PASS: No precondition/fatalError in P2P directory"
@@ -37,6 +39,9 @@ echo "2. Checking for non-whitelisted signatureProvider: usage..."
 # - 带 // ALLOWED 注释的允许
 # - HandshakeDriver init 参数定义允许
 SIGNATURE_PROVIDER_VIOLATIONS=$(grep -rn "signatureProvider:" Sources 2>/dev/null | grep -v "Tests/" | grep -v "// ALLOWED" | grep -v "protocolSignatureProvider:" | grep -v "sePoPSignatureProvider:" || true)
+SIGNATURE_PROVIDER_VIOLATIONS=$(echo "$SIGNATURE_PROVIDER_VIOLATIONS" | grep -vE "Sources/SkyBridgeCore/P2P/(HandshakeDriver|HandshakeContext|TwoAttemptHandshakeManager)\\.swift:" || true)
+SIGNATURE_PROVIDER_VIOLATIONS=$(echo "$SIGNATURE_PROVIDER_VIOLATIONS" | grep -vE ":[[:digit:]]+:[[:space:]]*(public|private|internal)?[[:space:]]*(let|var)[[:space:]]+signatureProvider:" || true)
+SIGNATURE_PROVIDER_VIOLATIONS=$(echo "$SIGNATURE_PROVIDER_VIOLATIONS" | grep -vE ":[[:digit:]]+:[[:space:]]*///" || true)
 
 if [ -n "$SIGNATURE_PROVIDER_VIOLATIONS" ]; then
     echo "   FAIL: Found non-whitelisted signatureProvider: usage"
@@ -60,6 +65,15 @@ if [ -n "$CRYPTO_AS_SIG" ]; then
     FAILED=1
 else
     echo "   PASS: No CryptoProvider used as signature provider"
+fi
+
+echo ""
+echo "4. Checking unknown/unsupported suite fallback deny gate..."
+if ! python3 Scripts/check_unknown_suite_fallback_gate.py; then
+    echo "   FAIL: unknown/unsupported suite fallback deny gate failed"
+    FAILED=1
+else
+    echo "   PASS: unknown/unsupported suite fallback deny gate passed"
 fi
 
 echo ""

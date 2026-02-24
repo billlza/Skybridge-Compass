@@ -21,7 +21,7 @@ final class DowngradeEventTests: XCTestCase {
                 preferPQC: true,
                 policy: .strictPQC
             ) { _, _ in
-                throw HandshakeError.failed(.suiteNotSupported)
+                throw HandshakeError.failed(.suiteNegotiationFailed)
             }
             XCTFail("Expected strictPQC to throw")
         } catch {
@@ -49,7 +49,7 @@ final class DowngradeEventTests: XCTestCase {
             policy: .default
         ) { strategy, _ in
             if strategy == .pqcOnly {
-                throw HandshakeError.failed(.suiteNotSupported)
+                throw HandshakeError.failed(.suiteNegotiationFailed)
             }
             return Self.makeSessionKeys()
         }
@@ -58,7 +58,7 @@ final class DowngradeEventTests: XCTestCase {
 
         let capturedContext = await contextBox.get()
         XCTAssertEqual(capturedContext["deviceId"], "event-test-device")
-        XCTAssertEqual(capturedContext["reason"], String(describing: HandshakeFailureReason.suiteNotSupported))
+        XCTAssertEqual(capturedContext["reason"], String(describing: HandshakeFailureReason.suiteNegotiationFailed))
         XCTAssertEqual(capturedContext["strategy"], HandshakeAttemptStrategy.classicOnly.rawValue)
     }
 

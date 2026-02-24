@@ -17,7 +17,7 @@ final class TwoAttemptHandshakeManagerPolicyTests: XCTestCase {
                 await strategyTracker.record(strategy)
                 let count = await tracker.increment()
                 if count == 1 {
-                    throw HandshakeError.failed(.suiteNotSupported)
+                    throw HandshakeError.failed(.suiteNegotiationFailed)
                 }
                 return Self.makeSessionKeys()
             }
@@ -42,7 +42,7 @@ final class TwoAttemptHandshakeManagerPolicyTests: XCTestCase {
             await strategyTracker.record(strategy)
             let count = await tracker.increment()
             if count == 1 {
-                throw HandshakeError.failed(.suiteNotSupported)
+                throw HandshakeError.failed(.suiteNegotiationFailed)
             }
             return Self.makeSessionKeys()
         }
