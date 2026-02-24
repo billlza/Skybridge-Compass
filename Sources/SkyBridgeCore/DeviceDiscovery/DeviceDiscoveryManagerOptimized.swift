@@ -2015,13 +2015,13 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
 
                                 // Reply with our KEM identity public keys (bootstrap for iOS initiator).
                                 let provider = CryptoProviderFactory.make(policy: .preferPQC)
-                                let suites = provider.supportedSuites.filter { $0.isPQCGroup }
                                 let km = DeviceIdentityKeyManager.shared
-                                var kemKeys: [KEMPublicKeyInfo] = []
-                                for s in suites {
-                                    if let pk = try? await km.getKEMPublicKey(for: s, provider: provider) {
-                                        kemKeys.append(KEMPublicKeyInfo(suiteWireId: s.wireId, publicKey: pk))
-                                    }
+                                let kemKeys: [KEMPublicKeyInfo]
+                                do {
+                                    kemKeys = try await km.pairingIdentityKEMPublicKeys(using: provider)
+                                } catch {
+                                    logger.warning("⚠️ 本机 KEM 公钥准备失败（bootstrap reply）：\(error.localizedDescription, privacy: .public)")
+                                    kemKeys = []
                                 }
                                 let localId = await SelfIdentityProvider.shared.snapshot().deviceId
                                 let localName = Host.current().localizedName
@@ -2100,7 +2100,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                         if peerHasPQCGroup {
                             selection = (effectivePolicy.requirePQC ? .requirePQC : .preferPQC)
                             cryptoProvider = CryptoProviderFactory.make(policy: selection)
-                            let localPQCSuites = cryptoProvider.supportedSuites.filter { $0.isPQCGroup }
+                            let localPQCSuites = DeviceIdentityKeyManager.pairingIdentityAdvertisedPQCSuites(using: cryptoProvider)
 
                             if localPQCSuites.isEmpty {
                                 if effectivePolicy.requirePQC {

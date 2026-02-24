@@ -1536,35 +1536,13 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                                 )
 
                                 let provider = CryptoProviderFactory.make(policy: .preferPQC)
-                                var suites = provider.supportedSuites.filter { $0.isPQCGroup }
-                                #if HAS_APPLE_PQC_SDK
-                                if #available(iOS 26.0, macOS 26.0, *), provider.tier == .nativePQC {
-                                    suites.append(.mlkem768MLDSA65)
-                                    suites.append(.xwingMLDSA)
-                                }
-                                #endif
-                                suites = suites.reduce(into: [UInt16: CryptoSuite]()) { partialResult, suite in
-                                    partialResult[suite.wireId] = suite
-                                }.values.sorted { $0.wireId < $1.wireId }
                                 let km = DeviceIdentityKeyManager.shared
-                                var kemKeys: [KEMPublicKeyInfo] = []
-                                for s in suites {
-                                    let suiteProvider: any CryptoProvider = {
-                                        #if HAS_APPLE_PQC_SDK
-                                        if #available(iOS 26.0, macOS 26.0, *), provider.tier == .nativePQC {
-                                            if s == .xwingMLDSA {
-                                                return AppleXWingCryptoProvider()
-                                            }
-                                            if s.isPQCGroup {
-                                                return ApplePQCCryptoProvider()
-                                            }
-                                        }
-                                        #endif
-                                        return provider
-                                    }()
-                                    if let pk = try? await km.getKEMPublicKey(for: s, provider: suiteProvider) {
-                                        kemKeys.append(KEMPublicKeyInfo(suiteWireId: s.wireId, publicKey: pk))
-                                    }
+                                let kemKeys: [KEMPublicKeyInfo]
+                                do {
+                                    kemKeys = try await km.pairingIdentityKEMPublicKeys(using: provider)
+                                } catch {
+                                    logger.warning("⚠️ WebRTC bootstrap reply KEM 公钥准备失败: \(error.localizedDescription, privacy: .public)")
+                                    kemKeys = []
                                 }
                                 let localId = await SelfIdentityProvider.shared.snapshot().deviceId
                                 let localPlatform: String = {
@@ -2147,7 +2125,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                         }()
                         let cryptoProvider = CryptoProviderFactory.make(policy: selection)
                         let offeredSuites: [CryptoSuite] = hasPQCGroup
-                        ? cryptoProvider.supportedSuites.filter { $0.isPQCGroup }
+                        ? DeviceIdentityKeyManager.pairingIdentityAdvertisedPQCSuites(using: cryptoProvider)
                         : cryptoProvider.supportedSuites.filter { !$0.isPQCGroup }
 
                         let keyManager = DeviceIdentityKeyManager.shared

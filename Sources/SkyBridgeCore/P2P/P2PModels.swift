@@ -1410,13 +1410,8 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         }
 
         let provider = CryptoProviderFactory.make(policy: .preferPQC)
-        let suites = provider.supportedSuites.filter { $0.isPQCGroup }
         let keyManager = DeviceIdentityKeyManager.shared
-        var kemKeys: [KEMPublicKeyInfo] = []
-        for suite in suites {
-            let publicKey = try await keyManager.getKEMPublicKey(for: suite, provider: provider)
-            kemKeys.append(KEMPublicKeyInfo(suiteWireId: suite.wireId, publicKey: publicKey))
-        }
+        let kemKeys = try await keyManager.pairingIdentityKEMPublicKeys(using: provider)
 
         let localDeviceId = await keyManager.getDeviceId()
         let localDeviceName: String? = {

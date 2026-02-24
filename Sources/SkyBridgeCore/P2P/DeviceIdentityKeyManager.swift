@@ -543,6 +543,69 @@ public actor DeviceIdentityKeyManager {
         let record = try await getOrCreateKEMIdentityKey(for: suite, provider: provider)
         return record.publicKey
     }
+
+    public nonisolated static func pairingIdentityAdvertisedPQCSuites(
+        using provider: any CryptoProvider
+    ) -> [CryptoSuite] {
+        var suites = provider.supportedSuites.filter { $0.isPQCGroup }
+
+        if provider.tier == .nativePQC {
+            suites.append(.xwingMLDSA)
+            suites.append(.mlkem768MLDSA65)
+        }
+
+        let dedupedByWire = suites.reduce(into: [UInt16: CryptoSuite]()) { partialResult, suite in
+            partialResult[suite.wireId] = suite
+        }
+        return dedupedByWire.values.sorted { $0.wireId < $1.wireId }
+    }
+
+    public func pairingIdentityKEMPublicKeys(
+        using provider: any CryptoProvider
+    ) async throws -> [KEMPublicKeyInfo] {
+        let suites = Self.pairingIdentityAdvertisedPQCSuites(using: provider)
+        guard !suites.isEmpty else { return [] }
+
+        let primaryWireIds = Set(provider.supportedSuites.filter { $0.isPQCGroup }.map(\.wireId))
+        var kemKeys: [KEMPublicKeyInfo] = []
+        kemKeys.reserveCapacity(suites.count)
+
+        for suite in suites {
+            let suiteProvider = Self.pairingIdentityProvider(for: suite, baseProvider: provider)
+            do {
+                let publicKey = try await getKEMPublicKey(for: suite, provider: suiteProvider)
+                kemKeys.append(KEMPublicKeyInfo(suiteWireId: suite.wireId, publicKey: publicKey))
+            } catch {
+                if primaryWireIds.contains(suite.wireId) {
+                    throw error
+                }
+                SkyBridgeLogger.p2p.warning(
+                    "⚠️ pairingIdentity 互操作 KEM 公钥准备失败（suite=\(suite.rawValue, privacy: .public)）：\(error.localizedDescription, privacy: .public)"
+                )
+            }
+        }
+
+        return kemKeys
+    }
+
+    private nonisolated static func pairingIdentityProvider(
+        for suite: CryptoSuite,
+        baseProvider: any CryptoProvider
+    ) -> any CryptoProvider {
+        #if HAS_APPLE_PQC_SDK
+        if baseProvider.tier == .nativePQC {
+            if #available(iOS 26.0, macOS 26.0, *) {
+                if suite == .xwingMLDSA {
+                    return AppleXWingCryptoProvider()
+                }
+                if suite.isPQCGroup {
+                    return ApplePQCCryptoProvider()
+                }
+            }
+        }
+        #endif
+        return baseProvider
+    }
     
  /// 验证签名
  /// - Parameters:

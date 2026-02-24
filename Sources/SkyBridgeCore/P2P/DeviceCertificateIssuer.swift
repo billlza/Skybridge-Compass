@@ -269,32 +269,7 @@ public actor P2PIdentityCertificateIssuer {
 
     private func getLocalKEMPublicKeys() async throws -> [KEMPublicKeyInfo] {
         let provider = CryptoProviderFactory.make(policy: .preferPQC)
-        guard provider.activeSuite.isPQC else {
-            return []
-        }
-
-        var keys: [KEMPublicKeyInfo] = []
-
-        let primaryPublicKey = try await keyManager.getKEMPublicKey(
-            for: provider.activeSuite,
-            provider: provider
-        )
-        keys.append(KEMPublicKeyInfo(suiteWireId: provider.activeSuite.wireId, publicKey: primaryPublicKey))
-
-        #if HAS_APPLE_PQC_SDK
-        if #available(iOS 26.0, macOS 26.0, *) {
-            if provider.tier == .nativePQC, provider.activeSuite != .xwingMLDSA {
-                let xwingProvider = AppleXWingCryptoProvider()
-                let xwingPublicKey = try await keyManager.getKEMPublicKey(
-                    for: xwingProvider.activeSuite,
-                    provider: xwingProvider
-                )
-                keys.append(KEMPublicKeyInfo(suiteWireId: xwingProvider.activeSuite.wireId, publicKey: xwingPublicKey))
-            }
-        }
-        #endif
-
-        return keys
+        return try await keyManager.pairingIdentityKEMPublicKeys(using: provider)
     }
 
 

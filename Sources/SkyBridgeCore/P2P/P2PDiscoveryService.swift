@@ -1640,7 +1640,7 @@ public class P2PDiscoveryService: BaseManager {
                         if peerHasPQCGroup {
                             selection = policy.requirePQC ? .requirePQC : .preferPQC
                             cryptoProvider = CryptoProviderFactory.make(policy: selection)
-                            let localPQCSuites = cryptoProvider.supportedSuites.filter { $0.isPQCGroup }
+                            let localPQCSuites = DeviceIdentityKeyManager.pairingIdentityAdvertisedPQCSuites(using: cryptoProvider)
 
                             if localPQCSuites.isEmpty {
                                 if policy.requirePQC {
