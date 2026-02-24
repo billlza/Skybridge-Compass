@@ -159,6 +159,7 @@ This document provides extended data tables referenced in the main paper. All da
 \item Table~\ref{tab:supp-cross-platform-contract} (Cross-platform contract consistency): static source-based checker output across iOS/macOS, Android, and Ubuntu for suite parity, encoding, fallback guardrails, and trust path.
 \item Table~\ref{tab:supp-interop-matrix} (Cross-platform interop matrix): measured external Linux direct/tunnel rows plus static Android/Ubuntu contract-consistency pair rows under a shared artifact date.
 \item Table~\ref{tab:supp-boundary-stress} (Boundary-stress cases and operator runbook): explicit in-model vs out-of-model classification for pairing social engineering, endpoint compromise classes, and audit-log abuse, with expected event signals and required operator actions.
+\item Table~\ref{tab:supp-boundary-stress-empirical} (Boundary-stress empirical invariants): machine-checkable rates for input perturbation, concurrency/race, adversarial-network timeout suppression, and evidence-schema integrity from \texttt{boundary\_stress\_<date>.csv}.
 \item Table~\ref{tab:supp-formal-code-traceability} (Formal-to-code traceability): mapping of theorem-facing lemmas/events to implementation-level enforcement points and artifacts.
 \item Tables~\ref{tab:supp-message-field-validation}--\ref{tab:artifact-map} (Protocol/Audit Appendices): wire-format validation rules, suite identifiers, PQC coverage and platform support matrices, key-size references, security event taxonomy, and an implementation-to-file mapping. These materials support auditability and reproducibility claims in main paper Sections~\ref{sec:handshake-state-machine}, \ref{sec:security-model}, and \ref{sec:implementation}.
 \item Tables moved from the main paper to satisfy page budget: Table~\ref{tab:novelty-delta}, Table~\ref{tab:migration-design-space}, Table~\ref{tab:claim-evidence-strength}, Table~\ref{tab:migration-provider-matrix}, Table~\ref{tab:migration-fleet-behavior}, Table~\ref{tab:failure-mode-robustness}, Table~\ref{tab:ablation-by-property}, Table~\ref{tab:suite-negotiation-scenarios}, Table~\ref{tab:system-impact}, Table~\ref{tab:ios-microbench}, Table~\ref{tab:aead-mapping}, Table~\ref{tab:network-conditions}.
@@ -279,6 +280,7 @@ All data is generated from the artifact CSV files:
 \item \texttt{Artifacts/\allowbreak ios\_\allowbreak microbench\_2026-01-23.csv} (Table~\ref{tab:ios-microbench}, Table~\ref{tab:supp-ios-microbench-devices})
 \item \texttt{Artifacts/\allowbreak realnet\_\allowbreak microstudy\_2026-01-23.csv} (Table~\ref{tab:supp-realnet-microstudy})
 \item \texttt{Artifacts/\allowbreak interop\_\allowbreak consistency\_2026-01-23.json} and \texttt{Artifacts/\allowbreak interop\_\allowbreak cross\_\allowbreak platform\_2026-01-23.csv} (Table~\ref{tab:supp-cross-platform-contract}, Table~\ref{tab:supp-interop-matrix})
+\item \texttt{Artifacts/\allowbreak boundary\_\allowbreak stress\_2026-02-24.csv} (Table~\ref{tab:supp-boundary-stress-empirical})
 \item \texttt{Artifacts/\allowbreak baseline\_\allowbreak summary\_*.csv} (Table~\ref{tab:supp-loopback-wire})
 \item \texttt{Artifacts/\allowbreak soa\_\allowbreak interop\_2026-02-22.csv} (Table~\ref{tab:soa-interop})
 \end{itemize}
@@ -1146,6 +1148,8 @@ Audit-log injection/truncation attempt on local store & In-model for integrity c
 Rows marked out-of-model are not covered by theorem-level security
 claims in main-paper Section~\ref{sec:security-model}; they are included
 to make deployment response obligations explicit.
+
+\IfFileExists{supp_tables/s25_boundary_stress_empirical.tex}{\input{supp_tables/s25_boundary_stress_empirical}}{\noindent\textit{(Boundary-stress empirical table not present: run \texttt{SKYBRIDGE\_RUN\_BOUNDARY\_STRESS=1 swift test --filter SkyBridgeCoreTests.BoundaryStressBenchTests}, then \texttt{python3 Scripts/aggregate\_boundary\_stress.py --artifact-date <date>}.)}\par}
 
 \subsection*{X-Wing Wire Size (Measured)}
 
