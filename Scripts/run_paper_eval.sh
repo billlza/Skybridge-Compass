@@ -264,6 +264,17 @@ fi
 export SKYBRIDGE_BENCH_APPLE_ITERATIONS="${bench_apple_iterations}"
 log_anchor "Run configuration: ARTIFACT_DATE=${ARTIFACT_DATE:-unset}, SKYBRIDGE_BENCH_SCOPE=${bench_scope}, SKYBRIDGE_BENCH_BATCHES=${bench_batches}, SKYBRIDGE_BENCH_MAX_BATCHES=${bench_max_batches}, SKYBRIDGE_BENCH_STABILITY_THRESHOLD=${bench_stability_threshold}, SKYBRIDGE_BENCH_STABILITY_REQUIRE_APPLE=${bench_stability_require_apple}, SKYBRIDGE_BENCH_APPLE_ITERATIONS=${bench_apple_iterations}, SKYBRIDGE_BENCH_COOLDOWN_SECONDS=${bench_cooldown_seconds}, SKYBRIDGE_BENCH_MAX_LOAD_RATIO=${bench_max_load_ratio}, SKYBRIDGE_BENCH_LOAD_WAIT_SECONDS=${bench_load_wait_seconds}, SKYBRIDGE_BENCH_DETERMINISTIC_TRANSPORT=${SKYBRIDGE_BENCH_DETERMINISTIC_TRANSPORT}, SKYBRIDGE_BENCH_DISABLE_HANDSHAKE_PADDING=${SKYBRIDGE_BENCH_DISABLE_HANDSHAKE_PADDING}, SKYBRIDGE_BENCH_DETERMINISTIC_NONCE=${SKYBRIDGE_BENCH_DETERMINISTIC_NONCE}, SKYBRIDGE_FI_ITERATIONS=${SKYBRIDGE_FI_ITERATIONS:-1000}, SKYBRIDGE_POLICY_ITERATIONS=${SKYBRIDGE_POLICY_ITERATIONS:-1000}, SKYBRIDGE_MIGRATION_ITERATIONS=${SKYBRIDGE_MIGRATION_ITERATIONS:-1000}, SKYBRIDGE_SOA_ITERATIONS=${SKYBRIDGE_SOA_ITERATIONS:-100}"
 
+# Handshake benchmark stability is very sensitive to debug/test harness jitter on macOS.
+# For paper evaluation we prefer a dedicated release-mode runner binary.
+run_stage "handshake-bench-runner-build" swift \
+  swift build -c release --product HandshakeBenchRunner "${swift_flags[@]}"
+handshake_bench_bin_dir="$(swift build -c release --show-bin-path "${swift_flags[@]}")"
+handshake_bench_runner="${handshake_bench_bin_dir}/HandshakeBenchRunner"
+if [[ ! -x "${handshake_bench_runner}" ]]; then
+  echo "HandshakeBenchRunner not found after build: ${handshake_bench_runner}" >&2
+  exit 1
+fi
+
 run_handshake_bench_batch() {
   local batch_index="$1"
   local batch_total="$2"
@@ -271,8 +282,8 @@ run_handshake_bench_batch() {
   stage_label_scope="${bench_scope}"
 
   wait_for_bench_load_budget "${bench_max_load_ratio}" "${bench_load_wait_seconds}"
-  run_stage "handshake-bench-${stage_label_scope}-batch-${batch_index}-of-${batch_total}" swift \
-    swift test --filter "${run_bench_filter}" "${swift_flags[@]}"
+  run_stage "handshake-bench-${stage_label_scope}-batch-${batch_index}-of-${batch_total}" none \
+    "${handshake_bench_runner}"
   cooldown_between_batches "${bench_cooldown_seconds}" "after handshake bench batch ${batch_index}"
 }
 

@@ -9,6 +9,7 @@ struct HandshakeBenchRunner {
     private enum ProviderType: String {
         case classic = "Classic (X25519 + Ed25519)"
         case liboqsPQC = "liboqs PQC (ML-KEM-768 + ML-DSA-65)"
+        case liboqsPQCv2FS = "liboqs PQC v2 FS (ML-KEM-768-FS + ML-DSA-65)"
         case applePQC = "CryptoKit PQC (ML-KEM-768 + ML-DSA-65)"
         case appleXWing = "CryptoKit Hybrid (X-Wing + ML-DSA-65)"
     }
@@ -138,12 +139,19 @@ struct HandshakeBenchRunner {
     }
 
     private static let wireSizeRecorder = WireSizeRecorder()
-    private static let runDate = dateStamp()
+    private static let runDate = resolvedArtifactDate()
 
     static func main() async {
         do {
-            let iterations = intEnv("BENCH_ITERATIONS", defaultValue: 1000)
-            let warmup = intEnv("BENCH_WARMUP", defaultValue: 10)
+            let iterations = intEnv(
+                "SKYBRIDGE_BENCH_ITERATIONS",
+                defaultValue: intEnv("BENCH_ITERATIONS", defaultValue: 1000)
+            )
+            let appleIterations = intEnv("SKYBRIDGE_BENCH_APPLE_ITERATIONS", defaultValue: iterations)
+            let warmup = intEnv(
+                "SKYBRIDGE_BENCH_WARMUP",
+                defaultValue: intEnv("BENCH_WARMUP", defaultValue: 10)
+            )
             let dateString = runDate
 
             let capability = CryptoProviderFactory.detectCapability()
@@ -162,6 +170,12 @@ struct HandshakeBenchRunner {
                     warmup: warmup,
                     dateString: dateString
                 )
+                try await runBench(
+                    providerType: .liboqsPQCv2FS,
+                    iterations: iterations,
+                    warmup: warmup,
+                    dateString: dateString
+                )
             } else {
                 print("[BENCH] liboqs not available, skipping PQC bench")
             }
@@ -169,16 +183,20 @@ struct HandshakeBenchRunner {
             if capability.hasApplePQC {
                 try await runBench(
                     providerType: .applePQC,
-                    iterations: iterations,
+                    iterations: appleIterations,
                     warmup: warmup,
                     dateString: dateString
                 )
-                try await runBench(
-                    providerType: .appleXWing,
-                    iterations: iterations,
-                    warmup: warmup,
-                    dateString: dateString
-                )
+                if includeXWingBench() {
+                    try await runBench(
+                        providerType: .appleXWing,
+                        iterations: appleIterations,
+                        warmup: warmup,
+                        dateString: dateString
+                    )
+                } else {
+                    print("[BENCH] X-Wing bench disabled (set SKYBRIDGE_BENCH_INCLUDE_XWING=1 to enable)")
+                }
             } else {
                 print("[BENCH] Apple PQC not available, skipping CryptoKit bench")
             }
@@ -229,7 +247,7 @@ struct HandshakeBenchRunner {
         switch providerType {
         case .classic:
             provider = ClassicCryptoProvider()
-        case .liboqsPQC:
+        case .liboqsPQC, .liboqsPQCv2FS:
             #if canImport(OQSRAII)
             provider = OQSPQCCryptoProvider()
             #else
@@ -267,10 +285,32 @@ struct HandshakeBenchRunner {
             #endif
         }
 
-        let strategy: HandshakeAttemptStrategy = (providerType == .classic) ? .classicOnly : .pqcOnly
-        let offeredSuitesResult = TwoAttemptHandshakeManager.getSuites(for: strategy, cryptoProvider: provider)
-        guard case .suites(let offeredSuites) = offeredSuitesResult else {
-            throw HandshakeError.emptyOfferedSuites
+        let offeredSuites: [CryptoSuite]
+        switch providerType {
+        case .classic:
+            let offeredSuitesResult = TwoAttemptHandshakeManager.getSuites(for: .classicOnly, cryptoProvider: provider)
+            guard case .suites(let suites) = offeredSuitesResult else {
+                throw HandshakeError.emptyOfferedSuites
+            }
+            offeredSuites = suites
+        case .liboqsPQC, .applePQC:
+            offeredSuites = [.mlkem768MLDSA65]
+        case .liboqsPQCv2FS:
+            let offeredSuitesResult = TwoAttemptHandshakeManager.getSuites(
+                for: .pqcOnly,
+                cryptoProvider: provider,
+                pqcOfferMode: .preferredSingle
+            )
+            guard case .suites(let suites) = offeredSuitesResult else {
+                throw HandshakeError.emptyOfferedSuites
+            }
+            offeredSuites = suites
+        case .appleXWing:
+            let offeredSuitesResult = TwoAttemptHandshakeManager.getSuites(for: .pqcOnly, cryptoProvider: provider)
+            guard case .suites(let suites) = offeredSuitesResult else {
+                throw HandshakeError.emptyOfferedSuites
+            }
+            offeredSuites = suites
         }
 
         let protocolSignatureProvider = ProtocolSignatureProviderSelector.select(for: provider.tier)
@@ -624,6 +664,25 @@ struct HandshakeBenchRunner {
         #if canImport(Darwin)
         _ = pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0)
         #endif
+    }
+
+    private static func resolvedArtifactDate() -> String {
+        if let raw = ProcessInfo.processInfo.environment["ARTIFACT_DATE"]
+            ?? ProcessInfo.processInfo.environment["SKYBRIDGE_ARTIFACT_DATE"] {
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                return trimmed
+            }
+        }
+        return dateStamp()
+    }
+
+    private static func includeXWingBench() -> Bool {
+        let raw = ProcessInfo.processInfo.environment["SKYBRIDGE_BENCH_INCLUDE_XWING"]
+            ?? ProcessInfo.processInfo.environment["BENCH_INCLUDE_XWING"]
+            ?? "0"
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return trimmed == "1" || trimmed == "true" || trimmed == "yes"
     }
 
     private static func dateStamp() -> String {
