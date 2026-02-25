@@ -28,6 +28,14 @@ public actor HandshakeContext {
 
     private static let deterministicNonceLock = NSLock()
     private nonisolated(unsafe) static var deterministicNonceCounter: UInt64 = 0
+    private nonisolated static let appleXWingAvailable: Bool = {
+        #if HAS_APPLE_PQC_SDK
+        if #available(iOS 26.0, macOS 26.0, *) {
+            return AppleXWingCryptoProvider.selfTest()
+        }
+        #endif
+        return false
+    }()
 
  // MARK: - Properties
 
@@ -165,7 +173,7 @@ public actor HandshakeContext {
         let hybridProvider: (any CryptoProvider)?
         #if HAS_APPLE_PQC_SDK
         if #available(iOS 26.0, macOS 26.0, *) {
-            if cryptoProvider.tier == .nativePQC, AppleXWingCryptoProvider.selfTest() {
+            if cryptoProvider.tier == .nativePQC, Self.appleXWingAvailable {
                 hybridProvider = AppleXWingCryptoProvider()
             } else {
                 hybridProvider = nil
