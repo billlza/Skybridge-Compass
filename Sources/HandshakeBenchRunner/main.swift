@@ -152,53 +152,77 @@ struct HandshakeBenchRunner {
                 "SKYBRIDGE_BENCH_WARMUP",
                 defaultValue: intEnv("BENCH_WARMUP", defaultValue: 10)
             )
+            let runnerBatches = intEnv(
+                "SKYBRIDGE_BENCH_RUNNER_BATCHES",
+                defaultValue: intEnv("BENCH_RUNNER_BATCHES", defaultValue: 1)
+            )
+            let cooldownSeconds = intEnv(
+                "SKYBRIDGE_BENCH_COOLDOWN_SECONDS",
+                defaultValue: intEnv("BENCH_COOLDOWN_SECONDS", defaultValue: 0)
+            )
             let dateString = runDate
 
             let capability = CryptoProviderFactory.detectCapability()
 
-            try await runBench(
-                providerType: .classic,
-                iterations: iterations,
-                warmup: warmup,
-                dateString: dateString
-            )
-
-            if capability.hasLiboqs {
-                try await runBench(
-                    providerType: .liboqsPQC,
-                    iterations: iterations,
-                    warmup: warmup,
-                    dateString: dateString
-                )
-                try await runBench(
-                    providerType: .liboqsPQCv2FS,
-                    iterations: iterations,
-                    warmup: warmup,
-                    dateString: dateString
-                )
-            } else {
-                print("[BENCH] liboqs not available, skipping PQC bench")
+            if runnerBatches < 1 {
+                throw NSError(domain: "HandshakeBench", code: 10, userInfo: [
+                    NSLocalizedDescriptionKey: "SKYBRIDGE_BENCH_RUNNER_BATCHES must be >= 1"
+                ])
             }
 
-            if capability.hasApplePQC {
+            for batch in 1...runnerBatches {
+                if runnerBatches > 1 {
+                    print("[BENCH] Batch \(batch)/\(runnerBatches)")
+                }
+
                 try await runBench(
-                    providerType: .applePQC,
-                    iterations: appleIterations,
+                    providerType: .classic,
+                    iterations: iterations,
                     warmup: warmup,
                     dateString: dateString
                 )
-                if includeXWingBench() {
+
+                if capability.hasLiboqs {
                     try await runBench(
-                        providerType: .appleXWing,
-                        iterations: appleIterations,
+                        providerType: .liboqsPQC,
+                        iterations: iterations,
+                        warmup: warmup,
+                        dateString: dateString
+                    )
+                    try await runBench(
+                        providerType: .liboqsPQCv2FS,
+                        iterations: iterations,
                         warmup: warmup,
                         dateString: dateString
                     )
                 } else {
-                    print("[BENCH] X-Wing bench disabled (set SKYBRIDGE_BENCH_INCLUDE_XWING=1 to enable)")
+                    print("[BENCH] liboqs not available, skipping PQC bench")
                 }
-            } else {
-                print("[BENCH] Apple PQC not available, skipping CryptoKit bench")
+
+                if capability.hasApplePQC {
+                    try await runBench(
+                        providerType: .applePQC,
+                        iterations: appleIterations,
+                        warmup: warmup,
+                        dateString: dateString
+                    )
+                    if includeXWingBench() {
+                        try await runBench(
+                            providerType: .appleXWing,
+                            iterations: appleIterations,
+                            warmup: warmup,
+                            dateString: dateString
+                        )
+                    } else {
+                        print("[BENCH] X-Wing bench disabled (set SKYBRIDGE_BENCH_INCLUDE_XWING=1 to enable)")
+                    }
+                } else {
+                    print("[BENCH] Apple PQC not available, skipping CryptoKit bench")
+                }
+
+                if cooldownSeconds > 0, batch < runnerBatches {
+                    try? await Task.sleep(for: .seconds(Double(cooldownSeconds)))
+                }
             }
         } catch {
             fputs("[BENCH] Failed: \(error)\n", stderr)

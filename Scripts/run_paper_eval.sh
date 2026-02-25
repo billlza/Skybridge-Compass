@@ -291,11 +291,24 @@ run_handshake_bench_batch() {
   cooldown_between_batches "${bench_cooldown_seconds}" "after handshake bench batch ${batch_index}"
 }
 
+bench_runner_batches="${SKYBRIDGE_BENCH_RUNNER_BATCHES:-}"
+
 executed_bench_batches=0
-for ((i=1; i<=bench_batches; i++)); do
-  run_handshake_bench_batch "${i}" "${bench_batches}"
-  executed_bench_batches="${i}"
-done
+if [[ -n "${bench_runner_batches}" ]]; then
+  if ! [[ "${bench_runner_batches}" =~ ^[0-9]+$ ]] || [[ "${bench_runner_batches}" -lt "${bench_batches}" ]] || [[ "${bench_runner_batches}" -gt "${bench_max_batches}" ]]; then
+    echo "Invalid SKYBRIDGE_BENCH_RUNNER_BATCHES='${bench_runner_batches}', expected integer in [${bench_batches},${bench_max_batches}]" >&2
+    exit 2
+  fi
+  wait_for_bench_load_budget "${bench_max_load_ratio}" "${bench_load_wait_seconds}"
+  run_stage "handshake-bench-${bench_scope}-runner-batches-1-of-${bench_runner_batches}" none \
+    "${handshake_bench_runner}"
+  executed_bench_batches="${bench_runner_batches}"
+else
+  for ((i=1; i<=bench_batches; i++)); do
+    run_handshake_bench_batch "${i}" "${bench_batches}"
+    executed_bench_batches="${i}"
+  done
+fi
 
 if [[ -f "Scripts/check_bench_stability_window.py" ]]; then
   stability_report="Artifacts/bench_stability_window_${artifact_date_for_checks}.json"

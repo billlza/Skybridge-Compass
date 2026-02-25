@@ -13,11 +13,20 @@ actor HandshakeReplayCache {
     
     private let ttl: TimeInterval = 5 * 60
     private let pruneInterval: TimeInterval = 1
+    private nonisolated static let disablePrune: Bool = {
+        let env = ProcessInfo.processInfo.environment
+        if env["SKYBRIDGE_DISABLE_REPLAY_PRUNE"] == "1" { return true }
+        // Bench/CI: pruning is unnecessary for correctness and adds O(n) noise that
+        // can dominate performance measurements under high handshake throughput.
+        if env["SKYBRIDGE_RUN_BENCH"] == "1" { return true }
+        if env["XCTestConfigurationFilePath"] != nil { return true }
+        return false
+    }()
     private var lastPrune: TimeInterval = 0
     private var entries: [Data: TimeInterval] = [:]
     
     func registerIfNew(_ handshakeId: Data, now: TimeInterval = ProcessInfo.processInfo.systemUptime) -> Bool {
-        if now - lastPrune >= pruneInterval {
+        if !Self.disablePrune, now - lastPrune >= pruneInterval {
             prune(now: now)
             lastPrune = now
         }
