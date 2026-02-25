@@ -213,7 +213,7 @@ struct HandshakeBenchRunner {
         dateString: String
     ) async throws {
         let context = try await prepareBenchmarkContext(providerType: providerType)
-        let latencySamples = try await measureHandshakeLatency(
+        let (latencySamples, rttSamples) = try await measureHandshakeLatencyAndRTT(
             context: context,
             iterations: iterations,
             warmup: warmup
@@ -224,12 +224,6 @@ struct HandshakeBenchRunner {
             stats: latencyStats,
             iterations: iterations,
             dateString: dateString
-        )
-
-        let rttSamples = try await measureHandshakeRTT(
-            context: context,
-            iterations: iterations,
-            warmup: warmup
         )
         let rttStats = EnhancedPercentileStats(samples: rttSamples)
         writeRTTArtifact(
@@ -404,53 +398,38 @@ struct HandshakeBenchRunner {
         return kemPublicKeys
     }
 
-    private static func measureHandshakeLatency(
+    private static func measureHandshakeLatencyAndRTT(
         context: BenchmarkContext,
         iterations: Int,
         warmup: Int
-    ) async throws -> [Double] {
+    ) async throws -> (latency: [Double], rtt: [Double]) {
         elevateBenchmarkQoS()
-        var samples: [Double] = []
-
-        for _ in 0..<warmup {
-            _ = try await performMockHandshake(context: context)
-        }
-
-        for _ in 0..<iterations {
-            let start = ContinuousClock.now
-            _ = try await performMockHandshake(context: context)
-            let elapsed = ContinuousClock.now - start
-            let ms = Double(elapsed.components.seconds) * 1000.0 +
-                Double(elapsed.components.attoseconds) / 1_000_000_000_000_000.0
-            samples.append(ms)
-        }
-
-        return samples
-    }
-
-    private static func measureHandshakeRTT(
-        context: BenchmarkContext,
-        iterations: Int,
-        warmup: Int
-    ) async throws -> [Double] {
-        elevateBenchmarkQoS()
-        var samples: [Double] = []
+        var latencySamples: [Double] = []
+        var rttSamples: [Double] = []
+        latencySamples.reserveCapacity(iterations)
+        rttSamples.reserveCapacity(iterations)
 
         for _ in 0..<warmup {
             _ = try await performMockHandshakeWithMetrics(context: context)
         }
 
         for _ in 0..<iterations {
+            let start = ContinuousClock.now
             let (_, metrics) = try await performMockHandshakeWithMetrics(context: context)
+            let elapsed = ContinuousClock.now - start
+            let ms = Double(elapsed.components.seconds) * 1000.0 +
+                Double(elapsed.components.attoseconds) / 1_000_000_000_000_000.0
+            latencySamples.append(ms)
+
             guard metrics.rttMs >= 0 else {
                 throw NSError(domain: "HandshakeBench", code: 3, userInfo: [
                     NSLocalizedDescriptionKey: "RTT unavailable in metrics"
                 ])
             }
-            samples.append(metrics.rttMs)
+            rttSamples.append(metrics.rttMs)
         }
 
-        return samples
+        return (latencySamples, rttSamples)
     }
 
     private static func performMockHandshake(context: BenchmarkContext) async throws -> Data {

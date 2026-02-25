@@ -186,6 +186,10 @@ else
 fi
 
 export SKYBRIDGE_RUN_BENCH=1
+# Paper evaluation should avoid touching the system Keychain to prevent
+# macOS interactive unlock prompts and reduce benchmark variance.
+# Tests already default to in-memory mode; release-mode runners need this.
+export SKYBRIDGE_KEYCHAIN_IN_MEMORY="${SKYBRIDGE_KEYCHAIN_IN_MEMORY:-1}"
 bench_batches="${SKYBRIDGE_BENCH_BATCHES:-3}"
 bench_max_batches="${SKYBRIDGE_BENCH_MAX_BATCHES:-5}"
 bench_stability_threshold="${SKYBRIDGE_BENCH_STABILITY_THRESHOLD:-0.07}"
