@@ -127,7 +127,11 @@ public enum CryptoProviderFactory {
         case .requirePQC:
             #if HAS_APPLE_PQC_SDK
             if capability.hasApplePQC {
-                return makeAppleNativeProvider()
+                // Strict-PQC mode should pick a stable, widely supported suite (ML-KEM/ML-DSA).
+                // X-Wing is measured separately and must not become a hard dependency for strict gates.
+                if #available(iOS 26.0, macOS 26.0, *) {
+                    return ApplePQCCryptoProvider()
+                }
             }
             #endif
             if capability.hasLiboqs {

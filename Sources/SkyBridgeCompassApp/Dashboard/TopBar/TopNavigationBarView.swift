@@ -111,11 +111,11 @@ public struct TopNavigationBarView: View {
                 .animation(themeConfiguration.easeAnimation, value: isActuallyConnected)
 
             if settingsManager.showConnectionStats, isActuallyConnected, let detail = connectionDetailText, !detail.isEmpty {
-                Text(LocalizationManager.shared.localizedString("device.status.connected") + " · " + detail)
+                Text(detail)
                     .font(.caption)
                     .foregroundColor(themeConfiguration.secondaryTextColor)
             } else {
-            Text(isActuallyConnected ? LocalizationManager.shared.localizedString("device.status.connected") : LocalizationManager.shared.localizedString("status.disconnected"))
+            Text(isActuallyConnected ? connectedStatusText : LocalizationManager.shared.localizedString("status.disconnected"))
                 .font(.caption)
                 .foregroundColor(themeConfiguration.secondaryTextColor)
             }
@@ -154,6 +154,22 @@ public struct TopNavigationBarView: View {
             suite: connectedPeer.lastCryptoSuite,
             guardStatus: connectedPeer.guardStatus ?? "守护中"
         ) ?? connectedPeer.name
+    }
+
+    private var connectedStatusText: String {
+        let base = LocalizationManager.shared.localizedString("device.status.connected")
+        let connectedPeer = unifiedDeviceManager.onlineDevices
+            .filter { !$0.isLocalDevice && $0.connectionStatus == .connected }
+            .sorted { ($0.lastConnectedAt ?? .distantPast) > ($1.lastConnectedAt ?? .distantPast) }
+            .first
+        guard let connectedPeer else {
+            return base
+        }
+        return ConnectionCryptoPresentation.connectedStatusText(
+            kind: connectedPeer.lastCryptoKind,
+            suite: connectedPeer.lastCryptoSuite,
+            baseConnectedText: base
+        )
     }
 
  // 实时FPS展示小控件（位于顶部导航栏中间）

@@ -385,11 +385,20 @@ public actor CryptoProviderSelector {
  // 根据 Provider 类型确定支持的算法
         switch providerType {
         case .cryptoKitPQC:
-            supportedKEM = [
-                P2PCryptoAlgorithm.xWing.rawValue,
-                P2PCryptoAlgorithm.mlKEM768.rawValue,
-                P2PCryptoAlgorithm.x25519.rawValue
-            ]
+            // IMPORTANT:
+            // Only advertise X-Wing when the Hybrid provider is actually available at runtime.
+            // Otherwise peers may negotiate to X-Wing and then fail, triggering Classic downgrade.
+            let xwingAvailable = isAppleXWingAvailable()
+            let preferXWingHybrid = prefersXWingHybridSuite()
+            supportedKEM = []
+            if xwingAvailable && preferXWingHybrid {
+                supportedKEM.append(P2PCryptoAlgorithm.xWing.rawValue)
+            }
+            supportedKEM.append(P2PCryptoAlgorithm.mlKEM768.rawValue)
+            if xwingAvailable && !preferXWingHybrid {
+                supportedKEM.append(P2PCryptoAlgorithm.xWing.rawValue)
+            }
+            supportedKEM.append(P2PCryptoAlgorithm.x25519.rawValue)
             // 兼容性要点：
             // - “supportedSignature” 在此语义下表示身份/认证层可用的签名算法集合。
             // - 即使启用 PQC/hybrid，也必须保留 P-256 以兼容 classic-only peer（否则协商无交集会落入错误兜底）。
@@ -437,6 +446,26 @@ public actor CryptoProviderSelector {
 
         _cachedCapabilities = capabilities
         return capabilities
+    }
+
+    private func isAppleXWingAvailable() -> Bool {
+        #if HAS_APPLE_PQC_SDK
+        if #available(iOS 26.0, macOS 26.0, *) {
+            return AppleXWingCryptoProvider.selfTest()
+        }
+        #endif
+        return false
+    }
+
+    private func prefersXWingHybridSuite() -> Bool {
+        if let raw = ProcessInfo.processInfo.environment["SB_PQC_PREFERRED_SUITE"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased(),
+           raw == "xwing" || raw == "hybrid" {
+            return true
+        }
+
+        return UserDefaults.standard.bool(forKey: "Settings.PreferXWingHybrid")
     }
 
  /// 运行时能力协商
