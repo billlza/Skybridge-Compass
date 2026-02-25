@@ -223,16 +223,19 @@ public actor FaultInjectionMockTransport: DiscoveryTransport {
     private var messageHandler: (@Sendable (PeerIdentifier, Data) async -> Void)?
     private let delayDuration: Duration
     private let timeout: Duration
+    private let simulateTiming: Bool
     private var messageCount: Int = 0
 
     public init(
         scenario: FaultScenario,
         timeout: Duration = .seconds(5),
-        delayDuration: Duration = .seconds(1)
+        delayDuration: Duration = .seconds(1),
+        simulateTiming: Bool = false
     ) {
         self.scenario = scenario
         self.timeout = timeout
         self.delayDuration = delayDuration
+        self.simulateTiming = simulateTiming
     }
 
     public func send(to peer: PeerIdentifier, data: Data) async throws {
@@ -244,11 +247,15 @@ public actor FaultInjectionMockTransport: DiscoveryTransport {
             return
 
         case .delayWithinTimeout:
-            try await Task.sleep(for: delayDuration)
+            if !simulateTiming {
+                try await Task.sleep(for: delayDuration)
+            }
             messageBuffer.append(data)
 
         case .delayExceedTimeout:
-            try await Task.sleep(for: timeout + delayDuration)
+            if !simulateTiming {
+                try await Task.sleep(for: timeout + delayDuration)
+            }
             messageBuffer.append(data)
 
         case .corruptHeader:
@@ -280,7 +287,11 @@ public actor FaultInjectionMockTransport: DiscoveryTransport {
             messageBuffer.append(data)  // 发送两次
 
         case .outOfOrder:
- // 延迟发送，让后续消息先到
+            if simulateTiming {
+                messageBuffer.append(data)
+                return
+            }
+            // 延迟发送，让后续消息先到
             let capturedData = data
             Task {
                 try? await Task.sleep(for: .milliseconds(100))
@@ -795,7 +806,8 @@ extension HandshakeFaultInjectionBenchTests {
                 let transport = FaultInjectionMockTransport(
                     scenario: scenario,
                     timeout: config.timeout,
-                    delayDuration: config.delayDuration
+                    delayDuration: config.delayDuration,
+                    simulateTiming: true
                 )
 
                 for iteration in 0..<iterations {
