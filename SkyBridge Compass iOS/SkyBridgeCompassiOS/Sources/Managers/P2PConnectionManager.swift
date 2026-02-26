@@ -548,7 +548,9 @@ public class P2PConnectionManager: ObservableObject {
            let negotiated = sessionKeys[device.id]?.negotiatedSuite,
            !negotiated.isPQCGroup {
             do {
-                let provider = CryptoProviderFactory.make(policy: .preferPQC)
+                // In strictPQC mode, the bootstrap rekey target must follow the strict selection policy.
+                // Do NOT let a "prefer X-Wing" UI toggle accidentally force X-Wing as a strict dependency.
+                let provider = CryptoProviderFactory.make(policy: effectiveSelectionPolicy(enforcePQC: true))
                 if let preferred = provider.supportedSuites.first(where: { $0.isPQCGroup }) {
                     SkyBridgeLogger.shared.warning("🧩 strictPQC bootstrap: negotiated Classic (\(negotiated.rawValue)). Exchanging KEM identity keys then rekeying to \(preferred.rawValue)… peer=\(device.id)")
                     try await sendPairingIdentityExchange(to: device.id)
@@ -1087,7 +1089,11 @@ public class P2PConnectionManager: ObservableObject {
             
             let keysNow = await KEMTrustStore.shared.kemPublicKeys(for: peerId)
             guard keysNow.keys.contains(where: { $0.rawValue == suiteRaw }) else {
-                SkyBridgeLogger.shared.warning("⏳ 等待对端 KEM 公钥超时（suite=\(suiteRaw)）。请在 macOS 弹窗选择允许后重试，或稍后手动点击“重新握手”。")
+                let known = keysNow.keys.map(\.rawValue).sorted().joined(separator: ",")
+                SkyBridgeLogger.shared.warning(
+                    "⏳ 等待对端 KEM 公钥超时（targetSuite=\(suiteRaw) knownSuites=\(known)）。" +
+                    "请在 macOS 弹窗选择允许后重试，或稍后手动点击“重新握手”。"
+                )
                 return
             }
             

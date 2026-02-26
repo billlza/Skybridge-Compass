@@ -167,7 +167,10 @@ public enum CryptoProviderFactory {
         case .requirePQC:
             #if HAS_APPLE_PQC_SDK
             if capability.hasApplePQC {
-                return makeAppleNativeProvider()
+                // Strict-PQC must be stable and broadly supported. Do NOT let user preference
+                // (e.g., X-Wing hybrid) become a hard dependency for strict gates/bootstraps.
+                // X-Wing is benchmarked separately as a supplemental suite.
+                return ApplePQCCryptoProvider()
             }
             #endif
             if capability.hasLiboqs {
