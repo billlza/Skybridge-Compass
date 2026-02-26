@@ -144,6 +144,15 @@ public enum CryptoProviderFactory {
         #endif
         return UnavailablePQCProvider()
     }
+
+    private static func makeAppleStrictPQCProvider() -> any CryptoProvider {
+        #if HAS_APPLE_PQC_SDK
+        if #available(iOS 26.0, macOS 26.0, *) {
+            return ApplePQCCryptoProvider()
+        }
+        #endif
+        return UnavailablePQCProvider()
+    }
     
     // MARK: - Private Methods
     
@@ -170,7 +179,7 @@ public enum CryptoProviderFactory {
                 // Strict-PQC must be stable and broadly supported. Do NOT let user preference
                 // (e.g., X-Wing hybrid) become a hard dependency for strict gates/bootstraps.
                 // X-Wing is benchmarked separately as a supplemental suite.
-                return ApplePQCCryptoProvider()
+                return makeAppleStrictPQCProvider()
             }
             #endif
             if capability.hasLiboqs {
