@@ -36,22 +36,22 @@ manifest="${ARTIFACTS_DIR}/cleanup_manifest_${artifact_date}.txt"
 
 prefixes=(
   handshake_bench
+  handshake_bench_contrast
   handshake_rtt
+  handshake_rtt_contrast
   handshake_wire
+  handshake_wire_contrast
   message_sizes
   fault_injection
   policy_downgrade
   migration_coverage
   traffic_padding
   traffic_padding_sensitivity
-  system_impact
-  network_emulation_kernel
-  realnet_microstudy
-  realnet
 )
 
 extra_globs=(
   "realnet_*_${artifact_date}*.csv"
+  "apple_contrast_summary_${artifact_date}.json"
 )
 
 deleted=0
@@ -90,10 +90,12 @@ for prefix in "${prefixes[@]}"; do
     leftovers+=("${target}")
   fi
 done
-while IFS= read -r target; do
-  [[ -n "${target}" ]] || continue
-  leftovers+=("${target}")
-done < <(find "${ARTIFACTS_DIR}" -maxdepth 1 -type f -name "realnet_*_${artifact_date}*.csv" -print)
+for pattern in "${extra_globs[@]}"; do
+  while IFS= read -r target; do
+    [[ -n "${target}" ]] || continue
+    leftovers+=("${target}")
+  done < <(find "${ARTIFACTS_DIR}" -maxdepth 1 -type f -name "${pattern}" -print)
+done
 
 if (( ${#leftovers[@]} > 0 )); then
   echo "Artifact cleanup incomplete; leftovers detected:" >&2

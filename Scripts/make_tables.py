@@ -12,6 +12,7 @@ Outputs:
   - supp_tables/s3_message_sizes.tex (Supplementary message breakdown)
   - supp_tables/s7_traffic_padding.tex (Supplementary traffic padding quantization summary)
   - supp_tables/s8_traffic_padding_sensitivity.tex (Supplementary SBP2 bucket-cap sensitivity study)
+  - supp_tables/s13_apple_contrast.tex (Supplementary Apple/X-Wing contrast table)
 """
 
 import csv
@@ -21,6 +22,14 @@ import json
 from pathlib import Path
 from datetime import datetime
 from statistics import stdev
+from bench_profiles import (
+    APPLE_PQC_CONFIG,
+    APPLE_XWING_CONFIG,
+    CORE_GATE_CONFIGS,
+    LIBOQS_PQC_CONFIG,
+    LIBOQS_PQC_V2FS_CONFIG,
+    V2_COMPARE_CONFIGS as BENCH_V2_COMPARE_CONFIGS,
+)
 
 # Paths
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -32,20 +41,12 @@ SUPP_DIR = PROJECT_ROOT / "Docs" / "supp_tables"
 MAX_REPEATABILITY_BATCHES = 5
 
 # Canonical configuration names used by the paper tables.
-ORDERED_PERF_CONFIGS = [
-    "Classic (X25519 + Ed25519)",
-    "liboqs PQC (ML-KEM-768 + ML-DSA-65)",
-    "CryptoKit PQC (ML-KEM-768 + ML-DSA-65)",
-]
-
-V2_COMPARE_CONFIGS = [
-    "liboqs PQC (ML-KEM-768 + ML-DSA-65)",
-    "liboqs PQC v2 FS (ML-KEM-768-FS + ML-DSA-65)",
-]
+ORDERED_PERF_CONFIGS = CORE_GATE_CONFIGS
+V2_COMPARE_CONFIGS = BENCH_V2_COMPARE_CONFIGS
 
 # Prefer selecting a representative batch based on the highest-variance configuration first.
 REFERENCE_CONFIG_PREFERENCE = [
-    "CryptoKit PQC (ML-KEM-768 + ML-DSA-65)",
+    "liboqs PQC v2 FS (ML-KEM-768-FS + ML-DSA-65)",
     "liboqs PQC (ML-KEM-768 + ML-DSA-65)",
     "Classic (X25519 + Ed25519)",
 ]
@@ -541,6 +542,10 @@ def short_config(config):
     """Convert long config name to short form."""
     if 'Classic' in config:
         return 'Classic'
+    if 'X-Wing' in config:
+        return 'CryptoKit X-Wing'
+    if 'v2 FS' in config:
+        return 'liboqs v2 FS'
     if 'liboqs' in config:
         return 'liboqs PQC'
     if 'CryptoKit' in config:
@@ -594,14 +599,14 @@ def generate_perf_summary_table(latency, rtt, msg_sizes, claims=None):
         ) +
         finished_size * 2
     )
-    cryptokit_total = (
+    liboqs_v2_total = (
         message_total(
-            ["MessageA.PQC-CryptoKit", "MessageA.PQC (CryptoKit)", "MessageA.PQC"],
-            6507
+            ["MessageA.PQC-liboqs-v2fs", "MessageA.PQC-v2"],
+            6550
         ) +
         message_total(
-            ["MessageB.PQC-CryptoKit", "MessageB.PQC (CryptoKit)", "MessageB.PQC"],
-            7595
+            ["MessageB.PQC-liboqs-v2fs", "MessageB.PQC-v2"],
+            5451
         ) +
         finished_size * 2
     )
@@ -610,17 +615,17 @@ def generate_perf_summary_table(latency, rtt, msg_sizes, claims=None):
         wire = claims["wire_size_bytes"]
         classic_total = int(wire.get("classic_payload_handshake", classic_total))
         liboqs_total = int(wire.get("liboqs_payload_handshake", liboqs_total))
-        cryptokit_total = int(wire.get("cryptokit_payload_handshake", cryptokit_total))
+        liboqs_v2_total = int(claims.get("v2_vs_v1", {}).get("v2_payload_handshake_bytes", liboqs_v2_total))
 
-    # Order: Classic, liboqs, CryptoKit
+    # Order: Classic, liboqs, liboqs v2 FS
     configs = [
         ('Classic (X25519 + Ed25519)', 'Classic', classic_total),
         ('liboqs PQC (ML-KEM-768 + ML-DSA-65)', 'liboqs PQC', liboqs_total),
-        ('CryptoKit PQC (ML-KEM-768 + ML-DSA-65)', 'CryptoKit PQC', cryptokit_total)
+        ('liboqs PQC v2 FS (ML-KEM-768-FS + ML-DSA-65)', 'liboqs v2 FS', liboqs_v2_total)
     ]
 
     # Throughput (hardcoded as no CSV, from text)
-    throughput = {'Classic': 3.7, 'liboqs PQC': 3.7, 'CryptoKit PQC': 3.7}
+    throughput = {'Classic': 3.7, 'liboqs PQC': 3.7, 'liboqs v2 FS': 3.7}
     iter_note = iteration_note_from_runs({cfg: [vals] for cfg, vals in latency.items()})
 
     lines = [
@@ -847,6 +852,60 @@ def generate_supp_message_sizes_table(msg_sizes):
 
     return '\n'.join(lines)
 
+
+def generate_supp_apple_contrast_table(claims):
+    contrast = claims.get("contrast", {})
+    latency = contrast.get("latency", {})
+    rtt = contrast.get("rtt", {})
+    batch_latency = contrast.get("batch_values", {}).get("latency", {})
+    batch_rtt = contrast.get("batch_values", {}).get("rtt", {})
+
+    rows = []
+    for config in (APPLE_PQC_CONFIG, APPLE_XWING_CONFIG):
+        lat = latency.get(config)
+        rt = rtt.get(config)
+        if not lat or not rt:
+            continue
+        b = int(batch_latency.get(config, {}).get("batches", 1))
+        short = short_config(config)
+        rows.append(
+            (
+                short,
+                int(lat.get("n", 0)),
+                b,
+                float(lat.get("mean", 0.0)),
+                float(lat.get("p95", 0.0)),
+                float(rt.get("mean", 0.0)),
+                float(rt.get("p95", 0.0)),
+            )
+        )
+
+    lines = [
+        r"\begin{table*}[!tp]",
+        r"\centering",
+        r"\caption{Supplementary Table \thetable: Apple-native contrast benchmarks (non-gating). These rows are reported for transparency and platform comparison, but are excluded from the core reproducibility gate.}",
+        r"\label{tab:supp-apple-contrast}",
+        r"\begin{tabular}{@{}lcccccc@{}}",
+        r"\toprule",
+        r"Configuration & N & B & Latency mean (ms) & Latency p95 (ms) & RTT mean (ms) & RTT p95 (ms) \\",
+        r"\midrule",
+    ]
+
+    if not rows:
+        lines.append(r"\multicolumn{7}{c}{Apple contrast unavailable in this snapshot} \\")
+    else:
+        for short, n, b, lat_mean, lat_p95, rtt_mean, rtt_p95 in rows:
+            lines.append(
+                f"{short} & {n} & {b} & {lat_mean:.3f} & {lat_p95:.3f} & {rtt_mean:.3f} & {rtt_p95:.3f} \\\\"
+            )
+
+    lines.extend([
+        r"\bottomrule",
+        r"\end{tabular}",
+        r"\end{table*}",
+    ])
+    return "\n".join(lines)
+
 def parse_traffic_padding(filepath):
     """Parse traffic padding CSV (already aggregated per-label in the runtime telemetry)."""
     if not filepath:
@@ -1023,7 +1082,15 @@ def generate_supp_traffic_padding_sensitivity_table(rows):
 
 def parse_system_impact(filepath: Path) -> list[dict[str, str]]:
     """Parse system_impact CSV rows (raw)."""
-    return _read_csv_rows(filepath)
+    rows = _read_csv_rows(filepath)
+    cleaned: list[dict[str, str]] = []
+    for row in rows:
+        date_value = (row.get("date") or "").strip().lower()
+        file_bytes_value = (row.get("file_bytes") or "").strip().lower()
+        if date_value == "date" or file_bytes_value == "file_bytes":
+            continue
+        cleaned.append(row)
+    return cleaned
 
 def generate_system_impact_table(rows: list[dict[str, str]], source_csv_name: str | None = None) -> str:
     """
@@ -1033,7 +1100,16 @@ def generate_system_impact_table(rows: list[dict[str, str]], source_csv_name: st
     - T_connect p50/p95 (ms) across conditions
     - T_total p50/p95 (ms) for selected file sizes under RTT 50±20ms
     """
-    present_file_bytes = sorted({int(r["file_bytes"]) for r in rows if r.get("file_bytes")})
+    present_file_bytes_set: set[int] = set()
+    for row in rows:
+        raw = row.get("file_bytes")
+        if not raw:
+            continue
+        try:
+            present_file_bytes_set.add(int(raw))
+        except ValueError:
+            continue
+    present_file_bytes = sorted(present_file_bytes_set)
     chosen_file_bytes = [b for b in SYSTEM_IMPACT_PREFERRED_FILE_BYTES if b in present_file_bytes]
     if not chosen_file_bytes:
         chosen_file_bytes = present_file_bytes[:2]
@@ -1299,6 +1375,13 @@ def main():
         f.write(supp_v2_compare)
     print(f"  -> {supp_v2_compare_path}")
 
+    supp_apple_contrast = generate_supp_apple_contrast_table(claims)
+    supp_apple_contrast_path = SUPP_DIR / "s13_apple_contrast.tex"
+    with open(supp_apple_contrast_path, 'w') as f:
+        f.write(f"% Auto-generated by make_tables.py\n\n")
+        f.write(supp_apple_contrast)
+    print(f"  -> {supp_apple_contrast_path}")
+
     supp_msg = generate_supp_message_sizes_table(msg_sizes)
     supp_msg_path = SUPP_DIR / "s3_message_sizes.tex"
     with open(supp_msg_path, 'w') as f:
@@ -1359,13 +1442,20 @@ def main():
     print("\n" + "=" * 60)
     print("NUMBERS FOR ABSTRACT VERIFICATION:")
     print("=" * 60)
-    for config in ['Classic (X25519 + Ed25519)',
-                   'liboqs PQC (ML-KEM-768 + ML-DSA-65)',
-                   'CryptoKit PQC (ML-KEM-768 + ML-DSA-65)']:
+    for config in ORDERED_PERF_CONFIGS:
         if config in latency:
             d = latency[config]
             print(f"{short_config(config)}:")
             print(f"  Latency: {d['mean']:.2f} ms (p95 {d['p95']:.2f} ms)")
+
+    contrast_latency = claims.get("contrast", {}).get("latency", {})
+    if contrast_latency:
+        print("\nContrast (non-gating):")
+        for config in (APPLE_PQC_CONFIG, APPLE_XWING_CONFIG):
+            if config in contrast_latency:
+                d = contrast_latency[config]
+                print(f"{short_config(config)}:")
+                print(f"  Latency: {d['mean']:.2f} ms (p95 {d['p95']:.2f} ms)")
 
     print("\nDone!")
 

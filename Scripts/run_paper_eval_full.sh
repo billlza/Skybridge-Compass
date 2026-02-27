@@ -187,6 +187,9 @@ worker_main() {
   local bench_scope="${SKYBRIDGE_BENCH_SCOPE:-core}"
   local bench_stability_require_apple="${SKYBRIDGE_BENCH_STABILITY_REQUIRE_APPLE:-0}"
   local bench_apple_iterations="${SKYBRIDGE_BENCH_APPLE_ITERATIONS:-5000}"
+  local bench_run_contrast="${SKYBRIDGE_BENCH_RUN_CONTRAST:-1}"
+  local bench_contrast_batches="${SKYBRIDGE_BENCH_CONTRAST_BATCHES:-1}"
+  local refresh_primary_snapshot_sha="${SKYBRIDGE_REFRESH_PRIMARY_SNAPSHOT_SHA:-1}"
   local bench_cooldown_seconds="${SKYBRIDGE_BENCH_COOLDOWN_SECONDS:-5}"
   local bench_max_load_ratio="${SKYBRIDGE_BENCH_MAX_LOAD_RATIO:-0.70}"
   local bench_load_wait_seconds="${SKYBRIDGE_BENCH_LOAD_WAIT_SECONDS:-120}"
@@ -226,6 +229,8 @@ worker_main() {
       echo "BENCH_SCOPE=${bench_scope}"
       echo "BENCH_STABILITY_REQUIRE_APPLE=${bench_stability_require_apple}"
       echo "BENCH_APPLE_ITERATIONS=${bench_apple_iterations}"
+      echo "BENCH_RUN_CONTRAST=${bench_run_contrast}"
+      echo "BENCH_CONTRAST_BATCHES=${bench_contrast_batches}"
       echo "BENCH_COOLDOWN_SECONDS=${bench_cooldown_seconds}"
       echo "BENCH_MAX_LOAD_RATIO=${bench_max_load_ratio}"
       echo "BENCH_LOAD_WAIT_SECONDS=${bench_load_wait_seconds}"
@@ -251,6 +256,8 @@ worker_main() {
     SB_BENCH_SCOPE="$bench_scope" \
     SB_BENCH_STABILITY_REQUIRE_APPLE="$bench_stability_require_apple" \
     SB_BENCH_APPLE_ITERATIONS="$bench_apple_iterations" \
+    SB_BENCH_RUN_CONTRAST="$bench_run_contrast" \
+    SB_BENCH_CONTRAST_BATCHES="$bench_contrast_batches" \
     SB_BENCH_COOLDOWN_SECONDS="$bench_cooldown_seconds" \
     SB_BENCH_MAX_LOAD_RATIO="$bench_max_load_ratio" \
     SB_BENCH_LOAD_WAIT_SECONDS="$bench_load_wait_seconds" \
@@ -291,6 +298,8 @@ data = {
     "bench_scope": os.environ.get("SB_BENCH_SCOPE", ""),
     "bench_stability_require_apple": to_int(os.environ.get("SB_BENCH_STABILITY_REQUIRE_APPLE", "")),
     "bench_apple_iterations": to_int(os.environ.get("SB_BENCH_APPLE_ITERATIONS", "")),
+    "bench_run_contrast": to_int(os.environ.get("SB_BENCH_RUN_CONTRAST", "")),
+    "bench_contrast_batches": to_int(os.environ.get("SB_BENCH_CONTRAST_BATCHES", "")),
     "bench_cooldown_seconds": to_int(os.environ.get("SB_BENCH_COOLDOWN_SECONDS", "")),
     "bench_max_load_ratio": os.environ.get("SB_BENCH_MAX_LOAD_RATIO", ""),
     "bench_load_wait_seconds": to_int(os.environ.get("SB_BENCH_LOAD_WAIT_SECONDS", "")),
@@ -436,10 +445,14 @@ PY
       "$ROOT_DIR/Artifacts/handshake_rtt_${artifact_date_value}.csv"
       "$ROOT_DIR/Artifacts/message_sizes_${artifact_date_value}.csv"
       "$ROOT_DIR/Artifacts/bench_stability_window_${artifact_date_value}.json"
+      "$ROOT_DIR/Artifacts/handshake_bench_contrast_${artifact_date_value}.csv"
+      "$ROOT_DIR/Artifacts/handshake_rtt_contrast_${artifact_date_value}.csv"
+      "$ROOT_DIR/Artifacts/apple_contrast_summary_${artifact_date_value}.json"
       "$ROOT_DIR/Artifacts/ios_minor_matrix_${artifact_date_value}.md"
       "$ROOT_DIR/Docs/generated/claims_macros.tex"
       "$ROOT_DIR/Docs/tables/perf_summary.tex"
       "$ROOT_DIR/Docs/supp_tables/s12_v2_v1_compare.tex"
+      "$ROOT_DIR/Docs/supp_tables/s13_apple_contrast.tex"
       "$ROOT_DIR/Docs/TDSC-2026-01-0318_IEEE_Paper_SkyBridge_Compass_patched.pdf"
       "$ROOT_DIR/Docs/TDSC-2026-01-0318_supplementary.pdf"
     )
@@ -467,6 +480,8 @@ PY
       echo "- Bench scope: ${bench_scope}"
       echo "- Bench stability require Apple: ${bench_stability_require_apple}"
       echo "- Bench Apple iterations: ${bench_apple_iterations}"
+      echo "- Bench run contrast: ${bench_run_contrast}"
+      echo "- Bench contrast batches: ${bench_contrast_batches}"
       echo "- Bench cooldown seconds: ${bench_cooldown_seconds}"
       echo "- Bench max load ratio: ${bench_max_load_ratio}"
       echo "- Bench load wait seconds: ${bench_load_wait_seconds}"
@@ -493,13 +508,21 @@ PY
       echo "- ${ROOT_DIR}/Artifacts/tamarin_skybridge_v2_summary_${artifact_date_value}.txt"
       echo "- ${ROOT_DIR}/Artifacts/tamarin_skybridge_v2_summary_${artifact_date_value}.png"
       echo "- ${ROOT_DIR}/Artifacts/bench_stability_window_${artifact_date_value}.json"
+      echo "- ${ROOT_DIR}/Artifacts/handshake_bench_contrast_${artifact_date_value}.csv"
+      echo "- ${ROOT_DIR}/Artifacts/handshake_rtt_contrast_${artifact_date_value}.csv"
+      echo "- ${ROOT_DIR}/Artifacts/apple_contrast_summary_${artifact_date_value}.json"
       echo "- ${ROOT_DIR}/Artifacts/ios_minor_matrix_${artifact_date_value}.md"
       echo "- ${ROOT_DIR}/Docs/supp_tables/s12_v2_v1_compare.tex"
+      echo "- ${ROOT_DIR}/Docs/supp_tables/s13_apple_contrast.tex"
       echo "- ${ROOT_DIR}/Docs/TDSC-2026-01-0318_IEEE_Paper_SkyBridge_Compass_patched.pdf"
       echo "- ${ROOT_DIR}/Docs/TDSC-2026-01-0318_supplementary.pdf"
       echo "- ${gate_report}"
       echo "- ${issue_report}"
       echo "- ${snapshot_dir}"
+      echo
+      echo "## Core Gate vs Contrast"
+      echo "- Core gate: Classic + liboqs + liboqs v2 FS (hard-gating)."
+      echo "- Contrast set: Apple PQC + X-Wing (non-gating diagnostics)."
       echo
       if [[ "$final_state" != "SUCCEEDED" ]]; then
         echo "## First Failure"
@@ -577,6 +600,18 @@ PY
       echo "SKYBRIDGE_BENCH_STABILITY_REQUIRE_APPLE must be 0 or 1 (got ${bench_stability_require_apple})." >&2
       return 1
     fi
+    if [[ "$bench_run_contrast" != "0" && "$bench_run_contrast" != "1" ]]; then
+      echo "SKYBRIDGE_BENCH_RUN_CONTRAST must be 0 or 1 (got ${bench_run_contrast})." >&2
+      return 1
+    fi
+    if [[ "$refresh_primary_snapshot_sha" != "0" && "$refresh_primary_snapshot_sha" != "1" ]]; then
+      echo "SKYBRIDGE_REFRESH_PRIMARY_SNAPSHOT_SHA must be 0 or 1 (got ${refresh_primary_snapshot_sha})." >&2
+      return 1
+    fi
+    if ! [[ "$bench_contrast_batches" =~ ^[0-9]+$ ]] || [[ "$bench_contrast_batches" -lt 1 ]]; then
+      echo "SKYBRIDGE_BENCH_CONTRAST_BATCHES must be an integer >= 1 (got ${bench_contrast_batches})." >&2
+      return 1
+    fi
     if ! [[ "$bench_apple_iterations" =~ ^[0-9]+$ ]] || [[ "$bench_apple_iterations" -lt 1 ]]; then
       echo "SKYBRIDGE_BENCH_APPLE_ITERATIONS must be an integer >= 1 (got ${bench_apple_iterations})." >&2
       return 1
@@ -651,6 +686,10 @@ PY
       echo "Missing script: $ROOT_DIR/Scripts/make_tables.py" >&2
       return 1
     }
+    [[ -f "$ROOT_DIR/Scripts/aggregate_apple_contrast.py" ]] || {
+      echo "Missing script: $ROOT_DIR/Scripts/aggregate_apple_contrast.py" >&2
+      return 1
+    }
     [[ -x "$ROOT_DIR/compile_paper.sh" ]] || {
       echo "Missing executable script: $ROOT_DIR/compile_paper.sh" >&2
       return 1
@@ -683,6 +722,8 @@ PY
     SKYBRIDGE_BENCH_SCOPE="$bench_scope" \
     SKYBRIDGE_BENCH_STABILITY_REQUIRE_APPLE="$bench_stability_require_apple" \
     SKYBRIDGE_BENCH_APPLE_ITERATIONS="$bench_apple_iterations" \
+    SKYBRIDGE_BENCH_RUN_CONTRAST="$bench_run_contrast" \
+    SKYBRIDGE_BENCH_CONTRAST_BATCHES="$bench_contrast_batches" \
     SKYBRIDGE_BENCH_COOLDOWN_SECONDS="$bench_cooldown_seconds" \
     SKYBRIDGE_BENCH_MAX_LOAD_RATIO="$bench_max_load_ratio" \
     SKYBRIDGE_BENCH_LOAD_WAIT_SECONDS="$bench_load_wait_seconds" \
@@ -701,6 +742,68 @@ PY
       python3 "$ROOT_DIR/Scripts/collect_claims.py"
     [[ -f "$ROOT_DIR/Artifacts/claims_${artifact_date_value}.json" ]]
     [[ -f "$ROOT_DIR/Docs/generated/claims_macros.tex" ]]
+  }
+
+  refresh_snapshot_sha_stage() {
+    [[ "$refresh_primary_snapshot_sha" == "1" ]] || return 0
+    local snapshots_file="$ROOT_DIR/Docs/artifact_snapshots.toml"
+    local dataset_file="$ROOT_DIR/Artifacts/handshake_bench_${artifact_date_value}.csv"
+    [[ -f "$snapshots_file" ]] || return 0
+    [[ -f "$dataset_file" ]] || {
+      echo "Missing benchmark dataset for snapshot refresh: ${dataset_file}" >&2
+      return 1
+    }
+
+    python3 - "$snapshots_file" "$dataset_file" "$artifact_date_value" <<'PY'
+from __future__ import annotations
+
+import hashlib
+import re
+import sys
+from pathlib import Path
+
+snapshots_path = Path(sys.argv[1])
+dataset_path = Path(sys.argv[2])
+artifact_date = sys.argv[3]
+target_snapshot_id = "primary-2026-01-23"
+
+sha = hashlib.sha256(dataset_path.read_bytes()).hexdigest()
+lines = snapshots_path.read_text(encoding="utf-8").splitlines()
+
+in_block = False
+block_id: str | None = None
+block_date: str | None = None
+
+for index, line in enumerate(lines):
+    stripped = line.strip()
+    if stripped == "[[snapshots]]":
+        in_block = True
+        block_id = None
+        block_date = None
+        continue
+    if not in_block:
+        continue
+    if stripped.startswith("id = "):
+        match = re.match(r'id\s*=\s*"([^"]+)"', stripped)
+        if match:
+            block_id = match.group(1)
+        continue
+    if stripped.startswith("artifact_date = "):
+        match = re.match(r'artifact_date\s*=\s*"([^"]+)"', stripped)
+        if match:
+            block_date = match.group(1)
+        continue
+    if stripped.startswith("dataset_sha256 = "):
+        if block_id == target_snapshot_id and block_date == artifact_date:
+            lines[index] = f'dataset_sha256 = "{sha}"'
+            snapshots_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            print(f"[snapshot-refresh] updated {target_snapshot_id} sha={sha}")
+            raise SystemExit(0)
+
+raise SystemExit(
+    f"could not locate snapshot id={target_snapshot_id} artifact_date={artifact_date} in {snapshots_path}"
+)
+PY
   }
 
   tables_and_figures_stage() {
@@ -742,6 +845,7 @@ PY
   run_stage "formal" formal_stage
   run_stage "core_eval" core_eval_stage
   run_stage "claims" claims_stage
+  run_stage "snapshot_sha_refresh" refresh_snapshot_sha_stage
   run_stage "tables_figures" tables_and_figures_stage
   run_stage "consistency" consistency_stage
   run_stage "compile" compile_stage
@@ -855,6 +959,14 @@ main() {
     echo "SKYBRIDGE_BENCH_APPLE_ITERATIONS must be an integer >= 1 (got '${SKYBRIDGE_BENCH_APPLE_ITERATIONS:-5000}')." >&2
     exit 2
   fi
+  if [[ "${SKYBRIDGE_BENCH_RUN_CONTRAST:-1}" != "0" && "${SKYBRIDGE_BENCH_RUN_CONTRAST:-1}" != "1" ]]; then
+    echo "SKYBRIDGE_BENCH_RUN_CONTRAST must be 0 or 1 (got '${SKYBRIDGE_BENCH_RUN_CONTRAST:-1}')." >&2
+    exit 2
+  fi
+  if ! [[ "${SKYBRIDGE_BENCH_CONTRAST_BATCHES:-1}" =~ ^[0-9]+$ ]] || [[ "${SKYBRIDGE_BENCH_CONTRAST_BATCHES:-1}" -lt 1 ]]; then
+    echo "SKYBRIDGE_BENCH_CONTRAST_BATCHES must be an integer >= 1 (got '${SKYBRIDGE_BENCH_CONTRAST_BATCHES:-1}')." >&2
+    exit 2
+  fi
   if [[ "${SKYBRIDGE_BENCH_STABILITY_REQUIRE_APPLE:-0}" != "0" && "${SKYBRIDGE_BENCH_STABILITY_REQUIRE_APPLE:-0}" != "1" ]]; then
     echo "SKYBRIDGE_BENCH_STABILITY_REQUIRE_APPLE must be 0 or 1 (got '${SKYBRIDGE_BENCH_STABILITY_REQUIRE_APPLE:-0}')." >&2
     exit 2
@@ -908,6 +1020,8 @@ main() {
     echo "BENCH_SCOPE=${SKYBRIDGE_BENCH_SCOPE:-core}"
     echo "BENCH_STABILITY_REQUIRE_APPLE=${SKYBRIDGE_BENCH_STABILITY_REQUIRE_APPLE:-0}"
     echo "BENCH_APPLE_ITERATIONS=${SKYBRIDGE_BENCH_APPLE_ITERATIONS:-5000}"
+    echo "BENCH_RUN_CONTRAST=${SKYBRIDGE_BENCH_RUN_CONTRAST:-1}"
+    echo "BENCH_CONTRAST_BATCHES=${SKYBRIDGE_BENCH_CONTRAST_BATCHES:-1}"
     echo "BENCH_COOLDOWN_SECONDS=${SKYBRIDGE_BENCH_COOLDOWN_SECONDS:-5}"
     echo "BENCH_MAX_LOAD_RATIO=${SKYBRIDGE_BENCH_MAX_LOAD_RATIO:-0.70}"
     echo "BENCH_LOAD_WAIT_SECONDS=${SKYBRIDGE_BENCH_LOAD_WAIT_SECONDS:-120}"

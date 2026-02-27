@@ -10,7 +10,7 @@ OUT_PATH = Path("Docs/figures/fig_handshake_latency.svg")
 CONFIG_ORDER = [
     "Classic (X25519 + Ed25519)",
     "liboqs PQC (ML-KEM-768 + ML-DSA-65)",
-    "CryptoKit PQC (ML-KEM-768 + ML-DSA-65)",
+    "liboqs PQC v2 FS (ML-KEM-768-FS + ML-DSA-65)",
 ]
 
 COLORS = {

@@ -6,13 +6,7 @@ import os
 from pathlib import Path
 from statistics import median
 
-
-CORE_CONFIGS = [
-    "Classic (X25519 + Ed25519)",
-    "liboqs PQC (ML-KEM-768 + ML-DSA-65)",
-    "CryptoKit PQC (ML-KEM-768 + ML-DSA-65)",
-    "liboqs PQC v2 FS (ML-KEM-768-FS + ML-DSA-65)",
-]
+from bench_profiles import STABILITY_TRACKED_CONFIGS, gate_configs
 
 
 def _read_rows(path: Path) -> list[dict[str, str]]:
@@ -103,6 +97,16 @@ def main() -> None:
     parser.add_argument("--bench-csv", default=None, help="override handshake bench csv path")
     parser.add_argument("--rtt-csv", default=None, help="override handshake rtt csv path")
     parser.add_argument("--threshold", type=float, default=0.07, help="max relative deviation")
+    parser.add_argument(
+        "--tail-threshold",
+        type=float,
+        default=(
+            float(os.environ["SKYBRIDGE_BENCH_STABILITY_TAIL_THRESHOLD"])
+            if "SKYBRIDGE_BENCH_STABILITY_TAIL_THRESHOLD" in os.environ
+            else None
+        ),
+        help="max relative deviation for tail metrics (p95); defaults to 2x --threshold",
+    )
     parser.add_argument("--min-batches", type=int, default=3, help="minimum complete batches required")
     parser.add_argument("--require-apple", choices=["0", "1"], default=os.environ.get("SKYBRIDGE_BENCH_STABILITY_REQUIRE_APPLE", "0"))
     parser.add_argument("--output", default=None, help="output json path")
@@ -123,16 +127,23 @@ def main() -> None:
         raise SystemExit("--min-batches must be >= 1")
     if args.threshold <= 0:
         raise SystemExit("--threshold must be > 0")
+    tail_threshold = (
+        float(args.tail_threshold)
+        if args.tail_threshold is not None
+        else max(args.threshold, args.threshold * 2.0)
+    )
+    if tail_threshold <= 0:
+        raise SystemExit("--tail-threshold must be > 0")
 
     require_apple = args.require_apple == "1"
-    gate_configs = CORE_CONFIGS if require_apple else [cfg for cfg in CORE_CONFIGS if "CryptoKit PQC" not in cfg]
-    gate_config_set = set(gate_configs)
+    active_gate_configs = gate_configs(require_apple=require_apple)
+    gate_config_set = set(active_gate_configs)
 
     bench_rows = _read_rows(bench_csv)
     rtt_rows = _read_rows(rtt_csv)
 
-    bench_batches = _group_complete_batches(bench_rows, gate_configs)
-    rtt_batches = _group_complete_batches(rtt_rows, gate_configs)
+    bench_batches = _group_complete_batches(bench_rows, active_gate_configs)
+    rtt_batches = _group_complete_batches(rtt_rows, active_gate_configs)
 
     complete_batches = min(len(bench_batches), len(rtt_batches))
     bench_batches = bench_batches[-complete_batches:] if complete_batches > 0 else []
@@ -140,10 +151,10 @@ def main() -> None:
 
     sufficient_batches = complete_batches >= args.min_batches
 
-    latency_mean, stable_latency_mean = _metric_report(bench_batches, CORE_CONFIGS, gate_config_set, "mean_ms", args.threshold)
-    latency_p95, stable_latency_p95 = _metric_report(bench_batches, CORE_CONFIGS, gate_config_set, "p95_ms", args.threshold)
-    rtt_mean, stable_rtt_mean = _metric_report(rtt_batches, CORE_CONFIGS, gate_config_set, "mean_ms", args.threshold)
-    rtt_p95, stable_rtt_p95 = _metric_report(rtt_batches, CORE_CONFIGS, gate_config_set, "p95_ms", args.threshold)
+    latency_mean, stable_latency_mean = _metric_report(bench_batches, STABILITY_TRACKED_CONFIGS, gate_config_set, "mean_ms", args.threshold)
+    latency_p95, stable_latency_p95 = _metric_report(bench_batches, STABILITY_TRACKED_CONFIGS, gate_config_set, "p95_ms", tail_threshold)
+    rtt_mean, stable_rtt_mean = _metric_report(rtt_batches, STABILITY_TRACKED_CONFIGS, gate_config_set, "mean_ms", args.threshold)
+    rtt_p95, stable_rtt_p95 = _metric_report(rtt_batches, STABILITY_TRACKED_CONFIGS, gate_config_set, "p95_ms", tail_threshold)
 
     overall_stable = (
         sufficient_batches
@@ -182,8 +193,9 @@ def main() -> None:
     report = {
         "artifact_date": artifact_date,
         "require_apple": require_apple,
-        "gate_configs": gate_configs,
+        "gate_configs": active_gate_configs,
         "threshold": args.threshold,
+        "tail_threshold": tail_threshold,
         "min_batches": args.min_batches,
         "complete_batches": complete_batches,
         "sufficient_batches": sufficient_batches,
@@ -201,14 +213,20 @@ def main() -> None:
     output.write_text(json.dumps(report, ensure_ascii=True, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
     if overall_stable:
-        print(f"stable: true (batches={complete_batches}, threshold={args.threshold:.4f})")
+        print(
+            "stable: true "
+            f"(batches={complete_batches}, threshold={args.threshold:.4f}, tail_threshold={tail_threshold:.4f})"
+        )
         print(f"report={output}")
         raise SystemExit(0)
 
     if not sufficient_batches:
         print(f"stable: false (insufficient complete batches: {complete_batches} < {args.min_batches})")
     else:
-        print(f"stable: false (threshold={args.threshold:.4f}, batches={complete_batches})")
+        print(
+            "stable: false "
+            f"(threshold={args.threshold:.4f}, tail_threshold={tail_threshold:.4f}, batches={complete_batches})"
+        )
     if top_unstable_metrics:
         worst = top_unstable_metrics[0]
         print(

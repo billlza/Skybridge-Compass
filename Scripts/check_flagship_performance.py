@@ -5,17 +5,12 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from bench_profiles import CONTRAST_CONFIGS, CORE_GATE_CONFIGS
+
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 RUNS_DIR = ROOT_DIR / "Artifacts" / "runs"
 EXPECTED_ARTIFACT_DATE = "2026-01-23"
-
-CORE_CONFIGS = [
-    "Classic (X25519 + Ed25519)",
-    "liboqs PQC (ML-KEM-768 + ML-DSA-65)",
-    "CryptoKit PQC (ML-KEM-768 + ML-DSA-65)",
-    "liboqs PQC v2 FS (ML-KEM-768-FS + ML-DSA-65)",
-]
 
 METRICS = [
     ("latency", "mean"),
@@ -87,20 +82,27 @@ def _safe_ratio_delta(baseline: float, candidate: float) -> float:
     return (candidate - baseline) / denom
 
 
-def _collect_diffs(baseline: dict, candidate: dict) -> list[DiffRow]:
+def _collect_diffs(
+    baseline: dict,
+    candidate: dict,
+    configs: list[str],
+    strict: bool = True,
+) -> list[DiffRow]:
     rows: list[DiffRow] = []
 
     for category, field in METRICS:
         b_bucket = baseline.get(category, {})
         c_bucket = candidate.get(category, {})
 
-        for config in CORE_CONFIGS:
+        for config in configs:
             b_values = b_bucket.get(config)
             c_values = c_bucket.get(config)
-            if b_values is None:
+            if b_values is None and strict:
                 raise SystemExit(f"missing baseline {category} config: {config}")
-            if c_values is None:
+            if c_values is None and strict:
                 raise SystemExit(f"missing candidate {category} config: {config}")
+            if b_values is None or c_values is None:
+                continue
 
             baseline_value = float(b_values[field])
             candidate_value = float(c_values[field])
@@ -138,6 +140,7 @@ def _write_report(
     regressions: list[DiffRow],
     breakthroughs: list[DiffRow],
     all_rows: list[DiffRow],
+    contrast_rows: list[DiffRow],
 ) -> None:
     lines: list[str] = []
     lines.append("# Flagship Performance Report")
@@ -190,6 +193,30 @@ def _write_report(
         lines.append("- none")
 
     lines.append("")
+    lines.append("## Contrast Diagnostics (Non-Gating)")
+    if contrast_rows:
+        lines.append("")
+        lines.append("| Config | Metric | Baseline | Candidate | Delta |")
+        lines.append("|---|---|---:|---:|---:|")
+        for row in contrast_rows:
+            metric_name = f"{row.category}.{row.field}"
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        _format_config(row.config),
+                        metric_name,
+                        f"{row.baseline:.4f}",
+                        f"{row.candidate:.4f}",
+                        f"{row.delta_ratio * 100:+.2f}%",
+                    ]
+                )
+                + " |"
+            )
+    else:
+        lines.append("- contrast data unavailable in one or both runs")
+
+    lines.append("")
     lines.append("## Breakthroughs")
     if breakthroughs:
         for row in breakthroughs:
@@ -236,7 +263,8 @@ def main() -> None:
     baseline = _load_claims(run_a_dir, artifact_date)
     candidate = _load_claims(run_b_dir, artifact_date)
 
-    diffs = _collect_diffs(baseline, candidate)
+    diffs = _collect_diffs(baseline, candidate, configs=CORE_GATE_CONFIGS, strict=True)
+    contrast_diffs = _collect_diffs(baseline, candidate, configs=CONTRAST_CONFIGS, strict=False)
 
     regressions = [row for row in diffs if row.delta_ratio > args.threshold]
     breakthroughs = [row for row in diffs if row.delta_ratio < -args.threshold]
@@ -254,6 +282,7 @@ def main() -> None:
         regressions=regressions,
         breakthroughs=breakthroughs,
         all_rows=diffs,
+        contrast_rows=contrast_diffs,
     )
 
     print(f"flagship_report={output_path}")
@@ -271,6 +300,9 @@ def main() -> None:
                 "BREAKTHROUGH: "
                 f"{_format_config(row.config)} {row.category}.{row.field} improved {abs(row.delta_ratio) * 100:.2f}%"
             )
+
+    if contrast_diffs:
+        print(f"INFO: contrast diagnostics rows={len(contrast_diffs)} (non-gating)")
 
     print("Flagship performance gate passed.")
 

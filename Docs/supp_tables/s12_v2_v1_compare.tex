@@ -3,14 +3,14 @@
 \begin{table*}[!tp]
 \centering
 \small
-\caption{Supplementary Table \thetable: liboqs PQC v1/v2 bridge comparison (N=1000, warmup=10). v1 uses \texttt{ML-KEM-768}; v2 uses \texttt{ML-KEM-768-FS} with additional ephemeral contribution composition. Observed v2-v1 deltas: mean latency +0.77 ms, p95 latency +0.74 ms, payload bytes +75 B.}
+\caption{Supplementary Table \thetable: liboqs PQC v1/v2 bridge comparison (N=1000, warmup=10). v1 uses \texttt{ML-KEM-768}; v2 uses \texttt{ML-KEM-768-FS} with additional ephemeral contribution composition. Observed v2-v1 deltas: mean latency +0.74 ms, p95 latency +0.78 ms, payload bytes +75 B.}
 \label{tab:supp-v2-v1-compare}
 \begin{tabular}{@{}lccccc@{}}
 \toprule
 Configuration & mean latency (ms) & p95 latency (ms) & p50 RTT (ms) & p95 RTT (ms) & payload handshake (B) \\
 \midrule
-liboqs v1 & 2.95 & 3.69 & 0.89 & 1.45 & 12,002 \\
-liboqs v2 FS & 3.72 & 4.43 & 1.23 & 1.82 & 12,077 \\
+liboqs v1 & 2.74 & 3.40 & 0.82 & 1.37 & 12,002 \\
+liboqs v2 FS & 3.48 & 4.18 & 1.15 & 1.70 & 12,077 \\
 \bottomrule
 \end{tabular}
 \end{table*}

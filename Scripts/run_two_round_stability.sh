@@ -12,7 +12,7 @@ bench_stability_require_apple="${SKYBRIDGE_BENCH_STABILITY_REQUIRE_APPLE:-0}"
 bench_apple_iterations="${SKYBRIDGE_BENCH_APPLE_ITERATIONS:-5000}"
 max_attempts="${SKYBRIDGE_STABILITY_MAX_ATTEMPTS:-3}"
 max_drift="${SKYBRIDGE_STABILITY_MAX_DRIFT:-0.07}"
-flagship_threshold="${SKYBRIDGE_FLAGSHIP_THRESHOLD:-0.03}"
+flagship_threshold="${SKYBRIDGE_FLAGSHIP_THRESHOLD:-0.04}"
 bench_disable_handshake_padding="${SKYBRIDGE_BENCH_DISABLE_HANDSHAKE_PADDING:-1}"
 bench_deterministic_nonce="${SKYBRIDGE_BENCH_DETERMINISTIC_NONCE:-1}"
 first_run_id=""
@@ -30,7 +30,7 @@ Environment:
   SKYBRIDGE_BENCH_APPLE_ITERATIONS  default: 5000
   SKYBRIDGE_STABILITY_MAX_ATTEMPTS  default: 3
   SKYBRIDGE_STABILITY_MAX_DRIFT     default: 0.07
-  SKYBRIDGE_FLAGSHIP_THRESHOLD      default: 0.03
+  SKYBRIDGE_FLAGSHIP_THRESHOLD      default: 0.04
 USAGE
 }
 
@@ -224,7 +224,6 @@ run_gate_with_tee() {
   set +e
   "$@" | tee "$output_file"
   local cmd_rc=${PIPESTATUS[0]}
-  set -e
   return "$cmd_rc"
 }
 

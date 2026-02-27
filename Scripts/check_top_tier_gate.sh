@@ -31,6 +31,12 @@ fail_item() {
   return 1
 }
 
+note_item() {
+  local text="$1"
+  GATE_ITEMS+=("- [~] ${text}")
+  log "NOTE ${text}"
+}
+
 require_file() {
   local file_path="$1"
   [[ -f "$file_path" ]] || fail_item "missing file: ${file_path}"
@@ -126,21 +132,18 @@ for file_path in \
 done
 pass_item "key artifact CSV files present for ${ARTIFACT_DATE_VALUE}"
 
-python3 - "$HANDSHAKE_BENCH" "$HANDSHAKE_RTT" "$MESSAGE_SIZES" "$TRAFFIC_PADDING_SENS" "$ARTIFACT_DATE_VALUE" <<'PY'
+python3 - "$HANDSHAKE_BENCH" "$HANDSHAKE_RTT" "$MESSAGE_SIZES" "$TRAFFIC_PADDING_SENS" "$ARTIFACT_DATE_VALUE" "$ROOT_DIR/Scripts" <<'PY'
 import csv
 import sys
 from pathlib import Path
 
-bench_path, rtt_path, msg_path, sens_path, expected_date = sys.argv[1:]
+bench_path, rtt_path, msg_path, sens_path, expected_date, scripts_dir = sys.argv[1:]
+sys.path.insert(0, scripts_dir)
+from bench_profiles import CORE_GATE_CONFIGS
 
 required_v2_config = "liboqs PQC v2 FS (ML-KEM-768-FS + ML-DSA-65)"
 required_msg_rows = {"MessageA.PQC-liboqs-v2fs", "MessageB.PQC-liboqs-v2fs"}
-required_core_configs = {
-    "Classic (X25519 + Ed25519)",
-    "liboqs PQC (ML-KEM-768 + ML-DSA-65)",
-    "CryptoKit PQC (ML-KEM-768 + ML-DSA-65)",
-    "liboqs PQC v2 FS (ML-KEM-768-FS + ML-DSA-65)",
-}
+required_core_configs = set(CORE_GATE_CONFIGS)
 
 
 def load(path: str):
@@ -217,6 +220,48 @@ if sens_rows:
 print("csv_checks_ok")
 PY
 pass_item "v1/v2 CSV gate passed (bench/rtt/message-size/date consistency)"
+
+CONTRAST_BENCH="Artifacts/handshake_bench_contrast_${ARTIFACT_DATE_VALUE}.csv"
+CONTRAST_RTT="Artifacts/handshake_rtt_contrast_${ARTIFACT_DATE_VALUE}.csv"
+if [[ -f "$CONTRAST_BENCH" && -f "$CONTRAST_RTT" ]]; then
+  if python3 - "$CONTRAST_BENCH" "$CONTRAST_RTT" "$ROOT_DIR/Scripts" <<'PY'
+import csv
+import sys
+from pathlib import Path
+
+bench_path, rtt_path, scripts_dir = sys.argv[1:]
+sys.path.insert(0, scripts_dir)
+from bench_profiles import CONTRAST_CONFIGS
+
+def read_rows(path: str):
+    with open(path, newline="", encoding="utf-8") as fh:
+        return list(csv.DictReader(fh))
+
+bench = read_rows(bench_path)
+rtt = read_rows(rtt_path)
+allowed = set(CONTRAST_CONFIGS)
+
+for path, rows in ((bench_path, bench), (rtt_path, rtt)):
+    unknown = sorted({row.get("configuration", "") for row in rows if row.get("configuration", "") not in allowed})
+    if unknown:
+        raise SystemExit(f"contrast file has unknown configuration rows ({Path(path).name}): {unknown}")
+
+for cfg in CONTRAST_CONFIGS:
+    bench_count = sum(1 for row in bench if row.get("configuration") == cfg)
+    rtt_count = sum(1 for row in rtt if row.get("configuration") == cfg)
+    if bench_count != rtt_count:
+        raise SystemExit(f"contrast row count mismatch for {cfg}: bench={bench_count}, rtt={rtt_count}")
+
+print("contrast_checks_ok")
+PY
+  then
+    note_item "contrast CSVs present and structurally consistent (informational)"
+  else
+    note_item "contrast CSVs present but failed structural checks (informational only)"
+  fi
+else
+  note_item "contrast CSVs not present; contrast diagnostics skipped (informational)"
+fi
 
 CLAIMS_JSON="Artifacts/claims_${ARTIFACT_DATE_VALUE}.json"
 CLAIMS_MACROS="Docs/generated/claims_macros.tex"

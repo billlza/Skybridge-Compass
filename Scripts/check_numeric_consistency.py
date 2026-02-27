@@ -41,11 +41,14 @@ def main() -> None:
     latency = claims["latency"]
     v2 = claims["v2_vs_v1"]
     wire = claims["wire_size_bytes"]
+    contrast = claims.get("contrast", {})
+    apple_latency = contrast.get("latency", {}).get("CryptoKit PQC (ML-KEM-768 + ML-DSA-65)")
 
     expected_macros = {
         "claimArtifactDate": claims["artifact_date"],
         "claimClassicPNineNineMs": fmt(latency["Classic (X25519 + Ed25519)"]["p99"]),
-        "claimCryptoKitPNineNineMs": fmt(latency["CryptoKit PQC (ML-KEM-768 + ML-DSA-65)"]["p99"]),
+        "claimLiboqsPNineNineMs": fmt(latency["liboqs PQC (ML-KEM-768 + ML-DSA-65)"]["p99"]),
+        "claimLiboqsVTwoPNineNineMs": fmt(latency["liboqs PQC v2 FS (ML-KEM-768-FS + ML-DSA-65)"]["p99"]),
         "claimClassicPayloadBytes": str(wire["classic_payload_handshake"]),
         "claimLiboqsPayloadBytes": str(wire["liboqs_payload_handshake"]),
         "claimVTwoDeltaPayloadBytes": str(v2["delta_payload_handshake_bytes"]),
@@ -53,6 +56,8 @@ def main() -> None:
         "claimVTwoDeltaMessageBBytes": str(v2["delta_message_b_bytes"]),
         "claimVTwoPNineFiveDeltaMs": fmt(v2["delta_p95_latency_ms"]),
     }
+    if apple_latency is not None and "claimCryptoKitPNineNineMs" in macros:
+        expected_macros["claimCryptoKitPNineNineMs"] = fmt(float(apple_latency["p99"]))
 
     for macro, expected in expected_macros.items():
         actual = macros.get(macro)
@@ -68,9 +73,9 @@ def main() -> None:
         "\\claimVTwoDeltaPayloadBytes",
         "\\claimVTwoDeltaMessageABytes",
         "\\claimVTwoDeltaMessageBBytes",
-        "\\claimCryptoKitPNineNineMs",
         "\\claimClassicPayloadBytes",
         "\\claimLiboqsPayloadBytes",
+        "\\claimLiboqsVTwoPNineNineMs",
     ]
     for token in required_refs:
         if token not in main_text and token not in supp_text:

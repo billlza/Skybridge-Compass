@@ -7,17 +7,11 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from bench_profiles import APPLE_PQC_CONFIG, CONTRAST_CONFIGS, CORE_GATE_CONFIGS
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 RUNS_DIR = ROOT_DIR / "Artifacts" / "runs"
 EXPECTED_ARTIFACT_DATE = "2026-01-23"
-
-CORE_CONFIGS = [
-    "Classic (X25519 + Ed25519)",
-    "liboqs PQC (ML-KEM-768 + ML-DSA-65)",
-    "CryptoKit PQC (ML-KEM-768 + ML-DSA-65)",
-    "liboqs PQC v2 FS (ML-KEM-768-FS + ML-DSA-65)",
-]
 
 V1_CFG = "liboqs PQC (ML-KEM-768 + ML-DSA-65)"
 V2_CFG = "liboqs PQC v2 FS (ML-KEM-768-FS + ML-DSA-65)"
@@ -103,7 +97,8 @@ def verify_claim_macro_alignment(claims: dict, macro_path: Path) -> list[str]:
     expected = {
         "claimArtifactDate": claims["artifact_date"],
         "claimClassicPNineNineMs": _fmt(latency["Classic (X25519 + Ed25519)"]["p99"]),
-        "claimCryptoKitPNineNineMs": _fmt(latency["CryptoKit PQC (ML-KEM-768 + ML-DSA-65)"]["p99"]),
+        "claimLiboqsPNineNineMs": _fmt(latency["liboqs PQC (ML-KEM-768 + ML-DSA-65)"]["p99"]),
+        "claimLiboqsVTwoPNineNineMs": _fmt(latency["liboqs PQC v2 FS (ML-KEM-768-FS + ML-DSA-65)"]["p99"]),
         "claimClassicPayloadBytes": str(wire["classic_payload_handshake"]),
         "claimLiboqsPayloadBytes": str(wire["liboqs_payload_handshake"]),
         "claimVTwoDeltaPayloadBytes": str(v2["delta_payload_handshake_bytes"]),
@@ -111,6 +106,11 @@ def verify_claim_macro_alignment(claims: dict, macro_path: Path) -> list[str]:
         "claimVTwoDeltaMessageBBytes": str(v2["delta_message_b_bytes"]),
         "claimVTwoPNineFiveDeltaMs": _fmt(v2["delta_p95_latency_ms"]),
     }
+
+    contrast = claims.get("contrast", {})
+    apple_latency = contrast.get("latency", {}).get(APPLE_PQC_CONFIG)
+    if apple_latency and "claimCryptoKitPNineNineMs" in macros:
+        expected["claimCryptoKitPNineNineMs"] = _fmt(float(apple_latency["p99"]))
 
     for macro, expected_value in expected.items():
         actual = macros.get(macro)
@@ -124,7 +124,7 @@ def verify_claim_macro_alignment(claims: dict, macro_path: Path) -> list[str]:
 
 def _parse_perf_row(line: str) -> tuple[str, float, float, float, float, int] | None:
     pattern = re.compile(
-        r"^\s*(Classic|liboqs PQC|CryptoKit PQC)\s*&\s*([0-9.]+)\s*&\s*([0-9.]+)\s*&\s*([0-9.]+)\s*&\s*([0-9.]+)\s*&\s*([0-9,]+)\s*&"
+        r"^\s*(Classic|liboqs PQC|liboqs v2 FS)\s*&\s*([0-9.]+)\s*&\s*([0-9.]+)\s*&\s*([0-9.]+)\s*&\s*([0-9.]+)\s*&\s*([0-9,]+)\s*&"
     )
     m = pattern.search(line)
     if not m:
@@ -151,14 +151,14 @@ def verify_perf_table_alignment(claims: dict, perf_path: Path, tol: float = 0.03
     mapping = {
         "Classic": "Classic (X25519 + Ed25519)",
         "liboqs PQC": "liboqs PQC (ML-KEM-768 + ML-DSA-65)",
-        "CryptoKit PQC": "CryptoKit PQC (ML-KEM-768 + ML-DSA-65)",
+        "liboqs v2 FS": "liboqs PQC v2 FS (ML-KEM-768-FS + ML-DSA-65)",
     }
 
     wire = claims["wire_size_bytes"]
     wire_map = {
         "Classic": wire["classic_payload_handshake"],
         "liboqs PQC": wire["liboqs_payload_handshake"],
-        "CryptoKit PQC": wire["cryptokit_payload_handshake"],
+        "liboqs v2 FS": claims["v2_vs_v1"]["v2_payload_handshake_bytes"],
     }
 
     for row_name, claim_key in mapping.items():
@@ -317,7 +317,7 @@ def compare_claims(a: dict, b: dict, max_drift: float) -> list[str]:
     issues: list[str] = []
 
     for category in ("latency", "rtt"):
-        for cfg in CORE_CONFIGS:
+        for cfg in CORE_GATE_CONFIGS:
             row_a = a.get(category, {}).get(cfg)
             row_b = b.get(category, {}).get(cfg)
             if not row_a:
@@ -355,12 +355,39 @@ def compare_claims(a: dict, b: dict, max_drift: float) -> list[str]:
     return issues
 
 
+def compare_contrast(a: dict, b: dict, max_drift: float) -> list[str]:
+    notes: list[str] = []
+    contrast_a = a.get("contrast", {})
+    contrast_b = b.get("contrast", {})
+    lat_a = contrast_a.get("latency", {})
+    lat_b = contrast_b.get("latency", {})
+    rtt_a = contrast_a.get("rtt", {})
+    rtt_b = contrast_b.get("rtt", {})
+
+    for cfg in CONTRAST_CONFIGS:
+        if cfg not in lat_a or cfg not in lat_b or cfg not in rtt_a or cfg not in rtt_b:
+            continue
+        for category, aa, bb in (
+            ("latency", lat_a[cfg], lat_b[cfg]),
+            ("rtt", rtt_a[cfg], rtt_b[cfg]),
+        ):
+            for field in ("mean", "p95"):
+                drift = relative_drift(float(aa[field]), float(bb[field]))
+                label = f"{category} drift {cfg} {field}: {drift * 100:.2f}%"
+                if drift > max_drift:
+                    notes.append(f"contrast_high_drift {label}")
+                else:
+                    notes.append(f"contrast_ok {label}")
+    return notes
+
+
 def build_markdown_report(
     run_a: RunSnapshot,
     run_b: RunSnapshot,
     max_drift: float,
     issues: list[str],
     warnings: list[str],
+    contrast_notes: list[str],
 ) -> str:
     lines: list[str] = []
     lines.append("# Stability Report")
@@ -392,6 +419,14 @@ def build_markdown_report(
     lines.append(f"- runA all-traces verified: {run_a.all_count}")
     lines.append(f"- runB exists-trace verified: {run_b.exists_count}")
     lines.append(f"- runB all-traces verified: {run_b.all_count}")
+    lines.append("")
+
+    lines.append("## Contrast (Non-Gating)")
+    if contrast_notes:
+        for note in contrast_notes:
+            lines.append(f"- {note}")
+    else:
+        lines.append("- contrast data unavailable in one or both runs")
     lines.append("")
 
     if warnings:
@@ -454,12 +489,13 @@ def main() -> None:
         issues.append("tamarin all-traces lemma count mismatch")
 
     warnings: list[str] = []
+    contrast_notes = compare_contrast(run_a.claims, run_b.claims, max_drift=args.max_drift)
     if run_a.main_pdf_hash and run_b.main_pdf_hash and run_a.main_pdf_hash != run_b.main_pdf_hash:
         warnings.append("main paper text hash mismatch (warning only)")
     if run_a.supp_pdf_hash and run_b.supp_pdf_hash and run_a.supp_pdf_hash != run_b.supp_pdf_hash:
         warnings.append("supplementary paper text hash mismatch (warning only)")
 
-    report_text = build_markdown_report(run_a, run_b, args.max_drift, issues, warnings)
+    report_text = build_markdown_report(run_a, run_b, args.max_drift, issues, warnings, contrast_notes)
 
     if args.output:
         report_path = Path(args.output)

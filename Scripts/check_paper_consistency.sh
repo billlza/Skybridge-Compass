@@ -23,6 +23,52 @@ require_file "$README_FILE"
 require_file "$SUBMISSION_TEX"
 require_file "$SUBMISSION_NAMED_TEX"
 
+restore_system_impact_if_missing() {
+  local artifact_date="$1"
+  local target="Artifacts/system_impact_${artifact_date}.csv"
+  [[ -f "$target" ]] && return 0
+  local backup
+  backup="$(ls -1t "${target}.bak_"* 2>/dev/null | head -n 1 || true)"
+  if [[ -n "$backup" && -f "$backup" ]]; then
+    cp "$backup" "$target"
+    echo "restored system impact snapshot from backup: $backup"
+  fi
+}
+
+restore_realnet_summaries_if_missing() {
+  local artifact_date="$1"
+  for kind in stun e2e; do
+    local pattern="Artifacts/realnet_${kind}_summary_${artifact_date}_*.csv.bak_*"
+    while IFS= read -r backup; do
+      [[ -n "$backup" ]] || continue
+      local canonical="${backup%%.csv.bak_*}.csv"
+      if [[ ! -f "$canonical" ]]; then
+        cp "$backup" "$canonical"
+        echo "restored realnet summary from backup: $backup"
+      fi
+    done < <(find Artifacts -maxdepth 1 -type f -name "realnet_${kind}_summary_${artifact_date}_*.csv.bak_*" -print)
+  done
+}
+
+restore_realnet_microstudy_if_missing() {
+  local artifact_date="$1"
+  local target="Artifacts/realnet_microstudy_${artifact_date}.csv"
+  [[ -f "$target" ]] && return 0
+  restore_realnet_summaries_if_missing "$artifact_date"
+  if [[ -x "Scripts/aggregate_realnet.py" || -f "Scripts/aggregate_realnet.py" ]]; then
+    ARTIFACT_DATE="$artifact_date" python3 Scripts/aggregate_realnet.py >/dev/null 2>&1 || true
+  fi
+}
+
+restore_kernel_emulation_if_missing() {
+  local artifact_date="$1"
+  local target="Artifacts/network_emulation_kernel_${artifact_date}.csv"
+  [[ -f "$target" ]] && return 0
+  if [[ -x "Scripts/run_network_emulation_kernel.sh" || -f "Scripts/run_network_emulation_kernel.sh" ]]; then
+    ARTIFACT_DATE="$artifact_date" TOOL=netem START_SERVER=0 bash Scripts/run_network_emulation_kernel.sh >/dev/null 2>&1 || true
+  fi
+}
+
 if ! cmp -s "$MAIN_TEX" "$SUBMISSION_TEX"; then
   echo "submission tex drift detected: $SUBMISSION_TEX differs from $MAIN_TEX" >&2
   exit 1
@@ -88,6 +134,10 @@ if ! rg -q "$main_tarsha" "$README_FILE"; then
   echo "README missing tar.gz SHA256: $main_tarsha" >&2
   exit 1
 fi
+
+restore_system_impact_if_missing "$main_artifact_date"
+restore_realnet_microstudy_if_missing "$main_artifact_date"
+restore_kernel_emulation_if_missing "$main_artifact_date"
 
 for prefix in system_impact realnet_microstudy network_emulation_kernel; do
   required_csv="Artifacts/${prefix}_${main_artifact_date}.csv"

@@ -149,6 +149,8 @@ def path_label_for_tex(label: str) -> str:
     aliases = {
         "ec2_v2_contract_54_direct": "direct-ec2-54",
         "ec2_v2_contract_tunnel": "ssh-tunnel",
+        "home_wifi": "home-wifi",
+        "phone_hotspot_5ga_r18": "hotspot-5ga",
         "static_contract_consistency": "static-contract",
     }
     return aliases.get(label, label)
@@ -211,18 +213,20 @@ def main() -> int:
 
     artifact_date = args.artifact_date
     interop_json = Path(args.interop_json or f"Artifacts/interop_consistency_{artifact_date}.json")
-    direct_summary = Path(
-        args.direct_summary
-        or f"Artifacts/realnet_e2e_summary_{artifact_date}_ec2_v2_contract_54_direct.csv"
-    )
-    tunnel_summary = Path(
-        args.tunnel_summary
-        or f"Artifacts/realnet_e2e_summary_{artifact_date}_ec2_v2_contract_tunnel.csv"
-    )
     out_csv = Path(args.out_csv or f"Artifacts/interop_cross_platform_{artifact_date}.csv")
     out_tex = Path(args.out_tex or "Docs/supp_tables/s13_interop_matrix.tex")
 
-    measured_rows = load_measured_rows(direct_summary) + load_measured_rows(tunnel_summary)
+    summary_inputs: List[Path] = []
+    if args.direct_summary:
+        summary_inputs.append(Path(args.direct_summary))
+    if args.tunnel_summary:
+        summary_inputs.append(Path(args.tunnel_summary))
+    if not summary_inputs:
+        summary_inputs = sorted(Path("Artifacts").glob(f"realnet_e2e_summary_{artifact_date}_*.csv"))
+
+    measured_rows: List[Dict[str, str]] = []
+    for summary_path in summary_inputs:
+        measured_rows.extend(load_measured_rows(summary_path))
     static_rows = load_static_rows(interop_json)
     all_rows = measured_rows + static_rows
 

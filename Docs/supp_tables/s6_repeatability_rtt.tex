@@ -2,15 +2,15 @@
 
 \begin{table*}[!tp]
 \centering
-\caption{Supplementary Table \thetable: Repeatability across independent benchmark batches (RTT). Table reports observed batch count $B$. Cells report mean and (when $B \ge 2$) $\pm$ 95\% CI across batches; configuration-specific N after 10 warmup runs (Classic=1000, liboqs PQC=1000, CryptoKit PQC=5000).}
+\caption{Supplementary Table \thetable: Repeatability across independent benchmark batches (RTT). Table reports observed batch count $B$. Cells report mean and (when $B \ge 2$) $\pm$ 95\% CI across batches; N=1000 iterations after 10 warmup runs.}
 \label{tab:supp-repeatability-rtt}
 \begin{tabular}{@{}lccccc@{}}
 \toprule
 Configuration & B & N/batch & mean (ms) & p50 (ms) & p95 (ms) \\
 \midrule
-Classic & 5 & 1000 & $0.531 \pm 0.012$ & $0.518 \pm 0.006$ & $0.583 \pm 0.038$ \\
-liboqs PQC & 5 & 1000 & $0.968 \pm 0.031$ & $0.897 \pm 0.025$ & $1.483 \pm 0.098$ \\
-CryptoKit PQC & 5 & 5000 & $2.577 \pm 1.135$ & $2.483 \pm 1.126$ & $3.211 \pm 1.144$ \\
+Classic & 3 & 1000 & $0.483 \pm 0.005$ & $0.474 \pm 0.003$ & $0.529 \pm 0.013$ \\
+liboqs PQC & 3 & 1000 & $0.889 \pm 0.018$ & $0.821 \pm 0.022$ & $1.358 \pm 0.053$ \\
+liboqs v2 FS & 3 & 1000 & $1.218 \pm 0.043$ & $1.153 \pm 0.033$ & $1.703 \pm 0.080$ \\
 \bottomrule
 \end{tabular}
 \end{table*}

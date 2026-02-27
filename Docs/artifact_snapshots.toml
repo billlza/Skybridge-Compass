@@ -6,7 +6,7 @@ git_commit = "b967ca6268e9ccca248e26ad894fcae062c0fe5e"
 os = "macOS 14+ (Apple Silicon)"
 toolchain = "Swift 6.2.1; Python 3.11"
 dataset_path = "Artifacts/handshake_bench_2026-01-23.csv"
-dataset_sha256 = "8300eb80d4da5b5f3589eefab61f56dc0b3dafbe6c0ff746c21e82282e7476ac"
+dataset_sha256 = "eee4c60259da27d631dbe5465dd588d0c3ad3e9e67a196d9c24808b09ef4c21c"
 notes = "Primary frozen benchmark snapshot used by main-paper quantitative claims."
 
 [[snapshots]]

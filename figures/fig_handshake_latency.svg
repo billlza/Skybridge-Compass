@@ -5,27 +5,27 @@
 <line x1="64" y1="370.0" x2="70" y2="370.0" stroke="#111" stroke-width="1"/>
 <text x="60" y="374.0" text-anchor="end" font-size="11" fill="#333">0.0</text>
 <line x1="64" y1="310.0" x2="70" y2="310.0" stroke="#111" stroke-width="1"/>
-<text x="60" y="314.0" text-anchor="end" font-size="11" fill="#333">1.4</text>
+<text x="60" y="314.0" text-anchor="end" font-size="11" fill="#333">0.9</text>
 <line x1="64" y1="250.0" x2="70" y2="250.0" stroke="#111" stroke-width="1"/>
-<text x="60" y="254.0" text-anchor="end" font-size="11" fill="#333">2.7</text>
+<text x="60" y="254.0" text-anchor="end" font-size="11" fill="#333">1.8</text>
 <line x1="64" y1="189.99999999999997" x2="70" y2="189.99999999999997" stroke="#111" stroke-width="1"/>
-<text x="60" y="193.99999999999997" text-anchor="end" font-size="11" fill="#333">4.1</text>
-<line x1="64" y1="130.0" x2="70" y2="130.0" stroke="#111" stroke-width="1"/>
-<text x="60" y="134.0" text-anchor="end" font-size="11" fill="#333">5.5</text>
+<text x="60" y="193.99999999999997" text-anchor="end" font-size="11" fill="#333">2.7</text>
+<line x1="64" y1="130.00000000000003" x2="70" y2="130.00000000000003" stroke="#111" stroke-width="1"/>
+<text x="60" y="134.00000000000003" text-anchor="end" font-size="11" fill="#333">3.7</text>
 <line x1="64" y1="70.0" x2="70" y2="70.0" stroke="#111" stroke-width="1"/>
-<text x="60" y="74.0" text-anchor="end" font-size="11" fill="#333">6.9</text>
-<rect x="128.33333333333334" y="263.73912947105305" width="58.333333333333336" height="106.26087052894695" fill="#2E86AB"/>
-<rect x="194.66666666666669" y="256.8815911297213" width="58.333333333333336" height="113.1184088702787" fill="#F6C85F"/>
-<rect x="261.0" y="248.3907993345016" width="58.333333333333336" height="121.6092006654984" fill="#F5703C"/>
+<text x="60" y="74.0" text-anchor="end" font-size="11" fill="#333">4.6</text>
+<rect x="128.33333333333334" y="225.63484251968507" width="58.333333333333336" height="144.36515748031493" fill="#2E86AB"/>
+<rect x="194.66666666666669" y="211.40688976377953" width="58.333333333333336" height="158.59311023622047" fill="#F6C85F"/>
+<rect x="261.0" y="205.75019685039373" width="58.333333333333336" height="164.24980314960627" fill="#F5703C"/>
 <text x="186.66666666666669" y="394" text-anchor="middle" font-size="12" fill="#333">Classic</text>
-<rect x="361.6666666666667" y="243.5931036423773" width="58.333333333333336" height="126.40689635762271" fill="#2E86AB"/>
-<rect x="428.0" y="210.04182624448828" width="58.333333333333336" height="159.95817375551172" fill="#F6C85F"/>
-<rect x="494.33333333333337" y="181.909863436918" width="58.333333333333336" height="188.090136563082" fill="#F5703C"/>
+<rect x="361.6666666666667" y="194.72112860892386" width="58.333333333333336" height="175.27887139107614" fill="#2E86AB"/>
+<rect x="428.0" y="146.6267716535433" width="58.333333333333336" height="223.3732283464567" fill="#F6C85F"/>
+<rect x="494.33333333333337" y="117.89206036745406" width="58.333333333333336" height="252.10793963254594" fill="#F5703C"/>
 <text x="420.0" y="394" text-anchor="middle" font-size="12" fill="#333">liboqs PQC</text>
-<rect x="595.0000000000001" y="135.88123487313084" width="58.333333333333336" height="234.11876512686916" fill="#2E86AB"/>
-<rect x="661.3333333333335" y="95.62553801234486" width="58.333333333333336" height="274.37446198765514" fill="#F6C85F"/>
+<rect x="595.0000000000001" y="146.2767716535433" width="58.333333333333336" height="223.7232283464567" fill="#2E86AB"/>
+<rect x="661.3333333333335" y="95.43195538057745" width="58.333333333333336" height="274.56804461942255" fill="#F6C85F"/>
 <rect x="727.6666666666667" y="70.0" width="58.333333333333336" height="300.0" fill="#F5703C"/>
-<text x="653.3333333333335" y="394" text-anchor="middle" font-size="12" fill="#333">CryptoKit PQC</text>
+<text x="653.3333333333335" y="394" text-anchor="middle" font-size="12" fill="#333">liboqs PQC v2 FS</text>
 <rect x="630" y="60" width="12" height="12" fill="#2E86AB"/>
 <text x="648" y="70" font-size="11" fill="#333">p50</text>
 <rect x="630" y="78" width="12" height="12" fill="#F6C85F"/>

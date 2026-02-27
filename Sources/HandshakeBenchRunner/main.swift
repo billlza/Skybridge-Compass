@@ -14,6 +14,17 @@ struct HandshakeBenchRunner {
         case appleXWing = "CryptoKit Hybrid (X-Wing + ML-DSA-65)"
     }
 
+    private enum BenchProfile: String {
+        case core
+        case contrast
+        case full
+    }
+
+    private enum BenchOutputSet: String {
+        case core
+        case contrast
+    }
+
     private struct BenchmarkContext {
         let providerType: ProviderType
         let provider: any CryptoProvider
@@ -161,6 +172,8 @@ struct HandshakeBenchRunner {
                 defaultValue: intEnv("BENCH_COOLDOWN_SECONDS", defaultValue: 0)
             )
             let dateString = runDate
+            let profile = benchProfile()
+            let outputSet = benchOutputSet()
 
             let capability = CryptoProviderFactory.detectCapability()
 
@@ -175,49 +188,60 @@ struct HandshakeBenchRunner {
                     print("[BENCH] Batch \(batch)/\(runnerBatches)")
                 }
 
-                try await runBench(
-                    providerType: .classic,
-                    iterations: iterations,
-                    warmup: warmup,
-                    dateString: dateString
-                )
+                print("[BENCH] profile=\(profile.rawValue) outputSet=\(outputSet.rawValue)")
 
-                if capability.hasLiboqs {
+                if profile != .contrast {
                     try await runBench(
-                        providerType: .liboqsPQC,
+                        providerType: .classic,
                         iterations: iterations,
                         warmup: warmup,
-                        dateString: dateString
+                        dateString: dateString,
+                        outputSet: outputSet
                     )
-                    try await runBench(
-                        providerType: .liboqsPQCv2FS,
-                        iterations: iterations,
-                        warmup: warmup,
-                        dateString: dateString
-                    )
-                } else {
-                    print("[BENCH] liboqs not available, skipping PQC bench")
-                }
 
-                if capability.hasApplePQC {
-                    try await runBench(
-                        providerType: .applePQC,
-                        iterations: appleIterations,
-                        warmup: warmup,
-                        dateString: dateString
-                    )
-                    if includeXWingBench() {
+                    if capability.hasLiboqs {
                         try await runBench(
-                            providerType: .appleXWing,
-                            iterations: appleIterations,
+                            providerType: .liboqsPQC,
+                            iterations: iterations,
                             warmup: warmup,
-                            dateString: dateString
+                            dateString: dateString,
+                            outputSet: outputSet
+                        )
+                        try await runBench(
+                            providerType: .liboqsPQCv2FS,
+                            iterations: iterations,
+                            warmup: warmup,
+                            dateString: dateString,
+                            outputSet: outputSet
                         )
                     } else {
-                        print("[BENCH] X-Wing bench disabled (set SKYBRIDGE_BENCH_INCLUDE_XWING=1 to enable)")
+                        print("[BENCH] liboqs not available, skipping PQC bench")
                     }
-                } else {
-                    print("[BENCH] Apple PQC not available, skipping CryptoKit bench")
+                }
+
+                if profile != .core {
+                    if capability.hasApplePQC {
+                        try await runBench(
+                            providerType: .applePQC,
+                            iterations: appleIterations,
+                            warmup: warmup,
+                            dateString: dateString,
+                            outputSet: outputSet
+                        )
+                        if includeXWingBench() {
+                            try await runBench(
+                                providerType: .appleXWing,
+                                iterations: appleIterations,
+                                warmup: warmup,
+                                dateString: dateString,
+                                outputSet: outputSet
+                            )
+                        } else {
+                            print("[BENCH] X-Wing bench disabled (set SKYBRIDGE_BENCH_INCLUDE_XWING=1 to enable)")
+                        }
+                    } else {
+                        print("[BENCH] Apple PQC not available, skipping CryptoKit bench")
+                    }
                 }
 
                 if cooldownSeconds > 0, batch < runnerBatches {
@@ -234,7 +258,8 @@ struct HandshakeBenchRunner {
         providerType: ProviderType,
         iterations: Int,
         warmup: Int,
-        dateString: String
+        dateString: String,
+        outputSet: BenchOutputSet
     ) async throws {
         let context = try await prepareBenchmarkContext(providerType: providerType)
         let (latencySamples, rttSamples) = try await measureHandshakeLatencyAndRTT(
@@ -247,14 +272,16 @@ struct HandshakeBenchRunner {
             configuration: providerType.rawValue,
             stats: latencyStats,
             iterations: iterations,
-            dateString: dateString
+            dateString: dateString,
+            outputSet: outputSet
         )
         let rttStats = EnhancedPercentileStats(samples: rttSamples)
         writeRTTArtifact(
             configuration: providerType.rawValue,
             stats: rttStats,
             iterations: iterations,
-            dateString: dateString
+            dateString: dateString,
+            outputSet: outputSet
         )
     }
 
@@ -538,10 +565,12 @@ struct HandshakeBenchRunner {
                 finishedBytes: initiatorSent[1].1.count + responderSent[1].1.count
             )
             if await wireSizeRecorder.shouldRecord(context.providerType) {
+                let outputSet = benchOutputSet()
                 writeWireSizes(
                     configuration: context.providerType.rawValue,
                     sizes: sizes,
-                    dateString: runDate
+                    dateString: runDate,
+                    outputSet: outputSet
                 )
             }
         }
@@ -559,10 +588,12 @@ struct HandshakeBenchRunner {
         configuration: String,
         stats: EnhancedPercentileStats,
         iterations: Int,
-        dateString: String
+        dateString: String,
+        outputSet: BenchOutputSet
     ) {
         let artifactsDir = URL(fileURLWithPath: "Artifacts")
-        let csvPath = artifactsDir.appendingPathComponent("handshake_bench_\(dateString).csv")
+        let filename = outputSet == .contrast ? "handshake_bench_contrast_\(dateString).csv" : "handshake_bench_\(dateString).csv"
+        let csvPath = artifactsDir.appendingPathComponent(filename)
 
         do {
             try FileManager.default.createDirectory(at: artifactsDir, withIntermediateDirectories: true)
@@ -589,10 +620,12 @@ struct HandshakeBenchRunner {
         configuration: String,
         stats: EnhancedPercentileStats,
         iterations: Int,
-        dateString: String
+        dateString: String,
+        outputSet: BenchOutputSet
     ) {
         let artifactsDir = URL(fileURLWithPath: "Artifacts")
-        let csvPath = artifactsDir.appendingPathComponent("handshake_rtt_\(dateString).csv")
+        let filename = outputSet == .contrast ? "handshake_rtt_contrast_\(dateString).csv" : "handshake_rtt_\(dateString).csv"
+        let csvPath = artifactsDir.appendingPathComponent(filename)
 
         do {
             try FileManager.default.createDirectory(at: artifactsDir, withIntermediateDirectories: true)
@@ -618,10 +651,12 @@ struct HandshakeBenchRunner {
     private static func writeWireSizes(
         configuration: String,
         sizes: HandshakeWireSizes,
-        dateString: String
+        dateString: String,
+        outputSet: BenchOutputSet
     ) {
         let artifactsDir = URL(fileURLWithPath: "Artifacts")
-        let csvPath = artifactsDir.appendingPathComponent("handshake_wire_\(dateString).csv")
+        let filename = outputSet == .contrast ? "handshake_wire_contrast_\(dateString).csv" : "handshake_wire_\(dateString).csv"
+        let csvPath = artifactsDir.appendingPathComponent(filename)
 
         do {
             try FileManager.default.createDirectory(at: artifactsDir, withIntermediateDirectories: true)
@@ -686,6 +721,29 @@ struct HandshakeBenchRunner {
             ?? "0"
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         return trimmed == "1" || trimmed == "true" || trimmed == "yes"
+    }
+
+    private static func benchProfile() -> BenchProfile {
+        let raw = ProcessInfo.processInfo.environment["SKYBRIDGE_BENCH_PROFILE"]
+            ?? ProcessInfo.processInfo.environment["BENCH_PROFILE"]
+            ?? "full"
+        let normalized = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        switch normalized {
+        case "core":
+            return .core
+        case "contrast":
+            return .contrast
+        default:
+            return .full
+        }
+    }
+
+    private static func benchOutputSet() -> BenchOutputSet {
+        let raw = ProcessInfo.processInfo.environment["SKYBRIDGE_BENCH_OUTPUT_SET"]
+            ?? ProcessInfo.processInfo.environment["BENCH_OUTPUT_SET"]
+            ?? "core"
+        let normalized = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return normalized == "contrast" ? .contrast : .core
     }
 
     private static func dateStamp() -> String {

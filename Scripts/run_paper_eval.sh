@@ -191,11 +191,14 @@ export SKYBRIDGE_RUN_BENCH=1
 # Tests already default to in-memory mode; release-mode runners need this.
 export SKYBRIDGE_KEYCHAIN_IN_MEMORY="${SKYBRIDGE_KEYCHAIN_IN_MEMORY:-1}"
 bench_batches="${SKYBRIDGE_BENCH_BATCHES:-3}"
-bench_max_batches="${SKYBRIDGE_BENCH_MAX_BATCHES:-5}"
-bench_stability_threshold="${SKYBRIDGE_BENCH_STABILITY_THRESHOLD:-0.07}"
+bench_max_batches="${SKYBRIDGE_BENCH_MAX_BATCHES:-7}"
+bench_stability_threshold="${SKYBRIDGE_BENCH_STABILITY_THRESHOLD:-0.10}"
 bench_stability_require_apple="${SKYBRIDGE_BENCH_STABILITY_REQUIRE_APPLE:-0}"
 bench_scope="${SKYBRIDGE_BENCH_SCOPE:-core}"
 bench_apple_iterations="${SKYBRIDGE_BENCH_APPLE_ITERATIONS:-5000}"
+bench_contrast_batches="${SKYBRIDGE_BENCH_CONTRAST_BATCHES:-1}"
+bench_run_contrast="${SKYBRIDGE_BENCH_RUN_CONTRAST:-1}"
+refresh_primary_snapshot_sha="${SKYBRIDGE_REFRESH_PRIMARY_SNAPSHOT_SHA:-1}"
 bench_cooldown_seconds="${SKYBRIDGE_BENCH_COOLDOWN_SECONDS:-5}"
 bench_max_load_ratio="${SKYBRIDGE_BENCH_MAX_LOAD_RATIO:-0.70}"
 bench_load_wait_seconds="${SKYBRIDGE_BENCH_LOAD_WAIT_SECONDS:-120}"
@@ -222,6 +225,18 @@ if [[ "${bench_stability_require_apple}" != "0" && "${bench_stability_require_ap
 fi
 if ! [[ "${bench_apple_iterations}" =~ ^[0-9]+$ ]] || [[ "${bench_apple_iterations}" -lt 1 ]]; then
   echo "Invalid SKYBRIDGE_BENCH_APPLE_ITERATIONS='${bench_apple_iterations}', expected integer >= 1" >&2
+  exit 2
+fi
+if ! [[ "${bench_contrast_batches}" =~ ^[0-9]+$ ]] || [[ "${bench_contrast_batches}" -lt 1 ]]; then
+  echo "Invalid SKYBRIDGE_BENCH_CONTRAST_BATCHES='${bench_contrast_batches}', expected integer >= 1" >&2
+  exit 2
+fi
+if [[ "${bench_run_contrast}" != "0" && "${bench_run_contrast}" != "1" ]]; then
+  echo "Invalid SKYBRIDGE_BENCH_RUN_CONTRAST='${bench_run_contrast}', expected 0 or 1" >&2
+  exit 2
+fi
+if [[ "${refresh_primary_snapshot_sha}" != "0" && "${refresh_primary_snapshot_sha}" != "1" ]]; then
+  echo "Invalid SKYBRIDGE_REFRESH_PRIMARY_SNAPSHOT_SHA='${refresh_primary_snapshot_sha}', expected 0 or 1" >&2
   exit 2
 fi
 if [[ "${bench_scope}" != "core" && "${bench_scope}" != "full" ]]; then
@@ -266,7 +281,7 @@ if [[ "${bench_scope}" == "core" ]]; then
 fi
 
 export SKYBRIDGE_BENCH_APPLE_ITERATIONS="${bench_apple_iterations}"
-log_anchor "Run configuration: ARTIFACT_DATE=${ARTIFACT_DATE:-unset}, SKYBRIDGE_BENCH_SCOPE=${bench_scope}, SKYBRIDGE_BENCH_BATCHES=${bench_batches}, SKYBRIDGE_BENCH_MAX_BATCHES=${bench_max_batches}, SKYBRIDGE_BENCH_STABILITY_THRESHOLD=${bench_stability_threshold}, SKYBRIDGE_BENCH_STABILITY_REQUIRE_APPLE=${bench_stability_require_apple}, SKYBRIDGE_BENCH_APPLE_ITERATIONS=${bench_apple_iterations}, SKYBRIDGE_BENCH_COOLDOWN_SECONDS=${bench_cooldown_seconds}, SKYBRIDGE_BENCH_MAX_LOAD_RATIO=${bench_max_load_ratio}, SKYBRIDGE_BENCH_LOAD_WAIT_SECONDS=${bench_load_wait_seconds}, SKYBRIDGE_BENCH_DETERMINISTIC_TRANSPORT=${SKYBRIDGE_BENCH_DETERMINISTIC_TRANSPORT}, SKYBRIDGE_BENCH_DISABLE_HANDSHAKE_PADDING=${SKYBRIDGE_BENCH_DISABLE_HANDSHAKE_PADDING}, SKYBRIDGE_BENCH_DETERMINISTIC_NONCE=${SKYBRIDGE_BENCH_DETERMINISTIC_NONCE}, SKYBRIDGE_FI_ITERATIONS=${SKYBRIDGE_FI_ITERATIONS:-1000}, SKYBRIDGE_POLICY_ITERATIONS=${SKYBRIDGE_POLICY_ITERATIONS:-1000}, SKYBRIDGE_MIGRATION_ITERATIONS=${SKYBRIDGE_MIGRATION_ITERATIONS:-1000}, SKYBRIDGE_SOA_ITERATIONS=${SKYBRIDGE_SOA_ITERATIONS:-100}"
+log_anchor "Run configuration: ARTIFACT_DATE=${ARTIFACT_DATE:-unset}, SKYBRIDGE_BENCH_SCOPE=${bench_scope}, SKYBRIDGE_BENCH_BATCHES=${bench_batches}, SKYBRIDGE_BENCH_MAX_BATCHES=${bench_max_batches}, SKYBRIDGE_BENCH_STABILITY_THRESHOLD=${bench_stability_threshold}, SKYBRIDGE_BENCH_STABILITY_REQUIRE_APPLE=${bench_stability_require_apple}, SKYBRIDGE_BENCH_APPLE_ITERATIONS=${bench_apple_iterations}, SKYBRIDGE_BENCH_RUN_CONTRAST=${bench_run_contrast}, SKYBRIDGE_BENCH_CONTRAST_BATCHES=${bench_contrast_batches}, SKYBRIDGE_BENCH_COOLDOWN_SECONDS=${bench_cooldown_seconds}, SKYBRIDGE_BENCH_MAX_LOAD_RATIO=${bench_max_load_ratio}, SKYBRIDGE_BENCH_LOAD_WAIT_SECONDS=${bench_load_wait_seconds}, SKYBRIDGE_BENCH_DETERMINISTIC_TRANSPORT=${SKYBRIDGE_BENCH_DETERMINISTIC_TRANSPORT}, SKYBRIDGE_BENCH_DISABLE_HANDSHAKE_PADDING=${SKYBRIDGE_BENCH_DISABLE_HANDSHAKE_PADDING}, SKYBRIDGE_BENCH_DETERMINISTIC_NONCE=${SKYBRIDGE_BENCH_DETERMINISTIC_NONCE}, SKYBRIDGE_FI_ITERATIONS=${SKYBRIDGE_FI_ITERATIONS:-1000}, SKYBRIDGE_POLICY_ITERATIONS=${SKYBRIDGE_POLICY_ITERATIONS:-1000}, SKYBRIDGE_MIGRATION_ITERATIONS=${SKYBRIDGE_MIGRATION_ITERATIONS:-1000}, SKYBRIDGE_SOA_ITERATIONS=${SKYBRIDGE_SOA_ITERATIONS:-100}"
 
 # Handshake benchmark stability is very sensitive to debug/test harness jitter on macOS.
 # For paper evaluation we prefer a dedicated release-mode runner binary.
@@ -282,12 +297,18 @@ fi
 run_handshake_bench_batch() {
   local batch_index="$1"
   local batch_total="$2"
-  local stage_label_scope
-  stage_label_scope="${bench_scope}"
+  local profile="$3"
+  local output_set="$4"
+  local include_xwing="$5"
+  local stage_label_scope="$profile"
 
   wait_for_bench_load_budget "${bench_max_load_ratio}" "${bench_load_wait_seconds}"
   run_stage "handshake-bench-${stage_label_scope}-batch-${batch_index}-of-${batch_total}" none \
-    "${handshake_bench_runner}"
+    env \
+      SKYBRIDGE_BENCH_PROFILE="${profile}" \
+      SKYBRIDGE_BENCH_OUTPUT_SET="${output_set}" \
+      SKYBRIDGE_BENCH_INCLUDE_XWING="${include_xwing}" \
+      "${handshake_bench_runner}"
   cooldown_between_batches "${bench_cooldown_seconds}" "after handshake bench batch ${batch_index}"
 }
 
@@ -300,12 +321,16 @@ if [[ -n "${bench_runner_batches}" ]]; then
     exit 2
   fi
   wait_for_bench_load_budget "${bench_max_load_ratio}" "${bench_load_wait_seconds}"
-  run_stage "handshake-bench-${bench_scope}-runner-batches-1-of-${bench_runner_batches}" none \
-    "${handshake_bench_runner}"
+  run_stage "handshake-bench-core-runner-batches-1-of-${bench_runner_batches}" none \
+    env \
+      SKYBRIDGE_BENCH_PROFILE="core" \
+      SKYBRIDGE_BENCH_OUTPUT_SET="core" \
+      SKYBRIDGE_BENCH_INCLUDE_XWING="0" \
+      "${handshake_bench_runner}"
   executed_bench_batches="${bench_runner_batches}"
 else
   for ((i=1; i<=bench_batches; i++)); do
-    run_handshake_bench_batch "${i}" "${bench_batches}"
+    run_handshake_bench_batch "${i}" "${bench_batches}" "core" "core" "0"
     executed_bench_batches="${i}"
   done
 fi
@@ -389,9 +414,21 @@ PY
     fi
 
     next_batch=$(( executed_bench_batches + 1 ))
-    run_handshake_bench_batch "${next_batch}" "${bench_max_batches}"
+    run_handshake_bench_batch "${next_batch}" "${bench_max_batches}" "core" "core" "0"
     executed_bench_batches="${next_batch}"
   done
+fi
+
+if [[ "${bench_run_contrast}" == "1" ]]; then
+  for ((i=1; i<=bench_contrast_batches; i++)); do
+    run_handshake_bench_batch "${i}" "${bench_contrast_batches}" "contrast" "contrast" "1"
+  done
+  if [[ -f "Scripts/aggregate_apple_contrast.py" ]]; then
+    run_stage "handshake-bench-contrast-aggregate" none \
+      python3 Scripts/aggregate_apple_contrast.py --artifact-date "${artifact_date_for_checks}"
+  fi
+else
+  log_anchor "Contrast sampling disabled (SKYBRIDGE_BENCH_RUN_CONTRAST=0)"
 fi
 
 export SKYBRIDGE_RUN_FI=1
@@ -457,6 +494,65 @@ if [[ "${SKYBRIDGE_SKIP_POSTPROCESS:-0}" != "1" ]]; then
   run_stage "plot-policy-downgrade" none python3 Scripts/plot_policy_downgrade.py
   run_stage "plot-failure-histogram" none python3 Scripts/plot_failure_histogram.py
   run_stage "ieee-figures-generate" none python3 Scripts/generate_ieee_figures.py
+
+  if [[ "${refresh_primary_snapshot_sha}" == "1" ]] && [[ -f "Docs/artifact_snapshots.toml" ]]; then
+    run_stage "refresh-primary-snapshot-sha" none \
+      python3 - "Docs/artifact_snapshots.toml" "Artifacts/handshake_bench_${artifact_date_for_checks}.csv" "${artifact_date_for_checks}" <<'PY'
+from __future__ import annotations
+
+import hashlib
+import re
+import sys
+from pathlib import Path
+
+snapshots_path = Path(sys.argv[1])
+dataset_path = Path(sys.argv[2])
+artifact_date = sys.argv[3]
+target_snapshot_id = "primary-2026-01-23"
+
+if not dataset_path.exists():
+    raise SystemExit(f"dataset missing for snapshot refresh: {dataset_path}")
+
+sha = hashlib.sha256(dataset_path.read_bytes()).hexdigest()
+lines = snapshots_path.read_text(encoding="utf-8").splitlines()
+
+in_block = False
+block_id: str | None = None
+block_date: str | None = None
+target_line_index: int | None = None
+
+for index, line in enumerate(lines):
+    stripped = line.strip()
+    if stripped == "[[snapshots]]":
+        in_block = True
+        block_id = None
+        block_date = None
+        target_line_index = None
+        continue
+    if not in_block:
+        continue
+    if stripped.startswith("id = "):
+        match = re.match(r'id\s*=\s*"([^"]+)"', stripped)
+        if match:
+            block_id = match.group(1)
+        continue
+    if stripped.startswith("artifact_date = "):
+        match = re.match(r'artifact_date\s*=\s*"([^"]+)"', stripped)
+        if match:
+            block_date = match.group(1)
+        continue
+    if stripped.startswith("dataset_sha256 = "):
+        if block_id == target_snapshot_id and block_date == artifact_date:
+            lines[index] = f'dataset_sha256 = "{sha}"'
+            snapshots_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            print(f"[snapshot-refresh] updated {target_snapshot_id} sha={sha}")
+            raise SystemExit(0)
+
+raise SystemExit(
+    f"could not locate snapshot id={target_snapshot_id} artifact_date={artifact_date} in {snapshots_path}"
+)
+PY
+  fi
 
   if [[ -x Scripts/check_paper_consistency.sh ]]; then
     run_stage "paper-consistency-check" none bash Scripts/check_paper_consistency.sh

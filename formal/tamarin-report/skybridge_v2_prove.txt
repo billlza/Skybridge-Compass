@@ -593,7 +593,7 @@ summary of summaries:
 
 analyzed: skybridge_v2.spthy
 
-  processing time: 0.19s
+  processing time: 0.24s
   
   Exists_DefaultClassicTrace (exists-trace): verified (5 steps)
   Exists_StrictPQCv2Trace (exists-trace): verified (4 steps)

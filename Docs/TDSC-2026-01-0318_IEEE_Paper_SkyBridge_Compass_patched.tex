@@ -181,19 +181,26 @@ decisions and failure semantics explicit and replayable. Signals are
 linked to transcript-derived identifiers for in-session tamper-evident
 ordering under a non-compromised runtime assumption; long-term retention
 and remote attestation of logs are out of scope. We
-evaluate three configurations on macOS 26.x as a deployment instance:
-classic (X25519 + Ed25519), PQC via liboqs (ML-KEM-768 + ML-DSA-65), and
-PQC via native CryptoKit (ML-KEM-768 + ML-DSA-65). We do not claim
+evaluate a reproducible \emph{core gate} on macOS 26.x with three
+configurations: classic (X25519 + Ed25519), PQC via liboqs (ML-KEM-768 +
+ML-DSA-65), and liboqs PQC v2 FS (ML-KEM-768-FS + ML-DSA-65). Apple
+CryptoKit PQC/X-Wing are reported as a separate \emph{contrast} dataset
+and do not participate in hard pass/fail gates. We do not claim
 perfect forward secrecy for the KEM-based PQC suites in v1; post-quantum
 confidentiality holds only while long-term KEM private keys remain
 uncompromised. \mbox{End-to-end}
 handshake completion latency (including event emission overhead) is
 \claimClassicMeanMs~ms (p95 \claimClassicPNineFiveMs~ms) for classic,
 \claimLiboqsMeanMs~ms (p95 \claimLiboqsPNineFiveMs~ms) for liboqs PQC, and
-\claimCryptoKitMeanMs~ms (p95 \claimCryptoKitPNineFiveMs~ms) for CryptoKit PQC
-under the benchmark controls (Classic/liboqs: N=1000; CryptoKit: N=5000).
+\claimLiboqsVTwoMeanMs~ms (p95 \claimLiboqsVTwoPNineFiveMs~ms) for liboqs PQC v2 FS
+under the core benchmark controls (N=1000 per configuration). Apple
+contrast runs are collected separately (N=5000) and reported in
+the supplementary Apple/X-Wing contrast report.
 The handshake payload size (MessageA + MessageB + 2$\times$Finished) grows
-from \claimClassicPayloadBytes~B (classic) to \claimLiboqsPayloadBytes~B (liboqs PQC) or \claimCryptoKitPayloadBytes~B (CryptoKit PQC) in this snapshot. Beyond
+from \claimClassicPayloadBytes~B (classic) to \claimLiboqsPayloadBytes~B
+(liboqs PQC) and \claimLiboqsVTwoPayloadBytes~B (liboqs PQC v2 FS) in the
+core gate. Apple PQC/X-Wing payloads are reported as contrast-only data
+in the supplementary Apple/X-Wing contrast report. Beyond
 performance, we validate downgrade policies, failure semantics, and
 audit-signal fidelity under fault injection, and we release scripts and
 artifacts that reproduce all primary figures and tables. Our portability
@@ -1601,7 +1608,7 @@ suppression, legacy precondition enforcement, and auditability) and
 \textbf{cost-centric evidence} (handshake latency, wire overhead,
 provider selection overhead, and data-plane throughput).
 
-\textbf{Environment:} All experiments are run on Apple Silicon (M1/M3 class) with macOS 26.x, where CryptoKit PQC is available when the SDK exposes ML-KEM/ML-DSA types \cite{ref1,ref34}. Build configuration uses Release (\texttt{-O}) with non-essential logging disabled. Timing uses a monotonic clock (\texttt{ContinuousClock}) with 10 warmup runs; per-batch iterations are N=1000 for Classic/liboqs and N=5000 for CryptoKit (stability control). Reported percentiles (p50/p95/p99) are computed directly from samples.
+\textbf{Environment:} All experiments are run on Apple Silicon (M1/M3 class) with macOS 26.x, where CryptoKit PQC is available when the SDK exposes ML-KEM/ML-DSA types \cite{ref1,ref34}. Build configuration uses Release (\texttt{-O}) with non-essential logging disabled. Timing uses a monotonic clock (\texttt{ContinuousClock}) with 10 warmup runs. The \emph{core gate} (Classic/liboqs/liboqs-v2-FS) uses N=1000 per configuration. Apple PQC/X-Wing are collected in a separate \emph{contrast} pass (N=5000) and are reported as non-gating diagnostics. Reported percentiles (p50/p95/p99) are computed directly from samples.
 
 \textbf{Repeatability:} We support multi-batch repeatability by
 restarting the benchmark test process for each batch. Supplementary
@@ -1610,7 +1617,7 @@ report the number of observed batches ($B$) and (when $B \ge 2$) mean and
 95\% confidence intervals across batches. To reproduce multi-batch CIs,
 re-run the harness with \texttt{SKYBRIDGE\_BENCH\_BATCHES=3}--\texttt{5}.
 
-\textbf{Reproducibility:} We ship an opt-in benchmark suite under \texttt{Tests/\allowbreak SkyBridgeCoreTests/} that emits date-stamped CSV artifacts under \texttt{Artifacts/} (pinned by \texttt{ARTIFACT\_DATE=\artifactdate}) and regenerates all evaluation tables/figures from scripts. For a one-shot run, use \texttt{Scripts/\allowbreak run\_\allowbreak paper\_\allowbreak eval.sh}. The complete command reference and CSV artifact specifications are provided in the Supplementary Materials (Reproducibility).
+\textbf{Reproducibility:} We ship an opt-in benchmark suite under \texttt{Tests/\allowbreak SkyBridgeCoreTests/} that emits date-stamped CSV artifacts under \texttt{Artifacts/} (pinned by \texttt{ARTIFACT\_DATE=\artifactdate}) and regenerates all evaluation tables/figures from scripts. For a one-shot run, use \texttt{Scripts/\allowbreak run\_\allowbreak paper\_\allowbreak eval.sh}. The runner supports profile-scoped collection via \texttt{SKYBRIDGE\_BENCH\_PROFILE} and \texttt{SKYBRIDGE\_BENCH\_OUTPUT\_SET}; contrast outputs are written to dedicated contrast CSV/JSON artifacts. The complete command reference and CSV artifact specifications are provided in the Supplementary Materials (Reproducibility).
 
 \textbf{iOS Reproducibility:} We ship an on-device micro-benchmark in
 the iOS app (\texttt{Settings} $\rightarrow$ \texttt{PQC} $\rightarrow$
@@ -1951,7 +1958,7 @@ adversarial burst-throughput characterization remains future work.
 
 \subsection{Performance Benchmarks}\label{c.-cost-centric-evaluation}
 
-Table~\ref{tab:perf-summary} consolidates all performance metrics. We measure \mbox{end-to-end} handshake completion time using an in-memory loopback transport to isolate cryptographic and state-machine overhead. Each configuration reports distributional statistics after 10 warmup runs (Classic/liboqs: N=1000; CryptoKit: N=5000).
+Table~\ref{tab:perf-summary} consolidates \emph{core gate} performance metrics. We measure \mbox{end-to-end} handshake completion time using an in-memory loopback transport to isolate cryptographic and state-machine overhead. Each core configuration reports distributional statistics after 10 warmup runs (N=1000 per configuration). Apple PQC/X-Wing are reported separately as non-gating contrast data.
 
 \input{tables/perf_summary}
 
@@ -1967,23 +1974,23 @@ low-millisecond range.
 \textbf{Latency Distribution.}
 Fig.~\ref{fig:handshake-latency} shows latency percentiles across
 configurations. Classic handshakes remain near
-\claimClassicMeanMs~ms (\claimClassicPNineNineMs~ms at p99). CryptoKit
-PQC remains around \claimCryptoKitPNineNineMs~ms at p99, with variance
-dominated by ML-DSA signature verification overhead. Extended statistics
+\claimClassicMeanMs~ms (\claimClassicPNineNineMs~ms at p99). The liboqs
+v2 FS configuration remains around \claimLiboqsVTwoPNineNineMs~ms at p99.
+Extended statistics
 (mean/p50/p95/p99, std) are
 available in Supplementary Tables~\ref{tab:supp-latency}--\ref{tab:supp-rtt}
 (reported in the supplementary PDF).
 
 \begin{figure}
 \pandocbounded{{\centering\includegraphics[keepaspectratio,width=\columnwidth]{figures/fig_handshake_latency.pdf}\par}}
-\caption{Handshake latency percentiles for Classic, liboqs PQC, and CryptoKit PQC (warmup=10; N=1000 for Classic/liboqs, N=5000 for CryptoKit). Data source: \texttt{handshake\_bench\_\artifactdate.csv}. Values align with Table~\ref{tab:perf-summary} and Supplementary Table~\ref{tab:supp-latency}.}
+\caption{Handshake latency percentiles for the core gate configurations (Classic, liboqs PQC, liboqs PQC v2 FS), warmup=10 and N=1000 per configuration. Data source: \texttt{handshake\_bench\_\artifactdate.csv}. Values align with Table~\ref{tab:perf-summary} and Supplementary Table~\ref{tab:supp-latency}.}
 \label{fig:handshake-latency}
 \end{figure}
 
 \textbf{Wire-Format Breakdown.}
-The handshake payload size increases from Classic (\claimClassicPayloadBytes~B) to PQC (\claimLiboqsPayloadBytes~B for liboqs; \claimCryptoKitPayloadBytes~B for CryptoKit in this snapshot), dominated by ML-DSA signatures (3309~B) and ML-KEM ciphertexts (1088~B). Fig.~\ref{fig:message-size-breakdown} shows the per-field breakdown.
+The handshake payload size increases from Classic (\claimClassicPayloadBytes~B) to PQC (\claimLiboqsPayloadBytes~B for liboqs; \claimLiboqsVTwoPayloadBytes~B for liboqs v2 FS in the core gate), dominated by ML-DSA signatures (3309~B) and ML-KEM ciphertexts (1088~B). Apple PQC/X-Wing payloads are reported in supplementary contrast artifacts. Fig.~\ref{fig:message-size-breakdown} shows the per-field breakdown.
 \textbf{Path-MTU implication.}
-The payload-only PQC handshake (\claimLiboqsPayloadBytes~B for liboqs; \claimCryptoKitPayloadBytes~B for CryptoKit in this snapshot) spans multiple transport segments under common MTUs. In our design, handshake
+The payload-only core-gate PQC handshake (\claimLiboqsPayloadBytes~B for liboqs; \claimLiboqsVTwoPayloadBytes~B for liboqs v2 FS) spans multiple transport segments under common MTUs. In our design, handshake
 messages run over stream transports (TCP/QUIC stream), so
 segmentation/reassembly is delegated to transport rather than custom
 handshake-layer fragmentation; the practical risk is latency inflation on
@@ -2122,7 +2129,7 @@ completion robustness remains the primary check.
 \textbf{Real-network micro-study.}
 \begin{itemize}\tightlist
 \item Metrics: STUN path telemetry and TCP end-to-end timing for
-payload-only handshake baselines (classic \claimClassicPayloadBytes~B; PQC \claimLiboqsPayloadBytes~B for liboqs and \claimCryptoKitPayloadBytes~B for CryptoKit in our snapshot),
+payload-only handshake baselines (classic \claimClassicPayloadBytes~B; core-gate PQC \claimLiboqsPayloadBytes~B for liboqs and \claimLiboqsVTwoPayloadBytes~B for liboqs v2 FS; Apple contrast \claimCryptoKitPayloadBytes~B where available),
 reported in Supplementary Table~\ref{tab:supp-realnet-microstudy}.
 \item Artifact source: \texttt{Artifacts/realnet\_*}.
 \item Direct label in this snapshot:
