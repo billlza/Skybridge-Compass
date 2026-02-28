@@ -73,4 +73,27 @@ final class ConnectionCryptoPresentationTests: XCTestCase {
 
         XCTAssertEqual(detail, "X-Wing · 守护中")
     }
+
+    func testConnectedStatusTextWithPolicyFallbackKeepsExplicitMode() {
+        let text = ConnectionCryptoPresentation.connectedStatusTextWithPolicyFallback(
+            kind: "liboqs",
+            suite: nil,
+            baseConnectedText: "已连接",
+            compatibilityModeEnabled: true
+        )
+
+        XCTAssertEqual(text, "liboqs已连接")
+    }
+
+    func testInferredModeLabelForCurrentPolicyReturnsKnownCategory() {
+        let mode = ConnectionCryptoPresentation.inferredModeLabelForCurrentPolicy(
+            compatibilityModeEnabled: true
+        )
+
+        XCTAssertNotNil(mode)
+        XCTAssertTrue(
+            ["X-Wing", "Apple PQC", "liboqs", "Classic"].contains(mode ?? ""),
+            "Unexpected inferred mode: \(mode ?? "nil")"
+        )
+    }
 }

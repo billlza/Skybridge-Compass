@@ -901,6 +901,7 @@ public struct EnhancedDeviceDiscoveryView: View {
         let onConnect: () -> Void
         @EnvironmentObject var themeConfiguration: ThemeConfiguration
         @StateObject private var settingsManager = SettingsManager.shared
+        @ObservedObject private var presenceService = ConnectionPresenceService.shared
 
         init(device: OnlineDevice, isConnecting: Bool = false, onConnect: @escaping () -> Void) {
             self.device = device
@@ -1010,24 +1011,91 @@ public struct EnhancedDeviceDiscoveryView: View {
             )
         }
 
+        private var resolvedCryptoKind: String? {
+            matchingPresenceConnection?.cryptoKind ?? device.lastCryptoKind
+        }
+
+        private var resolvedCryptoSuite: String? {
+            matchingPresenceConnection?.suite ?? device.lastCryptoSuite
+        }
+
+        private var resolvedGuardStatus: String? {
+            if let guardStatus = device.guardStatus,
+               !guardStatus.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return guardStatus
+            }
+            return device.connectionStatus == .connected ? "守护中" : nil
+        }
+
         private var statusText: String {
             guard device.connectionStatus == .connected else {
                 return device.connectionStatus.rawValue
             }
-            return ConnectionCryptoPresentation.connectedStatusText(
-                kind: device.lastCryptoKind,
-                suite: device.lastCryptoSuite,
-                baseConnectedText: device.connectionStatus.rawValue
+            return ConnectionCryptoPresentation.connectedStatusTextWithPolicyFallback(
+                kind: resolvedCryptoKind,
+                suite: resolvedCryptoSuite,
+                baseConnectedText: device.connectionStatus.rawValue,
+                compatibilityModeEnabled: settingsManager.enableCompatibilityMode
             )
         }
 
         private var connectionDetailText: String? {
             guard device.connectionStatus == .connected else { return nil }
             return ConnectionCryptoPresentation.detailText(
-                kind: device.lastCryptoKind,
-                suite: device.lastCryptoSuite,
-                guardStatus: device.guardStatus ?? "守护中"
+                kind: resolvedCryptoKind,
+                suite: resolvedCryptoSuite,
+                guardStatus: resolvedGuardStatus
             )
+        }
+
+        private var matchingPresenceConnection: ConnectionPresenceService.ActiveConnection? {
+            guard #available(macOS 14.0, iOS 17.0, *) else { return nil }
+
+            let activeConnections = presenceService.activeConnections
+            guard !activeConnections.isEmpty else { return nil }
+
+            if device.isLocalDevice {
+                return activeConnections.max(by: { $0.connectedAt < $1.connectedAt })
+            }
+
+            let normalizedName = normalizedToken(device.name)
+            if !normalizedName.isEmpty {
+                let byName = activeConnections.filter { normalizedToken($0.displayName) == normalizedName }
+                if let newestByName = byName.max(by: { $0.connectedAt < $1.connectedAt }) {
+                    return newestByName
+                }
+            }
+
+            let normalizedAddresses = Set([device.ipv4, device.ipv6].compactMap { normalizedAddress($0) })
+            if !normalizedAddresses.isEmpty {
+                let byAddress = activeConnections.filter { connection in
+                    guard let normalized = normalizedAddress(connection.address) else { return false }
+                    return normalizedAddresses.contains(normalized)
+                }
+                if let newestByAddress = byAddress.max(by: { $0.connectedAt < $1.connectedAt }) {
+                    return newestByAddress
+                }
+            }
+
+            return nil
+        }
+
+        private func normalizedAddress(_ raw: String?) -> String? {
+            guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
+                return nil
+            }
+            var value = raw
+            if value.hasPrefix("[") && value.hasSuffix("]") {
+                value = String(value.dropFirst().dropLast())
+            }
+            if let percent = value.firstIndex(of: "%") {
+                value = String(value[..<percent])
+            }
+            return value.lowercased()
+        }
+
+        private func normalizedToken(_ raw: String) -> String {
+            raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         }
 
         private var deviceIcon: String {

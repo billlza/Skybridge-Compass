@@ -54,6 +54,38 @@ public enum ConnectionCryptoPresentation {
         return "\(mode)\(baseConnectedText)"
     }
 
+    public static func inferredModeLabelForCurrentPolicy(
+        compatibilityModeEnabled: Bool = UserDefaults.standard.bool(forKey: "Settings.EnableCompatibilityMode")
+    ) -> String? {
+        let policy = HandshakePolicy.recommendedDefault(compatibilityModeEnabled: compatibilityModeEnabled)
+        let selection: CryptoProviderFactory.SelectionPolicy = policy.requirePQC ? .requirePQC : .preferPQC
+        let provider = CryptoProviderFactory.make(policy: selection)
+        return modeLabel(kind: provider.providerName, suite: provider.activeSuite.rawValue)
+    }
+
+    public static func connectedStatusTextWithPolicyFallback(
+        kind: String?,
+        suite: String?,
+        baseConnectedText: String,
+        compatibilityModeEnabled: Bool = UserDefaults.standard.bool(forKey: "Settings.EnableCompatibilityMode")
+    ) -> String {
+        let explicit = connectedStatusText(
+            kind: kind,
+            suite: suite,
+            baseConnectedText: baseConnectedText
+        )
+        if explicit != baseConnectedText {
+            return explicit
+        }
+
+        guard let inferredMode = inferredModeLabelForCurrentPolicy(
+            compatibilityModeEnabled: compatibilityModeEnabled
+        ) else {
+            return baseConnectedText
+        }
+        return "\(inferredMode)\(baseConnectedText)"
+    }
+
     public static func detailText(
         kind: String?,
         suite: String?,

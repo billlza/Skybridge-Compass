@@ -8,6 +8,7 @@ public struct TopNavigationBarView: View {
     @EnvironmentObject var appModel: DashboardViewModel
     @EnvironmentObject var themeConfiguration: ThemeConfiguration
     @ObservedObject private var unifiedDeviceManager = UnifiedOnlineDeviceManager.shared
+    @ObservedObject private var presenceService = ConnectionPresenceService.shared
     @StateObject private var settingsManager = SettingsManager.shared
 
     @Binding var showManualConnectSheet: Bool
@@ -156,19 +157,50 @@ public struct TopNavigationBarView: View {
         ) ?? connectedPeer.name
     }
 
+    private var latestPresenceConnection: ConnectionPresenceService.ActiveConnection? {
+        guard #available(macOS 14.0, iOS 17.0, *) else { return nil }
+        return presenceService.activeConnections.max(by: { $0.connectedAt < $1.connectedAt })
+    }
+
     private var connectedStatusText: String {
         let base = LocalizationManager.shared.localizedString("device.status.connected")
+
+        if let latestPresenceConnection {
+            return ConnectionCryptoPresentation.connectedStatusTextWithPolicyFallback(
+                kind: latestPresenceConnection.cryptoKind,
+                suite: latestPresenceConnection.suite,
+                baseConnectedText: base,
+                compatibilityModeEnabled: SettingsManager.shared.enableCompatibilityMode
+            )
+        }
+
         let connectedPeer = unifiedDeviceManager.onlineDevices
             .filter { !$0.isLocalDevice && $0.connectionStatus == .connected }
             .sorted { ($0.lastConnectedAt ?? .distantPast) > ($1.lastConnectedAt ?? .distantPast) }
             .first
-        guard let connectedPeer else {
-            return base
+        if let connectedPeer {
+            return ConnectionCryptoPresentation.connectedStatusTextWithPolicyFallback(
+                kind: connectedPeer.lastCryptoKind,
+                suite: connectedPeer.lastCryptoSuite,
+                baseConnectedText: base,
+                compatibilityModeEnabled: SettingsManager.shared.enableCompatibilityMode
+            )
         }
-        return ConnectionCryptoPresentation.connectedStatusText(
-            kind: connectedPeer.lastCryptoKind,
-            suite: connectedPeer.lastCryptoSuite,
-            baseConnectedText: base
+
+        if let detail = appModel.connectionDetail, !detail.isEmpty {
+            return ConnectionCryptoPresentation.connectedStatusTextWithPolicyFallback(
+                kind: detail,
+                suite: nil,
+                baseConnectedText: base,
+                compatibilityModeEnabled: SettingsManager.shared.enableCompatibilityMode
+            )
+        }
+
+        return ConnectionCryptoPresentation.connectedStatusTextWithPolicyFallback(
+            kind: nil,
+            suite: nil,
+            baseConnectedText: base,
+            compatibilityModeEnabled: SettingsManager.shared.enableCompatibilityMode
         )
     }
 
