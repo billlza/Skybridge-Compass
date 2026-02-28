@@ -358,10 +358,10 @@ public actor ScanHistoryStore {
     public static let maxEntrySizeBytes: Int = 50 * 1024
 
  /// UserDefaults 存储键
-    private static let storageKey = "com.skybridge.scanHistory"
+    private static let defaultStorageKey = "com.skybridge.scanHistory"
 
  /// UserDefaults 存储键 for summaries (new format)
-    private static let summariesStorageKey = "com.skybridge.scanHistorySummaries"
+    private static let defaultSummariesStorageKey = "com.skybridge.scanHistorySummaries"
 
  /// Details directory name
     private static let detailsDirectoryName = "ScanDetails"
@@ -372,6 +372,18 @@ public actor ScanHistoryStore {
 
  /// Security limits configuration
     private let limits: SecurityLimits
+
+ /// Storage backend
+    private let userDefaults: UserDefaults
+
+ /// Namespaced storage key for legacy entries
+    private let storageKey: String
+
+ /// Namespaced storage key for summaries
+    private let summariesStorageKey: String
+
+ /// Optional details directory override for testing
+    private let detailsDirectoryOverride: URL?
 
  /// 内存缓存 (legacy entries)
     private var entries: [ScanHistoryEntry] = []
@@ -384,6 +396,10 @@ public actor ScanHistoryStore {
 
  /// Details directory URL
     private var detailsDirectory: URL {
+        if let detailsDirectoryOverride {
+            return detailsDirectoryOverride
+        }
+
         let fm = FileManager.default
         let appSupport = (try? fm.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)) ?? fm.temporaryDirectory
         let bundleId = Bundle.main.bundleIdentifier ?? "com.skybridge.compass"
@@ -395,8 +411,27 @@ public actor ScanHistoryStore {
 
  // MARK: - Initialization
 
-    public init(limits: SecurityLimits = .default) {
+    public init(
+        limits: SecurityLimits = .default,
+        userDefaultsSuiteName: String? = nil,
+        storageNamespace: String? = nil,
+        detailsDirectoryOverride: URL? = nil
+    ) {
         self.limits = limits
+        if let userDefaultsSuiteName, let suiteDefaults = UserDefaults(suiteName: userDefaultsSuiteName) {
+            self.userDefaults = suiteDefaults
+        } else {
+            self.userDefaults = .standard
+        }
+        self.detailsDirectoryOverride = detailsDirectoryOverride
+
+        if let storageNamespace, !storageNamespace.isEmpty {
+            self.storageKey = "\(Self.defaultStorageKey).\(storageNamespace)"
+            self.summariesStorageKey = "\(Self.defaultSummariesStorageKey).\(storageNamespace)"
+        } else {
+            self.storageKey = Self.defaultStorageKey
+            self.summariesStorageKey = Self.defaultSummariesStorageKey
+        }
     }
 
  // MARK: - Public Methods
@@ -765,7 +800,7 @@ public actor ScanHistoryStore {
 
  /// Load summaries from UserDefaults
     private func loadSummaries() async {
-        guard let data = UserDefaults.standard.data(forKey: Self.summariesStorageKey) else {
+        guard let data = userDefaults.data(forKey: summariesStorageKey) else {
             logger.debug("📂 No summaries data found")
             return
         }
@@ -787,7 +822,7 @@ public actor ScanHistoryStore {
             let encoder = JSONEncoder()
             encoder.dateEncodingStrategy = .iso8601
             let data = try encoder.encode(summaries)
-            UserDefaults.standard.set(data, forKey: Self.summariesStorageKey)
+            userDefaults.set(data, forKey: summariesStorageKey)
             logger.debug("💾 Persisted \(self.summaries.count) summaries")
         } catch {
             logger.error("❌ Failed to persist summaries: \(error.localizedDescription)")
@@ -1021,7 +1056,7 @@ public actor ScanHistoryStore {
 
  /// 从 UserDefaults 加载历史记录
     private func load() async {
-        guard let data = UserDefaults.standard.data(forKey: Self.storageKey) else {
+        guard let data = userDefaults.data(forKey: storageKey) else {
             logger.debug("📂 无历史记录数据")
             return
         }
@@ -1043,7 +1078,7 @@ public actor ScanHistoryStore {
             let encoder = JSONEncoder()
             encoder.dateEncodingStrategy = .iso8601
             let data = try encoder.encode(entries)
-            UserDefaults.standard.set(data, forKey: Self.storageKey)
+            userDefaults.set(data, forKey: storageKey)
             logger.debug("💾 持久化扫描历史: \(self.entries.count) 条记录")
         } catch {
             logger.error("❌ 持久化扫描历史失败: \(error.localizedDescription)")
@@ -1109,8 +1144,8 @@ public actor ScanHistoryStore {
         entries.removeAll()
         summaries.removeAll()
         isLoaded = false
-        UserDefaults.standard.removeObject(forKey: Self.storageKey)
-        UserDefaults.standard.removeObject(forKey: Self.summariesStorageKey)
+        userDefaults.removeObject(forKey: storageKey)
+        userDefaults.removeObject(forKey: summariesStorageKey)
 
  // Clean up detail files
         let fm = FileManager.default

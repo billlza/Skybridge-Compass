@@ -89,15 +89,62 @@ struct ScanHistoryTestGenerator {
 final class ScanHistoryStoreTests: XCTestCase {
 
     var historyStore: ScanHistoryStore!
+    private var testRootDirectory: URL!
+    private var testUserDefaultsSuiteName: String!
+
+    private func makeIsolatedStore(namespace: String = UUID().uuidString, limits: SecurityLimits = .default) -> ScanHistoryStore {
+        let detailsDirectory = testRootDirectory
+            .appendingPathComponent("ScanDetails", isDirectory: true)
+            .appendingPathComponent(namespace, isDirectory: true)
+
+        return ScanHistoryStore(
+            limits: limits,
+            userDefaultsSuiteName: testUserDefaultsSuiteName,
+            storageNamespace: namespace,
+            detailsDirectoryOverride: detailsDirectory
+        )
+    }
 
     override func setUp() async throws {
-        historyStore = ScanHistoryStore()
+        let testSessionId = UUID().uuidString
+        let tempDirectory = FileManager.default.temporaryDirectory
+        let rootDirectory = tempDirectory
+            .appendingPathComponent("ScanHistoryStoreTests", isDirectory: true)
+            .appendingPathComponent(testSessionId, isDirectory: true)
+
+        try FileManager.default.createDirectory(at: rootDirectory, withIntermediateDirectories: true)
+
+        let suiteName = "com.skybridge.tests.scanhistory.\(testSessionId)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            throw NSError(
+                domain: "ScanHistoryStoreTests",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Failed to create isolated UserDefaults suite"]
+            )
+        }
+
+        testRootDirectory = rootDirectory
+        testUserDefaultsSuiteName = suiteName
+        defaults.removePersistentDomain(forName: suiteName)
+
+        historyStore = makeIsolatedStore(namespace: "primary")
         await historyStore.reset()
     }
 
     override func tearDown() async throws {
         await historyStore.reset()
         historyStore = nil
+
+        if let suiteName = testUserDefaultsSuiteName {
+            UserDefaults(suiteName: suiteName)?.removePersistentDomain(forName: suiteName)
+        }
+
+        if let testRootDirectory {
+            try? FileManager.default.removeItem(at: testRootDirectory)
+        }
+
+        testUserDefaultsSuiteName = nil
+        testRootDirectory = nil
     }
 
  /// Property test: For any completed scan, the result SHALL be stored in scan history
@@ -156,7 +203,7 @@ final class ScanHistoryStoreTests: XCTestCase {
         await historyStore.save(result)
 
  // Create a new store instance (simulating app restart)
-        let newStore = ScanHistoryStore()
+        let newStore = makeIsolatedStore(namespace: "primary")
 
  // Retrieve from new instance
         let entry = await newStore.getEntry(id: result.id)
@@ -575,7 +622,7 @@ extension ScanHistoryStoreTests {
         await historyStore.purgeOldEntries(olderThan: 30)
 
  // Create new store instance to verify persistence
-        let newStore = ScanHistoryStore()
+        let newStore = makeIsolatedStore(namespace: "primary")
         let countInNewStore = await newStore.getCount()
 
  // Should have 5 entries (days 25-29 are within 30 days)
@@ -876,7 +923,7 @@ extension ScanHistoryStoreTests {
  /// 4. Detail id matches summary id (Requirements 3.9)
     func testProperty7_SummaryDetailSeparation() async throws {
  // Create a dedicated store for this test
-        let testStore = ScanHistoryStore()
+        let testStore = makeIsolatedStore()
         await testStore.reset()
 
         let iterations = 100
@@ -955,7 +1002,7 @@ extension ScanHistoryStoreTests {
 
  /// Property test: For any scan result without threats/warnings, details file should not be created
     func testProperty7_NoDetailsForSafeResults() async throws {
-        let testStore = ScanHistoryStore()
+        let testStore = makeIsolatedStore()
         await testStore.reset()
 
         let iterations = 50
@@ -1026,7 +1073,7 @@ extension ScanHistoryStoreTests {
  /// Property test: detailHash is computed from actual file bytes, not re-encoded object
  /// This verifies Requirements 3.8 - hash must be of the actual bytes written to disk
     func testProperty7_DetailHashMatchesFileBytes() async throws {
-        let testStore = ScanHistoryStore()
+        let testStore = makeIsolatedStore()
         await testStore.reset()
 
         let iterations = 50
@@ -1078,7 +1125,7 @@ extension ScanHistoryStoreTests {
 
  /// Property test: Detail file is written atomically (no .tmp files left behind)
     func testProperty7_AtomicDetailFileWriting() async throws {
-        let testStore = ScanHistoryStore()
+        let testStore = makeIsolatedStore()
         await testStore.reset()
 
  // Save multiple results rapidly
@@ -1128,7 +1175,7 @@ extension ScanHistoryStoreTests {
 
  /// Property test: Summary contains only essential fields (not full threat details)
     func testProperty7_SummaryContainsOnlyEssentialFields() async throws {
-        let testStore = ScanHistoryStore()
+        let testStore = makeIsolatedStore()
         await testStore.reset()
 
  // Create result with many threats
@@ -1215,7 +1262,7 @@ extension ScanHistoryStoreTests {
 
  /// Property test: Round-trip - save and load preserves all detail information
     func testProperty7_RoundTripPreservesDetailInformation() async throws {
-        let testStore = ScanHistoryStore()
+        let testStore = makeIsolatedStore()
         await testStore.reset()
 
         let iterations = 30
@@ -1386,7 +1433,7 @@ extension ScanHistoryStoreTests {
             maxPendingPerSubscriber: 1_000
         )
 
-        let testStore = ScanHistoryStore.createForTesting(limits: testLimits)
+        let testStore = makeIsolatedStore(limits: testLimits)
         await testStore.reset()
 
         let iterations = 20
@@ -1567,7 +1614,7 @@ extension ScanHistoryStoreTests {
             maxPendingPerSubscriber: 1_000
         )
 
-        let testStore = ScanHistoryStore.createForTesting(limits: testLimits)
+        let testStore = makeIsolatedStore(limits: testLimits)
         await testStore.reset()
 
  // Save entries with known timestamps
@@ -1682,7 +1729,7 @@ extension ScanHistoryStoreTests {
             maxPendingPerSubscriber: 1_000
         )
 
-        let testStore = ScanHistoryStore.createForTesting(limits: testLimits)
+        let testStore = makeIsolatedStore(limits: testLimits)
         await testStore.reset()
 
  // First, add some small entries
@@ -1809,7 +1856,7 @@ extension ScanHistoryStoreTests {
             maxPendingPerSubscriber: 1_000
         )
 
-        let testStore = ScanHistoryStore.createForTesting(limits: testLimits)
+        let testStore = makeIsolatedStore(limits: testLimits)
         await testStore.reset()
 
  // Save entries with details - create larger entries with multiple threats
@@ -1940,7 +1987,7 @@ extension ScanHistoryStoreTests {
             maxPendingPerSubscriber: 1_000
         )
 
-        let testStore = ScanHistoryStore.createForTesting(limits: testLimits)
+        let testStore = makeIsolatedStore(limits: testLimits)
         await testStore.reset()
 
  // Save many entries to trigger multiple purges
@@ -2004,7 +2051,7 @@ extension ScanHistoryStoreTests {
  /// 3. Corrupted/tampered detail files are rejected
  /// 4. Missing detail files return nil
     func testProperty9_DetailIntegrityVerification() async throws {
-        let testStore = ScanHistoryStore()
+        let testStore = makeIsolatedStore()
         await testStore.reset()
 
         let iterations = 100
@@ -2053,7 +2100,7 @@ extension ScanHistoryStoreTests {
  /// Property test: Corrupted detail file (hash mismatch) returns nil
  /// This verifies Requirements 3.5 - hash verification before loading
     func testProperty9_CorruptedDetailFileReturnsNil() async throws {
-        let testStore = ScanHistoryStore()
+        let testStore = makeIsolatedStore()
         await testStore.reset()
 
  // Create and save a result with threats
@@ -2103,7 +2150,7 @@ extension ScanHistoryStoreTests {
  /// Property test: Missing detail file returns nil
  /// This verifies Requirements 3.5 - graceful handling of missing files
     func testProperty9_MissingDetailFileReturnsNil() async throws {
-        let testStore = ScanHistoryStore()
+        let testStore = makeIsolatedStore()
         await testStore.reset()
 
  // Create and save a result with threats
@@ -2143,7 +2190,7 @@ extension ScanHistoryStoreTests {
  /// Property test: Detail file with wrong id returns nil
  /// This verifies Requirements 3.9 - id field must match summary id
     func testProperty9_WrongIdInDetailFileReturnsNil() async throws {
-        let testStore = ScanHistoryStore()
+        let testStore = makeIsolatedStore()
         await testStore.reset()
 
  // Create and save a result with threats
@@ -2216,7 +2263,7 @@ extension ScanHistoryStoreTests {
  /// Property test: For any random tampering of detail file, load returns nil
  /// This is a fuzz-style test that verifies hash verification catches any modification
     func testProperty9_RandomTamperingDetected() async throws {
-        let testStore = ScanHistoryStore()
+        let testStore = makeIsolatedStore()
         await testStore.reset()
 
         let iterations = 50
@@ -2290,7 +2337,7 @@ extension ScanHistoryStoreTests {
 
  /// Property test: isDetailAvailable returns false for corrupted files
     func testProperty9_IsDetailAvailableReturnsFalseForCorruptedFiles() async throws {
-        let testStore = ScanHistoryStore()
+        let testStore = makeIsolatedStore()
         await testStore.reset()
 
  // Create and save a result with threats
@@ -2332,7 +2379,7 @@ extension ScanHistoryStoreTests {
  /// Property test: Hash verification uses actual file bytes, not re-encoded object
  /// This is critical for Requirements 3.5 - must hash the actual bytes on disk
     func testProperty9_HashVerificationUsesActualFileBytes() async throws {
-        let testStore = ScanHistoryStore()
+        let testStore = makeIsolatedStore()
         await testStore.reset()
 
         let iterations = 30
@@ -2390,7 +2437,7 @@ extension ScanHistoryStoreTests {
 
  /// Property test: Security event is emitted for corrupted detail files
     func testProperty9_SecurityEventEmittedForCorruptedFiles() async throws {
-        let testStore = ScanHistoryStore()
+        let testStore = makeIsolatedStore()
         await testStore.reset()
 
  // Create and save a result with threats
