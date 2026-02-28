@@ -8,6 +8,7 @@
 //
 
 import Foundation
+import Security
 
 @available(iOS 17.0, *)
 public enum TrafficPaddingMode: String, Sendable {
@@ -101,8 +102,8 @@ public enum TrafficPadding {
         let group = UserDefaults(suiteName: "group.com.skybridge.compass")
         func obj(_ ud: UserDefaults?, _ key: String) -> String {
             guard let ud else { return "nil-suite" }
-            if ud.object(forKey: key) == nil { return "nil" }
-            return String(describing: ud.object(forKey: key)!)
+            guard let value = ud.object(forKey: key) else { return "nil" }
+            return String(describing: value)
         }
 
         let diag =
@@ -168,10 +169,12 @@ public enum TrafficPadding {
         }
         logConfigHintOnceIfNeeded(cfg: cfg)
 
-        let len = data.withUnsafeBytes { raw -> UInt32 in
-            let base = raw.baseAddress!.advanced(by: 4)
-            return base.loadUnaligned(as: UInt32.self).bigEndian
+        let len = data.withUnsafeBytes { raw -> UInt32? in
+            guard let base = raw.baseAddress else { return nil }
+            let lengthPointer = base.advanced(by: 4)
+            return lengthPointer.loadUnaligned(as: UInt32.self).bigEndian
         }
+        guard let len else { return data }
 
         let actualLen = Int(len)
         guard actualLen >= 0, actualLen <= data.count - headerLen else { return data }
@@ -206,10 +209,16 @@ public enum TrafficPadding {
     }
 
     private static func randomBytes(count: Int) -> Data {
+        guard count > 0 else { return Data() }
+
         var bytes = [UInt8](repeating: 0, count: count)
-        for i in bytes.indices {
-            bytes[i] = UInt8.random(in: 0...255)
+        let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        if status != errSecSuccess {
+            for index in bytes.indices {
+                bytes[index] = UInt8.random(in: UInt8.min...UInt8.max)
+            }
         }
+
         return Data(bytes)
     }
 }

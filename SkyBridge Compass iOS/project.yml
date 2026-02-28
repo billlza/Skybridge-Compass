@@ -18,6 +18,24 @@ targets:
     platform: iOS
     info:
       path: "SkyBridgeCompassiOS/Supporting Files/Info.plist"
+      properties:
+        NSSupportsLiveActivities: true
+        NSLocalNetworkUsageDescription: "SkyBridge 需要访问本地网络以发现和连接附近设备。"
+        NSBonjourServices:
+          - _skybridge._tcp
+          - _skybridge._udp
+          - _skybridge-transfer._tcp
+          - _skybridge-remote._tcp
+        UILaunchStoryboardName: LaunchScreen
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
     sources:
       - path: SkyBridgeCompassiOS/Sources
       - path: "SkyBridgeCompassiOS/Supporting Files/LaunchScreen.storyboard"
@@ -63,9 +81,13 @@ targets:
     platform: iOS
     info:
       path: "Widgets/Info.plist"
+      properties:
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
     sources:
       - path: Widgets
       - path: SkyBridgeCompassiOS/Sources/LiveActivities/SkyBridgeActivityAttributes.swift
+        group: SkyBridgeCompassiOS/Sources/LiveActivities
     dependencies:
       - sdk: WidgetKit.framework
       - sdk: ActivityKit.framework
@@ -77,12 +99,47 @@ targets:
         SWIFT_STRICT_CONCURRENCY: targeted
         # Widgets do not need HAS_APPLE_PQC_SDK; keep build conditions minimal for portability.
 
+  SkyBridgeCompassiOSTests:
+    type: bundle.unit-test
+    platform: iOS
+    hostApplication: SkyBridgeCompass-iOS
+    sources:
+      - path: SkyBridgeCompassiOSTests
+    dependencies:
+      - target: SkyBridgeCompass-iOS
+      - sdk: AppIntents.framework
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.skybridge.compass.ios.tests
+        DEVELOPMENT_TEAM: YKUPL7Z869
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGNING_ALLOWED: NO
+        SWIFT_STRICT_CONCURRENCY: targeted
+        OTHER_SWIFT_FLAGS:
+          - "$(inherited)"
+          - "-Xcc"
+          - "-I"
+          - "-Xcc"
+          - "$(SRCROOT)/../Sources/Vendor/WebRTCHeaders"
+          - "-Xcc"
+          - "-Wno-incomplete-umbrella"
+        OTHER_CFLAGS: "$(inherited) -Wno-incomplete-umbrella"
+        OTHER_CPLUSPLUSFLAGS: "$(inherited) -Wno-incomplete-umbrella"
+        CLANG_WARN_INCOMPLETE_UMBRELLA: NO
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited)"
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS[sdk=iphoneos26*]: "$(inherited) HAS_APPLE_PQC_SDK"
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS[sdk=iphonesimulator26*]: "$(inherited) HAS_APPLE_PQC_SDK"
+
 schemes:
   SkyBridgeCompass-iOS:
     build:
       targets:
         SkyBridgeCompass-iOS: all
         SkyBridgeCompass-Widgets: all
+        SkyBridgeCompassiOSTests: [test]
+    test:
+      targets:
+        - SkyBridgeCompassiOSTests
     run:
       config: Debug
     profile:
@@ -91,3 +148,11 @@ schemes:
       config: Debug
     archive:
       config: Release
+
+  SkyBridgeCompassiOSTests:
+    build:
+      targets:
+        SkyBridgeCompassiOSTests: [test]
+    test:
+      targets:
+        - SkyBridgeCompassiOSTests

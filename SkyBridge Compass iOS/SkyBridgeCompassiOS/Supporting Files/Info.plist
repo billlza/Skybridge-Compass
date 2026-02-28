@@ -18,8 +18,6 @@
 	<string>1.0</string>
 	<key>CFBundleVersion</key>
 	<string>1</string>
-	<key>NSLocalNetworkUsageDescription</key>
-	<string>SkyBridge 需要访问本地网络以发现和连接附近设备。</string>
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_skybridge._tcp</string>
@@ -27,6 +25,8 @@
 		<string>_skybridge-transfer._tcp</string>
 		<string>_skybridge-remote._tcp</string>
 	</array>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>SkyBridge 需要访问本地网络以发现和连接附近设备。</string>
 	<key>NSSupportsLiveActivities</key>
 	<true/>
 	<key>UILaunchStoryboardName</key>

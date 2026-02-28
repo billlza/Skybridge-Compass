@@ -1051,7 +1051,8 @@ public actor HandshakeContext {
         guard SecRandomCopyBytes(kSecRandomDefault, nonceBytes.count, &nonceBytes) == errSecSuccess else {
             throw HandshakeError.failed(.cryptoError("Failed to generate nonce"))
         }
-        localNonce = Data(nonceBytes)
+        let nonce = Data(nonceBytes)
+        localNonce = nonce
         
         // 确定支持的套件（v1: 先按当前 provider 的 activeSuite；TwoAttemptHandshakeManager 会控制优先级）
         let suite = cryptoProvider.activeSuite
@@ -1111,7 +1112,7 @@ public actor HandshakeContext {
             version: HandshakeConstants.protocolVersion,
             supportedSuites: supportedSuites,
             keyShares: keyShares,
-            clientNonce: localNonce!,
+            clientNonce: nonce,
             policy: policy,
             capabilities: capabilities,
             signature: Data(),
@@ -1250,7 +1251,8 @@ public actor HandshakeContext {
         guard SecRandomCopyBytes(kSecRandomDefault, nonceBytes.count, &nonceBytes) == errSecSuccess else {
             throw HandshakeError.failed(.cryptoError("Failed to generate nonce"))
         }
-        localNonce = Data(nonceBytes)
+        let nonce = Data(nonceBytes)
+        localNonce = nonce
         
         let encryptedPayload: HPKESealedBox
         let sharedSecret: SecureBytes
@@ -1315,13 +1317,17 @@ public actor HandshakeContext {
             secureEnclavePublicKey: nil
         )
         
+        guard let transcriptHashA else {
+            throw HandshakeError.failed(.cryptoError("Missing transcript hash A"))
+        }
+
         // 构建签名 preimage
         var signatureData = Data("SkyBridge-B".utf8)
-        signatureData.append(transcriptHashA ?? Data())
+        signatureData.append(transcriptHashA)
         HandshakeEncoding.appendUInt16LE(suite.wireId, to: &signatureData)
         HandshakeEncoding.appendUInt16LE(UInt16(responderShare.count), to: &signatureData)
         signatureData.append(responderShare)
-        signatureData.append(localNonce!)
+        signatureData.append(nonce)
         let payloadHash = SHA256.hash(data: encryptedPayload.combinedWithHeader(suite: suite))
         signatureData.append(contentsOf: payloadHash)
         HandshakeEncoding.appendUInt16LE(UInt16(identityKeys.encoded.count), to: &signatureData)
@@ -1339,7 +1345,7 @@ public actor HandshakeContext {
         let messageB = HandshakeMessageB(
             selectedSuite: suite,
             responderShare: responderShare,
-            serverNonce: localNonce!,
+            serverNonce: nonce,
             encryptedPayload: encryptedPayload,
             signature: signature,
             identityPublicKeys: identityKeys
@@ -1367,9 +1373,13 @@ public actor HandshakeContext {
         // 解析身份公钥
         let identityKeys = try messageB.decodedIdentityPublicKeys()
         
+        guard let transcriptHashA else {
+            throw HandshakeError.failed(.cryptoError("Missing transcript hash A"))
+        }
+
         // 验证签名
         let isValid = try await protocolSignatureProvider.verify(
-            messageB.signaturePreimage(transcriptHashA: transcriptHashA ?? Data()),
+            messageB.signaturePreimage(transcriptHashA: transcriptHashA),
             signature: messageB.signature,
             publicKey: identityKeys.protocolPublicKey
         )
@@ -1527,11 +1537,14 @@ public actor HandshakeContext {
         info: Data,
         encapsulatedKey: Data
     ) throws -> HPKESealedBox {
+        guard let transcriptHashA else {
+            throw HandshakeError.failed(.cryptoError("Missing transcript hash A"))
+        }
+
         let inputKey = SymmetricKey(data: sharedSecret.noCopyData())
-        let salt = transcriptHashA ?? Data()
         let derivedKey = HKDF<SHA256>.deriveKey(
             inputKeyMaterial: inputKey,
-            salt: salt,
+            salt: transcriptHashA,
             info: info,
             outputByteCount: 32
         )
@@ -1557,11 +1570,14 @@ public actor HandshakeContext {
         sharedSecret: SecureBytes,
         info: Data
     ) throws -> Data {
+        guard let transcriptHashA else {
+            throw HandshakeError.failed(.cryptoError("Missing transcript hash A"))
+        }
+
         let inputKey = SymmetricKey(data: sharedSecret.noCopyData())
-        let salt = transcriptHashA ?? Data()
         let derivedKey = HKDF<SHA256>.deriveKey(
             inputKeyMaterial: inputKey,
-            salt: salt,
+            salt: transcriptHashA,
             info: info,
             outputByteCount: 32
         )

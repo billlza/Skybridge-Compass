@@ -53,7 +53,7 @@ private enum CrossNetworkMerkleAuthCompat {
     // Must match Android MerkleRootAuthV1.preimage
     static func preimage(transferId: String, merkleRoot: Data, fileSha256: Data?) -> Data {
         var out = Data()
-        out.append("SkyBridge-MerkleRoot|v1|".data(using: .utf8)!)
+        out.append(Data("SkyBridge-MerkleRoot|v1|".utf8))
 
         let tid = transferId.data(using: .utf8) ?? Data()
         out.append(u16le(tid.count))
@@ -242,6 +242,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     private static let shortCodeAllowedCharacters = Set(shortCodeAlphabet)
     
     private var signaling: WebSocketSignalingClient?
+    private let signalingRetryController = SignalingRetryController()
     private var session: WebRTCSession?
     private var currentSessionId: String?
     private let localDeviceId: String = KeychainManager.shared.getOrGenerateDeviceId()
@@ -436,39 +437,58 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         readiness = .idle
     }
 
-    private func sendEnvelope(_ envelope: WebRTCSignalingEnvelope, retries: Int = 2) async {
-        var attemptsLeft = max(0, retries)
-        while true {
-            do {
-                if signaling == nil {
-                    let wsURL = URL(string: CrossNetworkServerConfig.signalingWebSocketURL)!
-                    let newSignaling = WebSocketSignalingClient(url: wsURL)
-                    self.signaling = newSignaling
-                    await newSignaling.setOnEnvelope { [weak self] env in
-                        Task { @MainActor in
-                            self?.handleEnvelope(env)
-                        }
-                    }
-                    await newSignaling.connect()
-                }
+    private func signalingURL() throws -> URL {
+        guard let wsURL = SignalingRetryController.validatedWebSocketURL(
+            CrossNetworkServerConfig.signalingWebSocketURL
+        ) else {
+            throw SignalingRetryControllerError.invalidWebSocketURL(
+                CrossNetworkServerConfig.signalingWebSocketURL
+            )
+        }
+        return wsURL
+    }
 
-                guard let signaling else {
-                    throw WebSocketSignalingClient.SignalingError.notConnected
+    private func ensureSignalingConnected() async throws {
+        if signaling == nil {
+            let wsURL = try signalingURL()
+            let newSignaling = WebSocketSignalingClient(url: wsURL)
+            signaling = newSignaling
+            await newSignaling.setOnEnvelope { [weak self] env in
+                Task { @MainActor in
+                    self?.handleEnvelope(env)
                 }
-                try await signaling.send(envelope)
-                return
-            } catch {
-                if let wsError = error as? WebSocketSignalingClient.SignalingError,
-                   case .notConnected = wsError {
-                    await signaling?.connect()
-                }
-                if attemptsLeft == 0 {
-                    lastError = "信令发送失败: \(error.localizedDescription)"
-                    return
-                }
-                attemptsLeft -= 1
-                try? await Task.sleep(for: .milliseconds(350))
             }
+            await newSignaling.connect()
+            return
+        }
+
+        await signaling?.connect()
+    }
+
+    private func sendEnvelope(_ envelope: WebRTCSignalingEnvelope, retries: Int = 2) async {
+        do {
+            try await signalingRetryController.sendWithRetry(
+                retries: retries,
+                reconnectIfNeeded: { [weak self] in
+                    await self?.signaling?.connect()
+                },
+                send: { [weak self] in
+                    guard let self else { throw CancellationError() }
+                    try await self.ensureSignalingConnected()
+                    guard let signaling = self.signaling else {
+                        throw WebSocketSignalingClient.SignalingError.notConnected
+                    }
+                    try await signaling.send(envelope)
+                }
+            )
+        } catch SignalingRetryControllerError.invalidWebSocketURL {
+            lastError = "信令服务 URL 无效"
+        } catch SignalingRetryControllerError.attemptTimedOut {
+            lastError = "信令发送失败: 请求超时"
+        } catch is CancellationError {
+            return
+        } catch {
+            lastError = "信令发送失败: \(error.localizedDescription)"
         }
     }
 
@@ -746,7 +766,15 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         }
         
         // 1) WebSocket signaling
-        let wsURL = URL(string: CrossNetworkServerConfig.signalingWebSocketURL)!
+        let wsURL: URL
+        do {
+            wsURL = try signalingURL()
+        } catch {
+            state = .failed("信令服务 URL 无效")
+            readiness = .idle
+            throw error
+        }
+
         let signaling = WebSocketSignalingClient(url: wsURL)
         self.signaling = signaling
         

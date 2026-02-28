@@ -204,13 +204,17 @@ public class OfflineMessageQueue: ObservableObject {
     
     /// 清理过期消息
     public func cleanupExpiredMessages() {
-        let expiredIds = pendingMessages.filter { $0.isExpired }.map { $0.id }
+        let expiredPendingIds = pendingMessages.filter { $0.isExpired }.map { $0.id }
+        let expiredFailedIds = failedMessages.filter { $0.isExpired }.map { $0.id }
+
         pendingMessages.removeAll { $0.isExpired }
-        
-        for id in expiredIds {
+        failedMessages.removeAll { $0.isExpired }
+
+        for id in expiredPendingIds + expiredFailedIds {
             SkyBridgeLogger.shared.info("🗑️ 离线消息已过期并删除: \(id)")
         }
-        
+
+        guard !expiredPendingIds.isEmpty || !expiredFailedIds.isEmpty else { return }
         updateTotalCount()
         saveToStorage()
     }

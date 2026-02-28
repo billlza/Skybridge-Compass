@@ -244,7 +244,9 @@ struct SettingsView: View {
                 Text("隐私政策")
             }
             
-            Link("GitHub 仓库", destination: URL(string: "https://github.com/billlza/Skybridge-Compass")!)
+            if let repositoryURL = URL(string: "https://github.com/billlza/Skybridge-Compass") {
+                Link("GitHub 仓库", destination: repositoryURL)
+            }
         }
     }
     

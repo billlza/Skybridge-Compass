@@ -227,10 +227,13 @@ public class DeviceDiscoveryManager: ObservableObject {
         guard !isDiscovering else {
             // 这里很容易被重复触发（UI/scenePhase/设置变更），加节流避免日志刷屏与内存压力
             let now = Date()
-            if lastAlreadyRunningLogAt == nil || now.timeIntervalSince(lastAlreadyRunningLogAt!) > 5 {
-                lastAlreadyRunningLogAt = now
-                SkyBridgeLogger.shared.debug("📡 设备发现已在运行")
+            if let lastLogAt = lastAlreadyRunningLogAt,
+               now.timeIntervalSince(lastLogAt) <= 5 {
+                return
             }
+
+            lastAlreadyRunningLogAt = now
+            SkyBridgeLogger.shared.debug("📡 设备发现已在运行")
             return
         }
         

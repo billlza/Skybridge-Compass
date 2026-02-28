@@ -11,11 +11,17 @@ public actor KEMTrustStore {
         var updatedAt: Date
     }
 
-    private let storageKey = "kem_trust_store.v1"
+    private let storageKey: String
+    private let userDefaults: UserDefaults
     private var cache: [String: StoredPeer] = [:] // deviceId -> StoredPeer
 
-    private init() {
-        cache = Self.loadCache(storageKey: storageKey)
+    init(
+        storageKey: String = "kem_trust_store.v1",
+        userDefaults: UserDefaults = .standard
+    ) {
+        self.storageKey = storageKey
+        self.userDefaults = userDefaults
+        cache = Self.loadCache(storageKey: storageKey, userDefaults: userDefaults)
     }
 
     public func upsert(deviceId: String, kemPublicKeys: [KEMPublicKeyInfo]) {
@@ -42,14 +48,13 @@ public actor KEMTrustStore {
         save()
     }
 
-    private static func loadCache(storageKey: String) -> [String: StoredPeer] {
-        guard let data = UserDefaults.standard.data(forKey: storageKey) else { return [:] }
+    private static func loadCache(storageKey: String, userDefaults: UserDefaults) -> [String: StoredPeer] {
+        guard let data = userDefaults.data(forKey: storageKey) else { return [:] }
         return (try? JSONDecoder().decode([String: StoredPeer].self, from: data)) ?? [:]
     }
 
     private func save() {
         let data = (try? JSONEncoder().encode(cache)) ?? Data()
-        UserDefaults.standard.set(data, forKey: storageKey)
+        userDefaults.set(data, forKey: storageKey)
     }
 }
-

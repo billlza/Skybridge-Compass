@@ -16,6 +16,11 @@ import Foundation
 /// Provider 工厂 - 单一事实来源
 /// 负责能力探测和 Provider 选择
 public enum CryptoProviderFactory {
+    // Apple provider path boundary:
+    // 1) Apple provider path does not redefine the protocol contract.
+    // 2) Apple provider path does not alter the primary evidence base of the paper.
+    // 3) Apple provider path is evaluated only as an implementation capability mapping
+    //    under the existing negotiation and policy semantics.
 
  // MARK: - SelectionPolicy
 

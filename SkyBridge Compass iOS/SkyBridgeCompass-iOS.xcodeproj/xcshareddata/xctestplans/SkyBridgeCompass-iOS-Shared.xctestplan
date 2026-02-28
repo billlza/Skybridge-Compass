@@ -1,0 +1,29 @@
+{
+  "configurations" : [
+    {
+      "id" : "3B4A8E48-3F3E-4F9D-9E53-2D0D1A14B6E1",
+      "name" : "Default",
+      "options" : {
+
+      }
+    }
+  ],
+  "defaultOptions" : {
+    "codeCoverage" : false,
+    "targetForVariableExpansion" : {
+      "containerPath" : "container:SkyBridgeCompass-iOS.xcodeproj",
+      "identifier" : "537E084BA6452ABCF8886C45",
+      "name" : "SkyBridgeCompass-iOS"
+    }
+  },
+  "testTargets" : [
+    {
+      "target" : {
+        "containerPath" : "container:SkyBridgeCompass-iOS.xcodeproj",
+        "identifier" : "C67CFB04F930238C86B4F49F",
+        "name" : "SkyBridgeCompassiOSTests"
+      }
+    }
+  ],
+  "version" : 1
+}

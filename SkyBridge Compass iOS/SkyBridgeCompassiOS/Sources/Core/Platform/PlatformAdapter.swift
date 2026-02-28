@@ -334,7 +334,10 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
     public func encrypt(_ plaintext: Data, sessionKey: Data) throws -> Data {
         let key = SymmetricKey(data: sessionKey)
         let sealed = try AES.GCM.seal(plaintext, using: key)
-        return sealed.combined!
+        guard let combined = sealed.combined else {
+            throw SkyBridgeError.encryptionFailed(reason: "AES-GCM combined output unavailable")
+        }
+        return combined
     }
     
     /// 解密数据

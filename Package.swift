@@ -247,10 +247,14 @@ let package = Package(
             path: "Tests/SkyBridgeCoreTests",
             exclude: [
             ],
-            swiftSettings: (enableApplePQCSDK ? [
+            swiftSettings: ([
+                // 测试目标同样会导入 WebRTC，保持与主模块一致的头文件覆盖路径，避免 clang 依赖扫描误报。
+                .unsafeFlags(["-Xcc", "-Wno-deprecated-declarations"], .when(platforms: [.macOS])),
+                .unsafeFlags(["-Xcc", "-I", "-Xcc", webRTCHeadersIncludePath], .when(platforms: [.macOS])),
+            ] + (enableApplePQCSDK ? [
                 // 与 SkyBridgeCore 保持一致：否则测试中的 `#if HAS_APPLE_PQC_SDK` 分支会与被测模块不一致
                 .define("HAS_APPLE_PQC_SDK")
-            ] : [])
+            ] : []))
         ),
         .testTarget(
             name: "SkyBridgeBenchTests",
@@ -260,9 +264,12 @@ let package = Package(
                 "NoiseKit"
             ],
             path: "Tests/SkyBridgeBenchTests",
-            swiftSettings: (enableApplePQCSDK ? [
+            swiftSettings: ([
+                .unsafeFlags(["-Xcc", "-Wno-deprecated-declarations"], .when(platforms: [.macOS])),
+                .unsafeFlags(["-Xcc", "-I", "-Xcc", webRTCHeadersIncludePath], .when(platforms: [.macOS])),
+            ] + (enableApplePQCSDK ? [
                 .define("HAS_APPLE_PQC_SDK")
-            ] : [])
+            ] : []))
         ),
         // 小组件共享模型测试
         .testTarget(

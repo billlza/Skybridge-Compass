@@ -3,6 +3,9 @@ import PackageDescription
 
 let package = Package(
     name: "WebRTCLocal",
+    platforms: [
+        .iOS(.v17)
+    ],
     products: [
         .library(name: "WebRTC", targets: ["WebRTC"]),
     ],

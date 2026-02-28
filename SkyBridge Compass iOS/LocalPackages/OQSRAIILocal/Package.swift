@@ -3,6 +3,9 @@ import PackageDescription
 
 let package = Package(
     name: "OQSRAIILocal",
+    platforms: [
+        .iOS(.v17)
+    ],
     products: [
         .library(name: "OQSRAII", targets: ["OQSRAII"])
     ],

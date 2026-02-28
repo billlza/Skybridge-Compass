@@ -1,0 +1,188 @@
+import XCTest
+import CryptoKit
+@testable import SkyBridgeCompass_iOS
+
+@available(iOS 17.0, *)
+final class RegressionHardeningTests: XCTestCase {
+    @MainActor
+    func testOfflineQueueCleanupRemovesExpiredPendingAndFailedMessages() {
+        let queue = OfflineMessageQueue.shared
+        queue.clear()
+        defer { queue.clear() }
+
+        let expiredPending = OfflineMessage(
+            id: "expired-pending-\(UUID().uuidString)",
+            targetDeviceId: "peer-a",
+            messageType: .text,
+            payload: Data("p".utf8),
+            expiresAt: Date().addingTimeInterval(-60)
+        )
+
+        let expiredFailed = OfflineMessage(
+            id: "expired-failed-\(UUID().uuidString)",
+            targetDeviceId: "peer-b",
+            messageType: .text,
+            payload: Data("f".utf8),
+            expiresAt: Date().addingTimeInterval(-60)
+        )
+
+        let liveFailed = OfflineMessage(
+            id: "live-failed-\(UUID().uuidString)",
+            targetDeviceId: "peer-c",
+            messageType: .text,
+            payload: Data("live".utf8),
+            expiresAt: Date().addingTimeInterval(3600)
+        )
+
+        queue.enqueue(expiredPending)
+        queue.enqueue(expiredFailed)
+        queue.enqueue(liveFailed)
+
+        for _ in 0..<3 {
+            queue.markAsFailed(expiredFailed.id)
+            queue.markAsFailed(liveFailed.id)
+        }
+
+        XCTAssertEqual(queue.totalCount, 3)
+
+        queue.cleanupExpiredMessages()
+
+        XCTAssertEqual(queue.totalCount, 1)
+        XCTAssertTrue(queue.pendingMessages.isEmpty)
+        XCTAssertEqual(queue.failedMessages.count, 1)
+        XCTAssertEqual(queue.failedMessages.first?.id, liveFailed.id)
+    }
+
+    func testProcessMessageBWithoutTranscriptHashAFailsWithExplicitReason() async {
+        let context = makeInitiatorContext()
+        let messageB = makeMinimalMessageB()
+
+        do {
+            _ = try await context.processMessageB(messageB)
+            XCTFail("Expected processMessageB to fail when transcript hash A is missing")
+        } catch {
+            assertMissingTranscriptHashA(error)
+        }
+    }
+
+    func testConcurrentProcessMessageBWithoutTranscriptHashAFailsDeterministically() async {
+        let context = makeInitiatorContext()
+        let messageB = makeMinimalMessageB()
+
+        let errors = await withTaskGroup(of: Error?.self, returning: [Error].self) { group in
+            for _ in 0..<12 {
+                group.addTask {
+                    do {
+                        _ = try await context.processMessageB(messageB)
+                        return nil
+                    } catch {
+                        return error
+                    }
+                }
+            }
+
+            var collected: [Error] = []
+            for await error in group {
+                if let error {
+                    collected.append(error)
+                }
+            }
+            return collected
+        }
+
+        XCTAssertEqual(errors.count, 12)
+        for error in errors {
+            assertMissingTranscriptHashA(error)
+        }
+    }
+
+    func testTrafficPaddingRoundTripAndMalformedFrameBehavior() {
+        let defaults = UserDefaults.standard
+        let enabledKey = "sb_traffic_padding_enabled"
+        let modeKey = "sb_traffic_padding_mode"
+        let fixedKey = "sb_traffic_padding_fixed_size"
+
+        let oldEnabled = defaults.object(forKey: enabledKey)
+        let oldMode = defaults.object(forKey: modeKey)
+        let oldFixed = defaults.object(forKey: fixedKey)
+
+        defer {
+            restore(defaults, key: enabledKey, value: oldEnabled)
+            restore(defaults, key: modeKey, value: oldMode)
+            restore(defaults, key: fixedKey, value: oldFixed)
+        }
+
+        defaults.set(true, forKey: enabledKey)
+        defaults.set(TrafficPaddingMode.fixed.rawValue, forKey: modeKey)
+        defaults.set(128, forKey: fixedKey)
+
+        let payload = Data("traffic-padding-regression".utf8)
+        let wrapped = TrafficPadding.wrapIfEnabled(payload, label: "unit")
+
+        XCTAssertEqual(wrapped.count, 128)
+        XCTAssertEqual(TrafficPadding.unwrapIfNeeded(wrapped, label: "unit"), payload)
+
+        var malformed = Data([0x53, 0x42, 0x50, 0x32])
+        var declaredLen = UInt32(512).bigEndian
+        malformed.append(Data(bytes: &declaredLen, count: 4))
+        malformed.append(Data(repeating: 0xAA, count: 12))
+
+        XCTAssertEqual(TrafficPadding.unwrapIfNeeded(malformed, label: "unit"), malformed)
+    }
+
+    private func makeInitiatorContext() -> HandshakeContext {
+        let signingKey = Curve25519.Signing.PrivateKey()
+        return HandshakeContext(
+            role: .initiator,
+            cryptoProvider: ClassicCryptoProvider(),
+            protocolSignatureProvider: ClassicSignatureProvider(),
+            identityKeyHandle: nil,
+            identityPublicKey: signingKey.publicKey.rawRepresentation,
+            policy: .default,
+            peerKEMPublicKeys: [:]
+        )
+    }
+
+    private func makeMinimalMessageB() -> HandshakeMessageB {
+        let identityKeys = IdentityPublicKeys(
+            protocolPublicKey: Data(repeating: 0x11, count: 32),
+            protocolAlgorithm: .ed25519
+        )
+
+        let sealedBox = HPKESealedBox(
+            encapsulatedKey: Data(repeating: 0x22, count: 32),
+            ciphertext: Data([0x01, 0x02, 0x03]),
+            tag: Data(repeating: 0x33, count: 16),
+            nonce: Data(repeating: 0x44, count: 12)
+        )
+
+        return HandshakeMessageB(
+            selectedSuite: .x25519Ed25519,
+            responderShare: Data(repeating: 0x55, count: 32),
+            serverNonce: Data(repeating: 0x66, count: HandshakeConstants.nonceSize),
+            encryptedPayload: sealedBox,
+            signature: Data(repeating: 0x77, count: 64),
+            identityPublicKeys: identityKeys
+        )
+    }
+
+    private func assertMissingTranscriptHashA(_ error: Error, file: StaticString = #filePath, line: UInt = #line) {
+        guard case let HandshakeError.failed(reason) = error else {
+            XCTFail("Expected HandshakeError.failed, got \(error)", file: file, line: line)
+            return
+        }
+        guard case let .cryptoError(message) = reason else {
+            XCTFail("Expected HandshakeFailureReason.cryptoError, got \(reason)", file: file, line: line)
+            return
+        }
+        XCTAssertEqual(message, "Missing transcript hash A", file: file, line: line)
+    }
+
+    private func restore(_ defaults: UserDefaults, key: String, value: Any?) {
+        if let value {
+            defaults.set(value, forKey: key)
+        } else {
+            defaults.removeObject(forKey: key)
+        }
+    }
+}

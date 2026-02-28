@@ -95,6 +95,149 @@ public class P2PDiscoveryService: BaseManager {
         case wiredEthernetOnly
     }
 
+    private actor NetServiceResolveLimiter {
+        private let limit: Int
+        private var inFlight = 0
+        private var waiters: [CheckedContinuation<Void, Never>] = []
+
+        init(limit: Int) {
+            self.limit = max(1, limit)
+        }
+
+        func withPermit<T>(_ operation: @Sendable () async throws -> T) async rethrows -> T {
+            await acquire()
+            defer { release() }
+            return try await operation()
+        }
+
+        private func acquire() async {
+            if inFlight < limit {
+                inFlight += 1
+                return
+            }
+
+            await withCheckedContinuation { continuation in
+                waiters.append(continuation)
+            }
+            inFlight += 1
+        }
+
+        private func release() {
+            inFlight = max(0, inFlight - 1)
+            if let waiter = waiters.first {
+                waiters.removeFirst()
+                waiter.resume()
+            }
+        }
+    }
+
+    private struct NetServiceResolvedEndpoint: Sendable {
+        let port: Int
+        let ipv4: String?
+        let ipv6: String?
+    }
+
+    private struct LocalInterfaceCacheEntry: Sendable {
+        let addresses: Set<String>
+        let normalizedHostName: String
+        let updatedAt: Date
+    }
+
+    private enum NetServiceResolveError: LocalizedError {
+        case resolveFailed([String: NSNumber])
+
+        var errorDescription: String? {
+            switch self {
+            case .resolveFailed(let info):
+                return "NetService 解析失败: \(info)"
+            }
+        }
+    }
+
+    private final class NetServiceResolveContext: NSObject, NetServiceDelegate, @unchecked Sendable {
+        private let resumed = OSAllocatedUnfairLock(initialState: false)
+        private let continuation: CheckedContinuation<NetServiceResolvedEndpoint, Error>
+        private let service: NetService
+        private let timeoutSeconds: TimeInterval
+        private var timeoutTask: Task<Void, Never>?
+        private var selfRetain: NetServiceResolveContext?
+
+        init(
+            service: NetService,
+            timeoutSeconds: TimeInterval,
+            continuation: CheckedContinuation<NetServiceResolvedEndpoint, Error>
+        ) {
+            self.service = service
+            self.timeoutSeconds = timeoutSeconds
+            self.continuation = continuation
+            super.init()
+            self.selfRetain = self
+        }
+
+        func start() {
+            service.delegate = self
+            service.schedule(in: .main, forMode: .common)
+            service.resolve(withTimeout: timeoutSeconds)
+
+            timeoutTask = Task { [weak self] in
+                guard let self else { return }
+                try? await Task.sleep(for: .seconds(timeoutSeconds))
+                guard !Task.isCancelled else { return }
+                self.finish(.failure(P2PDiscoveryError.timeout))
+            }
+        }
+
+        func netServiceDidResolveAddress(_ sender: NetService) {
+            let port = max(0, sender.port)
+            var foundIPv4: String?
+            var foundIPv6: String?
+
+            if let addresses = sender.addresses {
+                for data in addresses {
+                    let address = P2P_ExtractIPAddress(from: data)
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                        .lowercased()
+                    guard !address.isEmpty, address != "未知地址" else { continue }
+                    if address.contains("."), !address.hasPrefix("169.254"), !address.hasPrefix("127."), foundIPv4 == nil {
+                        foundIPv4 = address
+                    } else if address.contains(":"), !address.hasPrefix("fe80:"), foundIPv6 == nil {
+                        foundIPv6 = address
+                    }
+                }
+            }
+
+            finish(.success(NetServiceResolvedEndpoint(port: port, ipv4: foundIPv4, ipv6: foundIPv6)))
+        }
+
+        func netService(_ sender: NetService, didNotResolve errorDict: [String : NSNumber]) {
+            finish(.failure(NetServiceResolveError.resolveFailed(errorDict)))
+        }
+
+        private func finish(_ result: Result<NetServiceResolvedEndpoint, Error>) {
+            let shouldResume = resumed.withLock { state -> Bool in
+                guard !state else { return false }
+                state = true
+                return true
+            }
+            guard shouldResume else { return }
+
+            timeoutTask?.cancel()
+            timeoutTask = nil
+            service.stop()
+            service.delegate = nil
+            service.remove(from: .main, forMode: .common)
+
+            switch result {
+            case .success(let resolved):
+                continuation.resume(returning: resolved)
+            case .failure(let error):
+                continuation.resume(throwing: error)
+            }
+
+            selfRetain = nil
+        }
+    }
+
     private final class WaitForConnectionContext: @unchecked Sendable {
         private let resumed = OSAllocatedUnfairLock(initialState: false)
         private let continuation: CheckedContinuation<Void, Error>
@@ -120,6 +263,10 @@ public class P2PDiscoveryService: BaseManager {
             }
         }
     }
+
+    private let netServiceResolveLimiter = NetServiceResolveLimiter(limit: 4)
+    private var localInterfaceCacheEntry: LocalInterfaceCacheEntry?
+    private let localInterfaceCacheTTL: TimeInterval = 8
 
  // MARK: - 初始化
 
@@ -1031,7 +1178,7 @@ public class P2PDiscoveryService: BaseManager {
             case .added(let result):
                 addDiscoveredDeviceAsync(from: result, serviceType: serviceType)
             case .removed(let result):
-                removeDiscoveredDevice(from: result)
+                removeDiscoveredDevice(from: result, serviceType: serviceType)
             case .changed(old: _, new: let new, flags: _):
                 updateDiscoveredDeviceAsync(from: new, serviceType: serviceType)
             case .identical:
@@ -1105,6 +1252,82 @@ public class P2PDiscoveryService: BaseManager {
         if let deviceId, !deviceId.isEmpty { return "id:\(deviceId)" }
         if let pubKeyFP, !pubKeyFP.isEmpty { return "fp:\(pubKeyFP)" }
         return bonjourIdentifier ?? ipv4 ?? ipv6
+    }
+
+    private func normalizeIdentifierForMatching(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        var value = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if value.hasPrefix("recent:") {
+            value.removeFirst("recent:".count)
+        }
+        return value.isEmpty ? nil : value
+    }
+
+    private func normalizeIPAddressForMatching(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        var value = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !value.isEmpty else { return nil }
+        if value.contains(":"), let base = value.split(separator: "%", maxSplits: 1).first {
+            value = String(base)
+        }
+        return value
+    }
+
+    private func normalizedNameTokenForMatching(_ raw: String) -> String {
+        raw.lowercased().filter { $0.isLetter || $0.isNumber }
+    }
+
+    private func findDiscoveredDeviceIndex(
+        name: String,
+        ipv4: String?,
+        ipv6: String?,
+        bonjourIdentifier: String?,
+        strongIdentity: (deviceId: String?, pubKeyFP: String?)
+    ) -> Int? {
+        let normalizedDeviceId = strongIdentity.deviceId?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedFingerprint = strongIdentity.pubKeyFP?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let normalizedBonjourIdentifier = normalizeIdentifierForMatching(bonjourIdentifier)
+        let normalizedIPv4 = normalizeIPAddressForMatching(ipv4)
+        let normalizedIPv6 = normalizeIPAddressForMatching(ipv6)
+        let normalizedNameToken = normalizedNameTokenForMatching(name)
+
+        return discoveredDevices.firstIndex(where: { existing in
+            if let normalizedDeviceId,
+               !normalizedDeviceId.isEmpty,
+               let existingId = existing.deviceId?.trimmingCharacters(in: .whitespacesAndNewlines),
+               existingId == normalizedDeviceId {
+                return true
+            }
+
+            if let normalizedFingerprint,
+               !normalizedFingerprint.isEmpty,
+               let existingFP = existing.pubKeyFP?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+               existingFP == normalizedFingerprint {
+                return true
+            }
+
+            if let normalizedBonjourIdentifier,
+               let existingIdentifier = normalizeIdentifierForMatching(existing.uniqueIdentifier),
+               existingIdentifier == normalizedBonjourIdentifier {
+                return true
+            }
+
+            if let normalizedIPv4,
+               let existingIPv4 = normalizeIPAddressForMatching(existing.ipv4),
+               existingIPv4 == normalizedIPv4 {
+                return true
+            }
+
+            if let normalizedIPv6,
+               let existingIPv6 = normalizeIPAddressForMatching(existing.ipv6),
+               existingIPv6 == normalizedIPv6 {
+                return true
+            }
+
+            guard !normalizedNameToken.isEmpty else { return false }
+            let existingNameToken = normalizedNameTokenForMatching(existing.name)
+            return !existingNameToken.isEmpty && existingNameToken == normalizedNameToken
+        })
     }
 
  /// 添加发现的设备 - 增强版：识别设备类型
@@ -1322,10 +1545,43 @@ public class P2PDiscoveryService: BaseManager {
     }
 
  /// 移除设备
-    private func removeDiscoveredDevice(from result: NWBrowser.Result) {
-        let deviceId = extractDeviceName(from: result)
-        discoveredDevices.removeAll { $0.name == deviceId }
-        logger.info("设备已离线: \(deviceId)")
+    private func removeDiscoveredDevice(from result: NWBrowser.Result, serviceType: String) {
+        let deviceName = P2P_ExtractDeviceName(result)
+        let (ipv4, ipv6) = P2P_ExtractNetworkAddrs(result)
+        let bonjourUniqueIdentifier = bonjourIdentifier(from: result.endpoint)
+        let strongIdentity = extractStrongIdentity(from: result)
+
+        guard let existingIndex = findDiscoveredDeviceIndex(
+            name: deviceName,
+            ipv4: ipv4,
+            ipv6: ipv6,
+            bonjourIdentifier: bonjourUniqueIdentifier,
+            strongIdentity: strongIdentity
+        ) else {
+            logger.debug("ℹ️ 忽略离线事件：未匹配到设备 [\(serviceType)] name=\(deviceName, privacy: .public)")
+            return
+        }
+
+        var existing = discoveredDevices[existingIndex]
+        existing.services.removeAll { $0 == serviceType }
+        existing.portMap.removeValue(forKey: serviceType)
+
+        let remainingTransportServices = existing.services.filter { $0.hasPrefix("_") }
+        if remainingTransportServices.isEmpty {
+            discoveredDevices.remove(at: existingIndex)
+            logger.info("设备已离线: \(existing.name, privacy: .public) [\(serviceType, privacy: .public)]")
+            return
+        }
+
+        if !remainingTransportServices.contains("_skybridge._tcp") {
+            existing.services.removeAll { $0 == "hs_soa" }
+        }
+
+        discoveredDevices[existingIndex] = existing
+        let remainingServiceSummary = remainingTransportServices.joined(separator: ",")
+        logger.info(
+            "🧹 设备服务下线: \(existing.name, privacy: .public) - 移除=\(serviceType, privacy: .public), 剩余=\(remainingServiceSummary, privacy: .public)"
+        )
     }
 
  /// 更新设备信息
@@ -1772,57 +2028,75 @@ public class P2PDiscoveryService: BaseManager {
         }
     }
 
- /// 判断给定 IPv4 地址是否属于本机，避免自连接导致路径冲突
-    private func isLocalIPAddress(_ address: String) -> Bool {
-        var ifaddr: UnsafeMutablePointer<ifaddrs>?
-        guard getifaddrs(&ifaddr) == 0 else { return false }
-        defer { freeifaddrs(ifaddr) }
-        var ptr = ifaddr
-        while ptr != nil {
-            defer { ptr = ptr?.pointee.ifa_next }
-            guard let interface = ptr?.pointee, let sa = interface.ifa_addr else { continue }
-            let family = sa.pointee.sa_family
-            if family == UInt8(AF_INET) || family == UInt8(AF_INET6) {
-                var buf = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-                if getnameinfo(sa, socklen_t(sa.pointee.sa_len), &buf, socklen_t(buf.count), nil, socklen_t(0), NI_NUMERICHOST) == 0 {
-                    let data = Data(bytes: buf, count: buf.count)
-                    let trimmed = data.prefix { $0 != 0 }
-                    let ip = String(decoding: trimmed, as: UTF8.self)
-                    if ip == address { return true }
-                }
-            }
-        }
-        return false
+    private func normalizedHostNameToken(_ raw: String) -> String {
+        raw.lowercased()
+            .replacingOccurrences(of: " ", with: "")
+            .replacingOccurrences(of: "(", with: "")
+            .replacingOccurrences(of: ")", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
- /// 判断是否为本机设备（严格匹配）
-    private func isProbablyLocalDevice(name: String, ipv4: String?, ipv6: String?) -> Bool {
+    private func localInterfaceCacheSnapshot(forceRefresh: Bool = false) -> LocalInterfaceCacheEntry {
+        if !forceRefresh,
+           let cached = localInterfaceCacheEntry,
+           Date().timeIntervalSince(cached.updatedAt) < localInterfaceCacheTTL {
+            return cached
+        }
+
+        var addresses: Set<String> = []
         var ifaddr: UnsafeMutablePointer<ifaddrs>?
-        var locals: Set<String> = []
         if getifaddrs(&ifaddr) == 0 {
+            defer { freeifaddrs(ifaddr) }
             var ptr = ifaddr
             while ptr != nil {
                 defer { ptr = ptr?.pointee.ifa_next }
                 guard let interface = ptr?.pointee, let sa = interface.ifa_addr else { continue }
-                let fam = sa.pointee.sa_family
-                if fam == UInt8(AF_INET) || fam == UInt8(AF_INET6) {
-                    var buf = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-                    if getnameinfo(sa, socklen_t(sa.pointee.sa_len), &buf, socklen_t(buf.count), nil, socklen_t(0), NI_NUMERICHOST) == 0 {
-                        let data = Data(bytes: buf, count: buf.count)
-                        let trimmed = data.prefix { $0 != 0 }
-                        let ip = String(decoding: trimmed, as: UTF8.self)
-                        if !ip.isEmpty { locals.insert(ip) }
-                    }
+                let family = sa.pointee.sa_family
+                guard family == UInt8(AF_INET) || family == UInt8(AF_INET6) else { continue }
+
+                var buf = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+                guard getnameinfo(sa, socklen_t(sa.pointee.sa_len), &buf, socklen_t(buf.count), nil, socklen_t(0), NI_NUMERICHOST) == 0 else {
+                    continue
+                }
+
+                let data = Data(bytes: buf, count: buf.count)
+                let trimmed = data.prefix { $0 != 0 }
+                let ip = String(decoding: trimmed, as: UTF8.self)
+                if let normalized = normalizeIPAddressForMatching(ip) {
+                    addresses.insert(normalized)
                 }
             }
-            freeifaddrs(ifaddr)
         }
-        if let v4 = ipv4, locals.contains(v4) { return true }
-        if let v6 = ipv6, locals.contains(v6) { return true }
-        func norm(_ s: String) -> String { s.lowercased().replacingOccurrences(of: " ", with: "").replacingOccurrences(of: "(", with: "").replacingOccurrences(of: ")", with: "") }
-        let localName = Host.current().localizedName ?? ""
-        if !localName.isEmpty, norm(name) == norm(localName) { return true }
-        return false
+
+        let snapshot = LocalInterfaceCacheEntry(
+            addresses: addresses,
+            normalizedHostName: normalizedHostNameToken(Host.current().localizedName ?? ""),
+            updatedAt: Date()
+        )
+        localInterfaceCacheEntry = snapshot
+        return snapshot
+    }
+
+ /// 判断给定 IPv4 地址是否属于本机，避免自连接导致路径冲突
+    private func isLocalIPAddress(_ address: String) -> Bool {
+        guard let normalizedAddress = normalizeIPAddressForMatching(address) else { return false }
+        return localInterfaceCacheSnapshot().addresses.contains(normalizedAddress)
+    }
+
+ /// 判断是否为本机设备（严格匹配）
+    private func isProbablyLocalDevice(name: String, ipv4: String?, ipv6: String?) -> Bool {
+        let snapshot = localInterfaceCacheSnapshot()
+
+        if let normalizedIPv4 = normalizeIPAddressForMatching(ipv4), snapshot.addresses.contains(normalizedIPv4) {
+            return true
+        }
+        if let normalizedIPv6 = normalizeIPAddressForMatching(ipv6), snapshot.addresses.contains(normalizedIPv6) {
+            return true
+        }
+
+        let normalizedLocalName = snapshot.normalizedHostName
+        guard !normalizedLocalName.isEmpty else { return false }
+        return normalizedHostNameToken(name) == normalizedLocalName
     }
 
     /// 等待连接建立（负责设置 stateUpdateHandler + 启动连接）
@@ -2174,6 +2448,34 @@ public class P2PDiscoveryService: BaseManager {
         }
     }
 
+    private func resolveNetServiceEndpoint(
+        domain: String,
+        type: String,
+        name: String,
+        timeoutSeconds: TimeInterval
+    ) async -> NetServiceResolvedEndpoint? {
+        let resolved: NetServiceResolvedEndpoint? = await netServiceResolveLimiter.withPermit {
+            try? await withCheckedThrowingContinuation { (continuation: CheckedContinuation<NetServiceResolvedEndpoint, Error>) in
+                let service = NetService(
+                    domain: domain.isEmpty ? "local." : domain,
+                    type: type,
+                    name: name
+                )
+                let context = NetServiceResolveContext(
+                    service: service,
+                    timeoutSeconds: timeoutSeconds,
+                    continuation: continuation
+                )
+                context.start()
+            }
+        }
+
+        if resolved == nil {
+            logger.debug("ℹ️ NetService 解析失败: name=\(name, privacy: .public) type=\(type, privacy: .public)")
+        }
+        return resolved
+    }
+
     private func resolveViaNetServiceIfNeeded(result: NWBrowser.Result, deviceIndex: Int, serviceType: String) {
         guard deviceIndex >= 0 && deviceIndex < discoveredDevices.count else { return }
         let d = discoveredDevices[deviceIndex]
@@ -2181,57 +2483,63 @@ public class P2PDiscoveryService: BaseManager {
         let hasAddr = (d.ipv4 != nil) || (d.ipv6 != nil)
         guard !hasPort || !hasAddr else { return }
         guard case .service(let name, let type, let domain, _) = result.endpoint else { return }
+
         let key = name + "|" + type
         let now = Date()
         if let last = txtResolveCooldown[key], now.timeIntervalSince(last) < 2.0 { return }
         txtResolveCooldown[key] = now
-        Task.detached { [domain, type, name, serviceType] in
-            let svc = NetService(domain: domain.isEmpty ? "local." : domain, type: type, name: name)
-            svc.resolve(withTimeout: 1.0)
-            var port = 0
-            if svc.port > 0 { port = svc.port }
-            var found4: String?
-            var found6: String?
-            if let addrs = svc.addresses {
-                for data in addrs {
-                    let addr = P2P_ExtractIPAddress(from: data)
-                    if addr.contains("."), !addr.starts(with: "169.254"), !addr.starts(with: "127."), found4 == nil { found4 = addr }
-                    else if addr.contains(":"), !addr.starts(with: "fe80:"), found6 == nil { found6 = addr }
-                }
+
+        let targetDeviceId = d.id
+
+        Task { [weak self, domain, type, name, serviceType, result, targetDeviceId] in
+            guard let self else { return }
+            guard let resolved = await self.resolveNetServiceEndpoint(
+                domain: domain,
+                type: type,
+                name: name,
+                timeoutSeconds: 1.2
+            ) else {
+                return
             }
-            await MainActor.run { [self] in
-                guard deviceIndex >= 0 && deviceIndex < self.discoveredDevices.count else { return }
-                let dd = self.discoveredDevices[deviceIndex]
-                var newPortMap = dd.portMap
-                if (newPortMap[serviceType] ?? 0) == 0 && port > 0 { newPortMap[serviceType] = port }
-                let newIPv4 = dd.ipv4 ?? found4
-                let newIPv6 = dd.ipv6 ?? found6
-                let bonjourUniqueIdentifier = self.bonjourIdentifier(from: result.endpoint)
-                let preferredIdentifier = self.preferredUniqueIdentifier(
-                    deviceId: dd.deviceId,
-                    pubKeyFP: dd.pubKeyFP,
-                    bonjourIdentifier: bonjourUniqueIdentifier,
-                    ipv4: newIPv4,
-                    ipv6: newIPv6
-                )
-                let updated = DiscoveredDevice(
-                    id: dd.id,
-                    name: dd.name,
-                    ipv4: newIPv4,
-                    ipv6: newIPv6,
-                    services: dd.services,
-                    portMap: newPortMap,
-                    connectionTypes: dd.connectionTypes,
-                    uniqueIdentifier: preferredIdentifier ?? dd.uniqueIdentifier,
-                    signalStrength: dd.signalStrength,
-                    source: dd.source,
-                    isLocalDevice: dd.isLocalDevice,
-                    deviceId: dd.deviceId,
-                    pubKeyFP: dd.pubKeyFP,
-                    macSet: dd.macSet
-                )
-                self.discoveredDevices[deviceIndex] = updated
+
+            guard let currentIndex = self.discoveredDevices.firstIndex(where: { $0.id == targetDeviceId }) else {
+                return
             }
+
+            let dd = self.discoveredDevices[currentIndex]
+            var newPortMap = dd.portMap
+            if (newPortMap[serviceType] ?? 0) == 0, resolved.port > 0 {
+                newPortMap[serviceType] = resolved.port
+            }
+
+            let newIPv4 = dd.ipv4 ?? resolved.ipv4
+            let newIPv6 = dd.ipv6 ?? resolved.ipv6
+            let bonjourUniqueIdentifier = self.bonjourIdentifier(from: result.endpoint)
+            let preferredIdentifier = self.preferredUniqueIdentifier(
+                deviceId: dd.deviceId,
+                pubKeyFP: dd.pubKeyFP,
+                bonjourIdentifier: bonjourUniqueIdentifier,
+                ipv4: newIPv4,
+                ipv6: newIPv6
+            )
+
+            let updated = DiscoveredDevice(
+                id: dd.id,
+                name: dd.name,
+                ipv4: newIPv4,
+                ipv6: newIPv6,
+                services: dd.services,
+                portMap: newPortMap,
+                connectionTypes: dd.connectionTypes,
+                uniqueIdentifier: preferredIdentifier ?? dd.uniqueIdentifier,
+                signalStrength: dd.signalStrength,
+                source: dd.source,
+                isLocalDevice: dd.isLocalDevice,
+                deviceId: dd.deviceId,
+                pubKeyFP: dd.pubKeyFP,
+                macSet: dd.macSet
+            )
+            self.discoveredDevices[currentIndex] = updated
         }
     }
     private func updateDiscoveredDeviceAsync(from result: NWBrowser.Result, serviceType: String) {
