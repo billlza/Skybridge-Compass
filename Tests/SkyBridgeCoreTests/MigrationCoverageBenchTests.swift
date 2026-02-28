@@ -55,7 +55,7 @@ final class MigrationCoverageBenchTests: XCTestCase {
     }
 
     private func writeCSV(rows: [String]) throws {
-        let artifactsDir = URL(fileURLWithPath: "Artifacts")
+        let artifactsDir = ArtifactDate.writableArtifactsDirectory()
         try FileManager.default.createDirectory(at: artifactsDir, withIntermediateDirectories: true)
 
         let dateString = ArtifactDate.current()

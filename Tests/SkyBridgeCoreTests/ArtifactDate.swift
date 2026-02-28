@@ -6,6 +6,7 @@
 // suffix via environment variables.
 
 import Foundation
+import SkyBridgeCore
 
 enum ArtifactDate {
     /// Return the date suffix used for artifact filenames.
@@ -24,6 +25,8 @@ enum ArtifactDate {
         df.locale = Locale(identifier: "en_US_POSIX")
         return df.string(from: Date())
     }
+
+    static func writableArtifactsDirectory() -> URL {
+        ArtifactPaths.writableArtifactsDirectory()
+    }
 }
-
-

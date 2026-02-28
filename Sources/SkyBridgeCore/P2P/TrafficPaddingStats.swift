@@ -155,7 +155,7 @@ public actor TrafficPaddingStats {
     /// This is intentionally aligned with other bench artifacts so `Scripts/make_tables.py`
     /// can select the latest file by prefix.
     public func flushToArtifactsCSV() async throws {
-        let artifactsDir = URL(fileURLWithPath: "Artifacts")
+        let artifactsDir = ArtifactPaths.writableArtifactsDirectory()
         try FileManager.default.createDirectory(at: artifactsDir, withIntermediateDirectories: true)
 
         // To avoid mixing datasets across dates (paper reproducibility), allow overriding the date suffix.

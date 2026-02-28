@@ -1025,7 +1025,7 @@ final class HandshakeDriverTests: XCTestCase {
         print("[BENCH] Provider selection self-test failure (us): \(selfTestFailureStats.describe(unit: "us"))")
 
         let dateString = ArtifactDate.current()
-        let artifactsDir = URL(fileURLWithPath: "Artifacts")
+        let artifactsDir = ArtifactDate.writableArtifactsDirectory()
         try FileManager.default.createDirectory(at: artifactsDir, withIntermediateDirectories: true)
         let csvPath = artifactsDir.appendingPathComponent("provider_selection_\(dateString).csv")
         let header = "scenario,p50_us,p95_us\n"

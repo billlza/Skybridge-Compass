@@ -820,7 +820,7 @@ final class HandshakeBenchmarkTests: XCTestCase {
     private func writeToArtifact(configuration: String, stats: PercentileStats, iterationCount: Int) {
         let dateString = ArtifactDate.current()
 
-        let artifactsDir = URL(fileURLWithPath: "Artifacts")
+        let artifactsDir = ArtifactDate.writableArtifactsDirectory()
         let csvPath = artifactsDir.appendingPathComponent("handshake_bench_\(dateString).csv")
 
         do {
@@ -852,7 +852,7 @@ final class HandshakeBenchmarkTests: XCTestCase {
     private func writeToArtifact(configuration: String, stats: EnhancedPercentileStats, iterationCount: Int) {
         let dateString = ArtifactDate.current()
 
-        let artifactsDir = URL(fileURLWithPath: "Artifacts")
+        let artifactsDir = ArtifactDate.writableArtifactsDirectory()
         let csvPath = artifactsDir.appendingPathComponent("handshake_bench_\(dateString).csv")
 
         do {
@@ -881,7 +881,7 @@ final class HandshakeBenchmarkTests: XCTestCase {
     private func writeRTTArtifact(configuration: String, stats: EnhancedPercentileStats, iterationCount: Int) {
         let dateString = ArtifactDate.current()
 
-        let artifactsDir = URL(fileURLWithPath: "Artifacts")
+        let artifactsDir = ArtifactDate.writableArtifactsDirectory()
         let csvPath = artifactsDir.appendingPathComponent("handshake_rtt_\(dateString).csv")
 
         do {
@@ -908,7 +908,7 @@ final class HandshakeBenchmarkTests: XCTestCase {
     private func writeWireSizes(configuration: String, sizes: HandshakeWireSizes) {
         let dateString = ArtifactDate.current()
 
-        let artifactsDir = URL(fileURLWithPath: "Artifacts")
+        let artifactsDir = ArtifactDate.writableArtifactsDirectory()
         let csvPath = artifactsDir.appendingPathComponent("handshake_wire_\(dateString).csv")
 
         do {

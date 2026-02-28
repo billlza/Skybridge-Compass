@@ -588,7 +588,7 @@ struct MessageSizeBenchRunner {
     }
 
     private static func writeBreakdownCSV(_ rows: [SizeBreakdown]) throws {
-        let artifactsDir = URL(fileURLWithPath: "Artifacts")
+        let artifactsDir = ArtifactPaths.writableArtifactsDirectory()
         try FileManager.default.createDirectory(at: artifactsDir, withIntermediateDirectories: true)
 
         let env = ProcessInfo.processInfo.environment

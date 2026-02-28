@@ -135,7 +135,7 @@ final class SystemImpactBenchTests: XCTestCase {
         #endif
 
         let runDate = Self.dateStamp()
-        let artifactsDir = URL(fileURLWithPath: "Artifacts")
+        let artifactsDir = ArtifactDate.writableArtifactsDirectory()
         try FileManager.default.createDirectory(at: artifactsDir, withIntermediateDirectories: true)
         let csvPath = artifactsDir.appendingPathComponent("system_impact_\(runDate).csv")
 

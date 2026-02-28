@@ -591,7 +591,7 @@ struct HandshakeBenchRunner {
         dateString: String,
         outputSet: BenchOutputSet
     ) {
-        let artifactsDir = URL(fileURLWithPath: "Artifacts")
+        let artifactsDir = ArtifactPaths.writableArtifactsDirectory()
         let filename = outputSet == .contrast ? "handshake_bench_contrast_\(dateString).csv" : "handshake_bench_\(dateString).csv"
         let csvPath = artifactsDir.appendingPathComponent(filename)
 
@@ -623,7 +623,7 @@ struct HandshakeBenchRunner {
         dateString: String,
         outputSet: BenchOutputSet
     ) {
-        let artifactsDir = URL(fileURLWithPath: "Artifacts")
+        let artifactsDir = ArtifactPaths.writableArtifactsDirectory()
         let filename = outputSet == .contrast ? "handshake_rtt_contrast_\(dateString).csv" : "handshake_rtt_\(dateString).csv"
         let csvPath = artifactsDir.appendingPathComponent(filename)
 
@@ -654,7 +654,7 @@ struct HandshakeBenchRunner {
         dateString: String,
         outputSet: BenchOutputSet
     ) {
-        let artifactsDir = URL(fileURLWithPath: "Artifacts")
+        let artifactsDir = ArtifactPaths.writableArtifactsDirectory()
         let filename = outputSet == .contrast ? "handshake_wire_contrast_\(dateString).csv" : "handshake_wire_\(dateString).csv"
         let csvPath = artifactsDir.appendingPathComponent(filename)
 

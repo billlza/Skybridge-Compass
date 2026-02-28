@@ -52,7 +52,7 @@ final class TrafficPaddingSensitivityBenchTests: XCTestCase {
 
         // Prepare one handshake + keys per cap run (to keep work independent and avoid state bleed).
         // Use deterministic workload seed per cap for fair comparison.
-        let outputURL = URL(fileURLWithPath: "Artifacts")
+        let outputURL = ArtifactDate.writableArtifactsDirectory()
             .appendingPathComponent("traffic_padding_sensitivity_\(artifactDate).csv")
         try FileManager.default.createDirectory(at: outputURL.deletingLastPathComponent(), withIntermediateDirectories: true)
 

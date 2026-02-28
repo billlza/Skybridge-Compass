@@ -230,7 +230,7 @@ final class MigrationThreatHarnessBenchTests: XCTestCase {
     }
 
     private func writeCSV(rows: [HarnessRow]) throws {
-        let artifactsDir = URL(fileURLWithPath: "Artifacts")
+        let artifactsDir = ArtifactDate.writableArtifactsDirectory()
         try FileManager.default.createDirectory(at: artifactsDir, withIntermediateDirectories: true)
 
         let dateString = ArtifactDate.current()

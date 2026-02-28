@@ -339,7 +339,7 @@ public struct CSVArtifactWriter {
     private let artifactsDir: URL
 
     public init() {
-        self.artifactsDir = URL(fileURLWithPath: "Artifacts")
+        self.artifactsDir = ArtifactDate.writableArtifactsDirectory()
     }
 
     public func writeFaultInjectionResults(_ stats: [FaultInjectionStats]) throws {
