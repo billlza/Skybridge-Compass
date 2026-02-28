@@ -1316,19 +1316,20 @@ final class ApplePQCProviderSelectionTests: XCTestCase {
  // MARK: - Provider Selection with Apple PQC Available
     
     #if DEBUG
- /// Test that preferPQC selects ApplePQC when available
+ /// Test that preferPQC selects a nativePQC provider when available
  /// **Validates: Requirements 4.1**
-    func testPreferPQCSelectsApplePQCWhenAvailable() {
+    func testPreferPQCSelectsNativePQCWhenAvailable() {
         let env = MockCryptoEnvironment(hasApplePQC: true, hasLiboqs: true)
         let provider = CryptoProviderFactory.make(policy: .preferPQC, environment: env)
-        
- // When Apple PQC is available, it should be preferred over liboqs
+
+ // When Apple PQC is available, preferPQC should stay on nativePQC tier.
+ // The concrete native provider may be ApplePQC or AppleXWing, depending on user preference.
         #if HAS_APPLE_PQC_SDK
         if #available(macOS 26.0, *) {
-            XCTAssertEqual(provider.providerName, "ApplePQC",
-                           "preferPQC should select ApplePQC when available")
             XCTAssertEqual(provider.tier, .nativePQC,
-                           "ApplePQC should have nativePQC tier")
+                           "preferPQC should select nativePQC when Apple PQC is available")
+            XCTAssertTrue(["ApplePQC", "AppleXWing"].contains(provider.providerName),
+                          "Expected Apple native provider, got \(provider.providerName)")
         } else {
  // On older macOS, should fall back to liboqs
             XCTAssertEqual(provider.tier, .liboqsPQC,
@@ -1527,17 +1528,17 @@ final class ApplePQCProviderIntegrationTests: XCTestCase {
                       "Provider suite should be PQC")
     }
     
- /// Test factory creates ApplePQCProvider on macOS 26+
+ /// Test factory creates a nativePQC provider on macOS 26+
  /// **Validates: Requirements 4.1, 4.2**
-    func testFactoryCreatesApplePQCProvider() {
+    func testFactoryCreatesNativePQCProvider() {
         #if DEBUG
         let env = MockCryptoEnvironment(hasApplePQC: true, hasLiboqs: true)
         let provider = CryptoProviderFactory.make(policy: .preferPQC, environment: env)
-        
-        XCTAssertEqual(provider.providerName, "ApplePQC",
-                       "Factory should create ApplePQCProvider when available")
+
         XCTAssertEqual(provider.tier, .nativePQC,
-                       "Provider should have nativePQC tier")
+                       "Provider should stay on nativePQC tier when Apple PQC is available")
+        XCTAssertTrue(["ApplePQC", "AppleXWing"].contains(provider.providerName),
+                      "Expected Apple native provider, got \(provider.providerName)")
         #endif
     }
 }
