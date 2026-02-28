@@ -301,6 +301,40 @@ Main-paper claims and all primary figures/tables are anchored to the
 introduced during revision are reported as \textbf{additional validation}
 in Supplementary sections and are used to strengthen robustness discussion;
 they do not replace or redefine the main-paper primary statistics.
+We separate source-quality, paper-integrity, and release-readiness gates
+to avoid cross-domain false failures and to preserve auditability.
+New zero-warning and layered-gate reports are
+\textbf{release-readiness auxiliary artifacts}; they are additive and do
+not change the core artifact schema (\texttt{handshake\_bench\_*},
+\texttt{handshake\_rtt\_*}, \texttt{message\_sizes\_*}, and
+claims/macro datasets).
+
+\subsection*{Frozen Invariants for the Upgrade Track}
+\begin{itemize}\tightlist
+\item wire format unchanged (MessageA/MessageB/Finished)
+\item suite IDs unchanged (including wireId assignments)
+\item canonical message vectors unchanged
+\item artifact date fixed at \texttt{2026-01-23}
+\item primary experimental numbers unchanged
+\item threat model unchanged
+\item policy semantics unchanged (strict/prefer/classic)
+\item fallback deny semantics unchanged
+\item main paper claims unchanged
+\end{itemize}
+
+\subsection*{Layered Gate Definitions and Failure Attribution}
+\begin{itemize}\tightlist
+\item \textbf{source-quality gate:} SwiftPM build/test, iOS build/test lane,
+  and zero-warning enforcement only for source/toolchain outcomes.
+\item \textbf{paper-integrity gate:} isolated paper compilation, claim/numeric
+  consistency checks, and PDF quality checks (Type3/text extraction/metadata)
+  without writing back tracked PDF outputs.
+\item \textbf{release-readiness gate:} aggregation-only layer over the two
+  domain gates; no additional cross-domain checks are injected.
+\item \textbf{failure attribution contract:} reports always expose
+  \texttt{failed\_domain}, \texttt{failed\_check\_id}, and
+  \texttt{owner\_hint} (code/paper/script/environment) for auditability.
+\end{itemize}
 
 Artifact release:
 \begin{itemize}\tightlist
@@ -818,7 +852,11 @@ inspired by HPKE but does not implement the full RFC 9180
 specification. On Apple 26+ platforms, CryptoKit exposes HPKE cipher
 suites including X-Wing (ML-KEM-768 with X25519), enabling a
 standards-aligned replacement for our compatibility envelope. This
-layer can then be replaced with direct CryptoKit PQ-HPKE calls.
+layer can then be replaced with direct CryptoKit PQ-HPKE calls. The
+Apple provider path does not redefine the protocol contract, does not
+alter the primary evidence base of the paper, and is evaluated only as
+an implementation capability mapping under existing negotiation and
+policy semantics.
 
 \subsection*{Conditional Compilation Strategy}
 

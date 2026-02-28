@@ -186,6 +186,18 @@ configurations: classic (X25519 + Ed25519), PQC via liboqs (ML-KEM-768 +
 ML-DSA-65), and liboqs PQC v2 FS (ML-KEM-768-FS + ML-DSA-65). Apple
 CryptoKit PQC/X-Wing are reported as a separate \emph{contrast} dataset
 and do not participate in hard pass/fail gates. We do not claim
+cross-domain gate equivalence from a single monolithic script:
+\emph{We separate source-quality, paper-integrity, and release-readiness
+gates to avoid cross-domain false failures and to preserve
+auditability.} To prevent upgrade-time moving-goalpost effects, this
+track freezes wire formats, suite/wire IDs, canonical vectors, the
+artifact date (\texttt{2026-01-23}), threat model, and strict/prefer/classic
+policy semantics (including fallback-deny behavior). Cross-platform
+uplift is validated with a decision-parity matrix that fixes policy
+mode, peer visibility, local provider availability, compile-time flags,
+trust-store state, and bootstrap/rekey state, then requires equivalent
+suite choice, fallback allow/deny, event semantics, and user-facing
+error categories across macOS and iOS. We do not claim
 perfect forward secrecy for the KEM-based PQC suites in v1; post-quantum
 confidentiality holds only while long-term KEM private keys remain
 uncompromised. \mbox{End-to-end}
@@ -1490,7 +1502,11 @@ The native provider wraps CryptoKit ML-KEM/ML-DSA APIs \cite{ref1,ref34} when th
 SDK exposes them, enabling platform-backed PQC suites and HPKE-based
 encapsulation. We treat this as a deployment instance rather than a
 protocol dependency; integration details are provided in the
-Supplementary Materials (Native PQC Integration).
+Supplementary Materials (Native PQC Integration). Specifically, the
+Apple provider path does not redefine the protocol contract, does not
+alter the primary evidence base of the paper, and is evaluated only as
+an implementation capability mapping under existing negotiation and
+policy semantics.
 
 \subsection{Conditional Compilation
 Strategy}\label{c.-conditional-compilation-strategy}
