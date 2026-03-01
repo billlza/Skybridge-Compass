@@ -185,14 +185,14 @@ evaluate a reproducible \emph{core gate} on macOS 26.x with three
 configurations: classic (X25519 + Ed25519), PQC via liboqs (ML-KEM-768 +
 ML-DSA-65), and liboqs PQC v2 FS (ML-KEM-768-FS + ML-DSA-65). Apple
 CryptoKit PQC/X-Wing are reported as a separate \emph{contrast} dataset
-and do not participate in hard pass/fail gates. We do not claim
-cross-domain gate equivalence from a single monolithic script:
-\emph{We separate source-quality, paper-integrity, and release-readiness
-gates to avoid cross-domain false failures and to preserve
-auditability.} To prevent upgrade-time moving-goalpost effects, this
-track freezes wire formats, suite/wire IDs, canonical vectors, the
-artifact date (\texttt{2026-01-23}), threat model, and strict/prefer/classic
-policy semantics (including fallback-deny behavior). Cross-platform
+and do not participate in hard pass/fail gates. To avoid
+cross-domain confounding, we evaluate source-quality,
+paper-integrity, and release-readiness gates independently with
+traceable pass/fail evidence in each domain. To prevent
+upgrade-time moving-goalpost effects, this track freezes wire formats,
+suite/wire IDs, canonical vectors, the artifact date
+(\texttt{2026-01-23}), threat model, and strict/prefer/classic policy
+semantics (including fallback-deny behavior). Cross-platform
 uplift is validated with a decision-parity matrix that fixes policy
 mode, peer visibility, local provider availability, compile-time flags,
 trust-store state, and bootstrap/rekey state, then requires equivalent
@@ -234,8 +234,8 @@ post-quantum cryptography, crypto agility, downgrade resistance, secure handshak
 \noindent Peer-to-peer (P2P) remote desktop and file transfer systems must
 establish secure sessions under adversarial network conditions, device
 churn, and multi-year lifecycles. These systems face a practical
-tension: users demand ``it just works'' pairing across heterogeneous
-stacks, while defenders require that cryptographic negotiation remains
+tension: users expect seamless pairing across heterogeneous stacks,
+while defenders require that cryptographic negotiation remains
 robust against downgrade and \mbox{implementation-level} failure modes.
 Post-quantum cryptography (PQC) increases this tension. Larger messages,
 higher computational cost, and uneven platform support make fallback
@@ -251,7 +251,7 @@ policy (e.g., ``require PQC'') is enforced at the entry points where
 callers cannot accidentally violate it, (iii) targeting deterministic
 failure semantics under timeouts, reorder/duplication, and malformed
 inputs, and (iv) emitting security-relevant telemetry that can be
-audited without turning the system into a logging minefield. In
+audited without relying on ad hoc or excessive logging. In
 practice, many systems either hard-code a single suite, or allow
 ``compatibility'' to creep into negotiation in ways that are hard to
 reason about and harder to verify.
@@ -290,7 +290,7 @@ instantiated in SkyBridge Compass, for staged PQC migration and
 downgrade-auditable negotiation, with Apple platforms as a deployment
 instance.
 
-\textbf{Why this is not ``TLS/QUIC + policy glue + logs'':} In widely
+\textbf{Distinction from protocol-plus-policy wrappers:} In widely
 deployed stacks, the causes and semantics of retry/fallback are
 typically pushed into application glue, making downgrade decisions hard
 to specify, prove, or audit post hoc. Our contract makes migration
@@ -381,25 +381,8 @@ template are unique.
 \end{itemize}
 }
 
-\begin{table}[!t]
-\centering
-\scriptsize
-\caption{Minimal event typing examples for Intro claims (subset of D3; full taxonomy in Supplementary Table~\ref{tab:supp-security-event-types}).}
-\label{tab:intro-event-typing}
-\begingroup
-\setlength{\tabcolsep}{2pt}
-\begin{tabular}{@{}p{0.30\linewidth}p{0.47\linewidth}p{0.17\linewidth}@{}}
-\toprule
-Outcome & Required event typing (minimal) & Downgrade-labeled? \\
-\midrule
-Successful establishment (no fallback) & \texttt{cryptoProviderSelected}; no downgrade/failure event & No \\
-Policy-allowed classic fallback & \texttt{cryptoDowngrade} + D3 context fields & Yes \\
-Identity key mismatch & \texttt{identityMismatch} + \texttt{handshakeFailed} & No \\
-Invalid peer protocol signature & \texttt{signatureVerificationFailed} + \texttt{handshakeFailed} & No \\
-\bottomrule
-\end{tabular}
-\endgroup
-\end{table}
+Representative minimal event typings are summarized in
+Supplementary Table~\ref{tab:supp-security-event-types} (S37).
 
 We additionally provide explicit key confirmation via two Finished
 frames (Fig.~\ref{fig:handshake-sequence}) and document v1 non-claims and
@@ -569,28 +552,12 @@ SkyBridge Compass & Yes (suite + policy bound) & Yes (explicit policy + events) 
 \end{tabular}
 \end{table*}
 
-BaselineBenchRunner measures \emph{time-to-ready} (NWConnection.ready) for
-fresh loopback connections; each sample creates a new connection and
-records the elapsed time from connect start to ready. We report N=1000
-after 10 warmup iterations (warm cache); 0-RTT/session resumption is not
-explicitly enabled and results reflect Network.framework defaults. QUIC
-measurements use ALPN \texttt{sbq} with a single bidirectional stream,
-and no application data is sent (\texttt{BASELINE\_KICKOFF\_BYTES=0}).
-
-Loopback SkyBridge p95 latency is 1.57/\allowbreak 2.76/\allowbreak 7.53~ms for
-classic/\allowbreak liboqs/\allowbreak CryptoKit in our loopback harness; these
-numbers are not directly comparable to TLS/QUIC/DTLS handshakes in
-production deployments, but provide a reproducible baseline under a
-consistent measurement setup. The in-memory handshake microbench isolates
-crypto/state-machine overhead (p95
-2.18/\allowbreak 4.18/\allowbreak 6.16~ms for
-classic/\allowbreak liboqs/\allowbreak CryptoKit) and is reported in
-Section~\ref{sec:evaluation} and Supplementary Tables~\ref{tab:supp-latency}--\ref{tab:supp-rtt}.
-Loopback TLS/QUIC/DTLS p95 latency is 11.37--14.01~ms; wire-size baselines
-(p50/p95) are reported in Supplementary Table~\ref{tab:supp-loopback-wire} and are reproducible via
-loopback pcap capture
-(\texttt{Scripts/\allowbreak run\_\allowbreak baseline\_\allowbreak bench.sh}).
-SkyBridge-CryptoKit loopback baselines are included in Supplementary Table~\ref{tab:supp-loopback-wire}.
+Baseline protocols expose transcript integrity but do not specify
+system-level retry causes or replayable downgrade evidence. Detailed
+baseline methodology (time-to-ready endpoint, warmup policy, ALPN setup,
+kickoff payload settings, and loopback pcap accounting) and full baseline
+tables are provided in the Supplementary Materials (notably
+Table~\ref{tab:supp-loopback-wire}).
 
 Importantly, baseline protocols' downgrade protections target negotiated
 parameter integrity within a single handshake. They do not specify when
@@ -1624,7 +1591,7 @@ suppression, legacy precondition enforcement, and auditability) and
 \textbf{cost-centric evidence} (handshake latency, wire overhead,
 provider selection overhead, and data-plane throughput).
 
-\textbf{Environment:} All experiments are run on Apple Silicon (M1/M3 class) with macOS 26.x, where CryptoKit PQC is available when the SDK exposes ML-KEM/ML-DSA types \cite{ref1,ref34}. Build configuration uses Release (\texttt{-O}) with non-essential logging disabled. Timing uses a monotonic clock (\texttt{ContinuousClock}) with 10 warmup runs. The \emph{core gate} (Classic/liboqs/liboqs-v2-FS) uses N=1000 per configuration. Apple PQC/X-Wing are collected in a separate \emph{contrast} pass (N=5000) and are reported as non-gating diagnostics. Reported percentiles (p50/p95/p99) are computed directly from samples.
+\textbf{Environment:} All experiments are run on Apple Silicon (M1/M3 class) with macOS 26.x, where CryptoKit PQC is available when the SDK exposes ML-KEM/ML-DSA types \cite{ref1,ref34}. Build configuration uses Release (\texttt{-O}) with non-essential logging disabled. Timing uses a monotonic clock (\texttt{ContinuousClock}) with 10 warmup runs. The \emph{core gate} (Classic/liboqs/liboqs-v2-FS) uses N=1000 per configuration. Apple PQC/X-Wing are collected in a separate \emph{contrast} pass (N=5000) and are reported as non-gating diagnostics. Reported percentiles (p50/p95/p99) are computed directly from samples; binary outcomes are reported with Wilson 95\% confidence intervals.
 
 \textbf{Repeatability:} We support multi-batch repeatability by
 restarting the benchmark test process for each batch. Supplementary
@@ -2167,111 +2134,34 @@ Supplementary Table~\ref{tab:supp-interop-matrix}.
 
 \section{Limitations and Future Work}\label{sec:limitations}
 
-\subsection{Current Limitations}\label{a.-current-limitations}
-
+\subsection{Current Limitations}
 \begin{enumerate}
-\item
-  \textbf{iOS PQC Availability (iOS < 26):} We do not currently bundle
-  liboqs for iOS; therefore PQC suites are only available on iOS 26+
-  devices via CryptoKit PQC \cite{ref34}. To support reproducible mobile evaluation,
-  we ship an \emph{on-device} self-test and micro-benchmark harness in the
-  iOS app (Settings $\rightarrow$ PQC $\rightarrow$ ``Self-test/Bench''),
-  which exports JSON artifacts for inclusion in Supplementary tables.
-\item
-  \textbf{X-Wing Hybrid KEM:} We have reserved wire-format identifiers
-  for X-Wing hybrid KEM (wireId 0x0001, combining X25519 + ML-KEM-768).
-  CryptoKit on Apple 26+ exposes HPKE cipher suites including X-Wing
-  (ML-KEM-768 with X25519), motivating a standards-informed hybrid path.
-  Our current implementation uses a domain-separated hybrid KEM
-  composition (X25519 + ML-KEM-768) under wireId 0x0001 and reports
-  on-device measurements in Supplementary Table~\ref{tab:ios-microbench}; full
-  integration with CryptoKit's PQ-HPKE ciphersuite API remains future
-  work.
-\item
-  \textbf{Key Rotation:} Session key rotation during long-lived
-  connections is not addressed in the current design.
-\item
-  \textbf{Forward Secrecy coverage is suite-dependent:} v2 introduces a
-  hybrid composition (static KEM secret + ephemeral contribution) to
-  strengthen post-compromise secrecy versus v1, but legacy v1
-  deployments remain static-recipient KEM and do not provide equivalent
-  FS semantics (Supplementary Table~\ref{tab:supp-v2-v1-compare}).
-\item
-  \textbf{Cross-Platform Interoperability and Generalization Boundaries:}
-  The migration contract and wire format are designed to be portable,
-  and this revision includes both contract-level interop evidence across
-  iOS/macOS, Android, and Ubuntu (suite-catalog parity, wire endianness,
-  signature-selection contract, timeout-blocked fallback, cooldown guard,
-  and trust-pinning path; Supplementary
-  Table~\ref{tab:supp-cross-platform-contract}) and measured external
-  Linux rows (direct + tunnel labels; Supplementary
-  Table~\ref{tab:supp-interop-matrix}). However, absolute
-  latency/throughput numbers in the main performance tables remain
-  Apple-centric and should not be transferred to broad non-Apple
-  deployments without remeasurement.
-\item
-  \textbf{Network Condition Evaluation:} We provide simulated impairment
-  results, kernel-level cross-check, and a real-network micro-study in
-  Section~\ref{sec:network-conditions}; however, the real-network sample
-  size remains limited (one non-overlay direct label plus overlay-mediated
-  SSH-tunnel labels in the STUN-coupled micro-study, plus one dedicated
-  direct-path EC2 Linux run with \texttt{n=50} per payload) and does not
-  yet cover large-scale mobility,
-  long-lived paths, or broad ISP diversity. In addition, while dummynet
-  and netem both preserve high completion under shared profile IDs, the
-  observed delay-profile separation is tighter for our current dummynet
-  setup than for netem, so delay-scale claims are anchored primarily by
-  controlled simulation and netem.
-\item
-  \textbf{Boundary-Stress Residual Risk:} Pairing social engineering and
-  signing-capable endpoint compromise remain outside cryptographic
-  protocol guarantees. Audit evidence improves incident triage but does
-  not by itself restore trust. Our current deployment guidance therefore
-  requires explicit operator runbook actions (quarantine, key rotation,
-  and authenticated re-pairing) as summarized in Supplementary
-  Table~\ref{tab:supp-boundary-stress}.
+\item \textbf{Platform scope:} Main performance numbers are Apple-centric;
+non-Apple deployments require remeasurement under the same artifact and
+workload controls.
+\item \textbf{Secrecy scope:} v1 static-recipient KEM deployments do not
+provide the same secrecy semantics as the v2 hybrid path
+(Supplementary Table~\ref{tab:supp-v2-v1-compare}).
+\item \textbf{External validity:} Real-network evidence remains small-scale
+and does not yet cover broad mobility and ISP diversity.
 \end{enumerate}
 
-\subsection{Future Directions}\label{b.-future-directions}
-
-\begin{enumerate}
-\item
-  \textbf{Cross-Platform Performance Expansion:} Extend quantitative
-  latency/throughput evaluation on Android/Ubuntu production devices
-  (beyond current contract-level interop evidence) and report
-  cross-device variance under identical workload definitions.
-\item
-  \textbf{PFS Hardening Beyond v2:} Extend v2 toward full
-  ephemeral-ephemeral designs and quantify compromise windows under
-  delayed key-exposure models.
-\item
-  \textbf{Cross-Peer Audit Attestation:} Build on the current
-  transcript-anchored local hash-chain by exchanging and cross-signing
-  compact audit digests between peers for stronger remote verifiability.
-\end{enumerate}
-
-\noindent Additional directions are provided in the Supplementary Materials.
+\subsection{Future Directions}
+Priority extensions are broader Android/Ubuntu replication,
+ephemeral-ephemeral secrecy designs beyond v2, and cross-peer audit
+attestation.
 
 
 
 \section{Conclusion}\label{sec:conclusion}
-
-SkyBridge Compass shows that cryptographic agility and post-quantum
-readiness are attainable in P2P systems without sacrificing API
-stability or operational transparency. We do not introduce new
-cryptographic primitives; instead, we contribute an enforceable migration
-contract (suite/provider separation, explicit policy semantics,
-deterministic failure outcomes, and protocol-level audit signals) with
-formalized definitions, machine-checkable proofs, and released artifacts.
-Protocol v2 adds a forward-secrecy-oriented composition path while
-remaining bridge-compatible with v1 deployments.
-
-Our Apple-platform deployment indicates that native PQC APIs can be
-integrated with modest overhead when available, with explicit, audited
-fallback under Default Mode and fail-closed strict policy in two
-operator-facing forms (Compliance and Bootstrap-Assisted). These results
-are deployment-instance measurements and should be re-established when
-porting to other ecosystems.
+SkyBridge Compass contributes an auditable migration contract for
+crypto-agile P2P handshakes with explicit fallback semantics,
+deterministic failure outcomes, and replayable evidence. In our Apple
+deployment instance, default policy preserves availability with local-only
+audited fallback, while strict policy remains fail-closed (or
+bootstrap-assisted with mandatory PQC rekey). These are
+deployment-instance measurements and should be re-established on
+non-Apple targets.
 
 
 
@@ -2378,9 +2268,6 @@ documented in the Supplementary Materials.
 
 \bibitem{ref33} C. Meyer and J. Schwenk, ``Lessons Learned From Previous SSL/TLS Attacks---A Brief Chronology of Attacks and Weaknesses,'' IACR Cryptology ePrint Archive, Report 2013/049, 2013.
 
-\bibitem{ref35} T. Tarman, R. Hutchinson, L. Pierson, P. Sholander, and E. Witzke, ``Algorithm-Agile Encryption in ATM Networks,'' IEEE Computer, vol.~31, no.~9, pp.~57--64, Sept.~1998.
-
-\bibitem{ref36} B. Sullivan and V. Liu, ``Web Application Security: A Beginner's Guide,'' McGraw-Hill, 2011, ch.~6 (Cryptographic Agility).
 
 \end{thebibliography}
 

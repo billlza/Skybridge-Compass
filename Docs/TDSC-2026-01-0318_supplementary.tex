@@ -251,6 +251,17 @@ SkyBridge (CryptoKit) & 19{,}009 & 19{,}257 \\
 \end{tabular}
 \end{table}
 
+BaselineBenchRunner measures \emph{time-to-ready}
+(\texttt{NWConnection.ready}) for fresh loopback connections. Each sample
+creates a new connection and records elapsed time from connect start to
+ready. We report N=1000 after 10 warmup iterations. 0-RTT/session
+resumption is not explicitly enabled and results reflect
+\texttt{Network.framework} defaults. QUIC uses ALPN \texttt{sbq} with a
+single bidirectional stream and no application data
+(\texttt{BASELINE\_KICKOFF\_BYTES=0}). Loopback wire-size values are
+reproducible from pcap capture via
+\texttt{Scripts/\allowbreak run\_\allowbreak baseline\_\allowbreak bench.sh}.
+
 Values are cert-dependent (localhost certificate). Noise-XX wire size is
 pattern-dependent and reflects the XX pattern used in this baseline.
 SkyBridge loopback wire sizes include framing and transport overhead (and may include SBP1 handshake padding);

@@ -36,6 +36,9 @@ public actor SecurityEventEmitter {
     
  /// Maximum pending events per subscriber
     private let maxPendingPerSubscriber: Int
+
+ /// Whether events from this emitter should be recorded to the global audit trail.
+    private let recordsToAuditTrail: Bool
     
  /// Minimum interval between meta-events (rate limiting)
     private let metaEventMinInterval: Duration = .seconds(1)
@@ -59,10 +62,12 @@ public actor SecurityEventEmitter {
  /// Initialize with custom limits (primarily for testing)
     public init(
         maxQueueSize: Int = SecurityLimits.default.maxEventQueueSize,
-        maxPendingPerSubscriber: Int = SecurityLimits.default.maxPendingPerSubscriber
+        maxPendingPerSubscriber: Int = SecurityLimits.default.maxPendingPerSubscriber,
+        recordsToAuditTrail: Bool = true
     ) {
         self.maxQueueSize = maxQueueSize
         self.maxPendingPerSubscriber = maxPendingPerSubscriber
+        self.recordsToAuditTrail = recordsToAuditTrail
     }
 
     // MARK: - Test Helpers
@@ -74,7 +79,11 @@ public actor SecurityEventEmitter {
         maxQueueSize: Int = SecurityLimits.default.maxEventQueueSize,
         maxPendingPerSubscriber: Int = SecurityLimits.default.maxPendingPerSubscriber
     ) -> SecurityEventEmitter {
-        SecurityEventEmitter(maxQueueSize: maxQueueSize, maxPendingPerSubscriber: maxPendingPerSubscriber)
+        SecurityEventEmitter(
+            maxQueueSize: maxQueueSize,
+            maxPendingPerSubscriber: maxPendingPerSubscriber,
+            recordsToAuditTrail: false
+        )
     }
     
  // MARK: - Public API
@@ -88,8 +97,10 @@ public actor SecurityEventEmitter {
  ///
  /// - Parameter event: The security event to emit
     public func emit(_ event: SecurityEvent) async {
-        // Always record to internal audit trail sink (even with zero UI subscribers)
-        await AuditTrail.shared.record(event)
+        if recordsToAuditTrail {
+            // Always record to internal audit trail sink (even with zero UI subscribers)
+            await AuditTrail.shared.record(event)
+        }
         if subscribers.isEmpty { return }
  // Meta-events bypass the queue entirely
         if event.isMetaEvent {
@@ -324,12 +335,15 @@ internal actor SubscriberActor {
         
  // Add to queue
         pendingEvents.append(event)
-        
+
  // Start processing if not already
         if !isProcessing {
-            await processQueue()
+            isProcessing = true
+            Task {
+                await processQueue()
+            }
         }
-        
+
         return true
     }
     
@@ -349,14 +363,11 @@ internal actor SubscriberActor {
     }
     
  // MARK: - Private Methods
-    
+
  /// Process the pending queue serially
     private func processQueue() async {
-        guard !isProcessing else { return }
-        isProcessing = true
-        
         defer { isProcessing = false }
-        
+
         while !pendingEvents.isEmpty {
             let event = pendingEvents.removeFirst()
             await handler(event)

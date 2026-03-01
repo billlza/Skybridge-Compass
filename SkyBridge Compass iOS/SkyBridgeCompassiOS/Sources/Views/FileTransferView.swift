@@ -23,8 +23,8 @@ struct FileTransferView: View {
                 if !settings.enableExperimentalFeatures {
                     VStack {
                         BetaBannerView(
-                            title: "文件传输（实验功能）",
-                            message: "当前实现支持分块/校验/可选压缩。发布前建议与 macOS 端做一次双向互通冒烟测试（同网段发现→连接→发送/接收）。"
+                            title: RuntimeLocalization.string("文件传输（实验功能）"),
+                            message: RuntimeLocalization.string("当前实现支持分块/校验/可选压缩。发布前建议与 macOS 端做一次双向互通冒烟测试（同网段发现→连接→发送/接收）。")
                         )
                         .padding(.horizontal, 16)
                         .padding(.top, 12)
@@ -49,7 +49,7 @@ struct FileTransferView: View {
                     .padding()
                 }
             }
-            .navigationTitle("文件传输")
+            .navigationTitle(RuntimeLocalization.string("文件传输"))
             .navigationBarTitleDisplayMode(.large)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -69,13 +69,13 @@ struct FileTransferView: View {
             .sheet(item: $previewItem) { item in
                 FileQuickLookPreview(url: item.url)
             }
-            .alert("无法打开文件", isPresented: Binding(
+            .alert(RuntimeLocalization.string("无法打开文件"), isPresented: Binding(
                 get: { fileOpenErrorMessage != nil },
                 set: { if !$0 { fileOpenErrorMessage = nil } }
             )) {
-                Button("好的", role: .cancel) { fileOpenErrorMessage = nil }
+                Button(RuntimeLocalization.string("好的"), role: .cancel) { fileOpenErrorMessage = nil }
             } message: {
-                Text(fileOpenErrorMessage ?? "未知错误")
+                Text(fileOpenErrorMessage ?? RuntimeLocalization.string("未知错误"))
             }
         }
     }
@@ -96,11 +96,16 @@ struct FileTransferView: View {
     
     private var quickSendSection: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("快速发送")
+            Text(RuntimeLocalization.string("快速发送"))
                 .font(.headline)
                 .foregroundColor(.white)
 
-            Text("接收目录：\(fileTransferManager.getDownloadsDirectory().path)")
+            Text(
+                String(
+                    format: RuntimeLocalization.string("接收目录：%@"),
+                    fileTransferManager.getDownloadsDirectory().path
+                )
+            )
                 .font(.caption)
                 .foregroundColor(.gray)
                 .lineLimit(1)
@@ -118,7 +123,7 @@ struct FileTransferView: View {
                     HStack(spacing: 12) {
                         if hasCrossNetwork {
                             let id = crossNetwork.remoteDeviceId ?? "webrtc-remote"
-                            let name = crossNetwork.remoteDeviceName ?? "跨网设备"
+                            let name = crossNetwork.remoteDeviceName ?? RuntimeLocalization.string("跨网设备")
                             let pseudo = DiscoveredDevice(
                                 id: id,
                                 name: name,
@@ -168,11 +173,11 @@ struct FileTransferView: View {
                 .font(.title)
                 .foregroundColor(.gray)
             
-            Text("没有连接的设备")
+            Text(RuntimeLocalization.string("没有连接的设备"))
                 .font(.subheadline)
                 .foregroundColor(.gray)
             
-            Text("请先在\"发现\"页面连接设备")
+            Text(RuntimeLocalization.string("请先在发现页面连接设备"))
                 .font(.caption)
                 .foregroundColor(.gray.opacity(0.7))
         }
@@ -184,7 +189,7 @@ struct FileTransferView: View {
     
     private var activeTransfersSection: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("正在传输")
+            Text(RuntimeLocalization.string("正在传输"))
                 .font(.headline)
                 .foregroundColor(.white)
             
@@ -202,21 +207,21 @@ struct FileTransferView: View {
     private var transferHistorySection: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
-                Text("传输历史")
+                Text(RuntimeLocalization.string("传输历史"))
                     .font(.headline)
                     .foregroundColor(.white)
                 
                 Spacer()
                 
                 Button(action: clearHistory) {
-                    Text("清空")
+                    Text(RuntimeLocalization.string("清空"))
                         .font(.caption)
                         .foregroundColor(.blue)
                 }
             }
             
             if fileTransferManager.transferHistory.isEmpty {
-                Text("暂无传输记录")
+                Text(RuntimeLocalization.string("暂无传输记录"))
                     .font(.subheadline)
                     .foregroundColor(.gray)
                     .frame(maxWidth: .infinity)
@@ -275,7 +280,10 @@ struct FileTransferView: View {
     private func openLocalFile(_ url: URL) {
         let path = url.path
         guard FileManager.default.fileExists(atPath: path) else {
-            fileOpenErrorMessage = "文件不存在，可能已被删除。\n路径：\(path)"
+            fileOpenErrorMessage = String(
+                format: RuntimeLocalization.string("文件不存在，可能已被删除。\n路径：%@"),
+                path
+            )
             return
         }
         previewItem = FilePreviewItem(url: url)
@@ -369,7 +377,7 @@ struct FileTransferCard: View {
             }
 
             if transfer.isIncoming, let locationText {
-                Text("保存位置：\(locationText)")
+                Text(String(format: RuntimeLocalization.string("保存位置：%@"), locationText))
                     .font(.caption2)
                     .foregroundColor(.gray)
                     .lineLimit(1)
@@ -457,7 +465,11 @@ struct FileTransferHistoryCard: View {
                         .lineLimit(1)
                     
                     HStack(spacing: 8) {
-                        Text(transfer.isIncoming ? "来自" : "发送至")
+                        Text(
+                            transfer.isIncoming
+                                ? RuntimeLocalization.string("来自")
+                                : RuntimeLocalization.string("发送至")
+                        )
                             .font(.caption)
                             .foregroundColor(.gray)
                         
@@ -483,12 +495,17 @@ struct FileTransferHistoryCard: View {
 
             if transfer.isIncoming, let localPath = transfer.localPath {
                 HStack(spacing: 8) {
-                    Text("保存位置：\(displayLocation(path: localPath))")
+                    Text(
+                        String(
+                            format: RuntimeLocalization.string("保存位置：%@"),
+                            displayLocation(path: localPath)
+                        )
+                    )
                         .font(.caption2)
                         .foregroundColor(.gray)
                         .lineLimit(1)
                     Spacer()
-                    Button("打开") {
+                    Button(RuntimeLocalization.string("打开")) {
                         onOpenFile(URL(fileURLWithPath: localPath))
                     }
                     .font(.caption2)

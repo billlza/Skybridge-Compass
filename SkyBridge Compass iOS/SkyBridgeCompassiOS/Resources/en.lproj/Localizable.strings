@@ -194,3 +194,21 @@
 "已保存到" = "Saved to";
 "期望/实际" = "Expected/Actual";
 "原因" = "Reason";
+
+"iOS 端目前作为查看/控制端使用。若与 macOS 端协议不一致，可能无法连接；建议先在设置中开启“实验功能”，并使用真机与同网段设备测试。" = "iOS currently works as the viewer/controller. If protocol versions differ from macOS, connection may fail. Enable Experimental Features first and test on real devices in the same network.";
+"选择要连接的设备" = "Select a device to connect";
+"当前没有活动连接" = "No active connections";
+"请先在发现页面连接设备" = "Connect a device on the Discover page first";
+"跨网设备" = "Cross-Network Device";
+"触摸模式" = "Touch Mode";
+"点击" = "Tap";
+"拖动" = "Drag";
+"滚动" = "Scroll";
+"PQC 加密" = "PQC Encryption";
+"当前实现支持分块/校验/可选压缩。发布前建议与 macOS 端做一次双向互通冒烟测试（同网段发现→连接→发送/接收）。" = "Current implementation supports chunking/checksum/optional compression. Before release, run a bidirectional smoke test with macOS (discover -> connect -> send/receive).";
+"快速发送" = "Quick Send";
+"接收目录：%@" = "Receive Directory: %@";
+"文件不存在，可能已被删除。\n路径：%@" = "File not found. It may have been deleted.\nPath: %@";
+"保存位置：%@" = "Saved Location: %@";
+"来自" = "From";
+"发送至" = "To";

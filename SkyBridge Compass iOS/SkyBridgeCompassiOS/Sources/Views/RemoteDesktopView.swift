@@ -29,8 +29,8 @@ struct RemoteDesktopView: View {
                 if !settings.enableExperimentalFeatures {
                     VStack {
                         BetaBannerView(
-                            title: "远程桌面（实验功能）",
-                            message: "iOS 端目前作为查看/控制端使用。若与 macOS 端协议不一致，可能无法连接；建议先在设置中开启“实验功能”，并使用真机与同网段设备测试。"
+                            title: RuntimeLocalization.string("远程桌面（实验功能）"),
+                            message: RuntimeLocalization.string("iOS 端目前作为查看/控制端使用。若与 macOS 端协议不一致，可能无法连接；建议先在设置中开启“实验功能”，并使用真机与同网段设备测试。")
                         )
                         .padding(.horizontal, 16)
                         .padding(.top, 12)
@@ -40,7 +40,7 @@ struct RemoteDesktopView: View {
                     .transition(.opacity)
                 }
             }
-            .navigationTitle("远程桌面")
+            .navigationTitle(RuntimeLocalization.string("远程桌面"))
             .navigationBarTitleDisplayMode(.inline)
             .navigationBarHidden(isFullScreen)
         }
@@ -54,12 +54,14 @@ struct RemoteDesktopView: View {
                 .font(.system(size: 80))
                 .foregroundStyle(.blue.gradient)
             
-            Text("选择要连接的设备")
+            Text(RuntimeLocalization.string("选择要连接的设备"))
                 .font(.title2.bold())
                 .foregroundColor(.white)
             
             if connectionManager.activeConnections.isEmpty && crossNetworkConnection == nil {
-                Text("当前没有活动连接\n请先在\"发现\"页面连接设备")
+                Text(
+                    "\(RuntimeLocalization.string("当前没有活动连接"))\n\(RuntimeLocalization.string("请先在发现页面连接设备"))"
+                )
                     .font(.body)
                     .foregroundColor(.gray)
                     .multilineTextAlignment(.center)
@@ -102,7 +104,7 @@ struct RemoteDesktopView: View {
     private var crossNetworkConnection: Connection? {
         guard case .connected(let sessionId) = crossNetworkManager.state else { return nil }
         let remoteId = crossNetworkManager.remoteDeviceId ?? "webrtc-\(sessionId)"
-        let remoteName = crossNetworkManager.remoteDeviceName ?? "跨网设备"
+        let remoteName = crossNetworkManager.remoteDeviceName ?? RuntimeLocalization.string("跨网设备")
         let pseudoDevice = DiscoveredDevice(
             id: remoteId,
             name: remoteName,
@@ -200,7 +202,7 @@ struct RemoteDesktopStreamView: View {
                     .gesture(tapGesture)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                ProgressView("正在连接...")
+                ProgressView(RuntimeLocalization.string("正在连接..."))
                     .tint(.white)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
@@ -229,7 +231,7 @@ struct RemoteDesktopStreamView: View {
                 Spacer()
                 
                 // 触摸模式选择
-                Picker("触摸模式", selection: $touchMode) {
+                Picker(RuntimeLocalization.string("触摸模式"), selection: $touchMode) {
                     ForEach(TouchMode.allCases, id: \.self) { mode in
                         Label(mode.title, systemImage: mode.icon)
                             .tag(mode)
@@ -353,9 +355,9 @@ enum TouchMode: String, CaseIterable {
     
     var title: String {
         switch self {
-        case .tap: return "点击"
-        case .drag: return "拖动"
-        case .scroll: return "滚动"
+        case .tap: return RuntimeLocalization.string("点击")
+        case .drag: return RuntimeLocalization.string("拖动")
+        case .scroll: return RuntimeLocalization.string("滚动")
         }
     }
     
@@ -402,7 +404,7 @@ struct ConnectionCardView: View {
                         .font(.caption)
                         .foregroundColor(.green)
                     
-                    Text("PQC 加密")
+                    Text(RuntimeLocalization.string("PQC 加密"))
                         .font(.caption)
                         .foregroundColor(.green)
                 }
