@@ -46,7 +46,7 @@ import ActivityKit
             transferSpeed: String? = nil,
             weatherCondition: String = "sun.max.fill",
             temperature: Int = 20,
-            weatherDescription: String = "晴朗"
+            weatherDescription: String = "Clear"
         ) {
             self.isConnected = isConnected
             self.connectedDeviceName = connectedDeviceName
@@ -81,4 +81,3 @@ import ActivityKit
 
     public init() {}
 }
-

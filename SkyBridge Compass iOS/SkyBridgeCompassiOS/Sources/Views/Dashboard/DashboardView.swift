@@ -450,12 +450,12 @@ public struct DashboardView: View {
                             .foregroundColor(.white)
                             .lineLimit(1)
                         Spacer()
-                        Text(latest.status == .completed ? "已完成" : "失败")
+                        Text(latest.status == .completed ? RuntimeLocalization.string("已完成") : RuntimeLocalization.string("失败"))
                             .font(.caption)
                             .foregroundColor(latest.status == .completed ? .green : .red)
                     }
                     if latest.isIncoming, let localPath = latest.localPath {
-                        Text("保存位置：Downloads/\(URL(fileURLWithPath: localPath).lastPathComponent)")
+                        Text("\(RuntimeLocalization.string("保存位置")): Downloads/\(URL(fileURLWithPath: localPath).lastPathComponent)")
                             .font(.caption2)
                             .foregroundColor(.secondary)
                             .lineLimit(1)
@@ -603,7 +603,7 @@ private struct UserAvatarButton: View {
     @EnvironmentObject private var authManager: AuthenticationManager
 
     private var displayName: String {
-        authManager.currentUser?.displayName ?? "用户"
+        authManager.currentUser?.displayName ?? RuntimeLocalization.string("用户")
     }
 
     private var avatarURL: URL? {
@@ -648,7 +648,7 @@ private struct UserAvatarButton: View {
             .overlay(Circle().stroke(Color.primary.opacity(0.12), lineWidth: 1))
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(Text("用户：\(displayName)"))
+        .accessibilityLabel(Text(String(format: RuntimeLocalization.string("用户：%@"), displayName)))
     }
 }
 
@@ -657,10 +657,18 @@ private struct UserAvatarButton: View {
 @available(iOS 17.0, *)
 private struct QRCodeHubSheet: View {
     enum Mode: String, CaseIterable, Identifiable {
-        case scan = "扫描"
-        case myQR = "我的二维码"
-        case code = "连接码"
+        case scan
+        case myQR
+        case code
         var id: String { rawValue }
+
+        var localizedTitle: String {
+            switch self {
+            case .scan: return RuntimeLocalization.string("扫描")
+            case .myQR: return RuntimeLocalization.string("我的二维码")
+            case .code: return RuntimeLocalization.string("连接码")
+            }
+        }
     }
 
     @Environment(\.dismiss) private var dismiss
@@ -682,7 +690,7 @@ private struct QRCodeHubSheet: View {
             VStack(spacing: 16) {
                 Picker("mode", selection: $mode) {
                     ForEach(Mode.allCases) { m in
-                        Text(m.rawValue).tag(m)
+                        Text(m.localizedTitle).tag(m)
                     }
                 }
                 .pickerStyle(.segmented)
@@ -818,7 +826,7 @@ private struct QRCodeHubSheet: View {
                                     .font(.headline)
                                     .foregroundStyle(.primary)
 
-                                Text(generatedCode.isEmpty ? (crossNetworkManager.localConnectionCode ?? "未生成") : generatedCode)
+                                Text(generatedCode.isEmpty ? (crossNetworkManager.localConnectionCode ?? RuntimeLocalization.string("未生成")) : generatedCode)
                                     .font(.system(size: 34, weight: .bold, design: .rounded))
                                     .monospacedDigit()
                                     .foregroundStyle(.cyan)
@@ -845,7 +853,7 @@ private struct QRCodeHubSheet: View {
                                         ProgressView()
                                             .controlSize(.small)
                                     }
-                                    Text(isGeneratingCode ? "生成中..." : "生成并等待连接")
+                                    Text(isGeneratingCode ? RuntimeLocalization.string("生成中...") : RuntimeLocalization.string("生成并等待连接"))
                                         .fontWeight(.semibold)
                                 }
                                 .frame(maxWidth: .infinity)
@@ -885,7 +893,7 @@ private struct QRCodePairingConfirmCard: View {
     let onConnect: () -> Void
 
     private var addressText: String {
-        let ip = data.ipAddress ?? "未知地址"
+        let ip = data.ipAddress ?? RuntimeLocalization.string("未知地址")
         if let port = data.port {
             return "\(ip):\(port)"
         }
@@ -930,7 +938,7 @@ private struct QRCodePairingConfirmCard: View {
                             ProgressView()
                                 .controlSize(.small)
                         }
-                        Text(isConnecting ? "连接中..." : "连接")
+                        Text(isConnecting ? RuntimeLocalization.string("连接中...") : RuntimeLocalization.string("连接"))
                     }
                 }
                 .buttonStyle(.borderedProminent)
@@ -1000,7 +1008,7 @@ private struct MyPairingQRCodeView: View {
 
         // 本机局域网 IP（best-effort）
         guard let ip = LocalIP.bestEffortIPv4() else {
-            errorText = "未能获取本机局域网 IP（请连接 Wi‑Fi 或热点）"
+            errorText = RuntimeLocalization.string("未能获取本机局域网 IP（请连接 Wi‑Fi 或热点）")
             return
         }
 
@@ -1034,7 +1042,7 @@ private struct MyPairingQRCodeView: View {
         if let image {
             qrImage = image
         } else {
-            errorText = "生成二维码失败"
+            errorText = RuntimeLocalization.string("生成二维码失败")
         }
     }
 }
@@ -1561,7 +1569,7 @@ private struct DashboardNotificationBellButton: View {
                                                 .foregroundStyle(.secondary)
 
                                                 if transfer.isIncoming, let location = localLocationHint(path: transfer.localPath) {
-                                                    Text("保存到 \(location)")
+                                                    Text(String(format: RuntimeLocalization.string("保存到 %@"), location))
                                                         .font(.caption2)
                                                         .foregroundStyle(.secondary)
                                                         .lineLimit(1)
@@ -1627,7 +1635,7 @@ private struct DashboardNotificationBellButton: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .fileTransferStarted)) { note in
             handleFileTransferStarted(note)
-            let fileName = (note.userInfo?["fileName"] as? String) ?? "未知文件"
+            let fileName = (note.userInfo?["fileName"] as? String) ?? RuntimeLocalization.string("未知文件")
             let fileSize = (note.userInfo?["fileSize"] as? Int64) ?? 0
             let direction = (note.userInfo?["direction"] as? String) ?? "unknown"
             let remotePeer = (note.userInfo?["remotePeer"] as? String) ?? ""
@@ -1636,10 +1644,10 @@ private struct DashboardNotificationBellButton: View {
                 detail += " · \(remotePeer)"
             }
             if direction == "incoming", let localPath = note.userInfo?["localPath"] as? String, !localPath.isEmpty {
-                detail += " · 保存到 \(localPath)"
+                detail += " · \(RuntimeLocalization.string("保存到")) \(localPath)"
             }
             appendEvent(
-                title: direction == "incoming" ? "正在接收文件" : "正在发送文件",
+                title: direction == "incoming" ? RuntimeLocalization.string("正在接收文件") : RuntimeLocalization.string("正在发送文件"),
                 detail: detail,
                 level: .info,
                 icon: "arrow.left.arrow.right.circle"
@@ -1650,41 +1658,41 @@ private struct DashboardNotificationBellButton: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .fileTransferCompleted)) { note in
             removeInFlightTransfer(note)
-            let fileName = (note.userInfo?["fileName"] as? String) ?? "未知文件"
+            let fileName = (note.userInfo?["fileName"] as? String) ?? RuntimeLocalization.string("未知文件")
             let fileSize = (note.userInfo?["fileSize"] as? Int64) ?? 0
             let direction = (note.userInfo?["direction"] as? String) ?? ""
             let remotePeer = (note.userInfo?["remotePeer"] as? String) ?? ""
             let localPath = (note.userInfo?["localPath"] as? String)
             var detail = "\(fileName) · \(byteCount(fileSize))"
             if let localPath, !localPath.isEmpty, direction == "incoming" {
-                detail += " · 已保存到 \(localPath)"
+                detail += " · \(RuntimeLocalization.string("已保存到")) \(localPath)"
             } else if !remotePeer.isEmpty, direction == "outgoing" {
                 detail += " · \(remotePeer)"
             }
-            appendEvent(title: "文件传输完成", detail: detail, level: .success, icon: "checkmark.circle.fill")
+            appendEvent(title: RuntimeLocalization.string("文件传输完成"), detail: detail, level: .success, icon: "checkmark.circle.fill")
         }
         .onReceive(NotificationCenter.default.publisher(for: .fileTransferFailed)) { note in
             removeInFlightTransfer(note)
-            let fileName = (note.userInfo?["fileName"] as? String) ?? "未知文件"
-            let error = (note.userInfo?["error"] as? String) ?? "未知错误"
-            appendEvent(title: "文件传输失败", detail: "\(fileName) · \(error)", level: .error, icon: "xmark.circle.fill")
+            let fileName = (note.userInfo?["fileName"] as? String) ?? RuntimeLocalization.string("未知文件")
+            let error = (note.userInfo?["error"] as? String) ?? RuntimeLocalization.string("未知错误")
+            appendEvent(title: RuntimeLocalization.string("文件传输失败"), detail: "\(fileName) · \(error)", level: .error, icon: "xmark.circle.fill")
         }
         .onReceive(NotificationCenter.default.publisher(for: Notification.Name("fileChunkVerified"))) { note in
-            appendEvent(from: note, fallbackTitle: "分块校验通过", success: true, icon: "checkmark.seal")
+            appendEvent(from: note, fallbackTitle: RuntimeLocalization.string("分块校验通过"), success: true, icon: "checkmark.seal")
         }
         .onReceive(NotificationCenter.default.publisher(for: Notification.Name("fileChunkVerifyFailed"))) { note in
-            appendEvent(from: note, fallbackTitle: "分块校验失败", success: false, icon: "xmark.seal")
+            appendEvent(from: note, fallbackTitle: RuntimeLocalization.string("分块校验失败"), success: false, icon: "xmark.seal")
         }
         .onReceive(NotificationCenter.default.publisher(for: Notification.Name("fileMerkleVerified"))) { note in
             let ok = (note.userInfo?["ok"] as? Bool) ?? false
-            appendEvent(from: note, fallbackTitle: ok ? "Merkle 校验通过" : "Merkle 校验失败", success: ok, icon: ok ? "checkmark.seal" : "exclamationmark.triangle")
+            appendEvent(from: note, fallbackTitle: ok ? RuntimeLocalization.string("Merkle 校验通过") : RuntimeLocalization.string("Merkle 校验失败"), success: ok, icon: ok ? "checkmark.seal" : "exclamationmark.triangle")
         }
         .onReceive(NotificationCenter.default.publisher(for: .quantumCertValidationEvent)) { note in
             let ok = (note.userInfo?["ok"] as? Bool) ?? false
             let reason = (note.userInfo?["reason"] as? String) ?? ""
             let elapsed = (note.userInfo?["elapsed"] as? TimeInterval) ?? 0
-            let title = ok ? "证书校验通过" : "证书校验失败"
-            let detail = reason.isEmpty ? String(format: "耗时 %.0fms", elapsed * 1000) : "\(reason) · " + String(format: "%.0fms", elapsed * 1000)
+            let title = ok ? RuntimeLocalization.string("证书校验通过") : RuntimeLocalization.string("证书校验失败")
+            let detail = reason.isEmpty ? String(format: RuntimeLocalization.string("耗时 %.0fms"), elapsed * 1000) : "\(reason) · " + String(format: "%.0fms", elapsed * 1000)
             appendEvent(title: title, detail: detail, level: ok ? .success : .error, icon: ok ? "lock.shield" : "lock.slash")
         }
         .onReceive(NotificationCenter.default.publisher(for: Notification.Name("fileMerkleTiming"))) { note in
@@ -1694,7 +1702,7 @@ private struct DashboardNotificationBellButton: View {
             let chunk = (note.userInfo?["chunkSize"] as? Int) ?? 0
             let elapsed = (note.userInfo?["elapsedMs"] as? Double) ?? 0
             let metal = (note.userInfo?["metalAvailable"] as? Bool) ?? false
-            let title = phase == "verify" ? "Merkle 校验耗时" : "Merkle 计算耗时"
+            let title = phase == "verify" ? RuntimeLocalization.string("Merkle 校验耗时") : RuntimeLocalization.string("Merkle 计算耗时")
             let detail = "\(file) · \(byteCount(size)) · chunk=\(byteCount(Int64(chunk))) · " + String(format: "%.0fms", elapsed) + (metal ? " · Metal" : "")
             appendEvent(title: title, detail: detail, level: .info, icon: "timer")
         }
@@ -1722,7 +1730,7 @@ private struct DashboardNotificationBellButton: View {
             if let transferId { parts.append("ID:\(transferId)") }
             if let chunkIndex { parts.append("Chunk:\(chunkIndex)") }
             if let expected, let actual {
-                parts.append("期望/实际: \(expected.prefix(8)) / \(actual.prefix(8))")
+                parts.append("\(RuntimeLocalization.string("期望/实际")): \(expected.prefix(8)) / \(actual.prefix(8))")
             }
             if let error { parts.append(error) }
             if !parts.isEmpty { detail = parts.joined(separator: " · ") }
@@ -1734,7 +1742,7 @@ private struct DashboardNotificationBellButton: View {
         guard let transferId = note.userInfo?["transferId"] as? String else { return }
         let snapshot = DashboardTransferSnapshot(
             transferId: transferId,
-            fileName: (note.userInfo?["fileName"] as? String) ?? "未知文件",
+            fileName: (note.userInfo?["fileName"] as? String) ?? RuntimeLocalization.string("未知文件"),
             fileSize: anyInt64(note.userInfo?["fileSize"]) ?? 0,
             transferredBytes: 0,
             progress: 0,
@@ -1752,7 +1760,7 @@ private struct DashboardNotificationBellButton: View {
         let existing = inFlightTransfers[transferId]
         var snapshot = existing ?? DashboardTransferSnapshot(
             transferId: transferId,
-            fileName: (note.userInfo?["fileName"] as? String) ?? "未知文件",
+            fileName: (note.userInfo?["fileName"] as? String) ?? RuntimeLocalization.string("未知文件"),
             fileSize: anyInt64(note.userInfo?["fileSize"]) ?? 0,
             transferredBytes: 0,
             progress: 0,
@@ -1795,13 +1803,13 @@ private struct DashboardNotificationBellButton: View {
         }
         guard notifiedConnectableDevices[deviceId] == nil else { return }
 
-        let trustText = isVerified ? "已验签" : "未验证"
+        let trustText = isVerified ? RuntimeLocalization.string("已验签") : RuntimeLocalization.string("未验证")
         var detail = "\(name) · \(address):\(port) · \(trustText)"
         if let reason = note.userInfo?["verificationFailedReason"] as? String, !reason.isEmpty {
-            detail += " · 原因: \(reason)"
+            detail += " · \(RuntimeLocalization.string("原因")): \(reason)"
         }
         appendEvent(
-            title: isVerified ? "📡 发现可连接设备" : "📡 发现可连接设备（未验证）",
+            title: isVerified ? RuntimeLocalization.string("📡 发现可连接设备") : RuntimeLocalization.string("📡 发现可连接设备（未验证）"),
             detail: detail,
             level: isVerified ? .success : .warning,
             icon: isVerified ? "antenna.radiowaves.left.and.right" : "exclamationmark.shield.fill"
@@ -1831,11 +1839,11 @@ private struct DashboardNotificationBellButton: View {
         let userID = user.id
         guard welcomeShownForUserID != userID else { return }
 
-        let displayName = user.displayName.isEmpty ? "用户" : user.displayName
+        let displayName = user.displayName.isEmpty ? RuntimeLocalization.string("用户") : user.displayName
         let greeting = timeGreeting()
         appendEvent(
             title: "\(displayName)，\(greeting)！",
-            detail: "欢迎使用 SkyBridge Compass",
+            detail: RuntimeLocalization.string("欢迎使用 SkyBridge Compass"),
             level: .success,
             icon: welcomeIconName()
         )
@@ -1845,14 +1853,14 @@ private struct DashboardNotificationBellButton: View {
     private func timeGreeting() -> String {
         let hour = Calendar.current.component(.hour, from: Date())
         switch hour {
-        case 0..<5: return "夜深了"
-        case 5..<7: return "清晨好"
-        case 7..<12: return "早上好"
-        case 12..<14: return "中午好"
-        case 14..<18: return "下午好"
-        case 18..<21: return "晚上好"
-        case 21..<24: return "夜深了"
-        default: return "你好"
+        case 0..<5: return RuntimeLocalization.string("夜深了")
+        case 5..<7: return RuntimeLocalization.string("清晨好")
+        case 7..<12: return RuntimeLocalization.string("早上好")
+        case 12..<14: return RuntimeLocalization.string("中午好")
+        case 14..<18: return RuntimeLocalization.string("下午好")
+        case 18..<21: return RuntimeLocalization.string("晚上好")
+        case 21..<24: return RuntimeLocalization.string("夜深了")
+        default: return RuntimeLocalization.string("你好")
         }
     }
 

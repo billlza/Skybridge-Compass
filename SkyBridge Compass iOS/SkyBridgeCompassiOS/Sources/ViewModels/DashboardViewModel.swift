@@ -213,10 +213,10 @@ public enum NetworkStatus: String, Sendable {
     
     public var displayName: String {
         switch self {
-        case .connected: return "已连接"
-        case .disconnected: return "已断开"
-        case .connecting: return "连接中"
-        case .limited: return "受限"
+        case .connected: return RuntimeLocalization.string("已连接")
+        case .disconnected: return RuntimeLocalization.string("已断开")
+        case .connecting: return RuntimeLocalization.string("连接中")
+        case .limited: return RuntimeLocalization.string("受限")
         }
     }
     
@@ -248,10 +248,10 @@ public enum PerformanceStatus: String, Sendable {
     
     public var displayName: String {
         switch self {
-        case .excellent: return "优秀"
-        case .good: return "良好"
-        case .fair: return "一般"
-        case .poor: return "较差"
+        case .excellent: return RuntimeLocalization.string("优秀")
+        case .good: return RuntimeLocalization.string("良好")
+        case .fair: return RuntimeLocalization.string("一般")
+        case .poor: return RuntimeLocalization.string("较差")
         }
     }
     

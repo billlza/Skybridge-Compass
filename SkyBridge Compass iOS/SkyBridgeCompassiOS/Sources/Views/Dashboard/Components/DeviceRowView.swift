@@ -221,14 +221,15 @@ private struct CapabilityBadge: View {
     let port: UInt16?
 
     var body: some View {
+        let localizedTitle = RuntimeLocalization.string(title)
         HStack(spacing: 4) {
             Image(systemName: icon)
                 .font(.system(size: 9))
             if let port {
-                Text("\(title):\(port)")
+                Text("\(localizedTitle):\(port)")
                     .font(.system(size: 9, weight: .semibold, design: .monospaced))
             } else {
-                Text(title)
+                Text(localizedTitle)
                     .font(.system(size: 9, weight: .semibold))
             }
         }
@@ -364,7 +365,7 @@ struct DeviceDetailSheet: View {
                     LabeledContent("名称", value: device.name)
                     LabeledContent("平台", value: device.platform.displayName)
                     LabeledContent("系统版本", value: device.osVersion)
-                    LabeledContent("连接状态", value: connectionStatus?.displayName ?? "未连接")
+                    LabeledContent("连接状态", value: connectionStatus?.displayName ?? RuntimeLocalization.string("未连接"))
                     if let ip = device.ipAddress {
                         LabeledContent("IP 地址", value: ip)
                     }
@@ -423,7 +424,7 @@ struct DeviceDetailSheet: View {
                                 } else {
                                     Image(systemName: "link")
                                 }
-                                Text(isConnecting ? "连接中..." : "连接设备")
+                                Text(isConnecting ? RuntimeLocalization.string("连接中...") : RuntimeLocalization.string("连接设备"))
                             }
                         }
                         .disabled(isConnecting || connectionStatus == .connecting)
@@ -520,12 +521,12 @@ struct DeviceDetailSheet: View {
     
     private func capabilityName(_ capability: String) -> String {
         switch capability {
-        case "remote_desktop", "remote_desktop_viewer": return "远程桌面"
-        case "file_transfer": return "文件传输"
-        case "clipboard_sync": return "剪贴板同步"
-        case "screen_sharing", "screen_sharing_viewer": return "屏幕共享"
-        case "touch_input": return "触控输入"
-        case "pqc": return "量子安全"
+        case "remote_desktop", "remote_desktop_viewer": return RuntimeLocalization.string("远程桌面")
+        case "file_transfer": return RuntimeLocalization.string("文件传输")
+        case "clipboard_sync": return RuntimeLocalization.string("剪贴板同步")
+        case "screen_sharing", "screen_sharing_viewer": return RuntimeLocalization.string("屏幕共享")
+        case "touch_input": return RuntimeLocalization.string("触控输入")
+        case "pqc": return RuntimeLocalization.string("量子安全")
         default: return capability
         }
     }

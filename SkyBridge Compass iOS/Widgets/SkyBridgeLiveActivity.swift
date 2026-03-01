@@ -457,7 +457,6 @@ struct LockScreenView: View {
         isConnected: false,
         weatherCondition: "sun.max.fill",
         temperature: 23,
-        weatherDescription: "晴朗"
+        weatherDescription: "Clear"
     )
 }
-

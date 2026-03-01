@@ -216,7 +216,7 @@ extension LiveActivityManager {
         await updateWeather(
             condition: info.condition.iconName,
             temperature: Int(info.temperature),
-            description: info.condition.rawValue
+            description: LocalizationManager.instance.localized(info.condition.localizationKey)
         )
     }
     

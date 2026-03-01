@@ -12,6 +12,7 @@ import SwiftUI
 @available(iOS 17.0, *)
 public struct WeatherCardView: View {
     
+    @EnvironmentObject private var localizationManager: LocalizationManager
     @StateObject private var weatherManager = WeatherManager.shared
     @StateObject private var settingsManager = SettingsManager.instance
     @State private var isRefreshing = false
@@ -158,7 +159,7 @@ public struct WeatherCardView: View {
                 }
                 
                 // 天气描述
-                Text(weather.condition.rawValue)
+                Text(localizationManager.localized(weather.condition.localizationKey))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 
@@ -196,11 +197,11 @@ public struct WeatherCardView: View {
                 .tint(.white)
             
             VStack(alignment: .leading, spacing: 2) {
-                Text("正在获取天气...")
+                Text(localizationManager.localized("weather.loading"))
                     .font(.subheadline)
                     .foregroundStyle(.primary)
                 
-                Text("请确保已授权位置权限")
+                Text(localizationManager.localized("weather.permission_required"))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
@@ -217,10 +218,10 @@ public struct WeatherCardView: View {
                 .foregroundStyle(.secondary)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text("实时天气已关闭")
+                Text(localizationManager.localized("weather.disabled_title"))
                     .font(.subheadline.bold())
                     .foregroundStyle(.primary)
-                Text("可在 设置 → 高级 打开实时天气（API）")
+                Text(localizationManager.localized("weather.disabled_hint"))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -240,7 +241,7 @@ public struct WeatherCardView: View {
                 .foregroundColor(.orange)
             
             VStack(alignment: .leading, spacing: 4) {
-                Text("天气获取失败")
+                Text(localizationManager.localized("weather.fetch_failed"))
                     .font(.subheadline.bold())
                     .foregroundStyle(.primary)
                 
@@ -257,7 +258,7 @@ public struct WeatherCardView: View {
                     await weatherManager.start()
                 }
             } label: {
-                Text("重试")
+                Text(localizationManager.localized("common.retry"))
                     .font(.caption.bold())
                     .foregroundColor(.orange)
                     .padding(.horizontal, 12)
@@ -310,11 +311,11 @@ public struct WeatherCardView: View {
         let interval = Date().timeIntervalSince(date)
         
         if interval < 60 {
-            return "刚刚更新"
+            return localizationManager.localized("weather.updated_just_now")
         } else if interval < 3600 {
-            return "\(Int(interval / 60))分钟前"
+            return localizationManager.localizedFormat("weather.updated_minutes_ago", Int(interval / 60))
         } else {
-            return "\(Int(interval / 3600))小时前"
+            return localizationManager.localizedFormat("weather.updated_hours_ago", Int(interval / 3600))
         }
     }
 }
@@ -355,6 +356,7 @@ struct WeatherCardView_Previews: PreviewProvider {
         }
         .padding()
         .background(Color.black)
+        .environmentObject(LocalizationManager.instance)
     }
 }
 #endif

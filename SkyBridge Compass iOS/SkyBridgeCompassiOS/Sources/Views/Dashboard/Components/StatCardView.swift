@@ -31,6 +31,7 @@ public struct StatCardView: View {
                     .foregroundColor(color)
                 Spacer()
             }
+            .padding(.top, 4)
             
             Spacer()
             
@@ -40,7 +41,7 @@ public struct StatCardView: View {
                 .foregroundColor(.white)
             
             // 标题
-            Text(title)
+            Text(RuntimeLocalization.string(title))
                 .font(.caption)
                 .foregroundColor(.secondary)
         }

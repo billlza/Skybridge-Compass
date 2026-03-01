@@ -232,12 +232,12 @@ public enum ConnectionStatus: String, Codable, Sendable {
     /// 显示名称
     public var displayName: String {
         switch self {
-        case .connecting: return "连接中"
-        case .connected: return "已连接"
-        case .disconnecting: return "断开中"
-        case .disconnected: return "已断开"
-        case .failed: return "连接失败"
-        case .error: return "错误"
+        case .connecting: return RuntimeLocalization.string("连接中")
+        case .connected: return RuntimeLocalization.string("已连接")
+        case .disconnecting: return RuntimeLocalization.string("断开中")
+        case .disconnected: return RuntimeLocalization.string("已断开")
+        case .failed: return RuntimeLocalization.string("连接失败")
+        case .error: return RuntimeLocalization.string("错误")
         }
     }
 }
@@ -338,12 +338,14 @@ public struct User: Identifiable, Codable, Sendable {
 
 /// 应用语言
 public enum AppLanguage: String, CaseIterable, Codable, Sendable {
+    case system = "system"
     case english = "en"
     case chinese = "zh-Hans"
     case japanese = "ja"
     
     public var displayName: String {
         switch self {
+        case .system: return "System"
         case .english: return "English"
         case .chinese: return "简体中文"
         case .japanese: return "日本語"
@@ -351,6 +353,39 @@ public enum AppLanguage: String, CaseIterable, Codable, Sendable {
     }
     
     public var locale: Locale {
-        Locale(identifier: rawValue)
+        switch self {
+        case .system:
+            return .autoupdatingCurrent
+        case .english:
+            return Locale(identifier: "en")
+        case .chinese:
+            return Locale(identifier: "zh-Hans")
+        case .japanese:
+            return Locale(identifier: "ja")
+        }
+    }
+
+    public var acceptLanguageTag: String {
+        switch self {
+        case .system:
+            let preferred = Locale.preferredLanguages
+            guard !preferred.isEmpty else {
+                return "en-US,en;q=0.9"
+            }
+            return preferred.prefix(3).enumerated().map { index, raw in
+                let lang = raw.replacingOccurrences(of: "_", with: "-")
+                if index == 0 {
+                    return lang
+                }
+                let quality = max(0.1, 1.0 - Double(index) * 0.1)
+                return "\(lang);q=\(String(format: "%.1f", quality))"
+            }.joined(separator: ",")
+        case .english:
+            return "en-US,en;q=0.9"
+        case .chinese:
+            return "zh-CN,zh-Hans;q=0.9,en;q=0.5"
+        case .japanese:
+            return "ja-JP,ja;q=0.9,en;q=0.5"
+        }
     }
 }

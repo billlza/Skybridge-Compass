@@ -9,6 +9,10 @@ struct SettingsView: View {
     
     @StateObject private var settingsManager = SettingsManager.instance
     @State private var showLogoutConfirmation = false
+
+    private func t(_ key: String) -> String {
+        localizationManager.localized(key)
+    }
     
     var body: some View {
         NavigationStack {
@@ -34,17 +38,17 @@ struct SettingsView: View {
                 // 退出登录
                 logoutSection
             }
-            .navigationTitle("设置")
+            .navigationTitle(localizationManager.localized("settings.title"))
             .navigationBarTitleDisplayMode(.large)
             .confirmationDialog(
-                "确定要退出登录吗？",
+                t("settings.logout.confirm"),
                 isPresented: $showLogoutConfirmation,
                 titleVisibility: .visible
             ) {
-                Button("退出登录", role: .destructive) {
+                Button(t("settings.logout"), role: .destructive) {
                     logout()
                 }
-                Button("取消", role: .cancel) {}
+                Button(t("common.cancel"), role: .cancel) {}
             }
         }
     }
@@ -86,10 +90,10 @@ struct SettingsView: View {
                 
                 // 用户信息
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(authManager.currentUser?.displayName ?? "用户")
+                    Text(authManager.currentUser?.displayName ?? t("settings.user.default_name"))
                         .font(.headline)
                     
-                    Text(authManager.currentUser?.email ?? "未登录")
+                    Text(authManager.currentUser?.email ?? t("settings.user.not_logged_in"))
                         .font(.caption)
                         .foregroundColor(.secondary)
                     
@@ -101,7 +105,7 @@ struct SettingsView: View {
                     }
                     
                     if let deviceID = UIDevice.current.identifierForVendor?.uuidString.prefix(8) {
-                        Text("设备 ID: \(deviceID)")
+                        Text("\(t("settings.user.device_id")): \(deviceID)")
                             .font(.caption2)
                             .foregroundColor(.secondary)
                     }
@@ -110,7 +114,7 @@ struct SettingsView: View {
                 Spacer()
 
                 if authManager.isAuthenticated && !authManager.isGuestMode {
-                    Button("刷新") {
+                    Button(t("common.refresh")) {
                         Task { await authManager.refreshProfile() }
                     }
                     .font(.caption)
@@ -123,17 +127,17 @@ struct SettingsView: View {
     // MARK: - Connection Settings
     
     private var connectionSettingsSection: some View {
-        Section("连接设置") {
+        Section(t("settings.section.connection")) {
             NavigationLink(destination: DiscoverySettingsView()) {
-                Label("设备发现", systemImage: "wifi.circle")
+                Label(t("settings.discovery"), systemImage: "wifi.circle")
             }
             
             Toggle(isOn: $settingsManager.autoReconnect) {
-                Label("自动重连", systemImage: "arrow.clockwise")
+                Label(t("settings.auto_reconnect"), systemImage: "arrow.clockwise")
             }
             
             Toggle(isOn: $settingsManager.allowBackgroundConnection) {
-                Label("后台连接", systemImage: "moon.fill")
+                Label(t("settings.background_connection"), systemImage: "moon.fill")
             }
         }
     }
@@ -141,10 +145,10 @@ struct SettingsView: View {
     // MARK: - Security Settings
     
     private var securitySettingsSection: some View {
-        Section("安全与隐私") {
+        Section(t("settings.section.security")) {
             NavigationLink(destination: PQCSecuritySettingsView()) {
                 HStack {
-                    Label("后量子加密", systemImage: "lock.shield.fill")
+                    Label(t("settings.pqc"), systemImage: "lock.shield.fill")
                     Spacer()
                     Image(systemName: "checkmark.circle.fill")
                         .foregroundColor(.green)
@@ -152,15 +156,15 @@ struct SettingsView: View {
             }
             
             NavigationLink(destination: TrustedDevicesView()) {
-                Label("受信任的设备", systemImage: "checkmark.shield")
+                Label(t("settings.trusted_devices"), systemImage: "checkmark.shield")
             }
             
             Toggle(isOn: $settingsManager.requireBiometricAuth) {
-                Label("生物识别认证", systemImage: "faceid")
+                Label(t("settings.biometric"), systemImage: "faceid")
             }
             
             Toggle(isOn: $settingsManager.endToEndEncryption) {
-                Label("端到端加密", systemImage: "lock.fill")
+                Label(t("settings.e2ee"), systemImage: "lock.fill")
             }
         }
     }
@@ -168,52 +172,52 @@ struct SettingsView: View {
     // MARK: - Appearance Settings
     
     private var appearanceSettingsSection: some View {
-        Section("外观") {
-            Picker("主题", selection: $themeConfiguration.isDarkMode) {
-                Text("浅色").tag(false)
-                Text("深色").tag(true)
+        Section(t("settings.section.appearance")) {
+            Picker(t("settings.theme"), selection: $themeConfiguration.isDarkMode) {
+                Text(t("settings.theme.light")).tag(false)
+                Text(t("settings.theme.dark")).tag(true)
             }
             
-            Picker("语言", selection: $localizationManager.currentLanguage) {
+            Picker(localizationManager.localized("settings.language"), selection: $localizationManager.currentLanguage) {
                 ForEach(AppLanguage.allCases, id: \.self) { language in
-                    Text(language.displayName).tag(language)
+                    Text(localizationManager.displayName(for: language)).tag(language)
                 }
             }
             
-            ColorPicker("强调色", selection: $themeConfiguration.accentColor)
+            ColorPicker(t("settings.accent_color"), selection: $themeConfiguration.accentColor)
         }
     }
     
     // MARK: - Advanced Settings
     
     private var advancedSettingsSection: some View {
-        Section("高级") {
+        Section(t("settings.section.advanced")) {
             NavigationLink(destination: PerformanceSettingsView()) {
-                Label("性能优化", systemImage: "speedometer")
+                Label(t("settings.performance"), systemImage: "speedometer")
             }
             
             NavigationLink(destination: ClipboardSettingsView()) {
-                Label("剪贴板同步", systemImage: "doc.on.clipboard")
+                Label(t("settings.clipboard_sync"), systemImage: "doc.on.clipboard")
             }
             
             NavigationLink(destination: CloudSyncSettingsView()) {
-                Label("iCloud 同步", systemImage: "icloud.fill")
+                Label(t("settings.icloud_sync"), systemImage: "icloud.fill")
             }
 
             NavigationLink(destination: SupabaseSettingsView()) {
-                Label("Supabase 配置", systemImage: "server.rack")
+                Label(t("settings.supabase"), systemImage: "server.rack")
             }
             
             NavigationLink(destination: LogsView()) {
-                Label("日志查看", systemImage: "doc.text.magnifyingglass")
+                Label(t("settings.logs"), systemImage: "doc.text.magnifyingglass")
             }
 
             Toggle(isOn: $settingsManager.enableRealTimeWeather) {
-                Label("实时天气（API）", systemImage: "cloud.sun")
+                Label(localizationManager.localized("settings.realtime_weather_api"), systemImage: "cloud.sun")
             }
 
             Toggle(isOn: $settingsManager.enableExperimentalFeatures) {
-                Label("实验功能（Beta）", systemImage: "testtube.2")
+                Label(t("settings.experimental"), systemImage: "testtube.2")
             }
         }
     }
@@ -221,31 +225,31 @@ struct SettingsView: View {
     // MARK: - About Section
     
     private var aboutSection: some View {
-        Section("关于") {
+        Section(t("settings.section.about")) {
             HStack {
-                Text("版本")
+                Text(t("settings.version"))
                 Spacer()
                 Text(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.0")
                     .foregroundColor(.secondary)
             }
             
             HStack {
-                Text("构建号")
+                Text(t("settings.build"))
                 Spacer()
                 Text(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "1")
                     .foregroundColor(.secondary)
             }
             
             NavigationLink(destination: LicensesView()) {
-                Text("开源许可")
+                Text(t("settings.opensource"))
             }
             
             NavigationLink(destination: PrivacyPolicyView()) {
-                Text("隐私政策")
+                Text(t("settings.privacy"))
             }
             
             if let repositoryURL = URL(string: "https://github.com/billlza/Skybridge-Compass") {
-                Link("GitHub 仓库", destination: repositoryURL)
+                Link(t("settings.github"), destination: repositoryURL)
             }
         }
     }
@@ -257,7 +261,7 @@ struct SettingsView: View {
             Button(role: .destructive, action: { showLogoutConfirmation = true }) {
                 HStack {
                     Spacer()
-                    Label("退出登录", systemImage: "rectangle.portrait.and.arrow.right")
+                    Label(t("settings.logout"), systemImage: "rectangle.portrait.and.arrow.right")
                     Spacer()
                 }
             }

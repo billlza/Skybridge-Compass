@@ -45,6 +45,7 @@
 		5891EEE7D4966C16F568445A /* PQCMicroBenchView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11836F0EEEF86B3B57A2F4CE /* PQCMicroBenchView.swift */; };
 		58CEE1C24851B675376CBBB7 /* SupabaseService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 490C0A61773E98D07F084DC6 /* SupabaseService.swift */; };
 		5AF4B12373F8955D228412F0 /* SupabaseConfig.plist in Resources */ = {isa = PBXBuildFile; fileRef = 40944D05DD176ECF8A8E7BDB /* SupabaseConfig.plist */; };
+		4D0F9A282A0B4F4AA96C1A01 /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = 4D0F9A292A0B4F4AA96C1A01 /* Localizable.strings */; };
 		5C11C0249C43AED260C81E89 /* AuthenticationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B68E3A442804F03C62887E08 /* AuthenticationView.swift */; };
 		5F2704328C4CFAE111CE91B9 /* ClipboardManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 831AD13F1950B5F99A30CD7A /* ClipboardManager.swift */; };
 		5FC455D2316C3C8EA7B12D57 /* HandshakePadding.swift in Sources */ = {isa = PBXBuildFile; fileRef = 053FDF90F358AEE09BA7D06C /* HandshakePadding.swift */; };
@@ -153,6 +154,9 @@
 		380347E9DAA089B6533D6F89 /* TrustedDeviceStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrustedDeviceStore.swift; sourceTree = "<group>"; };
 		392C43BFC3AF2C36DD4D7E06 /* BetaBannerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BetaBannerView.swift; sourceTree = "<group>"; };
 		40944D05DD176ECF8A8E7BDB /* SupabaseConfig.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = SupabaseConfig.plist; sourceTree = "<group>"; };
+		4D0F9A2A2A0B4F4AA96C1A01 /* en */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = en; path = en.lproj/Localizable.strings; sourceTree = "<group>"; };
+		4D0F9A2B2A0B4F4AA96C1A01 /* ja */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = ja; path = ja.lproj/Localizable.strings; sourceTree = "<group>"; };
+		4D0F9A2C2A0B4F4AA96C1A01 /* zh-Hans */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "zh-Hans"; path = "zh-Hans.lproj/Localizable.strings"; sourceTree = "<group>"; };
 		4160F9F87D13AA571CE03308 /* FallbackSemanticsParityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FallbackSemanticsParityTests.swift; sourceTree = "<group>"; };
 		45402D803823C9E08DB50A64 /* WebRTCSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebRTCSession.swift; sourceTree = "<group>"; };
 		490C0A61773E98D07F084DC6 /* SupabaseService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SupabaseService.swift; sourceTree = "<group>"; };
@@ -643,6 +647,7 @@
 			isa = PBXGroup;
 			children = (
 				B8FD2B5D6AB6A664E8469945 /* Assets.xcassets */,
+				4D0F9A292A0B4F4AA96C1A01 /* Localizable.strings */,
 				40944D05DD176ECF8A8E7BDB /* SupabaseConfig.plist */,
 			);
 			name = Resources;
@@ -739,6 +744,8 @@
 			knownRegions = (
 				Base,
 				en,
+				ja,
+				"zh-Hans",
 			);
 			mainGroup = B55949760F23D445644575EB;
 			minimizedProjectReferenceProxies = 1;
@@ -762,6 +769,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				6E30BE5F047F9D36C1C5DAA3 /* Assets.xcassets in Resources */,
+				4D0F9A282A0B4F4AA96C1A01 /* Localizable.strings in Resources */,
 				EE2CFADE97B5CC575F298B16 /* LaunchScreen.storyboard in Resources */,
 				5AF4B12373F8955D228412F0 /* SupabaseConfig.plist in Resources */,
 			);
@@ -879,6 +887,19 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXVariantGroup section */
+		4D0F9A292A0B4F4AA96C1A01 /* Localizable.strings */ = {
+			isa = PBXVariantGroup;
+			children = (
+				4D0F9A2A2A0B4F4AA96C1A01 /* en */,
+				4D0F9A2B2A0B4F4AA96C1A01 /* ja */,
+				4D0F9A2C2A0B4F4AA96C1A01 /* zh-Hans */,
+			);
+			name = Localizable.strings;
+			sourceTree = "<group>";
+		};
+/* End PBXVariantGroup section */
 
 /* Begin PBXTargetDependency section */
 		A5D882D0AC6E2C52158B3CF4 /* PBXTargetDependency */ = {

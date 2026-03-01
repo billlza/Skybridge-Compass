@@ -34,6 +34,7 @@ public final class WeatherManager: NSObject, ObservableObject {
     
     private let weatherService = WeatherService.shared
     private let locationManager = CLLocationManager()
+    private let localizationManager = LocalizationManager.instance
     
     // MARK: - Private Properties
     
@@ -158,9 +159,9 @@ public final class WeatherManager: NSObject, ObservableObject {
         
         weatherService.$error
             .receive(on: DispatchQueue.main)
-            .compactMap { $0?.localizedDescription }
-            .sink { [weak self] errorMsg in
-                self?.error = errorMsg
+            .sink { [weak self] weatherError in
+                guard let self else { return }
+                self.error = weatherError.map { self.localizedErrorMessage(for: $0) }
             }
             .store(in: &cancellables)
         
@@ -240,7 +241,7 @@ extension WeatherManager: CLLocationManagerDelegate {
     nonisolated public func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
         Task { @MainActor in
             SkyBridgeLogger.shared.error("❌ 位置获取失败: \(error.localizedDescription)")
-            self.error = error.localizedDescription
+            self.error = self.localizedLocationErrorMessage(error)
         }
     }
     
@@ -253,10 +254,33 @@ extension WeatherManager: CLLocationManagerDelegate {
             case .authorizedWhenInUse, .authorizedAlways:
                 self.locationManager.requestLocation()
             case .denied, .restricted:
-                self.error = "位置权限被拒绝"
+                self.error = self.localizationManager.localized("weather.error.location_permission_denied")
             default:
                 break
             }
         }
+    }
+}
+
+@available(iOS 17.0, *)
+private extension WeatherManager {
+    func localizedErrorMessage(for error: WeatherError) -> String {
+        switch error {
+        case .noLocation:
+            return localizationManager.localized("weather.error.no_location")
+        case .apiError(let message):
+            return localizationManager.localizedFormat("weather.error.api_error", message)
+        case .networkError:
+            return localizationManager.localized("weather.error.network_error")
+        case .invalidResponse:
+            return localizationManager.localized("weather.error.invalid_response")
+        }
+    }
+
+    func localizedLocationErrorMessage(_ error: Error) -> String {
+        if let clError = error as? CLError, clError.code == .denied {
+            return localizationManager.localized("weather.error.location_permission_denied")
+        }
+        return localizationManager.localized("weather.error.no_location")
     }
 }

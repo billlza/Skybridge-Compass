@@ -50,7 +50,7 @@ public struct QuickActionButtonView: View {
                 }
                 
                 // 标题
-                Text(title)
+                Text(RuntimeLocalization.string(title))
                     .font(.caption)
                     .fontWeight(.medium)
                     .foregroundColor(.white)

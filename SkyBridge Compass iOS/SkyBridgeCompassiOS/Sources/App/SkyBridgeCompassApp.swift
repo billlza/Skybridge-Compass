@@ -57,6 +57,9 @@ struct SkyBridgeCompassApp: App {
                         await handleScenePhaseChange(newPhase)
                     }
                 }
+                .onChange(of: localizationManager.currentLanguage) { _, _ in
+                    configureNotifications()
+                }
         }
     }
     
@@ -293,12 +296,12 @@ struct SkyBridgeCompassApp: App {
                 actions: [
                     UNNotificationAction(
                         identifier: "ACCEPT",
-                        title: "接受",
+                        title: localizationManager.localized("notifications.accept"),
                         options: .authenticationRequired
                     ),
                     UNNotificationAction(
                         identifier: "REJECT",
-                        title: "拒绝",
+                        title: localizationManager.localized("notifications.reject"),
                         options: .destructive
                     )
                 ],
@@ -333,12 +336,14 @@ class AppStateManager: ObservableObject {
         case fileTransfer = 2
         case settings = 3
         
+        @MainActor
         var title: String {
+            let l10n = LocalizationManager.instance
             switch self {
-            case .discovery: return "发现"
-            case .remoteDesktop: return "远程"
-            case .fileTransfer: return "文件"
-            case .settings: return "设置"
+            case .discovery: return l10n.localized("tab.discovery")
+            case .remoteDesktop: return l10n.localized("tab.remote")
+            case .fileTransfer: return l10n.localized("tab.files")
+            case .settings: return l10n.localized("tab.settings")
             }
         }
         
