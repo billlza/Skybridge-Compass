@@ -38,6 +38,8 @@ struct SettingsView: View {
                 // 退出登录
                 logoutSection
             }
+            .scrollContentBackground(.hidden)
+            .background(DashboardView.QuantumGlassBackground())
             .navigationTitle(localizationManager.localized("settings.title"))
             .navigationBarTitleDisplayMode(.large)
             .confirmationDialog(
@@ -98,7 +100,7 @@ struct SettingsView: View {
                         .foregroundColor(.secondary)
                     
                     if let nebulaId = authManager.currentUser?.nebulaId, !nebulaId.isEmpty {
-                        Text("NebulaID: \(nebulaId)")
+                        Text("\(RuntimeLocalization.string("Nebula 标识")): \(nebulaId)")
                             .font(.caption2)
                             .foregroundColor(.secondary)
                             .lineLimit(1)
@@ -364,20 +366,22 @@ struct PQCSecuritySettingsView: View {
 
             Section("论文 / 学术验证") {
                 NavigationLink(destination: PQCMicroBenchView()) {
-                    Label("PQC Self-test / Microbench", systemImage: "waveform.path.ecg")
+                    Label(RuntimeLocalization.string("PQC 自检 / 微基准"), systemImage: "waveform.path.ecg")
                 }
                 Text("原语级 microbench（encap/sign/verify/seal-open）固定为 warmup=10、N=1000、batches=3，导出 schema v3 JSON 到 artifact 管线。")
                     .font(.footnote)
                     .foregroundColor(.secondary)
 
                 NavigationLink(destination: RealNetworkE2EBenchView()) {
-                    Label("RealNet E2E Micro-Study", systemImage: "antenna.radiowaves.left.and.right")
+                    Label(RuntimeLocalization.string("真实网络端到端微研究"), systemImage: "antenna.radiowaves.left.and.right")
                 }
                 Text("在 iPhone/iPad 上作为 client，连接到 Mac 上的测试 server，对比 classic(687B) 与 PQC(12,002B) 的端到端时延与失败类型，并导出 CSV 到 Artifacts 管线。")
                     .font(.footnote)
                     .foregroundColor(.secondary)
             }
         }
+        .scrollContentBackground(.hidden)
+        .background(DashboardView.QuantumGlassBackground())
         .navigationTitle("后量子加密")
         .navigationBarTitleDisplayMode(.inline)
     }
@@ -472,6 +476,8 @@ struct DiscoverySettingsView: View {
                 Text("完整模式会浏览更多 Bonjour 服务，可能更耗电。自定义模式可按需选择服务类型。")
             }
         }
+            .scrollContentBackground(.hidden)
+            .background(DashboardView.QuantumGlassBackground())
             .navigationTitle("设备发现")
     }
 
@@ -521,7 +527,7 @@ struct TrustedDevicesView: View {
                             }
                             .font(.caption)
                             .foregroundColor(.secondary)
-                            Text("ID: \(dev.id)")
+                            Text("\(RuntimeLocalization.string("设备标识")): \(dev.id)")
                                 .font(.caption2)
                                 .foregroundColor(.secondary)
                                 .lineLimit(1)
@@ -568,6 +574,8 @@ struct TrustedDevicesView: View {
                 }
             }
         }
+            .scrollContentBackground(.hidden)
+            .background(DashboardView.QuantumGlassBackground())
             .navigationTitle("受信任的设备")
     }
 }
@@ -679,6 +687,8 @@ struct PerformanceSettingsView: View {
                 Text("限速为粗粒度节流（KB/s）。上传通过分片发送+sleep；下载通过消费端节流减少处理速度。")
             }
         }
+            .scrollContentBackground(.hidden)
+            .background(DashboardView.QuantumGlassBackground())
             .navigationTitle("性能优化")
     }
 }
@@ -793,7 +803,7 @@ struct ClipboardSettingsView: View {
 
             Section("当前剪贴板") {
                 if let (data, mime) = clipboard.getCurrentClipboardContent() {
-                    Text("MIME: \(mime)")
+                    Text("\(RuntimeLocalization.string("MIME 类型")): \(mime)")
                         .font(.caption)
                         .foregroundColor(.secondary)
 
@@ -872,6 +882,8 @@ struct ClipboardSettingsView: View {
                 }
             }
         }
+            .scrollContentBackground(.hidden)
+            .background(DashboardView.QuantumGlassBackground())
             .navigationTitle("剪贴板同步")
         .alert("清空历史记录", isPresented: $showClearHistoryAlert) {
             Button("取消", role: .cancel) {}
@@ -895,6 +907,8 @@ struct CloudSyncSettingsView: View {
                 Text("未在 Xcode Signing 中开启 iCloud/CloudKit 能力时，建议保持关闭。")
             }
         }
+        .scrollContentBackground(.hidden)
+        .background(DashboardView.QuantumGlassBackground())
         .navigationTitle("iCloud 同步")
     }
 }
@@ -951,6 +965,8 @@ struct SupabaseSettingsView: View {
                 }
             }
         }
+        .scrollContentBackground(.hidden)
+        .background(DashboardView.QuantumGlassBackground())
         .navigationTitle("Supabase 配置")
         .task { load() }
         .alert("提示", isPresented: $showAlert) {
@@ -1025,10 +1041,10 @@ struct LogsView: View {
                     .autocorrectionDisabled()
 
                 Picker("最小级别", selection: $minLevel) {
-                    Text("Debug").tag(LogLevel.debug)
-                    Text("Info").tag(LogLevel.info)
-                    Text("Warning").tag(LogLevel.warning)
-                    Text("Error").tag(LogLevel.error)
+                    Text(RuntimeLocalization.string("调试")).tag(LogLevel.debug)
+                    Text(RuntimeLocalization.string("信息")).tag(LogLevel.info)
+                    Text(RuntimeLocalization.string("警告")).tag(LogLevel.warning)
+                    Text(RuntimeLocalization.string("错误")).tag(LogLevel.error)
                 }
             } header: {
                 Text("过滤")
@@ -1037,7 +1053,7 @@ struct LogsView: View {
             Section {
                 let text = store.exportText(minLevel: minLevel, search: query)
                 ShareLink(item: text) {
-                    Label("导出日志（Share）", systemImage: "square.and.arrow.up")
+                    Label(RuntimeLocalization.string("导出日志（分享）"), systemImage: "square.and.arrow.up")
                 }
 
                 Button {
@@ -1085,6 +1101,8 @@ struct LogsView: View {
                 }
             }
         }
+            .scrollContentBackground(.hidden)
+            .background(DashboardView.QuantumGlassBackground())
             .navigationTitle("日志")
     }
 
@@ -1108,15 +1126,21 @@ struct LogsView: View {
 
 struct LicensesView: View {
     var body: some View {
-        Text("开源许可")
-            .navigationTitle("开源许可")
+        ZStack {
+            DashboardView.QuantumGlassBackground()
+            Text("开源许可")
+        }
+        .navigationTitle("开源许可")
     }
 }
 
 struct PrivacyPolicyView: View {
     var body: some View {
-        Text("隐私政策")
-            .navigationTitle("隐私政策")
+        ZStack {
+            DashboardView.QuantumGlassBackground()
+            Text("隐私政策")
+        }
+        .navigationTitle("隐私政策")
     }
 }
 

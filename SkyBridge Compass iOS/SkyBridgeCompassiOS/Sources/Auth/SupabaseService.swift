@@ -31,7 +31,7 @@ public final class SupabaseService: ObservableObject {
         }
 
         /// iOS 端优先 Keychain，其次 Info.plist
-        public static func fromEnvironment() -> Configuration? {
+        public static func fromEnvironment(logIfMissing: Bool = true) -> Configuration? {
             // 1) Keychain
             if let keychainConfig = try? KeychainManager.shared.retrieveSupabaseConfig() {
                 // If Keychain contains a placeholder config from earlier dev runs, delete it so it won't override bundle config.
@@ -92,7 +92,9 @@ public final class SupabaseService: ObservableObject {
             }
 #endif
 
-            SkyBridgeLogger.shared.warning("⚠️ Supabase 未配置（Keychain/Info.plist/Bundle 都未找到有效配置）")
+            if logIfMissing {
+                SkyBridgeLogger.shared.warning("⚠️ Supabase 未配置（Keychain/Info.plist/Bundle 都未找到有效配置）")
+            }
             return nil
         }
     }
@@ -123,7 +125,7 @@ public final class SupabaseService: ObservableObject {
         cfg.timeoutIntervalForRequest = 30
         cfg.timeoutIntervalForResource = 60
         self.urlSession = URLSession(configuration: cfg)
-        self.configuration = Configuration.fromEnvironment()
+        self.configuration = Configuration.fromEnvironment(logIfMissing: false)
     }
 
     private func requireConfiguration() throws -> Configuration {

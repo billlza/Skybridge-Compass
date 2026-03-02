@@ -9,7 +9,7 @@ struct BetaBannerView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
-                Text("BETA")
+                Text(RuntimeLocalization.string("测试版"))
                     .font(.caption2.weight(.bold))
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)

@@ -40,7 +40,27 @@ public enum CryptoProviderFactory {
         case xwing
     }
 
-    private static let hasLiboqsRuntimeSupport: Bool = OQSPQCCryptoProvider.selfTest()
+    // Cold-launch guard:
+    // cache runtime capability probes so we don't repeatedly run heavy self-tests on startup paths.
+    private static let hasApplePQCRuntimeSupport: Bool = {
+        #if HAS_APPLE_PQC_SDK
+        if #available(iOS 26.0, macOS 26.0, *) {
+            return ApplePQCCryptoProvider.quickRuntimeProbe()
+        }
+        #endif
+        return false
+    }()
+
+    private static let hasAppleXWingRuntimeSupport: Bool = {
+        #if HAS_APPLE_PQC_SDK
+        if #available(iOS 26.0, macOS 26.0, *) {
+            return AppleXWingCryptoProvider.quickRuntimeProbe()
+        }
+        #endif
+        return false
+    }()
+
+    private static let hasLiboqsRuntimeSupport: Bool = OQSPQCCryptoProvider.quickRuntimeProbe()
     
     // MARK: - Capability
     
@@ -85,11 +105,7 @@ public enum CryptoProviderFactory {
     public static func detectCapability() -> Capability {
         let osVersion = ProcessInfo.processInfo.operatingSystemVersionString
         
-        var hasApplePQC = false
-        if #available(iOS 26.0, macOS 26.0, *) {
-            hasApplePQC = isApplePQCAvailable()
-        }
-        
+        let hasApplePQC = hasApplePQCRuntimeSupport
         let hasLiboqs = hasLiboqsRuntimeSupport
         
         return Capability(
@@ -101,26 +117,11 @@ public enum CryptoProviderFactory {
     
     /// 检查 Apple PQC API 是否可用
     private static func isApplePQCAvailable() -> Bool {
-        #if HAS_APPLE_PQC_SDK
-        if #available(iOS 26.0, macOS 26.0, *) {
-            // 运行时 self-test：如果 CryptoKit PQC 类型可用且能生成密钥，则认为可用
-            return ApplePQCCryptoProvider.selfTest()
-        }
-        return false
-        #else
-        return false
-        #endif
+        hasApplePQCRuntimeSupport
     }
 
     private static func isAppleXWingAvailable() -> Bool {
-        #if HAS_APPLE_PQC_SDK
-        if #available(iOS 26.0, macOS 26.0, *) {
-            return AppleXWingCryptoProvider.selfTest()
-        }
-        return false
-        #else
-        return false
-        #endif
+        hasAppleXWingRuntimeSupport
     }
 
     private static func nativeSuitePreference() -> NativeSuitePreference {

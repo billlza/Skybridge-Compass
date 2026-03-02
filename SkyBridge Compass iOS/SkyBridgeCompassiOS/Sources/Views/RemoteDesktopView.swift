@@ -14,6 +14,8 @@ struct RemoteDesktopView: View {
     var body: some View {
         NavigationStack {
             ZStack {
+                DashboardView.QuantumGlassBackground()
+
                 if let connection = selectedConnection,
                    remoteDesktopManager.isStreaming {
                     // 远程桌面流
@@ -89,16 +91,6 @@ struct RemoteDesktopView: View {
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(
-            LinearGradient(
-                colors: [
-                    Color(red: 0.05, green: 0.05, blue: 0.15),
-                    Color(red: 0.1, green: 0.1, blue: 0.2)
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-        )
     }
 
     private var crossNetworkConnection: Connection? {

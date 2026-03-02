@@ -2,7 +2,7 @@
 // StatCardView.swift
 // SkyBridgeCompassiOS
 //
-// 统计卡片组件 - 显示数值统计信息
+// 统计卡片组件 - 显示数值统计信息 - Quantum Glass 风格
 //
 
 import SwiftUI
@@ -24,69 +24,43 @@ public struct StatCardView: View {
     
     public var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            // 图标
             HStack {
                 Image(systemName: icon)
                     .font(.title3)
-                    .foregroundColor(color)
+                    .foregroundStyle(color.gradient)
+                    .symbolRenderingMode(.multicolor)
                 Spacer()
             }
-            .padding(.top, 4)
             
-            Spacer()
+            Spacer(minLength: 8)
             
-            // 数值
-            Text(value)
-                .font(.title2.bold())
-                .foregroundColor(.white)
-            
-            // 标题
-            Text(RuntimeLocalization.string(title))
-                .font(.caption)
-                .foregroundColor(.secondary)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(value)
+                    .font(.system(size: 28, weight: .bold, design: .rounded))
+                    .foregroundColor(.white)
+                    .monospacedDigit()
+                    .contentTransition(.numericText())
+                
+                Text(title)
+                    .font(.caption)
+                    .fontWeight(.medium)
+                    .foregroundColor(.white.opacity(0.7))
+            }
         }
-        .padding()
-        .frame(height: 110)
-        .background(
-            LinearGradient(
-                colors: [
-                    color.opacity(0.15),
-                    color.opacity(0.05)
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .padding(16)
+        .frame(maxWidth: .infinity, minHeight: 110, alignment: .leading)
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .stroke(color.opacity(0.3), lineWidth: 1)
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .stroke(
+                    LinearGradient(
+                        colors: [.white.opacity(0.4), .clear, color.opacity(0.2)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ),
+                    lineWidth: 1
+                )
         )
     }
 }
-
-// MARK: - Preview
-#if DEBUG
-@available(iOS 17.0, *)
-struct StatCardView_Previews: PreviewProvider {
-    static var previews: some View {
-        HStack {
-            StatCardView(
-                title: "在线设备",
-                value: "5",
-                icon: "laptopcomputer",
-                color: .blue
-            )
-            
-            StatCardView(
-                title: "活跃会话",
-                value: "2",
-                icon: "display",
-                color: .green
-            )
-        }
-        .padding()
-        .background(Color.black)
-    }
-}
-#endif

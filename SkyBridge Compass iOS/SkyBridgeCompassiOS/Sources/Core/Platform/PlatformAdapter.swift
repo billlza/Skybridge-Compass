@@ -129,7 +129,10 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
                     reason: "ML-DSA identity key requested without PQC provider"
                 )
             }
-            let keyPair = try await provider.generateKeyPair(for: .signing)
+            // 避免在主线程执行 PQC 身份密钥生成（冷启动/首次监听会明显卡顿）。
+            let keyPair = try await Task.detached(priority: .userInitiated) {
+                try await provider.generateKeyPair(for: .signing)
+            }.value
             return (.softwareKey(keyPair.privateKey.bytes), keyPair.publicKey.bytes)
         }
     }
@@ -196,8 +199,11 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
 
         let probe = Data("skybridge.identity.selftest.v1".utf8)
         do {
-            let signature = try await signatureProvider.sign(probe, key: keyHandle)
-            return try await signatureProvider.verify(probe, signature: signature, publicKey: publicKey)
+            // Self-test may involve PQC signing/verification; run off main thread to avoid startup jank.
+            return try await Task.detached(priority: .userInitiated) {
+                let signature = try await signatureProvider.sign(probe, key: keyHandle)
+                return try await signatureProvider.verify(probe, signature: signature, publicKey: publicKey)
+            }.value
         } catch {
             return false
         }

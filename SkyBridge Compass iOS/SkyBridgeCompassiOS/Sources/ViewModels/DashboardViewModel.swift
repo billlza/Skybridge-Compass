@@ -8,6 +8,7 @@
 import Foundation
 import SwiftUI
 import Combine
+import Network
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -50,7 +51,7 @@ public class DashboardViewModel: ObservableObject {
     @Published public var recentTransfers: [FileTransfer] = []
     
     /// 当前网络状态
-    @Published public var networkStatus: NetworkStatus = .connected
+    @Published public var networkStatus: NetworkStatus = .disconnected
     
     /// 系统性能状态
     @Published public var performanceStatus: PerformanceStatus = .excellent
@@ -68,11 +69,18 @@ public class DashboardViewModel: ObservableObject {
     
     private var cancellables = Set<AnyCancellable>()
     private var refreshTimer: Timer?
+    private let pathMonitor = NWPathMonitor()
+    private let pathMonitorQueue = DispatchQueue(label: "com.skybridge.dashboard.network")
     
     // MARK: - Initialization
     
     private init() {
         setupBindings()
+        startNetworkMonitoring()
+    }
+
+    deinit {
+        pathMonitor.cancel()
     }
     
     // MARK: - Public Methods
@@ -180,6 +188,19 @@ public class DashboardViewModel: ObservableObject {
             .store(in: &cancellables)
     }
     
+    private func startNetworkMonitoring() {
+        pathMonitor.pathUpdateHandler = { [weak self] path in
+            Task { @MainActor [weak self] in
+                self?.updateNetworkStatus(isReachable: path.status == .satisfied)
+            }
+        }
+        pathMonitor.start(queue: pathMonitorQueue)
+    }
+
+    private func updateNetworkStatus(isReachable: Bool) {
+        networkStatus = isReachable ? .connected : .disconnected
+    }
+
     private func updateMetrics() {
         metrics.onlineDevices = discoveredDevices.count
         metrics.activeSessions = activeConnections.count
@@ -213,8 +234,8 @@ public enum NetworkStatus: String, Sendable {
     
     public var displayName: String {
         switch self {
-        case .connected: return RuntimeLocalization.string("已连接")
-        case .disconnected: return RuntimeLocalization.string("已断开")
+        case .connected: return RuntimeLocalization.string("在线")
+        case .disconnected: return RuntimeLocalization.string("离线")
         case .connecting: return RuntimeLocalization.string("连接中")
         case .limited: return RuntimeLocalization.string("受限")
         }

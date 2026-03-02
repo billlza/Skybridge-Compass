@@ -20,28 +20,32 @@ struct PQCMicroBenchView: View {
     @State private var errorText: String?
     @State private var artifactURL: URL?
 
+    private func t(_ key: String) -> String {
+        RuntimeLocalization.string(key)
+    }
+
     var body: some View {
         List {
-            Section("配置") {
-                TextField("ARTIFACT_DATE (YYYY-MM-DD)", text: $artifactDate)
+            Section(t("配置")) {
+                TextField(t("实验日期（YYYY-MM-DD）"), text: $artifactDate)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
 
-                TextField("device label", text: $deviceLabel)
+                TextField(t("设备标签"), text: $deviceLabel)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
 
-                TextField("warmup", text: $warmupText)
+                TextField(t("预热次数"), text: $warmupText)
                     .keyboardType(.numberPad)
 
-                TextField("N (iterations)", text: $iterationsText)
+                TextField(t("迭代次数 N"), text: $iterationsText)
                     .keyboardType(.numberPad)
 
-                TextField("batches", text: $batchesText)
+                TextField(t("批次数"), text: $batchesText)
                     .keyboardType(.numberPad)
             }
 
-            Section("运行") {
+            Section(t("运行")) {
                 Button {
                     Task { await runBenchmarks() }
                 } label: {
@@ -49,7 +53,7 @@ struct PQCMicroBenchView: View {
                         if isRunning {
                             ProgressView().padding(.trailing, 8)
                         }
-                        Text(isRunning ? "运行中..." : "开始 microbench")
+                        Text(isRunning ? t("运行中...") : t("开始微基准"))
                     }
                 }
                 .disabled(isRunning)
@@ -66,24 +70,26 @@ struct PQCMicroBenchView: View {
                 }
             }
 
-            Section("导出") {
+            Section(t("导出")) {
                 if let artifactURL {
                     ShareLink(item: artifactURL) {
-                        Label("导出 JSON (schema v3)", systemImage: "square.and.arrow.up")
+                        Label(t("导出 JSON（schema v3）"), systemImage: "square.and.arrow.up")
                     }
                     Text(artifactURL.lastPathComponent)
                         .font(.footnote)
                         .foregroundColor(.secondary)
                 } else {
-                    Text("尚未生成 artifact")
+                    Text(t("尚未生成结果文件"))
                         .foregroundColor(.secondary)
                 }
-                Text("导出到 Mac 后放入 Artifacts/，然后运行 python3 Scripts/aggregate_ios_microbench.py 生成主文表格。")
+                Text(t("导出到 Mac 后放入 Artifacts/，再运行 python3 Scripts/aggregate_ios_microbench.py 生成主文表格。"))
                     .font(.footnote)
                     .foregroundColor(.secondary)
             }
         }
-        .navigationTitle("PQC Self-test/Bench")
+        .scrollContentBackground(.hidden)
+        .background(DashboardView.QuantumGlassBackground())
+        .navigationTitle(t("PQC 自检/基准"))
         .navigationBarTitleDisplayMode(.inline)
     }
 
@@ -97,19 +103,19 @@ struct PQCMicroBenchView: View {
         let stamp = sanitize(artifactDate)
         let label = sanitize(deviceLabel)
         guard !label.isEmpty else {
-            errorText = "device label is empty"
+            errorText = t("设备标签不能为空")
             return
         }
         guard let warmup = Int(warmupText), warmup >= 0 else {
-            errorText = "invalid warmup"
+            errorText = t("预热次数无效")
             return
         }
         guard let iterations = Int(iterationsText), iterations > 0 else {
-            errorText = "invalid N"
+            errorText = t("迭代次数无效")
             return
         }
         guard let batches = Int(batchesText), batches > 0 else {
-            errorText = "invalid batches"
+            errorText = t("批次数无效")
             return
         }
 
@@ -145,7 +151,7 @@ struct PQCMicroBenchView: View {
                     var batchStats: [IOSMicrobenchBatchStats] = []
                     var pooledSamples: [Double] = []
                     for batch in 1...batches {
-                        progressText = "[\(suite.suiteLabel)] \(operation.displayName) batch \(batch)/\(batches)"
+                        progressText = "[\(suite.suiteLabel)] \(operation.displayName) 第 \(batch)/\(batches) 批"
                         let samples: [Double]
                         switch operation {
                         case .kemEncapsulate:
@@ -239,7 +245,7 @@ struct PQCMicroBenchView: View {
             artifactURL = outURL
             progressText = "完成: \(outURL.lastPathComponent)"
         } catch {
-            errorText = "benchmark failed: \(error.localizedDescription)"
+            errorText = t("基准测试失败：") + error.localizedDescription
         }
     }
 
@@ -452,10 +458,10 @@ private enum BenchOperation: String, CaseIterable {
 
     var displayName: String {
         switch self {
-        case .kemEncapsulate: return "KEM encapsulate"
-        case .sign: return "Sign"
-        case .verify: return "Verify"
-        case .sealOpen: return "KEM-DEM seal+open"
+        case .kemEncapsulate: return RuntimeLocalization.string("KEM 封装")
+        case .sign: return RuntimeLocalization.string("签名")
+        case .verify: return RuntimeLocalization.string("验签")
+        case .sealOpen: return RuntimeLocalization.string("KEM-DEM 封装+解封")
         }
     }
 }

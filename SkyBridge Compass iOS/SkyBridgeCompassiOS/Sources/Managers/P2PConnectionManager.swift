@@ -126,7 +126,7 @@ public class P2PConnectionManager: ObservableObject {
     }
     
     // PQC 加密管理器
-    private let pqcManager = PQCCryptoManager.instance
+    private var pqcManager: PQCCryptoManager { PQCCryptoManager.instance }
     
     // 传输层适配器
     private var transport: NWConnectionTransport?
@@ -277,6 +277,13 @@ public class P2PConnectionManager: ObservableObject {
         to device: DiscoveredDevice,
         allowUntrustedClassicBootstrapOnMissingPeerKEM: Bool = false
     ) async throws {
+        if isSelfConnectionTarget(device) {
+            connectionStatusByDeviceId[device.id] = .failed
+            connectionErrorByDeviceId[device.id] = "已阻止自连接"
+            SkyBridgeLogger.shared.warning("⚠️ 已阻止可能的自连接目标: \(device.id)")
+            throw P2PError.selfConnectionBlocked
+        }
+
         // 并发限制（来自 Settings）
         let limit = max(1, SettingsManager.instance.maxConcurrentConnections)
         guard connectingCount < limit else {
@@ -698,7 +705,8 @@ public class P2PConnectionManager: ObservableObject {
                         SkyBridgeLogger.shared.warning("⚠️ 检测到 TLS 记录头，但当前通道期望 length-framed 明文握手，已关闭该入站连接")
                         self?.cleanupBrokenInboundConnection(connection, peerId: peerId, reason: "传输协议不匹配（收到 TLS 记录头）")
                     } else {
-                        SkyBridgeLogger.shared.error("❌ 接收长度头非法: \(bodyLen)")
+                        let headerHex = lengthData.map { String(format: "%02x", $0) }.joined()
+                        SkyBridgeLogger.shared.error("❌ 接收长度头非法: \(bodyLen) peer=\(peerId) header=0x\(headerHex)（可能连接到了错误协议或端口）")
                         self?.cleanupBrokenInboundConnection(connection, peerId: peerId, reason: "非法消息长度头: \(bodyLen)")
                     }
                     return
@@ -1435,6 +1443,33 @@ public class P2PConnectionManager: ObservableObject {
         }
     }
 
+    private func isLoopbackAddress(_ ipAddress: String) -> Bool {
+        let normalized = ipAddress.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines).lowercased()
+        return normalized == "127.0.0.1"
+            || normalized == "::1"
+            || normalized == "0:0:0:0:0:0:0:1"
+            || normalized == "::ffff:127.0.0.1"
+            || normalized == "localhost"
+    }
+
+    private func isSelfConnectionTarget(_ device: DiscoveredDevice) -> Bool {
+        #if canImport(UIKit)
+        if let localId = UIDevice.current.identifierForVendor?.uuidString.lowercased() {
+            let normalizedDeviceId = device.id.lowercased()
+            if normalizedDeviceId == localId || normalizedDeviceId == "id:\(localId)" {
+                return true
+            }
+        }
+        #endif
+
+        if let ipAddress = device.ipAddress,
+           isLoopbackAddress(ipAddress) {
+            return true
+        }
+
+        return false
+    }
+
     private func setSessionKeys(_ keys: SessionKeys, for deviceId: String, deviceNameHint: String? = nil) {
         sessionKeys[deviceId] = keys
         negotiatedSuiteByDeviceId[deviceId] = keys.negotiatedSuite
@@ -1792,6 +1827,7 @@ public enum P2PError: Error, LocalizedError {
     case decryptionFailed
     case tooManyConcurrentConnections
     case alreadyConnected
+    case selfConnectionBlocked
     
     public var errorDescription: String? {
         switch self {
@@ -1805,6 +1841,7 @@ public enum P2PError: Error, LocalizedError {
         case .decryptionFailed: return "解密失败"
         case .tooManyConcurrentConnections: return "连接过于频繁，请稍后再试（已达到并发上限）"
         case .alreadyConnected: return "设备已建立连接"
+        case .selfConnectionBlocked: return "已阻止自连接目标"
         }
     }
 }

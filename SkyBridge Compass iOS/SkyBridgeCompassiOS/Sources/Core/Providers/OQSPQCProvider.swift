@@ -27,6 +27,24 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
 
     public init() {}
 
+    /// 快速能力探针：仅检查算法元信息是否可用，避免在主线程执行重型 keypair 自检。
+    ///
+    /// 说明：完整 `selfTest()` 会执行 ML-KEM/ML-DSA 密钥生成，可能在冷启动阶段造成明显卡顿。
+    /// 该探针用于启动路径的 capability 检测。
+    public static func quickRuntimeProbe() -> Bool {
+        #if canImport(OQSRAII)
+        return oqs_raii_mlkem768_public_key_length() > 0
+            && oqs_raii_mlkem768_secret_key_length() > 0
+            && oqs_raii_mlkem768_ciphertext_length() > 0
+            && oqs_raii_mlkem768_shared_secret_length() > 0
+            && oqs_raii_mldsa65_public_key_length() > 0
+            && oqs_raii_mldsa65_secret_key_length() > 0
+            && oqs_raii_mldsa65_signature_length() > 0
+        #else
+        return false
+        #endif
+    }
+
     public static func selfTest() -> Bool {
         #if canImport(OQSRAII)
         let pkLen = oqs_raii_mlkem768_public_key_length()

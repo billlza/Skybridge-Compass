@@ -132,7 +132,7 @@ public struct ClassicSignatureProvider: ProtocolSignatureProvider {
 /// PQC 签名 Provider (ML-DSA-65)
 public struct PQCSignatureProvider: ProtocolSignatureProvider {
     public let signatureAlgorithm: ProtocolSigningAlgorithm = .mlDSA65
-    private static let hasLiboqsBackend = OQSPQCCryptoProvider.selfTest()
+    private static let hasLiboqsBackend = OQSPQCCryptoProvider.quickRuntimeProbe()
     
     public init() {}
     

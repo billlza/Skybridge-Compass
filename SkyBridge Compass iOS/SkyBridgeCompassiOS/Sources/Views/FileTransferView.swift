@@ -2,7 +2,6 @@ import SwiftUI
 import UniformTypeIdentifiers
 import QuickLook
 
-/// 文件传输视图 - 与 Files app 集成，支持拖放和分享
 @available(iOS 17.0, *)
 struct FileTransferView: View {
     @EnvironmentObject private var connectionManager: P2PConnectionManager
@@ -17,38 +16,28 @@ struct FileTransferView: View {
     
     var body: some View {
         NavigationStack {
-            ZStack {
-                backgroundGradient
-
-                if !settings.enableExperimentalFeatures {
-                    VStack {
+            ScrollView(showsIndicators: false) {
+                VStack(spacing: 16) {
+                    if !settings.enableExperimentalFeatures {
                         BetaBannerView(
                             title: RuntimeLocalization.string("文件传输（实验功能）"),
                             message: RuntimeLocalization.string("当前实现支持分块/校验/可选压缩。发布前建议与 macOS 端做一次双向互通冒烟测试（同网段发现→连接→发送/接收）。")
                         )
-                        .padding(.horizontal, 16)
-                        .padding(.top, 12)
-
-                        Spacer()
                     }
-                }
-                
-                ScrollView {
-                    VStack(spacing: 24) {
-                        // 快速发送区域
-                        quickSendSection
-                        
-                        // 正在传输的文件
-                        if !fileTransferManager.activeTransfers.isEmpty {
-                            activeTransfersSection
-                        }
-                        
-                        // 传输历史
-                        transferHistorySection
+                    
+                    quickSendSection
+                    
+                    if !fileTransferManager.activeTransfers.isEmpty {
+                        activeTransfersSection
                     }
-                    .padding()
+                    
+                    transferHistorySection
                 }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
             }
+            .background(DashboardView.QuantumGlassBackground())
+            .scrollContentBackground(.hidden)
             .navigationTitle(RuntimeLocalization.string("文件传输"))
             .navigationBarTitleDisplayMode(.large)
             .toolbar {
@@ -56,6 +45,7 @@ struct FileTransferView: View {
                     Button(action: { showFilePicker = true }) {
                         Image(systemName: "plus.circle.fill")
                             .font(.title3)
+                            .foregroundStyle(.cyan)
                     }
                 }
             }
@@ -80,25 +70,17 @@ struct FileTransferView: View {
         }
     }
     
-    private var backgroundGradient: some View {
-        LinearGradient(
-            colors: [
-                Color(red: 0.05, green: 0.05, blue: 0.15),
-                Color(red: 0.1, green: 0.1, blue: 0.2)
-            ],
-            startPoint: .topLeading,
-            endPoint: .bottomTrailing
-        )
-        .ignoresSafeArea()
-    }
-    
     // MARK: - Quick Send Section
     
     private var quickSendSection: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text(RuntimeLocalization.string("快速发送"))
-                .font(.headline)
-                .foregroundColor(.white)
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Image(systemName: "paperplane.fill")
+                    .foregroundStyle(.cyan)
+                Text(RuntimeLocalization.string("快速发送"))
+                    .font(.headline)
+                    .foregroundColor(.white)
+            }
 
             Text(
                 String(
@@ -106,11 +88,10 @@ struct FileTransferView: View {
                     fileTransferManager.getDownloadsDirectory().path
                 )
             )
-                .font(.caption)
-                .foregroundColor(.gray)
-                .lineLimit(1)
+            .font(.caption)
+            .foregroundColor(.white.opacity(0.4))
+            .lineLimit(1)
             
-            // 在线设备列表
             let hasCrossNetwork: Bool = {
                 if case .connected = crossNetwork.state { return true }
                 return false
@@ -162,51 +143,65 @@ struct FileTransferView: View {
                 }
             }
         }
-        .padding()
-        .background(Color(white: 0.15))
-        .cornerRadius(16)
+        .padding(16)
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .stroke(LinearGradient(colors: [.white.opacity(0.2), .clear], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1)
+        )
     }
     
     private var emptyDeviceState: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 10) {
             Image(systemName: "wifi.slash")
-                .font(.title)
-                .foregroundColor(.gray)
+                .font(.title2)
+                .foregroundColor(.white.opacity(0.3))
             
             Text(RuntimeLocalization.string("没有连接的设备"))
                 .font(.subheadline)
-                .foregroundColor(.gray)
+                .foregroundColor(.white.opacity(0.5))
             
             Text(RuntimeLocalization.string("请先在发现页面连接设备"))
                 .font(.caption)
-                .foregroundColor(.gray.opacity(0.7))
+                .foregroundColor(.white.opacity(0.3))
         }
         .frame(maxWidth: .infinity)
-        .padding(.vertical, 40)
+        .padding(.vertical, 30)
     }
     
     // MARK: - Active Transfers Section
     
     private var activeTransfersSection: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text(RuntimeLocalization.string("正在传输"))
-                .font(.headline)
-                .foregroundColor(.white)
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Image(systemName: "arrow.left.arrow.right.circle.fill")
+                    .foregroundStyle(.green)
+                Text(RuntimeLocalization.string("正在传输"))
+                    .font(.headline)
+                    .foregroundColor(.white)
+            }
             
             ForEach(fileTransferManager.activeTransfers) { transfer in
                 FileTransferCard(transfer: transfer)
             }
         }
-        .padding()
-        .background(Color(white: 0.15))
-        .cornerRadius(16)
+        .padding(16)
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .stroke(LinearGradient(colors: [.green.opacity(0.3), .clear], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1)
+        )
     }
     
     // MARK: - Transfer History Section
     
     private var transferHistorySection: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 14) {
             HStack {
+                Image(systemName: "clock.arrow.circlepath")
+                    .foregroundStyle(.white.opacity(0.5))
                 Text(RuntimeLocalization.string("传输历史"))
                     .font(.headline)
                     .foregroundColor(.white)
@@ -216,16 +211,16 @@ struct FileTransferView: View {
                 Button(action: clearHistory) {
                     Text(RuntimeLocalization.string("清空"))
                         .font(.caption)
-                        .foregroundColor(.blue)
+                        .foregroundColor(.cyan)
                 }
             }
             
             if fileTransferManager.transferHistory.isEmpty {
                 Text(RuntimeLocalization.string("暂无传输记录"))
                     .font(.subheadline)
-                    .foregroundColor(.gray)
+                    .foregroundColor(.white.opacity(0.4))
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 40)
+                    .padding(.vertical, 30)
             } else {
                 ForEach(fileTransferManager.transferHistory) { transfer in
                     FileTransferHistoryCard(
@@ -235,9 +230,13 @@ struct FileTransferView: View {
                 }
             }
         }
-        .padding()
-        .background(Color(white: 0.15))
-        .cornerRadius(16)
+        .padding(16)
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .stroke(LinearGradient(colors: [.white.opacity(0.15), .clear], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1)
+        )
     }
     
     // MARK: - Actions
@@ -299,26 +298,30 @@ struct DeviceQuickSendCard: View {
     var body: some View {
         Button(action: onTap) {
             VStack(spacing: 8) {
-                Image(systemName: device.platform.iconName)
-                    .font(.title)
-                    .foregroundColor(.white)
-                    .frame(width: 60, height: 60)
-                    .background(
-                        LinearGradient(
-                            colors: device.platform.gradientColors,
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
+                ZStack {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(.ultraThinMaterial)
+                        .frame(width: 56, height: 56)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .stroke(LinearGradient(colors: [.white.opacity(0.2), .clear], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1)
                         )
-                    )
-                    .cornerRadius(12)
+                    
+                    Image(systemName: device.platform.iconName)
+                        .font(.system(size: 22))
+                        .foregroundStyle(
+                            LinearGradient(colors: device.platform.gradientColors, startPoint: .topLeading, endPoint: .bottomTrailing)
+                        )
+                }
                 
                 Text(device.name)
-                    .font(.caption)
-                    .foregroundColor(.white)
+                    .font(.caption2)
+                    .foregroundColor(.white.opacity(0.7))
                     .lineLimit(1)
             }
-            .frame(width: 80)
+            .frame(width: 72)
         }
+        .buttonStyle(.plain)
     }
 }
 
@@ -328,50 +331,66 @@ struct FileTransferCard: View {
     let transfer: FileTransfer
     
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 12) {
-                // 文件图标
-                Image(systemName: fileIcon)
-                    .font(.title2)
-                    .foregroundColor(.blue)
-                    .frame(width: 40, height: 40)
-                    .background(Color.blue.opacity(0.2))
-                    .cornerRadius(8)
+                ZStack {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(iconColor.opacity(0.15))
+                        .frame(width: 38, height: 38)
+                    
+                    Image(systemName: fileIcon)
+                        .font(.system(size: 16))
+                        .foregroundColor(iconColor)
+                }
                 
-                // 文件信息
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: 3) {
                     Text(transfer.fileName)
-                        .font(.subheadline.bold())
+                        .font(.subheadline.weight(.semibold))
                         .foregroundColor(.white)
                         .lineLimit(1)
                     
                     Text(formatFileSize(transfer.fileSize))
-                        .font(.caption)
-                        .foregroundColor(.gray)
+                        .font(.caption2)
+                        .foregroundColor(.white.opacity(0.4))
                 }
                 
                 Spacer()
                 
-                // 状态
                 statusBadge
             }
             
-            // 进度条
             if transfer.status == .transferring {
                 VStack(spacing: 4) {
-                    ProgressView(value: transfer.progress)
-                        .tint(.blue)
+                    GeometryReader { geo in
+                        ZStack(alignment: .leading) {
+                            Capsule()
+                                .fill(Color.white.opacity(0.08))
+                                .frame(height: 5)
+                            
+                            Capsule()
+                                .fill(
+                                    LinearGradient(
+                                        colors: [transfer.isIncoming ? .green : .blue, .cyan],
+                                        startPoint: .leading,
+                                        endPoint: .trailing
+                                    )
+                                )
+                                .frame(width: max(0, geo.size.width * CGFloat(transfer.progress)), height: 5)
+                                .shadow(color: .cyan.opacity(0.4), radius: 2, x: 0, y: 0)
+                        }
+                    }
+                    .frame(height: 5)
                     
                     HStack {
                         Text("\(Int(transfer.progress * 100))%")
-                            .font(.caption)
-                            .foregroundColor(.gray)
+                            .font(.caption2.monospacedDigit())
+                            .foregroundColor(.white.opacity(0.5))
                         
                         Spacer()
                         
                         Text(formatSpeed(transfer.speed))
-                            .font(.caption)
-                            .foregroundColor(.gray)
+                            .font(.caption2.monospacedDigit())
+                            .foregroundColor(.white.opacity(0.5))
                     }
                 }
             }
@@ -379,13 +398,22 @@ struct FileTransferCard: View {
             if transfer.isIncoming, let locationText {
                 Text(String(format: RuntimeLocalization.string("保存位置：%@"), locationText))
                     .font(.caption2)
-                    .foregroundColor(.gray)
+                    .foregroundColor(.white.opacity(0.35))
                     .lineLimit(1)
             }
         }
-        .padding()
-        .background(Color(white: 0.1))
-        .cornerRadius(12)
+        .padding(12)
+        .background(Color.white.opacity(0.04))
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+    
+    private var iconColor: Color {
+        switch transfer.status {
+        case .transferring: return .cyan
+        case .completed: return .green
+        case .failed: return .red
+        default: return .orange
+        }
     }
     
     private var fileIcon: String {
@@ -405,21 +433,19 @@ struct FileTransferCard: View {
             case .pending:
                 Image(systemName: "clock.fill")
                     .foregroundColor(.orange)
-                
             case .transferring:
                 ProgressView()
-                    .tint(.blue)
-                
+                    .tint(.cyan)
+                    .scaleEffect(0.8)
             case .completed:
                 Image(systemName: "checkmark.circle.fill")
                     .foregroundColor(.green)
-                
             case .failed:
                 Image(systemName: "xmark.circle.fill")
                     .foregroundColor(.red)
             }
         }
-        .font(.title3)
+        .font(.body)
     }
     
     private func formatFileSize(_ bytes: Int64) -> String {
@@ -455,42 +481,34 @@ struct FileTransferHistoryCard: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 12) {
                 Image(systemName: transfer.isIncoming ? "arrow.down.circle.fill" : "arrow.up.circle.fill")
-                    .font(.title2)
+                    .font(.title3)
                     .foregroundColor(transfer.isIncoming ? .green : .blue)
                 
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: 3) {
                     Text(transfer.fileName)
-                        .font(.subheadline)
+                        .font(.subheadline.weight(.medium))
                         .foregroundColor(.white)
                         .lineLimit(1)
                     
-                    HStack(spacing: 8) {
+                    HStack(spacing: 6) {
                         Text(
                             transfer.isIncoming
                                 ? RuntimeLocalization.string("来自")
                                 : RuntimeLocalization.string("发送至")
                         )
-                            .font(.caption)
-                            .foregroundColor(.gray)
-                        
                         Text(transfer.remotePeer)
-                            .font(.caption)
-                            .foregroundColor(.gray)
-                        
-                        Text("•")
-                            .foregroundColor(.gray)
-                        
+                        Text("·")
                         Text(relativeTimestampText)
-                            .font(.caption)
-                            .foregroundColor(.gray)
                     }
+                    .font(.caption2)
+                    .foregroundColor(.white.opacity(0.4))
                 }
                 
                 Spacer()
                 
                 Text(ByteCountFormatter.string(fromByteCount: transfer.fileSize, countStyle: .file))
-                    .font(.caption)
-                    .foregroundColor(.gray)
+                    .font(.caption2.monospacedDigit())
+                    .foregroundColor(.white.opacity(0.4))
             }
 
             if transfer.isIncoming, let localPath = transfer.localPath {
@@ -501,21 +519,24 @@ struct FileTransferHistoryCard: View {
                             displayLocation(path: localPath)
                         )
                     )
-                        .font(.caption2)
-                        .foregroundColor(.gray)
-                        .lineLimit(1)
+                    .font(.caption2)
+                    .foregroundColor(.white.opacity(0.3))
+                    .lineLimit(1)
+                    
                     Spacer()
+                    
                     Button(RuntimeLocalization.string("打开")) {
                         onOpenFile(URL(fileURLWithPath: localPath))
                     }
                     .font(.caption2)
+                    .foregroundColor(.cyan)
                     .buttonStyle(.borderless)
                 }
             }
         }
-        .padding()
-        .background(Color(white: 0.1))
-        .cornerRadius(12)
+        .padding(12)
+        .background(Color.white.opacity(0.04))
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 
     private func displayLocation(path: String) -> String {

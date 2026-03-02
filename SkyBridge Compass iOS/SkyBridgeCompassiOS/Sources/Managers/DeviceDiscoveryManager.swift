@@ -212,6 +212,16 @@ public class DeviceDiscoveryManager: ObservableObject {
         return "Mac"
         #endif
     }
+
+    /// 本机稳定设备 ID（与 stableDeviceId 生成策略对齐）
+    private var localStableDeviceId: String? {
+        #if canImport(UIKit)
+        guard let raw = UIDevice.current.identifierForVendor?.uuidString.lowercased() else { return nil }
+        return "id:\(raw)"
+        #else
+        return nil
+        #endif
+    }
     
     private init() {}
     
@@ -478,8 +488,8 @@ public class DeviceDiscoveryManager: ObservableObject {
     private func handleDeviceAdded(_ result: NWBrowser.Result, serviceType: DiscoveryServiceType) async {
         let device = await createDevice(from: result, serviceType: serviceType)
         
-        // 过滤自己
-        if device.name == deviceName && device.platform == localPlatform {
+        // 过滤自己（同名同平台 / 本机稳定 ID / loopback 地址）
+        if isSelfDevice(device) {
             return
         }
         
@@ -634,6 +644,41 @@ public class DeviceDiscoveryManager: ObservableObject {
             if let v = txt[lower], !v.isEmpty { return v.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines) }
         }
         return nil
+    }
+
+    private func isLoopbackAddress(_ value: String) -> Bool {
+        let normalized = value.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines).lowercased()
+        return normalized == "127.0.0.1"
+            || normalized == "::1"
+            || normalized == "0:0:0:0:0:0:0:1"
+            || normalized == "::ffff:127.0.0.1"
+    }
+
+    private func isLoopbackEndpoint(_ endpoint: NWEndpoint) -> Bool {
+        guard case .hostPort(let host, _) = endpoint else { return false }
+
+        switch host {
+        case .ipv4(let address):
+            return isLoopbackAddress("\(address)")
+        case .ipv6(let address):
+            return isLoopbackAddress("\(address)")
+        default:
+            return false
+        }
+    }
+
+    private func isSelfDevice(_ device: DiscoveredDevice) -> Bool {
+        if let localStableDeviceId,
+           device.id.caseInsensitiveCompare(localStableDeviceId) == .orderedSame {
+            return true
+        }
+
+        if let ipAddress = device.ipAddress,
+           isLoopbackAddress(ipAddress) {
+            return true
+        }
+
+        return device.name == deviceName && device.platform == localPlatform
     }
 
     /// 生成尽可能稳定的设备 id：
@@ -1017,29 +1062,43 @@ public class DeviceDiscoveryManager: ObservableObject {
     }
     
     private func handleNewIncomingConnection(_ connection: NWConnection) async {
-        SkyBridgeLogger.shared.info("📞 收到新连接")
-        
+        let endpointDescription = connection.endpoint.debugDescription
+
+        if isLoopbackEndpoint(connection.endpoint) {
+            SkyBridgeLogger.shared.warning("⚠️ 已忽略回环地址入站连接: \(endpointDescription)")
+            connection.cancel()
+            return
+        }
+
+        SkyBridgeLogger.shared.info("📞 收到新连接: \(endpointDescription)")
+
         let peerId = extractPeerId(from: connection)
-        
+        if let localStableDeviceId,
+           peerId.caseInsensitiveCompare(localStableDeviceId) == .orderedSame {
+            SkyBridgeLogger.shared.warning("⚠️ 已忽略疑似自连接入站连接: \(peerId)")
+            connection.cancel()
+            return
+        }
+
         connection.stateUpdateHandler = { [weak self] state in
             Task { @MainActor in
                 switch state {
                 case .ready:
                     SkyBridgeLogger.shared.info("✅ 入站连接就绪: \(peerId)")
                     self?.onNewConnection?(connection, peerId)
-                    
+
                 case .failed(let error):
                     SkyBridgeLogger.shared.error("❌ 入站连接失败: \(error.localizedDescription)")
-                    
+
                 case .cancelled:
                     SkyBridgeLogger.shared.info("⏹️ 入站连接已取消")
-                    
+
                 default:
                     break
                 }
             }
         }
-        
+
         connection.start(queue: queue)
     }
     

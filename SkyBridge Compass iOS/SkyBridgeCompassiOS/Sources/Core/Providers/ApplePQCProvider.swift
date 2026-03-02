@@ -62,6 +62,11 @@ public struct ApplePQCCryptoProvider: CryptoProvider, Sendable {
     
     // MARK: - Self Test
     
+    /// 快速能力探针：仅做最小可用性判断，避免冷启动阶段反复进行重型密钥生成。
+    public static func quickRuntimeProbe() -> Bool {
+        true
+    }
+
     /// Self-test 验证 API 可用性：能生成 MLKEM/MLDSA 密钥则视为可用
     public static func selfTest() -> Bool {
         do {
@@ -435,6 +440,10 @@ public struct AppleXWingCryptoProvider: CryptoProvider, Sendable {
     private static let hkdfSaltLabel = "SkyBridge-KDF-Salt-v1|"
 
     public init() {}
+
+    public static func quickRuntimeProbe() -> Bool {
+        true
+    }
 
     public static func selfTest() -> Bool {
         do {

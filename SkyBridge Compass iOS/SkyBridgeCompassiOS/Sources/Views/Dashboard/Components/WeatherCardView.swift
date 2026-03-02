@@ -34,10 +34,10 @@ public struct WeatherCardView: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 14)
         .background(weatherBackground)
-        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .stroke(Color.primary.opacity(0.12), lineWidth: 1)
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .stroke(LinearGradient(colors: [.white.opacity(0.4), .clear], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1)
         )
         .shadow(color: .black.opacity(0.2), radius: 10, x: 0, y: 4)
         .task {
@@ -59,7 +59,7 @@ public struct WeatherCardView: View {
     private var weatherBackground: some View {
         ZStack {
             // 自适应“玻璃底色”（在浅色背景下不会导致文字隐身）
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
                 .fill(.ultraThinMaterial)
 
             if let weather = weatherManager.currentWeather {

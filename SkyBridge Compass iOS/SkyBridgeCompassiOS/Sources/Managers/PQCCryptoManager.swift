@@ -100,26 +100,29 @@ public class PQCCryptoManager: ObservableObject {
     /// 生成密钥对
     public func generateKeyPair() async throws {
         SkyBridgeLogger.shared.info("🔑 正在生成密钥对 (Suite: \(currentSuite.rawValue))...")
-        
-        // 生成 KEM 密钥对
-        let kemKeyPair = try await cryptoProvider.generateKeyPair(for: .keyExchange)
+
+        // 冷启动性能：将重型密钥生成放到后台线程，避免阻塞主线程/UI。
+        let provider = cryptoProvider
+        let (kemKeyPair, sigKeyPair) = try await Task.detached(priority: .userInitiated) {
+            let kem = try await provider.generateKeyPair(for: .keyExchange)
+            let sig = try await provider.generateKeyPair(for: .signing)
+            return (kem, sig)
+        }.value
+
         kemPrivateKey = SecureBytes(data: kemKeyPair.privateKey.bytes)
         kemPublicKey = kemKeyPair.publicKey.bytes
-        
-        // 生成签名密钥对
-        let sigKeyPair = try await cryptoProvider.generateKeyPair(for: .signing)
         signingPrivateKey = SecureBytes(data: sigKeyPair.privateKey.bytes)
         signingPublicKey = sigKeyPair.publicKey.bytes
-        
+
         // 保存到 Keychain
         try keychainManager.savePrivateKey(kemKeyPair.privateKey.bytes, identifier: "pqc.kem.private.\(currentSuite.wireId)")
         try keychainManager.savePublicKey(kemKeyPair.publicKey.bytes, identifier: "pqc.kem.public.\(currentSuite.wireId)")
         try keychainManager.savePrivateKey(sigKeyPair.privateKey.bytes, identifier: "pqc.sig.private.\(currentSuite.wireId)")
         try keychainManager.savePublicKey(sigKeyPair.publicKey.bytes, identifier: "pqc.sig.public.\(currentSuite.wireId)")
-        
+
         hasKeyPair = true
         keyGenerationDate = Date()
-        
+
         SkyBridgeLogger.shared.info("✅ 密钥对生成完成 (KEM Public: \(kemPublicKey?.count ?? 0) bytes, Signing Public: \(signingPublicKey?.count ?? 0) bytes)")
     }
     

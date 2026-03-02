@@ -132,6 +132,16 @@ public actor FileTransferNetworkService {
         deviceId: String,
         deviceName: String
     ) async throws -> NWConnection {
+        let normalizedIP = ipAddress.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines).lowercased()
+        if normalizedIP == "127.0.0.1"
+            || normalizedIP == "::1"
+            || normalizedIP == "0:0:0:0:0:0:0:1"
+            || normalizedIP == "::ffff:127.0.0.1"
+            || normalizedIP == "localhost" {
+            SkyBridgeLogger.shared.warning("⚠️ 已阻止文件传输自连接目标: \(ipAddress)")
+            throw FileTransferError.invalidDestination
+        }
+
         let endpoint = NWEndpoint.hostPort(
             host: NWEndpoint.Host(ipAddress),
             port: NWEndpoint.Port(integerLiteral: port)

@@ -23,10 +23,14 @@ public struct DashboardView: View {
     @StateObject private var fileTransferManager = FileTransferManager.instance
     @StateObject private var remoteDesktopManager = RemoteDesktopManager.instance
     @StateObject private var settingsManager = SettingsManager.instance
-    @StateObject private var crossNetworkManager = CrossNetworkWebRTCManager.instance
     @EnvironmentObject private var authManager: AuthenticationManager
-    
+
+    private var crossNetworkManager: CrossNetworkWebRTCManager { CrossNetworkWebRTCManager.instance }
+
     @State private var selectedTab: DashboardTab = .home
+    @State private var loadedTabs: Set<DashboardTab> = [.home]
+    @State private var enableAnimatedBackground = false
+    @State private var enableWeatherEffects = false
     @State private var showingQRScanner = false
     @State private var showingSettings = false
     @State private var showingDeviceDetail: DiscoveredDevice?
@@ -38,55 +42,59 @@ public struct DashboardView: View {
     // MARK: - Body
     
     public var body: some View {
-        ZStack {
-            // 背景渐变
-            backgroundGradient
-
-            WeatherEffectsBackgroundLayer(
-                isActive: settingsManager.enableRealTimeWeather &&
-                    !(fileTransferManager.isTransferring || remoteDesktopManager.isStreaming)
-            )
-            
-            // 主内容
-            TabView(selection: $selectedTab) {
-                // 首页
+        TabView(selection: $selectedTab) {
+            // 首页
+            tabRoot(for: .home) {
                 homeTab
-                    .tabItem {
-                        Label("首页", systemImage: "house.fill")
-                    }
-                    .tag(DashboardTab.home)
-                
-                // 设备
-                devicesTab
-                    .tabItem {
-                        Label("设备", systemImage: "laptopcomputer.and.iphone")
-                    }
-                    .tag(DashboardTab.devices)
-                
-                // 文件
-                filesTab
-                    .tabItem {
-                        Label("文件", systemImage: "folder.fill")
-                    }
-                    .tag(DashboardTab.files)
-                
-                // 远程桌面
-                remoteTab
-                    .tabItem {
-                        Label("远程", systemImage: "display")
-                    }
-                    .tag(DashboardTab.remote)
-                
-                // 设置
-                settingsTab
-                    .tabItem {
-                        Label("设置", systemImage: "gearshape.fill")
-                    }
-                    .tag(DashboardTab.settings)
             }
-            .tint(.cyan)
+            .tabItem {
+                Label("首页", systemImage: "house.fill")
+            }
+            .tag(DashboardTab.home)
+
+            // 设备
+            tabRoot(for: .devices) {
+                devicesTab
+            }
+            .tabItem {
+                Label("设备", systemImage: "laptopcomputer.and.iphone")
+            }
+            .tag(DashboardTab.devices)
+
+            // 文件
+            tabRoot(for: .files) {
+                filesTab
+            }
+            .tabItem {
+                Label("文件", systemImage: "folder.fill")
+            }
+            .tag(DashboardTab.files)
+
+            // 远程桌面
+            tabRoot(for: .remote) {
+                remoteTab
+            }
+            .tabItem {
+                Label("远程", systemImage: "display")
+            }
+            .tag(DashboardTab.remote)
+
+            // 设置
+            tabRoot(for: .settings) {
+                settingsTab
+            }
+            .tabItem {
+                Label("设置", systemImage: "gearshape.fill")
+            }
+            .tag(DashboardTab.settings)
+        }
+        .tint(.cyan)
+        .preferredColorScheme(.dark)
+        .onChange(of: selectedTab) { _, newValue in
+            loadedTabs.insert(newValue)
         }
         .task {
+            loadedTabs.insert(selectedTab)
             await viewModel.start()
         }
         .onDisappear {
@@ -127,71 +135,258 @@ public struct DashboardView: View {
             DeviceDetailSheet(device: device)
         }
     }
+
+    @ViewBuilder
+    private func tabRoot<Content: View>(for tab: DashboardTab, @ViewBuilder content: () -> Content) -> some View {
+        if loadedTabs.contains(tab) {
+            content()
+        } else {
+            Color.clear
+        }
+    }
     
-    // MARK: - Background
-    
-    private var backgroundGradient: some View {
-        LinearGradient(
-            colors: [
-                Color(red: 0.05, green: 0.05, blue: 0.15),
-                Color(red: 0.08, green: 0.08, blue: 0.12),
-                Color(red: 0.03, green: 0.03, blue: 0.08)
-            ],
-            startPoint: .topLeading,
-            endPoint: .bottomTrailing
-        )
+// MARK: - Quantum Glass Background
+
+@available(iOS 17.0, *)
+public struct QuantumGlassBackground: View {
+    @StateObject private var settingsManager = SettingsManager.instance
+    @StateObject private var fileTransferManager = FileTransferManager.instance
+    @StateObject private var remoteDesktopManager = RemoteDesktopManager.instance
+
+    private let enableAnimations: Bool
+    private let enableWeatherEffects: Bool
+
+    public init(enableAnimations: Bool = true, enableWeatherEffects: Bool = true) {
+        self.enableAnimations = enableAnimations
+        self.enableWeatherEffects = enableWeatherEffects
+    }
+
+    public var body: some View {
+        ZStack {
+            // 1. Rich deep-space gradient (navy → deep indigo, NOT pure black)
+            LinearGradient(
+                gradient: Gradient(colors: [
+                    Color(red: 0.04, green: 0.06, blue: 0.18),
+                    Color(red: 0.06, green: 0.04, blue: 0.16),
+                    Color(red: 0.03, green: 0.03, blue: 0.10)
+                ]),
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            .ignoresSafeArea()
+
+            // 2. Motion layer (deferred on launch to avoid startup stutter)
+            if enableAnimations {
+                TimelineView(.periodic(from: .now, by: 1.0 / 24.0)) { timeline in
+                    let currentTime = timeline.date.timeIntervalSinceReferenceDate
+                    ZStack {
+                        QuantumFluidLayer(time: currentTime)
+                            .blendMode(.screen)
+                            .opacity(0.82)
+
+                        QuantumStarLayer(time: currentTime)
+                            .opacity(0.45)
+                    }
+                }
+                .transition(.opacity)
+            } else {
+                ZStack {
+                    QuantumFluidLayer(time: 0)
+                        .blendMode(.screen)
+                        .opacity(0.74)
+
+                    QuantumStarLayer(time: 0)
+                        .opacity(0.33)
+                }
+            }
+
+            // 3. Frosted overlay (material -> tint for lower iOS GPU pressure)
+            Rectangle()
+                .fill(Color.white.opacity(0.06))
+                .blendMode(.overlay)
+                .ignoresSafeArea()
+
+            // 4. Weather effects (independent lifecycle, must NOT be re-created per frame)
+            WeatherEffectsBackgroundLayer(
+                isActive: enableWeatherEffects &&
+                    settingsManager.enableRealTimeWeather &&
+                    !(fileTransferManager.isTransferring || remoteDesktopManager.isStreaming)
+            )
+        }
         .ignoresSafeArea()
+    }
+}
+
+// MARK: - Canvas Fluid Blob Layer (iOS)
+
+@available(iOS 17.0, *)
+private struct QuantumFluidLayer: View {
+    let time: TimeInterval
+    
+    private struct Blob {
+        let color: Color
+        let xSeed: Double
+        let ySeed: Double
+        let sizeScale: Double
+        let speed: Double
+    }
+    
+    var body: some View {
+        Canvas { context, size in
+            let w = size.width
+            let h = size.height
+            let minDim = min(w, h)
+            
+            let blobs = [
+                Blob(color: Color(red: 0.10, green: 0.30, blue: 0.75), xSeed: 123.4, ySeed: 567.8, sizeScale: 0.70, speed: 0.15),
+                Blob(color: Color(red: 0.35, green: 0.10, blue: 0.65), xSeed: 234.5, ySeed: 678.9, sizeScale: 0.60, speed: 0.12),
+                Blob(color: Color(red: 0.10, green: 0.45, blue: 0.55), xSeed: 345.6, ySeed: 789.0, sizeScale: 0.55, speed: 0.18),
+                Blob(color: Color(red: 0.55, green: 0.15, blue: 0.45), xSeed: 456.7, ySeed: 890.1, sizeScale: 0.45, speed: 0.14),
+                Blob(color: Color(red: 0.15, green: 0.20, blue: 0.60), xSeed: 567.8, ySeed: 123.4, sizeScale: 0.50, speed: 0.10)
+            ]
+            
+            for blob in blobs {
+                let xProgress = (sin(time * blob.speed + blob.xSeed) + 1) / 2
+                let yProgress = (cos(time * blob.speed * 0.8 + blob.ySeed) + 1) / 2
+                
+                let x = w * 0.05 + xProgress * w * 0.9
+                let y = h * 0.05 + yProgress * h * 0.9
+                let blobSize = minDim * blob.sizeScale
+                
+                let rect = CGRect(
+                    x: x - blobSize / 2,
+                    y: y - blobSize / 2,
+                    width: blobSize,
+                    height: blobSize
+                )
+                
+                let breathe = 0.6 + 0.4 * sin(time * 0.4 + blob.xSeed * 0.01)
+                context.opacity = breathe
+                context.fill(Path(ellipseIn: rect), with: .color(blob.color))
+            }
+        }
+        .blur(radius: 80)
+    }
+}
+
+// MARK: - Canvas Star Layer (iOS)
+
+@available(iOS 17.0, *)
+private struct QuantumStarLayer: View {
+    let time: TimeInterval
+    
+    private struct SeededRNG {
+        private var state: UInt64
+        init(seed: Int) { state = UInt64(seed) }
+        mutating func next() -> Double {
+            state = state &* 6364136223846793005 &+ 1
+            return Double(state) / Double(UInt64.max)
+        }
+        mutating func next(in range: ClosedRange<Double>) -> Double {
+            range.lowerBound + next() * (range.upperBound - range.lowerBound)
+        }
+    }
+    
+    var body: some View {
+        Canvas { context, size in
+            let count = 60
+            for i in 0..<count {
+                var rng = SeededRNG(seed: i * 73)
+                let x = rng.next() * size.width
+                let y = rng.next() * size.height
+                let r = rng.next(in: 0.6...1.8)
+                let twinkleSpeed = rng.next(in: 0.8...3.0)
+                let phase = rng.next(in: 0...Double.pi * 2)
+                let alpha = (0.3 + 0.5 * sin(time * twinkleSpeed + phase)) * rng.next(in: 0.4...1.0)
+                
+                let tint = rng.next()
+                let color: Color
+                if tint < 0.15 {
+                    color = .cyan.opacity(0.9)
+                } else if tint < 0.3 {
+                    color = Color(red: 0.7, green: 0.8, blue: 1.0)
+                } else {
+                    color = .white
+                }
+                
+                context.opacity = max(0, alpha)
+                context.fill(
+                    Path(ellipseIn: CGRect(x: x, y: y, width: r, height: r)),
+                    with: .color(color)
+                )
+            }
+        }
+    }
+}
+
+    private var dashboardTitle: String {
+        RuntimeLocalization.string("应用标题")
     }
     
     // MARK: - Home Tab
     
     private var homeTab: some View {
         NavigationStack {
-            ScrollView {
-                VStack(spacing: 16) {
-                    // 标题下方信息区：iPhone 图标 / iOS 版本 / PQC
-                    // （按你的要求放在 SkyBridge Compass 标题下面，天气卡片放在其下方）
-                    welcomeSection
-                    
-                    // 🌤️ 天气卡片 - 放在 iOS 版本信息下方、统计卡片上方
-                    WeatherCardView()
-                    
-                    // 统计卡片
-                    statsSection
-                    
-                    // 快捷操作
-                    quickActionsSection
+            ZStack {
+                QuantumGlassBackground(
+                    enableAnimations: enableAnimatedBackground,
+                    enableWeatherEffects: enableWeatherEffects
+                )
 
-                    // 文件传输概览（进行中/最近完成）
-                    if !fileTransferManager.activeTransfers.isEmpty || !viewModel.recentTransfers.isEmpty {
-                        transferOverviewSection
+                ScrollView(showsIndicators: false) {
+                    VStack(spacing: 16) {
+                        welcomeSection
+                        
+                        // Live Transfer Banner
+                        if !fileTransferManager.activeTransfers.isEmpty || !viewModel.recentTransfers.isEmpty {
+                            transferOverviewSection
+                        }
+                        
+                        // Weather: full width
+                        WeatherCardView()
+                        
+                        // Stats: side by side
+                        statsSection
+                        
+                        // Quick Actions
+                        quickActionsSection
+
+                        // Recent Devices
+                        recentDevicesSection
+                        
+                        // Active Connections
+                        if !viewModel.activeConnections.isEmpty {
+                            activeConnectionsSection
+                        }
                     }
-                    
-                    // 最近设备
-                    recentDevicesSection
-                    
-                    // 活跃连接
-                    if !viewModel.activeConnections.isEmpty {
-                        activeConnectionsSection
-                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
                 }
-                .padding()
+                .scrollContentBackground(.hidden)
+                .background(Color.clear)
             }
-            .navigationTitle("SkyBridge Compass")
-            .navigationBarTitleDisplayMode(.large)
+            .navigationTitle(dashboardTitle)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbarColorScheme(.dark, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
                     UserAvatarButton()
+                }
+                ToolbarItem(placement: .principal) {
+                    Text(dashboardTitle)
+                        .font(.headline.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
                 }
                 ToolbarItemGroup(placement: .navigationBarTrailing) {
                     Button {
                         Task { await viewModel.refresh() }
                     } label: {
-                        if viewModel.isRefreshing {
-                            ProgressView()
-                        } else {
-                            Image(systemName: "arrow.clockwise")
-                        }
+                        Image(systemName: viewModel.isRefreshing ? "arrow.triangle.2.circlepath" : "arrow.clockwise")
+                            .font(.system(size: 16, weight: .medium))
+                            .foregroundStyle(.white.opacity(0.7))
+                            .rotationEffect(.degrees(viewModel.isRefreshing ? 360 : 0))
+                            .animation(viewModel.isRefreshing ? .linear(duration: 1).repeatForever(autoreverses: false) : .default, value: viewModel.isRefreshing)
                     }
 
                     DashboardNotificationBellButton()
@@ -200,12 +395,29 @@ public struct DashboardView: View {
                         showingQRScanner = true
                     } label: {
                         Image(systemName: "qrcode.viewfinder")
-                            .font(.title3)
+                            .font(.system(size: 16, weight: .medium))
+                            .foregroundStyle(.white.opacity(0.7))
                     }
                 }
             }
             .refreshable {
                 await viewModel.refresh()
+            }
+            .onAppear {
+                loadedTabs.insert(.home)
+                guard !enableAnimatedBackground else { return }
+
+                Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(180))
+                    withAnimation(.easeInOut(duration: 0.45)) {
+                        enableAnimatedBackground = true
+                    }
+
+                    try? await Task.sleep(for: .milliseconds(120))
+                    withAnimation(.easeInOut(duration: 0.45)) {
+                        enableWeatherEffects = true
+                    }
+                }
             }
         }
     }
@@ -214,73 +426,78 @@ public struct DashboardView: View {
     
     private var welcomeSection: some View {
         HStack(spacing: 16) {
-            // 设备图标
+            // 设备图标 (Glassy)
             ZStack {
                 Circle()
-                    .fill(
-                        LinearGradient(
-                            colors: [.cyan, .blue],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
+                    .fill(.ultraThinMaterial)
                     .frame(width: 60, height: 60)
                 
                 Image(systemName: "iphone")
                     .font(.title)
-                    .foregroundColor(.white)
+                    .foregroundStyle(
+                        LinearGradient(
+                            colors: [.cyan, .purple],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                    .symbolEffect(.pulse, options: .repeating)
             }
             
-            VStack(alignment: .leading, spacing: 4) {
-                // 设备名称（单独一行，避免被挤没）
+            VStack(alignment: .leading, spacing: 6) {
                 Text(UIDevice.current.name)
                     .font(.headline)
                     .foregroundColor(.white)
                     .lineLimit(1)
 
-                // 型号 + 芯片（第二行）
                 Text("\(Self.currentModelDisplayName) · \(Self.currentChipDisplayName)")
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.white.opacity(0.7))
                     .lineLimit(1)
                 
                 Text("iOS \(UIDevice.current.systemVersion)")
                     .font(.subheadline)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(.white.opacity(0.7))
                 
-                // 网络状态
                 HStack(spacing: 4) {
                     Circle()
-                        .fill(viewModel.networkStatus.color)
+                        .fill(primaryConnectionStatusColor)
                         .frame(width: 8, height: 8)
-                    Text(viewModel.networkStatus.displayName)
+                        .shadow(color: primaryConnectionStatusColor.opacity(0.5), radius: 3, x: 0, y: 0)
+                    Text(primaryConnectionStatusText)
                         .font(.caption)
-                        .foregroundColor(.secondary)
+                        .foregroundColor(.white.opacity(0.7))
                 }
             }
             
             Spacer()
             
-            // PQC 状态徽章
+            // PQC Status Badge (Quantum glow)
             VStack(spacing: 4) {
                 Image(systemName: "lock.shield.fill")
                     .font(.title2)
-                    .foregroundColor(.green)
+                    .foregroundStyle(.green.gradient)
+                    .symbolRenderingMode(.multicolor)
+                    .shadow(color: .green.opacity(0.4), radius: 5, x: 0, y: 0)
                 Text("PQC")
                     .font(.caption2)
                     .fontWeight(.bold)
                     .foregroundColor(.green)
             }
-            .padding(8)
-            .background(Color.green.opacity(0.15))
-            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .padding(10)
+            .background(.ultraThinMaterial)
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(LinearGradient(colors: [.green.opacity(0.4), .clear], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1)
+            )
         }
         .padding()
-        .background(Color.white.opacity(0.05))
-        .clipShape(RoundedRectangle(cornerRadius: 20))
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 20)
-                .stroke(Color.white.opacity(0.1), lineWidth: 1)
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .stroke(LinearGradient(colors: [.white.opacity(0.4), .clear, .cyan.opacity(0.2)], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1)
         )
     }
 
@@ -316,40 +533,68 @@ public struct DashboardView: View {
             return "Apple Silicon"
         }
     }
+
+    private var primaryConnectionStatusText: String {
+        RuntimeLocalization.string(primaryConnectionStatusKey)
+    }
+
+    private var primaryConnectionStatusColor: Color {
+        primaryConnectionStatusKey == "离线" ? .red : .green
+    }
+
+    private var primaryConnectionStatusKey: String {
+        if viewModel.networkStatus == .disconnected {
+            return "离线"
+        }
+
+        guard !connectionManager.activeConnections.isEmpty else {
+            return "在线"
+        }
+
+        if activeNegotiatedSuites.contains(.xwing) {
+            return "X-Wing已连接"
+        }
+
+        if activeNegotiatedSuites.contains(where: { CryptoSuite.allClassicSuites.contains($0) }) {
+            return "Classic已连接"
+        }
+
+        let hasMLKEMConnected = activeNegotiatedSuites.contains { $0 == .mlkem768 || $0 == .mlkem768fs }
+        if hasMLKEMConnected {
+            switch SkyBridgeiOSCore.shared.cryptoProvider?.tier {
+            case .nativePQC?:
+                return "Apple PQC已连接"
+            case .liboqsPQC?:
+                return "liboqs已连接"
+            default:
+                return "已连接"
+            }
+        }
+
+        return "已连接"
+    }
+
+    private var activeNegotiatedSuites: [CryptoSuite] {
+        let activeDeviceIds = Set(connectionManager.activeConnections.map { $0.device.id })
+        return activeDeviceIds.compactMap { connectionManager.negotiatedSuiteByDeviceId[$0] }
+    }
     
     // MARK: - Stats Section
     
     private var statsSection: some View {
-        LazyVGrid(columns: [
-            GridItem(.flexible()),
-            GridItem(.flexible())
-        ], spacing: 12) {
+        HStack(spacing: 12) {
             StatCardView(
-                title: "在线设备",
-                value: "\(viewModel.metrics.onlineDevices)",
-                icon: "laptopcomputer",
-                color: .blue
+                title: RuntimeLocalization.string("发现与连接"),
+                value: "\(viewModel.metrics.onlineDevices) / \(viewModel.metrics.activeSessions)",
+                icon: "antenna.radiowaves.left.and.right",
+                color: .cyan
             )
             
             StatCardView(
-                title: "活跃会话",
-                value: "\(viewModel.metrics.activeSessions)",
-                icon: "display",
-                color: .green
-            )
-            
-            StatCardView(
-                title: "传输任务",
-                value: "\(viewModel.metrics.fileTransfers)",
-                icon: "folder",
-                color: .orange
-            )
-            
-            StatCardView(
-                title: "性能状态",
-                value: viewModel.performanceStatus.displayName,
-                icon: viewModel.performanceStatus.icon,
-                color: viewModel.performanceStatus.color
+                title: RuntimeLocalization.string("传输与性能"),
+                value: "\(viewModel.metrics.fileTransfers) / \(viewModel.performanceStatus.displayName)",
+                icon: "bolt.horizontal.circle.fill",
+                color: .purple
             )
         }
     }
@@ -358,117 +603,97 @@ public struct DashboardView: View {
     
     private var quickActionsSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("快捷操作")
+            Text(RuntimeLocalization.string("快捷操作"))
                 .font(.headline)
-                .foregroundColor(.white)
+                .foregroundColor(.white.opacity(0.9))
             
-            LazyVGrid(columns: [
-                GridItem(.flexible()),
-                GridItem(.flexible()),
-                GridItem(.flexible()),
-                GridItem(.flexible())
-            ], spacing: 12) {
-                QuickActionButtonView(
-                    title: "扫描",
-                    icon: "magnifyingglass",
-                    color: .blue
-                ) {
-                    viewModel.triggerDiscoveryRefresh()
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 16) {
+                    QuickActionButtonView(
+                        title: RuntimeLocalization.string("扫描网络"),
+                        icon: "magnifyingglass",
+                        color: .cyan
+                    ) {
+                        viewModel.triggerDiscoveryRefresh()
+                    }
+                    
+                    QuickActionButtonView(
+                        title: RuntimeLocalization.string("发送文件"),
+                        icon: "paperplane.fill",
+                        color: .purple
+                    ) {
+                        selectedTab = .files
+                    }
+                    
+                    QuickActionButtonView(
+                        title: RuntimeLocalization.string("远程桌面"),
+                        icon: "display",
+                        color: .blue
+                    ) {
+                        selectedTab = .remote
+                    }
+                    
+                    QuickActionButtonView(
+                        title: RuntimeLocalization.string("扫码连接"),
+                        icon: "qrcode.viewfinder",
+                        color: .mint
+                    ) {
+                        showingQRScanner = true
+                    }
                 }
-                
-                QuickActionButtonView(
-                    title: "传输",
-                    icon: "arrow.up.arrow.down",
-                    color: .orange
-                ) {
-                    selectedTab = .files
-                }
-                
-                QuickActionButtonView(
-                    title: "远程",
-                    icon: "display",
-                    color: .cyan
-                ) {
-                    selectedTab = .remote
-                }
-                
-                QuickActionButtonView(
-                    title: "二维码",
-                    icon: "qrcode",
-                    color: .purple
-                ) {
-                    showingQRScanner = true
-                }
+                .padding(.horizontal, 4)
+                .padding(.vertical, 8)
             }
         }
-        .padding()
-        .background(Color.white.opacity(0.05))
-        .clipShape(RoundedRectangle(cornerRadius: 16))
     }
-
-    // MARK: - Transfer Overview
-
+    
+    // MARK: - Transfer Overview (Live Transfer Banner)
+    
     private var transferOverviewSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("文件传输")
-                    .font(.headline)
-                    .foregroundColor(.white)
-                Spacer()
-                Button("查看全部") { selectedTab = .files }
-                    .font(.subheadline)
-                    .foregroundColor(.cyan)
-            }
-
+        VStack(spacing: 12) {
             if !fileTransferManager.activeTransfers.isEmpty {
-                ForEach(fileTransferManager.activeTransfers.prefix(3)) { transfer in
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack {
-                            Text(transfer.fileName)
-                                .font(.subheadline.weight(.semibold))
-                                .foregroundColor(.white)
-                                .lineLimit(1)
-                            Spacer()
-                            Text("\(Int(transfer.progress * 100))%")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                        ProgressView(value: transfer.progress)
-                            .tint(transfer.isIncoming ? .green : .blue)
-                    }
-                    .padding(10)
-                    .background(Color.white.opacity(0.04))
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                ForEach(fileTransferManager.activeTransfers.prefix(2)) { transfer in
+                    LiveTransferBannerView(
+                        fileName: transfer.fileName,
+                        progress: transfer.progress,
+                        isIncoming: transfer.isIncoming,
+                        speed: transfer.speed
+                    )
                 }
             } else if let latest = viewModel.recentTransfers.first {
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack {
-                        Image(systemName: latest.isIncoming ? "arrow.down.circle.fill" : "arrow.up.circle.fill")
-                            .foregroundColor(latest.isIncoming ? .green : .blue)
+                HStack(spacing: 16) {
+                    ZStack {
+                        Circle()
+                            .fill(latest.status == .completed ? Color.green.opacity(0.2) : Color.red.opacity(0.2))
+                            .frame(width: 40, height: 40)
+                        
+                        Image(systemName: latest.status == .completed ? "checkmark" : "xmark")
+                            .font(.system(size: 16, weight: .bold))
+                            .foregroundColor(latest.status == .completed ? .green : .red)
+                    }
+                    
+                    VStack(alignment: .leading, spacing: 4) {
                         Text(latest.fileName)
                             .font(.subheadline.weight(.semibold))
                             .foregroundColor(.white)
                             .lineLimit(1)
-                        Spacer()
-                        Text(latest.status == .completed ? RuntimeLocalization.string("已完成") : RuntimeLocalization.string("失败"))
+                        
+                        Text(latest.status == .completed ? RuntimeLocalization.string("传输完成") : RuntimeLocalization.string("传输失败"))
                             .font(.caption)
-                            .foregroundColor(latest.status == .completed ? .green : .red)
+                            .foregroundColor(latest.status == .completed ? .green.opacity(0.8) : .red.opacity(0.8))
                     }
-                    if latest.isIncoming, let localPath = latest.localPath {
-                        Text("\(RuntimeLocalization.string("保存位置")): Downloads/\(URL(fileURLWithPath: localPath).lastPathComponent)")
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                            .lineLimit(1)
-                    }
+                    
+                    Spacer()
                 }
-                .padding(10)
-                .background(Color.white.opacity(0.04))
-                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .padding(16)
+                .background(.ultraThinMaterial)
+                .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 24, style: .continuous)
+                        .stroke(LinearGradient(colors: [.white.opacity(0.3), .clear], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1)
+                )
             }
         }
-        .padding()
-        .background(Color.white.opacity(0.05))
-        .clipShape(RoundedRectangle(cornerRadius: 16))
     }
     
     // MARK: - Recent Devices Section
@@ -478,7 +703,7 @@ public struct DashboardView: View {
             HStack {
                 Text("附近设备")
                     .font(.headline)
-                    .foregroundColor(.white)
+                    .foregroundColor(.white.opacity(0.9))
                 
                 Spacer()
                 
@@ -492,19 +717,18 @@ public struct DashboardView: View {
             if viewModel.discoveredDevices.isEmpty {
                 EmptyDevicesView()
             } else {
-                ForEach(viewModel.discoveredDevices.prefix(3)) { device in
-                    DeviceRowView(
-                        device: device,
-                        connectionStatus: connectionManager.connectionStatusByDeviceId[device.id]
-                    ) {
-                        showingDeviceDetail = device
+                VStack(spacing: 8) {
+                    ForEach(viewModel.discoveredDevices.prefix(3)) { device in
+                        DeviceRowView(
+                            device: device,
+                            connectionStatus: connectionManager.connectionStatusByDeviceId[device.id]
+                        ) {
+                            showingDeviceDetail = device
+                        }
                     }
                 }
             }
         }
-        .padding()
-        .background(Color.white.opacity(0.05))
-        .clipShape(RoundedRectangle(cornerRadius: 16))
     }
     
     // MARK: - Active Connections Section
@@ -514,31 +738,30 @@ public struct DashboardView: View {
             HStack {
                 Text("活跃连接")
                     .font(.headline)
-                    .foregroundColor(.white)
+                    .foregroundColor(.white.opacity(0.9))
                 
                 Spacer()
                 
                 Text("\(viewModel.activeConnections.count)")
                     .font(.subheadline)
-                    .foregroundColor(.secondary)
-                    .padding(.horizontal, 8)
+                    .foregroundColor(.cyan)
+                    .padding(.horizontal, 10)
                     .padding(.vertical, 4)
-                    .background(Color.green.opacity(0.2))
+                    .background(Color.cyan.opacity(0.15))
                     .clipShape(Capsule())
+                    .overlay(Capsule().stroke(Color.cyan.opacity(0.3), lineWidth: 1))
             }
             
-            ForEach(viewModel.activeConnections) { connection in
-                ConnectionRowView(connection: connection) {
-                    // 断开连接
-                    Task {
-                        await viewModel.disconnect(from: connection.device)
+            VStack(spacing: 8) {
+                ForEach(viewModel.activeConnections) { connection in
+                    ConnectionRowView(connection: connection) {
+                        Task {
+                            await viewModel.disconnect(from: connection.device)
+                        }
                     }
                 }
             }
         }
-        .padding()
-        .background(Color.white.opacity(0.05))
-        .clipShape(RoundedRectangle(cornerRadius: 16))
     }
     
     // MARK: - Devices Tab
@@ -570,9 +793,7 @@ public struct DashboardView: View {
     private func handleQRCodeScan(_ data: QRCodeData) {
         showingQRScanner = false
         
-        // 处理扫描到的二维码数据
         if data.type == .devicePairing {
-            // 连接到设备
             if let ip = data.ipAddress, let _ = data.port {
                 Task {
                     let skybridgeTCP = DiscoveryServiceType.skybridge.rawValue
@@ -596,7 +817,85 @@ public struct DashboardView: View {
     }
 }
 
-// MARK: - User Avatar (Supabase)
+// MARK: - Live Transfer Banner View
+@available(iOS 17.0, *)
+private struct LiveTransferBannerView: View {
+    let fileName: String
+    let progress: Double
+    let isIncoming: Bool
+    let speed: Double
+    
+    var body: some View {
+        HStack(spacing: 16) {
+            // Icon
+            ZStack {
+                Circle()
+                    .fill(isIncoming ? Color.green.opacity(0.2) : Color.blue.opacity(0.2))
+                    .frame(width: 44, height: 44)
+                
+                Image(systemName: isIncoming ? "arrow.down.circle.fill" : "arrow.up.circle.fill")
+                    .font(.system(size: 20))
+                    .foregroundStyle(isIncoming ? .green : .blue)
+            }
+            
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text(fileName)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundColor(.white)
+                        .lineLimit(1)
+                    
+                    Spacer()
+                    
+                    Text("\(Int(progress * 100))%")
+                        .font(.caption.monospacedDigit())
+                        .foregroundColor(.cyan)
+                }
+                
+                // Animated Progress Bar
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        Capsule()
+                            .fill(Color.white.opacity(0.1))
+                            .frame(height: 6)
+                        
+                        Capsule()
+                            .fill(
+                                LinearGradient(
+                                    colors: [isIncoming ? .green : .blue, .cyan],
+                                    startPoint: .leading,
+                                    endPoint: .trailing
+                                )
+                            )
+                            .frame(width: max(0, geo.size.width * CGFloat(progress)), height: 6)
+                            .shadow(color: .cyan.opacity(0.5), radius: 3, x: 0, y: 0)
+                    }
+                }
+                .frame(height: 6)
+                
+                Text(speedDisplay(speed))
+                    .font(.caption2.monospacedDigit())
+                    .foregroundColor(.white.opacity(0.6))
+            }
+        }
+        .padding(16)
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .stroke(LinearGradient(colors: [.white.opacity(0.4), .clear, .cyan.opacity(0.2)], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1)
+        )
+    }
+    
+    private func byteCount(_ bytes: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: max(0, bytes), countStyle: .file)
+    }
+    
+    private func speedDisplay(_ bytesPerSecond: Double) -> String {
+        let bytes = Int64(max(0, bytesPerSecond))
+        return "\(byteCount(bytes))/s"
+    }
+}
 
 @available(iOS 17.0, *)
 private struct UserAvatarButton: View {
@@ -622,7 +921,7 @@ private struct UserAvatarButton: View {
             // 预留：进入个人资料/账号页（与 macOS 保持一致）
         } label: {
             ZStack {
-                Circle().fill(Color.white.opacity(0.08))
+                Circle().fill(.ultraThinMaterial)
 
                 if let url = avatarURL {
                     AsyncImage(url: url) { phase in
@@ -633,19 +932,25 @@ private struct UserAvatarButton: View {
                             image.resizable().scaledToFill()
                         default:
                             Text(initials)
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.secondary)
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(.white.opacity(0.7))
                         }
                     }
                 } else {
                     Text(initials)
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.7))
                 }
             }
-            .frame(width: 34, height: 34)
+            .frame(width: 32, height: 32)
             .clipShape(Circle())
-            .overlay(Circle().stroke(Color.primary.opacity(0.12), lineWidth: 1))
+            .overlay(
+                Circle()
+                    .stroke(
+                        LinearGradient(colors: [.white.opacity(0.25), .clear], startPoint: .topLeading, endPoint: .bottomTrailing),
+                        lineWidth: 1
+                    )
+            )
         }
         .buttonStyle(.plain)
         .accessibilityLabel(Text(String(format: RuntimeLocalization.string("用户：%@"), displayName)))
@@ -1086,11 +1391,23 @@ private enum LocalIP {
 
 	@available(iOS 17.0, *)
 	private enum WeatherEffectsFrameRatePolicy {
-	    static func targetFPS() -> Double {
-	        let lowPower = ProcessInfo.processInfo.isLowPowerModeEnabled
-	        if lowPower { return 30 }
-	        return 60
-	    }
+    static func targetFPS() -> Double {
+        let processInfo = ProcessInfo.processInfo
+        if processInfo.isLowPowerModeEnabled {
+            return 24
+        }
+
+        switch processInfo.thermalState {
+        case .serious, .critical:
+            return 20
+        case .fair:
+            return 28
+        case .nominal:
+            return 36
+        @unknown default:
+            return 28
+        }
+    }
 
     static func minimumInterval() -> TimeInterval {
         let fps = max(10, targetFPS())
@@ -1500,27 +1817,9 @@ private struct DashboardNotificationBellButton: View {
             showCenter = true
             unreadCount = 0
         } label: {
-            ZStack(alignment: .topTrailing) {
-                Image(systemName: unreadCount > 0 ? "bell.badge.fill" : "bell")
-                    .font(.title3)
-                    .foregroundStyle(.primary)
-                if unreadCount > 0 {
-                    Text("\(min(unreadCount, 99))")
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 2)
-                        .background(
-                            LinearGradient(
-                                colors: [.red, .pink],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            ),
-                            in: Capsule()
-                        )
-                        .offset(x: 8, y: -8)
-                }
-            }
+            Image(systemName: unreadCount > 0 ? "bell.badge.fill" : "bell")
+                .font(.system(size: 16, weight: .medium))
+                .foregroundStyle(unreadCount > 0 ? .cyan : .white.opacity(0.7))
         }
         .buttonStyle(.plain)
         .sheet(isPresented: $showCenter) {

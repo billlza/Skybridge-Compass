@@ -32,12 +32,15 @@ struct SkyBridgeCompassApp: App {
 
     @Environment(\.scenePhase) private var scenePhase
     @State private var backgroundTeardownTask: Task<Void, Never>?
+    @State private var didStartServices = false
     
     // MARK: - Scene Configuration
     
     var body: some Scene {
         WindowGroup {
             ContentView()
+
+                .id(localizationManager.currentLanguage.rawValue)
                 .environmentObject(appState)
                 .environmentObject(discoveryManager)
                 .environmentObject(connectionManager)
@@ -48,9 +51,14 @@ struct SkyBridgeCompassApp: App {
                 .preferredColorScheme(themeConfiguration.isDarkMode ? .dark : .light)
                 .onAppear {
                     setupApplication()
-                }
-                .task {
-                    await initializeServices()
+                    if !didStartServices {
+                        didStartServices = true
+                        SkyBridgeLogger.shared.info("🧭 启动流程：服务初始化任务已创建")
+                        Task(priority: .userInitiated) {
+                            SkyBridgeLogger.shared.info("🧭 启动流程：服务初始化任务开始执行")
+                            await initializeServices()
+                        }
+                    }
                 }
                 .onChange(of: scenePhase) { _, newPhase in
                     Task { @MainActor in
@@ -84,18 +92,19 @@ struct SkyBridgeCompassApp: App {
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
         let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
         SkyBridgeLogger.shared.info("🏷️ App Version: \(version) (\(build))")
-        SkyBridgeLogger.shared.info("🔧 Settings: enforcePQC=\(PQCCryptoManager.instance.enforcePQCHandshake ? "1" : "0"), allowClassicFallback=\(PQCCryptoManager.instance.allowClassicFallbackForCompatibility ? "1" : "0")")
+        let allowClassicFallback = UserDefaults.standard.bool(forKey: "pqc_allow_classic_fallback")
+        SkyBridgeLogger.shared.info("🔧 Settings: allowClassicFallback=\(allowClassicFallback ? "1" : "0")")
         SkyBridgeLogger.shared.info("📱 iOS 版本: \(UIDevice.current.systemVersion)")
         SkyBridgeLogger.shared.info("📲 设备类型: \(UIDevice.current.userInterfaceIdiom == .pad ? "iPad" : "iPhone")")
 
         // Supabase config quick sanity (prints in device logs even if user profile refresh hasn't run yet)
-        if let cfg = SupabaseService.Configuration.fromEnvironment() {
+        if let cfg = SupabaseService.Configuration.fromEnvironment(logIfMissing: false) {
             let host = cfg.url.host ?? "unknown"
             SkyBridgeLogger.shared.info("🔐 Supabase resolved host=\(host)")
             print("🔐 Supabase resolved host=\(host)")
         } else {
-            SkyBridgeLogger.shared.warning("⚠️ Supabase 未配置（启动时未解析到有效配置）")
-            print("⚠️ Supabase 未配置（启动时未解析到有效配置）")
+            SkyBridgeLogger.shared.info("ℹ️ Supabase 未配置（当前为离线认证模式，可在设置页填写 SUPABASE_URL/SUPABASE_ANON_KEY）")
+            print("ℹ️ Supabase 未配置（当前为离线认证模式，可在设置页填写 SUPABASE_URL/SUPABASE_ANON_KEY）")
         }
     }
     
@@ -103,19 +112,29 @@ struct SkyBridgeCompassApp: App {
     private func initializeServices() async {
         do {
             // 1. 初始化 PQC 加密系统
+            SkyBridgeLogger.shared.info("⏱️ 启动步骤开始：PQC 初始化")
+            let pqcStartedAt = Date()
             try await PQCCryptoManager.instance.initialize()
-            SkyBridgeLogger.shared.info("✅ PQC 加密系统初始化完成")
+            let pqcElapsedMs = Int(Date().timeIntervalSince(pqcStartedAt) * 1000)
+            SkyBridgeLogger.shared.info("✅ PQC 加密系统初始化完成 (\(pqcElapsedMs)ms)")
         } catch {
             SkyBridgeLogger.shared.error("❌ PQC 初始化失败: \(error.localizedDescription)")
         }
 
         // 2. 启动设备发现服务（按设置：模式/自定义服务/扫描周期）
+        SkyBridgeLogger.shared.info("⏱️ 启动步骤开始：Discovery 配置")
+        let discoveryStartedAt = Date()
         applyDiscoverySettings()
+        let discoveryElapsedMs = Int(Date().timeIntervalSince(discoveryStartedAt) * 1000)
+        SkyBridgeLogger.shared.info("✅ Discovery 配置完成 (\(discoveryElapsedMs)ms)")
 
         // 3. 初始化 CloudKit 同步（默认关闭；需要在设置中开启且配置 iCloud 能力）
         if SettingsManager.instance.enableCloudKitSync {
+            SkyBridgeLogger.shared.info("⏱️ 启动步骤开始：CloudKit 初始化")
+            let cloudKitStartedAt = Date()
             await CloudKitSyncManager.instance.initialize()
-            SkyBridgeLogger.shared.info("✅ CloudKit 同步已初始化")
+            let cloudKitElapsedMs = Int(Date().timeIntervalSince(cloudKitStartedAt) * 1000)
+            SkyBridgeLogger.shared.info("✅ CloudKit 同步已初始化 (\(cloudKitElapsedMs)ms)")
         } else {
             SkyBridgeLogger.shared.info("ℹ️ CloudKit 同步未开启（SettingsManager.enableCloudKitSync = false）")
         }
@@ -123,8 +142,11 @@ struct SkyBridgeCompassApp: App {
         // 4. 启动 P2P 监听器（按后台策略）
         if SettingsManager.instance.allowBackgroundConnection || scenePhase == .active {
             do {
+                SkyBridgeLogger.shared.info("⏱️ 启动步骤开始：P2P 监听器")
+                let p2pStartedAt = Date()
                 try await connectionManager.startListening()
-                SkyBridgeLogger.shared.info("✅ P2P 监听器已启动")
+                let p2pElapsedMs = Int(Date().timeIntervalSince(p2pStartedAt) * 1000)
+                SkyBridgeLogger.shared.info("✅ P2P 监听器已启动 (\(p2pElapsedMs)ms)")
             } catch {
                 SkyBridgeLogger.shared.error("❌ P2P 监听器启动失败: \(error.localizedDescription)")
             }
@@ -143,10 +165,19 @@ struct SkyBridgeCompassApp: App {
         applyClipboardSettings()
 
         // 7. 启动文件传输监听（iOS 作为接收端：macOS -> iOS）
+        SkyBridgeLogger.shared.info("⏱️ 启动步骤开始：文件传输监听")
+        let fileTransferStartedAt = Date()
         await FileTransferRuntime.shared.startIfNeeded()
+        let fileTransferElapsedMs = Int(Date().timeIntervalSince(fileTransferStartedAt) * 1000)
+        SkyBridgeLogger.shared.info("✅ 文件传输监听步骤完成 (\(fileTransferElapsedMs)ms)")
 
         // 8. 启动灵动岛 Live Activity（显示天气或连接状态）
+        SkyBridgeLogger.shared.info("⏱️ 启动步骤开始：Live Activity")
+        let liveActivityStartedAt = Date()
         await initializeLiveActivity()
+        let liveActivityElapsedMs = Int(Date().timeIntervalSince(liveActivityStartedAt) * 1000)
+        SkyBridgeLogger.shared.info("✅ Live Activity 启动步骤完成 (\(liveActivityElapsedMs)ms)")
+        SkyBridgeLogger.shared.info("✅ 启动服务初始化流程已完成")
     }
 
     /// 初始化灵动岛 Live Activity

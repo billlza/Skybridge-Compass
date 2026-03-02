@@ -237,32 +237,36 @@ struct RealNetworkE2EBenchView: View {
     // Fixed payload sizes (paper-aligned; payload-only handshake bytes)
     private let payloads: [Int] = [687, 12_002]
 
+    private func t(_ key: String) -> String {
+        RuntimeLocalization.string(key)
+    }
+
     var body: some View {
         List {
-            Section("配置") {
-                TextField("Label（如 home_wifi / phone_hotspot）", text: $label)
+            Section(t("配置")) {
+                TextField(t("标签（如 home_wifi / phone_hotspot）"), text: $label)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
 
-                TextField("ARTIFACT_DATE（YYYY-MM-DD）", text: $artifactDate)
+                TextField(t("实验日期（YYYY-MM-DD）"), text: $artifactDate)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
 
-                TextField("Server IP", text: $serverHost)
+                TextField(t("服务器 IP"), text: $serverHost)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
 
-                TextField("Port", text: $serverPort)
+                TextField(t("端口"), text: $serverPort)
                     .keyboardType(.numberPad)
 
-                TextField("Samples（每个 payload）", text: $samples)
+                TextField(t("样本数（每个载荷）"), text: $samples)
                     .keyboardType(.numberPad)
 
-                TextField("Timeout (ms)", text: $timeoutMs)
+                TextField(t("超时（毫秒）"), text: $timeoutMs)
                     .keyboardType(.numberPad)
 
                 HStack {
-                    Text("Payload sizes")
+                    Text(t("载荷大小"))
                     Spacer()
                     Text("687 B / 12,002 B")
                         .font(.system(.body, design: .monospaced))
@@ -270,13 +274,13 @@ struct RealNetworkE2EBenchView: View {
                 }
             }
 
-            Section("运行") {
+            Section(t("运行")) {
                 Button {
                     Task { await run() }
                 } label: {
                     HStack {
                         if isRunning { ProgressView().padding(.trailing, 8) }
-                        Text(isRunning ? "运行中…" : "开始测试")
+                        Text(isRunning ? t("运行中...") : t("开始测试"))
                     }
                 }
                 .disabled(isRunning)
@@ -294,31 +298,33 @@ struct RealNetworkE2EBenchView: View {
                 }
             }
 
-            Section("导出") {
+            Section(t("导出")) {
                 if let samplesFileURL {
                     ShareLink(item: samplesFileURL) {
-                        Label("导出 samples CSV", systemImage: "square.and.arrow.up")
+                        Label(t("导出样本 CSV"), systemImage: "square.and.arrow.up")
                     }
                 } else {
-                    Text("samples CSV：未生成")
+                    Text(t("样本 CSV：未生成"))
                         .foregroundColor(.secondary)
                 }
 
                 if let summaryFileURL {
                     ShareLink(item: summaryFileURL) {
-                        Label("导出 summary CSV", systemImage: "square.and.arrow.up")
+                        Label(t("导出汇总 CSV"), systemImage: "square.and.arrow.up")
                     }
                 } else {
-                    Text("summary CSV：未生成")
+                    Text(t("汇总 CSV：未生成"))
                         .foregroundColor(.secondary)
                 }
 
-                Text("建议通过 AirDrop 导出到 Mac，并放入仓库的 Artifacts/ 目录，再运行 python3 Scripts/aggregate_realnet.py 生成 Supplementary 表。")
+                Text(t("建议通过 AirDrop 导出到 Mac，并放入仓库的 Artifacts/ 目录，再运行 python3 Scripts/aggregate_realnet.py 生成补充表。"))
                     .font(.footnote)
                     .foregroundColor(.secondary)
             }
         }
-        .navigationTitle("RealNet E2E")
+        .scrollContentBackground(.hidden)
+        .background(DashboardView.QuantumGlassBackground())
+        .navigationTitle(t("真实网络端到端"))
         .navigationBarTitleDisplayMode(.inline)
     }
 
@@ -334,15 +340,15 @@ struct RealNetworkE2EBenchView: View {
 
         let lbl = sanitize(label)
         guard let port = UInt16(serverPort.trimmingCharacters(in: .whitespacesAndNewlines)) else {
-            lastError = "Invalid port"
+            lastError = t("端口无效")
             return
         }
         guard let nSamples = Int(samples.trimmingCharacters(in: .whitespacesAndNewlines)), nSamples > 0 else {
-            lastError = "Invalid samples"
+            lastError = t("样本数无效")
             return
         }
         guard let toMs = Int(timeoutMs.trimmingCharacters(in: .whitespacesAndNewlines)), toMs >= 50 else {
-            lastError = "Invalid timeout"
+            lastError = t("超时值无效")
             return
         }
 
@@ -356,7 +362,7 @@ struct RealNetworkE2EBenchView: View {
         summaryRows.reserveCapacity(payloads.count)
 
         for payload in payloads {
-            progressText = "payload=\(payload)B, running \(nSamples) samples…"
+            progressText = "载荷=\(payload)B，正在运行 \(nSamples) 组样本..."
             var rows: [SampleRow] = []
             rows.reserveCapacity(nSamples)
 
@@ -378,7 +384,7 @@ struct RealNetworkE2EBenchView: View {
                 rows.append(row)
                 allSamples.append(row)
                 if (i + 1) % max(1, min(10, nSamples)) == 0 {
-                    progressText = "payload=\(payload)B, progress \(i+1)/\(nSamples)"
+                    progressText = "载荷=\(payload)B，进度 \(i+1)/\(nSamples)"
                 }
             }
 
@@ -391,7 +397,7 @@ struct RealNetworkE2EBenchView: View {
             summaryFileURL = summaryURL
             progressText = "完成：已生成 CSV，可导出"
         } catch {
-            lastError = "Write CSV failed: \(error.localizedDescription)"
+            lastError = t("写入 CSV 失败：") + error.localizedDescription
         }
     }
 

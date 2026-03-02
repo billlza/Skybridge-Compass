@@ -1,6 +1,46 @@
 import SwiftUI
 
-/// 设备发现视图 - 发现和连接其他设备（iOS/macOS/其他平台）
+@available(iOS 17.0, *)
+struct RadarScanOverlay: View {
+    @State private var rotation = 0.0
+    @State private var pulse = false
+    
+    var body: some View {
+        ZStack {
+            Circle()
+                .stroke(Color.cyan.opacity(0.2), lineWidth: 1)
+                .frame(width: pulse ? 400 : 50, height: pulse ? 400 : 50)
+                .opacity(pulse ? 0 : 1)
+            
+            Circle()
+                .stroke(Color.cyan.opacity(0.15), lineWidth: 1)
+                .frame(width: pulse ? 600 : 50, height: pulse ? 600 : 50)
+                .opacity(pulse ? 0 : 1)
+                .animation(.easeOut(duration: 2).delay(0.5).repeatForever(autoreverses: false), value: pulse)
+            
+            Circle()
+                .fill(
+                    AngularGradient(
+                        gradient: Gradient(colors: [Color.clear, Color.cyan.opacity(0.05), Color.cyan.opacity(0.2)]),
+                        center: .center,
+                        startAngle: .degrees(0),
+                        endAngle: .degrees(90)
+                    )
+                )
+                .rotationEffect(.degrees(rotation))
+        }
+        .allowsHitTesting(false)
+        .onAppear {
+            withAnimation(.linear(duration: 2).repeatForever(autoreverses: false)) {
+                rotation = 360.0
+            }
+            withAnimation(.easeOut(duration: 2).repeatForever(autoreverses: false)) {
+                pulse = true
+            }
+        }
+    }
+}
+
 @available(iOS 17.0, *)
 struct DeviceDiscoveryView: View {
     @EnvironmentObject private var discoveryManager: DeviceDiscoveryManager
@@ -11,22 +51,25 @@ struct DeviceDiscoveryView: View {
     @State private var showConnectionSheet = false
     @State private var searchText = ""
     
-    // iPad 自适应布局
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     
     var body: some View {
         NavigationStack {
-            ZStack {
-                // 背景
-                backgroundGradient
-                
-                // 主内容
-                if discoveryManager.discoveredDevices.isEmpty {
-                    emptyStateView
-                } else {
-                    deviceListView
+            ScrollView(showsIndicators: false) {
+                VStack(spacing: 16) {
+                    scanStatusHeader
+                    
+                    if discoveryManager.discoveredDevices.isEmpty {
+                        emptyStateView
+                    } else {
+                        deviceListContent
+                    }
                 }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
             }
+            .background(DashboardView.QuantumGlassBackground())
+            .scrollContentBackground(.hidden)
             .navigationTitle("设备发现")
 #if os(iOS)
             .navigationBarTitleDisplayMode(.large)
@@ -43,74 +86,117 @@ struct DeviceDiscoveryView: View {
         }
     }
     
-    // MARK: - Background
+    // MARK: - Scan Status Header
     
-    private var backgroundGradient: some View {
-        LinearGradient(
-            colors: [
-                Color(red: 0.05, green: 0.05, blue: 0.15),
-                Color(red: 0.1, green: 0.1, blue: 0.2)
-            ],
-            startPoint: .topLeading,
-            endPoint: .bottomTrailing
+    private var scanStatusHeader: some View {
+        HStack(spacing: 14) {
+            ZStack {
+                Circle()
+                    .fill(isScanning ? Color.cyan.opacity(0.15) : Color.white.opacity(0.05))
+                    .frame(width: 48, height: 48)
+                
+                Image(systemName: "antenna.radiowaves.left.and.right")
+                    .font(.system(size: 20, weight: .medium))
+                    .foregroundStyle(isScanning ? .cyan : .white.opacity(0.5))
+            }
+            
+            VStack(alignment: .leading, spacing: 3) {
+                Text(isScanning ? "正在扫描..." : "设备扫描")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundColor(.white)
+                
+                Text(isScanning
+                     ? "发现 \(discoveryManager.discoveredDevices.count) 台设备"
+                     : "点击右上角开始扫描附近设备")
+                    .font(.caption)
+                    .foregroundColor(.white.opacity(0.5))
+            }
+            
+            Spacer()
+            
+            if isScanning {
+                ProgressView()
+                    .tint(.cyan)
+                    .scaleEffect(0.8)
+            }
+        }
+        .padding(16)
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .stroke(
+                    LinearGradient(
+                        colors: [isScanning ? Color.cyan.opacity(0.4) : Color.white.opacity(0.15), .clear],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ),
+                    lineWidth: 1
+                )
         )
-        .ignoresSafeArea()
     }
-    
+
     // MARK: - Empty State
     
     private var emptyStateView: some View {
-        VStack(spacing: 24) {
-            Spacer()
+        VStack(spacing: 20) {
+            Spacer().frame(height: 60)
             
-            // 图标
-            Image(systemName: "wifi.circle.fill")
-                .font(.system(size: 80))
-                .foregroundStyle(.blue.gradient)
+            ZStack {
+                if isScanning {
+                    RadarScanOverlay()
+                        .frame(width: 200, height: 200)
+                }
+                
+                Image(systemName: "wifi.circle")
+                    .font(.system(size: 64, weight: .thin))
+                    .foregroundStyle(.cyan.opacity(0.6))
+            }
+            .frame(height: 200)
             
-            // 标题
-            Text("没有发现设备")
-                .font(.title2.bold())
-                .foregroundColor(.white)
+            Text(isScanning ? "正在搜索附近设备..." : "暂无发现设备")
+                .font(.title3.weight(.medium))
+                .foregroundColor(.white.opacity(0.8))
             
-            // 说明
-            Text("点击右上角扫描按钮开始发现附近的设备")
-                .font(.body)
-                .foregroundColor(.gray)
+            Text("请确保目标设备在同一网络，或已开启跨网发现")
+                .font(.caption)
+                .foregroundColor(.white.opacity(0.4))
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 40)
             
-            // 扫描按钮
-            Button(action: startScanning) {
-                Label("开始扫描", systemImage: "antenna.radiowaves.left.and.right")
-                    .font(.headline)
+            if !isScanning {
+                Button(action: startScanning) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "antenna.radiowaves.left.and.right")
+                        Text("开始扫描")
+                            .fontWeight(.semibold)
+                    }
                     .foregroundColor(.white)
-                    .padding(.horizontal, 32)
-                    .padding(.vertical, 16)
-                    .background(.blue.gradient)
-                    .cornerRadius(12)
+                    .padding(.horizontal, 28)
+                    .padding(.vertical, 14)
+                    .background(
+                        LinearGradient(colors: [.cyan, .blue], startPoint: .leading, endPoint: .trailing)
+                    )
+                    .clipShape(Capsule())
+                }
             }
-            .disabled(isScanning)
             
-            Spacer()
+            Spacer().frame(height: 60)
         }
     }
     
     // MARK: - Device List
     
-    private var deviceListView: some View {
-        ScrollView {
-            LazyVStack(spacing: 12) {
-                ForEach(filteredDevices) { device in
-                    DeviceRowView(
-                        device: device,
-                        connectionStatus: connectionManager.connectionStatusByDeviceId[device.id]
-                    ) {
-                        selectedDevice = device
-                    }
+    private var deviceListContent: some View {
+        LazyVStack(spacing: 10) {
+            ForEach(filteredDevices) { device in
+                DeviceRowView(
+                    device: device,
+                    connectionStatus: connectionManager.connectionStatusByDeviceId[device.id]
+                ) {
+                    selectedDevice = device
                 }
             }
-            .padding()
         }
     }
     
@@ -131,7 +217,7 @@ struct DeviceDiscoveryView: View {
         Button(action: startScanning) {
             Image(systemName: isScanning ? "stop.circle.fill" : "antenna.radiowaves.left.and.right")
                 .font(.title3)
-                .foregroundColor(isScanning ? .red : .blue)
+                .foregroundColor(isScanning ? .red : .cyan)
         }
     }
     

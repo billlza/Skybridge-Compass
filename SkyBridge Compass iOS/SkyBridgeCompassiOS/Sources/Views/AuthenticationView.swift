@@ -11,6 +11,7 @@ struct AuthenticationView: View {
     @State private var errorMessage = ""
     @State private var isLoading = false
     @State private var showSupabaseSettings = false
+    @State private var isSupabaseConfigured = false
 
     init(isRegistering: Bool = false) {
         _isRegistering = State(initialValue: isRegistering)
@@ -18,9 +19,8 @@ struct AuthenticationView: View {
     
     var body: some View {
         ZStack {
-            // 背景渐变
-            backgroundGradient
-            
+            DashboardView.QuantumGlassBackground()
+
             ScrollView {
                 VStack(spacing: 28) {
                     // Logo 和标题
@@ -55,24 +55,13 @@ struct AuthenticationView: View {
         } message: {
             Text(errorMessage)
         }
-        .sheet(isPresented: $showSupabaseSettings) {
+        .sheet(isPresented: $showSupabaseSettings, onDismiss: refreshSupabaseConfigurationStatus) {
             NavigationStack {
                 SupabaseSettingsView()
             }
         }
-    }
-    
-    private var backgroundGradient: some View {
-        LinearGradient(
-            colors: [
-                Color(red: 0.05, green: 0.05, blue: 0.2),
-                Color(red: 0.1, green: 0.05, blue: 0.25),
-                Color(red: 0.05, green: 0.1, blue: 0.3)
-            ],
-            startPoint: .topLeading,
-            endPoint: .bottomTrailing
-        )
-        .ignoresSafeArea()
+        .onAppear(perform: refreshSupabaseConfigurationStatus)
+        .preferredColorScheme(.dark)
     }
     
     private var headerSection: some View {
@@ -114,8 +103,12 @@ struct AuthenticationView: View {
                     .foregroundColor(.white)
             }
             .padding()
-            .background(Color.white.opacity(0.1))
-            .cornerRadius(12)
+            .background(.ultraThinMaterial)
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(LinearGradient(colors: [.white.opacity(0.3), .clear], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1)
+            )
             
             // 密码输入
             HStack {
@@ -128,8 +121,12 @@ struct AuthenticationView: View {
                     .foregroundColor(.white)
             }
             .padding()
-            .background(Color.white.opacity(0.1))
-            .cornerRadius(12)
+            .background(.ultraThinMaterial)
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(LinearGradient(colors: [.white.opacity(0.3), .clear], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1)
+            )
         }
     }
     
@@ -143,19 +140,21 @@ struct AuthenticationView: View {
                 } else {
                     Text(isRegistering ? "注册" : "登录")
                         .font(.headline)
+                        .fontWeight(.bold)
                 }
             }
             .frame(maxWidth: .infinity)
-            .frame(height: 50)
+            .frame(height: 52)
             .background(
                 LinearGradient(
-                    colors: [.blue, .purple],
+                    colors: [.cyan, .purple],
                     startPoint: .leading,
                     endPoint: .trailing
                 )
             )
             .foregroundColor(.white)
-            .cornerRadius(12)
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .shadow(color: .cyan.opacity(0.3), radius: 10, x: 0, y: 5)
             .disabled(isLoading || !isFormValid)
             .opacity(isFormValid ? 1.0 : 0.6)
             
@@ -194,13 +193,13 @@ struct AuthenticationView: View {
                     .font(.headline)
             }
             .frame(maxWidth: .infinity)
-            .frame(height: 50)
-            .background(Color.white.opacity(0.1))
+            .frame(height: 52)
+            .background(.ultraThinMaterial)
             .foregroundColor(.white)
-            .cornerRadius(12)
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(Color.white.opacity(0.3), lineWidth: 1)
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(LinearGradient(colors: [.white.opacity(0.3), .clear], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1)
             )
         }
     }
@@ -223,20 +222,20 @@ struct AuthenticationView: View {
                         .font(.subheadline.weight(.semibold))
                 }
                 .frame(maxWidth: .infinity)
-                .frame(height: 44)
-                .background(Color.white.opacity(0.08))
+                .frame(height: 48)
+                .background(.ultraThinMaterial)
                 .foregroundColor(.white)
-                .cornerRadius(12)
+                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 12)
-                        .stroke(Color.white.opacity(0.25), lineWidth: 1)
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .stroke(LinearGradient(colors: [.white.opacity(0.3), .clear], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1)
                 )
             }
         }
     }
 
-    private var isSupabaseConfigured: Bool {
-        SupabaseService.Configuration.fromEnvironment() != nil
+    private func refreshSupabaseConfigurationStatus() {
+        isSupabaseConfigured = SupabaseService.Configuration.fromEnvironment(logIfMissing: false) != nil
     }
     
     private var isFormValid: Bool {

@@ -2,7 +2,7 @@
 // QuickActionButtonView.swift
 // SkyBridgeCompassiOS
 //
-// 快捷操作按钮组件
+// 快捷操作按钮组件 - Quantum Glass 风格
 //
 
 import SwiftUI
@@ -26,86 +26,47 @@ public struct QuickActionButtonView: View {
     
     public var body: some View {
         Button(action: {
-            // 触感反馈
             let generator = UIImpactFeedbackGenerator(style: .medium)
             generator.impactOccurred()
-            action()
-        }) {
-            VStack(spacing: 8) {
-                // 图标容器
-                ZStack {
-                    Circle()
-                        .fill(
-                            LinearGradient(
-                                colors: [color.opacity(0.3), color.opacity(0.1)],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
-                        .frame(width: 50, height: 50)
-                    
-                    Image(systemName: icon)
-                        .font(.title3)
-                        .foregroundColor(color)
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) {
+                isPressed = true
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) {
+                    isPressed = false
                 }
+                action()
+            }
+        }) {
+            HStack(spacing: 10) {
+                Image(systemName: icon)
+                    .font(.system(size: 20, weight: .semibold))
+                    .foregroundStyle(color.gradient)
+                    .symbolRenderingMode(.multicolor)
                 
-                // 标题
-                Text(RuntimeLocalization.string(title))
-                    .font(.caption)
+                Text(title)
+                    .font(.subheadline)
                     .fontWeight(.medium)
                     .foregroundColor(.white)
             }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 12)
-            .background(Color.white.opacity(isPressed ? 0.1 : 0.05))
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .padding(.horizontal, 20)
+            .padding(.vertical, 14)
+            .background(.ultraThinMaterial)
+            .clipShape(Capsule())
             .overlay(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .stroke(Color.white.opacity(0.1), lineWidth: 1)
+                Capsule()
+                    .stroke(
+                        LinearGradient(
+                            colors: [.white.opacity(0.4), .clear, color.opacity(0.3)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        lineWidth: 1
+                    )
             )
-            .scaleEffect(isPressed ? 0.95 : 1.0)
+            .shadow(color: color.opacity(isPressed ? 0.3 : 0.05), radius: isPressed ? 12 : 8, x: 0, y: isPressed ? 6 : 3)
+            .scaleEffect(isPressed ? 0.92 : 1.0)
         }
-        .buttonStyle(PlainButtonStyle())
-        .onLongPressGesture(minimumDuration: .infinity, pressing: { pressing in
-            withAnimation(.easeInOut(duration: 0.1)) {
-                isPressed = pressing
-            }
-        }, perform: {})
+        .buttonStyle(.plain)
     }
 }
-
-// MARK: - Preview
-#if DEBUG
-@available(iOS 17.0, *)
-struct QuickActionButtonView_Previews: PreviewProvider {
-    static var previews: some View {
-        HStack {
-            QuickActionButtonView(
-                title: "扫描",
-                icon: "magnifyingglass",
-                color: .blue
-            ) {}
-            
-            QuickActionButtonView(
-                title: "传输",
-                icon: "arrow.up.arrow.down",
-                color: .orange
-            ) {}
-            
-            QuickActionButtonView(
-                title: "远程",
-                icon: "display",
-                color: .cyan
-            ) {}
-            
-            QuickActionButtonView(
-                title: "二维码",
-                icon: "qrcode",
-                color: .purple
-            ) {}
-        }
-        .padding()
-        .background(Color.black)
-    }
-}
-#endif

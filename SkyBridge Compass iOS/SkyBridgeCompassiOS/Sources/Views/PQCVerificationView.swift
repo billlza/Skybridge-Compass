@@ -16,7 +16,7 @@ struct PQCVerificationView: View {
     var body: some View {
         NavigationStack {
             ZStack {
-                backgroundGradient
+                DashboardView.QuantumGlassBackground()
                 
                 ScrollView {
                     VStack(spacing: 32) {
@@ -48,19 +48,6 @@ struct PQCVerificationView: View {
             }
         }
     }
-    
-    private var backgroundGradient: some View {
-        LinearGradient(
-            colors: [
-                Color(red: 0.05, green: 0.05, blue: 0.15),
-                Color(red: 0.1, green: 0.1, blue: 0.2)
-            ],
-            startPoint: .topLeading,
-            endPoint: .bottomTrailing
-        )
-        .ignoresSafeArea()
-    }
-    
     // MARK: - Progress Indicator
     
     private var progressIndicator: some View {
