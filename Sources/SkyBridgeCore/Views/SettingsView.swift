@@ -1033,6 +1033,9 @@ public struct SettingsView: View {
                                     await CryptoProviderSelector.shared.clearCache()
                                 }
                             }
+                        Text(localizationManager.localizedString("settings.advanced.pqc.preferXWing.caption"))
+                            .font(.caption)
+                            .foregroundColor(.secondary)
                         HStack {
                             Text(localizationManager.localizedString("settings.advanced.pqc.signatureAlgorithm"))
                             Picker("", selection: $settingsManager.pqcSignatureAlgorithm) {

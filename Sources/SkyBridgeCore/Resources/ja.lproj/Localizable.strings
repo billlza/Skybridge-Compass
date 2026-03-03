@@ -457,10 +457,11 @@
 "settings.advanced.pqc.enableHybridTLS" = "TLSハイブリッドネゴシエーションを有効化（システム対応時）";
 "settings.advanced.pqc.preferXWing" = "X-Wing ハイブリッドスイートを優先（macOS 26+）";
 "settings.advanced.pqc.preferXWing.help" = "起動時に ML-KEM-768 と X-Wing の両方を宣言し、このスイッチは優先順位のみを変更します。";
+"settings.advanced.pqc.preferXWing.caption" = "有効時は X-Wing を優先し、無効時は ML-KEM-768 を優先します（どちらも宣言は維持）。";
 "settings.advanced.pqc.signatureAlgorithm" = "署名アルゴリズム:";
 "settings.advanced.pqc.useSecureEnclaveMLDSA" = "ML-DSAにSecure Enclaveを使用";
 "settings.advanced.pqc.useSecureEnclaveMLKEM" = "ML-KEMにSecure Enclaveを使用";
-"settings.advanced.pqc.note" = "Secure Enclave PQCは macOS 26+（CryptoKit）のみ。macOS 14–15 は liboqs（ML‑KEM‑768/ML‑DSA‑65）へ、OQS 不可の場合は Classic（X25519/Ed25519）へフォールバック。";
+"settings.advanced.pqc.note" = "X-Wing（ハイブリッド）と ML-KEM-768（純PQC）は macOS 26+（CryptoKit）で利用可能で、Secure Enclave PQC も同条件で有効です。macOS 14–15 は liboqs（ML‑KEM‑768/ML‑DSA‑65）へ、OQS 不可の場合は Classic（X25519/Ed25519）へフォールバック。";
 
 "settings.advanced.smoothing.title" = "デバイス信号スムージング";
 "settings.advanced.smoothing.alpha" = "スムージング係数（EMA）";

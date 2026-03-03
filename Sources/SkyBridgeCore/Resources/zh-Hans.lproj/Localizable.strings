@@ -513,10 +513,11 @@
 "settings.advanced.pqc.enableHybridTLS" = "启用TLS混合协商（系统支持时）";
 "settings.advanced.pqc.preferXWing" = "优先 X-Wing 混合套件（macOS 26+）";
 "settings.advanced.pqc.preferXWing.help" = "启动时会同时声明 ML-KEM-768 与 X-Wing；此开关仅调整套件优先级。";
+"settings.advanced.pqc.preferXWing.caption" = "启用后优先协商 X-Wing；关闭则优先 ML-KEM-768（两者能力仍会一并声明）。";
 "settings.advanced.pqc.signatureAlgorithm" = "签名算法:";
 "settings.advanced.pqc.useSecureEnclaveMLDSA" = "ML-DSA 使用 Secure Enclave";
 "settings.advanced.pqc.useSecureEnclaveMLKEM" = "ML-KEM 使用 Secure Enclave";
-"settings.advanced.pqc.note" = "Secure Enclave PQC 仅在 macOS 26+（CryptoKit）可用；macOS 14–15 回退到 liboqs（ML‑KEM‑768/ML‑DSA‑65），OQS 不可用则回退 Classic（X25519/Ed25519）。";
+"settings.advanced.pqc.note" = "X-Wing（混合）与 ML-KEM-768（纯 PQC）在 macOS 26+（CryptoKit）可用；Secure Enclave PQC 也仅在该条件下生效。macOS 14–15 回退到 liboqs（ML‑KEM‑768/ML‑DSA‑65），OQS 不可用则回退 Classic（X25519/Ed25519）。";
 
 "settings.advanced.smoothing.title" = "设备强度平滑";
 "settings.advanced.smoothing.alpha" = "强度平滑系数 (EMA)";

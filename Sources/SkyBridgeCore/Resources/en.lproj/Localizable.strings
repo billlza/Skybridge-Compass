@@ -486,10 +486,11 @@
 "settings.advanced.pqc.enableHybridTLS" = "Enable TLS hybrid negotiation (when supported by system)";
 "settings.advanced.pqc.preferXWing" = "Prefer X-Wing hybrid suite (macOS 26+)";
 "settings.advanced.pqc.preferXWing.help" = "Keep both ML-KEM-768 and X-Wing advertised at startup; this switch only changes suite priority.";
+"settings.advanced.pqc.preferXWing.caption" = "When enabled, X-Wing is prioritized; when disabled, ML-KEM-768 is prioritized (both are still advertised).";
 "settings.advanced.pqc.signatureAlgorithm" = "Signature Algorithm:";
 "settings.advanced.pqc.useSecureEnclaveMLDSA" = "Use Secure Enclave for ML-DSA";
 "settings.advanced.pqc.useSecureEnclaveMLKEM" = "Use Secure Enclave for ML-KEM";
-"settings.advanced.pqc.note" = "Secure Enclave PQC is available only on macOS 26+ (CryptoKit). macOS 14–15 falls back to liboqs (ML-KEM-768/ML-DSA-65) or Classic (X25519/Ed25519) when OQS is unavailable.";
+"settings.advanced.pqc.note" = "X-Wing (hybrid) and ML-KEM-768 (pure PQC) are available on macOS 26+ (CryptoKit), where Secure Enclave PQC is also available. macOS 14–15 falls back to liboqs (ML-KEM-768/ML-DSA-65) or Classic (X25519/Ed25519) when OQS is unavailable.";
 
 "settings.advanced.smoothing.title" = "Device Signal Smoothing";
 "settings.advanced.smoothing.alpha" = "Smoothing Factor (EMA)";
