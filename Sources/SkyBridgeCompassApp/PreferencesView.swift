@@ -887,6 +887,7 @@ struct AdvancedPreferencesView: View {
     @EnvironmentObject private var weatherManager: WeatherIntegrationManager
     @EnvironmentObject private var weatherSettings: WeatherEffectsSettings
     @AppStorage("ssh.trustOnFirstUse") private var trustOnFirstUse: Bool = false
+    @AppStorage("Settings.PreferXWingHybrid") private var preferXWingHybrid: Bool = false
     @State private var knownHosts: [SSHKnownHostEntry] = []
     @State private var showingKnownHostsImporter = false
     @State private var knownHostsMessage: String?
@@ -940,6 +941,16 @@ struct AdvancedPreferencesView: View {
                     Text("调试").tag("Debug")
                 }
                 .help("设置日志记录的详细程度")
+            }
+
+            Section("量子安全套件") {
+                Toggle("优先 X-Wing 混合套件（macOS 26+）", isOn: $preferXWingHybrid)
+                    .help("仅调整本机套件优先顺序；若系统支持，启动时会同时声明 ML-KEM-768 与 X-Wing 能力。")
+                    .onChange(of: preferXWingHybrid) { _, _ in
+                        Task {
+                            await CryptoProviderSelector.shared.clearCache()
+                        }
+                    }
             }
 
             Section("性能优化") {

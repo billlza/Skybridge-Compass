@@ -165,15 +165,16 @@ public struct TwoAttemptHandshakeManager: Sendable {
     ) throws -> AttemptPreparation {
 // 1. 先 build suites
         let buildResult: HandshakeOfferedSuites.BuildResult
+        let negotiationSuites = availableSuitesForNegotiation(using: cryptoProvider)
         switch strategy {
         case .pqcOnly:
             buildResult = HandshakeOfferedSuites.build(
                 strategy: strategy,
-                cryptoProvider: cryptoProvider,
+                availableSuites: negotiationSuites,
                 pqcOfferMode: pqcOfferMode
             )
         case .classicOnly:
-            var availableSuites = cryptoProvider.supportedSuites
+            var availableSuites = negotiationSuites
             let classicSuites = ClassicCryptoProvider().supportedSuites
             for suite in classicSuites where !availableSuites.contains(where: { $0.wireId == suite.wireId }) {
                 availableSuites.append(suite)
@@ -491,9 +492,68 @@ public struct TwoAttemptHandshakeManager: Sendable {
              .identityMismatch, .replayDetected, .secureEnclavePoPRequired,
              .secureEnclaveSignatureInvalid, .keyConfirmationFailed, .suiteSignatureMismatch,
              .supersededByConcurrentAttempt:
- // 其他错误不允许降级
+// 其他错误不允许降级
             return false
         }
+    }
+
+    private static func availableSuitesForNegotiation(
+        using cryptoProvider: any CryptoProvider
+    ) -> [CryptoSuite] {
+        var suites = cryptoProvider.supportedSuites
+        guard cryptoProvider.tier == .nativePQC else {
+            return deduplicatedSuitesByWire(suites)
+        }
+
+        let preferXWing = prefersXWingHybridSuite()
+        let xwingAvailable = isAppleXWingAvailable()
+
+        suites.removeAll { suite in
+            suite.wireId == CryptoSuite.xwingMLDSA.wireId ||
+            suite.wireId == CryptoSuite.mlkem768MLDSA65.wireId
+        }
+
+        if preferXWing, xwingAvailable {
+            suites.insert(.xwingMLDSA, at: 0)
+            suites.insert(.mlkem768MLDSA65, at: 1)
+        } else {
+            suites.insert(.mlkem768MLDSA65, at: 0)
+            if xwingAvailable {
+                suites.insert(.xwingMLDSA, at: 1)
+            }
+        }
+
+        return deduplicatedSuitesByWire(suites)
+    }
+
+    private static func deduplicatedSuitesByWire(_ suites: [CryptoSuite]) -> [CryptoSuite] {
+        var seen = Set<UInt16>()
+        var result: [CryptoSuite] = []
+        result.reserveCapacity(suites.count)
+        for suite in suites where seen.insert(suite.wireId).inserted {
+            result.append(suite)
+        }
+        return result
+    }
+
+    private static func prefersXWingHybridSuite() -> Bool {
+        if let raw = ProcessInfo.processInfo.environment["SB_PQC_PREFERRED_SUITE"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased(),
+           raw == "xwing" || raw == "hybrid" {
+            return true
+        }
+
+        return UserDefaults.standard.bool(forKey: "Settings.PreferXWingHybrid")
+    }
+
+    private static func isAppleXWingAvailable() -> Bool {
+        #if HAS_APPLE_PQC_SDK
+        if #available(iOS 26.0, macOS 26.0, *) {
+            return AppleXWingCryptoProvider.selfTest()
+        }
+        #endif
+        return false
     }
 
  /// 根据策略获取 offeredSuites（使用 CryptoProvider）
@@ -509,15 +569,16 @@ public struct TwoAttemptHandshakeManager: Sendable {
         cryptoProvider: any CryptoProvider,
         pqcOfferMode: HandshakeOfferedSuites.PQCOfferMode = .allAvailable
     ) -> HandshakeOfferedSuites.BuildResult {
+        let negotiationSuites = availableSuitesForNegotiation(using: cryptoProvider)
         switch strategy {
         case .pqcOnly:
             return HandshakeOfferedSuites.build(
                 strategy: strategy,
-                cryptoProvider: cryptoProvider,
+                availableSuites: negotiationSuites,
                 pqcOfferMode: pqcOfferMode
             )
         case .classicOnly:
-            var availableSuites = cryptoProvider.supportedSuites
+            var availableSuites = negotiationSuites
             let classicSuites = ClassicCryptoProvider().supportedSuites
             for suite in classicSuites where !availableSuites.contains(where: { $0.wireId == suite.wireId }) {
                 availableSuites.append(suite)
