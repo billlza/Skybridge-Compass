@@ -57,9 +57,6 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
  /// 当前物理连接的 USB 设备指纹（用于“USB 在线态”判断）
     private var activeUSBPresenceTokens: Set<String> = []
     private var pathMonitor: NWPathMonitor?
-    /// Runtime-only lease for explicit "connect" actions to avoid immediate UI regressions.
-    private var connectedLeaseExpiryByDeviceId: [UUID: Date] = [:]
-    private let connectedLeaseDuration: TimeInterval = 10 * 60
 
  /// 设备清理定时器(移除长时间离线的设备)
     private var cleanupTimer: Timer?
@@ -192,7 +189,6 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         device.connectionStatus = .connected
         device.lastConnectedAt = Date()
         if device.guardStatus == nil { device.guardStatus = "守护中" }
-        extendConnectedLease(for: device.id)
 
         onlineDevices[index] = device
         deviceMap[device.uniqueIdentifier] = device
@@ -226,7 +222,6 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         if let idx = onlineDevices.firstIndex(where: { $0.name == displayName }) {
             var device = onlineDevices[idx]
             applyConnectedStatus(to: &device)
-            extendConnectedLease(for: device.id)
             onlineDevices[idx] = device
             deviceMap[device.uniqueIdentifier] = device
             pruneRecentDuplicates(matching: normalizedRecentIdentifier, keep: device.id)
@@ -239,7 +234,6 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         if let idx = indexOfDeviceMatchingPeerIP(normalizedPeerId) {
             var device = onlineDevices[idx]
             applyConnectedStatus(to: &device)
-            extendConnectedLease(for: device.id)
             onlineDevices[idx] = device
             deviceMap[device.uniqueIdentifier] = device
             pruneRecentDuplicates(matching: normalizedRecentIdentifier, keep: device.id)
@@ -255,7 +249,6 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
             var device = onlineDevices[idx]
             let oldIdentifier = device.uniqueIdentifier
             applyConnectedStatus(to: &device)
-            extendConnectedLease(for: device.id)
             if oldIdentifier.hasPrefix("recent:") && oldIdentifier != normalizedRecentIdentifier {
                 device = Self.copyDevice(device, uniqueIdentifier: normalizedRecentIdentifier)
             }
@@ -302,7 +295,6 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
             isAuthorized: false
         )
         deviceMap[new.uniqueIdentifier] = new
-        extendConnectedLease(for: new.id)
         onlineDevices.append(new)
         pruneRecentDuplicates(matching: normalizedRecentIdentifier, keep: new.id)
         storage.saveDevice(new)
@@ -375,6 +367,14 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] devices in
                 self?.handleUSBDevicesUpdate(devices)
+            }
+            .store(in: &cancellables)
+
+ // 观察安全连接在线态变化，确保连接状态在 UI 上及时刷新
+        ConnectionPresenceService.shared.$activeConnections
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.updateDevicesList()
             }
             .store(in: &cancellables)
     }
@@ -960,29 +960,95 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         // Remove deduped-out duplicates from the map so they don't keep resurfacing.
         let retainedIds = Set(uniqueDevices.map(\.id))
         deviceMap = deviceMap.filter { _, device in retainedIds.contains(device.id) }
-        pruneConnectedLeases(retaining: retainedIds, now: now)
 
         // Update device status:
         // - Preserve "connected" for active secure sessions (ConnectionPresenceService)
         // - Otherwise fall back to lastSeen heuristics
-        let activePeerIds: Set<String> = {
+        let activeConnectionSnapshots: [(id: String, displayName: String, address: String?)] = {
             if #available(macOS 14.0, iOS 17.0, *) {
-                return Set(ConnectionPresenceService.shared.activeConnections.map(\.id))
+                return ConnectionPresenceService.shared.activeConnections.map { connection in
+                    (id: connection.id, displayName: connection.displayName, address: connection.address)
+                }
             }
             return []
         }()
+        let activePeerIds = Set(activeConnectionSnapshots.map(\.id))
         let normalizedActivePeerIds = Set(activePeerIds.map(Self.normalizedPeerIdentifier))
+        let normalizedActiveDisplayNames = Set(
+            activeConnectionSnapshots.map { normalizeDeviceName($0.displayName) }.filter { !$0.isEmpty }
+        )
+
+        func normalizedPresenceAddress(_ raw: String?) -> String? {
+            guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
+                return nil
+            }
+            let token = Self.normalizePeerHostToken(raw)
+            return token.isEmpty ? nil : token
+        }
+
+        let normalizedActiveAddresses = Set(activeConnectionSnapshots.compactMap { connection in
+            if let normalizedAddress = normalizedPresenceAddress(connection.address) {
+                return normalizedAddress
+            }
+            let normalizedPeerId = Self.normalizedPeerIdentifier(connection.id)
+            let extracted = Self.extractIPComponents(fromNormalizedPeerId: normalizedPeerId)
+            if let ipv4 = extracted.ipv4 { return Self.normalizeIPAddress(ipv4) }
+            if let ipv6 = extracted.ipv6 { return Self.normalizeIPAddress(ipv6) }
+            return nil
+        })
+
+        func normalizedStableIdentifier(from uniqueIdentifier: String) -> String? {
+            guard uniqueIdentifier.hasPrefix("id:") else { return nil }
+            let payload = String(uniqueIdentifier.dropFirst("id:".count))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return payload.isEmpty ? nil : payload
+        }
 
         func isActivelyConnected(_ device: OnlineDevice) -> Bool {
             // Our inbound "recently connected" records use uniqueIdentifier: "recent:<peerId>"
             if let normalizedRecent = Self.normalizedRecentIdentifier(from: device.uniqueIdentifier) {
                 let peerId = String(normalizedRecent.dropFirst("recent:".count))
-                return normalizedActivePeerIds.contains(peerId)
+                if normalizedActivePeerIds.contains(peerId) {
+                    return true
+                }
             }
+
+            if device.uniqueIdentifier.hasPrefix("bonjour:"),
+               normalizedActivePeerIds.contains(Self.normalizedPeerIdentifier(device.uniqueIdentifier)) {
+                return true
+            }
+
+            if let stableId = normalizedStableIdentifier(from: device.uniqueIdentifier),
+               (activePeerIds.contains(stableId) ||
+                normalizedActivePeerIds.contains(Self.normalizedPeerIdentifier(stableId))) {
+                return true
+            }
+
+            let normalizedDeviceAddresses = Set([device.ipv4, device.ipv6].compactMap { normalizedPresenceAddress($0) })
+            if !normalizedDeviceAddresses.isEmpty,
+               !normalizedDeviceAddresses.isDisjoint(with: normalizedActiveAddresses) {
+                return true
+            }
+
+            if device.uniqueIdentifier.hasPrefix("ip:") {
+                let payload = String(device.uniqueIdentifier.dropFirst("ip:".count))
+                let normalizedIdentifierIP = Self.normalizeIPAddress(payload)
+                if !normalizedIdentifierIP.isEmpty,
+                   normalizedActiveAddresses.contains(normalizedIdentifierIP) {
+                    return true
+                }
+            }
+
+            let normalizedName = normalizeDeviceName(device.name)
+            if !normalizedName.isEmpty && normalizedActiveDisplayNames.contains(normalizedName) {
+                return true
+            }
+
             return false
         }
 
-        // 更新设备状态
+        // 更新设备状态（论文口径）:
+        // connected 仅由 "活跃会话存在（握手完成）" 驱动，不再使用 UI lease 推断。
         for i in 0..<uniqueDevices.count {
             let device = uniqueDevices[i]
             let usbAttached = isActivelyAttachedOverUSB(device)
@@ -990,16 +1056,20 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                 uniqueDevices[i].lastSeen = now
             }
             let timeSinceLastSeen = now.timeIntervalSince(uniqueDevices[i].lastSeen)
-            let hasConnectedLease = isWithinConnectedLease(for: device.id, at: now)
 
  // 判断设备状态
             if device.isLocalDevice {
-                uniqueDevices[i].connectionStatus = .connected
+                uniqueDevices[i].connectionStatus = .online
+                uniqueDevices[i].lastSeen = now
             } else if isActivelyConnected(device) {
                 uniqueDevices[i].connectionStatus = .connected
-                extendConnectedLease(for: device.id, now: now)
-            } else if hasConnectedLease && (usbAttached || timeSinceLastSeen < 60) {
-                uniqueDevices[i].connectionStatus = .connected
+                uniqueDevices[i].lastSeen = now
+                if uniqueDevices[i].lastConnectedAt == nil {
+                    uniqueDevices[i].lastConnectedAt = now
+                }
+                if uniqueDevices[i].guardStatus == nil {
+                    uniqueDevices[i].guardStatus = "守护中"
+                }
             } else if usbAttached {
                 uniqueDevices[i].connectionStatus = .online
             } else if timeSinceLastSeen < 60 {
@@ -1077,25 +1147,6 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         updateDeviceStats()
 
         logger.debug("📊 设备列表更新: \(self.onlineDevices.count) 台在线")
-    }
-
-    private func extendConnectedLease(for deviceId: UUID, now: Date = Date()) {
-        connectedLeaseExpiryByDeviceId[deviceId] = now.addingTimeInterval(connectedLeaseDuration)
-    }
-
-    private func isWithinConnectedLease(for deviceId: UUID, at now: Date) -> Bool {
-        guard let expiry = connectedLeaseExpiryByDeviceId[deviceId] else { return false }
-        if expiry <= now {
-            connectedLeaseExpiryByDeviceId.removeValue(forKey: deviceId)
-            return false
-        }
-        return true
-    }
-
-    private func pruneConnectedLeases(retaining retainedIds: Set<UUID>, now: Date) {
-        connectedLeaseExpiryByDeviceId = connectedLeaseExpiryByDeviceId.filter { entry in
-            retainedIds.contains(entry.key) && entry.value > now
-        }
     }
 
  /// 更新设备统计
@@ -1444,8 +1495,8 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
             sources: [DeviceSource.unknown],  // 本机设备使用 unknown 作为来源
             discoveredAt: Date(),
             lastSeen: Date(),
-            connectionStatus: .connected,
-            lastConnectedAt: Date(),
+            connectionStatus: .online,
+            lastConnectedAt: nil,
             isLocalDevice: true,
             isAuthorized: true
         )

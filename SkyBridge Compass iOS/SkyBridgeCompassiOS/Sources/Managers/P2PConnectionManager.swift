@@ -570,6 +570,8 @@ public class P2PConnectionManager: ObservableObject {
             }
         }
         
+        // Paper-aligned contract:
+        // connected == handshake finished && session keys ready (not just transport ready).
         SkyBridgeLogger.shared.info("✅ 已连接到 \(device.name)")
         connectionStatusByDeviceId[device.id] = .connected
         connectionErrorByDeviceId.removeValue(forKey: device.id)

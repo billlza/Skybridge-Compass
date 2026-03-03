@@ -307,6 +307,9 @@ public actor KeychainManager {
  ///
  /// nonisolated - Keychain 扫描和删除操作是系统级线程安全的
     public nonisolated func deduplicate(servicePrefix: String) {
+        guard !servicePrefix.isEmpty else { return }
+        if Self.useInMemoryKeychain { return }
+
         let context = makeNonInteractiveAuthContext()
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,

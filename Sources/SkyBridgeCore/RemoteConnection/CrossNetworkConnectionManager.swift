@@ -72,6 +72,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 
  /// 跨网络连接状态 - 符合 Swift 6.2.3 的 Sendable 要求和严格并发控制
  /// 注意：这是CrossNetworkConnectionManager专用的连接状态，与全局ConnectionStatus不同
+ /// 论文口径：`connected` 必须与 `readiness == .handshakeComplete` 对齐。
     public enum CrossNetworkConnectionStatus: Sendable {
         case idle
         case generating
@@ -477,7 +478,10 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 
         self.currentConnection = connection
         self.connectionStatus = .connected
-        self.readiness = .transportReady(sessionId: connection.id)
+        self.readiness = .handshakeComplete(
+            sessionId: connection.id,
+            negotiatedSuite: "quic-transport"
+        )
 
         logger.info("✅ 通过 iCloud 连接成功")
         return connection
@@ -2318,7 +2322,10 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 await MainActor.run {
                     self.currentConnection = connection
                     self.connectionStatus = .connected
-                    self.readiness = .transportReady(sessionId: connection.id)
+                    self.readiness = .handshakeComplete(
+                        sessionId: connection.id,
+                        negotiatedSuite: "quic-transport"
+                    )
                 }
             }
         }
@@ -2336,7 +2343,10 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 await MainActor.run {
                     self.currentConnection = connection
                     self.connectionStatus = .connected
-                    self.readiness = .transportReady(sessionId: connection.id)
+                    self.readiness = .handshakeComplete(
+                        sessionId: connection.id,
+                        negotiatedSuite: "quic-transport"
+                    )
                 }
             }
         }

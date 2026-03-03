@@ -1592,6 +1592,8 @@ private extension CrossNetworkWebRTCManager {
             self.sessionKeys = keys
             self.handshakeDriver = nil
             if self.currentSessionId == sessionId {
+                // Paper-aligned contract:
+                // WebRTC DataChannel ready is only transportReady; connected must wait for handshakeComplete.
                 self.state = .connected(sessionId: sessionId)
                 self.readiness = .handshakeComplete(
                     sessionId: sessionId,

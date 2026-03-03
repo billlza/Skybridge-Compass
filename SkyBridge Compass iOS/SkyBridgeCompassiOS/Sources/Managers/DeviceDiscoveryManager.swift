@@ -233,30 +233,35 @@ public class DeviceDiscoveryManager: ObservableObject {
         if let mode = mode {
             self.discoveryMode = mode
         }
-        
-        guard !isDiscovering else {
+
+        if isDiscovering {
             // 这里很容易被重复触发（UI/scenePhase/设置变更），加节流避免日志刷屏与内存压力
             let now = Date()
             if let lastLogAt = lastAlreadyRunningLogAt,
-               now.timeIntervalSince(lastLogAt) <= 5 {
-                return
+               now.timeIntervalSince(lastLogAt) > 5 {
+                lastAlreadyRunningLogAt = now
+                SkyBridgeLogger.shared.debug("📡 设备发现已在运行，执行自愈检查")
+            } else if lastAlreadyRunningLogAt == nil {
+                lastAlreadyRunningLogAt = now
+                SkyBridgeLogger.shared.debug("📡 设备发现已在运行，执行自愈检查")
             }
 
-            lastAlreadyRunningLogAt = now
-            SkyBridgeLogger.shared.debug("📡 设备发现已在运行")
+            // 关键修复：即使 isDiscovering=true，也要按当前模式补齐/重建浏览器，
+            // 避免网络抖动或系统省电导致 NWBrowser 失效后“手动发现无效”。
+            reconcileBrowsersForCurrentMode()
+            startCleanupTimer()
+            if periodicRefreshIntervalSeconds > 0 {
+                startPeriodicRefreshTimer()
+            }
             return
         }
-        
+
         isDiscovering = true
         error = nil
-        
+
         SkyBridgeLogger.shared.info("🔍 开始设备发现 (模式: \(String(describing: discoveryMode)))")
-        
-        // 为每种服务类型创建浏览器
-        for serviceType in discoveryMode.serviceTypes {
-            startBrowser(for: serviceType)
-        }
-        
+        reconcileBrowsersForCurrentMode()
+
         // 启动设备清理定时器
         startCleanupTimer()
 
@@ -299,9 +304,11 @@ public class DeviceDiscoveryManager: ObservableObject {
         endpointToDeviceId.removeAll()
         deviceLastActivity.removeAll()
         updateDiscoveredDevices()
-        
+
         if !isDiscovering {
             try? await startDiscovery()
+        } else {
+            reconcileBrowsersForCurrentMode()
         }
     }
 
@@ -406,7 +413,38 @@ public class DeviceDiscoveryManager: ObservableObject {
     }
     
     // MARK: - Private Methods - Browser
-    
+
+    private func reconcileBrowsersForCurrentMode() {
+        let desiredTypes = Set(discoveryMode.serviceTypes)
+
+        let staleTypes = browsers.keys.filter { !desiredTypes.contains($0) }
+        for stale in staleTypes {
+            browsers[stale]?.cancel()
+            browsers.removeValue(forKey: stale)
+            SkyBridgeLogger.shared.debug("⏹️ 停止非当前模式浏览器: \(stale.rawValue)")
+        }
+
+        for serviceType in discoveryMode.serviceTypes where browsers[serviceType] == nil {
+            startBrowser(for: serviceType)
+        }
+    }
+
+    private func scheduleBrowserRecovery(for serviceType: DiscoveryServiceType, reason: String) {
+        guard isDiscovering else { return }
+        guard discoveryMode.serviceTypes.contains(serviceType) else { return }
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            try? await Task.sleep(for: .milliseconds(900))
+            guard self.isDiscovering else { return }
+            guard self.discoveryMode.serviceTypes.contains(serviceType) else { return }
+            guard self.browsers[serviceType] == nil else { return }
+
+            SkyBridgeLogger.shared.info("🔁 重建浏览器: \(serviceType.rawValue) reason=\(reason)")
+            self.startBrowser(for: serviceType)
+        }
+    }
+
     /// 启动特定服务类型的浏览器
     private func startBrowser(for serviceType: DiscoveryServiceType) {
         let parameters = NWParameters()
@@ -449,9 +487,13 @@ public class DeviceDiscoveryManager: ObservableObject {
                 SkyBridgeLogger.shared.error("❌ 浏览器失败 (\(serviceType.rawValue)): \(error.localizedDescription)")
             }
             self.error = error
+            browsers.removeValue(forKey: serviceType)
+            scheduleBrowserRecovery(for: serviceType, reason: "failed")
             
         case .cancelled:
             SkyBridgeLogger.shared.debug("⏹️ 浏览器已取消: \(serviceType.rawValue)")
+            browsers.removeValue(forKey: serviceType)
+            scheduleBrowserRecovery(for: serviceType, reason: "cancelled")
             
         default:
             break

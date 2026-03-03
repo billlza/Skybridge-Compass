@@ -46,7 +46,6 @@ struct DeviceDiscoveryView: View {
     @EnvironmentObject private var discoveryManager: DeviceDiscoveryManager
     @EnvironmentObject private var connectionManager: P2PConnectionManager
     
-    @State private var isScanning = false
     @State private var selectedDevice: DiscoveredDevice?
     @State private var showConnectionSheet = false
     @State private var searchText = ""
@@ -210,6 +209,10 @@ struct DeviceDiscoveryView: View {
             }
         }
     }
+
+    private var isScanning: Bool {
+        discoveryManager.isDiscovering
+    }
     
     // MARK: - Scan Button
     
@@ -224,21 +227,19 @@ struct DeviceDiscoveryView: View {
     // MARK: - Actions
     
     private func startScanning() {
-        isScanning.toggle()
-        
         if isScanning {
-            Task {
-                do {
-                    try await discoveryManager.startDiscovery()
-                    SkyBridgeLogger.shared.info("📡 开始扫描设备...")
-                } catch {
-                    SkyBridgeLogger.shared.error("❌ 扫描失败: \(error.localizedDescription)")
-                    isScanning = false
-                }
-            }
-        } else {
             discoveryManager.stopDiscovery()
             SkyBridgeLogger.shared.info("⏹️ 停止扫描")
+            return
+        }
+
+        Task {
+            do {
+                try await discoveryManager.startDiscovery()
+                SkyBridgeLogger.shared.info("📡 开始扫描设备...")
+            } catch {
+                SkyBridgeLogger.shared.error("❌ 扫描失败: \(error.localizedDescription)")
+            }
         }
     }
 }

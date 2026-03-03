@@ -360,6 +360,14 @@ public final class RemoteControlManager: BaseManager {
  /// 启动本机屏幕捕获 + 硬件编码 + 推流
     private func startScreenSharing(to peer: PeerConnection) async {
         logger.info("📺 开始屏幕共享（ScreenCaptureKit + 硬件编码） -> \(peer.id, privacy: .public)")
+
+        guard await ensureScreenCapturePermission() else {
+            logger.error("❌ 屏幕录制权限未授权，无法开始屏幕共享。请在 系统设置 -> 隐私与安全 -> 屏幕录制 中授权 SkyBridge。")
+            screenSharingActive = false
+            stopRemoteControl(from: peer.id)
+            return
+        }
+
         screenSharingActive = true
 
         let streamer = ScreenCaptureKitStreamer()
@@ -413,6 +421,26 @@ public final class RemoteControlManager: BaseManager {
         } catch {
             logger.error("❌ 启动 ScreenCaptureKitStreamer 失败: \(error.localizedDescription, privacy: .public)")
             screenSharingActive = false
+            stopRemoteControl(from: peer.id)
+        }
+    }
+
+    private func ensureScreenCapturePermission() async -> Bool {
+        if CGPreflightScreenCaptureAccess() {
+            return true
+        }
+
+        // Best effort: prompt once if the app has not been granted Screen Recording yet.
+        let requested = await MainActor.run { CGRequestScreenCaptureAccess() }
+        if requested {
+            return true
+        }
+
+        do {
+            _ = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+            return true
+        } catch {
+            return false
         }
     }
 

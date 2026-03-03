@@ -1020,6 +1020,7 @@ public struct EnhancedDeviceDiscoveryView: View {
         }
 
         private var resolvedGuardStatus: String? {
+            if device.isLocalDevice { return nil }
             if let guardStatus = device.guardStatus,
                !guardStatus.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 return guardStatus
@@ -1028,6 +1029,9 @@ public struct EnhancedDeviceDiscoveryView: View {
         }
 
         private var statusText: String {
+            if device.isLocalDevice {
+                return "在线"
+            }
             guard device.connectionStatus == .connected else {
                 return device.connectionStatus.rawValue
             }
@@ -1055,7 +1059,7 @@ public struct EnhancedDeviceDiscoveryView: View {
             guard !activeConnections.isEmpty else { return nil }
 
             if device.isLocalDevice {
-                return activeConnections.max(by: { $0.connectedAt < $1.connectedAt })
+                return nil
             }
 
             let normalizedName = normalizedToken(device.name)

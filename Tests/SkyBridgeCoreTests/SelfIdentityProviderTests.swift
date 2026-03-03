@@ -6,12 +6,10 @@ import CryptoKit
 /// 验证本机强身份生成、持久化和判定逻辑
 @available(macOS 14.0, *)
 final class SelfIdentityProviderTests: XCTestCase {
-    
-    override func setUp() async throws {
-        try await super.setUp()
- // 测试前清理 Keychain（避免脏数据）
-        KeychainManager.shared.deduplicate(servicePrefix: "SkyBridge.SelfIdentity")
-    }
+    private static let localNameCollisionProbe = {
+        let host = ProcessInfo.processInfo.hostName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return host.isEmpty ? "SkyBridgeLocalNameProbe" : host
+    }()
     
  // MARK: - 基础功能测试
     
@@ -176,7 +174,7 @@ final class SelfIdentityProviderTests: XCTestCase {
  // 构造同名但强身份不匹配的设备
         let remoteDevice = DiscoveredDevice(
             id: UUID(),
-            name: Host.current().localizedName ?? "本机", // 同名
+            name: Self.localNameCollisionProbe, // 同名（固定字符串，避免 Host.current() 触发阻塞）
             ipv4: "192.168.1.200",
             ipv6: nil,
             services: ["_skybridge._tcp"],
@@ -294,7 +292,7 @@ final class SelfIdentityProviderTests: XCTestCase {
         let selfId = await provider.snapshot()
         let resolver = IdentityResolver()
         
-        let deviceName = Host.current().localizedName ?? "MacBook Pro"
+        let deviceName = Self.localNameCollisionProbe
         
  // 构造一台设备：IP 相同 + 名称相同，但强身份不匹配
         let collisionDevice = DiscoveredDevice(
@@ -327,4 +325,3 @@ extension String {
         return regex.firstMatch(in: self, options: [], range: range) != nil
     }
 }
-

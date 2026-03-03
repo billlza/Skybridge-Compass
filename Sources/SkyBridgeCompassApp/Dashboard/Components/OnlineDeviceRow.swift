@@ -175,6 +175,9 @@ public struct OnlineDeviceRow: View {
     }
 
     private var statusText: String {
+        if device.isLocalDevice {
+            return device.connectionStatus.rawValue
+        }
         guard device.connectionStatus == .connected else {
             return device.connectionStatus.rawValue
         }
@@ -188,7 +191,7 @@ public struct OnlineDeviceRow: View {
         guard !activeConnections.isEmpty else { return nil }
 
         if device.isLocalDevice {
-            return activeConnections.max(by: { $0.connectedAt < $1.connectedAt })
+            return nil
         }
 
         let normalizedName = normalizedToken(device.name)
