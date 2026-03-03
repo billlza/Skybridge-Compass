@@ -37,6 +37,7 @@ public struct SettingsView: View {
     @State private var showingTransferPathFallbackAlert = false
     @State private var transferPathFallbackMessage = ""
     @State private var newCustomServiceType = ""
+    @AppStorage("Settings.PreferXWingHybrid") private var preferXWingHybrid: Bool = false
     
  // MARK: - 设置标签页
     enum SettingsTab: String, CaseIterable {
@@ -1025,6 +1026,13 @@ public struct SettingsView: View {
                     VStack(alignment: .leading, spacing: 12) {
                         Toggle(localizationManager.localizedString("settings.advanced.pqc.enableAppLayer"), isOn: $settingsManager.enablePQC)
                         Toggle(localizationManager.localizedString("settings.advanced.pqc.enableHybridTLS"), isOn: $settingsManager.enablePQCHybridTLS)
+                        Toggle(localizationManager.localizedString("settings.advanced.pqc.preferXWing"), isOn: $preferXWingHybrid)
+                            .help(localizationManager.localizedString("settings.advanced.pqc.preferXWing.help"))
+                            .onChange(of: preferXWingHybrid) { _, _ in
+                                Task {
+                                    await CryptoProviderSelector.shared.clearCache()
+                                }
+                            }
                         HStack {
                             Text(localizationManager.localizedString("settings.advanced.pqc.signatureAlgorithm"))
                             Picker("", selection: $settingsManager.pqcSignatureAlgorithm) {

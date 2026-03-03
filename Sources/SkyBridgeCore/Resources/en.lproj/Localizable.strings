@@ -484,6 +484,8 @@
 "settings.advanced.pqc.title" = "Post-Quantum Security";
 "settings.advanced.pqc.enableAppLayer" = "Enable post-quantum cryptography (app layer)";
 "settings.advanced.pqc.enableHybridTLS" = "Enable TLS hybrid negotiation (when supported by system)";
+"settings.advanced.pqc.preferXWing" = "Prefer X-Wing hybrid suite (macOS 26+)";
+"settings.advanced.pqc.preferXWing.help" = "Keep both ML-KEM-768 and X-Wing advertised at startup; this switch only changes suite priority.";
 "settings.advanced.pqc.signatureAlgorithm" = "Signature Algorithm:";
 "settings.advanced.pqc.useSecureEnclaveMLDSA" = "Use Secure Enclave for ML-DSA";
 "settings.advanced.pqc.useSecureEnclaveMLKEM" = "Use Secure Enclave for ML-KEM";

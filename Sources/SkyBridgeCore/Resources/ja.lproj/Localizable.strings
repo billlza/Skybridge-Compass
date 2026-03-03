@@ -455,6 +455,8 @@
 "settings.advanced.pqc.title" = "量子耐性セキュリティ";
 "settings.advanced.pqc.enableAppLayer" = "ポスト量子暗号（アプリ層）を有効化";
 "settings.advanced.pqc.enableHybridTLS" = "TLSハイブリッドネゴシエーションを有効化（システム対応時）";
+"settings.advanced.pqc.preferXWing" = "X-Wing ハイブリッドスイートを優先（macOS 26+）";
+"settings.advanced.pqc.preferXWing.help" = "起動時に ML-KEM-768 と X-Wing の両方を宣言し、このスイッチは優先順位のみを変更します。";
 "settings.advanced.pqc.signatureAlgorithm" = "署名アルゴリズム:";
 "settings.advanced.pqc.useSecureEnclaveMLDSA" = "ML-DSAにSecure Enclaveを使用";
 "settings.advanced.pqc.useSecureEnclaveMLKEM" = "ML-KEMにSecure Enclaveを使用";
