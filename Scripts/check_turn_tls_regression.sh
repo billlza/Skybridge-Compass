@@ -160,12 +160,15 @@ echo "[OK] TLS handshake succeeded on ${TURN_TLS_HOST}:${TURN_TLS_PORT}"
 if [[ "${CHECK_WS}" == "1" ]]; then
   echo "[STEP] WebSocket upgrade check"
   ws_code="$(
-    curl -sS -o /dev/null -w "%{http_code}" \
-      -H "Connection: Upgrade" \
-      -H "Upgrade: websocket" \
-      -H "Sec-WebSocket-Version: 13" \
-      -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
-      "${BASE_URL}/ws"
+    (
+      curl --http1.1 --max-time 8 -sS -o /dev/null -w "%{http_code}" \
+        -H "Connection: Upgrade" \
+        -H "Upgrade: websocket" \
+        -H "Sec-WebSocket-Version: 13" \
+        -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
+        "${BASE_URL}/ws" \
+        2>/dev/null
+    ) || true
   )"
   if [[ "${ws_code}" != "101" ]]; then
     echo "[FAIL] GET /ws upgrade expected 101, got ${ws_code}" >&2
