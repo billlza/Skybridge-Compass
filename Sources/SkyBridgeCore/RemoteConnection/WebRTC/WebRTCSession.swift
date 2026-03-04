@@ -70,13 +70,25 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     
     public struct ICEConfig: Sendable {
         public var stunURL: String
-        public var turnURL: String
+        public var turnURLs: [String]
         public var turnUsername: String
         public var turnPassword: String
+
+        public var turnURL: String {
+            get { turnURLs.first ?? "" }
+            set { turnURLs = [newValue] }
+        }
+
+        public init(stunURL: String, turnURLs: [String], turnUsername: String, turnPassword: String) {
+            self.stunURL = stunURL
+            self.turnURLs = turnURLs
+            self.turnUsername = turnUsername
+            self.turnPassword = turnPassword
+        }
         
         public init(stunURL: String, turnURL: String, turnUsername: String, turnPassword: String) {
             self.stunURL = stunURL
-            self.turnURL = turnURL
+            self.turnURLs = turnURL.isEmpty ? [] : [turnURL]
             self.turnUsername = turnUsername
             self.turnPassword = turnPassword
         }
@@ -200,18 +212,26 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             logger.warning("⚠️ Invalid STUN URL. sessionId=\(self.sessionId, privacy: .public)")
         }
 
-        let turnURL = Self.normalizedICEURL(ice.turnURL)
+        let turnURLs = ice.turnURLs.compactMap(Self.normalizedICEURL)
+        let validTurnURLs = Array(Set(turnURLs)).sorted { lhs, rhs in
+            let lhsLower = lhs.lowercased()
+            let rhsLower = rhs.lowercased()
+            if lhsLower.hasPrefix("turns:") == rhsLower.hasPrefix("turns:") {
+                return lhs < rhs
+            }
+            return lhsLower.hasPrefix("turns:")
+        }
         let turnUsername = Self.normalizedCredential(ice.turnUsername)
         let turnPassword = Self.normalizedCredential(ice.turnPassword)
 
-        if let turnURL, (turnURL.hasPrefix("turn:") || turnURL.hasPrefix("turns:")) {
+        if !validTurnURLs.isEmpty {
             if !turnUsername.isEmpty, !turnPassword.isEmpty {
-                servers.append(RTCIceServer(urlStrings: [turnURL], username: turnUsername, credential: turnPassword))
+                servers.append(RTCIceServer(urlStrings: validTurnURLs, username: turnUsername, credential: turnPassword))
             } else {
                 logger.warning("⚠️ TURN credentials missing, degraded to STUN-only. sessionId=\(self.sessionId, privacy: .public)")
             }
-        } else if !ice.turnURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            logger.warning("⚠️ Invalid TURN URL. sessionId=\(self.sessionId, privacy: .public)")
+        } else if !ice.turnURLs.isEmpty {
+            logger.warning("⚠️ Invalid TURN URLs. sessionId=\(self.sessionId, privacy: .public)")
         }
 
         if servers.isEmpty {

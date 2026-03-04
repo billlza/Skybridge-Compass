@@ -85,7 +85,9 @@ private enum CrossNetworkServerConfig {
     static let signalingWebSocketURL = "wss://api.nebula-technologies.net/ws"
     static let signalingServerURL = "https://api.nebula-technologies.net"
     static let stunURL = "stun:54.92.79.99:3478"
-    static let turnURL = "turn:54.92.79.99:3478"
+    static let turnURL = "turn:54.92.79.99:3478?transport=udp"
+    static let turnTLSURL = "turns:54.92.79.99:5349?transport=tcp"
+    static let turnURLs = [turnTLSURL, turnURL]
 
     static var clientAPIKey: String {
         ProcessInfo.processInfo.environment["SKYBRIDGE_CLIENT_API_KEY"] ?? "skybridge-client-v1"
@@ -95,12 +97,12 @@ private enum CrossNetworkServerConfig {
         let creds = await CrossNetworkTURNCredentialService.shared.getCredentials()
         let turnUsername = normalizedValue(creds.username)
         let turnPassword = normalizedValue(creds.password)
-        let turnURL = firstValidTurnURI(from: creds.uris) ?? CrossNetworkServerConfig.turnURL
-        let shouldUseTURN = !turnUsername.isEmpty && !turnPassword.isEmpty
+        let turnURIs = preferredTurnURIs(from: creds.uris, fallback: turnURLs)
+        let shouldUseTURN = !turnUsername.isEmpty && !turnPassword.isEmpty && !turnURIs.isEmpty
 
         return WebRTCSession.ICEConfig(
             stunURL: stunURL,
-            turnURL: shouldUseTURN ? turnURL : "",
+            turnURLs: shouldUseTURN ? turnURIs : [],
             turnUsername: shouldUseTURN ? turnUsername : "",
             turnPassword: shouldUseTURN ? turnPassword : ""
         )
@@ -110,10 +112,42 @@ private enum CrossNetworkServerConfig {
         raw.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private static func firstValidTurnURI(from uris: [String]) -> String? {
-        uris
+    fileprivate static func normalizedTurnURIs(_ uris: [String]) -> [String] {
+        var seen = Set<String>()
+        return uris
             .map { normalizedValue($0) }
-            .first { $0.hasPrefix("turn:") || $0.hasPrefix("turns:") }
+            .filter { uri in
+                let lower = uri.lowercased()
+                guard lower.hasPrefix("turn:") || lower.hasPrefix("turns:") else {
+                    return false
+                }
+                if seen.contains(lower) {
+                    return false
+                }
+                seen.insert(lower)
+                return true
+            }
+    }
+
+    fileprivate static func turnPriority(_ uri: String) -> Int {
+        let lower = uri.lowercased()
+        if lower.hasPrefix("turns:") { return 0 }
+        if lower.contains("transport=tcp") { return 1 }
+        return 2
+    }
+
+    fileprivate static func preferredTurnURIs(from uris: [String], fallback: [String]) -> [String] {
+        let candidates = normalizedTurnURIs(uris)
+        let effective = candidates.isEmpty ? normalizedTurnURIs(fallback) : candidates
+        return effective
+            .enumerated()
+            .sorted { lhs, rhs in
+                let lp = turnPriority(lhs.element)
+                let rp = turnPriority(rhs.element)
+                if lp == rp { return lhs.offset < rhs.offset }
+                return lp < rp
+            }
+            .map(\.element)
     }
 }
 
@@ -142,6 +176,8 @@ private actor CrossNetworkTURNCredentialService {
         let password: String
         let ttl: Int
         let uris: [String]?
+        let expiresAt: Int?
+        let mode: String?
     }
 
     func getCredentials() async -> TURNCredentials {
@@ -164,6 +200,9 @@ private actor CrossNetworkTURNCredentialService {
         req.httpMethod = "GET"
         req.setValue("application/json", forHTTPHeaderField: "Accept")
         req.setValue(CrossNetworkServerConfig.clientAPIKey, forHTTPHeaderField: "X-API-Key")
+        if let deviceId = resolvedDeviceIdentifier() {
+            req.setValue(deviceId, forHTTPHeaderField: "X-Device-Id")
+        }
         req.timeoutInterval = 10
 
         let (data, resp) = try await URLSession.shared.data(for: req)
@@ -173,12 +212,22 @@ private actor CrossNetworkTURNCredentialService {
             throw NSError(domain: "TURN", code: http.statusCode, userInfo: ["body": body])
         }
         let decoded = try JSONDecoder().decode(ServerResponse.self, from: data)
-        let expiresAt = Date().addingTimeInterval(TimeInterval(decoded.ttl))
+        let ttl = max(60, decoded.ttl)
+        let expiresAt: Date
+        if let expiresAtEpoch = decoded.expiresAt, expiresAtEpoch > 0 {
+            expiresAt = Date(timeIntervalSince1970: TimeInterval(expiresAtEpoch))
+        } else {
+            expiresAt = Date().addingTimeInterval(TimeInterval(ttl))
+        }
+        let uris = CrossNetworkServerConfig.preferredTurnURIs(
+            from: decoded.uris ?? [],
+            fallback: CrossNetworkServerConfig.turnURLs
+        )
         return TURNCredentials(
             username: decoded.username,
             password: decoded.password,
-            ttl: decoded.ttl,
-            uris: decoded.uris ?? [CrossNetworkServerConfig.turnURL],
+            ttl: ttl,
+            uris: uris,
             expiresAt: expiresAt
         )
     }
@@ -205,9 +254,20 @@ private actor CrossNetworkTURNCredentialService {
             username: username,
             password: password,
             ttl: 3600,
-            uris: [CrossNetworkServerConfig.turnURL],
+            uris: CrossNetworkServerConfig.turnURLs,
             expiresAt: Date().addingTimeInterval(3600)
         )
+    }
+
+    private func resolvedDeviceIdentifier() -> String? {
+        let envID = ProcessInfo.processInfo.environment["SKYBRIDGE_DEVICE_ID"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !envID.isEmpty {
+            return envID
+        }
+        let keychainID = KeychainManager.shared.getOrGenerateDeviceId()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return keychainID.isEmpty ? nil : keychainID
     }
 }
 

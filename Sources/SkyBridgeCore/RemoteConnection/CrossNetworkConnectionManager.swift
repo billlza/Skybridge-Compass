@@ -36,15 +36,12 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 
     private let logger = Logger(subsystem: "com.skybridge.connection", category: "CrossNetwork")
     private let signalServer: SignalServerClient
-    private let iceServers: [String] = [
-        // SkyBridge 自建服务器 (首选)
-        SkyBridgeServerConfig.stunURL,
-        // TURN（中继兜底）
-        SkyBridgeServerConfig.turnURL,
-        // 公共备用服务器
-        "stun:stun.l.google.com:19302",
-        "stun:stun1.l.google.com:19302"
-    ]
+    private let iceServers: [String] = [SkyBridgeServerConfig.stunURL]
+        + SkyBridgeServerConfig.turnURLs
+        + [
+            "stun:stun.l.google.com:19302",
+            "stun:stun1.l.google.com:19302"
+        ]
     private var activeListeners: [ConnectionListener] = []
     private var deviceFingerprint: String
     private static let shortCodeAlphabet = Array("ABCDEFGHJKLMNPQRSTUVWXYZ23456789")
@@ -116,10 +113,12 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     }
 
     private static func hasUsableTURNCredentials(_ ice: WebRTCSession.ICEConfig) -> Bool {
-        let turnURL = ice.turnURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasTurnURL = ice.turnURLs.contains {
+            !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
         let username = ice.turnUsername.trimmingCharacters(in: .whitespacesAndNewlines)
         let password = ice.turnPassword.trimmingCharacters(in: .whitespacesAndNewlines)
-        return !turnURL.isEmpty && !username.isEmpty && !password.isEmpty
+        return hasTurnURL && !username.isEmpty && !password.isEmpty
     }
 
     private func logICEPlan(_ ice: WebRTCSession.ICEConfig, context: String) {

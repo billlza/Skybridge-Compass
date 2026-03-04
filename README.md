@@ -42,7 +42,7 @@ SkyBridge Compass Pro 是一个以 **跨平台协议内核（SkyBridgeCore）** 
 
 - **实现入口**：`Sources/SkyBridgeCore/RemoteConnection/CrossNetworkConnectionManager.swift`（已开始落地 offer/answer/ICE 信令与 DataChannel 传输层）
 - **信令地址**：`Sources/SkyBridgeCore/Config/ServerConfig.swift` 中的 `SkyBridgeServerConfig.signalingWebSocketURL`
-- **TURN/STUN**：同上 `SkyBridgeServerConfig.stunURL / turnURL / turnUsername / turnPassword`
+- **TURN/STUN**：同上 `SkyBridgeServerConfig.stunURL / turnURLs`（默认 `turns:5349` 优先，`turn:3478` 兜底）
 
 ### 服务器端口（EC2 安全组建议）
 
@@ -51,7 +51,8 @@ SkyBridge Compass Pro 是一个以 **跨平台协议内核（SkyBridgeCore）** 
 - **TURN (TLS)**：`5349/tcp`（推荐）
 - **TURN relay 端口段**：`49152–65535/udp`
 
-> 生产环境建议使用 **短期 TURN 凭据**（例如 coturn 的 REST API / shared secret），避免在客户端硬编码用户名密码。
+> 生产环境默认强制 **短期 TURN 凭据**（`mode=shared_secret_hmac`）。
+> 除非手动开启 `TURN_ALLOW_STATIC_FALLBACK=true`，否则服务端不会回退静态长期凭据。
 
 ### 信令服务部署（推荐生产流程）
 
@@ -72,6 +73,19 @@ bash Server/skybridge-signaling/deploy/scripts/deploy_remote.sh \
 ```
 
 该流程会强制校验 `/api/turn/credentials` 路由语义，避免“代码已修复但线上仍旧 404”的配置漂移问题。
+
+上线前建议额外执行 TURN/TLS 回归脚本：
+
+```bash
+TURN_CLIENT_API_KEY=<same-as-production.env> \
+bash Scripts/check_turn_tls_regression.sh https://api.nebula-technologies.net
+```
+
+脚本会检查：
+- `/health` 与 `/api/turn/credentials` 可达性
+- 返回模式是否为短期凭据（默认拒绝 static fallback）
+- 返回的 URI 是否包含 `turns:...:5349`
+- `5349/TLS` 握手、`/ws` 升级（101）和 STUN UDP 探测
 
 ## 构建与运行（macOS）
 

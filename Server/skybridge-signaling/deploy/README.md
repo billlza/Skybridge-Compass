@@ -36,6 +36,13 @@ Expected behavior:
 - `GET /` returns JSON with advertised endpoints.
 - `GET /health` returns `200`.
 - `GET /api/turn/credentials` is not `404`.
+- `GET /api/turn/credentials` returns short-lived mode (`mode=shared_secret_hmac`) in production.
+
+Recommended pre-release regression:
+
+```bash
+bash Scripts/check_turn_tls_regression.sh https://api.nebula-technologies.net
+```
 
 ## 4. Rollback
 
@@ -57,6 +64,8 @@ bash Server/skybridge-signaling/deploy/scripts/rollback_remote.sh \
 ## Security notes
 
 - Keep `ALLOW_INSECURE=false` in production.
-- Prefer `TURN_SHARED_SECRET` short-lived credentials over static TURN password.
+- Must configure `TURN_SHARED_SECRET` for short-lived TURN REST credentials.
+- Keep `TURN_ALLOW_STATIC_FALLBACK=false` in production (enable only for temporary rollback).
+- Keep `TURN_URIS` dual-stack (`turns:...:5349?transport=tcp` first, `turn:...:3478?transport=udp` fallback).
 - Keep `TURN_ENFORCE_API_KEY=true` and align `TURN_CLIENT_API_KEY` with app-side `SKYBRIDGE_CLIENT_API_KEY`.
 - Keep Node bound to localhost (`HOST=127.0.0.1`) and expose through Nginx TLS only.

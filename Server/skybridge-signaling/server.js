@@ -58,10 +58,11 @@ const TURN_CRED_TTL_SECONDS = Number(process.env.TURN_CRED_TTL_SECONDS || 3600);
 const TURN_SHARED_SECRET = process.env.TURN_SHARED_SECRET || '';
 const TURN_STATIC_USERNAME = process.env.TURN_USERNAME || process.env.SKYBRIDGE_TURN_USERNAME || '';
 const TURN_STATIC_PASSWORD = process.env.TURN_PASSWORD || process.env.SKYBRIDGE_TURN_PASSWORD || '';
-const TURN_URIS = (process.env.TURN_URIS || process.env.TURN_URLS || 'turn:54.92.79.99:3478')
+const TURN_ALLOW_STATIC_FALLBACK = /^(1|true|yes)$/i.test(process.env.TURN_ALLOW_STATIC_FALLBACK || 'false');
+const TURN_URIS = (process.env.TURN_URIS || process.env.TURN_URLS || 'turns:54.92.79.99:5349?transport=tcp,turn:54.92.79.99:3478?transport=udp')
   .split(',')
   .map((s) => s.trim())
-  .filter(Boolean);
+  .filter((s) => Boolean(s) && /^(turn:|turns:)/i.test(s));
 
 // Brute-force mitigation for /api/lookup (code enumeration)
 const LOOKUP_INVALID_WINDOW_MS = Number(process.env.LOOKUP_INVALID_WINDOW_MS || 60_000);
@@ -358,19 +359,34 @@ app.get('/api/turn/credentials', rlTurn, (req, res) => {
   // Preferred mode: generate short-lived TURN REST credentials from shared secret.
   if (TURN_SHARED_SECRET) {
     const clientTag = safeClientTag(req.get('X-Device-Id') || req.query.deviceId || req.ip);
-    const username = `${Math.floor(now() / 1000) + ttl}:${clientTag}`;
+    const expiresAtEpoch = Math.floor(now() / 1000) + ttl;
+    const username = `${expiresAtEpoch}:${clientTag}`;
     const password = crypto.createHmac('sha1', TURN_SHARED_SECRET).update(username).digest('base64');
-    return res.json({ username, password, ttl, uris: TURN_URIS });
+    return res.json({
+      username,
+      password,
+      ttl,
+      expiresAt: expiresAtEpoch,
+      uris: TURN_URIS,
+      mode: 'shared_secret_hmac'
+    });
   }
 
-  // Fallback mode: static long-term credentials (still avoids 404 and preserves compatibility).
-  if (TURN_STATIC_USERNAME && TURN_STATIC_PASSWORD) {
+  // Optional fallback mode: static long-term credentials.
+  // Disabled by default to avoid accidentally shipping long-lived shared credentials.
+  if (TURN_ALLOW_STATIC_FALLBACK && TURN_STATIC_USERNAME && TURN_STATIC_PASSWORD) {
     return res.json({
       username: TURN_STATIC_USERNAME,
       password: TURN_STATIC_PASSWORD,
       ttl,
-      uris: TURN_URIS
+      expiresAt: null,
+      uris: TURN_URIS,
+      mode: 'static_fallback'
     });
+  }
+
+  if (!TURN_SHARED_SECRET && TURN_STATIC_USERNAME && TURN_STATIC_PASSWORD && !TURN_ALLOW_STATIC_FALLBACK) {
+    return res.status(503).json({ error: 'turn_static_fallback_disabled' });
   }
 
   return res.status(503).json({ error: 'turn_credentials_not_configured' });

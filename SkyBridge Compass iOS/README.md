@@ -86,8 +86,15 @@ macOS 端已经有 `TrustSyncService/TrustRecord`；iOS 端目前还没有完整
 使用 Network Framework 的 P2P 功能：
 
 1. **本地网络发现**: Bonjour + NWBrowser
-2. **跨网络连接**: iCloud Relay / STUN
+2. **跨网络连接**: WebRTC ICE（`turns:5349` 优先，`turn:3478` 兜底）
 3. **加密通道**: TLS 1.3 + PQC 层
+
+### TURN（iOS + macOS 互通）策略
+
+- 客户端通过 `/api/turn/credentials` 获取短期 TURN 凭据（带本机 `X-Device-Id` 标识）。
+- iOS 端会把服务端返回的 **多个 TURN URI** 全量注入 ICE（不再只取单个 URI）。
+- 生产模式默认要求服务端返回 `mode=shared_secret_hmac`。
+- 若服务端不可用且本地未配置回退凭据，将自动降级 STUN-only（不在客户端硬编码长期密码）。
 
 ### 数据同步
 - CloudKit 同步设备列表和信任关系

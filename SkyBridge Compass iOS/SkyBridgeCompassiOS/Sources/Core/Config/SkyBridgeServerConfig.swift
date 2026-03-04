@@ -14,7 +14,9 @@ public enum SkyBridgeServerConfig {
 
     // STUN/TURN hosts (Cloudflare doesn't proxy UDP, so these are direct)
     public static let stunURL = "stun:54.92.79.99:3478"
-    public static let turnURL = "turn:54.92.79.99:3478"
+    public static let turnURL = "turn:54.92.79.99:3478?transport=udp"
+    public static let turnTLSURL = "turns:54.92.79.99:5349?transport=tcp"
+    public static let turnURLs = [turnTLSURL, turnURL]
 
     /// Client API key used for requesting dynamic TURN credentials.
     /// This is NOT a secret; it's only used to tag legitimate client traffic.
@@ -27,12 +29,12 @@ public enum SkyBridgeServerConfig {
         let creds = await TURNCredentialService.shared.getCredentials()
         let turnUsername = normalizedValue(creds.username)
         let turnPassword = normalizedValue(creds.password)
-        let turnURL = firstValidTurnURI(from: creds.uris) ?? self.turnURL
-        let shouldUseTURN = !turnUsername.isEmpty && !turnPassword.isEmpty
+        let turnURIs = preferredTurnURIs(from: creds.uris, fallback: turnURLs)
+        let shouldUseTURN = !turnUsername.isEmpty && !turnPassword.isEmpty && !turnURIs.isEmpty
 
         return WebRTCSession.ICEConfig(
             stunURL: stunURL,
-            turnURL: shouldUseTURN ? turnURL : "",
+            turnURLs: shouldUseTURN ? turnURIs : [],
             turnUsername: shouldUseTURN ? turnUsername : "",
             turnPassword: shouldUseTURN ? turnPassword : ""
         )
@@ -42,10 +44,42 @@ public enum SkyBridgeServerConfig {
         raw.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private static func firstValidTurnURI(from uris: [String]) -> String? {
-        uris
+    fileprivate static func normalizedTurnURIs(_ uris: [String]) -> [String] {
+        var seen = Set<String>()
+        return uris
             .map { normalizedValue($0) }
-            .first { $0.hasPrefix("turn:") || $0.hasPrefix("turns:") }
+            .filter { uri in
+                let lower = uri.lowercased()
+                guard lower.hasPrefix("turn:") || lower.hasPrefix("turns:") else {
+                    return false
+                }
+                if seen.contains(lower) {
+                    return false
+                }
+                seen.insert(lower)
+                return true
+            }
+    }
+
+    fileprivate static func turnPriority(_ uri: String) -> Int {
+        let lower = uri.lowercased()
+        if lower.hasPrefix("turns:") { return 0 }
+        if lower.contains("transport=tcp") { return 1 }
+        return 2
+    }
+
+    fileprivate static func preferredTurnURIs(from uris: [String], fallback: [String]) -> [String] {
+        let candidates = normalizedTurnURIs(uris)
+        let effective = candidates.isEmpty ? normalizedTurnURIs(fallback) : candidates
+        return effective
+            .enumerated()
+            .sorted { lhs, rhs in
+                let lp = turnPriority(lhs.element)
+                let rp = turnPriority(rhs.element)
+                if lp == rp { return lhs.offset < rhs.offset }
+                return lp < rp
+            }
+            .map(\.element)
     }
 }
 
@@ -81,6 +115,8 @@ public actor TURNCredentialService {
         let password: String
         let ttl: Int
         let uris: [String]?
+        let expiresAt: Int?
+        let mode: String?
     }
 
     public func getCredentials() async -> TURNCredentials {
@@ -105,6 +141,9 @@ public actor TURNCredentialService {
         request.httpMethod = "GET"
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue(SkyBridgeServerConfig.clientAPIKey, forHTTPHeaderField: "X-API-Key")
+        if let deviceId = resolvedDeviceIdentifier() {
+            request.setValue(deviceId, forHTTPHeaderField: "X-Device-Id")
+        }
         request.timeoutInterval = 10
 
         let (data, response) = try await URLSession.shared.data(for: request)
@@ -114,12 +153,19 @@ public actor TURNCredentialService {
             throw NSError(domain: "TURN", code: http.statusCode, userInfo: ["body": body])
         }
         let decoded = try JSONDecoder().decode(ServerResponse.self, from: data)
-        let expiresAt = Date().addingTimeInterval(TimeInterval(decoded.ttl))
+        let ttl = max(60, decoded.ttl)
+        let expiresAt: Date
+        if let expiresAtEpoch = decoded.expiresAt, expiresAtEpoch > 0 {
+            expiresAt = Date(timeIntervalSince1970: TimeInterval(expiresAtEpoch))
+        } else {
+            expiresAt = Date().addingTimeInterval(TimeInterval(ttl))
+        }
+        let uris = SkyBridgeServerConfig.preferredTurnURIs(from: decoded.uris ?? [], fallback: SkyBridgeServerConfig.turnURLs)
         return TURNCredentials(
             username: decoded.username,
             password: decoded.password,
-            ttl: decoded.ttl,
-            uris: decoded.uris ?? [SkyBridgeServerConfig.turnURL],
+            ttl: ttl,
+            uris: uris,
             expiresAt: expiresAt
         )
     }
@@ -147,9 +193,19 @@ public actor TURNCredentialService {
             username: username,
             password: password,
             ttl: 3600,
-            uris: [SkyBridgeServerConfig.turnURL],
+            uris: SkyBridgeServerConfig.turnURLs,
             expiresAt: Date().addingTimeInterval(3600)
         )
     }
-}
 
+    private func resolvedDeviceIdentifier() -> String? {
+        let envID = ProcessInfo.processInfo.environment["SKYBRIDGE_DEVICE_ID"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !envID.isEmpty {
+            return envID
+        }
+        let keychainID = KeychainManager.shared.getOrGenerateDeviceId()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return keychainID.isEmpty ? nil : keychainID
+    }
+}

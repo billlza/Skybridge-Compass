@@ -20,6 +20,7 @@ public enum SkyBridgeServerConfig {
     /// TURN 服务器配置
     public static let turnServerHost = "54.92.79.99"
     public static let turnServerPort: UInt16 = 3478
+    public static let turnTLSServerPort: UInt16 = 5349
 
     /// TURN 用户名（非敏感；可选覆盖）
     public static var turnUsername: String {
@@ -40,7 +41,17 @@ public enum SkyBridgeServerConfig {
 
     /// 完整的 TURN URL
     public static var turnURL: String {
-        "turn:\(turnServerHost):\(turnServerPort)"
+        "turn:\(turnServerHost):\(turnServerPort)?transport=udp"
+    }
+
+    /// 优先使用的 TURN over TLS URL（5349/TCP）
+    public static var turnTLSURL: String {
+        "turns:\(turnServerHost):\(turnTLSServerPort)?transport=tcp"
+    }
+
+    /// 推荐的 TURN URL 列表（按优先级排序：TLS → UDP）
+    public static var turnURLs: [String] {
+        [turnTLSURL, turnURL]
     }
 
     /// TURN URL（不包含凭据，避免在日志/URL 中泄露密码）
