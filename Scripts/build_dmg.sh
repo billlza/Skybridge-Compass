@@ -20,6 +20,7 @@ VOLUME_NAME="SkyBridge Compass Pro"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+source "$PROJECT_ROOT/Scripts/apple_pqc_sdk_probe.sh"
 INFO_PLIST_PATH="$PROJECT_ROOT/Sources/SkyBridgeCompassApp/Info.plist"
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$INFO_PLIST_PATH" 2>/dev/null || echo "0.0.0")"
 DIST_DIR="$PROJECT_ROOT/dist"
@@ -126,21 +127,22 @@ if [[ "$SKIP_BUILD" == false ]]; then
     cd "$PROJECT_ROOT"
 
     log_info "检测 Apple PQC SDK 可用性（用于 HAS_APPLE_PQC_SDK）..."
-    HOST_OS_VER="$(sw_vers -productVersion 2>/dev/null || echo "")"
-    SDK_VER="$(xcrun --sdk macosx --show-sdk-version 2>/dev/null || echo "")"
-    HOST_MAJOR="$(echo "$HOST_OS_VER" | awk -F. '{print $1}')"
-    SDK_MAJOR="$(echo "$SDK_VER" | awk -F. '{print $1}')"
-    log_info "Host macOS 版本: ${HOST_OS_VER:-unknown}"
-    log_info "Xcode macOS SDK 版本: ${SDK_VER:-unknown}"
-    if [[ -n "$HOST_OS_VER" && -n "$SDK_VER" && "$HOST_OS_VER" != "$SDK_VER" ]]; then
+    skybridge_detect_apple_pqc_sdk
+    log_info "Host macOS 版本: ${SKYBRIDGE_PQC_HOST_OS_VER:-unknown}"
+    log_info "Xcode macOS SDK 版本: ${SKYBRIDGE_PQC_SDK_VER:-unknown}"
+    log_info "Xcode macOS SDK 路径: ${SKYBRIDGE_PQC_SDK_PATH:-unknown}"
+    if [[ -n "$SKYBRIDGE_PQC_HOST_OS_VER" && -n "$SKYBRIDGE_PQC_SDK_VER" && "$SKYBRIDGE_PQC_HOST_OS_VER" != "$SKYBRIDGE_PQC_SDK_VER" ]]; then
         log_info "提示：Host 与 SDK 版本不同是常见情况（例如 Host 26.3 + SDK 26.2）。编译能力按 SDK 判定。"
     fi
-    if [[ -n "$SDK_MAJOR" && "$SDK_MAJOR" -ge 26 ]]; then
+    if [[ "${SKYBRIDGE_PQC_SDK_AVAILABLE:-0}" == "1" ]]; then
         export SKYBRIDGE_ENABLE_APPLE_PQC_SDK=1
-        log_info "检测到 macOS SDK ${SDK_VER}（>=26），启用 Apple PQC 编译条件"
+        log_info "Apple PQC SDK 探测通过（mode=${SKYBRIDGE_PQC_PROBE_MODE}），启用 Apple PQC 编译条件"
     else
-        unset SKYBRIDGE_ENABLE_APPLE_PQC_SDK
-        log_info "未检测到 macOS SDK 26+（当前: ${SDK_VER:-unknown}），禁用 Apple PQC 编译条件"
+        export SKYBRIDGE_ENABLE_APPLE_PQC_SDK=0
+        log_info "Apple PQC SDK 探测未通过（mode=${SKYBRIDGE_PQC_PROBE_MODE}），禁用 Apple PQC 编译条件"
+        if [[ -n "${SKYBRIDGE_PQC_PROBE_ERROR:-}" ]]; then
+            log_info "PQC 探测详情: ${SKYBRIDGE_PQC_PROBE_ERROR}"
+        fi
     fi
 
     log_info "使用 Xcode Release 构建..."

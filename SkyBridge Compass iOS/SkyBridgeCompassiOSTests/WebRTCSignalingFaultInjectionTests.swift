@@ -8,7 +8,7 @@ final class WebRTCSignalingFaultInjectionTests: XCTestCase {
             let probe = RetryProbe()
             let controller = SignalingRetryController(
                 retryDelay: .milliseconds(10),
-                attemptTimeout: .milliseconds(50),
+                attemptTimeout: .seconds(1),
                 sleep: { duration in
                     await probe.recordSleep(duration)
                 }

@@ -23,9 +23,8 @@ public struct DashboardView: View {
     @StateObject private var fileTransferManager = FileTransferManager.instance
     @StateObject private var remoteDesktopManager = RemoteDesktopManager.instance
     @StateObject private var settingsManager = SettingsManager.instance
+    @StateObject private var crossNetworkManager = CrossNetworkWebRTCManager.instance
     @EnvironmentObject private var authManager: AuthenticationManager
-
-    private var crossNetworkManager: CrossNetworkWebRTCManager { CrossNetworkWebRTCManager.instance }
 
     @State private var selectedTab: DashboardTab = .home
     @State private var loadedTabs: Set<DashboardTab> = [.home]
@@ -355,7 +354,7 @@ private struct QuantumStarLayer: View {
                         recentDevicesSection
                         
                         // Active Connections
-                        if !viewModel.activeConnections.isEmpty {
+                        if !displayedActiveConnections.isEmpty {
                             activeConnectionsSection
                         }
                     }
@@ -547,8 +546,11 @@ private struct QuantumStarLayer: View {
             return "离线"
         }
 
-        guard !connectionManager.activeConnections.isEmpty else {
-            return "在线"
+        if connectionManager.activeConnections.isEmpty {
+            guard isCrossNetworkSessionActive else {
+                return "在线"
+            }
+            return crossNetworkStatusKey
         }
 
         if activeNegotiatedSuites.contains(.xwing) {
@@ -572,6 +574,46 @@ private struct QuantumStarLayer: View {
         }
 
         return "已连接"
+    }
+
+    private var isCrossNetworkSessionActive: Bool {
+        if case .connected = crossNetworkManager.state { return true }
+        if case .handshakeComplete = crossNetworkManager.readiness { return true }
+        return false
+    }
+
+    private var crossNetworkStatusKey: String {
+        guard let suite = crossNetworkNegotiatedSuite?.lowercased() else {
+            return "已连接"
+        }
+
+        if suite.contains("xwing") {
+            return "X-Wing已连接"
+        }
+
+        if suite.contains("x25519") || suite.contains("p256") {
+            return "Classic已连接"
+        }
+
+        if suite.contains("ml-kem") || suite.contains("mlkem") || suite.contains("mldsa") {
+            switch SkyBridgeiOSCore.shared.cryptoProvider?.tier {
+            case .nativePQC?:
+                return "Apple PQC已连接"
+            case .liboqsPQC?:
+                return "liboqs已连接"
+            default:
+                return "已连接"
+            }
+        }
+
+        return "已连接"
+    }
+
+    private var crossNetworkNegotiatedSuite: String? {
+        if case .handshakeComplete(_, let negotiatedSuite) = crossNetworkManager.readiness {
+            return negotiatedSuite
+        }
+        return nil
     }
 
     private var activeNegotiatedSuites: [CryptoSuite] {
@@ -742,7 +784,7 @@ private struct QuantumStarLayer: View {
                 
                 Spacer()
                 
-                Text("\(viewModel.activeConnections.count)")
+                Text("\(displayedActiveConnections.count)")
                     .font(.subheadline)
                     .foregroundColor(.cyan)
                     .padding(.horizontal, 10)
@@ -753,15 +795,57 @@ private struct QuantumStarLayer: View {
             }
             
             VStack(spacing: 8) {
-                ForEach(viewModel.activeConnections) { connection in
+                ForEach(displayedActiveConnections) { connection in
                     ConnectionRowView(connection: connection) {
                         Task {
-                            await viewModel.disconnect(from: connection.device)
+                            if connection.id.hasPrefix("webrtc-") {
+                                await crossNetworkManager.disconnect()
+                            } else {
+                                await viewModel.disconnect(from: connection.device)
+                            }
                         }
                     }
                 }
             }
         }
+    }
+
+    private var displayedActiveConnections: [Connection] {
+        var connections: [Connection] = []
+        if let crossNetworkActiveConnection {
+            connections.append(crossNetworkActiveConnection)
+        }
+        connections.append(contentsOf: viewModel.activeConnections)
+        return connections
+    }
+
+    private var crossNetworkActiveConnection: Connection? {
+        guard case .connected(let sessionId) = crossNetworkManager.state else { return nil }
+        let remoteId = crossNetworkManager.remoteDeviceId ?? "webrtc-\(sessionId)"
+        let remoteName = crossNetworkManager.remoteDeviceName ?? RuntimeLocalization.string("跨网设备")
+        let pseudoDevice = DiscoveredDevice(
+            id: remoteId,
+            name: remoteName,
+            modelName: "Remote",
+            platform: .macOS,
+            osVersion: "",
+            ipAddress: nil,
+            services: [],
+            portMap: [:],
+            signalStrength: -50,
+            lastSeen: Date(),
+            isConnected: true,
+            isTrusted: true,
+            publicKey: nil,
+            advertisedCapabilities: ["remote_desktop"],
+            capabilities: ["remote_desktop"]
+        )
+        return Connection(
+            id: "webrtc-\(sessionId)",
+            device: pseudoDevice,
+            status: .connected,
+            encryptionType: .pqc
+        )
     }
     
     // MARK: - Devices Tab

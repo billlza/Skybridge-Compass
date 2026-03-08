@@ -71,6 +71,7 @@ public class DashboardViewModel: ObservableObject {
     private var refreshTimer: Timer?
     private let pathMonitor = NWPathMonitor()
     private let pathMonitorQueue = DispatchQueue(label: "com.skybridge.dashboard.network")
+    private let crossNetworkManager = CrossNetworkWebRTCManager.instance
     
     // MARK: - Initialization
     
@@ -186,6 +187,17 @@ public class DashboardViewModel: ObservableObject {
                 self?.metrics.pendingMessages = count
             }
             .store(in: &cancellables)
+
+        Publishers.CombineLatest3(
+            crossNetworkManager.$state,
+            crossNetworkManager.$readiness,
+            crossNetworkManager.$remoteDeviceId
+        )
+        .receive(on: DispatchQueue.main)
+        .sink { [weak self] _, _, _ in
+            self?.updateMetrics()
+        }
+        .store(in: &cancellables)
     }
     
     private func startNetworkMonitoring() {
@@ -202,9 +214,26 @@ public class DashboardViewModel: ObservableObject {
     }
 
     private func updateMetrics() {
-        metrics.onlineDevices = discoveredDevices.count
-        metrics.activeSessions = activeConnections.count
+        let hasCrossNetworkSession = isCrossNetworkSessionActive
+        let hasDistinctCrossNetworkPeer = hasCrossNetworkSession && !isCrossNetworkPeerAlreadyDiscovered
+
+        metrics.onlineDevices = discoveredDevices.count + (hasDistinctCrossNetworkPeer ? 1 : 0)
+        metrics.activeSessions = activeConnections.count + (hasCrossNetworkSession ? 1 : 0)
         metrics.fileTransfers = FileTransferManager.instance.activeTransfers.count
+    }
+
+    private var isCrossNetworkSessionActive: Bool {
+        if case .connected = crossNetworkManager.state { return true }
+        if case .handshakeComplete = crossNetworkManager.readiness { return true }
+        return false
+    }
+
+    private var isCrossNetworkPeerAlreadyDiscovered: Bool {
+        guard let remoteDeviceId = crossNetworkManager.remoteDeviceId?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !remoteDeviceId.isEmpty else {
+            return false
+        }
+        return discoveredDevices.contains { $0.id == remoteDeviceId }
     }
     
     private func startAutoRefresh() {

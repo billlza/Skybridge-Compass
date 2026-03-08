@@ -83,7 +83,11 @@ struct SkyBridgeCompassApp: App {
         SkyBridgeLogger.shared.configure(level: .debug)
         
         // 请求必要的权限
-        requestPermissions()
+        if LocalWebRTCSmokeHarness.shared.isEnabled {
+            SkyBridgeLogger.shared.info("🧪 Local WebRTC smoke: 跳过交互式权限弹窗")
+        } else {
+            requestPermissions()
+        }
         
         // 配置通知
         configureNotifications()
@@ -178,6 +182,7 @@ struct SkyBridgeCompassApp: App {
         let liveActivityElapsedMs = Int(Date().timeIntervalSince(liveActivityStartedAt) * 1000)
         SkyBridgeLogger.shared.info("✅ Live Activity 启动步骤完成 (\(liveActivityElapsedMs)ms)")
         SkyBridgeLogger.shared.info("✅ 启动服务初始化流程已完成")
+        await LocalWebRTCSmokeHarness.shared.startIfNeeded()
     }
 
     /// 初始化灵动岛 Live Activity
@@ -516,6 +521,141 @@ class BiometricAuthManager {
             )
         } catch {
             throw error
+        }
+    }
+}
+
+@available(iOS 17.0, *)
+@MainActor
+private final class LocalWebRTCSmokeHarness {
+    static let shared = LocalWebRTCSmokeHarness()
+
+    private var didStart = false
+
+    private init() {}
+
+    var isEnabled: Bool {
+        role == "ios-client"
+    }
+
+    private var role: String {
+        ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
+    private var connectCode: String {
+        ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_CONNECT_CODE"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
+    func startIfNeeded() async {
+        guard isEnabled, !didStart else { return }
+        didStart = true
+
+        let reporter = SmokeStatusReporter(statusURL: statusURL())
+        reporter.reset()
+        reporter.append("boot role=ios-client")
+
+        guard !connectCode.isEmpty else {
+            reporter.append("failed stage=bootstrap error=missing_connect_code")
+            return
+        }
+
+        let manager = CrossNetworkWebRTCManager.instance
+        await manager.disconnect()
+
+        reporter.append("connect \(connectCode)")
+        await manager.connect(withCode: connectCode)
+
+        let timeoutSeconds = Double(ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_TIMEOUT_SECONDS"] ?? "") ?? 90
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        var lastState = ""
+        var lastReadiness = ""
+        var lastRekeyEvent = ""
+        var heartbeatStarted = false
+
+        while Date() < deadline {
+            let stateDescription = String(describing: manager.state)
+            if stateDescription != lastState {
+                lastState = stateDescription
+                reporter.append("state \(Self.sanitize(stateDescription))")
+            }
+
+            let readinessDescription = String(describing: manager.readiness)
+            if readinessDescription != lastReadiness {
+                lastReadiness = readinessDescription
+                reporter.append("readiness \(Self.sanitize(readinessDescription))")
+            }
+
+            let rekeyDescription = manager.lastRekeyEvent ?? ""
+            if rekeyDescription != lastRekeyEvent, !rekeyDescription.isEmpty {
+                lastRekeyEvent = rekeyDescription
+                reporter.append("rekey \(Self.sanitize(rekeyDescription))")
+            }
+
+            if case .failed(let message) = manager.state {
+                reporter.append("failed stage=handshake error=\(Self.sanitize(message))")
+                return
+            }
+
+            if case .handshakeComplete(let sessionId, let negotiatedSuite) = manager.readiness,
+               !heartbeatStarted {
+                heartbeatStarted = true
+                reporter.append(
+                    "handshake session=\(sessionId) suite=\(Self.sanitize(negotiatedSuite))"
+                )
+                manager.startRemoteDesktopHeartbeat()
+            }
+
+            if let screenData = manager.lastScreenData {
+                reporter.append(
+                    "success frame=\(screenData.width)x\(screenData.height) bytes=\(screenData.imageData.count)"
+                )
+                return
+            }
+
+            try? await Task.sleep(for: .milliseconds(250))
+        }
+
+        reporter.append("failed stage=timeout error=ios_smoke_timeout")
+    }
+
+    private func statusURL() -> URL? {
+        let fileName = ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_STATUS_BASENAME"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "skybridge-smoke-status.log"
+        guard !fileName.isEmpty else { return nil }
+        return FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)
+            .first?
+            .appendingPathComponent(fileName)
+    }
+
+    private static func sanitize(_ value: String) -> String {
+        value.replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\r", with: " ")
+    }
+}
+
+@available(iOS 17.0, *)
+private struct SmokeStatusReporter {
+    let statusURL: URL?
+
+    func reset() {
+        guard let statusURL else { return }
+        try? FileManager.default.createDirectory(at: statusURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? "".write(to: statusURL, atomically: true, encoding: .utf8)
+    }
+
+    func append(_ line: String) {
+        guard let statusURL else { return }
+        let formatted = "[\(ISO8601DateFormatter().string(from: Date()))] \(line)\n"
+        guard let data = formatted.data(using: .utf8) else { return }
+        if FileManager.default.fileExists(atPath: statusURL.path),
+           let handle = try? FileHandle(forWritingTo: statusURL) {
+            defer { try? handle.close() }
+            _ = try? handle.seekToEnd()
+            try? handle.write(contentsOf: data)
+        } else {
+            try? FileManager.default.createDirectory(at: statusURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? data.write(to: statusURL, options: .atomic)
         }
     }
 }

@@ -221,6 +221,24 @@ struct RemoteDesktopStreamView: View {
                 }
                 
                 Spacer()
+
+                if let transportStatusText = remoteDesktopManager.transportStatusText {
+                    HStack(spacing: 6) {
+                        Image(systemName: transportStatusText.contains("WebRTC") ? "dot.radiowaves.left.and.right" : "network")
+                            .font(.caption)
+                        Text(transportStatusText)
+                            .font(.caption.weight(.semibold))
+                    }
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(Color.white.opacity(0.12))
+                    .overlay(
+                        Capsule()
+                            .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                    )
+                    .clipShape(Capsule())
+                }
                 
                 // 触摸模式选择
                 Picker(RuntimeLocalization.string("触摸模式"), selection: $touchMode) {

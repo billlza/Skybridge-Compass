@@ -33,6 +33,7 @@ struct SkyBridgeCompassApp: App {
 
     private let renderConfig: DMGBackgroundRenderConfig?
     private let iconApplied: Bool
+    private let localWebRTCSmokeHarness = LocalWebRTCSmokeHarness()
 
     var body: some Scene {
         WindowGroup(localizationManager.localizedString("app.name")) {
@@ -73,6 +74,11 @@ struct SkyBridgeCompassApp: App {
             }
             .task {
                 if renderConfig == nil {
+                    if localWebRTCSmokeHarness.isEnabledForCurrentEnvironment {
+                        localWebRTCSmokeHarness.startIfNeeded()
+                        return
+                    }
+
  // 开始协调启动流程
                     await startupCoordinator.startCoordinatedLaunch()
 
@@ -84,6 +90,8 @@ struct SkyBridgeCompassApp: App {
                             SkyBridgeLogger.ui.debugOnly("✅ Supabase模式已启用")
                         }
                     }
+
+                    localWebRTCSmokeHarness.startIfNeeded()
                 }
             }
         }
@@ -623,5 +631,174 @@ private extension EnvironmentValues {
     var iconMissingHint: Bool {
         get { self[IconMissingHintKey.self] }
         set { self[IconMissingHintKey.self] = newValue }
+    }
+}
+
+@available(macOS 14.0, *)
+@MainActor
+private final class LocalWebRTCSmokeHarness {
+    private var didStart = false
+
+    private var role: String {
+        ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
+    private var isEnabled: Bool {
+        role == "mac-host"
+    }
+
+    var isEnabledForCurrentEnvironment: Bool {
+        isEnabled
+    }
+
+    private var expectsPQCRekey: Bool {
+        ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_EXPECT_PQC_REKEY"] == "1"
+    }
+
+    func startIfNeeded() {
+        guard isEnabled, !didStart else { return }
+        didStart = true
+
+        let expectsPQCRekey = self.expectsPQCRekey
+        let statusURL = self.statusURL()
+        let codeURL = self.codeURL()
+
+        Task { @MainActor in
+            let reporter = SmokeStatusReporter(statusURL: statusURL)
+            reporter.reset()
+            reporter.append("boot role=mac-host")
+
+            let manager = CrossNetworkConnectionManager.shared
+            await manager.disconnect()
+
+            do {
+                let code = try await manager.generateConnectionCode()
+                if let codeURL {
+                    try Self.writeText(code, to: codeURL)
+                }
+                reporter.append("code \(code)")
+            } catch {
+                reporter.append("failed stage=generate error=\(Self.sanitize(error.localizedDescription))")
+                self.terminateIfNeeded()
+                return
+            }
+
+            let timeoutSeconds = Double(ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_TIMEOUT_SECONDS"] ?? "") ?? 90
+            let deadline = Date().addingTimeInterval(timeoutSeconds)
+            var lastStatus = ""
+            var lastReadiness = ""
+            var lastRekeyEvent = ""
+            var sawInitialHandshake = false
+
+            while Date() < deadline {
+                let statusDescription = String(describing: manager.connectionStatus)
+                if statusDescription != lastStatus {
+                    lastStatus = statusDescription
+                    reporter.append("status \(Self.sanitize(statusDescription))")
+                }
+
+                let readinessDescription = String(describing: manager.readiness)
+                if readinessDescription != lastReadiness {
+                    lastReadiness = readinessDescription
+                    reporter.append("readiness \(Self.sanitize(readinessDescription))")
+                }
+
+                let rekeyDescription = manager.lastRekeyEvent ?? ""
+                if rekeyDescription != lastRekeyEvent, !rekeyDescription.isEmpty {
+                    lastRekeyEvent = rekeyDescription
+                    reporter.append("rekey \(Self.sanitize(rekeyDescription))")
+                }
+
+                if case .failed(let message) = manager.connectionStatus {
+                    reporter.append("failed stage=handshake error=\(Self.sanitize(message))")
+                    self.terminateIfNeeded()
+                    return
+                }
+
+                if case .handshakeComplete(let sessionId, let negotiatedSuite) = manager.readiness {
+                    if !sawInitialHandshake {
+                        sawInitialHandshake = true
+                        reporter.append(
+                            "handshake session=\(sessionId) suite=\(Self.sanitize(negotiatedSuite))"
+                        )
+                    }
+
+                    let suiteName = negotiatedSuite.uppercased()
+                    let isClassicBootstrap = suiteName == "X25519" || suiteName == "X25519-ED25519"
+                    if !expectsPQCRekey || !isClassicBootstrap {
+                        reporter.append(
+                            "success session=\(sessionId) suite=\(Self.sanitize(negotiatedSuite))"
+                        )
+                        self.terminateIfNeeded()
+                        return
+                    }
+                }
+
+                try? await Task.sleep(for: .milliseconds(250))
+            }
+
+            reporter.append("failed stage=timeout error=mac_smoke_timeout")
+            self.terminateIfNeeded()
+        }
+    }
+
+    private func terminateIfNeeded() {
+        guard ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_AUTO_EXIT"] == "1" else { return }
+        NSApp.terminate(nil)
+    }
+
+    private func statusURL() -> URL? {
+        guard let raw = ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_STATUS_FILE"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else {
+            return nil
+        }
+        return URL(fileURLWithPath: raw)
+    }
+
+    private func codeURL() -> URL? {
+        guard let raw = ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_CODE_FILE"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else {
+            return nil
+        }
+        return URL(fileURLWithPath: raw)
+    }
+
+    private static func writeText(_ text: String, to url: URL) throws {
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try text.appending("\n").write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    private static func sanitize(_ value: String) -> String {
+        value.replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\r", with: " ")
+    }
+}
+
+@available(macOS 14.0, *)
+private struct SmokeStatusReporter {
+    let statusURL: URL?
+
+    func reset() {
+        guard let statusURL else { return }
+        try? FileManager.default.createDirectory(at: statusURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? "".write(to: statusURL, atomically: true, encoding: .utf8)
+    }
+
+    func append(_ line: String) {
+        guard let statusURL else { return }
+        let sanitizedLine = "[\(ISO8601DateFormatter().string(from: Date()))] \(line)\n"
+        if let data = sanitizedLine.data(using: .utf8) {
+            if FileManager.default.fileExists(atPath: statusURL.path),
+               let handle = try? FileHandle(forWritingTo: statusURL) {
+                defer { try? handle.close() }
+                _ = try? handle.seekToEnd()
+                try? handle.write(contentsOf: data)
+            } else {
+                try? FileManager.default.createDirectory(at: statusURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try? data.write(to: statusURL, options: .atomic)
+            }
+        }
     }
 }

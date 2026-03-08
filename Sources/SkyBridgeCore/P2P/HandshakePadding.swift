@@ -113,18 +113,21 @@ public enum HandshakePadding {
         }
     }
 
-    public static func wrapIfEnabled(_ payload: Data, label: String? = nil) -> Data {
+    public static func wrapIfEnabled(_ payload: Data, label: String? = nil, maxTotalBytes: Int? = nil) -> Data {
         let cfg = HandshakePaddingConfig.fromUserDefaults()
         guard cfg.enabled else { return payload }
         logConfigHintOnceIfNeeded(cfg: cfg)
 
         let minLen = headerLen + payload.count
+        let effectiveCap = maxTotalBytes.map { max($0, minLen) }
         let targetLen: Int
         switch cfg.mode {
         case .fixed:
-            targetLen = max(minLen, cfg.fixedSizeBytes > 0 ? cfg.fixedSizeBytes : minLen)
+            let requested = max(minLen, cfg.fixedSizeBytes > 0 ? cfg.fixedSizeBytes : minLen)
+            targetLen = if let effectiveCap, requested > effectiveCap { minLen } else { requested }
         case .bucketed:
-            targetLen = cfg.bucketSizesBytes.first(where: { $0 >= minLen }) ?? minLen
+            let requested = cfg.bucketSizesBytes.first(where: { $0 >= minLen }) ?? minLen
+            targetLen = if let effectiveCap, requested > effectiveCap { minLen } else { requested }
         }
 
         let out: Data
@@ -137,7 +140,8 @@ public enum HandshakePadding {
 
         if cfg.debugLog {
             let name = label ?? "handshake"
-            let msg = "🧪 Padding[\(name)]: raw=\(payload.count)B -> padded=\(out.count)B (mode=\(cfg.mode.rawValue))"
+            let capDescription = effectiveCap.map { ", cap=\($0)B" } ?? ""
+            let msg = "🧪 Padding[\(name)]: raw=\(payload.count)B -> padded=\(out.count)B (mode=\(cfg.mode.rawValue)\(capDescription))"
             // debugOnly 可能在某些 Console/Xcode 过滤下不可见；这里额外用 info 输出（仅在开关打开时）
             SkyBridgeLogger.p2p.debugOnly(msg)
             SkyBridgeLogger.p2p.info("\(msg, privacy: .public)")

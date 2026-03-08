@@ -57,6 +57,14 @@ private enum WebRTCPeerConnectionFactoryProvider {
 }
 #endif
 
+#if canImport(WebRTC)
+private actor WebRTCOutboundFrameGate {
+    func run<T>(_ operation: @Sendable () async throws -> T) async rethrows -> T {
+        try await operation()
+    }
+}
+#endif
+
 /// WebRTC 会话：负责 PeerConnection + DataChannel + ICE 收发
 ///
 /// 注意：
@@ -127,7 +135,11 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     public var onLocalOffer: (@Sendable (String) -> Void)?
     public var onLocalAnswer: (@Sendable (String) -> Void)?
     public var onLocalICECandidate: (@Sendable (WebRTCSignalingEnvelope.Payload) -> Void)?
-    public var onData: (@Sendable (Data) -> Void)?
+    public var onData: (@Sendable (Data) -> Void)? {
+        didSet {
+            flushPendingInboundDataIfNeeded()
+        }
+    }
     public var onReady: (@Sendable () -> Void)?
     public var onDisconnected: (@Sendable (String) -> Void)?
     
@@ -143,6 +155,10 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     private var didNotifyReady = false
     private var hasRemoteDescription = false
     private var isSettingRemoteDescription = false
+    private let inboundDataLock = NSLock()
+    private let outboundFrameLock = NSLock()
+    private let outboundFrameGate = WebRTCOutboundFrameGate()
+    private var pendingInboundDataBuffers: [Data] = []
     
     public init(sessionId: String, localDeviceId: String, role: Role, ice: ICEConfig) {
         self.sessionId = sessionId
@@ -180,6 +196,9 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         onLocalOffer = nil
         onLocalAnswer = nil
         onLocalICECandidate = nil
+        inboundDataLock.lock()
+        pendingInboundDataBuffers.removeAll(keepingCapacity: false)
+        inboundDataLock.unlock()
         onData = nil
         onReady = nil
         logger.info("⏹️ WebRTCSession closed sessionId=\(self.sessionId, privacy: .public)")
@@ -302,6 +321,42 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         didNotifyReady = true
         onReady?()
     }
+
+    private func flushPendingInboundDataIfNeeded() {
+        let handler: (@Sendable (Data) -> Void)?
+        var buffered: [Data] = []
+        inboundDataLock.lock()
+        handler = onData
+        if handler != nil, !pendingInboundDataBuffers.isEmpty {
+            buffered = pendingInboundDataBuffers
+            pendingInboundDataBuffers.removeAll(keepingCapacity: false)
+        }
+        inboundDataLock.unlock()
+
+        guard let handler else { return }
+        buffered.forEach(handler)
+    }
+
+    private func deliverInboundData(_ data: Data) {
+        let handler: (@Sendable (Data) -> Void)?
+        var buffered: [Data] = []
+        inboundDataLock.lock()
+        if let activeHandler = onData {
+            handler = activeHandler
+            if !pendingInboundDataBuffers.isEmpty {
+                buffered = pendingInboundDataBuffers
+                pendingInboundDataBuffers.removeAll(keepingCapacity: false)
+            }
+        } else {
+            pendingInboundDataBuffers.append(data)
+            handler = nil
+        }
+        inboundDataLock.unlock()
+
+        guard let handler else { return }
+        buffered.forEach(handler)
+        handler(data)
+    }
     
     public func setRemoteOffer(_ sdp: String) {
 #if canImport(WebRTC)
@@ -390,12 +445,83 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
 #endif
     }
 
+    public func sendFramedPayload(_ payload: Data, maxChunkBytes: Int = 8 * 1024) throws {
+        precondition(maxChunkBytes > 0, "maxChunkBytes must be greater than zero")
+
+        outboundFrameLock.lock()
+        defer { outboundFrameLock.unlock() }
+
+        var framed = Data()
+        var length = UInt32(payload.count).bigEndian
+        framed.append(Data(bytes: &length, count: 4))
+        framed.append(payload)
+
+        var offset = 0
+        while offset < framed.count {
+            let end = min(offset + maxChunkBytes, framed.count)
+            let chunk = Data(framed[offset..<end])
+            try send(chunk)
+            offset = end
+        }
+    }
+
+    public func sendFramedPayloadAsync(
+        _ payload: Data,
+        maxChunkBytes: Int = 8 * 1024,
+        maxBufferedAmountBytes: UInt64 = 16 * 1024,
+        pollInterval: Duration = .milliseconds(10),
+        drainTimeout: Duration = .seconds(5)
+    ) async throws {
+        precondition(maxChunkBytes > 0, "maxChunkBytes must be greater than zero")
+
+        try await outboundFrameGate.run {
+            var framed = Data()
+            var length = UInt32(payload.count).bigEndian
+            framed.append(Data(bytes: &length, count: 4))
+            framed.append(payload)
+
+            var offset = 0
+            while offset < framed.count {
+                try await waitForBufferedAmountBelow(
+                    maxBufferedAmountBytes,
+                    pollInterval: pollInterval,
+                    timeout: drainTimeout
+                )
+                let end = min(offset + maxChunkBytes, framed.count)
+                let chunk = Data(framed[offset..<end])
+                try send(chunk)
+                offset = end
+            }
+
+            try await waitForBufferedAmountBelow(
+                maxBufferedAmountBytes,
+                pollInterval: pollInterval,
+                timeout: drainTimeout
+            )
+        }
+    }
+
     public func dataChannelBufferedAmountBytes() -> UInt64 {
 #if canImport(WebRTC)
         return dataChannel?.bufferedAmount ?? 0
 #else
         return 0
 #endif
+    }
+
+    private func waitForBufferedAmountBelow(
+        _ threshold: UInt64,
+        pollInterval: Duration,
+        timeout: Duration
+    ) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now + timeout
+        while dataChannelBufferedAmountBytes() > threshold {
+            if clock.now >= deadline {
+                throw WebRTCError.dataChannelSendFailed
+            }
+            try await Task.sleep(for: pollInterval)
+        }
     }
     
 #if canImport(WebRTC)
@@ -512,7 +638,7 @@ extension WebRTCSession: RTCDataChannelDelegate {
     }
     
     public func dataChannel(_ dataChannel: RTCDataChannel, didReceiveMessageWith buffer: RTCDataBuffer) {
-        onData?(buffer.data)
+        deliverInboundData(buffer.data)
     }
 }
 #endif

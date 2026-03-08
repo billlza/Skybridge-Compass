@@ -12,7 +12,18 @@ let webRTCHeadersIncludePath = "\(packageRootPath)/Sources/Vendor/WebRTCHeaders"
 //
 // Therefore we enable it only when the build environment explicitly opts in (release pipeline / Xcode 26).
 func shouldEnableApplePQCSDK() -> Bool {
-    if ProcessInfo.processInfo.environment["SKYBRIDGE_ENABLE_APPLE_PQC_SDK"] == "1" { return true }
+    if let rawOverride = ProcessInfo.processInfo.environment["SKYBRIDGE_ENABLE_APPLE_PQC_SDK"]?
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        .lowercased() {
+        switch rawOverride {
+        case "1", "true", "yes":
+            return true
+        case "0", "false", "no":
+            return false
+        default:
+            break
+        }
+    }
     // Auto-enable when building with a 26.x SDK (Xcode 26 / iOS 26 / macOS 26).
     //
     // Notes:
@@ -80,6 +91,7 @@ let package = Package(
     ],
     products: [
         .executable(name: "SkyBridgeCompassApp", targets: ["SkyBridgeCompassApp"]),
+        .executable(name: "LocalWebRTCSmokeHost", targets: ["LocalWebRTCSmokeHost"]),
         .executable(name: "BaselineBenchRunner", targets: ["BaselineBenchRunner"]),
         .executable(name: "HandshakeBenchRunner", targets: ["HandshakeBenchRunner"]),
         .executable(name: "MessageSizeBenchRunner", targets: ["MessageSizeBenchRunner"]),
@@ -91,7 +103,7 @@ let package = Package(
         .library(name: "SkyBridgeWidgetShared", targets: ["SkyBridgeWidgetShared"])
     ],
     dependencies: [
-        .package(url: "https://github.com/apple/swift-collections", from: "1.3.0"),
+        .package(url: "https://github.com/apple/swift-collections", from: "1.4.0"),
         .package(url: "https://github.com/apple/swift-nio-ssh", from: "0.12.0"),
         // ASN.1/DER 解析库：用于 PEM/PKCS#8 私钥解析（Ed25519）
         .package(url: "https://github.com/apple/swift-asn1", from: "1.5.1"),
@@ -314,6 +326,22 @@ let package = Package(
                 .linkedFramework("SwiftUI"),
                 .linkedFramework("AuthenticationServices"),
                 // 中文注释：移除静默链接器告警，依赖库目标版本已统一为 14.0
+            ]
+        ),
+        .executableTarget(
+            name: "LocalWebRTCSmokeHost",
+            dependencies: [
+                "SkyBridgeCore"
+            ],
+            path: "Sources/LocalWebRTCSmokeHost",
+            swiftSettings: [
+                .enableUpcomingFeature("StrictConcurrency"),
+                .define("APPLE_SILICON_OPTIMIZED"),
+                .unsafeFlags(["-Xcc", "-Wno-deprecated-declarations"], .when(platforms: [.macOS])),
+                .unsafeFlags(["-Xcc", "-I", "-Xcc", webRTCHeadersIncludePath], .when(platforms: [.macOS])),
+            ],
+            linkerSettings: [
+                .linkedFramework("AppKit")
             ]
         ),
         .executableTarget(

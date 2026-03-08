@@ -4,14 +4,38 @@ import Foundation
 /// 集中管理所有服务器地址配置
 public enum SkyBridgeServerConfig {
 
+    private static func environmentValue(_ name: String) -> String? {
+        guard let raw = ProcessInfo.processInfo.environment[name] else { return nil }
+        return raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func environmentValue(_ name: String, default defaultValue: String) -> String {
+        guard let value = environmentValue(name), !value.isEmpty else { return defaultValue }
+        return value
+    }
+
+    private static func environmentList(_ name: String, default defaultValue: [String]) -> [String] {
+        guard let raw = ProcessInfo.processInfo.environment[name] else {
+            return defaultValue
+        }
+        return raw
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
     // MARK: - 生产环境服务器
 
     /// 主信令服务器地址（走 Cloudflare / Nginx TLS 入口）
     /// 注意：STUN/TURN 不走此域名（Cloudflare 不代理 UDP），仍然直连 EC2 IP。
-    public static let signalingServerURL = "https://api.nebula-technologies.net"
+    public static var signalingServerURL: String {
+        environmentValue("SKYBRIDGE_SIGNALING_SERVER_URL", default: "https://api.nebula-technologies.net")
+    }
 
     /// WebSocket 信令地址（走 Cloudflare / Nginx TLS 入口）
-    public static let signalingWebSocketURL = "wss://api.nebula-technologies.net/ws"
+    public static var signalingWebSocketURL: String {
+        environmentValue("SKYBRIDGE_SIGNALING_WEBSOCKET_URL", default: "wss://api.nebula-technologies.net/ws")
+    }
 
     /// STUN 服务器地址
     public static let stunServerHost = "54.92.79.99"
@@ -36,27 +60,27 @@ public enum SkyBridgeServerConfig {
 
     /// 完整的 STUN URL
     public static var stunURL: String {
-        "stun:\(stunServerHost):\(stunServerPort)"
+        environmentValue("SKYBRIDGE_STUN_URL", default: "stun:\(stunServerHost):\(stunServerPort)")
     }
 
     /// 完整的 TURN URL
     public static var turnURL: String {
-        "turn:\(turnServerHost):\(turnServerPort)?transport=udp"
+        environmentValue("SKYBRIDGE_TURN_URL", default: "turn:\(turnServerHost):\(turnServerPort)?transport=udp")
     }
 
     /// 优先使用的 TURN over TLS URL（5349/TCP）
     public static var turnTLSURL: String {
-        "turns:\(turnServerHost):\(turnTLSServerPort)?transport=tcp"
+        environmentValue("SKYBRIDGE_TURN_TLS_URL", default: "turns:\(turnServerHost):\(turnTLSServerPort)?transport=tcp")
     }
 
     /// 推荐的 TURN URL 列表（按优先级排序：TLS → UDP）
     public static var turnURLs: [String] {
-        [turnTLSURL, turnURL]
+        environmentList("SKYBRIDGE_TURN_URLS", default: [turnTLSURL, turnURL])
     }
 
     /// TURN URL（不包含凭据，避免在日志/URL 中泄露密码）
     public static var turnURLRedacted: String {
-        "turn:\(turnServerHost):\(turnServerPort)"
+        turnURLs.first ?? environmentValue("SKYBRIDGE_TURN_URL_REDACTED", default: "turn:\(turnServerHost):\(turnServerPort)")
     }
 
     // MARK: - API 端点

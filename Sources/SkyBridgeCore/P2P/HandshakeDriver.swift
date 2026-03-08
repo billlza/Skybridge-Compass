@@ -948,6 +948,11 @@ public actor HandshakeDriver {
  // 发送 MessageB（失败时必须 zeroize - 11.5）
             do {
                 let padded = HandshakePadding.wrapIfEnabled(messageB.encoded, label: "MessageB")
+                if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] == "mac-host" {
+                    SkyBridgeLogger.p2p.info(
+                        "📤 Handshake MessageB: total=\(padded.count) bytes, suite=\(messageB.selectedSuite.rawValue)"
+                    )
+                }
                 try await transport.send(to: peer, data: padded)
             } catch {
                 await handleHandshakeError(HandshakeError.failed(.transportError(error.localizedDescription)), context: ctx)

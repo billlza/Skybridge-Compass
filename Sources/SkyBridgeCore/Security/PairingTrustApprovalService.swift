@@ -100,6 +100,11 @@ public final class PairingTrustApprovalService: ObservableObject {
     
     /// Ask the user to approve a pairing/trust request, or return immediately if a policy exists.
     public func decide(for request: Request) async -> Decision {
+        if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_AUTO_APPROVE_PAIRING"] == "1" {
+            logger.info("🧪 Smoke auto-approving pairing request for deviceId=\(request.declaredDeviceId, privacy: .public)")
+            return .alwaysAllow
+        }
+
         let deviceId = request.declaredDeviceId
         if let raw = policyByDeviceId[deviceId], let policy = Decision(rawValue: raw) {
             switch policy {
@@ -178,4 +183,3 @@ public final class PairingTrustApprovalService: ObservableObject {
         logger.info("Pairing/trust decision: \(decision.rawValue, privacy: .public) deviceId=\(request.declaredDeviceId, privacy: .public)")
     }
 }
-

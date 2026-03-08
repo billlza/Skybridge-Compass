@@ -1401,6 +1401,8 @@ public class FileTransferManager: BaseManager {
         guard let transfer = activeTransfers[transferId] else { return }
         transfer.status = .transferring
         transfer.updateProgress(transferredBytes: transferredBytes)
+        lastTransferActivityAt = Date()
+        postTransferProgressNotification(for: transfer)
         updateTransferringStatus()
     }
 
@@ -1411,7 +1413,9 @@ public class FileTransferManager: BaseManager {
         transfer.progress = 1.0
         transfer.completedAt = Date()
         transfer.localPath = url
+        lastTransferActivityAt = Date()
         moveToHistory(transfer)
+        postTransferCompletedNotification(for: transfer, direction: "incoming", localPath: url.path)
         updateTransferringStatus()
     }
 
@@ -1420,7 +1424,9 @@ public class FileTransferManager: BaseManager {
         transfer.status = .failed
         transfer.error = errorMessage
         transfer.completedAt = Date()
+        lastTransferActivityAt = Date()
         moveToHistory(transfer)
+        postTransferFailedNotification(for: transfer, errorMessage: errorMessage)
         updateTransferringStatus()
     }
 
@@ -1452,6 +1458,8 @@ public class FileTransferManager: BaseManager {
         guard let transfer = activeTransfers[transferId] else { return }
         transfer.status = .transferring
         transfer.updateProgress(transferredBytes: transferredBytes)
+        lastTransferActivityAt = Date()
+        postTransferProgressNotification(for: transfer)
         updateTransferringStatus()
     }
 
@@ -1460,7 +1468,9 @@ public class FileTransferManager: BaseManager {
         transfer.status = .completed
         transfer.progress = 1.0
         transfer.completedAt = Date()
+        lastTransferActivityAt = Date()
         moveToHistory(transfer)
+        postTransferCompletedNotification(for: transfer, direction: "outgoing", localPath: transfer.localPath?.path)
         updateTransferringStatus()
     }
 
@@ -1477,6 +1487,94 @@ public class FileTransferManager: BaseManager {
         if transferHistory.count > 100 {
             transferHistory.removeFirst()
         }
+    }
+
+    private func postTransferProgressNotification(for transfer: FileTransfer) {
+        let progress = max(0.0, min(1.0, transfer.progress))
+        let transferredBytes = Int64(Double(transfer.fileSize) * progress)
+        let userInfo: [String: Any] = [
+            "transferId": transfer.id,
+            "fileName": transfer.fileName,
+            "progress": progress,
+            "speed": 0.0,
+            "transferredBytes": transferredBytes,
+            "fileSize": transfer.fileSize,
+            "deviceName": transfer.deviceName ?? transfer.deviceId
+        ]
+        NotificationCenter.default.post(
+            name: Notification.Name("com.skybridge.fileTransfer.progressUpdated"),
+            object: nil,
+            userInfo: userInfo
+        )
+    }
+
+    private func postTransferCompletedNotification(
+        for transfer: FileTransfer,
+        direction: String,
+        localPath: String?
+    ) {
+        var userInfo: [String: Any] = [
+            "transferId": transfer.id,
+            "fileName": transfer.fileName,
+            "fileSize": transfer.fileSize,
+            "deviceName": transfer.deviceName ?? transfer.deviceId,
+            "direction": direction
+        ]
+        if let localPath, !localPath.isEmpty {
+            userInfo["localPath"] = localPath
+        }
+
+        NotificationCenter.default.post(
+            name: Notification.Name("FileTransferCompleted"),
+            object: nil,
+            userInfo: userInfo
+        )
+        NotificationCenter.default.post(
+            name: Notification.Name("com.skybridge.fileTransfer.completed"),
+            object: nil,
+            userInfo: userInfo
+        )
+
+        #if canImport(UserNotifications)
+        if direction == "incoming", Self.canUseUserNotificationsSafely() {
+            let content = UNMutableNotificationContent()
+            content.title = "文件接收完成"
+            content.subtitle = transfer.deviceName ?? transfer.deviceId
+            if let localPath, !localPath.isEmpty {
+                content.body = "\(transfer.fileName) 已保存到 \(localPath)"
+            } else {
+                content.body = "\(transfer.fileName) 已接收完成"
+            }
+            content.userInfo = userInfo
+            let request = UNNotificationRequest(
+                identifier: "file-transfer-\(transfer.id)",
+                content: content,
+                trigger: nil
+            )
+            Task {
+                _ = try? await UNUserNotificationCenter.current().add(request)
+            }
+        }
+        #endif
+    }
+
+    private func postTransferFailedNotification(for transfer: FileTransfer, errorMessage: String) {
+        let userInfo: [String: Any] = [
+            "transferId": transfer.id,
+            "fileName": transfer.fileName,
+            "error": errorMessage,
+            "deviceName": transfer.deviceName ?? transfer.deviceId
+        ]
+        NotificationCenter.default.post(
+            name: Notification.Name("FileTransferFailed"),
+            object: nil,
+            userInfo: userInfo
+        )
+        NotificationCenter.default.post(
+            name: Notification.Name("com.skybridge.fileTransfer.failed"),
+            object: nil,
+            userInfo: userInfo
+        )
     }
 
  /// 更新传输状态

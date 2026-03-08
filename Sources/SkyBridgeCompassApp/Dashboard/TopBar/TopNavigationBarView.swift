@@ -9,6 +9,7 @@ public struct TopNavigationBarView: View {
     @EnvironmentObject var themeConfiguration: ThemeConfiguration
     @ObservedObject private var unifiedDeviceManager = UnifiedOnlineDeviceManager.shared
     @ObservedObject private var presenceService = ConnectionPresenceService.shared
+    @ObservedObject private var crossNetworkManager = CrossNetworkConnectionManager.shared
     @StateObject private var settingsManager = SettingsManager.shared
 
     @Binding var showManualConnectSheet: Bool
@@ -134,6 +135,12 @@ public struct TopNavigationBarView: View {
         if appModel.connectionStatus == .connected {
             return true
         }
+        if case .connected = crossNetworkManager.connectionStatus {
+            return true
+        }
+        if case .handshakeComplete = crossNetworkManager.readiness {
+            return true
+        }
         return unifiedDeviceManager.onlineDevices.contains { device in
             !device.isLocalDevice && device.connectionStatus == .connected
         }
@@ -147,14 +154,24 @@ public struct TopNavigationBarView: View {
             .filter { !$0.isLocalDevice && $0.connectionStatus == .connected }
             .sorted { ($0.lastConnectedAt ?? .distantPast) > ($1.lastConnectedAt ?? .distantPast) }
             .first
-        guard let connectedPeer else {
-            return nil
+        if let connectedPeer {
+            return ConnectionCryptoPresentation.detailText(
+                kind: connectedPeer.lastCryptoKind,
+                suite: connectedPeer.lastCryptoSuite,
+                guardStatus: connectedPeer.guardStatus ?? "守护中"
+            ) ?? connectedPeer.name
         }
-        return ConnectionCryptoPresentation.detailText(
-            kind: connectedPeer.lastCryptoKind,
-            suite: connectedPeer.lastCryptoSuite,
-            guardStatus: connectedPeer.guardStatus ?? "守护中"
-        ) ?? connectedPeer.name
+        if case .handshakeComplete(_, let negotiatedSuite) = crossNetworkManager.readiness {
+            return ConnectionCryptoPresentation.detailText(
+                kind: nil,
+                suite: negotiatedSuite,
+                guardStatus: "跨网已连接"
+            ) ?? "跨网已连接"
+        }
+        if case .connected = crossNetworkManager.connectionStatus {
+            return "跨网已连接"
+        }
+        return nil
     }
 
     private var latestPresenceConnection: ConnectionPresenceService.ActiveConnection? {
@@ -169,6 +186,15 @@ public struct TopNavigationBarView: View {
             return ConnectionCryptoPresentation.connectedStatusTextWithPolicyFallback(
                 kind: latestPresenceConnection.cryptoKind,
                 suite: latestPresenceConnection.suite,
+                baseConnectedText: base,
+                compatibilityModeEnabled: SettingsManager.shared.enableCompatibilityMode
+            )
+        }
+
+        if case .handshakeComplete(_, let negotiatedSuite) = crossNetworkManager.readiness {
+            return ConnectionCryptoPresentation.connectedStatusTextWithPolicyFallback(
+                kind: nil,
+                suite: negotiatedSuite,
                 baseConnectedText: base,
                 compatibilityModeEnabled: SettingsManager.shared.enableCompatibilityMode
             )

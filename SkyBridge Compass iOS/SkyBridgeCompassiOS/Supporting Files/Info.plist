@@ -25,6 +25,11 @@
 		<string>_skybridge-transfer._tcp</string>
 		<string>_skybridge-remote._tcp</string>
 	</array>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>SkyBridge 需要访问本地网络以发现和连接附近设备。</string>
 	<key>NSLocationWhenInUseUsageDescription</key>

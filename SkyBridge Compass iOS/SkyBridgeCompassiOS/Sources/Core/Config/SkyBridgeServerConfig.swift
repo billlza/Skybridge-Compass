@@ -8,15 +8,51 @@ import OSLog
 /// - We keep iOS network endpoints here to avoid cross-target build issues.
 @available(iOS 17.0, *)
 public enum SkyBridgeServerConfig {
+    private static func environmentValue(_ name: String) -> String? {
+        guard let raw = ProcessInfo.processInfo.environment[name] else { return nil }
+        return raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func environmentValue(_ name: String, default defaultValue: String) -> String {
+        guard let value = environmentValue(name), !value.isEmpty else { return defaultValue }
+        return value
+    }
+
+    private static func environmentList(_ name: String, default defaultValue: [String]) -> [String] {
+        guard let raw = ProcessInfo.processInfo.environment[name] else {
+            return defaultValue
+        }
+        return raw
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
     // Production endpoints
-    public static let signalingServerURL = "https://api.nebula-technologies.net"
-    public static let signalingWebSocketURL = "wss://api.nebula-technologies.net/ws"
+    public static var signalingServerURL: String {
+        environmentValue("SKYBRIDGE_SIGNALING_SERVER_URL", default: "https://api.nebula-technologies.net")
+    }
+
+    public static var signalingWebSocketURL: String {
+        environmentValue("SKYBRIDGE_SIGNALING_WEBSOCKET_URL", default: "wss://api.nebula-technologies.net/ws")
+    }
 
     // STUN/TURN hosts (Cloudflare doesn't proxy UDP, so these are direct)
-    public static let stunURL = "stun:54.92.79.99:3478"
-    public static let turnURL = "turn:54.92.79.99:3478?transport=udp"
-    public static let turnTLSURL = "turns:54.92.79.99:5349?transport=tcp"
-    public static let turnURLs = [turnTLSURL, turnURL]
+    public static var stunURL: String {
+        environmentValue("SKYBRIDGE_STUN_URL", default: "stun:54.92.79.99:3478")
+    }
+
+    public static var turnURL: String {
+        environmentValue("SKYBRIDGE_TURN_URL", default: "turn:54.92.79.99:3478?transport=udp")
+    }
+
+    public static var turnTLSURL: String {
+        environmentValue("SKYBRIDGE_TURN_TLS_URL", default: "turns:54.92.79.99:5349?transport=tcp")
+    }
+
+    public static var turnURLs: [String] {
+        environmentList("SKYBRIDGE_TURN_URLS", default: [turnTLSURL, turnURL])
+    }
 
     /// Client API key used for requesting dynamic TURN credentials.
     /// This is NOT a secret; it's only used to tag legitimate client traffic.

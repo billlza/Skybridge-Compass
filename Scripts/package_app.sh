@@ -86,6 +86,7 @@ function select_identity() {
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
+source "${ROOT_DIR}/Scripts/apple_pqc_sdk_probe.sh"
 BUILD_DIR="${ROOT_DIR}/.build/xcode/Build/Products/Release"
 APP_NAME="SkyBridge Compass Pro.app"
 APP_DIR="${ROOT_DIR}/dist/${APP_NAME}"
@@ -112,14 +113,19 @@ EXECUTABLE="SkyBridgeCompassApp"
 
 if [[ "${SKIP_BUILD}" != "1" ]]; then
   log "执行 Release 构建，确保打包包含最新代码"
-  SDK_VER="$(xcrun --sdk macosx --show-sdk-version 2>/dev/null || echo "")"
-  SDK_MAJOR="$(echo "$SDK_VER" | awk -F. '{print $1}')"
-  if [[ -n "$SDK_MAJOR" && "$SDK_MAJOR" -ge 26 ]]; then
+  skybridge_detect_apple_pqc_sdk
+  log "Host macOS 版本: ${SKYBRIDGE_PQC_HOST_OS_VER:-unknown}"
+  log "Xcode macOS SDK 版本: ${SKYBRIDGE_PQC_SDK_VER:-unknown}"
+  log "Xcode macOS SDK 路径: ${SKYBRIDGE_PQC_SDK_PATH:-unknown}"
+  if [[ "${SKYBRIDGE_PQC_SDK_AVAILABLE:-0}" == "1" ]]; then
     export SKYBRIDGE_ENABLE_APPLE_PQC_SDK=1
-    log "检测到 macOS SDK ${SDK_VER}（>=26），启用 Apple PQC 编译条件"
+    log "Apple PQC SDK 探测通过（mode=${SKYBRIDGE_PQC_PROBE_MODE}），启用 Apple PQC 编译条件"
   else
-    unset SKYBRIDGE_ENABLE_APPLE_PQC_SDK
-    log "未检测到 macOS SDK 26+（当前: ${SDK_VER:-unknown}），禁用 Apple PQC 编译条件"
+    export SKYBRIDGE_ENABLE_APPLE_PQC_SDK=0
+    log "Apple PQC SDK 探测未通过（mode=${SKYBRIDGE_PQC_PROBE_MODE}），禁用 Apple PQC 编译条件"
+    if [[ -n "${SKYBRIDGE_PQC_PROBE_ERROR:-}" ]]; then
+      log "PQC 探测详情: ${SKYBRIDGE_PQC_PROBE_ERROR}"
+    fi
   fi
 
   xcodebuild -workspace "${ROOT_DIR}/.swiftpm/xcode/package.xcworkspace" \

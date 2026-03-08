@@ -50,6 +50,7 @@ final class DashboardViewModel: ObservableObject {
     private let discoveryService = DeviceDiscoveryService()
     private let p2pDiscoveryService = P2PDiscoveryService()
     private let connectionManager = ConnectionManager()  // 添加连接管理器以支持USB设备扫描
+    private let crossNetworkManager = CrossNetworkConnectionManager.shared
     private let usbcManager = USBCConnectionManager()    // 直接监听USB设备连接，计入在线设备
     private let sessionService = RemoteDesktopManager.shared
     private let fileTransferService = FileTransferManager.shared
@@ -331,12 +332,24 @@ final class DashboardViewModel: ObservableObject {
         
         let unified = unifiedDeviceManager.$onlineDevices
         
-        Publishers.CombineLatest3(base, presence, unified)
+        let crossNetwork = Publishers.CombineLatest3(
+            crossNetworkManager.$connectionStatus,
+            crossNetworkManager.$readiness,
+            crossNetworkManager.$currentConnection
+        )
+
+        Publishers.CombineLatest4(base, presence, unified, crossNetwork)
             .receive(on: DispatchQueue.main)
-        .sink { [weak self] baseTuple, presenceTuple, unifiedDevices in
+        .sink { [weak self] baseTuple, presenceTuple, unifiedDevices, crossTuple in
                 guard let self else { return }
             let (baseStatus, p2pStatus, inboundCount, isTransferring) = baseTuple
             let (presenceConnections, rekeyStatusByPeerId) = presenceTuple
+            let (crossStatus, crossReadiness, crossConnection) = crossTuple
+            let crossConnected = Self.isCrossNetworkConnected(
+                status: crossStatus,
+                readiness: crossReadiness
+            )
+            let crossSuite = Self.crossNetworkNegotiatedSuite(from: crossReadiness)
 
             // 统一“顶部连接态”判定：
             // 只把明确的实时连接态(.connected)视为已连接，避免历史/扫描信息导致假阳性。
@@ -361,6 +374,12 @@ final class DashboardViewModel: ObservableObject {
                     suite: newestUnified.lastCryptoSuite,
                     guardStatus: newestUnified.guardStatus ?? "守护中"
                 ) ?? newestUnified.name
+            } else if crossConnected {
+                self.connectionDetail = ConnectionCryptoPresentation.detailText(
+                    kind: nil,
+                    suite: crossSuite,
+                    guardStatus: "跨网已连接"
+                ) ?? crossConnection?.deviceName ?? "跨网已连接"
             } else {
                 self.connectionDetail = nil
             }
@@ -378,6 +397,10 @@ final class DashboardViewModel: ObservableObject {
                 self.connectionStatus = .connected
                 return
             }
+                if crossConnected {
+                    self.connectionStatus = .connected
+                    return
+                }
                 if inboundCount > 0 {
                     self.connectionStatus = .connected
                     return
@@ -868,11 +891,17 @@ final class DashboardViewModel: ObservableObject {
             let onlineCount = self.deviceStats.online
             let connectedCount = self.deviceStats.connected
             let totalDevices = self.deviceStats.total
+            let hasUnifiedConnectedPeer = self.onlineDevices.contains { !$0.isLocalDevice && $0.connectionStatus == .connected }
+            let hasCrossNetworkSession = Self.isCrossNetworkConnected(
+                status: self.crossNetworkManager.connectionStatus,
+                readiness: self.crossNetworkManager.readiness
+            )
+            let crossNetworkPeerContribution = (hasCrossNetworkSession && !hasUnifiedConnectedPeer) ? 1 : 0
 
  // 兼容：如果统一设备列表为空，使用旧的计数逻辑
             let actualOnlineDevices: Int
             if totalDevices > 0 {
-                actualOnlineDevices = totalDevices
+                actualOnlineDevices = totalDevices + crossNetworkPeerContribution
             } else {
  // 回退到旧的逻辑
                 let discoveredCount = self.discoveredDevices.count
@@ -884,11 +913,13 @@ final class DashboardViewModel: ObservableObject {
                         return false
                     }
                 }.count
-                actualOnlineDevices = (discoveredCount + usbCount == 0 && self.isNetworkOnline) ? 1 : (discoveredCount + usbCount)
+                let fallbackCount = (discoveredCount + usbCount == 0 && self.isNetworkOnline) ? 1 : (discoveredCount + usbCount)
+                actualOnlineDevices = fallbackCount + crossNetworkPeerContribution
             }
 
             self.metrics.onlineDevices = actualOnlineDevices
             self.metrics.activeSessions = self.sessions.filter { $0.status == .connected }.count
+                + (hasCrossNetworkSession ? 1 : 0)
             self.metrics.fileTransfers = self.transferTasks.count
 
             #if DEBUG
@@ -926,6 +957,24 @@ final class DashboardViewModel: ObservableObject {
             freeifaddrs(ifaddr)
         }
         return addr
+    }
+
+    private static func isCrossNetworkConnected(
+        status: CrossNetworkConnectionManager.CrossNetworkConnectionStatus,
+        readiness: CrossNetworkConnectionManager.CrossNetworkReadiness
+    ) -> Bool {
+        if case .connected = status { return true }
+        if case .handshakeComplete = readiness { return true }
+        return false
+    }
+
+    private static func crossNetworkNegotiatedSuite(
+        from readiness: CrossNetworkConnectionManager.CrossNetworkReadiness
+    ) -> String? {
+        if case .handshakeComplete(_, let negotiatedSuite) = readiness {
+            return negotiatedSuite
+        }
+        return nil
     }
 }
 

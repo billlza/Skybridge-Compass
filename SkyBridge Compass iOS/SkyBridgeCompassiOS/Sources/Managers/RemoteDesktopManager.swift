@@ -611,6 +611,9 @@ public class RemoteDesktopManager: ObservableObject {
     
     /// 分辨率
     @Published public private(set) var resolution: CGSize = .zero
+
+    /// 当前传输方式（用于 UI 提示）
+    @Published public private(set) var transportStatusText: String?
     
     /// 是否全屏
     @Published public var isFullscreen: Bool = false
@@ -666,6 +669,7 @@ public class RemoteDesktopManager: ObservableObject {
                 networkConnection?.cancel()
                 networkConnection = nil
                 activeTransportMode = .crossNetwork
+                transportStatusText = currentTransportStatusText()
                 currentConnection = Connection(device: resolvedDevice, status: .connected)
                 state = .connected
                 isStreaming = true
@@ -693,6 +697,7 @@ public class RemoteDesktopManager: ObservableObject {
             let connection = try await createConnection(to: endpoint)
             networkConnection = connection
             activeTransportMode = .lan
+            transportStatusText = currentTransportStatusText()
 
             // 创建 Connection 对象
             currentConnection = Connection(device: resolvedDevice, status: .connected)
@@ -708,6 +713,7 @@ public class RemoteDesktopManager: ObservableObject {
             
         } catch {
             activeTransportMode = .none
+            transportStatusText = currentTransportStatusText()
             state = .error(error.localizedDescription)
             throw error
         }
@@ -783,6 +789,7 @@ public class RemoteDesktopManager: ObservableObject {
         networkConnection?.cancel()
         networkConnection = nil
         activeTransportMode = .none
+        transportStatusText = currentTransportStatusText()
         
         // 清理解码器
         await decoder.cleanup()
@@ -797,6 +804,20 @@ public class RemoteDesktopManager: ObservableObject {
         resolution = .zero
         pendingFrames.removeAll()
         isDecodingFrame = false
+    }
+
+    private func currentTransportStatusText() -> String? {
+        switch activeTransportMode {
+        case .none:
+            return nil
+        case .lan:
+            return "P2P / LAN"
+        case .crossNetwork:
+            if case .handshakeComplete(_, let negotiatedSuite) = crossNetwork.readiness {
+                return "WebRTC · \(negotiatedSuite)"
+            }
+            return "WebRTC"
+        }
     }
     
     // MARK: - Input Events
