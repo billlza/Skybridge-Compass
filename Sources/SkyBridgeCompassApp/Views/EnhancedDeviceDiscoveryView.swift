@@ -381,7 +381,7 @@ public struct EnhancedDeviceDiscoveryView: View {
 
             // 最近连接（不等同于“信任/已配对”，但应立即可见）
             let recentlyConnected = unifiedDeviceManager.onlineDevices
-                .filter { !$0.isLocalDevice && $0.lastConnectedAt != nil }
+                .filter { !$0.isLocalDevice && $0.lastConnectedAt != nil && $0.connectionStatus != .connected }
                 .sorted { ($0.lastConnectedAt ?? .distantPast) > ($1.lastConnectedAt ?? .distantPast) }
             if !recentlyConnected.isEmpty {
                 VStack(alignment: .leading, spacing: 12) {
@@ -576,7 +576,7 @@ public struct EnhancedDeviceDiscoveryView: View {
 
                     if let qrData = crossNetworkManager.qrCodeData {
                         QRCodeView(data: qrData)
-                            .frame(width: 220, height: 220)
+                            .frame(width: 280, height: 280)
                             .background(Color.white)
                             .cornerRadius(12)
                             .shadow(color: .black.opacity(0.1), radius: 4)
@@ -614,7 +614,7 @@ public struct EnhancedDeviceDiscoveryView: View {
                                 Text(LocalizationManager.shared.localizedString("discovery.qrCode.generate"))
                                     .font(.headline)
                             }
-                            .frame(width: 220, height: 220)
+                            .frame(width: 280, height: 280)
                             .background(Color.blue.opacity(0.1))
                             .cornerRadius(12)
                         }
@@ -647,7 +647,7 @@ public struct EnhancedDeviceDiscoveryView: View {
                                 .foregroundColor(.secondary)
                                 .multilineTextAlignment(.center)
                         }
-                        .frame(width: 220, height: 220)
+                        .frame(width: 280, height: 280)
                         .background(Color.green.opacity(0.1))
                         .cornerRadius(12)
                     }

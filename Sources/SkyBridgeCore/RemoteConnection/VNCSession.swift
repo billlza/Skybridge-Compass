@@ -26,10 +26,10 @@ public final class VNCSession: ObservableObject {
         self.host = host
         self.port = port
  // 将渲染器输出绑定到纹理发布器
-        renderer.frameHandler = { [weak self] texture in
+        renderer.frameHandler = { [weak self] texture, backing in
             guard let self else { return }
             Task { @MainActor in
-                self.textureFeed.update(texture: texture)
+                self.textureFeed.update(texture: texture, backing: backing)
             }
         }
     }

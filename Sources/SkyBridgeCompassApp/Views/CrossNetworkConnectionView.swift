@@ -140,7 +140,7 @@ struct CrossNetworkConnectionView: View {
 
                     if let qrData = connectionManager.qrCodeData {
                         QRCodeView(data: qrData)
-                            .frame(width: 250, height: 250)
+                            .frame(width: 280, height: 280)
                             .background(Color.white)
                             .cornerRadius(12)
                             .shadow(radius: 4)
@@ -170,7 +170,7 @@ struct CrossNetworkConnectionView: View {
                                 Text(LocalizationManager.shared.localizedString("connection.generateQR"))
                                     .font(.headline)
                             }
-                            .frame(width: 250, height: 250)
+                            .frame(width: 280, height: 280)
                             .background(Color.blue.opacity(0.1))
                             .cornerRadius(12)
                         }
@@ -457,6 +457,7 @@ struct CrossNetworkConnectionView: View {
                         .buttonStyle(.borderedProminent)
                         .disabled(inputCode.count != 6)
                         .frame(width: 280)
+
                     }
                     .frame(height: 200)
                 }
@@ -588,7 +589,7 @@ struct QRCodeView: View {
         let context = CIContext()
         let filter = CIFilter.qrCodeGenerator()
         filter.setValue(data, forKey: "inputMessage")
-        filter.setValue("H", forKey: "inputCorrectionLevel")
+        filter.setValue("M", forKey: "inputCorrectionLevel")
 
         guard let ciImage = filter.outputImage else { return nil }
 

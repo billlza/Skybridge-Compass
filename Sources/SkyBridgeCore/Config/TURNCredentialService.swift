@@ -150,6 +150,10 @@ public actor TURNCredentialService {
         guard let httpResponse = response as? HTTPURLResponse else {
             throw TURNCredentialError.invalidResponse("非 HTTP 响应")
         }
+        let instance = httpResponse.value(forHTTPHeaderField: "X-SkyBridge-Instance") ?? "unknown"
+        let backend = httpResponse.value(forHTTPHeaderField: "X-SkyBridge-State-Backend") ?? "unknown"
+        let prefixes = httpResponse.value(forHTTPHeaderField: "X-SkyBridge-Code-Prefixes") ?? "-"
+        logger.info("🌐 TURN credentials served by instance=\(instance, privacy: .public) backend=\(backend, privacy: .public) prefixes=\(prefixes, privacy: .public)")
         
         guard (200...299).contains(httpResponse.statusCode) else {
             let body = String(data: data, encoding: .utf8)

@@ -25,6 +25,9 @@ struct LocalWebRTCSmokeHost {
         }
 
         let expectsPQCRekey = ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_EXPECT_PQC_REKEY"] == "1"
+        let requiresStreamEvidence = ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_REQUIRE_STREAM"] == "1"
+        let requiresDirectPath = ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_REQUIRE_DIRECT"] == "1"
+        let holdAfterSuccessSeconds = Double(ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_HOLD_AFTER_SUCCESS_SECONDS"] ?? "") ?? 0
         let timeoutSeconds = Double(ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_TIMEOUT_SECONDS"] ?? "") ?? 90
         let deadline = Date().addingTimeInterval(timeoutSeconds)
         var lastStatus = ""
@@ -32,6 +35,7 @@ struct LocalWebRTCSmokeHost {
         var lastRekeyEvent = ""
         var sawInitialHandshake = false
         var reportedSuccess = false
+        var successAt: Date?
 
         while reportedSuccess || Date() < deadline {
             let statusDescription = String(describing: manager.connectionStatus)
@@ -66,8 +70,22 @@ struct LocalWebRTCSmokeHost {
                 let suiteName = negotiatedSuite.uppercased()
                 let isClassicBootstrap = suiteName == "X25519" || suiteName == "X25519-ED25519"
                 if !reportedSuccess && (!expectsPQCRekey || !isClassicBootstrap) {
-                    reportedSuccess = true
-                    reporter.append("success session=\(sessionId) suite=\(sanitize(negotiatedSuite))")
+                    let evidence = smokeEvidence(statusURL: statusURL())
+                    let streamSatisfied = !requiresStreamEvidence || evidence.hasStream
+                    let directSatisfied = !requiresDirectPath || evidence.hasDirectPath
+                    if streamSatisfied && directSatisfied {
+                        reportedSuccess = true
+                        successAt = Date()
+                        reporter.append(
+                            "success session=\(sessionId) suite=\(sanitize(negotiatedSuite)) stream=\(evidence.hasStream) direct=\(evidence.hasDirectPath)"
+                        )
+                    }
+                }
+            }
+
+            if reportedSuccess {
+                if let successAt, Date().timeIntervalSince(successAt) >= holdAfterSuccessSeconds {
+                    exit(EXIT_SUCCESS)
                 }
             }
 
@@ -96,6 +114,15 @@ struct LocalWebRTCSmokeHost {
         return URL(fileURLWithPath: raw)
     }
 
+    private static func smokeFileURL() -> URL? {
+        guard let raw = ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_SEND_FILE"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else {
+            return nil
+        }
+        return URL(fileURLWithPath: raw)
+    }
+
     private static func writeText(_ text: String, to url: URL) throws {
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try text.appending("\n").write(to: url, atomically: true, encoding: .utf8)
@@ -103,6 +130,18 @@ struct LocalWebRTCSmokeHost {
 
     private static func sanitize(_ value: String) -> String {
         value.replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\r", with: " ")
+    }
+
+    private static func smokeEvidence(statusURL: URL?) -> (hasStream: Bool, hasDirectPath: Bool) {
+        guard let statusURL,
+              let contents = try? String(contentsOf: statusURL, encoding: .utf8) else {
+            return (false, false)
+        }
+        let hasStream = contents.contains("stream-format ")
+            || contents.contains("stream-stats ")
+        let hasDirectPath = contents.contains("stream-path ")
+            && contents.contains("path=direct")
+        return (hasStream, hasDirectPath)
     }
 }
 

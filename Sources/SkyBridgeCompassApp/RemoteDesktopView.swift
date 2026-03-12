@@ -29,17 +29,11 @@ struct RemoteDesktopView: View {
 
     var body: some View {
         HStack(spacing: 0) {
- // 侧边栏 - 会话列表
+// 侧边栏 - 会话列表
             sessionSidebar
 
- // 主内容区域
-            Group {
-                if let session = selectedSession {
-                    remoteDesktopContent(for: session)
-                } else {
-                    emptyStateView
-                }
-            }
+// 主内容区域
+            remoteWorkspaceContent
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .toolbar {
@@ -63,13 +57,14 @@ struct RemoteDesktopView: View {
                 remoteDesktopManager.bootstrap()
             }
         }
- // 订阅远程桌面管理器的会话发布，实时更新侧边栏列表
+// 订阅远程桌面管理器的会话发布，实时更新侧边栏列表
         .onReceive(remoteDesktopManager.sessions) { sessions in
- // 说明：该订阅仅更新会话快照，不改变连接状态
+// 说明：该订阅仅更新会话快照，不改变连接状态
             self.allSessions = sessions
+            syncSelectedSession(with: sessions)
         }
         .onDisappear {
- // 确保在视图消失时正确清理资源
+// 确保在视图消失时正确清理资源
             remoteDesktopManager.shutdown()
         }
     }
@@ -211,29 +206,102 @@ struct RemoteDesktopView: View {
         .padding(.bottom, 6)
     }
 
- // MARK: - 主内容区域
-    private func remoteDesktopContent(for session: RemoteSessionSummary) -> some View {
-        VStack(spacing: 0) {
- // 顶部控制栏
-            remoteDesktopToolbar(for: session)
-
- // 远程桌面显示区域
-            remoteDisplayArea(for: session)
+// MARK: - 主内容区域
+    private var remoteWorkspaceContent: some View {
+        VStack(spacing: 16) {
+            trustedActiveSessionsPanel
+            previewPanel
         }
-        .background(Color.black)
+        .padding(20)
+        .background(
+            LinearGradient(
+                colors: [
+                    Color.black.opacity(0.94),
+                    Color.blue.opacity(0.24),
+                    Color.black.opacity(0.98)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        )
+    }
+
+    private var trustedActiveSessionsPanel: some View {
+        remoteSurfacePanel(
+            title: "Trusted Active Sessions",
+            trailing: filteredActiveSessions.isEmpty ? "No active session" : "\(filteredActiveSessions.count) active"
+        ) {
+            if filteredActiveSessions.isEmpty {
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("Trusted peers will appear here once a verified remote session is established.")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+
+                    HStack(spacing: 12) {
+                        Button(LocalizationManager.shared.localizedString("remote.connect.recommended")) {
+                            NotificationCenter.default.post(name: .skybridgeNavigateToDeviceDiscovery, object: nil)
+                        }
+                        .buttonStyle(.borderedProminent)
+
+                        Button(LocalizationManager.shared.localizedString("remote.connect.advanced")) {
+                            newConnectionPrefersAdvanced = true
+                            showingConnectionSheet = true
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                LazyVGrid(
+                    columns: [
+                        GridItem(.flexible(), spacing: 12),
+                        GridItem(.flexible(), spacing: 12),
+                        GridItem(.flexible(), spacing: 12)
+                    ],
+                    spacing: 12
+                ) {
+                    ForEach(filteredActiveSessions.prefix(3)) { session in
+                        remoteSessionSummaryCard(for: session)
+                    }
+                }
+            }
+        }
+    }
+
+    private var previewPanel: some View {
+        remoteSurfacePanel(
+            title: "Preview",
+            trailing: previewSession.map { "\(String(format: "%.0f", $0.frameLatencyMilliseconds)) ms" } ?? "Idle"
+        ) {
+            if let session = previewSession {
+                VStack(spacing: 14) {
+                    remoteDesktopToolbar(for: session)
+                    remoteDisplayArea(for: session)
+                        .frame(maxWidth: .infinity, minHeight: 420)
+                        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+                }
+            } else {
+                emptyStateView
+                    .frame(maxWidth: .infinity, minHeight: 420)
+                    .background(
+                        RoundedRectangle(cornerRadius: 22, style: .continuous)
+                            .fill(Color.black.opacity(0.22))
+                    )
+            }
+        }
     }
 
     private func remoteDesktopToolbar(for session: RemoteSessionSummary) -> some View {
         HStack {
- // 连接信息
+// 连接信息
             VStack(alignment: .leading, spacing: 2) {
                 Text(session.targetName)
                     .font(.headline)
-                    .foregroundColor(.white)
+                    .foregroundColor(.primary)
 
                 HStack(spacing: 8) {
                     Circle()
-                        .fill(.green)
+                        .fill(statusColor(for: session))
                         .frame(width: 8, height: 8)
 
                     Text("\(session.protocolDescription) • \(session.bandwidthMbps, specifier: "%.1f") Mbps")
@@ -244,22 +312,22 @@ struct RemoteDesktopView: View {
 
             Spacer()
 
- // 控制按钮
+// 控制按钮
             HStack(spacing: 8) {
- // 双通道模式徽章
+// 双通道模式徽章
                 connectionModeBadge
 
                 Divider()
                     .frame(height: 20)
 
- // Metal 4 性能监控开关
+// Metal 4 性能监控开关
                 Button(action: { showPerformanceOverlay.toggle() }) {
                     Image(systemName: showPerformanceOverlay ? "chart.bar.fill" : "chart.bar")
-                        .foregroundColor(showPerformanceOverlay ? .green : .white)
+                        .foregroundColor(showPerformanceOverlay ? .green : .primary)
                 }
                 .help(LocalizationManager.shared.localizedString("remote.performance.monitor"))
 
- // 质量设置
+// 质量设置
                 Menu {
                     ForEach(VideoQuality.allCases, id: \.self) { quality in
                         Button(quality.displayName) {
@@ -268,25 +336,25 @@ struct RemoteDesktopView: View {
                     }
                 } label: {
                     Image(systemName: "tv")
-                        .foregroundColor(.white)
+                        .foregroundColor(.primary)
                 }
                 .menuStyle(.borderlessButton)
 
- // 设置按钮
+// 设置按钮
                 Button(action: { showingSettingsSheet = true }) {
                     Image(systemName: "gearshape")
-                        .foregroundColor(.white)
+                        .foregroundColor(.primary)
                 }
                 .help(LocalizationManager.shared.localizedString("remote.settings.help"))
 
- // 全屏切换
+// 全屏切换
                 Button(action: { isFullScreen.toggle() }) {
                     Image(systemName: isFullScreen ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
-                        .foregroundColor(.white)
+                        .foregroundColor(.primary)
                 }
                 .buttonStyle(.borderless)
 
- // 断开连接
+// 断开连接
                 Button(action: { disconnectSession(session) }) {
                     Image(systemName: "xmark.circle")
                         .foregroundColor(.red)
@@ -296,7 +364,10 @@ struct RemoteDesktopView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
-        .background(Color.black.opacity(0.8))
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(.ultraThinMaterial)
+        )
     }
 
  /// 连接模式徽章 - 显示当前使用的通道
@@ -382,12 +453,12 @@ struct RemoteDesktopView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(Color.black)
                 .overlay(
- // 连接状态覆盖层
+// 连接状态覆盖层
                     connectionStatusOverlay(for: session),
                     alignment: .center
                 )
                 .overlay(
- // Metal 4 性能监控覆盖层（右上角）
+// Metal 4 性能监控覆盖层（右上角）
                     performanceOverlay,
                     alignment: .topTrailing
                 )
@@ -413,7 +484,7 @@ struct RemoteDesktopView: View {
         }
     }
 
- // MARK: - 空状态视图
+// MARK: - 空状态视图
     private var emptyStateView: some View {
         VStack(spacing: 24) {
             Image(systemName: "display")
@@ -449,7 +520,141 @@ struct RemoteDesktopView: View {
         .frame(maxWidth: 400)
     }
 
- // MARK: - 工具栏按钮
+    private var previewSession: RemoteSessionSummary? {
+        if let selectedSession,
+           let refreshedSession = allSessions.first(where: { $0.id == selectedSession.id }) {
+            return refreshedSession
+        }
+        return filteredActiveSessions.first
+    }
+
+    private func remoteSessionSummaryCard(for session: RemoteSessionSummary) -> some View {
+        Button {
+            selectedSession = session
+        } label: {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .top) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(session.targetName)
+                            .font(.headline)
+                            .foregroundColor(.primary)
+                            .lineLimit(1)
+                        Text(session.protocolDescription)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                    }
+
+                    Spacer()
+
+                    Label(session.status.rawValue.capitalized, systemImage: "checkmark.shield")
+                        .font(.caption2.weight(.semibold))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 5)
+                        .background(statusColor(for: session).opacity(0.16), in: Capsule())
+                        .foregroundColor(statusColor(for: session))
+                }
+
+                HStack(spacing: 12) {
+                    remoteMetricPill(
+                        title: "Transport",
+                        value: "\(String(format: "%.1f", session.bandwidthMbps)) Mbps",
+                        icon: "arrow.left.arrow.right",
+                        color: .blue
+                    )
+                    remoteMetricPill(
+                        title: "Latency",
+                        value: "\(String(format: "%.0f", session.frameLatencyMilliseconds)) ms",
+                        icon: "waveform.path.ecg",
+                        color: .green
+                    )
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(16)
+            .background(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(selectedSession?.id == session.id ? Color.accentColor.opacity(0.18) : Color.white.opacity(0.05))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .stroke(selectedSession?.id == session.id ? Color.accentColor.opacity(0.35) : Color.white.opacity(0.08), lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func remoteMetricPill(title: String, value: String, icon: String, color: Color) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label(title, systemImage: icon)
+                .font(.caption2.weight(.semibold))
+                .foregroundColor(.secondary)
+            Text(value)
+                .font(.subheadline.weight(.semibold))
+                .foregroundColor(.primary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(color.opacity(0.10))
+        )
+    }
+
+    private func remoteSurfacePanel<Content: View>(title: String, trailing: String?, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(title)
+                    .font(.title3.weight(.semibold))
+                    .foregroundColor(.primary)
+                Spacer()
+                if let trailing {
+                    Text(trailing)
+                        .font(.caption.weight(.semibold))
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            content()
+        }
+        .padding(20)
+        .background {
+            if #available(macOS 26.0, *) {
+                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                    .fill(.clear)
+                    .glassEffect(.regular, in: .rect(cornerRadius: 24))
+            } else {
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .fill(themeConfiguration.cardBackgroundMaterial)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 22, style: .continuous)
+                            .stroke(themeConfiguration.borderColor, lineWidth: 1)
+                    )
+            }
+        }
+    }
+
+    private func syncSelectedSession(with sessions: [RemoteSessionSummary]) {
+        if let selectedSession,
+           let refreshedSession = sessions.first(where: { $0.id == selectedSession.id }) {
+            self.selectedSession = refreshedSession
+            return
+        }
+        self.selectedSession = sessions.first
+    }
+
+    private func statusColor(for session: RemoteSessionSummary) -> Color {
+        switch session.status {
+        case .connected:
+            return .green
+        case .connecting:
+            return .orange
+        case .disconnected, .failed:
+            return .red
+        }
+    }
+
+// MARK: - 工具栏按钮
     private var toolbarButtons: some View {
         Group {
             Menu {

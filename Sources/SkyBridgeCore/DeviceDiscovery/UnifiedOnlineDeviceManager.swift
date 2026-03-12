@@ -826,13 +826,13 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         )
     }
 
-    private static func normalizedRecentIdentifier(from uniqueIdentifier: String) -> String? {
+    private nonisolated static func normalizedRecentIdentifier(from uniqueIdentifier: String) -> String? {
         guard uniqueIdentifier.hasPrefix("recent:") else { return nil }
         let peerId = String(uniqueIdentifier.dropFirst("recent:".count))
         return "recent:\(normalizedPeerIdentifier(peerId))"
     }
 
-    private static func normalizedPeerIdentifier(_ peerId: String) -> String {
+    private nonisolated static func normalizedPeerIdentifier(_ peerId: String) -> String {
         let trimmed = peerId.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.hasPrefix("bonjour:") {
             let payload = String(trimmed.dropFirst("bonjour:".count))
@@ -852,7 +852,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         return "peer:\(normalizePeerHostToken(raw))"
     }
 
-    private static func normalizePeerHostToken(_ raw: String) -> String {
+    private nonisolated static func normalizePeerHostToken(_ raw: String) -> String {
         var token = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         if token.hasPrefix("[") && token.hasSuffix("]") {
             token = String(token.dropFirst().dropLast())
@@ -876,7 +876,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         return token.lowercased()
     }
 
-    private static func normalizeIPAddress(_ raw: String) -> String {
+    private nonisolated static func normalizeIPAddress(_ raw: String) -> String {
         var token = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         if token.hasPrefix("[") && token.hasSuffix("]") {
             token = String(token.dropFirst().dropLast())
@@ -887,7 +887,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         return token.lowercased()
     }
 
-    private static func extractIPComponents(fromNormalizedPeerId peerId: String) -> (ipv4: String?, ipv6: String?) {
+    private nonisolated static func extractIPComponents(fromNormalizedPeerId peerId: String) -> (ipv4: String?, ipv6: String?) {
         guard peerId.hasPrefix("peer:") else { return (nil, nil) }
         let host = String(peerId.dropFirst("peer:".count))
         if host.contains(":") {
@@ -900,12 +900,12 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         return (nil, nil)
     }
 
-    private static func isSyntheticPeerDisplayName(_ displayName: String) -> Bool {
+    private nonisolated static func isSyntheticPeerDisplayName(_ displayName: String) -> Bool {
         let normalized = displayName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         return normalized.hasPrefix("peer:")
     }
 
-    private static func syntheticPeerHost(fromDisplayName displayName: String) -> String? {
+    private nonisolated static func syntheticPeerHost(fromDisplayName displayName: String) -> String? {
         guard isSyntheticPeerDisplayName(displayName) else { return nil }
         let normalizedPeerId = normalizedPeerIdentifier(displayName)
         let extracted = extractIPComponents(fromNormalizedPeerId: normalizedPeerId)
@@ -924,6 +924,106 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
             return lhsConnected > rhsConnected ? lhs : rhs
         }
         return lhs.lastSeen >= rhs.lastSeen ? lhs : rhs
+    }
+
+    nonisolated static func shouldCollapseRecentDevice(
+        _ recent: OnlineDevice,
+        against candidates: [OnlineDevice]
+    ) -> Bool {
+        guard let normalizedRecent = normalizedRecentIdentifier(from: recent.uniqueIdentifier) else {
+            return false
+        }
+        let recentPeerId = String(normalizedRecent.dropFirst("recent:".count))
+        let normalizedRecentName = normalizedDedupeName(recent.name)
+
+        return candidates.contains { candidate in
+            guard candidate.id != recent.id else { return false }
+            guard normalizedRecentIdentifier(from: candidate.uniqueIdentifier) == nil else { return false }
+            guard candidateRepresentsRecentPeer(
+                candidate,
+                recentPeerId: recentPeerId,
+                normalizedRecentName: normalizedRecentName
+            ) else {
+                return false
+            }
+
+            return candidate.isConnectable
+                || candidate.connectionStatus != .offline
+                || candidate.lastConnectedAt != nil
+                || candidate.isAuthorized
+                || Self.identifierStrength(candidate.uniqueIdentifier) > Self.identifierStrength(recent.uniqueIdentifier)
+        }
+    }
+
+    private nonisolated static func candidateRepresentsRecentPeer(
+        _ candidate: OnlineDevice,
+        recentPeerId: String,
+        normalizedRecentName: String
+    ) -> Bool {
+        let aliases = normalizedPeerAliases(for: candidate)
+        if aliases.contains(recentPeerId) {
+            return true
+        }
+
+        if !normalizedRecentName.isEmpty,
+           normalizedDedupeName(candidate.name) == normalizedRecentName,
+           Self.identifierStrength(candidate.uniqueIdentifier) >= 440 {
+            return true
+        }
+
+        return false
+    }
+
+    private nonisolated static func normalizedPeerAliases(for device: OnlineDevice) -> Set<String> {
+        var aliases: Set<String> = []
+
+        if let stableId = normalizedStableIdentifierPayload(from: device.uniqueIdentifier) {
+            aliases.insert(normalizedPeerIdentifier(stableId))
+        }
+
+        if device.uniqueIdentifier.hasPrefix("bonjour:") {
+            aliases.insert(normalizedPeerIdentifier(device.uniqueIdentifier))
+        }
+
+        if device.uniqueIdentifier.hasPrefix("ip:") {
+            let payload = String(device.uniqueIdentifier.dropFirst("ip:".count))
+            let normalized = normalizePeerHostToken(payload)
+            if !normalized.isEmpty {
+                aliases.insert("peer:\(normalized)")
+            }
+        }
+
+        if let ipv4 = device.ipv4 {
+            let normalized = normalizePeerHostToken(ipv4)
+            if !normalized.isEmpty {
+                aliases.insert("peer:\(normalized)")
+            }
+        }
+
+        if let ipv6 = device.ipv6 {
+            let normalized = normalizePeerHostToken(ipv6)
+            if !normalized.isEmpty {
+                aliases.insert("peer:\(normalized)")
+            }
+        }
+
+        return aliases
+    }
+
+    private nonisolated static func normalizedStableIdentifierPayload(from uniqueIdentifier: String) -> String? {
+        guard uniqueIdentifier.hasPrefix("id:") else { return nil }
+        let payload = String(uniqueIdentifier.dropFirst("id:".count))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return payload.isEmpty ? nil : payload
+    }
+
+    private nonisolated static func normalizedDedupeName(_ raw: String) -> String {
+        raw
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: " ", with: "")
+            .replacingOccurrences(of: "-", with: "")
+            .replacingOccurrences(of: "_", with: "")
     }
 
  /// 更新设备列表
@@ -955,7 +1055,11 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                 normalDevices.append(device)
             }
         }
-        uniqueDevices = normalDevices + Array(recentByNormalizedId.values)
+
+        let collapsedRecentDevices = recentByNormalizedId.values.filter { recent in
+            !Self.shouldCollapseRecentDevice(recent, against: normalDevices)
+        }
+        uniqueDevices = normalDevices + collapsedRecentDevices
 
         // Remove deduped-out duplicates from the map so they don't keep resurfacing.
         let retainedIds = Set(uniqueDevices.map(\.id))
@@ -1335,7 +1439,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         }
 
         if raw.hasPrefix("id:"),
-           let normalized = normalizeStableIdentifier(String(raw.dropFirst("id:".count))) {
+           let normalized = Self.normalizeStableIdentifier(String(raw.dropFirst("id:".count))) {
             return "id:\(normalized)"
         }
         if raw.hasPrefix("fp:"),
@@ -1350,7 +1454,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
             let normalized = Self.normalizeIPAddress(payload)
             return normalized.isEmpty ? nil : "ip:\(normalized)"
         }
-        if let stable = normalizeStableIdentifier(raw) {
+        if let stable = Self.normalizeStableIdentifier(raw) {
             return "id:\(stable)"
         }
         let normalizedIP = Self.normalizeIPAddress(raw)
@@ -1379,7 +1483,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         return nil
     }
 
-    private func normalizeStableIdentifier(_ raw: String?) -> String? {
+    private nonisolated static func normalizeStableIdentifier(_ raw: String?) -> String? {
         guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
             return nil
         }
@@ -1396,15 +1500,15 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
     }
 
     private func preferredIdentifier(current: String, incoming: String) -> String {
-        let currentScore = identifierStrength(current)
-        let incomingScore = identifierStrength(incoming)
+        let currentScore = Self.identifierStrength(current)
+        let incomingScore = Self.identifierStrength(incoming)
         if incomingScore > currentScore {
             return incoming
         }
         return current
     }
 
-    private func identifierStrength(_ identifier: String) -> Int {
+    private nonisolated static func identifierStrength(_ identifier: String) -> Int {
         if identifier.hasPrefix("id:") { return 600 }
         if identifier.hasPrefix("fp:") { return 550 }
         if identifier.hasPrefix("recent:bonjour:") { return 450 }
@@ -1414,7 +1518,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         if identifier.hasPrefix("ip:") { return 260 }
         if identifier.hasPrefix("recent:peer:") { return 180 }
         if identifier.hasPrefix("name:") { return 100 }
-        if normalizeStableIdentifier(identifier) != nil { return 500 }
+        if Self.normalizeStableIdentifier(identifier) != nil { return 500 }
         if Self.normalizeIPAddress(identifier).contains(".") || Self.normalizeIPAddress(identifier).contains(":") {
             return 240
         }

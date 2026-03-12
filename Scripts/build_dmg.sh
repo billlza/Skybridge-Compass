@@ -21,6 +21,7 @@ VOLUME_NAME="SkyBridge Compass Pro"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 source "$PROJECT_ROOT/Scripts/apple_pqc_sdk_probe.sh"
+source "$PROJECT_ROOT/Scripts/xcodebuild_helpers.sh"
 INFO_PLIST_PATH="$PROJECT_ROOT/Sources/SkyBridgeCompassApp/Info.plist"
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$INFO_PLIST_PATH" 2>/dev/null || echo "0.0.0")"
 DIST_DIR="$PROJECT_ROOT/dist"
@@ -30,6 +31,7 @@ TEMP_DMG="$DIST_DIR/temp_${DMG_NAME}.dmg"
 STAGE_DIR="$DIST_DIR/dmg_stage"
 BG_SRC_PNG="$PROJECT_ROOT/Sources/SkyBridgeCompassApp/Resources/AppIcon.png"
 BG_NAME="background.png"
+BUILD_DESTINATION="${BUILD_DESTINATION:-$(skybridge_default_macos_destination)}"
 
 SIGNING_IDENTITY="${SIGNING_IDENTITY:-}"
 
@@ -146,10 +148,10 @@ if [[ "$SKIP_BUILD" == false ]]; then
     fi
 
     log_info "使用 Xcode Release 构建..."
-    xcodebuild -workspace .swiftpm/xcode/package.xcworkspace \
+    skybridge_run_xcodebuild -workspace .swiftpm/xcode/package.xcworkspace \
         -scheme SkyBridgeCompassApp \
         -configuration Release \
-        -destination 'platform=macOS,arch=arm64' \
+        -destination "$BUILD_DESTINATION" \
         -derivedDataPath .build/xcode \
         build
 

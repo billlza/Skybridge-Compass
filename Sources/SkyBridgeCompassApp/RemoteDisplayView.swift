@@ -134,7 +134,7 @@ struct RemoteDisplayView: NSViewRepresentable {
         view.device = MTLCreateSystemDefaultDevice()
         view.colorPixelFormat = .bgra8Unorm
         view.isPaused = true                  // 显式绘制：仅在收到新纹理时绘制
-        view.enableSetNeedsDisplay = false    // 不使用 setNeedsDisplay 驱动
+        view.enableSetNeedsDisplay = true     // 使用 setNeedsDisplay 驱动，避免重入 draw()
         view.framebufferOnly = true           // 仅作为显示目标，提高驱动优化
         view.delegate = context.coordinator
         
@@ -173,6 +173,7 @@ struct RemoteDisplayView: NSViewRepresentable {
         private weak var view: MTKView?
         private var cancellable: AnyCancellable?
         private var latestTexture: MTLTexture?
+        private var displayRequestPending = false
 
  /// 绑定 MTKView 与纹理发布者。
         func attach(view: MTKView, feed: RemoteTextureFeed) {
@@ -211,7 +212,11 @@ struct RemoteDisplayView: NSViewRepresentable {
                 .sink { [weak self] (tex: MTLTexture?) in
                     guard let self = self else { return }
                     self.latestTexture = tex
-                    self.view?.draw()
+                    guard let view = self.view, view.window != nil else { return }
+                    if !self.displayRequestPending {
+                        self.displayRequestPending = true
+                        view.needsDisplay = true
+                    }
                 }
         }
         
@@ -219,6 +224,9 @@ struct RemoteDisplayView: NSViewRepresentable {
  // 手动清理订阅
             cancellable?.cancel()
             cancellable = nil
+            latestTexture = nil
+            displayRequestPending = false
+            view?.delegate = nil
         }
 
         func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
@@ -226,6 +234,7 @@ struct RemoteDisplayView: NSViewRepresentable {
         }
 
         func draw(in view: MTKView) {
+            displayRequestPending = false
             guard let commandQueue, let pipelineState else { return }
             guard let descriptor = view.currentRenderPassDescriptor, let drawable = view.currentDrawable else { return }
 

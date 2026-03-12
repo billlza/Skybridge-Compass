@@ -18,6 +18,10 @@ import UIKit
 @available(iOS 17.0, *)
 @MainActor
 public final class ClipboardManager: ObservableObject {
+    private enum ActivationSource: Hashable {
+        case global
+        case session(UUID)
+    }
     
     public static let shared = ClipboardManager()
     
@@ -76,6 +80,7 @@ public final class ClipboardManager: ObservableObject {
     
     /// 当前会话 ID
     private var activeSessionId: UUID?
+    private var activeSources: Set<ActivationSource> = []
     
     /// 剪贴板变化观察者
     private var clipboardMonitorTimer: Timer?
@@ -99,6 +104,7 @@ public final class ClipboardManager: ObservableObject {
     
     /// 剪贴板数据回调（发送到远程）
     public var onLocalClipboardChanged: ((Data, String) -> Void)?
+    private var localClipboardListeners: [UUID: @Sendable (Data, String) -> Void] = [:]
     
     /// 远程剪贴板数据接收回调
     public var onRemoteClipboardReceived: ((Data, String) -> Void)?
@@ -131,7 +137,7 @@ public final class ClipboardManager: ObservableObject {
 
     /// 便捷启用（不关心 sessionId 的场景，例如 Settings 中的全局启用）
     public func enable() {
-        enable(for: UUID())
+        activate(source: .global, sessionId: nil)
     }
     
     // MARK: - Public Methods
@@ -139,32 +145,28 @@ public final class ClipboardManager: ObservableObject {
     /// 启用剪贴板重定向
     /// - Parameter sessionId: 会话 ID
     public func enable(for sessionId: UUID) {
-        guard !isEnabled || activeSessionId != sessionId else { return }
-        
-        isEnabled = true
-        activeSessionId = sessionId
-        syncStatus = .active
-        
-        // 开始监听本地剪贴板变化
-        startMonitoringLocalClipboard()
-        loadHistory()
-        
-        SkyBridgeLogger.shared.info("✅ 剪贴板同步已启用: sessionId=\(sessionId.uuidString)")
+        activate(source: .session(sessionId), sessionId: sessionId)
     }
     
     /// 禁用剪贴板重定向
     public func disable() {
-        guard isEnabled else { return }
-        
-        isEnabled = false
-        stopMonitoringLocalClipboard()
-        activeSessionId = nil
-        lastRemoteClipboardHash = nil
-        lastLocalClipboardHash = nil
-        syncStatus = .idle
-        saveHistory()
-        
-        SkyBridgeLogger.shared.info("🛑 剪贴板同步已禁用")
+        deactivate(source: .global, sessionId: nil)
+    }
+
+    public func disable(for sessionId: UUID) {
+        deactivate(source: .session(sessionId), sessionId: sessionId)
+    }
+
+    public func addLocalClipboardListener(
+        _ listener: @escaping @Sendable (Data, String) -> Void
+    ) -> UUID {
+        let token = UUID()
+        localClipboardListeners[token] = listener
+        return token
+    }
+
+    public func removeLocalClipboardListener(_ token: UUID) {
+        localClipboardListeners.removeValue(forKey: token)
     }
     
     /// 设置远程剪贴板内容
@@ -270,7 +272,7 @@ public final class ClipboardManager: ObservableObject {
 
             guard shouldSendNow() else { return }
             
-            onLocalClipboardChanged?(data, mimeType)
+            notifyLocalClipboardChanged(data: data, mimeType: mimeType)
             lastSyncTime = Date()
             syncStatus = .syncing
             
@@ -334,7 +336,7 @@ public final class ClipboardManager: ObservableObject {
 
         guard shouldSendNow() else { return }
         
-        onLocalClipboardChanged?(data, mimeType)
+        notifyLocalClipboardChanged(data: data, mimeType: mimeType)
         lastSyncTime = Date()
         syncStatus = .syncing
 
@@ -394,6 +396,56 @@ public final class ClipboardManager: ObservableObject {
         }
         if history.count > limit {
             history.removeFirst(history.count - limit)
+        }
+    }
+
+    private func activate(source: ActivationSource, sessionId: UUID?) {
+        let wasEnabled = isEnabled
+        let (inserted, _) = activeSources.insert(source)
+        guard inserted else { return }
+
+        isEnabled = true
+        if let sessionId {
+            activeSessionId = sessionId
+        }
+        syncStatus = .active
+
+        if !wasEnabled {
+            startMonitoringLocalClipboard()
+            loadHistory()
+        }
+
+        let scope = sessionId?.uuidString ?? "global"
+        SkyBridgeLogger.shared.info("✅ 剪贴板同步已启用: scope=\(scope)")
+    }
+
+    private func deactivate(source: ActivationSource, sessionId: UUID?) {
+        guard activeSources.remove(source) != nil else { return }
+
+        if case .session(let token) = source, activeSessionId == token {
+            activeSessionId = nil
+        }
+
+        if activeSources.isEmpty {
+            isEnabled = false
+            stopMonitoringLocalClipboard()
+            activeSessionId = nil
+            lastRemoteClipboardHash = nil
+            lastLocalClipboardHash = nil
+            syncStatus = .idle
+            saveHistory()
+        } else {
+            syncStatus = .active
+        }
+
+        let scope = sessionId?.uuidString ?? "global"
+        SkyBridgeLogger.shared.info("🛑 剪贴板同步已禁用: scope=\(scope)")
+    }
+
+    private func notifyLocalClipboardChanged(data: Data, mimeType: String) {
+        onLocalClipboardChanged?(data, mimeType)
+        for listener in localClipboardListeners.values {
+            listener(data, mimeType)
         }
     }
 }
@@ -463,4 +515,3 @@ public enum SyncStatus: String, Sendable {
         }
     }
 }
-

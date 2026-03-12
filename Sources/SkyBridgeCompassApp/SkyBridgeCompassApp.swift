@@ -661,6 +661,8 @@ private final class LocalWebRTCSmokeHarness {
         didStart = true
 
         let expectsPQCRekey = self.expectsPQCRekey
+        let requiresStreamEvidence = ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_REQUIRE_STREAM"] == "1"
+        let requiresDirectPath = ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_REQUIRE_DIRECT"] == "1"
         let statusURL = self.statusURL()
         let codeURL = self.codeURL()
 
@@ -726,9 +728,12 @@ private final class LocalWebRTCSmokeHarness {
 
                     let suiteName = negotiatedSuite.uppercased()
                     let isClassicBootstrap = suiteName == "X25519" || suiteName == "X25519-ED25519"
-                    if !expectsPQCRekey || !isClassicBootstrap {
+                    let evidence = Self.smokeEvidence(statusURL: statusURL)
+                    let streamSatisfied = !requiresStreamEvidence || evidence.hasStream
+                    let directSatisfied = !requiresDirectPath || evidence.hasDirectPath
+                    if (!expectsPQCRekey || !isClassicBootstrap) && streamSatisfied && directSatisfied {
                         reporter.append(
-                            "success session=\(sessionId) suite=\(Self.sanitize(negotiatedSuite))"
+                            "success session=\(sessionId) suite=\(Self.sanitize(negotiatedSuite)) stream=\(evidence.hasStream) direct=\(evidence.hasDirectPath)"
                         )
                         self.terminateIfNeeded()
                         return
@@ -773,6 +778,18 @@ private final class LocalWebRTCSmokeHarness {
 
     private static func sanitize(_ value: String) -> String {
         value.replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\r", with: " ")
+    }
+
+    private static func smokeEvidence(statusURL: URL?) -> (hasStream: Bool, hasDirectPath: Bool) {
+        guard let statusURL,
+              let contents = try? String(contentsOf: statusURL, encoding: .utf8) else {
+            return (false, false)
+        }
+        let hasStream = contents.contains("stream-format ")
+            || contents.contains("stream-stats ")
+        let hasDirectPath = contents.contains("stream-path ")
+            && contents.contains("path=direct")
+        return (hasStream, hasDirectPath)
     }
 }
 

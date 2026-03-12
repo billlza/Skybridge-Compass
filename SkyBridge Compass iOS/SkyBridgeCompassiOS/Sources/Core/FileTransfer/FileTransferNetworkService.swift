@@ -72,18 +72,31 @@ public actor FileTransferNetworkService {
         // 配置 Bonjour 以便 macOS 端发现 (修复"未建立可用文件传输通道"错误)
         #if canImport(UIKit)
         let deviceName = await Self.currentDeviceName()
+        let systemVersion = await Self.currentSystemVersion()
+        let model = await Self.currentModel()
         #else
         let deviceName = "iOS Device"
+        let systemVersion = ProcessInfo.processInfo.operatingSystemVersionString
+        let model = "iOS Device"
         #endif
 
-        let txtRecord: [String: Data] = [
-            "version": "1.0".data(using: .utf8) ?? Data(),
-            "device": deviceName.data(using: .utf8) ?? Data(),
-            "capabilities": "file-transfer".data(using: .utf8) ?? Data()
-        ]
+        let deviceId = KeychainManager.shared.getOrGenerateDeviceId()
+
+        let txtRecord = Self.makeBonjourTXTRecord(
+            deviceName: deviceName,
+            deviceId: deviceId,
+            model: model,
+            systemVersion: systemVersion,
+            port: port
+        )
         let txtData = NetService.data(fromTXTRecord: txtRecord)
         
-        listener?.service = NWListener.Service(type: "_skybridge-transfer._tcp", txtRecord: txtData)
+        listener?.service = NWListener.Service(
+            name: deviceName,
+            type: "_skybridge-transfer._tcp",
+            domain: "local.",
+            txtRecord: txtData
+        )
         
         listener?.stateUpdateHandler = { [weak self] state in
             Task { [weak self] in
@@ -108,7 +121,42 @@ public actor FileTransferNetworkService {
     private static func currentDeviceName() -> String {
         UIDevice.current.name
     }
+
+    @MainActor
+    private static func currentSystemVersion() -> String {
+        UIDevice.current.systemVersion
+    }
+
+    @MainActor
+    private static func currentModel() -> String {
+        UIDevice.current.model
+    }
     #endif
+
+    private static func makeBonjourTXTRecord(
+        deviceName: String,
+        deviceId: String,
+        model: String,
+        systemVersion: String,
+        port: UInt16
+    ) -> [String: Data] {
+        let portString = String(port)
+        return [
+            "version": Data("1".utf8),
+            "platform": Data("ios".utf8),
+            "name": Data(deviceName.utf8),
+            "device": Data(deviceName.utf8),
+            "deviceId": Data(deviceId.utf8),
+            "uuid": Data(deviceId.utf8),
+            "model": Data(model.utf8),
+            "osVersion": Data(systemVersion.utf8),
+            "capabilities": Data("file_transfer".utf8),
+            "transferPort": Data(portString.utf8),
+            "fileTransferPort": Data(portString.utf8),
+            "file_transfer_port": Data(portString.utf8),
+            "port": Data(portString.utf8)
+        ]
+    }
     
     /// 停止监听服务
     public func stopListening() {

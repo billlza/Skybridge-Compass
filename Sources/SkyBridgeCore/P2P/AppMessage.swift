@@ -40,6 +40,7 @@ public enum AppMessage: Codable, Sendable, Equatable {
         public let platform: String?
         public let osVersion: String?
         public let chip: String?
+        public let remoteVideoFormats: [String]?
         public let sentAt: Date
 
         public init(
@@ -50,6 +51,7 @@ public enum AppMessage: Codable, Sendable, Equatable {
             platform: String? = nil,
             osVersion: String? = nil,
             chip: String? = nil,
+            remoteVideoFormats: [String]? = nil,
             sentAt: Date = Date()
         ) {
             self.deviceId = deviceId
@@ -59,6 +61,7 @@ public enum AppMessage: Codable, Sendable, Equatable {
             self.platform = platform
             self.osVersion = osVersion
             self.chip = chip
+            self.remoteVideoFormats = remoteVideoFormats
             self.sentAt = sentAt
         }
     }
@@ -72,6 +75,7 @@ public enum AppMessage: Codable, Sendable, Equatable {
         public let platform: String?
         public let osVersion: String?
         public let chip: String?
+        public let remoteVideoFormats: [String]?
 
         public init(
             sentAt: Date = Date(),
@@ -80,7 +84,8 @@ public enum AppMessage: Codable, Sendable, Equatable {
             modelName: String? = nil,
             platform: String? = nil,
             osVersion: String? = nil,
-            chip: String? = nil
+            chip: String? = nil,
+            remoteVideoFormats: [String]? = nil
         ) {
             self.sentAt = sentAt
             self.deviceId = deviceId
@@ -89,6 +94,7 @@ public enum AppMessage: Codable, Sendable, Equatable {
             self.platform = platform
             self.osVersion = osVersion
             self.chip = chip
+            self.remoteVideoFormats = remoteVideoFormats
         }
     }
 

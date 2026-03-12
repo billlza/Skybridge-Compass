@@ -422,9 +422,7 @@ public class FileTransferManager: ObservableObject {
         
         do {
             // Cross-network path (WebRTC DataChannel): zero-config, no ports required.
-            if case .connected = crossNetwork.state,
-               let remoteId = crossNetwork.remoteDeviceId,
-               device.id == remoteId {
+            if shouldUseCrossNetworkTransport(for: device) {
                 try await sendFileOverWebRTC(from: url, transfer: transfer, metadata: state.metadata!, to: device)
                 await completeTransfer(transfer.id, success: true)
                 SkyBridgeLogger.shared.info("✅ 文件发送完成(WebRTC): \(fileName)")
@@ -440,20 +438,32 @@ public class FileTransferManager: ObservableObject {
             let endpoint: NWEndpoint
             let transferServiceType = DiscoveredDevice.fileTransferServiceType
             let parsedBonjour = parseBonjourIdentity(from: resolvedDevice.id)
+            let bonjourName = resolvedDevice.bonjourServiceName ?? parsedBonjour?.name
+            let bonjourDomain = resolvedDevice.bonjourServiceDomain ?? parsedBonjour?.domain ?? "local."
             let hasTransferService =
                 resolvedDevice.services.contains(transferServiceType)
                 || resolvedDevice.bonjourServiceType == transferServiceType
 
             if hasTransferService {
                 endpoint = .service(
-                    name: resolvedDevice.bonjourServiceName ?? parsedBonjour?.name ?? resolvedDevice.name,
+                    name: bonjourName ?? resolvedDevice.name,
                     type: transferServiceType,
-                    domain: resolvedDevice.bonjourServiceDomain ?? parsedBonjour?.domain ?? "local.",
+                    domain: bonjourDomain,
                     interface: nil
                 )
             } else if let ip = bestIPAddress(for: resolvedDevice) {
                 let port = resolvedDevice.fileTransferPort ?? FileTransferConstants.defaultPort
                 endpoint = .hostPort(host: .init(ip), port: .init(integerLiteral: port))
+            } else if let bonjourName, !bonjourName.isEmpty {
+                SkyBridgeLogger.shared.info(
+                    "📡 文件传输未发现独立端口，尝试使用 Bonjour 名称回退连接: name=\(bonjourName) domain=\(bonjourDomain)"
+                )
+                endpoint = .service(
+                    name: bonjourName,
+                    type: transferServiceType,
+                    domain: bonjourDomain,
+                    interface: nil
+                )
             } else {
                 throw FileTransferError.invalidDestination
             }
@@ -490,31 +500,191 @@ public class FileTransferManager: ObservableObject {
     // MARK: - Cross-network (WebRTC DataChannel) send
 
     private func resolveLatestTransferDevice(from device: DiscoveredDevice) -> DiscoveredDevice {
-        var best = device
         let discovered = DeviceDiscoveryManager.instance.discoveredDevices
+        let resolved = Self.resolveBestTransferDevice(target: device, discovered: discovered)
+        if resolved.id != device.id
+            || resolved.bonjourServiceType != device.bonjourServiceType
+            || resolved.portMap != device.portMap {
+            SkyBridgeLogger.shared.info(
+                "📡 文件传输目标已补全: target=\(device.name) original=\(device.id) resolved=\(resolved.id) services=\(resolved.services.joined(separator: ",")) portMap=\(resolved.portMap)"
+            )
+        }
+        return resolved
+    }
 
-        if let exact = discovered.first(where: { $0.id == device.id }) {
-            best = preferredTransferDevice(best, exact)
+    private func shouldUseCrossNetworkTransport(for device: DiscoveredDevice) -> Bool {
+        let localActiveConnectionDeviceIds = Set(connectionManager.activeConnections.map(\.device.id))
+        return Self.shouldPreferCrossNetworkTransfer(
+            targetDeviceId: device.id,
+            crossNetworkState: crossNetwork.state,
+            crossNetworkRemoteDeviceId: crossNetwork.remoteDeviceId,
+            localActiveConnectionDeviceIds: localActiveConnectionDeviceIds
+        )
+    }
+
+    static func shouldPreferCrossNetworkTransfer(
+        targetDeviceId: String,
+        crossNetworkState: CrossNetworkWebRTCManager.State,
+        crossNetworkRemoteDeviceId: String?,
+        localActiveConnectionDeviceIds: Set<String>
+    ) -> Bool {
+        guard case .connected = crossNetworkState else { return false }
+
+        let normalizedTarget = normalizedTransferIdentity(targetDeviceId)
+        guard !normalizedTarget.isEmpty else { return false }
+
+        let normalizedRemote = normalizedTransferIdentity(crossNetworkRemoteDeviceId)
+        guard normalizedRemote == normalizedTarget else { return false }
+
+        let normalizedLocalActiveIds = Set(localActiveConnectionDeviceIds.map(normalizedTransferIdentity))
+        return !normalizedLocalActiveIds.contains(normalizedTarget)
+    }
+
+    static func resolveBestTransferDevice(
+        target: DiscoveredDevice,
+        discovered: [DiscoveredDevice]
+    ) -> DiscoveredDevice {
+        let targetScore = transferResolutionScore(candidate: target, target: target)
+        let bestCandidate = discovered.max { lhs, rhs in
+            let left = transferResolutionScore(candidate: lhs, target: target)
+            let right = transferResolutionScore(candidate: rhs, target: target)
+            if left != right { return left < right }
+            return lhs.name.localizedStandardCompare(rhs.name) == .orderedDescending
         }
 
-        if let currentIP = bestIPAddress(for: best),
-           let byIP = discovered.first(where: { bestIPAddress(for: $0) == currentIP }) {
-            best = preferredTransferDevice(best, byIP)
+        guard let bestCandidate else { return target }
+        let bestScore = transferResolutionScore(candidate: bestCandidate, target: target)
+        return bestScore > targetScore ? bestCandidate : target
+    }
+
+    private static func transferResolutionScore(candidate: DiscoveredDevice, target: DiscoveredDevice) -> Int {
+        let targetIdentity = normalizedTransferIdentity(target.id)
+        let candidateIdentity = normalizedTransferIdentity(candidate.id)
+        let exactIdMatch = !targetIdentity.isEmpty && targetIdentity == candidateIdentity
+
+        let targetIP = bestTransferIPAddress(for: target)
+        let candidateIP = bestTransferIPAddress(for: candidate)
+        let ipMatch = targetIP != nil && targetIP == candidateIP
+
+        let targetBonjour = bonjourIdentityComponents(for: target)
+        let candidateBonjour = bonjourIdentityComponents(for: candidate)
+        let bonjourMatch = targetBonjour != nil && targetBonjour == candidateBonjour
+
+        let targetName = normalizedTransferDeviceName(target.name)
+        let candidateName = normalizedTransferDeviceName(candidate.name)
+        let nameMatch = !targetName.isEmpty && targetName == candidateName
+
+        let targetAliases = Set(PeerIdentityAliasResolver.aliasKeys(for: target))
+        let candidateAliases = Set(PeerIdentityAliasResolver.aliasKeys(for: candidate))
+        let aliasMatch = !targetAliases.isEmpty && !candidateAliases.isDisjoint(with: targetAliases)
+
+        guard exactIdMatch || ipMatch || bonjourMatch || nameMatch || aliasMatch else {
+            return 0
         }
 
-        if let bonjourName = best.bonjourServiceName?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !bonjourName.isEmpty,
-           let byBonjour = discovered.first(where: { $0.bonjourServiceName == bonjourName }) {
-            best = preferredTransferDevice(best, byBonjour)
+        var score = 0
+        if exactIdMatch { score += 300 }
+        if ipMatch { score += 250 }
+        if bonjourMatch { score += 220 }
+        if nameMatch { score += 160 }
+        if aliasMatch { score += 260 }
+
+        if candidate.services.contains(DiscoveredDevice.fileTransferServiceType)
+            || candidate.bonjourServiceType == DiscoveredDevice.fileTransferServiceType {
+            score += 240
+        }
+        if candidate.fileTransferPort != nil { score += 160 }
+        if candidateIP != nil { score += 120 }
+        if !candidate.services.isEmpty { score += 40 }
+
+        return score
+    }
+
+    private static func normalizedTransferIdentity(_ raw: String?) -> String {
+        raw?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() ?? ""
+    }
+
+    private static func normalizedTransferDeviceName(_ raw: String) -> String {
+        raw
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: " ", with: "")
+    }
+
+    private static func bonjourIdentityComponents(for device: DiscoveredDevice) -> String? {
+        let name = device.bonjourServiceName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let domain = device.bonjourServiceDomain?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let name, !name.isEmpty {
+            let normalizedDomain = (domain?.isEmpty == false ? domain! : "local.")
+            return "\(name.lowercased())@\(normalizedDomain.lowercased())"
         }
 
-        let normalizedName = normalizeDeviceName(best.name)
-        if !normalizedName.isEmpty,
-           let byName = discovered.first(where: { normalizeDeviceName($0.name) == normalizedName }) {
-            best = preferredTransferDevice(best, byName)
+        if let parsed = parseTransferBonjourIdentity(from: device.id) {
+            return "\(parsed.name.lowercased())@\(parsed.domain.lowercased())"
         }
 
-        return best
+        return nil
+    }
+
+    private static func parseTransferBonjourIdentity(from identifier: String) -> (name: String, domain: String)? {
+        guard identifier.hasPrefix("bonjour:") else { return nil }
+        let payload = String(identifier.dropFirst("bonjour:".count))
+        let parts = payload.split(separator: "@", maxSplits: 1).map(String.init)
+        guard let name = parts.first, !name.isEmpty else { return nil }
+        let domain = parts.count > 1 ? parts[1] : "local."
+        return (name, domain)
+    }
+
+    private static func bestTransferIPAddress(for device: DiscoveredDevice) -> String? {
+        sanitizeTransferAddress(device.ipAddress)
+            ?? sanitizeTransferAddress(addressFromTransferIdentifier(device.id))
+    }
+
+    private static func addressFromTransferIdentifier(_ identifier: String) -> String? {
+        if identifier.hasPrefix("host:") {
+            return String(identifier.dropFirst("host:".count))
+        }
+        if identifier.hasPrefix("peer:") {
+            return String(identifier.dropFirst("peer:".count))
+        }
+        return nil
+    }
+
+    private static func sanitizeTransferAddress(_ raw: String?) -> String? {
+        guard var token = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !token.isEmpty else {
+            return nil
+        }
+
+        if token.hasPrefix("host:") {
+            token = String(token.dropFirst("host:".count))
+        } else if token.hasPrefix("peer:") {
+            token = String(token.dropFirst("peer:".count))
+        } else if token.hasPrefix("ip:") {
+            token = String(token.dropFirst("ip:".count))
+        }
+
+        if token.hasPrefix("[") && token.hasSuffix("]") {
+            token = String(token.dropFirst().dropLast())
+        }
+
+        if token.contains(":"),
+           let dot = token.lastIndex(of: "."),
+           token[token.index(after: dot)...].allSatisfy({ $0.isNumber }) {
+            token = String(token[..<dot])
+        } else {
+            let parts = token.split(separator: ".")
+            if parts.count == 5,
+               parts.dropLast().allSatisfy({ Int($0) != nil }),
+               let port = Int(parts.last ?? ""),
+               (0...65535).contains(port) {
+                token = parts.dropLast().map(String.init).joined(separator: ".")
+            }
+        }
+
+        let sanitized = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        return sanitized.isEmpty ? nil : sanitized
     }
 
     private func preferredTransferDevice(_ lhs: DiscoveredDevice, _ rhs: DiscoveredDevice) -> DiscoveredDevice {

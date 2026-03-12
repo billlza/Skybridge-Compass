@@ -184,6 +184,10 @@ public actor TURNCredentialService {
 
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
+        let instance = http.value(forHTTPHeaderField: "X-SkyBridge-Instance") ?? "unknown"
+        let backend = http.value(forHTTPHeaderField: "X-SkyBridge-State-Backend") ?? "unknown"
+        let prefixes = http.value(forHTTPHeaderField: "X-SkyBridge-Code-Prefixes") ?? "-"
+        logger.info("🌐 TURN credentials served by instance=\(instance, privacy: .public) backend=\(backend, privacy: .public) prefixes=\(prefixes, privacy: .public)")
         guard (200...299).contains(http.statusCode) else {
             let body = String(data: data, encoding: .utf8) ?? ""
             throw NSError(domain: "TURN", code: http.statusCode, userInfo: ["body": body])

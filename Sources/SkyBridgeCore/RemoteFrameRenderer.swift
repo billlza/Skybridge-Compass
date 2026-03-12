@@ -27,17 +27,51 @@ public struct RenderMetrics {
     public let latencyMilliseconds: Double
 }
 
+private final class RemoteFrameBacking: @unchecked Sendable {
+    let textureRef: CVMetalTexture
+    let imageBuffer: CVImageBuffer
+
+    init(textureRef: CVMetalTexture, imageBuffer: CVImageBuffer) {
+        self.textureRef = textureRef
+        self.imageBuffer = imageBuffer
+    }
+}
+
+private final class RemoteFrameDecompressionCallbackContext {
+    private let lock = NSLock()
+    weak var renderer: RemoteFrameRenderer?
+    private var isActive = true
+
+    init(renderer: RemoteFrameRenderer) {
+        self.renderer = renderer
+    }
+
+    func deactivate() {
+        lock.lock()
+        isActive = false
+        lock.unlock()
+    }
+
+    func activeRenderer() -> RemoteFrameRenderer? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard isActive else { return nil }
+        return renderer
+    }
+}
+
 public final class RemoteFrameRenderer: @unchecked Sendable {
     private let device: MTLDevice?
     private let commandQueue: MTLCommandQueue?
     private var textureCache: CVMetalTextureCache?
     private var decompressionSession: VTDecompressionSession?
+    private var decompressionCallbackRefcon: UnsafeMutableRawPointer?
     private var formatDescription: CMVideoFormatDescription?
     private var currentCodec: RemoteFrameType?
     private var previousFrameTimestamp: DispatchTime?
     private let log = Logger(subsystem: "com.skybridge.compass", category: "MetalRenderer")
     private let renderQueue = DispatchQueue(label: "com.skybridge.compass.metal.render")
-    public var frameHandler: ((MTLTexture) -> Void)?
+    public var frameHandler: ((MTLTexture, AnyObject?) -> Void)?
 
     public init() {
         device = MTLCreateSystemDefaultDevice()
@@ -48,11 +82,13 @@ public final class RemoteFrameRenderer: @unchecked Sendable {
     }
 
     public func teardown() {
+        deactivateDecompressionCallbackContext()
         if let decompressionSession {
             VTDecompressionSessionWaitForAsynchronousFrames(decompressionSession)
             VTDecompressionSessionInvalidate(decompressionSession)
         }
         decompressionSession = nil
+        releaseDecompressionCallbackContext()
         formatDescription = nil
         textureCache = nil
         currentCodec = nil
@@ -127,8 +163,9 @@ public final class RemoteFrameRenderer: @unchecked Sendable {
         }
 
         if let textureRef, let texture = CVMetalTextureGetTexture(textureRef) {
+            let backing = RemoteFrameBacking(textureRef: textureRef, imageBuffer: buffer)
             renderQueue.async { [weak self] in
-                self?.frameHandler?(texture)
+                self?.frameHandler?(texture, backing)
             }
         }
         commandBuffer.commit()
@@ -260,11 +297,14 @@ public final class RemoteFrameRenderer: @unchecked Sendable {
                CMFormatDescriptionEqual(currentDescription, otherFormatDescription: formatDescription) {
                 return
             }
+            deactivateDecompressionCallbackContext()
             VTDecompressionSessionWaitForAsynchronousFrames(existing)
             VTDecompressionSessionInvalidate(existing)
+            releaseDecompressionCallbackContext()
         }
 
         var newSession: VTDecompressionSession?
+        let callbackRefcon = makeDecompressionCallbackRefcon()
         var callback = VTDecompressionOutputCallbackRecord(
             decompressionOutputCallback: { decompressionOutputRefCon, sourceFrameRefCon, status, infoFlags, imageBuffer, presentationTimeStamp, presentationDuration in
                 RemoteFrameRenderer.decompressionCallback(
@@ -277,7 +317,7 @@ public final class RemoteFrameRenderer: @unchecked Sendable {
                     presentationDuration: presentationDuration
                 )
             },
-            decompressionOutputRefCon: UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
+            decompressionOutputRefCon: callbackRefcon
         )
 
         let destinationAttributes: [NSString: Any] = [
@@ -306,7 +346,9 @@ public final class RemoteFrameRenderer: @unchecked Sendable {
 
         if status == noErr {
             decompressionSession = newSession
+            decompressionCallbackRefcon = callbackRefcon
         } else {
+            Self.releaseDecompressionCallbackRefcon(callbackRefcon)
             decompressionSession = nil
             log.error("Failed to create VTDecompressionSession for codec \(String(describing: codec)) status \(status)")
         }
@@ -324,12 +366,38 @@ public final class RemoteFrameRenderer: @unchecked Sendable {
         presentationDuration: CMTime
     ) {
         guard let decompressionOutputRefCon else { return }
-        let renderer = Unmanaged<RemoteFrameRenderer>.fromOpaque(decompressionOutputRefCon).takeUnretainedValue()
+        let unmanaged = Unmanaged<RemoteFrameDecompressionCallbackContext>.fromOpaque(decompressionOutputRefCon)
+        _ = unmanaged.retain()
+        let context = unmanaged.takeUnretainedValue()
+        defer { unmanaged.release() }
+        guard let renderer = context.activeRenderer() else { return }
         if status != noErr {
             renderer.log.error("Decompression callback error: \(status), flags \(infoFlags.rawValue)")
         } else if let imageBuffer {
             renderer.handleDecompressedFrame(imageBuffer: imageBuffer, presentationTimeStamp: presentationTimeStamp)
         }
+    }
+
+    private func makeDecompressionCallbackRefcon() -> UnsafeMutableRawPointer {
+        UnsafeMutableRawPointer(Unmanaged.passRetained(RemoteFrameDecompressionCallbackContext(renderer: self)).toOpaque())
+    }
+
+    private func deactivateDecompressionCallbackContext() {
+        guard let decompressionCallbackRefcon else { return }
+        let context = Unmanaged<RemoteFrameDecompressionCallbackContext>
+            .fromOpaque(decompressionCallbackRefcon)
+            .takeUnretainedValue()
+        context.deactivate()
+    }
+
+    private func releaseDecompressionCallbackContext() {
+        guard let decompressionCallbackRefcon else { return }
+        Self.releaseDecompressionCallbackRefcon(decompressionCallbackRefcon)
+        self.decompressionCallbackRefcon = nil
+    }
+
+    private static func releaseDecompressionCallbackRefcon(_ refcon: UnsafeMutableRawPointer) {
+        Unmanaged<RemoteFrameDecompressionCallbackContext>.fromOpaque(refcon).release()
     }
 
     private func handleDecompressedFrame(imageBuffer: CVImageBuffer, presentationTimeStamp: CMTime) {
@@ -354,7 +422,8 @@ public final class RemoteFrameRenderer: @unchecked Sendable {
                 &textureRef
             )
             if status == kCVReturnSuccess, let textureRef, let texture = CVMetalTextureGetTexture(textureRef) {
-                self.frameHandler?(texture)
+                let backing = RemoteFrameBacking(textureRef: textureRef, imageBuffer: imageBuffer)
+                self.frameHandler?(texture, backing)
             } else {
                 self.log.error("Failed to create Metal texture from decoded frame: \(status)")
             }

@@ -1,5 +1,6 @@
 import XCTest
 import CryptoKit
+import Network
 @testable import SkyBridgeCompass_iOS
 
 @available(iOS 17.0, *)
@@ -128,6 +129,307 @@ final class RegressionHardeningTests: XCTestCase {
         malformed.append(Data(repeating: 0xAA, count: 12))
 
         XCTAssertEqual(TrafficPadding.unwrapIfNeeded(malformed, label: "unit"), malformed)
+    }
+
+    @MainActor
+    func testFileTransferPrefersLocalP2POverStaleWebRTCForSamePeer() {
+        let shouldPreferCrossNetwork = FileTransferManager.shouldPreferCrossNetworkTransfer(
+            targetDeviceId: "id:peer-1",
+            crossNetworkState: .connected(sessionId: "ABC123"),
+            crossNetworkRemoteDeviceId: "id:peer-1",
+            localActiveConnectionDeviceIds: ["id:peer-1"]
+        )
+
+        XCTAssertFalse(shouldPreferCrossNetwork)
+    }
+
+    @MainActor
+    func testFileTransferUsesCrossNetworkWhenNoLocalP2PExists() {
+        let shouldPreferCrossNetwork = FileTransferManager.shouldPreferCrossNetworkTransfer(
+            targetDeviceId: "id:peer-1",
+            crossNetworkState: .connected(sessionId: "ABC123"),
+            crossNetworkRemoteDeviceId: "id:peer-1",
+            localActiveConnectionDeviceIds: []
+        )
+
+        XCTAssertTrue(shouldPreferCrossNetwork)
+    }
+
+    func testRemoteDesktopStreamConfigurationPayloadEqualityIgnoresSentAtButTracksRefreshToken() {
+        let base = RemoteDesktopStreamConfigurationPayload(
+            width: 1920,
+            height: 1080,
+            preferredCodec: "h264",
+            supportedVideoFormats: ["h264", "jpeg"],
+            targetFrameRate: 60,
+            keyFrameInterval: 30,
+            lowLatencyMode: true,
+            enableHardwareAcceleration: true,
+            enableAppleSiliconOptimization: true,
+            clipboardSyncEnabled: true,
+            streamRefreshToken: nil,
+            sentAt: 1
+        )
+
+        let sameSettingsDifferentTimestamp = RemoteDesktopStreamConfigurationPayload(
+            width: 1920,
+            height: 1080,
+            preferredCodec: "h264",
+            supportedVideoFormats: ["h264", "jpeg"],
+            targetFrameRate: 60,
+            keyFrameInterval: 30,
+            lowLatencyMode: true,
+            enableHardwareAcceleration: true,
+            enableAppleSiliconOptimization: true,
+            clipboardSyncEnabled: true,
+            streamRefreshToken: nil,
+            sentAt: 999
+        )
+
+        let refreshed = RemoteDesktopStreamConfigurationPayload(
+            width: 1920,
+            height: 1080,
+            preferredCodec: "h264",
+            supportedVideoFormats: ["h264", "jpeg"],
+            targetFrameRate: 60,
+            keyFrameInterval: 30,
+            lowLatencyMode: true,
+            enableHardwareAcceleration: true,
+            enableAppleSiliconOptimization: true,
+            clipboardSyncEnabled: true,
+            streamRefreshToken: 7,
+            sentAt: 1000
+        )
+
+        XCTAssertEqual(base, sameSettingsDifferentTimestamp)
+        XCTAssertNotEqual(base, refreshed)
+    }
+
+    func testRemoteDesktopAutomaticViewerPolicyPrefersHEVCAt60FPS() {
+        XCTAssertEqual(RemoteDesktopViewerFrameRate.adaptive.targetFPS, 60)
+        XCTAssertEqual(RemoteDesktopViewerResolution.uhd5k.dimensions?.width, 5120)
+        XCTAssertEqual(RemoteDesktopViewerResolution.uhd5k.dimensions?.height, 2880)
+        XCTAssertEqual(RemoteDesktopViewerSettings().activePreset, .automatic)
+        XCTAssertEqual(
+            RemoteDesktopViewerCodec.automatic.resolvedWireValue(
+                supportedFormats: ["hevc", "jpeg", "h264"]
+            ),
+            "hevc"
+        )
+        XCTAssertEqual(
+            RemoteDesktopViewerCodec.automatic.resolvedWireValue(
+                supportedFormats: ["jpeg", "h264"]
+            ),
+            "h264"
+        )
+    }
+
+    func testRemoteDesktopViewerPresetApplicationSupportsProModes() {
+        var settings = RemoteDesktopViewerSettings()
+
+        settings.applyPreset(.pro5k120)
+
+        XCTAssertEqual(settings.activePreset, .pro5k120)
+        XCTAssertEqual(settings.resolution, .uhd5k)
+        XCTAssertEqual(settings.frameRate, .fps120)
+        XCTAssertEqual(settings.preferredCodec, .hevc)
+        XCTAssertTrue(settings.lowLatencyMode)
+
+        settings.resolution = .qhd1440
+
+        XCTAssertEqual(settings.activePreset, .custom)
+    }
+
+    func testRemoteDesktopViewerFluidPresetTargetsLowLatencyH264() {
+        var settings = RemoteDesktopViewerSettings()
+
+        settings.applyPreset(.fluid)
+
+        XCTAssertEqual(settings.activePreset, .fluid)
+        XCTAssertEqual(settings.resolution, .hd720)
+        XCTAssertEqual(settings.frameRate, .fps60)
+        XCTAssertEqual(settings.preferredCodec, .h264)
+        XCTAssertTrue(settings.lowLatencyMode)
+    }
+
+    func testRemoteDesktopViewerPresetCarriesTransportGovernanceHints() {
+        var settings = RemoteDesktopViewerSettings()
+
+        settings.applyPreset(.pro4k120)
+
+        XCTAssertEqual(settings.transportTuning.qualityPresetWireValue, "geek4k120")
+        XCTAssertEqual(settings.transportTuning.jitterBufferFrames, 1)
+        XCTAssertEqual(settings.transportTuning.refreshStrategy, "instant")
+        XCTAssertEqual(settings.transportTuning.lossRecoveryMode, "fast-retransmit")
+        XCTAssertTrue(settings.transportTuning.damageTrackingEnabled)
+        XCTAssertTrue(settings.transportTuning.separateCursorChannelEnabled)
+        XCTAssertTrue(settings.transportTuning.interactionOverlayChannelEnabled)
+    }
+
+    func testRemoteDesktopCodecGovernanceDisablesHEVCAfterRepeatedDecoderFailures() {
+        var governance = RemoteDesktopCodecGovernance()
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+
+        XCTAssertEqual(
+            governance.noteDecodeFailure(format: "hevc", reason: "callback-no-image", at: start),
+            .none
+        )
+        XCTAssertEqual(
+            governance.noteDecodeFailure(
+                format: "hevc",
+                reason: "VTDecompressionSessionDecodeFrame status=-12909",
+                at: start.addingTimeInterval(0.2)
+            ),
+            .none
+        )
+
+        let event = governance.noteDecodeFailure(
+            format: "hevc",
+            reason: "callback-no-image",
+            at: start.addingTimeInterval(0.4)
+        )
+
+        guard case .disableHEVC(let until) = event else {
+            return XCTFail("Expected HEVC circuit breaker to disable the codec temporarily")
+        }
+
+        XCTAssertEqual(
+            governance.effectiveSupportedFormats(
+                from: ["hevc", "h264", "jpeg"],
+                at: start.addingTimeInterval(1)
+            ),
+            ["h264", "jpeg"]
+        )
+        XCTAssertEqual(
+            governance.effectivePreferredCodec(
+                userPreference: .automatic,
+                supportedFormats: ["hevc", "h264", "jpeg"],
+                at: start.addingTimeInterval(1)
+            ),
+            "h264"
+        )
+        XCTAssertGreaterThan(until.timeIntervalSince(start), 10)
+    }
+
+    func testRemoteDesktopCodecGovernanceReenablesHEVCAfterStableFallbackFrames() {
+        var governance = RemoteDesktopCodecGovernance()
+        let start = Date(timeIntervalSince1970: 1_700_000_100)
+
+        _ = governance.noteDecodeFailure(format: "hevc", reason: "callback-no-image", at: start)
+        _ = governance.noteDecodeFailure(format: "hevc", reason: "callback-no-image", at: start.addingTimeInterval(0.1))
+        let disableEvent = governance.noteDecodeFailure(
+            format: "hevc",
+            reason: "callback-no-image",
+            at: start.addingTimeInterval(0.2)
+        )
+        guard case .disableHEVC(let until) = disableEvent else {
+            return XCTFail("Expected HEVC to enter cooldown first")
+        }
+
+        var probeEvent: RemoteDesktopCodecGovernanceEvent = .none
+        for frameIndex in 0..<24 {
+            probeEvent = governance.noteDecodeSuccess(
+                format: "h264",
+                at: until.addingTimeInterval(Double(frameIndex) * 0.05)
+            )
+        }
+
+        XCTAssertEqual(probeEvent, .reenableHEVCProbe)
+        XCTAssertEqual(
+            governance.effectiveSupportedFormats(
+                from: ["hevc", "h264", "jpeg"],
+                at: until.addingTimeInterval(2)
+            ),
+            ["hevc", "h264", "jpeg"]
+        )
+    }
+
+    func testPeerIdentityAliasResolverMapsHostEndpointBackToStableDeviceID() {
+        let endpoint = NWEndpoint.hostPort(
+            host: NWEndpoint.Host("192.168.31.20"),
+            port: NWEndpoint.Port(integerLiteral: 9527)
+        )
+
+        let resolved = PeerIdentityAliasResolver.resolveDeviceId(
+            for: endpoint,
+            endpointKey: endpoint.debugDescription,
+            exactEndpointMap: [:],
+            aliasMap: ["host:192.168.31.20": "id:peer-1"]
+        )
+
+        XCTAssertEqual(resolved, "id:peer-1")
+    }
+
+    func testPeerIdentityAliasResolverMapsBonjourEndpointBackToStableDeviceID() {
+        let endpoint = NWEndpoint.service(
+            name: "Lza's MacBook Pro",
+            type: "_skybridge._tcp",
+            domain: "local.",
+            interface: nil
+        )
+
+        let resolved = PeerIdentityAliasResolver.resolveDeviceId(
+            for: endpoint,
+            endpointKey: endpoint.debugDescription,
+            exactEndpointMap: [:],
+            aliasMap: ["bonjour:lza's macbook pro@local.": "id:peer-bonjour"]
+        )
+
+        XCTAssertEqual(resolved, "id:peer-bonjour")
+    }
+
+    @MainActor
+    func testResolveBestTransferDevicePrefersTransferServiceCandidateOverBareSnapshot() {
+        let target = DiscoveredDevice(
+            id: "id:peer-1",
+            name: "MacBook Pro",
+            bonjourServiceName: "MacBook Pro",
+            modelName: "Mac",
+            platform: .macOS,
+            osVersion: "26.3.1",
+            ipAddress: nil,
+            bonjourServiceType: "_skybridge._tcp",
+            bonjourServiceDomain: "local.",
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 9527],
+            signalStrength: -40,
+            lastSeen: Date(),
+            isConnected: true,
+            isTrusted: true,
+            publicKey: nil,
+            advertisedCapabilities: [],
+            capabilities: []
+        )
+
+        let richerTransferCandidate = DiscoveredDevice(
+            id: "bonjour:MacBook Pro@local.",
+            name: "MacBook Pro",
+            bonjourServiceName: "MacBook Pro",
+            modelName: "Mac",
+            platform: .macOS,
+            osVersion: "26.3.1",
+            ipAddress: "192.168.31.20",
+            bonjourServiceType: DiscoveredDevice.fileTransferServiceType,
+            bonjourServiceDomain: "local.",
+            services: [DiscoveredDevice.fileTransferServiceType],
+            portMap: [DiscoveredDevice.fileTransferServiceType: 8080],
+            signalStrength: -38,
+            lastSeen: Date(),
+            isConnected: false,
+            isTrusted: true,
+            publicKey: nil,
+            advertisedCapabilities: ["file_transfer"],
+            capabilities: ["file_transfer"]
+        )
+
+        let resolved = FileTransferManager.resolveBestTransferDevice(
+            target: target,
+            discovered: [richerTransferCandidate]
+        )
+
+        XCTAssertEqual(resolved.id, richerTransferCandidate.id)
+        XCTAssertEqual(resolved.fileTransferPort, 8080)
+        XCTAssertEqual(resolved.ipAddress, "192.168.31.20")
     }
 
     private func makeInitiatorContext() -> HandshakeContext {

@@ -350,13 +350,30 @@ public actor ServiceAdvertiserCenter {
 
         let parameters = NWParameters.tcp
         parameters.includePeerToPeer = true
+        parameters.allowLocalEndpointReuse = true
         if let tcpOptions = parameters.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
             tcpOptions.enableKeepalive = true
             tcpOptions.keepaliveIdle = 30
             tcpOptions.keepaliveInterval = 15
             tcpOptions.keepaliveCount = 4
         }
-        let listener = try NWListener(using: parameters)
+
+        let listener: NWListener
+        if serviceType == "_skybridge._tcp" {
+            do {
+                listener = try NWListener(
+                    using: parameters,
+                    on: NWEndpoint.Port(integerLiteral: 9527)
+                )
+            } catch {
+                logger.warning(
+                    "⚠️ _skybridge._tcp 绑定默认端口 9527 失败，回退动态端口: \(error.localizedDescription, privacy: .public)"
+                )
+                listener = try NWListener(using: parameters)
+            }
+        } else {
+            listener = try NWListener(using: parameters)
+        }
 
         // 默认携带基础 TXT（iOS 端用于显示系统版本等）；若调用方提供 TXT，则在此基础上覆盖/补充。
         let baseTXT = await makeDefaultTXTRecord()
@@ -381,6 +398,15 @@ public actor ServiceAdvertiserCenter {
         listener.start(queue: .global(qos: .utility))
         listeners[serviceType] = listener
         let port = listener.port?.rawValue ?? 0
+        if port > 0 {
+            finalTXT["port"] = String(port)
+            listener.service = NWListener.Service(
+                name: serviceName,
+                type: serviceType,
+                domain: "local.",
+                txtRecord: finalTXT
+            )
+        }
         if port > 0 {
             logger.info("📡 广播服务启动: \(serviceType, privacy: .public) 端口 \(port, privacy: .public)")
         } else {
@@ -440,7 +466,11 @@ public actor ServiceAdvertiserCenter {
         }
 
         // Capabilities are optional strings used by non-Apple clients for UI hints.
-        record["capabilities"] = "file,rdview,rdcontrol,clipboard"
+        record["capabilities"] = "file,file_transfer,rdview,rdcontrol,remote_control,remote_desktop,clipboard"
+        record["transferPort"] = "8080"
+        record["fileTransferPort"] = "8080"
+        record["remotePort"] = "5901"
+        record["remoteControlPort"] = "5901"
         record["hs_soa"] = "1"
         return record
     }

@@ -91,6 +91,7 @@ let package = Package(
     ],
     products: [
         .executable(name: "SkyBridgeCompassApp", targets: ["SkyBridgeCompassApp"]),
+        .executable(name: "MacUIBaselineCapture", targets: ["MacUIBaselineCapture"]),
         .executable(name: "LocalWebRTCSmokeHost", targets: ["LocalWebRTCSmokeHost"]),
         .executable(name: "BaselineBenchRunner", targets: ["BaselineBenchRunner"]),
         .executable(name: "HandshakeBenchRunner", targets: ["HandshakeBenchRunner"]),
@@ -326,6 +327,15 @@ let package = Package(
                 .linkedFramework("SwiftUI"),
                 .linkedFramework("AuthenticationServices"),
                 // 中文注释：移除静默链接器告警，依赖库目标版本已统一为 14.0
+            ]
+        ),
+        .executableTarget(
+            name: "MacUIBaselineCapture",
+            dependencies: [],
+            path: "Sources/MacUIBaselineCapture",
+            linkerSettings: [
+                .linkedFramework("AppKit"),
+                .linkedFramework("SwiftUI")
             ]
         ),
         .executableTarget(

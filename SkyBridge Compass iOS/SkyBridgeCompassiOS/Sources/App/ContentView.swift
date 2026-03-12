@@ -47,21 +47,21 @@ private struct PairingTrustRequestSheet: View {
     var body: some View {
         NavigationStack {
             List {
-                Section("设备信息") {
-                    LabeledContent("名称", value: request.deviceName)
-                    LabeledContent("平台", value: request.platform.displayName)
+                Section(RuntimeLocalization.string("设备信息")) {
+                    LabeledContent(RuntimeLocalization.string("名称"), value: request.deviceName)
+                    LabeledContent(RuntimeLocalization.string("平台"), value: request.platform.displayName)
                     if !request.modelName.isEmpty {
-                        LabeledContent("型号", value: request.modelName)
+                        LabeledContent(RuntimeLocalization.string("型号"), value: request.modelName)
                     }
-                    LabeledContent("系统", value: request.osVersion)
+                    LabeledContent(RuntimeLocalization.string("系统"), value: request.osVersion)
                 }
                 
-                Section("识别信息") {
-                    LabeledContent("Peer ID", value: request.peerId)
+                Section(RuntimeLocalization.string("识别信息")) {
+                    LabeledContent(RuntimeLocalization.string("Peer ID"), value: request.peerId)
                     if !request.declaredDeviceId.isEmpty {
-                        LabeledContent("声明的 Device ID", value: request.declaredDeviceId)
+                        LabeledContent(RuntimeLocalization.string("声明的 Device ID"), value: request.declaredDeviceId)
                     }
-                    LabeledContent("KEM Keys", value: "\(request.kemKeyCount)")
+                    LabeledContent(RuntimeLocalization.string("KEM Keys"), value: "\(request.kemKeyCount)")
                 }
                 
                 Section {
@@ -69,33 +69,33 @@ private struct PairingTrustRequestSheet: View {
                         onDecision(.alwaysAllow)
                         dismiss()
                     } label: {
-                        Text("始终允许")
+                        Text(RuntimeLocalization.string("始终允许"))
                     }
                     
                     Button {
                         onDecision(.allowOnce)
                         dismiss()
                     } label: {
-                        Text("允许本次")
+                        Text(RuntimeLocalization.string("允许本次"))
                     }
                     
                     Button(role: .destructive) {
                         onDecision(.reject)
                         dismiss()
                     } label: {
-                        Text("拒绝")
+                        Text(RuntimeLocalization.string("拒绝"))
                     }
                 } footer: {
-                    Text("这是对端发起的配对/受信任申请。若选择“始终允许”，系统会记住该设备并允许后续的 PQC 引导流程。")
+                    Text(RuntimeLocalization.string("这是对端发起的配对/受信任申请。若选择“始终允许”，系统会记住该设备并允许后续的 PQC 引导流程。"))
                 }
             }
-            .navigationTitle("受信任申请")
+            .navigationTitle(RuntimeLocalization.string("受信任申请"))
 #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
 #endif
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("关闭") { dismiss() }
+                    Button(RuntimeLocalization.string("关闭")) { dismiss() }
                 }
             }
         }

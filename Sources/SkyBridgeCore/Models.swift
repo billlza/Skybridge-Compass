@@ -128,6 +128,7 @@ public struct DiscoveredDevice: Identifiable, Hashable, Sendable {
     public private(set) var ipv6: String?
     public var services: [String]
     public var portMap: [String: Int]
+    public var remoteVideoFormats: Set<String>
  /// 设备连接方式集合（一台设备可能有多种连接方式）
     public var connectionTypes: Set<DeviceConnectionType>
  /// 设备唯一标识符（用于去重，如序列号、MAC地址等）
@@ -154,6 +155,7 @@ public struct DiscoveredDevice: Identifiable, Hashable, Sendable {
         ipv6: String?,
         services: [String],
         portMap: [String: Int],
+        remoteVideoFormats: Set<String> = [],
         connectionTypes: Set<DeviceConnectionType> = [DeviceConnectionType.unknown],
         uniqueIdentifier: String? = nil,
         signalStrength: Double? = nil,
@@ -169,6 +171,7 @@ public struct DiscoveredDevice: Identifiable, Hashable, Sendable {
         self.ipv6 = ipv6
         self.services = services
         self.portMap = portMap
+        self.remoteVideoFormats = remoteVideoFormats
         self.connectionTypes = connectionTypes
         self.uniqueIdentifier = uniqueIdentifier
         self.signalStrength = signalStrength

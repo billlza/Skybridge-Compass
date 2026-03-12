@@ -109,6 +109,161 @@ public enum DiscoveryMode: Sendable {
     }
 }
 
+enum PeerIdentityAliasResolver {
+    static func aliasKeys(for device: DiscoveredDevice) -> [String] {
+        var keys = Set<String>()
+
+        let normalizedId = device.id.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if !normalizedId.isEmpty {
+            keys.insert(normalizedId)
+        }
+
+        if let alias = hostAlias(from: device.id) {
+            keys.insert(alias)
+        }
+
+        if let alias = hostAlias(fromIPAddress: device.ipAddress) {
+            keys.insert(alias)
+        }
+
+        if let alias = bonjourAlias(
+            name: device.bonjourServiceName,
+            domain: device.bonjourServiceDomain
+        ) {
+            keys.insert(alias)
+        } else if let alias = bonjourAlias(from: device.id) {
+            keys.insert(alias)
+        }
+
+        return Array(keys)
+    }
+
+    static func resolveDeviceId(
+        for endpoint: NWEndpoint,
+        endpointKey: String? = nil,
+        exactEndpointMap: [String: String],
+        aliasMap: [String: String]
+    ) -> String? {
+        if let endpointKey,
+           let exact = exactEndpointMap[endpointKey] {
+            return exact
+        }
+
+        for alias in candidateAliases(for: endpoint, endpointKey: endpointKey) {
+            if let mapped = aliasMap[alias] {
+                return mapped
+            }
+        }
+
+        return nil
+    }
+
+    private static func candidateAliases(for endpoint: NWEndpoint, endpointKey: String? = nil) -> [String] {
+        var keys = Set<String>()
+        if let endpointKey {
+            let normalized = endpointKey.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if !normalized.isEmpty {
+                keys.insert(normalized)
+            }
+        }
+
+        switch endpoint {
+        case .service(let name, _, let domain, _):
+            if let alias = bonjourAlias(name: name, domain: domain) {
+                keys.insert(alias)
+            }
+        case .hostPort(let host, _):
+            if let alias = hostAlias(fromIPAddress: String(describing: host)) {
+                keys.insert(alias)
+            }
+        default:
+            break
+        }
+
+        return Array(keys)
+    }
+
+    private static func hostAlias(from identifier: String) -> String? {
+        let normalized = identifier.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if normalized.hasPrefix("host:") {
+            return hostAlias(fromIPAddress: String(normalized.dropFirst("host:".count)))
+        }
+        if normalized.hasPrefix("peer:") {
+            return hostAlias(fromIPAddress: String(normalized.dropFirst("peer:".count)))
+        }
+        return nil
+    }
+
+    private static func hostAlias(fromIPAddress raw: String?) -> String? {
+        guard var token = raw?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+              !token.isEmpty else {
+            return nil
+        }
+
+        if token.hasPrefix("host:") {
+            token = String(token.dropFirst("host:".count))
+        } else if token.hasPrefix("peer:") {
+            token = String(token.dropFirst("peer:".count))
+        }
+
+        if token.hasPrefix("[") && token.hasSuffix("]") && token.count >= 2 {
+            token = String(token.dropFirst().dropLast())
+        }
+
+        if let percent = token.firstIndex(of: "%") {
+            token = String(token[..<percent])
+        }
+
+        if token.contains(":"),
+           let dot = token.lastIndex(of: "."),
+           token[token.index(after: dot)...].allSatisfy({ $0.isNumber }) {
+            token = String(token[..<dot])
+        } else {
+            let parts = token.split(separator: ".")
+            if parts.count == 5,
+               parts.dropLast().allSatisfy({ Int($0) != nil }),
+               let port = Int(parts.last ?? ""),
+               (0...65535).contains(port) {
+                token = parts.dropLast().map(String.init).joined(separator: ".")
+            }
+        }
+
+        let normalized = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return nil }
+        return "host:\(normalized)"
+    }
+
+    private static func bonjourAlias(from identifier: String) -> String? {
+        let normalized = identifier.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard normalized.lowercased().hasPrefix("bonjour:") else { return nil }
+
+        let payload = String(normalized.dropFirst("bonjour:".count))
+        let parts = payload.split(separator: "@", maxSplits: 1).map(String.init)
+        guard let name = parts.first, !name.isEmpty else { return nil }
+        let domain = parts.count > 1 ? parts[1] : "local."
+        return bonjourAlias(name: name, domain: domain)
+    }
+
+    private static func bonjourAlias(name: String?, domain: String?) -> String? {
+        guard let rawName = name?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !rawName.isEmpty else {
+            return nil
+        }
+
+        let rawDomain = domain?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "local."
+        let normalizedDomain: String
+        if rawDomain.isEmpty {
+            normalizedDomain = "local."
+        } else if rawDomain.hasSuffix(".") {
+            normalizedDomain = rawDomain.lowercased()
+        } else {
+            normalizedDomain = "\(rawDomain.lowercased())."
+        }
+
+        return "bonjour:\(rawName.lowercased())@\(normalizedDomain)"
+    }
+}
+
 // MARK: - DeviceDiscoveryManager
 
 /// 跨平台设备发现管理器
@@ -150,6 +305,9 @@ public class DeviceDiscoveryManager: ObservableObject {
 
     /// endpoint debugDescription -> stable deviceId（用于处理 removed 事件时定位缓存项）
     private var endpointToDeviceId: [String: String] = [:]
+
+    /// host/bonjour 等别名 -> 稳定 deviceId，避免入站连接退化成临时 host 身份
+    private var identityAliasToDeviceId: [String: String] = [:]
     
     /// 设备最后活动时间
     private var deviceLastActivity: [String: Date] = [:]
@@ -302,6 +460,7 @@ public class DeviceDiscoveryManager: ObservableObject {
         // Instead, do a soft refresh: clear caches and let existing browsers continue delivering results.
         deviceCache.removeAll()
         endpointToDeviceId.removeAll()
+        identityAliasToDeviceId.removeAll()
         deviceLastActivity.removeAll()
         updateDiscoveredDevices()
 
@@ -343,7 +502,7 @@ public class DeviceDiscoveryManager: ObservableObject {
         }
         
         // 创建 TXT 记录
-        let txtRecord = createTXTRecord()
+        let txtRecord = createTXTRecord(port: port)
         
         // 创建监听器参数
         let parameters = NWParameters.tcp
@@ -648,6 +807,16 @@ public class DeviceDiscoveryManager: ObservableObject {
         var portMap: [String: UInt16] = [:]
         if let p = parsePort(for: serviceType, from: txtRecord) {
             portMap[serviceType.rawValue] = p
+        } else if case .service(_, _, let servicePort, _) = endpoint,
+                  let parsedPort = UInt16(servicePort),
+                  parsedPort > 0 {
+            portMap[serviceType.rawValue] = parsedPort
+        }
+        if let transferPort = parseUInt16(txtValue(txtRecord, "transferPort", "fileTransferPort", "file_transfer_port")) {
+            portMap[DiscoveredDevice.fileTransferServiceType] = transferPort
+        }
+        if let remotePort = parseUInt16(txtValue(txtRecord, "remotePort", "remoteControlPort", "remote_port")) {
+            portMap[DiscoveredDevice.remoteControlServiceType] = remotePort
         }
 
         let signalStrength = resolveSignalStrength(from: txtRecord, endpoint: endpoint)
@@ -793,7 +962,10 @@ public class DeviceDiscoveryManager: ObservableObject {
 
         // 最新 IP / Bonjour type/domain（优先保留已有的主服务类型，缺省时补齐）
         if merged.ipAddress == nil { merged.ipAddress = update.ipAddress }
-        if merged.bonjourServiceType == nil { merged.bonjourServiceType = update.bonjourServiceType }
+        if merged.bonjourServiceType == nil
+            || update.bonjourServiceType == DiscoveryServiceType.skybridge.rawValue {
+            merged.bonjourServiceType = update.bonjourServiceType
+        }
         if merged.bonjourServiceDomain == nil { merged.bonjourServiceDomain = update.bonjourServiceDomain }
 
         // 合并 services / portMap
@@ -814,6 +986,44 @@ public class DeviceDiscoveryManager: ObservableObject {
         merged.lastSeen = Date()
 
         return merged
+    }
+
+    private func aliasPriority(for device: DiscoveredDevice) -> Int {
+        var score = 0
+        if device.id.lowercased().hasPrefix("id:") {
+            score += 300
+        }
+        if device.services.contains(DiscoveryServiceType.skybridge.rawValue) {
+            score += 120
+        }
+        if device.bonjourServiceType == DiscoveryServiceType.skybridge.rawValue {
+            score += 80
+        }
+        if device.bonjourServiceName?.isEmpty == false {
+            score += 30
+        }
+        if device.ipAddress?.isEmpty == false {
+            score += 20
+        }
+        return score
+    }
+
+    private func rebuildIdentityAliasIndex() {
+        var aliasMap: [String: String] = [:]
+        var ownerScores: [String: Int] = [:]
+
+        for device in deviceCache.values.sorted(by: { $0.lastSeen > $1.lastSeen }) {
+            let score = aliasPriority(for: device)
+            for alias in PeerIdentityAliasResolver.aliasKeys(for: device) {
+                let existingScore = ownerScores[alias] ?? Int.min
+                if aliasMap[alias] == nil || score >= existingScore {
+                    aliasMap[alias] = device.id
+                    ownerScores[alias] = score
+                }
+            }
+        }
+
+        identityAliasToDeviceId = aliasMap
     }
 
     private func capabilitiesInferred(from serviceType: DiscoveryServiceType) -> Set<String> {
@@ -854,12 +1064,12 @@ public class DeviceDiscoveryManager: ObservableObject {
     }
 
     private func parsePort(for serviceType: DiscoveryServiceType, from txt: [String: String]) -> UInt16? {
-        func parseUInt16(_ s: String?) -> UInt16? {
-            guard let s, !s.isEmpty else { return nil }
-            return UInt16(s.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines))
-        }
-
         switch serviceType {
+        case .skybridge, .skybridgeQUIC:
+            return parseUInt16(txtValue(txt, "port"))
+                ?? parseUInt16(txtValue(txt, "skybridgePort"))
+                ?? parseUInt16(txtValue(txt, "p2pPort"))
+                ?? parseUInt16(txtValue(txt, "controlPort"))
         case .skybridgeTransfer:
             return parseUInt16(txtValue(txt, "transferPort"))
                 ?? parseUInt16(txtValue(txt, "fileTransferPort"))
@@ -873,6 +1083,11 @@ public class DeviceDiscoveryManager: ObservableObject {
         default:
             return nil
         }
+    }
+
+    private func parseUInt16(_ s: String?) -> UInt16? {
+        guard let s, !s.isEmpty else { return nil }
+        return UInt16(s.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines))
     }
 
     // MARK: - Signal strength (RSSI)
@@ -1149,7 +1364,12 @@ public class DeviceDiscoveryManager: ObservableObject {
         // This is critical for UI refresh: the device list is keyed by `DiscoveredDevice.id` (stableDeviceId),
         // while inbound NWConnection endpoints often arrive as hostPort (IP) and would otherwise mismatch.
         let endpointKey = connection.endpoint.debugDescription
-        if let mapped = endpointToDeviceId[endpointKey] {
+        if let mapped = PeerIdentityAliasResolver.resolveDeviceId(
+            for: connection.endpoint,
+            endpointKey: endpointKey,
+            exactEndpointMap: endpointToDeviceId,
+            aliasMap: identityAliasToDeviceId
+        ) {
             return mapped
         }
 
@@ -1171,7 +1391,7 @@ public class DeviceDiscoveryManager: ObservableObject {
     // MARK: - Private Methods - TXT Record
     
     /// 创建 TXT 记录（用于广播）
-    private func createTXTRecord() -> NWTXTRecord {
+    private func createTXTRecord(port: UInt16) -> NWTXTRecord {
         var record = NWTXTRecord()
         
         // 平台信息
@@ -1196,6 +1416,11 @@ public class DeviceDiscoveryManager: ObservableObject {
         // 协议版本
         record["version"] = "1"
         record["hs_soa"] = "1"
+        record["name"] = deviceName
+        if port > 0 {
+            record["port"] = String(port)
+            record["skybridgePort"] = String(port)
+        }
         
         // 设备 ID（用于与 macOS 端对齐的稳定主键；不要截断，避免碰撞）
         #if canImport(UIKit)
@@ -1256,6 +1481,8 @@ public class DeviceDiscoveryManager: ObservableObject {
     
     /// 更新发现的设备列表
     private func updateDiscoveredDevices() {
+        rebuildIdentityAliasIndex()
+
         // 按最后活动时间排序
         discoveredDevices = Array(deviceCache.values).sorted { $0.lastSeen > $1.lastSeen }
         

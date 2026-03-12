@@ -244,6 +244,10 @@ private actor CrossNetworkTURNCredentialService {
 
         let (data, resp) = try await URLSession.shared.data(for: req)
         guard let http = resp as? HTTPURLResponse else { throw URLError(.badServerResponse) }
+        let instance = http.value(forHTTPHeaderField: "X-SkyBridge-Instance") ?? "unknown"
+        let backend = http.value(forHTTPHeaderField: "X-SkyBridge-State-Backend") ?? "unknown"
+        let prefixes = http.value(forHTTPHeaderField: "X-SkyBridge-Code-Prefixes") ?? "-"
+        logger.info("🌐 TURN credentials served by instance=\(instance, privacy: .public) backend=\(backend, privacy: .public) prefixes=\(prefixes, privacy: .public)")
         guard (200...299).contains(http.statusCode) else {
             let body = String(data: data, encoding: .utf8) ?? ""
             throw NSError(domain: "TURN", code: http.statusCode, userInfo: ["body": body])
@@ -340,6 +344,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     private static let shortCodeAllowedCharacters = Set(shortCodeAlphabet)
     
     private var signaling: WebSocketSignalingClient?
+    private var signalingShardKey: String?
     private let signalingRetryController = SignalingRetryController()
     private var session: WebRTCSession?
     private var currentSessionId: String?
@@ -501,6 +506,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             await signaling.close()
         }
         signaling = nil
+        signalingShardKey = nil
         session?.close()
         session = nil
         currentSessionId = nil
@@ -539,7 +545,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         readiness = .idle
     }
 
-    private func signalingURL() throws -> URL {
+    private func signalingURL(shardKey: String? = nil) throws -> URL {
         guard let wsURL = SignalingRetryController.validatedWebSocketURL(
             CrossNetworkServerConfig.signalingWebSocketURL
         ) else {
@@ -547,14 +553,36 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
                 CrossNetworkServerConfig.signalingWebSocketURL
             )
         }
-        return wsURL
+        guard let shardKey = shardKey?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !shardKey.isEmpty else {
+            return wsURL
+        }
+        guard var components = URLComponents(url: wsURL, resolvingAgainstBaseURL: false) else {
+            return wsURL
+        }
+        var queryItems = components.queryItems ?? []
+        queryItems.removeAll { $0.name == "shard" }
+        queryItems.append(URLQueryItem(name: "shard", value: shardKey))
+        components.queryItems = queryItems
+        return components.url ?? wsURL
     }
 
-    private func ensureSignalingConnected() async throws {
+    private func ensureSignalingConnected(shardKey: String? = nil) async throws {
+        let effectiveShardKey = (shardKey ?? currentSessionId)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedShardKey = (effectiveShardKey?.isEmpty == false) ? effectiveShardKey : nil
+
+        if let signaling, signalingShardKey != normalizedShardKey {
+            await signaling.close()
+            self.signaling = nil
+            signalingShardKey = nil
+        }
+
         if signaling == nil {
-            let wsURL = try signalingURL()
+            let wsURL = try signalingURL(shardKey: normalizedShardKey)
             let newSignaling = WebSocketSignalingClient(url: wsURL)
             signaling = newSignaling
+            signalingShardKey = normalizedShardKey
             await newSignaling.setOnEnvelope { [weak self] env in
                 Task { @MainActor in
                     self?.handleEnvelope(env)
@@ -576,7 +604,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
                 },
                 send: { [weak self] in
                     guard let self else { throw CancellationError() }
-                    try await self.ensureSignalingConnected()
+                    try await self.ensureSignalingConnected(shardKey: envelope.sessionId)
                     guard let signaling = self.signaling else {
                         throw WebSocketSignalingClient.SignalingError.notConnected
                     }
@@ -755,7 +783,8 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
                     modelName: localModel,
                     platform: "iOS",
                     osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
-                    chip: nil
+                    chip: nil,
+                    remoteVideoFormats: RemoteDesktopManager.supportedRemoteVideoFormats()
                 ))
 
                 do {
@@ -806,6 +835,17 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         let iceServers: [String]
         let expiresAt: Date
     }
+
+    private struct CompactDynamicQRCodeData: Codable {
+        let v: Int
+        let s: String
+        let n: String
+        let d: String
+        let k: Data?
+        let g: Data?
+        let t: Double?
+        let e: Double
+    }
     
     private enum ConnectLinkError: LocalizedError {
         case invalidFormat
@@ -855,9 +895,30 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         guard let jsonData = decodeConnectPayload(payload) else {
             throw ConnectLinkError.invalidBase64
         }
-        let qr = try JSONDecoder().decode(DynamicQRCodeData.self, from: jsonData)
+        let qr = try decodeDynamicQRCodePayload(from: jsonData)
         guard qr.expiresAt > Date() else { throw ConnectLinkError.expired }
         return qr
+    }
+
+    private func decodeDynamicQRCodePayload(from jsonData: Data) throws -> DynamicQRCodeData {
+        let decoder = JSONDecoder()
+        if let legacy = try? decoder.decode(DynamicQRCodeData.self, from: jsonData) {
+            return legacy
+        }
+
+        let compact = try decoder.decode(CompactDynamicQRCodeData.self, from: jsonData)
+        return DynamicQRCodeData(
+            version: compact.v,
+            sessionID: compact.s,
+            deviceName: compact.n,
+            deviceFingerprint: compact.d,
+            publicKey: Data(),
+            signingPublicKey: compact.k,
+            signature: compact.g,
+            signatureTimestamp: compact.t,
+            iceServers: [],
+            expiresAt: Date(timeIntervalSince1970: compact.e)
+        )
     }
 
     private func extractConnectPayload(from raw: String) -> String? {
@@ -938,7 +999,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         // 1) WebSocket signaling
         let wsURL: URL
         do {
-            wsURL = try signalingURL()
+            wsURL = try signalingURL(shardKey: sessionId)
         } catch {
             state = .failed("信令服务 URL 无效")
             readiness = .idle
@@ -1995,7 +2056,8 @@ private extension CrossNetworkWebRTCManager {
             modelName: nil,
             platform: "iOS",
             osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
-            chip: nil
+            chip: nil,
+            remoteVideoFormats: RemoteDesktopManager.supportedRemoteVideoFormats()
         ))
         try await sendAppMessageOverWebRTC(
             message,
@@ -2267,6 +2329,30 @@ private extension CrossNetworkWebRTCManager {
                                     await MainActor.run {
                                         self.lastScreenData = sd
                                         NotificationCenter.default.post(name: Notification.Name("CrossNetworkScreenDataUpdated"), object: nil)
+                                    }
+                                } else if msg.type == .damageReport,
+                                          let report = try? JSONDecoder().decode(RemoteDesktopDamageReportPayload.self, from: msg.payload) {
+                                    await MainActor.run {
+                                        RemoteDesktopManager.instance.handleInboundDamageReport(report)
+                                    }
+                                } else if msg.type == .cursorUpdate,
+                                          let payload = try? JSONDecoder().decode(RemoteDesktopCursorPayload.self, from: msg.payload) {
+                                    await MainActor.run {
+                                        RemoteDesktopManager.instance.handleInboundCursorUpdate(payload)
+                                    }
+                                } else if msg.type == .overlayUpdate,
+                                          let payload = try? JSONDecoder().decode(RemoteDesktopOverlayPayload.self, from: msg.payload) {
+                                    await MainActor.run {
+                                        RemoteDesktopManager.instance.handleInboundOverlayUpdate(payload)
+                                    }
+                                } else if msg.type == .clipboard,
+                                          let payload = try? JSONDecoder().decode(RemoteClipboardMessagePayload.self, from: msg.payload) {
+                                    await MainActor.run {
+                                        RemoteDesktopManager.instance.handleInboundRemoteClipboard(
+                                            data: payload.data,
+                                            mimeType: payload.mimeType,
+                                            fromDeviceId: self.remoteDeviceId
+                                        )
                                     }
                                 }
                             }

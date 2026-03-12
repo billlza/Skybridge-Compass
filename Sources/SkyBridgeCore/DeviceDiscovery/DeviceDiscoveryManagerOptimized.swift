@@ -1466,6 +1466,11 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                 // model/chip are optional; keep best-effort and cheap.
                 let model = await SelfIdentityProvider.shared.getRegistrationDeviceInfo().hardwareModel
                 if !model.isEmpty { txt["modelName"] = model }
+                txt["capabilities"] = "file,file_transfer,rdview,rdcontrol,remote_control,remote_desktop,clipboard"
+                txt["transferPort"] = "8080"
+                txt["fileTransferPort"] = "8080"
+                txt["remotePort"] = "5901"
+                txt["remoteControlPort"] = "5901"
                 let port = try await ServiceAdvertiserCenter.shared.startAdvertising(
                     serviceName: self.getDeviceName(),
                     serviceType: serviceType,
@@ -1509,6 +1514,11 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             if !snap.pubKeyFP.isEmpty { txt["pubKeyFP"] = snap.pubKeyFP }
             let model = await SelfIdentityProvider.shared.getRegistrationDeviceInfo().hardwareModel
             if !model.isEmpty { txt["modelName"] = model }
+            txt["capabilities"] = "file,file_transfer,rdview,rdcontrol,remote_control,remote_desktop,clipboard"
+            txt["transferPort"] = "8080"
+            txt["fileTransferPort"] = "8080"
+            txt["remotePort"] = "5901"
+            txt["remoteControlPort"] = "5901"
             let port = try await ServiceAdvertiserCenter.shared.startAdvertising(
                 serviceName: Self.resolveDeviceName(),
                 serviceType: serviceType,

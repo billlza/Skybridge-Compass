@@ -622,10 +622,10 @@ final class RemoteDesktopSession {
 
     private func configureCallbacks() {
  // 帧回调：FreeRDPBridge 把解码后的 BGRA/H.264 帧交给我们
-        renderer.frameHandler = { [weak self] texture in
+        renderer.frameHandler = { [weak self] texture, backing in
             guard let self else { return }
             Task { @MainActor in
-                self.feed?.update(texture: texture)
+                self.feed?.update(texture: texture, backing: backing)
             }
         }
 

@@ -10,12 +10,14 @@ import Metal
 public final class RemoteTextureFeed: ObservableObject {
  /// 最新的远端帧纹理。UI 侧收到更新后触发一次绘制。
     @Published public private(set) var texture: MTLTexture?
+    private var backingObject: AnyObject?
 
     public init() {}
 
  /// 由会话渲染器在主线程更新纹理引用。
  /// - Parameter texture: 解码并转换为 Metal 的纹理对象。
-    public func update(texture: MTLTexture?) {
+    public func update(texture: MTLTexture?, backing: AnyObject? = nil) {
+        backingObject = backing
         self.texture = texture
     }
 }

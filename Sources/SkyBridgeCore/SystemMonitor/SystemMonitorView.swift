@@ -186,84 +186,10 @@ public struct SystemMonitorView: View {
  // MARK: - 监控控制视图主体
     
     public var body: some View {
-        VStack(spacing: 20) {
- // 标题和状态
-            HStack {
-                Text(LocalizationManager.shared.localizedString("monitor.title"))
-                    .font(.title2)
-                    .fontWeight(.bold)
-                
-                Spacer()
-                
- // ✅ 显示监控状态（自动启动，无需手动按钮）
-                HStack(spacing: 8) {
-                    Circle()
-                        .fill(isMonitoring ? Color.green : Color.gray)
-                        .frame(width: 8, height: 8)
-                    Text(isMonitoring ? LocalizationManager.shared.localizedString("monitor.status.monitoring") : LocalizationManager.shared.localizedString("monitor.status.initializing"))
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-                
- // 可选：提供手动停止按钮（如果需要）
-                if isMonitoring {
-                    Button(action: stopMonitoring) {
-                    HStack {
-                            Image(systemName: "stop.circle.fill")
-                            Text(LocalizationManager.shared.localizedString("monitor.action.stop"))
-                    }
-                        .foregroundColor(.red)
-                    }
-                    .buttonStyle(.borderless)
-                }
-            }
-            
-// 高级监控提示（XPC Helper 未连接时显示）
-            advancedMonitoringNotice
-
-            monitoringModeCard
-            
-// ✅ 自动开始监控（无需手动点击）
-            if systemPerformanceMonitor != nil && isMonitoring {
-                if hasEnabledMonitorDisplayMetric {
- // 系统概览卡片
-                    systemOverviewCard
-
- // 详细监控数据
-                    detailMonitoringCards
-
-                    if settingsManager.showTrendIndicators {
-                        systemTrendChartCard
-// 系统状态指示器
-                        systemStatusIndicators
-                    }
-                } else {
-                    monitorDisplayDisabledStateCard
-                }
-
-                if showDiagnostics {
-                    diagnosticsCard
-                }
-            } else {
- // 等待监控启动
-                VStack(spacing: 16) {
-                    ProgressView()
-                        .scaleEffect(1.5)
-                        .padding()
-                    
-                    Text(LocalizationManager.shared.localizedString("monitor.waiting.cpuStable"))
-                        .font(.headline)
-                        .foregroundColor(.secondary)
-                    
-                    Text(LocalizationManager.shared.localizedString("monitor.waiting.tip"))
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .multilineTextAlignment(.center)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
+        ScrollView(.vertical, showsIndicators: false) {
+            liveSnapshotPanel
+                .padding()
         }
-        .padding()
         .task {
             await initializeAndStartMonitoring()
             helperInstalled = HelperInstaller.isHelperInstalled()
@@ -286,6 +212,324 @@ public struct SystemMonitorView: View {
         .onDisappear {
             stopMonitoring()
         }
+    }
+
+    private var liveSnapshotPanel: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            liveSnapshotHeader
+            advancedMonitoringNotice
+            monitoringModeCard
+
+            if let monitor = systemPerformanceMonitor, isMonitoring {
+                if hasEnabledMonitorDisplayMetric {
+                    liveSnapshotMetrics(for: monitor)
+                    liveSnapshotHighlights(for: monitor)
+
+                    if settingsManager.showTrendIndicators {
+                        liveSnapshotTrend(for: monitor)
+                    }
+
+                    liveSnapshotStatusStrip
+                } else {
+                    monitorDisplayDisabledStateCard
+                }
+
+                if showDiagnostics {
+                    liveSnapshotDiagnostics(for: monitor)
+                }
+            } else {
+                liveSnapshotWaitingState
+            }
+        }
+        .padding(24)
+        .background(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .fill(.ultraThinMaterial)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .stroke(Color.white.opacity(0.08), lineWidth: 1)
+        )
+    }
+
+    private var liveSnapshotHeader: some View {
+        HStack(alignment: .top, spacing: 16) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Live Snapshot")
+                    .font(.title2)
+                    .fontWeight(.bold)
+                Text("Unified monitor view for current health, load, network and thermal headroom.")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+            }
+
+            Spacer()
+
+            HStack(spacing: 10) {
+                Label(
+                    isMonitoring
+                        ? LocalizationManager.shared.localizedString("monitor.status.monitoring")
+                        : LocalizationManager.shared.localizedString("monitor.status.initializing"),
+                    systemImage: "dot.radiowaves.left.and.right"
+                )
+                .font(.caption.weight(.semibold))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background((isMonitoring ? Color.green : Color.gray).opacity(0.16), in: Capsule())
+                .foregroundColor(isMonitoring ? .green : .secondary)
+
+                if isMonitoring {
+                    Button(action: stopMonitoring) {
+                        Label(LocalizationManager.shared.localizedString("monitor.action.stop"), systemImage: "stop.circle.fill")
+                            .foregroundColor(.red)
+                    }
+                    .buttonStyle(.borderless)
+                }
+            }
+        }
+    }
+
+    private func liveSnapshotMetrics(for monitor: SystemPerformanceMonitor) -> some View {
+        LazyVGrid(
+            columns: [
+                GridItem(.flexible(), spacing: 12),
+                GridItem(.flexible(), spacing: 12),
+                GridItem(.flexible(), spacing: 12),
+                GridItem(.flexible(), spacing: 12)
+            ],
+            spacing: 12
+        ) {
+            liveSnapshotMetricCard(
+                title: "CPU",
+                value: String(format: "%.1f%%", monitor.cpuUsage),
+                subtitle: "System load",
+                color: loadColor,
+                icon: "cpu"
+            )
+            liveSnapshotMetricCard(
+                title: "Memory",
+                value: String(format: "%.1f%%", monitor.memoryUsage),
+                subtitle: "Pressure",
+                color: .blue,
+                icon: "memorychip"
+            )
+            liveSnapshotMetricCard(
+                title: "Bandwidth",
+                value: String(format: "%.2f Mbps", monitor.networkThroughputMbps),
+                subtitle: "Live traffic",
+                color: .green,
+                icon: "network"
+            )
+            liveSnapshotMetricCard(
+                title: "Thermal",
+                value: formatTemperature(max(monitor.cpuTemperature, monitor.gpuTemperature), state: preferredTemperatureState(for: monitor)),
+                subtitle: thermalStatus,
+                color: thermalColor,
+                icon: "thermometer"
+            )
+        }
+    }
+
+    private func liveSnapshotHighlights(for monitor: SystemPerformanceMonitor) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            liveSnapshotInsightRow(
+                title: "Overall Health",
+                detail: overallHealth,
+                caption: "Aggregates CPU, memory, disk and thermal headroom.",
+                color: healthColor
+            )
+            liveSnapshotInsightRow(
+                title: "Thermal Envelope",
+                detail: thermalStatus,
+                caption: "CPU \(formatTemperature(monitor.cpuTemperature, state: monitor.cpuTemperatureState)) • GPU \(formatTemperature(monitor.gpuTemperature, state: monitor.gpuTemperatureState))",
+                color: thermalColor
+            )
+            liveSnapshotInsightRow(
+                title: "Cooling + Transport",
+                detail: "Fan \(formatFanRPM(monitor.fanSpeed, state: monitor.fanState))",
+                caption: "Network throughput \(String(format: "%.2f", monitor.networkThroughputMbps)) Mbps",
+                color: .cyan
+            )
+        }
+    }
+
+    private func liveSnapshotTrend(for monitor: SystemPerformanceMonitor) -> some View {
+        let points = Array(monitor.historyPoints.suffix(20))
+
+        return VStack(alignment: .leading, spacing: 12) {
+            Text("Trend")
+                .font(.headline)
+            if points.isEmpty {
+                Text(LocalizationManager.shared.localizedString("monitor.noData"))
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .frame(maxWidth: .infinity, minHeight: 160, alignment: .center)
+            } else {
+                Chart {
+                    ForEach(points) { point in
+                        LineMark(
+                            x: .value("Time", point.timestamp),
+                            y: .value("CPU", point.cpuUsage)
+                        )
+                        .foregroundStyle(.orange)
+
+                        LineMark(
+                            x: .value("Time", point.timestamp),
+                            y: .value("Memory", point.memoryUsage)
+                        )
+                        .foregroundStyle(.blue)
+                    }
+                }
+                .chartLegend(.visible)
+                .frame(height: 180)
+            }
+        }
+        .padding(18)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color.black.opacity(0.08))
+        )
+    }
+
+    private var liveSnapshotStatusStrip: some View {
+        HStack(spacing: 12) {
+            liveSnapshotStatusPill(
+                title: LocalizationManager.shared.localizedString("monitor.indicator.health"),
+                value: overallHealth,
+                color: healthColor
+            )
+            liveSnapshotStatusPill(
+                title: LocalizationManager.shared.localizedString("monitor.indicator.thermal"),
+                value: thermalStatus,
+                color: thermalColor
+            )
+            liveSnapshotStatusPill(
+                title: LocalizationManager.shared.localizedString("monitor.indicator.load"),
+                value: "\(String(format: "%.0f", systemLoad))%",
+                color: loadColor
+            )
+        }
+    }
+
+    private func liveSnapshotDiagnostics(for monitor: SystemPerformanceMonitor) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(LocalizationManager.shared.localizedString("monitor.diagnostics.title"))
+                .font(.headline)
+            diagnosticRow(title: "GPU Usage", detail: metricDiagnosticText(monitor.gpuUsageState))
+            diagnosticRow(title: "GPU Power", detail: metricDiagnosticText(monitor.gpuPowerState))
+            diagnosticRow(title: "CPU Temp", detail: metricDiagnosticText(monitor.cpuTemperatureState))
+            diagnosticRow(title: "GPU Temp", detail: metricDiagnosticText(monitor.gpuTemperatureState))
+            diagnosticRow(title: "Fan", detail: metricDiagnosticText(monitor.fanState))
+        }
+        .padding(18)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color.black.opacity(0.08))
+        )
+    }
+
+    private var liveSnapshotWaitingState: some View {
+        VStack(spacing: 16) {
+            ProgressView()
+                .scaleEffect(1.4)
+                .padding(.top, 8)
+
+            Text(LocalizationManager.shared.localizedString("monitor.waiting.cpuStable"))
+                .font(.headline)
+
+            Text(LocalizationManager.shared.localizedString("monitor.waiting.tip"))
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity, minHeight: 320)
+    }
+
+    private func liveSnapshotMetricCard(title: String, value: String, subtitle: String, color: Color, icon: String) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Image(systemName: icon)
+                .foregroundColor(color)
+                .font(.title3.weight(.semibold))
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundColor(.secondary)
+            Text(value)
+                .font(.title3.weight(.bold))
+            Text(subtitle)
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(color.opacity(0.10))
+        )
+    }
+
+    private func liveSnapshotInsightRow(title: String, detail: String, caption: String, color: Color) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Circle()
+                .fill(color)
+                .frame(width: 10, height: 10)
+                .padding(.top, 4)
+
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text(title)
+                        .font(.headline)
+                    Spacer()
+                    Text(detail)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundColor(color)
+                }
+                Text(caption)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+        }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color.black.opacity(0.06))
+        )
+    }
+
+    private func liveSnapshotStatusPill(title: String, value: String, color: Color) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundColor(.secondary)
+            Text(value)
+                .font(.subheadline.weight(.semibold))
+                .foregroundColor(color)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(color.opacity(0.10))
+        )
+    }
+
+    private func diagnosticRow(title: String, detail: String) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+            Spacer()
+            Text(detail)
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.trailing)
+        }
+    }
+
+    private func preferredTemperatureState(for monitor: SystemPerformanceMonitor) -> MetricState {
+        if monitor.cpuTemperatureState.availability != .unavailable {
+            return monitor.cpuTemperatureState
+        }
+        return monitor.gpuTemperatureState
     }
     
  // MARK: - 子视图组件

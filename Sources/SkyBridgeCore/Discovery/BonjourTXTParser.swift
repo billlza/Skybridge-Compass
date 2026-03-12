@@ -16,6 +16,7 @@ public struct BonjourDeviceInfo: Sendable, Equatable {
     public let manufacturer: String?
     public let platform: String?
     public let name: String?
+    public let remoteVideoFormats: [String]
 
     public init(
         deviceId: String? = nil,
@@ -26,7 +27,8 @@ public struct BonjourDeviceInfo: Sendable, Equatable {
         osVersion: String? = nil,
         manufacturer: String? = nil,
         platform: String? = nil,
-        name: String? = nil
+        name: String? = nil,
+        remoteVideoFormats: [String] = []
     ) {
         self.deviceId = deviceId
         self.hostname = hostname
@@ -37,6 +39,7 @@ public struct BonjourDeviceInfo: Sendable, Equatable {
         self.manufacturer = manufacturer
         self.platform = platform
         self.name = name
+        self.remoteVideoFormats = remoteVideoFormats
     }
 
  /// 获取最佳可用的唯一标识符
@@ -74,6 +77,7 @@ public enum BonjourTXTParser: Sendable {
         ("platform", ["platform", "os"]),
         ("version", ["version", "ver", "sw"]),
         ("osVersion", ["osVersion", "os_version", "osver", "osVer", "osv"]),
+        ("remoteVideoFormats", ["remoteVideoFormats", "remote_video_formats", "remoteformats"]),
     ]
 
  /// 用于正则解析的模式（降级方案）
@@ -96,6 +100,14 @@ public enum BonjourTXTParser: Sendable {
         ("version", "version=([^,\\]]+)"),
         ("osVersion", "osVersion=([^,\\]]+)"),
         ("os_version", "os_version=([^,\\]]+)"),
+        (
+            "remoteVideoFormats",
+            "remoteVideoFormats=([^\\]]+?)(?=,(?:[A-Za-z0-9_]+=)|\\]|$)"
+        ),
+        (
+            "remote_video_formats",
+            "remote_video_formats=([^\\]]+?)(?=,(?:[A-Za-z0-9_]+=)|\\]|$)"
+        ),
     ]
 
  // MARK: - 主解析方法
@@ -200,6 +212,9 @@ public enum BonjourTXTParser: Sendable {
     public static func extractDeviceInfo(from dict: [String: String]) -> BonjourDeviceInfo {
  // 查找设备 ID（按优先级）
         let deviceId = dict["deviceId"] ?? dict["id"] ?? dict["deviceID"] ?? dict["serial"] ?? dict["mac"] ?? dict["bssid"]
+        let remoteVideoFormats = parseRemoteVideoFormats(
+            dict["remoteVideoFormats"] ?? dict["remote_video_formats"] ?? dict["remoteformats"]
+        )
 
         return BonjourDeviceInfo(
             deviceId: deviceId,
@@ -210,8 +225,22 @@ public enum BonjourTXTParser: Sendable {
             osVersion: dict["osVersion"] ?? dict["os_version"] ?? dict["osver"] ?? dict["osVer"] ?? dict["osv"],
             manufacturer: dict["manufacturer"] ?? dict["brand"],
             platform: dict["platform"] ?? dict["os"],
-            name: dict["name"] ?? dict["device"] ?? dict["fn"]
+            name: dict["name"] ?? dict["device"] ?? dict["fn"],
+            remoteVideoFormats: remoteVideoFormats
         )
+    }
+
+    private static func parseRemoteVideoFormats(_ raw: String?) -> [String] {
+        guard let raw, !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return []
+        }
+        var formats: [String] = []
+        for token in raw.split(separator: ",") {
+            let normalized = token.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard !normalized.isEmpty, !formats.contains(normalized) else { continue }
+            formats.append(normalized)
+        }
+        return formats
     }
 
  /// 从字符串描述提取设备信息
@@ -293,4 +322,3 @@ extension NWTXTRecord {
 // MARK: - 注意事项
 // TXTRecordHelper 已在 RealSignalService.swift 中定义
 // 新代码应直接使用 BonjourTXTParser
-

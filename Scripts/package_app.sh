@@ -87,6 +87,7 @@ function select_identity() {
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 source "${ROOT_DIR}/Scripts/apple_pqc_sdk_probe.sh"
+source "${ROOT_DIR}/Scripts/xcodebuild_helpers.sh"
 BUILD_DIR="${ROOT_DIR}/.build/xcode/Build/Products/Release"
 APP_NAME="SkyBridge Compass Pro.app"
 APP_DIR="${ROOT_DIR}/dist/${APP_NAME}"
@@ -96,7 +97,7 @@ RES_DIR="${CONTENTS_DIR}/Resources"
 FW_DIR="${CONTENTS_DIR}/Frameworks"
 SIGN_IDENTITY="${IDENTITY:-$(select_identity)}"
 SKIP_BUILD="${SKIP_BUILD:-0}"
-BUILD_DESTINATION="${BUILD_DESTINATION:-platform=macOS,arch=arm64}"
+BUILD_DESTINATION="${BUILD_DESTINATION:-$(skybridge_default_macos_destination)}"
 IS_ADHOC_SIGNING=0
 if [[ -z "${SIGN_IDENTITY}" || "${SIGN_IDENTITY}" == "-" ]]; then
   IS_ADHOC_SIGNING=1
@@ -128,7 +129,7 @@ if [[ "${SKIP_BUILD}" != "1" ]]; then
     fi
   fi
 
-  xcodebuild -workspace "${ROOT_DIR}/.swiftpm/xcode/package.xcworkspace" \
+  skybridge_run_xcodebuild -workspace "${ROOT_DIR}/.swiftpm/xcode/package.xcworkspace" \
              -scheme SkyBridgeCompassApp \
              -configuration Release \
              -destination "${BUILD_DESTINATION}" \
@@ -237,12 +238,12 @@ HELPER_BIN_PATH="${BUILD_DIR}/${HELPER_EXECUTABLE}"
 # 某些构建路径只会产出主 App，可在这里补构建 Helper
 if [[ ! -x "${HELPER_BIN_PATH}" ]]; then
   log "未检测到 PowerMetricsHelper，尝试单独构建..."
-  if xcodebuild -workspace .swiftpm/xcode/package.xcworkspace \
+  if skybridge_run_xcodebuild -workspace .swiftpm/xcode/package.xcworkspace \
                 -scheme "${HELPER_EXECUTABLE}" \
                 -configuration Release \
-                -destination 'platform=macOS' \
+                -destination "${BUILD_DESTINATION}" \
                 -derivedDataPath "${ROOT_DIR}/.build/xcode" \
-                build >/dev/null 2>&1; then
+                build >/dev/null; then
     log "PowerMetricsHelper 构建完成"
   else
     log "PowerMetricsHelper 构建失败，将继续打包主应用（高级监控功能不可用）"

@@ -3,6 +3,10 @@
 
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/Scripts/xcodebuild_helpers.sh"
+BUILD_DESTINATION="${BUILD_DESTINATION:-$(skybridge_default_macos_destination)}"
+
 echo "🔎 检测 Apple PQC SDK（用于编译期开关 HAS_APPLE_PQC_SDK）..."
 SDK_VER="$(xcrun --sdk macosx --show-sdk-version 2>/dev/null || echo "")"
 SDK_MAJOR="$(echo "$SDK_VER" | awk -F. '{print $1}')"
@@ -15,12 +19,12 @@ else
 fi
 
 echo "🔨 使用 Xcode 构建 Release 版本..."
-xcodebuild -workspace .swiftpm/xcode/package.xcworkspace \
-           -scheme SkyBridgeCompassApp \
-           -configuration Release \
-           -destination 'platform=macOS' \
-           -derivedDataPath .build/xcode \
-           build
+skybridge_run_xcodebuild -workspace .swiftpm/xcode/package.xcworkspace \
+                         -scheme SkyBridgeCompassApp \
+                         -configuration Release \
+                         -destination "$BUILD_DESTINATION" \
+                         -derivedDataPath .build/xcode \
+                         build
 
 echo "📦 打包应用..."
 Scripts/package_app.sh

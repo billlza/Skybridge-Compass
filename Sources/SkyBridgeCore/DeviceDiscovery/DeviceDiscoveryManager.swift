@@ -409,10 +409,23 @@ public class DeviceDiscoveryManager: BaseManager {
                 return
             }
             do {
+                let snap = await SelfIdentityProvider.shared.snapshot()
+                var txt = NWTXTRecord()
+                txt["platform"] = "macos"
+                txt["osVersion"] = ProcessInfo.processInfo.operatingSystemVersionString
+                txt["name"] = self.getDeviceName()
+                if !snap.deviceId.isEmpty { txt["deviceId"] = snap.deviceId }
+                if !snap.pubKeyFP.isEmpty { txt["pubKeyFP"] = snap.pubKeyFP }
+                txt["capabilities"] = "file,file_transfer,rdview,rdcontrol,remote_control,remote_desktop,clipboard"
+                txt["transferPort"] = "8080"
+                txt["fileTransferPort"] = "8080"
+                txt["remotePort"] = "5901"
+                txt["remoteControlPort"] = "5901"
  // 通过统一广播中心启动，避免跨管理器重复监听同一服务类型
                 let port = try await ServiceAdvertiserCenter.shared.startAdvertising(
                     serviceName: getDeviceName(),
                     serviceType: "_skybridge._tcp",
+                    txtRecord: txt,
                     connectionHandler: { [weak self] connection in
                         Task { @MainActor in self?.handleNewConnection(connection) }
                     },

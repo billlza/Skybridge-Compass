@@ -75,6 +75,12 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         case offerer
         case answerer
     }
+
+    public enum ICETransportPath: String, Sendable {
+        case unknown
+        case direct
+        case relay
+    }
     
     public struct ICEConfig: Sendable {
         public var stunURL: String
@@ -509,6 +515,41 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
 #endif
     }
 
+    public func currentICETransportPath() async -> ICETransportPath {
+#if canImport(WebRTC)
+        guard let peerConnection else { return .unknown }
+        return await withCheckedContinuation { continuation in
+            final class ResumeState: @unchecked Sendable {
+                private let lock = NSLock()
+                private var resumed = false
+
+                func resume(
+                    _ path: ICETransportPath,
+                    continuation: CheckedContinuation<ICETransportPath, Never>
+                ) {
+                    lock.lock()
+                    defer { lock.unlock() }
+                    guard !resumed else { return }
+                    resumed = true
+                    continuation.resume(returning: path)
+                }
+            }
+
+            let state = ResumeState()
+
+            peerConnection.statistics { report in
+                state.resume(Self.detectICETransportPath(from: report), continuation: continuation)
+            }
+
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.25) {
+                state.resume(.unknown, continuation: continuation)
+            }
+        }
+#else
+        return .unknown
+#endif
+    }
+
     private func waitForBufferedAmountBelow(
         _ threshold: UInt64,
         pollInterval: Duration,
@@ -591,6 +632,52 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
                 self.onLocalAnswer?(sdpString)
             }
         }
+    }
+
+    private static func detectICETransportPath(from report: RTCStatisticsReport) -> ICETransportPath {
+        let statsById = report.statistics
+
+        func stringValue(_ stat: RTCStatistics, key: String) -> String? {
+            guard let value = stat.values[key] else { return nil }
+            if let text = value as? String { return text }
+            if let number = value as? NSNumber { return number.stringValue }
+            return nil
+        }
+
+        func boolValue(_ stat: RTCStatistics, key: String) -> Bool {
+            guard let value = stat.values[key] else { return false }
+            if let number = value as? NSNumber { return number.boolValue }
+            if let text = value as? String {
+                let lowered = text.lowercased()
+                return lowered == "true" || lowered == "1"
+            }
+            return false
+        }
+
+        let selectedPair = statsById.values.first { stat in
+            guard stat.type.lowercased() == "candidate-pair" else { return false }
+            let state = stringValue(stat, key: "state")?.lowercased()
+            let selected = boolValue(stat, key: "selected")
+            let nominated = boolValue(stat, key: "nominated")
+            return selected || (nominated && state == "succeeded")
+        }
+
+        guard let selectedPair else { return .unknown }
+
+        let candidateIDs = [
+            stringValue(selectedPair, key: "localCandidateId"),
+            stringValue(selectedPair, key: "remoteCandidateId"),
+        ]
+        .compactMap { $0 }
+
+        for candidateId in candidateIDs {
+            guard let candidate = statsById[candidateId] else { continue }
+            if stringValue(candidate, key: "candidateType")?.lowercased() == "relay" {
+                return .relay
+            }
+        }
+
+        return .direct
     }
 #endif
 }

@@ -207,6 +207,7 @@ public final class DeviceDiscoveryService: ObservableObject {
         for (key, value) in newDevice.portMap {
             mergedPortMap[key] = value
         }
+        let mergedRemoteVideoFormats = existing.remoteVideoFormats.union(newDevice.remoteVideoFormats)
 
  // 合并连接类型
         var mergedConnectionTypes = existing.connectionTypes
@@ -229,6 +230,7 @@ public final class DeviceDiscoveryService: ObservableObject {
             ipv6: mergedIPv6,
             services: mergedServices,
             portMap: mergedPortMap,
+            remoteVideoFormats: mergedRemoteVideoFormats,
             connectionTypes: mergedConnectionTypes,
             uniqueIdentifier: mergedUniqueId,
             signalStrength: mergedStrength
@@ -613,6 +615,7 @@ public final class DeviceDiscoveryService: ObservableObject {
                 if case let .service(name: name, type: _, domain: _, interface: _) = result.endpoint {
                     var resolvedName = name
                     var uniqueId: String? = nil
+                    var remoteVideoFormats = Set<String>()
  // 解析 metadata 的 TXT 记录（使用统一解析器）
                     if case .bonjour(let txtRecord) = result.metadata {
                         let deviceInfo = BonjourTXTParser.extractDeviceInfo(txtRecord)
@@ -621,6 +624,7 @@ public final class DeviceDiscoveryService: ObservableObject {
                             mdnsDeviceIdCache[resolvedName] = devId
                         }
                         if let host = deviceInfo.hostname ?? deviceInfo.name { resolvedName = host }
+                        remoteVideoFormats = Set(deviceInfo.remoteVideoFormats)
                     } else {
  // 回退：尝试 NetService 解析 TXT 记录
                         if case .service(let sName, let sType, _, _) = result.endpoint {
@@ -628,6 +632,9 @@ public final class DeviceDiscoveryService: ObservableObject {
                             netService.resolve(withTimeout: 0.8)
                             if let data = netService.txtRecordData() {
                                 let dict = NetService.dictionary(fromTXTRecord: data)
+                                let deviceInfo = BonjourTXTParser.extractDeviceInfo(from: dict.reduce(into: [String: String]()) { partialResult, item in
+                                    partialResult[item.key] = String(data: item.value, encoding: .utf8)
+                                })
                                 if let devIdData = dict["deviceId"] ?? dict["id"] ?? dict["deviceID"],
                                    let devId = String(data: devIdData, encoding: .utf8) {
                                     uniqueId = devId
@@ -635,6 +642,7 @@ public final class DeviceDiscoveryService: ObservableObject {
                                 }
                                 if let hostData = dict["hostname"] ?? dict["name"],
                                    let host = String(data: hostData, encoding: .utf8) { resolvedName = host }
+                                remoteVideoFormats = Set(deviceInfo.remoteVideoFormats)
                             }
                         }
                     }
@@ -645,6 +653,7 @@ public final class DeviceDiscoveryService: ObservableObject {
                         ipv6: nil,
                         services: [serviceType],
                         portMap: [:],
+                        remoteVideoFormats: remoteVideoFormats,
                         connectionTypes: [.wifi],
                         uniqueIdentifier: uniqueId
                     )
@@ -945,6 +954,7 @@ public final class DeviceDiscoveryService: ObservableObject {
                                 self?.logger.debug("🚫 mDNS解析已禁用，使用原始名称")
                             }
  // 解析 Bonjour TXT 记录，填充 mdnsDeviceID（使用统一解析器）
+                            var remoteVideoFormats = Set<String>()
                             if case .bonjour(let txtRecord) = result.metadata, let strongSelf = self {
                                 let parsed = BonjourTXTParser.parse(txtRecord)
                                 if !parsed.isEmpty {
@@ -953,6 +963,7 @@ public final class DeviceDiscoveryService: ObservableObject {
                                     if let deviceId = deviceInfo.deviceId {
                                         strongSelf.mdnsDeviceIdCache[resolvedName] = deviceId
                                     }
+                                    remoteVideoFormats = Set(deviceInfo.remoteVideoFormats)
                                 }
                             }
                             let device = DiscoveredDevice(
@@ -962,6 +973,7 @@ public final class DeviceDiscoveryService: ObservableObject {
                                 ipv6: nil,
                                 services: [serviceType],
                                 portMap: [:],
+                                remoteVideoFormats: remoteVideoFormats,
                                 connectionTypes: [.wifi],
                                 uniqueIdentifier: self?.mdnsDeviceIdCache[resolvedName]
                             )

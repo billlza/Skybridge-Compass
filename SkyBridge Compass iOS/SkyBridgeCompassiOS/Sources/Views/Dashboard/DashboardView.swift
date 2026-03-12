@@ -130,6 +130,15 @@ public struct DashboardView: View {
         } message: {
             Text(crossNetworkAlertMessage ?? "")
         }
+        .onChange(of: crossNetworkManager.readiness) { _, newValue in
+            guard case .handshakeComplete = newValue else { return }
+            if showingQRScanner {
+                showingQRScanner = false
+            }
+            if selectedTab != .remote {
+                selectedTab = .remote
+            }
+        }
         .sheet(item: $showingDeviceDetail) { device in
             DeviceDetailSheet(device: device)
         }

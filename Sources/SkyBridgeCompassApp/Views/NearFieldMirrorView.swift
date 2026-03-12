@@ -350,8 +350,7 @@ struct NearFieldMirrorView: View {
  // 符合Swift 6.2.1最佳实践：startControlling是async方法（非throws），不需要try-catch
                 if let connection = discoveryManager.activeConnection(for: targetDevice.id) {
                     Task {
- // 使用设备ID字符串作为控制会话标识
-                        await remoteControlManager.startControlling(deviceId: targetDevice.id.uuidString, connection: connection)
+                        await remoteControlManager.startControlling(device: targetDevice, connection: connection)
                         await MainActor.run { self.currentDeviceId = targetDevice.id.uuidString }
                     }
                 } else {

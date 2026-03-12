@@ -382,7 +382,7 @@ final class SystemImpactBenchTests: XCTestCase {
         // === First frame ===
         let firstFrameRecorder = FirstFrameRecorder()
         let renderer = RemoteFrameRenderer()
-        renderer.frameHandler = { _ in
+        renderer.frameHandler = { _, _ in
             Task { await firstFrameRecorder.mark() }
         }
 
@@ -740,5 +740,4 @@ final class SystemImpactBenchTests: XCTestCase {
         Self.elapsedMs(since: start, end: DispatchTime.now())
     }
 }
-
 
