@@ -599,6 +599,74 @@ public extension KeychainManager {
         _ = deleteKey(service: "SkyBridge.Supabase", account: "AnonKey")
         _ = deleteKey(service: "SkyBridge.Supabase", account: "ServiceRoleKey")
     }
+
+    struct NebulaConfig: Codable, Sendable {
+        public let baseURL: String
+        public let clientId: String
+        public let clientSecret: String?
+
+        public init(baseURL: String, clientId: String, clientSecret: String?) {
+            self.baseURL = baseURL
+            self.clientId = clientId
+            self.clientSecret = clientSecret
+        }
+    }
+
+    nonisolated func storeNebulaConfig(baseURL: String, clientId: String, clientSecret: String?) throws {
+        let baseURLTrimmed = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let clientIdTrimmed = clientId.trimmingCharacters(in: .whitespacesAndNewlines)
+        let clientSecretTrimmed = clientSecret?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        try saveGenericPasswordSync(account: "nebula.baseURL", data: Data(baseURLTrimmed.utf8))
+        try saveGenericPasswordSync(account: "nebula.clientId", data: Data(clientIdTrimmed.utf8))
+        if let clientSecretTrimmed, !clientSecretTrimmed.isEmpty {
+            try saveGenericPasswordSync(account: "nebula.clientSecret", data: Data(clientSecretTrimmed.utf8))
+        } else {
+            deleteGenericPasswordSync(account: "nebula.clientSecret")
+        }
+
+        _ = importKey(data: Data(baseURLTrimmed.utf8), service: "SkyBridge.Nebula", account: "BaseURL")
+        _ = importKey(data: Data(clientIdTrimmed.utf8), service: "SkyBridge.Nebula", account: "ClientId")
+        if let clientSecretTrimmed, !clientSecretTrimmed.isEmpty {
+            _ = importKey(data: Data(clientSecretTrimmed.utf8), service: "SkyBridge.Nebula", account: "ClientSecret")
+        } else {
+            _ = deleteKey(service: "SkyBridge.Nebula", account: "ClientSecret")
+        }
+    }
+
+    nonisolated func retrieveNebulaConfig() throws -> NebulaConfig {
+        do {
+            let baseURLData = try loadGenericPasswordSync(account: "nebula.baseURL")
+            let clientIdData = try loadGenericPasswordSync(account: "nebula.clientId")
+            let clientSecretData = try? loadGenericPasswordSync(account: "nebula.clientSecret")
+            guard let baseURL = String(data: baseURLData, encoding: .utf8),
+                  let clientId = String(data: clientIdData, encoding: .utf8) else {
+                throw KeychainError.decodingError
+            }
+            let clientSecret = clientSecretData.flatMap { String(data: $0, encoding: .utf8) }
+            return NebulaConfig(baseURL: baseURL, clientId: clientId, clientSecret: clientSecret)
+        } catch {
+            if let clientIdData = exportKey(service: "SkyBridge.Nebula", account: "ClientId"),
+               let clientId = String(data: clientIdData, encoding: .utf8) {
+                let baseURL = exportKey(service: "SkyBridge.Nebula", account: "BaseURL")
+                    .flatMap { String(data: $0, encoding: .utf8) } ?? ""
+                let clientSecret = exportKey(service: "SkyBridge.Nebula", account: "ClientSecret")
+                    .flatMap { String(data: $0, encoding: .utf8) }
+                try? storeNebulaConfig(baseURL: baseURL, clientId: clientId, clientSecret: clientSecret)
+                return NebulaConfig(baseURL: baseURL, clientId: clientId, clientSecret: clientSecret)
+            }
+            throw error
+        }
+    }
+
+    nonisolated func deleteNebulaConfig() {
+        deleteGenericPasswordSync(account: "nebula.baseURL")
+        deleteGenericPasswordSync(account: "nebula.clientId")
+        deleteGenericPasswordSync(account: "nebula.clientSecret")
+        _ = deleteKey(service: "SkyBridge.Nebula", account: "BaseURL")
+        _ = deleteKey(service: "SkyBridge.Nebula", account: "ClientId")
+        _ = deleteKey(service: "SkyBridge.Nebula", account: "ClientSecret")
+    }
     
     nonisolated func storeAuthSession(_ session: AuthSession) throws {
         let data = try JSONEncoder().encode(session)
@@ -614,4 +682,3 @@ public extension KeychainManager {
         deleteGenericPasswordSync(account: "auth.session")
     }
 }
-

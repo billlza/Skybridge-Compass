@@ -69,6 +69,9 @@ struct SkyBridgeCompassApp: App {
             .frame(minWidth: 1280, minHeight: 720)
             .preferredColorScheme(.dark)
             .onOpenURL { url in
+                if url.scheme == "skybridge", url.host == "auth" {
+                    return
+                }
  // 处理 Widget Deep Link
                 DeepLinkRouter.shared.handleDeepLink(url)
             }

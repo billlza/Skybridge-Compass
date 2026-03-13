@@ -54,6 +54,24 @@ public enum SkyBridgeServerConfig {
         environmentList("SKYBRIDGE_TURN_URLS", default: [turnTLSURL, turnURL])
     }
 
+    /// Nebula auth configuration uses the same keys as macOS for future parity.
+    /// Native clients should avoid shipping long-lived secrets in production builds.
+    public static var nebulaBaseURL: String? {
+        NebulaConfigurationResolver.resolve()?.baseURL
+    }
+
+    public static var nebulaClientID: String? {
+        NebulaConfigurationResolver.resolve()?.clientId
+    }
+
+    public static var nebulaClientSecret: String? {
+        NebulaConfigurationResolver.resolve()?.clientSecret
+    }
+
+    public static var hasNebulaConfiguration: Bool {
+        NebulaConfigurationResolver.resolve() != nil
+    }
+
     /// Client API key used for requesting dynamic TURN credentials.
     /// This is NOT a secret; it's only used to tag legitimate client traffic.
     public static var clientAPIKey: String {
@@ -116,6 +134,103 @@ public enum SkyBridgeServerConfig {
                 return lp < rp
             }
             .map(\.element)
+    }
+}
+
+private enum NebulaConfigurationResolver {
+    struct ResolvedConfiguration: Sendable, Equatable {
+        let baseURL: String
+        let clientId: String
+        let clientSecret: String?
+    }
+
+    static func resolve(bundle: Bundle = .main) -> ResolvedConfiguration? {
+        guard let baseURL = resolvedValue("NEBULA_BASE_URL", bundle: bundle, validator: isValidBaseURL),
+              let clientId = resolvedValue("NEBULA_CLIENT_ID", bundle: bundle) else {
+            return nil
+        }
+
+        let clientSecret = resolvedValue("NEBULA_CLIENT_SECRET", bundle: bundle)
+
+        return ResolvedConfiguration(
+            baseURL: baseURL,
+            clientId: clientId,
+            clientSecret: clientSecret
+        )
+    }
+
+    private static func resolvedValue(
+        _ key: String,
+        bundle: Bundle,
+        validator: (String) -> Bool = { !$0.isEmpty }
+    ) -> String? {
+        if let value = normalizedKeychainValue(forKey: key),
+           !isPlaceholder(value, key: key),
+           validator(value) {
+            return value
+        }
+
+        if let value = normalized(ProcessInfo.processInfo.environment[key]),
+           !isPlaceholder(value, key: key),
+           validator(value) {
+            return value
+        }
+
+        if let value = normalized(bundle.object(forInfoDictionaryKey: key) as? String),
+           !isPlaceholder(value, key: key),
+           validator(value) {
+            return value
+        }
+
+        return nil
+    }
+
+    private static func normalizedKeychainValue(forKey key: String) -> String? {
+        guard let config = try? KeychainManager.shared.retrieveNebulaConfig() else {
+            return nil
+        }
+
+        switch key {
+        case "NEBULA_BASE_URL":
+            return normalized(config.baseURL)
+        case "NEBULA_CLIENT_ID":
+            return normalized(config.clientId)
+        case "NEBULA_CLIENT_SECRET":
+            return normalized(config.clientSecret)
+        default:
+            return nil
+        }
+    }
+
+    private static func normalized(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private static func isValidBaseURL(_ value: String) -> Bool {
+        guard let url = URL(string: value),
+              let scheme = url.scheme?.lowercased(),
+              (scheme == "https" || scheme == "http"),
+              let host = url.host,
+              !host.isEmpty else {
+            return false
+        }
+        return true
+    }
+
+    private static func isPlaceholder(_ value: String, key: String) -> Bool {
+        let lowered = value.lowercased()
+        switch key {
+        case "NEBULA_BASE_URL":
+            return lowered.contains("your-nebula-host") || lowered.contains("example.com")
+        case "NEBULA_CLIENT_ID":
+            return lowered == "your-nebula-client-id"
+        case "NEBULA_CLIENT_SECRET":
+            return lowered == "your-nebula-client-secret"
+        default:
+            return false
+        }
     }
 }
 

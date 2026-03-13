@@ -84,6 +84,44 @@ public class AuthenticationManager: ObservableObject {
         SkyBridgeLogger.shared.info("✅ 登录成功: \(email)")
     }
 
+    /// Nebula 安全浏览器登录（OAuth 2.1 + PKCE）
+    public func signInWithNebulaBrowser() async throws {
+        let (tokenResponse, userInfo) = try await NebulaPublicClientOAuth.shared.authenticateUsingSystemBrowser()
+        let displayName = userInfo.name ?? userInfo.preferredUsername ?? userInfo.email ?? "Nebula User"
+        let email = userInfo.email ?? "\(userInfo.subject)@nebula.local"
+        let session = AuthSession(
+            accessToken: tokenResponse.accessToken,
+            refreshToken: tokenResponse.refreshToken,
+            userIdentifier: userInfo.subject,
+            displayName: displayName,
+            email: userInfo.email,
+            avatarURL: userInfo.picture,
+            nebulaId: nil,
+            issuedAt: Date()
+        )
+        applySession(session, emailFallback: email)
+        SkyBridgeLogger.shared.info("✅ Nebula 浏览器登录成功: \(displayName)")
+    }
+
+    /// Nebula 安全浏览器注册（OAuth 2.1 + PKCE）
+    public func registerWithNebulaBrowser() async throws {
+        let (tokenResponse, userInfo) = try await NebulaPublicClientOAuth.shared.registerUsingSystemBrowser()
+        let displayName = userInfo.name ?? userInfo.preferredUsername ?? userInfo.email ?? "Nebula User"
+        let email = userInfo.email ?? "\(userInfo.subject)@nebula.local"
+        let session = AuthSession(
+            accessToken: tokenResponse.accessToken,
+            refreshToken: tokenResponse.refreshToken,
+            userIdentifier: userInfo.subject,
+            displayName: displayName,
+            email: userInfo.email,
+            avatarURL: userInfo.picture,
+            nebulaId: nil,
+            issuedAt: Date()
+        )
+        applySession(session, emailFallback: email)
+        SkyBridgeLogger.shared.info("✅ Nebula 浏览器注册成功: \(displayName)")
+    }
+
     /// 手动刷新账号资料（NebulaID/头像/昵称等），与 macOS 持久化体验对齐
     public func refreshProfile() async {
         await refreshProfileIfPossible()

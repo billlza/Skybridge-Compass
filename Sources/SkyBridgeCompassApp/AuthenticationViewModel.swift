@@ -5,6 +5,9 @@ import AuthenticationServices
 import LocalAuthentication
 import Security
 import SkyBridgeCore
+#if canImport(AppKit)
+import AppKit
+#endif
 
 /// 现代化登录视图模型，遵循Apple 2025设计规范和最佳实践
 /// 支持Apple ID、星云、手机号、邮箱四种登录方式
@@ -112,6 +115,8 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
     private let authService: AuthenticationService
     private var cancellables = Set<AnyCancellable>()
     private var phoneCodeTimer: Timer?
+    private var nebulaBrowserSession: ASWebAuthenticationSession?
+    private let nebulaPresentationContextProvider = NebulaBrowserPresentationContextProvider()
 
  /// 当前设备指纹（懒加载）
     private var deviceFingerprint: String?
@@ -296,18 +301,107 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
 
  // MARK: - 星云登录
 
- /// 星云登录
+    /// 星云登录
     func loginWithNebula() async {
+        await performAuthenticationTask {
+            try await self.loginWithNebulaUsingBrowser()
+        }
+    }
+
+    private func loginWithNebulaDirectCredentials() async throws -> AuthSession {
         guard !nebulaAccount.isEmpty && !nebulaPassword.isEmpty else {
-            errorMessage = "请输入完整的账号和密码"
-            return
+            throw NSError(domain: "Nebula", code: -1, userInfo: [NSLocalizedDescriptionKey: "请输入完整的账号和密码"])
         }
 
-        await performAuthenticationTask {
-            try await self.authService.authenticateWithNebula(
-                username: self.nebulaAccount,
-                password: self.nebulaPassword
-            )
+        return try await self.authService.authenticateWithNebula(
+            username: self.nebulaAccount,
+            password: self.nebulaPassword
+        )
+    }
+
+    private func loginWithNebulaUsingBrowser() async throws -> AuthSession {
+        let authorizationRequest = try NebulaPublicClientOAuth.shared.makeAuthorizationRequest(
+            redirectURI: "skybridge://auth/nebula"
+        )
+        return try await completeNebulaBrowserAuthorization(authorizationRequest)
+    }
+
+    private func registerWithNebulaUsingBrowser() async throws -> AuthSession {
+        let authorizationRequest = try NebulaPublicClientOAuth.shared.makeRegistrationAuthorizationRequest(
+            redirectURI: "skybridge://auth/nebula"
+        )
+        return try await completeNebulaBrowserAuthorization(authorizationRequest)
+    }
+
+    private func completeNebulaBrowserAuthorization(_ authorizationRequest: NebulaPublicClientOAuth.AuthorizationRequest) async throws -> AuthSession {
+        let callbackURL = try await startNebulaBrowserSession(
+            url: authorizationRequest.authorizationURL,
+            callbackScheme: "skybridge"
+        )
+
+        guard let components = URLComponents(url: callbackURL, resolvingAgainstBaseURL: false) else {
+            throw NSError(domain: "Nebula", code: -2, userInfo: [NSLocalizedDescriptionKey: "Nebula 回调地址无效"])
+        }
+
+        let queryItems = Dictionary(uniqueKeysWithValues: (components.queryItems ?? []).map { ($0.name, $0.value ?? "") })
+        if let error = queryItems["error"], !error.isEmpty {
+            let description = queryItems["error_description"].flatMap { $0.isEmpty ? nil : $0 } ?? error
+            throw NSError(domain: "Nebula", code: -3, userInfo: [NSLocalizedDescriptionKey: description])
+        }
+
+        let returnedState = queryItems["state"] ?? ""
+        guard returnedState == authorizationRequest.state else {
+            throw NSError(domain: "Nebula", code: -4, userInfo: [NSLocalizedDescriptionKey: "Nebula 登录状态校验失败"])
+        }
+
+        guard let code = queryItems["code"], !code.isEmpty else {
+            throw NSError(domain: "Nebula", code: -5, userInfo: [NSLocalizedDescriptionKey: "Nebula 未返回授权码"])
+        }
+
+        let tokenResponse = try await NebulaPublicClientOAuth.shared.exchangeAuthorizationCode(
+            code,
+            authorizationRequest: authorizationRequest
+        )
+        let userInfo = try await NebulaPublicClientOAuth.shared.fetchUserInfo(accessToken: tokenResponse.accessToken)
+
+        let displayName = userInfo.name ?? userInfo.preferredUsername ?? userInfo.email ?? "Nebula User"
+        let session = AuthSession(
+            accessToken: tokenResponse.accessToken,
+            refreshToken: tokenResponse.refreshToken,
+            userIdentifier: userInfo.subject,
+            displayName: displayName,
+            issuedAt: Date()
+        )
+        try authService.updateSession(session)
+        return session
+    }
+
+    private func startNebulaBrowserSession(url: URL, callbackScheme: String) async throws -> URL {
+        try await withCheckedThrowingContinuation { continuation in
+            let session = ASWebAuthenticationSession(
+                url: url,
+                callbackURLScheme: callbackScheme
+            ) { callbackURL, error in
+                Task { @MainActor in
+                    self.nebulaBrowserSession = nil
+                }
+
+                if let callbackURL {
+                    continuation.resume(returning: callbackURL)
+                } else if let error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume(throwing: NSError(domain: "Nebula", code: -6, userInfo: [NSLocalizedDescriptionKey: "Nebula 浏览器登录已取消"]))
+                }
+            }
+            session.presentationContextProvider = nebulaPresentationContextProvider
+            session.prefersEphemeralWebBrowserSession = false
+            self.nebulaBrowserSession = session
+
+            if !session.start() {
+                self.nebulaBrowserSession = nil
+                continuation.resume(throwing: NSError(domain: "Nebula", code: -7, userInfo: [NSLocalizedDescriptionKey: "无法启动 Nebula 浏览器登录"]))
+            }
         }
     }
 
@@ -327,6 +421,9 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
                 mfaToken: mfaToken,
                 code: mfaCode
             )
+
+            await loadUserAvatarAfterLogin(session: session)
+            await loadUserNebulaIdAfterLogin(session: session)
 
             currentSession = session
             showMFAInput = false
@@ -1143,6 +1240,22 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
                 SkyBridgeLogger.ui.debugOnly("✅ [AuthenticationViewModel] UI状态更新完成")
                 SkyBridgeLogger.ui.debugOnly("   currentSession 用户: \(self.currentSession?.userIdentifier ?? "无")")
             }
+        } catch let error as AuthenticationService.AuthenticationError {
+            if case .nebulaMFARequired(let token) = error {
+                await MainActor.run {
+                    self.mfaToken = token
+                    self.showMFAInput = true
+                    self.errorMessage = nil
+                    self.isProcessing = false
+                }
+                return
+            }
+
+            SkyBridgeLogger.ui.error("❌ [AuthenticationViewModel] 认证任务失败: \(error.localizedDescription, privacy: .private)")
+            await MainActor.run {
+                self.errorMessage = SupabaseService.userMessage(for: error) ?? error.localizedDescription
+                self.isProcessing = false
+            }
         } catch {
             SkyBridgeLogger.ui.error("❌ [AuthenticationViewModel] 认证任务失败: \(error.localizedDescription, privacy: .private)")
             await MainActor.run {
@@ -1235,6 +1348,12 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
  /// 星云用户注册（增强安全校验）
     @MainActor
     func registerWithNebula() async {
+        if isNebulaRegistrationMode {
+            await performAuthenticationTask {
+                try await self.registerWithNebulaUsingBrowser()
+            }
+            return
+        }
  // 清洗输入
         let sanitizedUsername = sanitizeUsername(nebulaAccount)
         let sanitizedPassword = sanitizePassword(nebulaPassword)
@@ -1317,7 +1436,11 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
  // 如果注册后自动登录了，尝试保存 nebulaid 到 Supabase 数据库
                     if !result.requiresEmailVerification && !result.requiresAdminApproval {
  // 等待登录完成后再保存
-                        await loginWithNebula()
+                        let session = try await loginWithNebulaDirectCredentials()
+                        await loadUserAvatarAfterLogin(session: session)
+                        await loadUserNebulaIdAfterLogin(session: session)
+                        currentSession = session
+                        clearAllFields()
 
  // 登录成功后，尝试保存 nebulaid 到数据库
                         if let session = currentSession {
@@ -1643,5 +1766,15 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
                 SkyBridgeLogger.ui.debugOnly("ℹ️ [AuthenticationViewModel] 清除凭据失败或不存在: \(status)")
             }
         }
+    }
+}
+
+private final class NebulaBrowserPresentationContextProvider: NSObject, ASWebAuthenticationPresentationContextProviding {
+    func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
+#if canImport(AppKit)
+        return NSApp.keyWindow ?? NSApp.windows.first ?? ASPresentationAnchor()
+#else
+        return ASPresentationAnchor()
+#endif
     }
 }

@@ -37,6 +37,7 @@ import Security
     public enum AuthenticationError: LocalizedError {
         case configurationMissing
         case invalidResponse
+        case nebulaMFARequired(String)
         case server(String)
         case storage(OSStatus)
 
@@ -46,6 +47,8 @@ import Security
                 return "未配置真实登录接口，请先设置 SKYBRIDGE_AUTH_BASEURL 或在应用启动时提供配置"
             case .invalidResponse:
                 return "服务器返回的数据格式无效"
+            case .nebulaMFARequired:
+                return "需要多因素认证验证"
             case .server(let message):
                 return message
             case .storage(let status):
@@ -130,24 +133,42 @@ import Security
         return try await performRequest(endpoint: configuration?.appleEndpoint, payload: payload)
     }
 
- /// 星云登录
- /// - Parameters:
- /// - username: 用户名
- /// - password: 密码
- /// - Returns: 认证结果
+/// 星云登录
+/// - Parameters:
+/// - username: 用户名
+/// - password: 密码
+/// - Returns: 认证结果
     public func authenticateWithNebula(username: String, password: String) async throws -> AuthSession {
-        let payload = NebulaPayload(account: username, password: password)
-        return try await performRequest(endpoint: configuration?.nebulaEndpoint, payload: payload)
+        let result = try await NebulaService.shared.authenticateWithCredentials(
+            username: username,
+            password: password
+        )
+
+        if result.mfaRequired {
+            guard let token = result.mfaToken?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !token.isEmpty else {
+                throw AuthenticationError.server("需要多因素认证，但服务器未返回有效的 MFA 令牌")
+            }
+            throw AuthenticationError.nebulaMFARequired(token)
+        }
+
+        let session = try session(fromNebulaResult: result)
+        try store(session: session)
+        sessionSubject.send(session)
+        return session
     }
 
  /// 验证星云MFA
  /// - Parameters:
- /// - mfaToken: MFA令牌
- /// - code: 验证码
- /// - Returns: 认证结果
+/// - mfaToken: MFA令牌
+/// - code: 验证码
+/// - Returns: 认证结果
     public func verifyNebulaMFA(mfaToken: String, code: String) async throws -> AuthSession {
-        let payload = NebulaMFAPayload(mfaToken: mfaToken, code: code)
-        return try await performRequest(endpoint: configuration?.nebulaEndpoint, payload: payload)
+        let result = try await NebulaService.shared.verifyMFA(mfaToken: mfaToken, code: code)
+        let session = try session(fromNebulaResult: result)
+        try store(session: session)
+        sessionSubject.send(session)
+        return session
     }
 
  /// 发送手机验证码
@@ -243,6 +264,25 @@ import Security
     public func updateSession(_ session: AuthSession) throws {
         try store(session: session)
         sessionSubject.send(session)
+    }
+
+    private func session(fromNebulaResult result: NebulaService.NebulaAuthResult) throws -> AuthSession {
+        guard result.success else {
+            throw AuthenticationError.server("星云认证失败，请检查账号信息")
+        }
+        guard let accessToken = result.accessToken?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !accessToken.isEmpty,
+              let userInfo = result.userInfo else {
+            throw AuthenticationError.invalidResponse
+        }
+
+        return AuthSession(
+            accessToken: accessToken,
+            refreshToken: result.refreshToken,
+            userIdentifier: userInfo.userId,
+            displayName: userInfo.displayName,
+            issuedAt: Date()
+        )
     }
 
     private func performRequest<P: Encodable>(endpoint: URL?, payload: P) async throws -> AuthSession {

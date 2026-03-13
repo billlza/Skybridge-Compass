@@ -13,7 +13,7 @@ public final class NebulaService: BaseManager {
     public struct Configuration: Sendable {
         public let baseURL: String
         public let clientId: String
-        public let clientSecret: String
+        public let clientSecret: String?
         public let redirectURI: String
         public let scopes: [String]
         public let enableMFA: Bool
@@ -21,7 +21,7 @@ public final class NebulaService: BaseManager {
         
         public init(baseURL: String,
                    clientId: String,
-                   clientSecret: String,
+                   clientSecret: String? = nil,
                    redirectURI: String = "skybridge://auth/nebula",
                    scopes: [String] = ["profile", "email", "company"],
                    enableMFA: Bool = true,
@@ -34,24 +34,55 @@ public final class NebulaService: BaseManager {
             self.enableMFA = enableMFA
             self.enableSSO = enableSSO
         }
-        
- /// 生产环境配置 - 使用环境变量
-        public static var production: Configuration {
- // 使用环境变量或默认配置，避免同步调用MainActor隔离的方法
+
+        public var isComplete: Bool {
+            let trimmedBaseURL = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+            let trimmedClientId = clientId.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedBaseURL.isEmpty,
+                  !trimmedClientId.isEmpty,
+                  let url = URL(string: trimmedBaseURL),
+                  let scheme = url.scheme?.lowercased(),
+                  (scheme == "https" || scheme == "http"),
+                  let host = url.host,
+                  !host.isEmpty else {
+                return false
+            }
+            return true
+        }
+
+        public var normalizedClientSecret: String? {
+            guard let clientSecret else { return nil }
+            let trimmed = clientSecret.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+
+        public static func fromUnifiedConfiguration(bundle: Bundle = .main) -> Configuration? {
+            guard let resolved = NebulaConfigurationResolver.resolve(bundle: bundle) else {
+                return nil
+            }
+
             return Configuration(
-                baseURL: "https://nebula.skybridge.com",
-                clientId: ProcessInfo.processInfo.environment["NEBULA_CLIENT_ID"] ?? "skybridge_compass_pro",
-                clientSecret: ProcessInfo.processInfo.environment["NEBULA_CLIENT_SECRET"] ?? "sk_prod_nebula_2025"
+                baseURL: resolved.baseURL,
+                clientId: resolved.clientId,
+                clientSecret: resolved.clientSecret
             )
         }
         
- /// 开发环境配置 - 使用环境变量
+ /// 生产环境兼容兜底（仅提供非敏感默认值）
+        public static var production: Configuration {
+            return Configuration(
+                baseURL: "https://nebula.skybridge.com",
+                clientId: "skybridge_compass_pro",
+                clientSecret: ""
+            )
+        }
+        
+ /// 开发环境兼容兜底（仅提供非敏感默认值）
         public static var development: Configuration {
- // 使用环境变量或默认配置，避免同步调用MainActor隔离的方法
             return Configuration(
                 baseURL: "https://nebula-dev.skybridge.com",
-                clientId: ProcessInfo.processInfo.environment["NEBULA_CLIENT_ID"] ?? "skybridge_compass_dev",
-                clientSecret: ProcessInfo.processInfo.environment["NEBULA_CLIENT_SECRET"] ?? "sk_dev_nebula_2025"
+                clientId: "skybridge_compass_dev",
+                clientSecret: ""
             )
         }
     }
@@ -74,7 +105,7 @@ public final class NebulaService: BaseManager {
         public var errorDescription: String? {
             switch self {
             case .configurationMissing:
-                return "星云服务配置缺失"
+                return "星云服务配置缺失，请至少设置 \(NebulaConfigurationResolver.requiredKeysDescription)。\(NebulaConfigurationResolver.optionalKeysDescription) 仅用于兼容旧后端。"
             case .invalidCredentials:
                 return "用户名或密码错误"
             case .networkError(let error):
@@ -183,14 +214,13 @@ public final class NebulaService: BaseManager {
         
         super.init(category: "NebulaService")
         
- // 根据构建配置设置默认配置
-        #if DEBUG
-        self.configuration = .development
-        #else
-        self.configuration = .production
-        #endif
-        
-        logger.info("NebulaService initialized with configuration")
+        self.configuration = Self.initialConfiguration()
+
+        if let config = self.configuration, config.isComplete {
+            logger.info("NebulaService initialized host=\(URL(string: config.baseURL)?.host ?? "unknown", privacy: .public)")
+        } else {
+            logger.warning("NebulaService initialized without complete Nebula configuration; set \(NebulaConfigurationResolver.requiredKeysDescription, privacy: .public) to enable Nebula auth.")
+        }
     }
     
  // MARK: - BaseManager重写
@@ -201,10 +231,36 @@ public final class NebulaService: BaseManager {
     
  // MARK: - 配置管理
     
- /// 设置星云服务配置
+/// 设置星云服务配置
     public func setConfiguration(_ config: Configuration) {
         self.configuration = config
         logger.info("NebulaService configuration updated")
+    }
+
+    private static func initialConfiguration(bundle: Bundle = .main) -> Configuration? {
+        if let resolved = Configuration.fromUnifiedConfiguration(bundle: bundle) {
+            return resolved
+        }
+
+        #if DEBUG
+        let fallback = Configuration.development
+        #else
+        let fallback = Configuration.production
+        #endif
+
+        return fallback.isComplete ? fallback : nil
+    }
+
+    private func currentConfiguration() -> Configuration? {
+        if let resolved = Self.initialConfiguration() {
+            configuration = resolved
+        }
+
+        guard let configuration, configuration.isComplete else {
+            return nil
+        }
+
+        return configuration
     }
     
  // MARK: - 用户名密码认证
@@ -215,7 +271,7 @@ public final class NebulaService: BaseManager {
  /// - password: 密码
  /// - Returns: 认证结果
     public func authenticateWithCredentials(username: String, password: String) async throws -> NebulaAuthResult {
-        guard let config = configuration else {
+        guard let config = currentConfiguration() else {
             throw NebulaError.configurationMissing
         }
         
@@ -227,7 +283,7 @@ public final class NebulaService: BaseManager {
                 username: username,
                 password: password,
                 clientId: config.clientId,
-                clientSecret: config.clientSecret,
+                clientSecret: config.normalizedClientSecret,
                 scopes: config.scopes
             )
             
@@ -259,7 +315,7 @@ public final class NebulaService: BaseManager {
  /// - code: 验证码
  /// - Returns: 认证结果
     public func verifyMFA(mfaToken: String, code: String) async throws -> NebulaAuthResult {
-        guard let config = configuration else {
+        guard let config = currentConfiguration() else {
             throw NebulaError.configurationMissing
         }
         
@@ -292,7 +348,7 @@ public final class NebulaService: BaseManager {
  /// - Parameter refreshToken: 刷新令牌
  /// - Returns: 新的认证结果
     public func refreshAccessToken(_ refreshToken: String) async throws -> NebulaAuthResult {
-        guard let config = configuration else {
+        guard let config = currentConfiguration() else {
             throw NebulaError.configurationMissing
         }
         
@@ -302,7 +358,7 @@ public final class NebulaService: BaseManager {
             let refreshRequest = NebulaRefreshRequest(
                 refreshToken: refreshToken,
                 clientId: config.clientId,
-                clientSecret: config.clientSecret
+                clientSecret: config.normalizedClientSecret
             )
             
             let result = try await sendRefreshRequest(refreshRequest, config: config)
@@ -334,7 +390,7 @@ public final class NebulaService: BaseManager {
                            email: String, 
                            displayName: String,
                            companyId: String? = nil) async throws -> NebulaRegistrationResult {
-        guard let config = configuration else {
+        guard let config = currentConfiguration() else {
             throw NebulaError.configurationMissing
         }
         
@@ -353,7 +409,7 @@ public final class NebulaService: BaseManager {
                 displayName: displayName,
                 companyId: companyId,
                 clientId: config.clientId,
-                clientSecret: config.clientSecret
+                clientSecret: config.normalizedClientSecret
             )
             
  // 发送注册请求
@@ -375,7 +431,7 @@ public final class NebulaService: BaseManager {
  /// - Parameter username: 用户名
  /// - Returns: 是否可用
     public func checkUsernameAvailability(_ username: String) async throws -> Bool {
-        guard let config = configuration else {
+        guard let config = currentConfiguration() else {
             throw NebulaError.configurationMissing
         }
         
@@ -418,7 +474,7 @@ public final class NebulaService: BaseManager {
  /// - accessToken: 访问令牌
  /// - Returns: 更新后的用户信息
     public func updateDisplayName(userId: String, displayName: String, accessToken: String) async throws -> NebulaUserInfo {
-        guard let config = configuration else {
+        guard let config = currentConfiguration() else {
             throw NebulaError.configurationMissing
         }
         
@@ -491,7 +547,7 @@ public final class NebulaService: BaseManager {
  /// - accessToken: 访问令牌
  /// - Returns: 头像URL
     public func uploadAvatar(userId: String, imageData: Data, accessToken: String) async throws -> String {
-        guard let config = configuration else {
+        guard let config = currentConfiguration() else {
             throw NebulaError.configurationMissing
         }
         
@@ -810,7 +866,7 @@ private struct NebulaAuthRequest: Codable {
     let username: String
     let password: String
     let clientId: String
-    let clientSecret: String
+    let clientSecret: String?
     let scopes: [String]
 }
 
@@ -825,7 +881,7 @@ private struct NebulaMFARequest: Codable {
 private struct NebulaRefreshRequest: Codable {
     let refreshToken: String
     let clientId: String
-    let clientSecret: String
+    let clientSecret: String?
 }
 
 /// 星云认证响应
@@ -903,7 +959,7 @@ private struct NebulaRegistrationRequest: Codable {
     let displayName: String
     let companyId: String?
     let clientId: String
-    let clientSecret: String
+    let clientSecret: String?
 }
 
 /// 星云注册响应

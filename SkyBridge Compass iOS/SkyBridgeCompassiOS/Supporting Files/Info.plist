@@ -14,6 +14,23 @@
 	<string>$(PRODUCT_NAME)</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.skybridge.compass.ios</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>skybridge</string>
+			</array>
+		</dict>
+	</array>
+	<key>NEBULA_BASE_URL</key>
+	<string>https://nebula.skybridge.com</string>
+	<key>NEBULA_CLIENT_ID</key>
+	<string>skybridge_compass_ios</string>
+	<key>NEBULA_CLIENT_SECRET</key>
+	<string></string>
 	<key>CFBundleShortVersionString</key>
 	<string>1.0</string>
 	<key>CFBundleVersion</key>

@@ -10,6 +10,7 @@ struct AuthenticationView: View {
     @State private var showError = false
     @State private var errorMessage = ""
     @State private var isLoading = false
+    @State private var isNebulaLoading = false
     @State private var showSupabaseSettings = false
     @State private var isSupabaseConfigured = false
 
@@ -132,6 +133,48 @@ struct AuthenticationView: View {
     
     private var actionButtons: some View {
         VStack(spacing: 16) {
+            Button(action: performNebulaAction) {
+                HStack(spacing: 10) {
+                    if isNebulaLoading {
+                        ProgressView()
+                            .tint(.white)
+                    } else {
+                        Image(systemName: "safari.fill")
+                        Text(isRegistering ? "使用 Nebula 安全注册" : "使用 Nebula 安全登录")
+                            .font(.headline)
+                            .fontWeight(.bold)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: 52)
+            .background(
+                LinearGradient(
+                    colors: [.indigo, .blue],
+                    startPoint: .leading,
+                    endPoint: .trailing
+                )
+            )
+            .foregroundColor(.white)
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .shadow(color: .blue.opacity(0.28), radius: 10, x: 0, y: 5)
+            .disabled(isNebulaLoading || !SkyBridgeServerConfig.hasNebulaConfiguration)
+            .opacity(SkyBridgeServerConfig.hasNebulaConfiguration ? 1.0 : 0.55)
+
+            if SkyBridgeServerConfig.hasNebulaConfiguration {
+                Text(isRegistering
+                     ? "Nebula 注册将在系统浏览器中完成，邮箱验证与二次验证都会留在浏览器授权会话里。"
+                     : "Nebula 登录将在系统浏览器中完成，授权与二次验证均不在 App 内处理。")
+                    .font(.footnote)
+                    .foregroundColor(.gray)
+                    .multilineTextAlignment(.center)
+            } else {
+                Text("Nebula 配置缺失：请先提供 NEBULA_BASE_URL / NEBULA_CLIENT_ID。")
+                    .font(.footnote)
+                    .foregroundColor(.orange)
+                    .multilineTextAlignment(.center)
+            }
+
             // 主操作按钮（登录/注册）
             Button(action: performAction) {
                 if isLoading {
@@ -260,6 +303,25 @@ struct AuthenticationView: View {
             }
             
             isLoading = false
+        }
+    }
+
+    private func performNebulaAction() {
+        isNebulaLoading = true
+
+        Task {
+            do {
+                if isRegistering {
+                    try await authManager.registerWithNebulaBrowser()
+                } else {
+                    try await authManager.signInWithNebulaBrowser()
+                }
+            } catch {
+                errorMessage = error.localizedDescription
+                showError = true
+            }
+
+            isNebulaLoading = false
         }
     }
     

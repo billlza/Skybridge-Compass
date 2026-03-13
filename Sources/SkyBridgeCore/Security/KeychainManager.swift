@@ -351,7 +351,11 @@ public actor KeychainManager {
 @available(macOS 14.0, *)
 extension KeychainManager {
     public struct SupabaseConfig: Codable { public let url: String; public let anonKey: String; public let serviceRoleKey: String? }
-    public struct NebulaConfig: Codable { public let clientId: String; public let clientSecret: String }
+    public struct NebulaConfig: Codable {
+        public let baseURL: String
+        public let clientId: String
+        public let clientSecret: String?
+    }
     public struct SMSConfig: Codable { public let accessKeyId: String; public let accessKeySecret: String }
 
     public nonisolated func storeWeatherAPIKey(_ key: String) throws {
@@ -412,18 +416,40 @@ extension KeychainManager {
         return SupabaseConfig(url: url, anonKey: anon, serviceRoleKey: sRole)
     }
 
-    public nonisolated func storeNebulaConfig(clientId: String, clientSecret: String) throws {
+    public nonisolated func storeNebulaConfig(baseURL: String, clientId: String, clientSecret: String?) throws {
         let base = "SkyBridge.Nebula"
-        let ok1 = storeKeyData(Data(clientId.utf8), service: base, account: "ClientId")
-        let ok2 = storeKeyData(Data(clientSecret.utf8), service: base, account: "ClientSecret")
-        if !ok1 || !ok2 { throw NSError(domain: "Keychain", code: -4) }
+        let trimmedBaseURL = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedClientId = clientId.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedClientSecret = clientSecret?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let ok1 = storeKeyData(Data(trimmedBaseURL.utf8), service: base, account: "BaseURL")
+        let ok2 = storeKeyData(Data(trimmedClientId.utf8), service: base, account: "ClientId")
+        let ok3: Bool
+        if let trimmedClientSecret, !trimmedClientSecret.isEmpty {
+            ok3 = storeKeyData(Data(trimmedClientSecret.utf8), service: base, account: "ClientSecret")
+        } else {
+            do {
+                try deleteAPIKey(service: base, account: "ClientSecret")
+                ok3 = true
+            } catch {
+                ok3 = false
+            }
+        }
+        if !ok1 || !ok2 || !ok3 { throw NSError(domain: "Keychain", code: -4) }
     }
 
     public nonisolated func retrieveNebulaConfig() throws -> NebulaConfig {
         let base = "SkyBridge.Nebula"
-        guard let cid = loadKeyData(service: base, account: "ClientId").flatMap({ String(data: $0, encoding: .utf8) }),
-              let csec = loadKeyData(service: base, account: "ClientSecret").flatMap({ String(data: $0, encoding: .utf8) }) else { throw NSError(domain: "Keychain", code: -7) }
-        return NebulaConfig(clientId: cid, clientSecret: csec)
+        guard let cid = loadKeyData(service: base, account: "ClientId").flatMap({ String(data: $0, encoding: .utf8) }) else {
+            throw NSError(domain: "Keychain", code: -7)
+        }
+
+        let baseURL = loadKeyData(service: base, account: "BaseURL")
+            .flatMap { String(data: $0, encoding: .utf8) } ?? ""
+        let clientSecret = loadKeyData(service: base, account: "ClientSecret")
+            .flatMap { String(data: $0, encoding: .utf8) }
+
+        return NebulaConfig(baseURL: baseURL, clientId: cid, clientSecret: clientSecret)
     }
 
     public nonisolated func storeSMSConfig(accessKeyId: String, accessKeySecret: String) throws {

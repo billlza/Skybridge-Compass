@@ -17,10 +17,27 @@
     <string>APPL</string>
     <key>CFBundleExecutable</key>
     <string>SkyBridgeCompassApp</string>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>com.skybridge.compass.pro</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>skybridge</string>
+            </array>
+        </dict>
+    </array>
 
     <!-- 认证服务配置 -->
     <key>SKYBRIDGE_AUTH_BASEURL</key>
     <string>https://hloqytmhjludmuhwyyzb.supabase.co</string>
+    <key>NEBULA_BASE_URL</key>
+    <string>https://nebula.skybridge.com</string>
+    <key>NEBULA_CLIENT_ID</key>
+    <string>skybridge_compass_pro</string>
+    <key>NEBULA_CLIENT_SECRET</key>
+    <string></string>
 
     <!-- 网络权限配置 -->
     <key>NSLocalNetworkUsageDescription</key>

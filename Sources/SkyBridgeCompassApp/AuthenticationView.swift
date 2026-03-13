@@ -398,165 +398,14 @@ struct AuthenticationView: View {
                 
                 Spacer()
             }
-            
- // 用户名输入（带可用性检查）
-            VStack(alignment: .leading, spacing: 8) {
-                if #available(macOS 14.0, *) {
-                    LiquidGlassTextField(
-                        title: LocalizationManager.shared.localizedString("auth.nebula.account"),
-                        text: $viewModel.nebulaAccount,
-                        icon: "person.circle.fill",
-                        primaryColor: .purple
-                    )
-                    .onChange(of: viewModel.nebulaAccount) { _, _ in
- // 星云账号文本变化时，注册模式下触发可用性检查
-                        if viewModel.isNebulaRegistrationMode {
-                            Task {
-                                await viewModel.checkUsernameAvailability()
-                            }
-                        }
-                    }
-                } else {
-                    ModernTextField(
-                        title: LocalizationManager.shared.localizedString("auth.nebula.account"),
-                        text: $viewModel.nebulaAccount,
-                        placeholder: LocalizationManager.shared.localizedString("auth.nebula.account.placeholder"),
-                        icon: "person.circle.fill"
-                    )
-                    .onChange(of: viewModel.nebulaAccount) { _, _ in
- // 兼容旧版 UI 的星云账号变化监听，触发可用性检查
-                        if viewModel.isNebulaRegistrationMode {
-                            Task {
-                                await viewModel.checkUsernameAvailability()
-                            }
-                        }
-                    }
-                }
-                
- // 用户名可用性提示
-                if viewModel.isNebulaRegistrationMode && !viewModel.nebulaAccount.isEmpty {
-                    HStack(spacing: 8) {
-                        if viewModel.usernameCheckInProgress {
-                            ProgressView()
-                                .scaleEffect(0.6)
-                                .progressViewStyle(CircularProgressViewStyle(tint: .purple))
-                        } else if let isAvailable = viewModel.isUsernameAvailable {
-                            Image(systemName: isAvailable ? "checkmark.circle.fill" : "xmark.circle.fill")
-                                .font(.caption)
-                                .foregroundColor(isAvailable ? .green : .red)
-                            
-                            Text(isAvailable ? "用户名可用" : "用户名已被占用")
-                                .font(.caption)
-                                .foregroundColor(isAvailable ? .green : .red)
-                        }
-                        
-                        Spacer()
-                    }
-                    .padding(.horizontal, 16)
-                    .transition(.asymmetric(
-                        insertion: .opacity.combined(with: .move(edge: .top)).combined(with: .move(edge: .top)),
-                        removal: .opacity.combined(with: .move(edge: .top)).combined(with: .move(edge: .top))
-                    ))
-                }
-            }
-            
- // 密码输入
-            if #available(macOS 14.0, *) {
-                    LiquidGlassSecureField(
-                        title: LocalizationManager.shared.localizedString("auth.password"),
-                    text: $viewModel.nebulaPassword,
-                    icon: "lock.circle.fill",
-                    primaryColor: .purple
-                )
-            } else {
-                    ModernSecureField(
-                        title: LocalizationManager.shared.localizedString("auth.password"),
-                    text: $viewModel.nebulaPassword,
-                        placeholder: LocalizationManager.shared.localizedString("auth.password.placeholder"),
-                    icon: "lock.circle.fill"
-                )
-            }
-            
- // 注册模式下的额外字段
-            if viewModel.isNebulaRegistrationMode {
-                if #available(macOS 14.0, *) {
-                    LiquidGlassSecureField(
-                        title: LocalizationManager.shared.localizedString("auth.confirmPassword"),
-                        text: $viewModel.nebulaConfirmPassword,
-                        icon: "lock.shield.fill",
-                        primaryColor: .purple
-                    )
-                    .transition(.asymmetric(
-                        insertion: .opacity.combined(with: .move(edge: .top)).combined(with: .scale(scale: 0.95)),
-                        removal: .opacity.combined(with: .move(edge: .top)).combined(with: .scale(scale: 1.05))
-                    ))
-                } else {
-                    ModernSecureField(
-                        title: LocalizationManager.shared.localizedString("auth.confirmPassword"),
-                        text: $viewModel.nebulaConfirmPassword,
-                        placeholder: LocalizationManager.shared.localizedString("auth.confirmPassword.placeholder"),
-                        icon: "lock.shield.fill"
-                    )
-                    .transition(.asymmetric(
-                        insertion: .opacity.combined(with: .move(edge: .top)).combined(with: .scale(scale: 0.95)),
-                        removal: .opacity.combined(with: .move(edge: .top)).combined(with: .scale(scale: 1.05))
-                    ))
-                }
-                
-                if #available(macOS 14.0, *) {
-                    LiquidGlassTextField(
-                        title: LocalizationManager.shared.localizedString("auth.displayName"),
-                        text: $viewModel.nebulaDisplayName,
-                        icon: "person.text.rectangle.fill",
-                        primaryColor: .purple
-                    )
-                    .transition(.asymmetric(
-                        insertion: .opacity.combined(with: .move(edge: .top)).combined(with: .scale(scale: 0.95)),
-                        removal: .opacity.combined(with: .move(edge: .top)).combined(with: .scale(scale: 1.05))
-                    ))
-                } else {
-                    ModernTextField(
-                        title: LocalizationManager.shared.localizedString("auth.displayName"),
-                        text: $viewModel.nebulaDisplayName,
-                        placeholder: LocalizationManager.shared.localizedString("auth.displayName.placeholder"),
-                        icon: "person.text.rectangle.fill"
-                    )
-                    .transition(.asymmetric(
-                        insertion: .opacity.combined(with: .move(edge: .top)).combined(with: .scale(scale: 0.95)),
-                        removal: .opacity.combined(with: .move(edge: .top)).combined(with: .scale(scale: 1.05))
-                    ))
-                }
-                
-                if #available(macOS 14.0, *) {
-                    LiquidGlassTextField(
-                        title: LocalizationManager.shared.localizedString("auth.emailAddress"),
-                        text: $viewModel.nebulaEmail,
-                        icon: "envelope.circle.fill",
-                        primaryColor: .purple
-                    )
-                    .transition(.asymmetric(
-                        insertion: .opacity.combined(with: .move(edge: .top)).combined(with: .scale(scale: 0.95)),
-                        removal: .opacity.combined(with: .move(edge: .top)).combined(with: .scale(scale: 1.05))
-                    ))
-                } else {
-                    ModernTextField(
-                        title: LocalizationManager.shared.localizedString("auth.emailAddress"),
-                        text: $viewModel.nebulaEmail,
-                        placeholder: LocalizationManager.shared.localizedString("auth.emailAddress.placeholder"),
-                        icon: "envelope.circle.fill"
-                    )
-                    .transition(.asymmetric(
-                        insertion: .opacity.combined(with: .move(edge: .top)).combined(with: .scale(scale: 0.95)),
-                        removal: .opacity.combined(with: .move(edge: .top)).combined(with: .scale(scale: 1.05))
-                    ))
-                }
-            }
-            
+
+            nebulaBrowserLoginHint
+
  // 主要操作按钮
             if #available(macOS 14.0, *) {
                     LiquidGlassButton(
-                        title: viewModel.isNebulaRegistrationMode ? LocalizationManager.shared.localizedString("auth.nebula.register") : LocalizationManager.shared.localizedString("auth.nebula.login"),
-                    icon: viewModel.isNebulaRegistrationMode ? "person.badge.plus.fill" : "sparkles",
+                        title: viewModel.isNebulaRegistrationMode ? "在安全浏览器中注册" : "在安全浏览器中登录",
+                    icon: viewModel.isNebulaRegistrationMode ? "person.badge.plus.fill" : "safari.fill",
                     primaryColor: .purple,
                     isLoading: viewModel.isProcessing
                 ) {
@@ -570,7 +419,7 @@ struct AuthenticationView: View {
                 }
             } else {
                 ModernButton(
-                    title: viewModel.isNebulaRegistrationMode ? LocalizationManager.shared.localizedString("auth.nebula.register") : LocalizationManager.shared.localizedString("auth.nebula.login"),
+                    title: viewModel.isNebulaRegistrationMode ? "在安全浏览器中注册" : "在安全浏览器中登录",
                     isLoading: viewModel.isProcessing
                 ) {
                     Task {
@@ -632,6 +481,38 @@ struct AuthenticationView: View {
                 }
             }
         }
+    }
+
+    private var nebulaBrowserLoginHint: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label(viewModel.isNebulaRegistrationMode ? "推荐使用安全浏览器注册" : "推荐使用安全浏览器登录", systemImage: "lock.shield.fill")
+                .font(.headline)
+                .foregroundStyle(.purple)
+
+            Text(viewModel.isNebulaRegistrationMode
+                 ? "Nebula 注册会在系统浏览器中完成，邮箱验证与二次验证都会留在浏览器授权会话里。"
+                 : "Nebula 登录会在系统浏览器中完成，授权与二次验证都会留在浏览器授权会话里。")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 8) {
+                Image(systemName: "checkmark.seal.fill")
+                    .foregroundStyle(.green)
+                Text(viewModel.isNebulaRegistrationMode ? "支持 PKCE、浏览器内注册与 MFA" : "支持 PKCE 与浏览器内 MFA")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(18)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(themeConfiguration.cardBackgroundMaterial)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .stroke(themeConfiguration.borderColor.opacity(0.7), lineWidth: 0.8)
+                )
+        )
     }
     
  // MARK: - 手机号登录表单
