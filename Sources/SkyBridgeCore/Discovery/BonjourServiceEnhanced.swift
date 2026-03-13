@@ -7,6 +7,7 @@
 import Foundation
 import Network
 import OSLog
+import SkyBridgeProtocolCore
 
 // MARK: - Bonjour TXT Record Builder
 

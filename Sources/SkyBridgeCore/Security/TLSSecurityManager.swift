@@ -1016,23 +1016,38 @@ private class CertificateManager {
         return identity
     }
 
- /// 验证证书
+    /// 验证证书
     func validateCertificate(_ certificate: SecCertificate, for deviceId: String) -> Bool {
- // 这里可以实现自定义的证书验证逻辑
- // 例如：检查证书的有效期、颁发者、主题等
-
- // 获取证书数据
-        let certificateData = SecCertificateCopyData(certificate)
-        let _ = CFDataGetBytePtr(certificateData)  // 使用 _ 忽略未使用的变量
-        let length = CFDataGetLength(certificateData)
-
- // 简单的验证：检查证书是否为空
-        guard length > 0 else {
+        let certificateDataRef = SecCertificateCopyData(certificate)
+        let certificateData = certificateDataRef as Data
+        guard !certificateData.isEmpty else {
             return false
         }
 
- // 在实际应用中，这里应该实现更严格的验证逻辑
-        return true
+        let digest = SHA256.hash(data: certificateData)
+        let fingerprint = digest.compactMap { String(format: "%02x", $0) }.joined()
+
+ // 优先使用已存指纹做 pinning；没有 pin 的 helper 不允许 silent trust-on-first-use。
+        if let storedFingerprint = getStoredFingerprint(for: deviceId) {
+            let matches = fingerprint == storedFingerprint
+            if !matches {
+                SkyBridgeLogger.security.error("❌ 证书指纹不匹配: \(deviceId, privacy: .private)")
+            }
+            return matches
+        }
+
+ // 若已有本地证书，则要求字节级一致，避免把任意非空证书当成合法证书。
+        if let localCertificate = loadCertificateFromKeychain(deviceId: deviceId) {
+            let localData = SecCertificateCopyData(localCertificate) as Data
+            let matches = localData == certificateData
+            if !matches {
+                SkyBridgeLogger.security.error("❌ 证书与本地已存证书不匹配: \(deviceId, privacy: .private)")
+            }
+            return matches
+        }
+
+        SkyBridgeLogger.security.error("❌ 缺少已知 pin/certificate，拒绝隐式信任对端证书: \(deviceId, privacy: .private)")
+        return false
     }
 
  /// 获取存储的证书指纹 - 用于证书固定

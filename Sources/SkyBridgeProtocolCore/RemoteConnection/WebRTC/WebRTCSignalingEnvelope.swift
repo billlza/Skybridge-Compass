@@ -19,6 +19,7 @@ public struct WebRTCSignalingEnvelope: Codable, Sendable, Equatable {
     public let to: String?
     public let type: MessageType
     public let payload: Payload?
+    public let authToken: String?
     public let sentAt: Double
     
     public init(
@@ -27,6 +28,7 @@ public struct WebRTCSignalingEnvelope: Codable, Sendable, Equatable {
         to: String? = nil,
         type: MessageType,
         payload: Payload? = nil,
+        authToken: String? = nil,
         sentAt: Double = Date().timeIntervalSince1970
     ) {
         self.sessionId = sessionId
@@ -34,6 +36,7 @@ public struct WebRTCSignalingEnvelope: Codable, Sendable, Equatable {
         self.to = to
         self.type = type
         self.payload = payload
+        self.authToken = authToken
         self.sentAt = sentAt
     }
     
@@ -57,5 +60,4 @@ public struct WebRTCSignalingEnvelope: Codable, Sendable, Equatable {
         }
     }
 }
-
 

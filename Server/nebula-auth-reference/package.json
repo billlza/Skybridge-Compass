@@ -1,0 +1,15 @@
+{
+  "name": "nebula-auth-reference",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Reference Nebula OAuth 2.1 public-client + PKCE server",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "check": "node --check server.js",
+    "smoke": "bash ./smoke_pkce.sh"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

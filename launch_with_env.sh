@@ -17,6 +17,19 @@ else
   echo "   Key: <unset>"
 fi
 
+echo "☁️  Nebula 配置检查:"
+echo "   Base URL: ${NEBULA_BASE_URL:-<unset>}"
+if [ -n "$NEBULA_CLIENT_ID" ]; then
+  echo "   Client ID: <set>"
+else
+  echo "   Client ID: <unset>"
+fi
+if [ -n "$NEBULA_CLIENT_SECRET" ]; then
+  echo "   Client Secret: <set>"
+else
+  echo "   Client Secret: <unset> (optional)"
+fi
+
 # 切换到项目目录（脚本所在路径）
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"

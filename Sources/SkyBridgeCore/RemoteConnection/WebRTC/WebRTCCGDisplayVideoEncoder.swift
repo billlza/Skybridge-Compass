@@ -5,6 +5,53 @@ import Foundation
 import OSLog
 import VideoToolbox
 
+enum WebRTCCGDisplayPixelBufferRenderer {
+    static func makePixelBuffer(from image: CGImage, width: Int, height: Int) -> CVPixelBuffer? {
+        var pixelBuffer: CVPixelBuffer?
+        let attrs: [CFString: Any] = [
+            kCVPixelBufferCGImageCompatibilityKey: true,
+            kCVPixelBufferCGBitmapContextCompatibilityKey: true,
+            kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA,
+            kCVPixelBufferWidthKey: width,
+            kCVPixelBufferHeightKey: height,
+            kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary
+        ]
+        let status = CVPixelBufferCreate(
+            kCFAllocatorDefault,
+            width,
+            height,
+            kCVPixelFormatType_32BGRA,
+            attrs as CFDictionary,
+            &pixelBuffer
+        )
+        guard status == kCVReturnSuccess, let pixelBuffer else { return nil }
+
+        CVPixelBufferLockBaseAddress(pixelBuffer, [])
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, []) }
+
+        guard let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer) else { return nil }
+        let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
+        guard let context = CGContext(
+            data: baseAddress,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: bytesPerRow,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+        ) else {
+            return nil
+        }
+
+        context.clear(CGRect(x: 0, y: 0, width: width, height: height))
+        context.interpolationQuality = .medium
+        // CGDisplayCreateImage already matches the top-left-oriented desktop raster.
+        // Flipping again here inverts the entire remote desktop frame.
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        return pixelBuffer
+    }
+}
+
 final class WebRTCCGDisplayVideoEncoder: @unchecked Sendable {
     enum EncodedBitstreamFormat: Sendable {
         case native
@@ -267,48 +314,7 @@ final class WebRTCCGDisplayVideoEncoder: @unchecked Sendable {
     }
 
     private func makePixelBuffer(from image: CGImage) -> CVPixelBuffer? {
-        var pixelBuffer: CVPixelBuffer?
-        let attrs: [CFString: Any] = [
-            kCVPixelBufferCGImageCompatibilityKey: true,
-            kCVPixelBufferCGBitmapContextCompatibilityKey: true,
-            kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA,
-            kCVPixelBufferWidthKey: width,
-            kCVPixelBufferHeightKey: height,
-            kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary
-        ]
-        let status = CVPixelBufferCreate(
-            kCFAllocatorDefault,
-            width,
-            height,
-            kCVPixelFormatType_32BGRA,
-            attrs as CFDictionary,
-            &pixelBuffer
-        )
-        guard status == kCVReturnSuccess, let pixelBuffer else { return nil }
-
-        CVPixelBufferLockBaseAddress(pixelBuffer, [])
-        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, []) }
-
-        guard let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer) else { return nil }
-        let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
-        guard let context = CGContext(
-            data: baseAddress,
-            width: width,
-            height: height,
-            bitsPerComponent: 8,
-            bytesPerRow: bytesPerRow,
-            space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
-        ) else {
-            return nil
-        }
-
-        context.clear(CGRect(x: 0, y: 0, width: width, height: height))
-        context.interpolationQuality = .medium
-        context.translateBy(x: 0, y: CGFloat(height))
-        context.scaleBy(x: 1, y: -1)
-        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
-        return pixelBuffer
+        WebRTCCGDisplayPixelBufferRenderer.makePixelBuffer(from: image, width: width, height: height)
     }
 
     private func handleCompressedSample(_ sampleBuffer: CMSampleBuffer) {

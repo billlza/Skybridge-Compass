@@ -1,5 +1,6 @@
 import Foundation
 import OSLog
+import SkyBridgeProtocolCore
 
 // MARK: - TURN 动态凭据服务
 /// 从后端动态获取 TURN 凭据，避免硬编码凭据带来的安全风险
@@ -134,7 +135,10 @@ public actor TURNCredentialService {
         var request = URLRequest(url: endpoint)
         request.httpMethod = "GET"
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue(SkyBridgeServerConfig.clientAPIKey, forHTTPHeaderField: "X-API-Key")
+        let clientAPIKey = SkyBridgeServerConfig.clientAPIKey
+        if !clientAPIKey.isEmpty {
+            request.setValue(clientAPIKey, forHTTPHeaderField: "X-API-Key")
+        }
         if let deviceId = resolvedDeviceIdentifier() {
             request.setValue(deviceId, forHTTPHeaderField: "X-Device-Id")
         }
@@ -229,68 +233,15 @@ public actor TURNCredentialService {
 // MARK: - 扩展 SkyBridgeServerConfig
 
 extension SkyBridgeServerConfig {
-    private static func normalizedValue(_ raw: String) -> String {
-        raw.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    fileprivate static func normalizedTurnURIs(_ uris: [String]) -> [String] {
-        var seen = Set<String>()
-        return uris
-            .map { normalizedValue($0) }
-            .filter { uri in
-                let lower = uri.lowercased()
-                guard lower.hasPrefix("turn:") || lower.hasPrefix("turns:") else {
-                    return false
-                }
-                if seen.contains(lower) {
-                    return false
-                }
-                seen.insert(lower)
-                return true
-            }
-    }
-
-    private static func turnPriority(_ uri: String) -> Int {
-        let lower = uri.lowercased()
-        if lower.hasPrefix("turns:") { return 0 }
-        if lower.contains("transport=tcp") { return 1 }
-        return 2
-    }
-
-    fileprivate static func preferredTurnURIs(from uris: [String], fallback: [String]) -> [String] {
-        let candidates = normalizedTurnURIs(uris)
-        let effective = candidates.isEmpty ? normalizedTurnURIs(fallback) : candidates
-        return effective
-            .enumerated()
-            .sorted { lhs, rhs in
-                let lp = turnPriority(lhs.element)
-                let rp = turnPriority(rhs.element)
-                if lp == rp { return lhs.offset < rhs.offset }
-                return lp < rp
-            }
-            .map(\.element)
-    }
-
-    /// 客户端 API Key（用于认证 TURN 凭据请求）
-    /// 注意：这个 key 是公开的，用于标识合法客户端，不是敏感凭据
-    public static var clientAPIKey: String {
-        // 从 Keychain 或环境变量获取
-        if let key = ProcessInfo.processInfo.environment["SKYBRIDGE_CLIENT_API_KEY"] {
-            return key
-        }
-        // 开发环境默认值
-        return "skybridge-client-v1"
-    }
-    
     /// 动态获取 TURN 凭据的 ICE 配置
-    public static func dynamicICEConfig() async -> WebRTCSession.ICEConfig {
+    public static func dynamicICEConfig() async -> SkyBridgeICEConfiguration {
         let creds = await TURNCredentialService.shared.getCredentials()
-        let turnUsername = normalizedValue(creds.username)
-        let turnPassword = normalizedValue(creds.password)
+        let turnUsername = creds.username.trimmingCharacters(in: .whitespacesAndNewlines)
+        let turnPassword = creds.password.trimmingCharacters(in: .whitespacesAndNewlines)
         let turnURIs = preferredTurnURIs(from: creds.uris, fallback: self.turnURLs)
         let shouldUseTURN = !turnUsername.isEmpty && !turnPassword.isEmpty && !turnURIs.isEmpty
 
-        return WebRTCSession.ICEConfig(
+        return SkyBridgeICEConfiguration(
             stunURL: stunURL,
             turnURLs: shouldUseTURN ? turnURIs : [],
             turnUsername: shouldUseTURN ? turnUsername : "",

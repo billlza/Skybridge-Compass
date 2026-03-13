@@ -106,6 +106,13 @@ def build_markdown(report: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
+def write_report(report: dict, out_json: Path, out_md: Path) -> None:
+    out_json.parent.mkdir(parents=True, exist_ok=True)
+    out_md.parent.mkdir(parents=True, exist_ok=True)
+    out_json.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    out_md.write_text(build_markdown(report), encoding="utf-8")
+
+
 def main() -> int:
     repo_root = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser()
@@ -156,6 +163,57 @@ def main() -> int:
     ubuntu_trust_file = ubuntu_root / "skybridge-core/src/p2p/trust.rs"
 
     website_supabase_file = website_root / "frontend/src/lib/supabase.ts"
+
+    required_inputs = {
+        "ios_suite_file": ios_suite_file,
+        "ios_wire_file": ios_wire_file,
+        "ios_fallback_file": ios_fallback_file,
+        "ios_sig_file": ios_sig_file,
+        "ios_trust_file": ios_trust_file,
+        "android_suite_file": android_suite_file,
+        "android_wire_file": android_wire_file,
+        "android_client_file": android_client_file,
+        "ubuntu_suite_file": ubuntu_suite_file,
+        "ubuntu_messages_file": ubuntu_messages_file,
+        "ubuntu_driver_file": ubuntu_driver_file,
+        "ubuntu_trust_file": ubuntu_trust_file,
+        "website_supabase_file": website_supabase_file,
+    }
+    missing_inputs = [f"{name}: {path}" for name, path in required_inputs.items() if not path.exists()]
+    if missing_inputs:
+        report = {
+            "status": "fail",
+            "generated_at_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "artifact_date": artifact_date,
+            "paths": {
+                "ios_root": str(ios_root),
+                "android_root": str(android_root),
+                "ubuntu_root": str(ubuntu_root),
+                "website_root": str(website_root),
+            },
+            "suite_ids": {
+                "ios_mac": {},
+                "android": {},
+                "ubuntu": {},
+            },
+            "diffs": {
+                "missing_in_android": [],
+                "extra_in_android": [],
+                "missing_in_ubuntu": [],
+                "extra_in_ubuntu": [],
+            },
+            "checks": {},
+            "blockers": [
+                "Missing required cross-platform source inputs.",
+                *missing_inputs,
+            ],
+            "warnings": [],
+        }
+        write_report(report, out_json, out_md)
+        print("[interop] status=fail")
+        print(f"[interop] wrote {out_json}")
+        print(f"[interop] wrote {out_md}")
+        return 1
 
     ios_suite_text = read_text(ios_suite_file)
     ios_wire_text = read_text(ios_wire_file)
@@ -307,10 +365,7 @@ def main() -> int:
         "warnings": warnings,
     }
 
-    out_json.parent.mkdir(parents=True, exist_ok=True)
-    out_md.parent.mkdir(parents=True, exist_ok=True)
-    out_json.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    out_md.write_text(build_markdown(report), encoding="utf-8")
+    write_report(report, out_json, out_md)
 
     print(f"[interop] status={status}")
     print(f"[interop] wrote {out_json}")

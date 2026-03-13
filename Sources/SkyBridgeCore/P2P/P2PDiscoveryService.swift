@@ -2584,7 +2584,7 @@ public class P2PDiscoveryService: BaseManager {
             port: UInt16(portInt),
             osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
             capabilities: Array(Set(d.services)).sorted(),
-            publicKey: Data(), // 公钥在 P2PSecurityManager.establishSessionKey 握手时获取
+            publicKey: Data(), // 公钥在协议握手主路径中获取并完成绑定
             lastSeen: Date(),
             endpoints: endpoints,
             lastMessageTimestamp: nil,

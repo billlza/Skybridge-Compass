@@ -445,18 +445,17 @@ public class P2PSecurityManager: ObservableObject, Sendable {
     
  /// 创建设备证书
     private func createDeviceCertificate(timestamp: Date) throws -> P2PDeviceCertificate {
-        let publicKeyData = deviceKeyPair.publicKey.rawRepresentation
+        let signingKey = P256.Signing.PrivateKey()
+        let publicKeyData = signingKey.publicKey.rawRepresentation
+        let deviceId = getDeviceId()
         let fingerprint = SHA256.hash(data: publicKeyData).compactMap { String(format: "%02x", $0) }.joined()
         
- // 创建签名数据
-        let signatureData = publicKeyData + Data(getDeviceId().utf8) + Data(timestamp.timeIntervalSince1970.description.utf8)
-        
- // 使用P256.Signing进行签名
-        let signingKey = P256.Signing.PrivateKey()
+ // 自签名证书：公钥、设备ID 与时间戳全部绑定到同一把签名密钥。
+        let signatureData = publicKeyData + Data(deviceId.utf8) + Data(timestamp.timeIntervalSince1970.description.utf8)
         let signature = try signingKey.signature(for: signatureData)
         
         return P2PDeviceCertificate(
-            deviceId: getDeviceId(),
+            deviceId: deviceId,
             publicKey: publicKeyData,
             fingerprint: fingerprint,
             timestamp: timestamp,
@@ -477,9 +476,13 @@ public class P2PSecurityManager: ObservableObject, Sendable {
         guard certificate.fingerprint == computedFingerprint else {
             return false
         }
-        
- // 简化验证，实际应用中需要更复杂的证书验证
-        return true
+
+        let signatureData = certificate.publicKey
+            + Data(certificate.deviceId.utf8)
+            + Data(certificate.timestamp.timeIntervalSince1970.description.utf8)
+        let verifyingKey = try P256.Signing.PublicKey(rawRepresentation: certificate.publicKey)
+        let signature = try P256.Signing.ECDSASignature(rawRepresentation: certificate.signature)
+        return verifyingKey.isValidSignature(signature, for: signatureData)
     }
     
  /// 加载信任设备

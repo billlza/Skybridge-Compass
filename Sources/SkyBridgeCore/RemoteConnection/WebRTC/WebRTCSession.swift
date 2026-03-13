@@ -1,5 +1,6 @@
 import Foundation
 import OSLog
+import SkyBridgeProtocolCore
 
 #if canImport(WebRTC)
 @preconcurrency import WebRTC
@@ -81,32 +82,8 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         case direct
         case relay
     }
-    
-    public struct ICEConfig: Sendable {
-        public var stunURL: String
-        public var turnURLs: [String]
-        public var turnUsername: String
-        public var turnPassword: String
 
-        public var turnURL: String {
-            get { turnURLs.first ?? "" }
-            set { turnURLs = [newValue] }
-        }
-
-        public init(stunURL: String, turnURLs: [String], turnUsername: String, turnPassword: String) {
-            self.stunURL = stunURL
-            self.turnURLs = turnURLs
-            self.turnUsername = turnUsername
-            self.turnPassword = turnPassword
-        }
-        
-        public init(stunURL: String, turnURL: String, turnUsername: String, turnPassword: String) {
-            self.stunURL = stunURL
-            self.turnURLs = turnURL.isEmpty ? [] : [turnURL]
-            self.turnUsername = turnUsername
-            self.turnPassword = turnPassword
-        }
-    }
+    public typealias ICEConfig = SkyBridgeICEConfiguration
     
     public enum WebRTCError: Error, LocalizedError, Sendable {
         case webRTCNotAvailable

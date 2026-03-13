@@ -1,12 +1,12 @@
 import Foundation
 import CryptoKit
 
-enum CrossNetworkMerkle {
+public enum CrossNetworkMerkle {
     /// Deterministic SHA-256 Merkle root:
     /// - Leaves are per-chunk SHA-256 digests (32B), ordered by chunkIndex.
     /// - Parent = SHA256(left || right)
     /// - Odd count: duplicate last.
-    static func root(leaves: [Data]) -> Data? {
+    public static func root(leaves: [Data]) -> Data? {
         guard !leaves.isEmpty else { return nil }
         guard leaves.allSatisfy({ $0.count == 32 }) else { return nil }
 
@@ -26,9 +26,8 @@ enum CrossNetworkMerkle {
         return level.first
     }
 
-    static func sha256(_ data: Data) -> Data {
+    public static func sha256(_ data: Data) -> Data {
         Data(SHA256.hash(data: data))
     }
 }
-
 

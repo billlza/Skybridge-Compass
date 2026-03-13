@@ -3,6 +3,8 @@ import Network
 import CryptoKit
 import Combine
 import OSLog
+import SkyBridgeAppleTransport
+import SkyBridgeProtocolCore
 import CoreGraphics
 import ImageIO
 import ApplicationServices
@@ -150,6 +152,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 
     private var signalingClient: WebSocketSignalingClient?
     private var signalingShardKey: String?
+    private var webrtcSignalingAuthTokenBySessionId: [String: String] = [:]
     private var webrtcSessionsBySessionId: [String: WebRTCSession] = [:]
     private var pendingWebRTCOfferSessionIds: Set<String> = []
     private var webrtcRemoteIdBySessionId: [String: String] = [:]
@@ -598,6 +601,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         webrtcLatestOfferBySessionId.removeValue(forKey: sessionID)
         webrtcLatestAnswerBySessionId.removeValue(forKey: sessionID)
         webrtcLocalICECandidatesBySessionId.removeValue(forKey: sessionID)
+        webrtcSignalingAuthTokenBySessionId.removeValue(forKey: sessionID)
         webrtcRemoteIdBySessionId.removeValue(forKey: sessionID)
         webrtcSessionKeysBySessionId.removeValue(forKey: sessionID)
         webrtcRekeyInProgressSessionIds.remove(sessionID)
@@ -717,6 +721,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 
         // 5) 清空会话密钥
         webrtcSessionKeysBySessionId.removeAll()
+        webrtcSignalingAuthTokenBySessionId.removeAll()
         webrtcRemoteIdBySessionId.removeAll()
         webrtcLatestOfferBySessionId.removeAll()
         pendingWebRTCOfferSessionIds.removeAll()
@@ -775,9 +780,14 @@ public final class CrossNetworkConnectionManager: ObservableObject {
  // 签名时间戳，用于时效与重放保护
         let signatureTimestamp = Date().timeIntervalSince1970
 
- // 2. 注册到信号服务器
-        let sessionID = UUID().uuidString
-        // 注意：WebRTC 模式下，二维码只承担“会话引导”作用，真正的 offer/answer/ICE 通过 WebSocket 信令交换。
+        let sessionLease = try await signalServer.registerSession(
+            deviceFingerprint: deviceFingerprint,
+            validDuration: validDuration
+        )
+        let sessionID = sessionLease.sessionID
+        webrtcSignalingAuthTokenBySessionId[sessionLease.sessionID] = sessionLease.signalingToken
+        // 注意：WebRTC 模式下，二维码承担“会话引导 + signaling token 交付”作用，
+        // 真正的 offer/answer/ICE 仍通过 WebSocket 信令交换。
 
  // 3. 构建 QR 码数据结构
  // 为统一验签，签名覆盖规范化负载（参照 P2PSecurityManager）
@@ -797,13 +807,14 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 
         let expiresAt = Date().addingTimeInterval(validDuration)
         let qrData = CompactDynamicQRCodeData(
-            v: 3,
+            v: 4,
             s: sessionID,
             n: Host.current().localizedName ?? "Mac",
             d: deviceFingerprint,
             k: signingPublicKeyData,
             g: signature.rawRepresentation,
             t: signatureTimestamp,
+            a: sessionLease.signalingToken,
             e: expiresAt.timeIntervalSince1970
         )
 
@@ -882,6 +893,11 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             throw CrossNetworkConnectionError.invalidSignature
         }
 
+        if let signalingAuthToken = qrData.signalingAuthToken?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !signalingAuthToken.isEmpty {
+            webrtcSignalingAuthTokenBySessionId[qrData.sessionID] = signalingAuthToken
+        }
+
         // 4. 建立 WebRTC DataChannel 连接（跨网）
         let connection = try await establishWebRTCConnection(with: qrData)
 
@@ -952,23 +968,27 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 
  // MARK: - 3️⃣ 智能连接码
 
- /// 生成智能连接码（6位字母数字）
+ /// 生成服务器签发的智能连接码（默认 8 位，可由服务端配置）
     public func generateConnectionCode() async throws -> String {
         logger.info("生成智能连接码")
         connectionStatus = .generating
         readiness = .idle
 
-        // 1) 生成短码（6 位，排除易混淆字符）
-        let code = Self.generateShortCode()
+        let lease = try await signalServer.registerConnectionCode(
+            deviceFingerprint: deviceFingerprint,
+            deviceName: Host.current().localizedName ?? "Mac",
+            validDuration: 600
+        )
+        let code = lease.code
+        webrtcSignalingAuthTokenBySessionId[lease.sessionID] = lease.initiatorToken
 
-        // 2) 对齐“零配置跨网”方案：直接把 code 当作 WebRTC sessionId。
-        //    iOS 端只需输入同一 code 即可 join 同一 signaling room 并完成 offer/answer/ICE。
+        // 2) 当前主路径由服务端发放短期 code + initiator token，code 同时作为 WebRTC sessionId。
         self.connectionCode = code
         self.connectionStatus = .waiting(code: code)
         self.readiness = .idle
 
-        // 3) 启动 WebRTC offerer（等待对端输入 code 后 join，同会话完成 SDP/ICE，DataChannel ready）
-        startWebRTCOfferSession(sessionID: code)
+        // 3) 启动 WebRTC offerer（等待对端输入同一 code 后 join，同会话完成 SDP/ICE，DataChannel ready）
+        startWebRTCOfferSession(sessionID: lease.sessionID)
 
         logger.info("✅ 连接码生成成功: \(code)")
         return code
@@ -976,7 +996,6 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 
     /// 通过连接码连接
     public func connectWithCode(_ code: String) async throws -> RemoteConnection {
-        // 作为“输入方”（answerer）加入对端创建的 sessionId=code 的 WebRTC 会话。
         guard let normalized = Self.normalizeConnectionCode(code) else {
             throw CrossNetworkConnectionError.invalidDevice
         }
@@ -998,6 +1017,9 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 
         connectionStatus = .connecting
         readiness = .idle
+
+        let lookup = try await signalServer.lookupConnectionCode(code: normalized, deviceFingerprint: deviceFingerprint)
+        webrtcSignalingAuthTokenBySessionId[lookup.sessionID] = lookup.responderToken
 
         ensureSignalingConnected(shardKey: sessionID)
 
@@ -1108,7 +1130,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         }
         var queryItems = components.queryItems ?? []
         queryItems.removeAll { $0.name == "shard" }
-        queryItems.append(URLQueryItem(name: "shard", value: shardKey))
+        queryItems.append(URLQueryItem(name: "shard", value: shardKey.uppercased()))
         components.queryItems = queryItems
         return components.url ?? baseURL
     }
@@ -1138,11 +1160,22 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     self?.handleSignalingEnvelope(env)
                 }
             }
+            await client.setOnServerFrame { [weak self] frame in
+                Task { @MainActor in
+                    self?.handleSignalingServerFrame(frame)
+                }
+            }
             await client.connect()
         }
     }
 
     private func startWebRTCOfferSession(sessionID: String) {
+        guard webrtcSignalingAuthTokenBySessionId[sessionID]?.isEmpty == false else {
+            logger.error("❌ startWebRTCOfferSession 缺少 signaling token: session=\(sessionID, privacy: .public)")
+            connectionStatus = .failed("Missing signaling token")
+            readiness = .idle
+            return
+        }
         ensureSignalingConnected(shardKey: sessionID)
         if webrtcSessionsBySessionId[sessionID] != nil, !canReuseWebRTCSession(sessionID) {
             cleanupWebRTCSession(sessionID, reason: "replace_stale_offerer_session")
@@ -1220,6 +1253,9 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     }
 
     private func establishWebRTCConnection(with qrData: DynamicQRCodeData) async throws -> RemoteConnection {
+        guard webrtcSignalingAuthTokenBySessionId[qrData.sessionID]?.isEmpty == false else {
+            throw CrossNetworkConnectionError.missingSignalingToken
+        }
         ensureSignalingConnected(shardKey: qrData.sessionID)
 
         let sessionID = qrData.sessionID
@@ -1286,7 +1322,31 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         return RemoteConnection(id: sessionID, deviceName: qrData.deviceName, transport: .webrtc(session))
     }
 
+    private func authenticatedEnvelope(_ env: WebRTCSignalingEnvelope) -> WebRTCSignalingEnvelope? {
+        if env.authToken?.isEmpty == false {
+            return env
+        }
+        guard let token = webrtcSignalingAuthTokenBySessionId[env.sessionId], !token.isEmpty else {
+            logger.error("❌ 缺少 signaling auth token: session=\(env.sessionId, privacy: .public)")
+            return nil
+        }
+        return WebRTCSignalingEnvelope(
+            sessionId: env.sessionId,
+            from: env.from,
+            to: env.to,
+            type: env.type,
+            payload: env.payload,
+            authToken: token,
+            sentAt: env.sentAt
+        )
+    }
+
     private func sendSignal(_ env: WebRTCSignalingEnvelope, retries: Int = 2) async {
+        guard let authorizedEnvelope = authenticatedEnvelope(env) else {
+            connectionStatus = .failed("Missing signaling authorization")
+            readiness = .idle
+            return
+        }
         var attemptsLeft = max(0, retries)
         while true {
             do {
@@ -1298,9 +1358,9 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 guard let signalingClient else {
                     throw WebSocketSignalingClient.SignalingError.notConnected
                 }
-                try await signalingClient.send(env)
+                try await signalingClient.send(authorizedEnvelope)
                 appendSmokeStatus(
-                    "signal-send session=\(env.sessionId) type=\(env.type.rawValue)"
+                    "signal-send session=\(authorizedEnvelope.sessionId) type=\(authorizedEnvelope.type.rawValue)"
                 )
                 return
             } catch {
@@ -1309,13 +1369,13 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     if let signalingClient {
                         await signalingClient.connect()
                     } else {
-                        ensureSignalingConnected(shardKey: env.sessionId)
+                        ensureSignalingConnected(shardKey: authorizedEnvelope.sessionId)
                     }
                 }
                 if attemptsLeft == 0 {
-                    logger.error("❌ signaling send failed: type=\(env.type.rawValue, privacy: .public) session=\(env.sessionId, privacy: .public) err=\(error.localizedDescription, privacy: .public)")
+                    logger.error("❌ signaling send failed: type=\(authorizedEnvelope.type.rawValue, privacy: .public) session=\(authorizedEnvelope.sessionId, privacy: .public) err=\(error.localizedDescription, privacy: .public)")
                     appendSmokeStatus(
-                        "signal-send-failed session=\(env.sessionId) type=\(env.type.rawValue) error=\(error.localizedDescription)"
+                        "signal-send-failed session=\(authorizedEnvelope.sessionId) type=\(authorizedEnvelope.type.rawValue) error=\(error.localizedDescription)"
                     )
                     return
                 }
@@ -1323,6 +1383,20 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 try? await Task.sleep(for: .milliseconds(350))
             }
         }
+    }
+
+    private func handleSignalingServerFrame(_ frame: WebSocketSignalingClient.SignalingServerFrame) {
+        guard frame.isError else { return }
+        let sessionID = frame.sessionId?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let reason = frame.error ?? "unknown_signaling_error"
+        logger.error("❌ signaling server rejected frame: session=\(sessionID ?? "-", privacy: .public) error=\(reason, privacy: .public)")
+        appendSmokeStatus("signal-server-error session=\(sessionID ?? "-") error=\(reason)")
+
+        if let sessionID, webrtcSessionsBySessionId[sessionID] != nil {
+            cleanupWebRTCSession(sessionID, reason: "signaling_server_error:\(reason)")
+        }
+        connectionStatus = .failed("Signaling error: \(reason)")
+        readiness = .idle
     }
 
     private func handleSignalingEnvelope(_ env: WebRTCSignalingEnvelope) {
@@ -3883,16 +3957,11 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         return hash.compactMap { String(format: "%02x", $0) }.joined().prefix(16).uppercased()
     }
 
-    private static func generateShortCode() -> String {
- // 生成 6 位字母数字码（排除易混淆字符：0/O, 1/I/l）
-        String((0..<6).compactMap { _ in shortCodeAlphabet.randomElement() })
-    }
-
     private static func normalizeConnectionCode(_ raw: String) -> String? {
         let normalized = raw
             .uppercased()
             .filter { shortCodeAllowedCharacters.contains($0) }
-        guard normalized.count == 6 else { return nil }
+        guard (6...16).contains(normalized.count) else { return nil }
         return normalized
     }
 
@@ -3963,6 +4032,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             signingPublicKey: compact.k,
             signature: compact.g,
             signatureTimestamp: compact.t,
+            signalingAuthToken: compact.a,
             iceServers: [],
             expiresAt: Date(timeIntervalSince1970: compact.e)
         )
@@ -4022,10 +4092,38 @@ struct DynamicQRCodeData: Codable {
     let signature: Data?
  // 签名时间戳（秒）
     let signatureTimestamp: Double?
+ // WebRTC 信令短期鉴权 token（二维码主路径）
+    let signalingAuthToken: String?
  // ICE服务器列表
     let iceServers: [String]
  // 二维码过期时间
     let expiresAt: Date
+
+    init(
+        version: Int,
+        sessionID: String,
+        deviceName: String,
+        deviceFingerprint: String,
+        publicKey: Data,
+        signingPublicKey: Data?,
+        signature: Data?,
+        signatureTimestamp: Double?,
+        signalingAuthToken: String? = nil,
+        iceServers: [String],
+        expiresAt: Date
+    ) {
+        self.version = version
+        self.sessionID = sessionID
+        self.deviceName = deviceName
+        self.deviceFingerprint = deviceFingerprint
+        self.publicKey = publicKey
+        self.signingPublicKey = signingPublicKey
+        self.signature = signature
+        self.signatureTimestamp = signatureTimestamp
+        self.signalingAuthToken = signalingAuthToken
+        self.iceServers = iceServers
+        self.expiresAt = expiresAt
+    }
 }
 
 struct CompactDynamicQRCodeData: Codable {
@@ -4036,7 +4134,20 @@ struct CompactDynamicQRCodeData: Codable {
     let k: Data?
     let g: Data?
     let t: Double?
+    let a: String?
     let e: Double
+
+    init(v: Int, s: String, n: String, d: String, k: Data?, g: Data?, t: Double?, a: String? = nil, e: Double) {
+        self.v = v
+        self.s = s
+        self.n = n
+        self.d = d
+        self.k = k
+        self.g = g
+        self.t = t
+        self.a = a
+        self.e = e
+    }
 }
 
 
@@ -4129,44 +4240,13 @@ actor ConnectionListener {
     }
 }
 
-/// 信号服务器客户端 - 通过 HTTPS 与 SkyBridge 信令后端通信。
-///
-/// 说明（IEEE TDSC §IV-A）：
-/// - 信令服务器**不参与**密钥协商，仅承担会话引导与 ICE 候选中继。
-/// - 所有注册/查询均带客户端 API Key 做基本鉴权。
-/// - 当前跨网主路径已改用 WebSocket + WebRTC DataChannel，
-///   此客户端仅在 iCloud / 回退路径中使用。
-actor SignalServerClient {
-    private let logger = Logger(subsystem: "com.skybridge.signal", category: "ServerClient")
-
-    func registerSession(sessionID: String, deviceFingerprint: String, publicKey: Data, validDuration: TimeInterval) async throws -> String {
-        logger.info("registerSession: sessionID=\(sessionID, privacy: .public) (WebRTC signaling via WS is primary path)")
-        return sessionID
-    }
-
-    func registerConnectionCode(code: String, deviceFingerprint: String, deviceName: String, publicKey: Data, validDuration: TimeInterval) async throws -> String {
-        logger.info("registerConnectionCode: code=\(code, privacy: .public) (WebRTC signaling via WS is primary path)")
-        return code
-    }
-
-    func queryConnectionCode(code: String) async throws -> CrossNetworkDeviceInfo {
-        // 当前跨网连接主路径为 WebRTC（code 即 sessionId），不再依赖 REST 查询。
-        // 保留接口以兼容 iCloud 回退方案。
-        logger.warning("queryConnectionCode called for code=\(code, privacy: .public); returning placeholder (WebRTC path does not use this)")
-        return CrossNetworkDeviceInfo(
-            deviceFingerprint: code,
-            deviceName: "Remote Device",
-            publicKey: Data()
-        )
-    }
-}
-
 /// 跨网络连接错误
 public enum CrossNetworkConnectionError: Error {
     case invalidQRCode
     case qrCodeExpired
     case invalidSignature
     case invalidDevice
+    case missingSignalingToken
     case timeout
     case networkError
 }

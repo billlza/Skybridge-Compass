@@ -16,14 +16,22 @@ const http = require('http');
 const https = require('https');
 const fs = require('fs');
 const crypto = require('crypto');
+const os = require('os');
 
 const express = require('express');
 const { WebSocketServer } = require('ws');
 const { v4: uuidv4 } = require('uuid');
+const { createSignalingStateBackend, unique } = require('./lib/signaling_state_backend');
 
 // -------------------- Config --------------------
 const PORT = Number(process.env.PORT || 8443);
 const HOST = process.env.HOST || '0.0.0.0';
+const INSTANCE_ID = String(process.env.INSTANCE_ID || `${os.hostname()}-${process.pid}`).trim();
+const SIGNALING_STATE_BACKEND = String(process.env.SIGNALING_STATE_BACKEND || 'memory').trim().toLowerCase();
+const SIGNALING_REDIS_URL = String(process.env.SIGNALING_REDIS_URL || process.env.REDIS_URL || '').trim();
+const SIGNALING_REDIS_KEY_PREFIX = String(process.env.SIGNALING_REDIS_KEY_PREFIX || 'skybridge:signaling:').trim() || 'skybridge:signaling:';
+const SIGNALING_REDIS_CHANNEL_PREFIX = String(process.env.SIGNALING_REDIS_CHANNEL_PREFIX || 'skybridge:signaling:channel:').trim() || 'skybridge:signaling:channel:';
+const SIGNALING_REDIS_CONNECT_TIMEOUT_MS = Number(process.env.SIGNALING_REDIS_CONNECT_TIMEOUT_MS || 5_000);
 
 // SECURITY: default to false. If you expose Node directly with trust-proxy enabled, attackers can spoof X-Forwarded-For
 // and bypass per-IP rate limits. Only enable when you're definitely behind a trusted reverse proxy (CF/nginx).
@@ -37,6 +45,8 @@ const SWEEP_INTERVAL_MS = Number(process.env.SWEEP_INTERVAL_MS || 10_000);
 
 const ICE_TTL_MS = Number(process.env.ICE_TTL_MS || 30 * 60_000); // 30 minutes
 const ICE_MAX_PER_SESSION = Number(process.env.ICE_MAX_PER_SESSION || 200);
+const ROOM_MEMBERSHIP_TTL_MS = Number(process.env.ROOM_MEMBERSHIP_TTL_MS || 120_000);
+const LEGACY_BINDING_TTL_MS = Number(process.env.LEGACY_BINDING_TTL_MS || CODE_TTL_MS);
 
 // 兼容旧客户端：允许 lookup/answer 不带 token（建议尽快关掉）
 // SECURITY: default MUST be false in production. If you need legacy compatibility, explicitly set ALLOW_INSECURE=true.
@@ -47,12 +57,20 @@ const WS_MAX_MSG_BYTES = Number(process.env.WS_MAX_MSG_BYTES || 64 * 1024); // 6
 const WS_MAX_MSGS_PER_10S = Number(process.env.WS_MAX_MSGS_PER_10S || 200);
 const WS_MAX_CLIENTS_PER_ROOM = Number(process.env.WS_MAX_CLIENTS_PER_ROOM || 4);
 
+// Optional sticky affinity hint cookie.
+// This is deployment-facing only: it does not change signaling payloads or protocol semantics.
+const ENABLE_STICKY_HINT_COOKIE = /^(1|true|yes)$/i.test(process.env.ENABLE_STICKY_HINT_COOKIE || 'false');
+const STICKY_HINT_COOKIE_NAME = String(process.env.STICKY_HINT_COOKIE_NAME || 'skybridge_route').trim() || 'skybridge_route';
+const STICKY_HINT_COOKIE_MAX_AGE_SECONDS = Number(process.env.STICKY_HINT_COOKIE_MAX_AGE_SECONDS || Math.max(60, Math.round(CODE_TTL_MS / 1000)));
+const STICKY_HINT_COOKIE_SECURE = /^(1|true|yes)$/i.test(process.env.STICKY_HINT_COOKIE_SECURE || 'true');
+const STICKY_HINT_COOKIE_SAMESITE = String(process.env.STICKY_HINT_COOKIE_SAMESITE || 'Lax').trim() || 'Lax';
+
 // CORS（原生 App 一般无 Origin，Web 端才有）
 // SECURITY: default to deny-by-default (no CORS header). Set explicitly if you have a browser client.
 const CORS_ORIGIN = process.env.CORS_ORIGIN || ''; // e.g. "https://app.example.com,https://admin.example.com"
 
 // TURN credential endpoint (RFC 7635-style short-lived credentials)
-const TURN_CLIENT_API_KEY = process.env.TURN_CLIENT_API_KEY || process.env.SKYBRIDGE_CLIENT_API_KEY || 'skybridge-client-v1';
+const TURN_CLIENT_API_KEY = String(process.env.TURN_CLIENT_API_KEY || process.env.SKYBRIDGE_CLIENT_API_KEY || '').trim();
 const TURN_ENFORCE_API_KEY = /^(1|true|yes)$/i.test(process.env.TURN_ENFORCE_API_KEY || 'true');
 const TURN_CRED_TTL_SECONDS = Number(process.env.TURN_CRED_TTL_SECONDS || 3600);
 const TURN_SHARED_SECRET = process.env.TURN_SHARED_SECRET || '';
@@ -113,11 +131,35 @@ function sha256Hex(s) {
   return crypto.createHash('sha256').update(String(s)).digest('hex');
 }
 
+function secureStringEqual(left, right) {
+  if (typeof left !== 'string' || typeof right !== 'string') return false;
+  const leftBuf = Buffer.from(left, 'utf8');
+  const rightBuf = Buffer.from(right, 'utf8');
+  if (leftBuf.length !== rightBuf.length) return false;
+  return crypto.timingSafeEqual(leftBuf, rightBuf);
+}
+
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no 0/O/1/I
+function normalizeCodePrefixes(raw) {
+  const text = String(raw || '').trim().toUpperCase();
+  if (!text) return '';
+  const seen = new Set();
+  let out = '';
+  for (const ch of text) {
+    if (!CODE_ALPHABET.includes(ch) || seen.has(ch)) continue;
+    seen.add(ch);
+    out += ch;
+  }
+  return out;
+}
+const INSTANCE_CODE_PREFIXES = normalizeCodePrefixes(process.env.INSTANCE_CODE_PREFIXES || '');
 function generateCode(len = CODE_LEN) {
   const bytes = crypto.randomBytes(len);
-  let out = '';
-  for (let i = 0; i < len; i++) {
+  if (len <= 0) return '';
+  let out = INSTANCE_CODE_PREFIXES
+    ? INSTANCE_CODE_PREFIXES[bytes[0] % INSTANCE_CODE_PREFIXES.length]
+    : CODE_ALPHABET[bytes[0] % CODE_ALPHABET.length];
+  for (let i = 1; i < len; i++) {
     out += CODE_ALPHABET[bytes[i] % CODE_ALPHABET.length];
   }
   return out;
@@ -131,10 +173,25 @@ function safeUpperCode(x) {
   return String(x || '').trim().toUpperCase();
 }
 
+function normalizeRecordId(x) {
+  return String(x || '').trim();
+}
+
 function safeClientTag(x) {
   const normalized = String(x || '').trim().replace(/[^a-zA-Z0-9._:-]/g, '');
   if (!normalized) return 'anon';
   return normalized.slice(0, 64);
+}
+
+function issueStickyHintCookie(res, shardKey, maxAgeSeconds = STICKY_HINT_COOKIE_MAX_AGE_SECONDS) {
+  if (!ENABLE_STICKY_HINT_COOKIE || !res || !shardKey) return;
+  res.cookie(STICKY_HINT_COOKIE_NAME, String(shardKey), {
+    httpOnly: true,
+    secure: STICKY_HINT_COOKIE_SECURE,
+    sameSite: STICKY_HINT_COOKIE_SAMESITE,
+    path: '/',
+    maxAge: Math.max(1, Number(maxAgeSeconds || 0)) * 1000
+  });
 }
 
 // Simple in-memory rate limiter (per IP)
@@ -157,23 +214,33 @@ function rateLimit({ windowMs, max, keyFn }) {
   };
 }
 
-// -------------------- State --------------------
-/**
- * connectionCodes: code -> {
- *   deviceId, offer,
- *   createdAt, expiresAt,
- *   initiatorTokenHash, responderTokenHash,
- *   responderId,
- *   wsInitiator, wsResponder,
- *   answer, answerFrom
- * }
- */
-const connectionCodes = new Map();
+function asyncRoute(handler) {
+  return (req, res, next) => {
+    Promise.resolve(handler(req, res, next)).catch((error) => {
+      console.error(`[HTTP] ${req.method} ${req.originalUrl} failed:`, error);
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'internal_error' });
+      }
+      if (typeof next === 'function') next(error);
+    });
+  };
+}
 
-/**
- * iceCandidates: sessionId -> [{ candidate, from, timestamp }]
- */
-const iceCandidates = new Map();
+// -------------------- Shared state backend --------------------
+const signalingState = createSignalingStateBackend({
+  backendName: SIGNALING_STATE_BACKEND,
+  instanceId: INSTANCE_ID,
+  codeTtlMs: CODE_TTL_MS,
+  iceTtlMs: ICE_TTL_MS,
+  iceMaxPerSession: ICE_MAX_PER_SESSION,
+  roomMembershipTtlMs: ROOM_MEMBERSHIP_TTL_MS,
+  legacyBindingTtlMs: LEGACY_BINDING_TTL_MS,
+  redisUrl: SIGNALING_REDIS_URL,
+  redisKeyPrefix: SIGNALING_REDIS_KEY_PREFIX,
+  redisChannelPrefix: SIGNALING_REDIS_CHANNEL_PREFIX,
+  redisConnectTimeoutMs: SIGNALING_REDIS_CONNECT_TIMEOUT_MS,
+  log: console
+});
 
 /**
  * WebRTC envelope rooms (new protocol):
@@ -185,6 +252,7 @@ const iceCandidates = new Map();
  * We keep the legacy “connection code + bind/role” protocol for backward compatibility.
  */
 const rooms = new Map();
+const legacyBindings = new Map(); // code -> { initiator?: ws, responder?: ws }
 
 // ws metadata
 const wsMeta = new WeakMap(); // ws -> { code, role, clientId }
@@ -202,6 +270,8 @@ function isWebRTCEnvelope(msg) {
   if (typeof msg.sessionId !== 'string') return false;
   if (typeof msg.from !== 'string') return false;
   if (typeof msg.type !== 'string') return false;
+  if (typeof msg.sentAt !== 'undefined' && typeof msg.sentAt !== 'number') return false;
+  if (typeof msg.authToken !== 'undefined' && typeof msg.authToken !== 'string') return false;
   const t = msg.type;
   return t === 'join' || t === 'offer' || t === 'answer' || t === 'iceCandidate' || t === 'leave';
 }
@@ -217,17 +287,59 @@ function getOrCreateRoom(sessionId) {
   return room;
 }
 
-function removeFromAllRooms(ws) {
-  const meta = wsMeta.get(ws);
-  if (!meta || !meta.sessionId) return;
-  const sid = meta.sessionId;
-  const room = rooms.get(sid);
-  if (!room) return;
-  room.clients.delete(ws);
-  if (meta.deviceId && room.clientsByDeviceId.get(meta.deviceId) === ws) {
-    room.clientsByDeviceId.delete(meta.deviceId);
+function getOrCreateLegacyBindings(code) {
+  const key = safeUpperCode(code);
+  if (!key) return null;
+  let bindings = legacyBindings.get(key);
+  if (!bindings) {
+    bindings = { initiator: null, responder: null };
+    legacyBindings.set(key, bindings);
   }
-  if (room.clients.size === 0) rooms.delete(sid);
+  return bindings;
+}
+
+function setLocalLegacyBinding(code, role, ws) {
+  const bindings = getOrCreateLegacyBindings(code);
+  if (!bindings) return;
+  bindings[role] = ws;
+}
+
+function getLocalLegacyBinding(code, role) {
+  const bindings = legacyBindings.get(safeUpperCode(code));
+  return bindings ? bindings[role] : null;
+}
+
+function clearLocalLegacyBinding(code, role, ws) {
+  const key = safeUpperCode(code);
+  const bindings = legacyBindings.get(key);
+  if (!bindings) return;
+  if (!ws || bindings[role] === ws) {
+    bindings[role] = null;
+  }
+  if (!bindings.initiator && !bindings.responder) {
+    legacyBindings.delete(key);
+  }
+}
+
+async function removeFromAllRooms(ws) {
+  const meta = wsMeta.get(ws) || null;
+  const clientId = meta?.clientId || '';
+  for (const [sid, room] of rooms.entries()) {
+    if (!room.clients.has(ws)) continue;
+    room.clients.delete(ws);
+    const removedDeviceIds = [];
+    for (const [deviceId, boundWs] of room.clientsByDeviceId.entries()) {
+      if (boundWs !== ws) continue;
+      room.clientsByDeviceId.delete(deviceId);
+      removedDeviceIds.push(deviceId);
+    }
+    for (const deviceId of removedDeviceIds) {
+      await signalingState.removeRoomMember(sid, deviceId, clientId);
+    }
+    if (room.clients.size === 0) {
+      rooms.delete(sid);
+    }
+  }
 }
 
 function wsSendRaw(ws, obj) {
@@ -236,54 +348,193 @@ function wsSendRaw(ws, obj) {
   return true;
 }
 
-function handleWebRTCEnvelope(ws, msg) {
+function makeWebRTCError(error, sessionId = null) {
+  const payload = { type: 'error', error };
+  if (sessionId) payload.sessionId = sessionId;
+  return payload;
+}
+
+function sanitizeEnvelopeForPeer(msg) {
+  return {
+    sessionId: normalizeSessionId(msg.sessionId),
+    from: normalizeDeviceId(msg.from),
+    to: typeof msg.to === 'string' ? normalizeDeviceId(msg.to) || undefined : undefined,
+    type: msg.type,
+    payload: isPlainObject(msg.payload) ? msg.payload : null,
+    sentAt: typeof msg.sentAt === 'number' ? msg.sentAt : Math.floor(now() / 1000)
+  };
+}
+
+function deliverEnvelopeLocally(ws, msg) {
   const sid = normalizeSessionId(msg.sessionId);
-  const from = normalizeDeviceId(msg.from);
-  if (!sid || !from) return wsSendRaw(ws, { type: 'error', error: 'bad_envelope' });
-
-  // Ensure membership
-  const room = getOrCreateRoom(sid);
-  if (!room) return wsSendRaw(ws, { type: 'error', error: 'bad_sessionId' });
-
-  // Attach metadata (so we can cleanup on close)
-  const legacyMeta = wsMeta.get(ws) || { code: null, role: null, clientId: uuidv4() };
-  wsMeta.set(ws, { ...legacyMeta, sessionId: sid, deviceId: from });
-
-  if (msg.type === 'join') {
-    // Room size cap (prevents uncontrolled fan-out amplification).
-    if (!room.clients.has(ws) && room.clients.size >= WS_MAX_CLIENTS_PER_ROOM) {
-      return wsSendRaw(ws, { type: 'error', error: 'room_full' });
-    }
-    room.clients.add(ws);
-    room.clientsByDeviceId.set(from, ws);
-    return; // no ack needed
-  }
-
-  // For non-join messages, if the sender forgot to join, auto-join.
-  if (!room.clients.has(ws)) {
-    if (room.clients.size >= WS_MAX_CLIENTS_PER_ROOM) {
-      return wsSendRaw(ws, { type: 'error', error: 'room_full' });
-    }
-    room.clients.add(ws);
-    room.clientsByDeviceId.set(from, ws);
-  }
-
-  // Route:
-  // - if `to` present and we have an active ws for it, deliver only to it
-  // - else broadcast to room (excluding sender)
+  const room = rooms.get(sid);
+  if (!room) return false;
+  const sanitized = sanitizeEnvelopeForPeer(msg);
   const to = typeof msg.to === 'string' ? normalizeDeviceId(msg.to) : '';
   if (to) {
     const target = room.clientsByDeviceId.get(to);
     if (target && target !== ws) {
-      wsSendRaw(target, msg);
-      return;
+      wsSendRaw(target, sanitized);
+      return true;
     }
-    // If `to` is unknown, fall back to broadcast (helps when peers don't have stable ids yet)
+    return false;
   }
 
   for (const peer of room.clients) {
     if (peer === ws) continue;
-    wsSendRaw(peer, msg);
+    wsSendRaw(peer, sanitized);
+  }
+  return true;
+}
+
+function remoteInstanceIdsForMembers(members, excludeInstanceId) {
+  return unique(
+    members
+      .map((member) => member.instanceId)
+      .filter((instanceId) => instanceId && instanceId !== excludeInstanceId)
+  );
+}
+
+async function forwardEnvelopeToRemoteInstances(msg) {
+  const to = typeof msg.to === 'string' ? normalizeDeviceId(msg.to) : '';
+  const members = await signalingState.listRoomMembers(msg.sessionId);
+  const sanitized = sanitizeEnvelopeForPeer(msg);
+  let targetInstances;
+  if (to) {
+    const directedMember = members.find((member) => member.deviceId === to);
+    targetInstances = directedMember ? [directedMember.instanceId] : [];
+  } else {
+    targetInstances = remoteInstanceIdsForMembers(members, INSTANCE_ID);
+  }
+  await Promise.all(targetInstances.map((instanceId) => signalingState.publishToInstance(instanceId, {
+    kind: 'webrtc-envelope',
+    envelope: sanitized
+  })));
+}
+
+function authMatchesHash(token, hash) {
+  return typeof token === 'string' && Boolean(hash) && sha256Hex(token) === hash;
+}
+
+function authWebRTCEnvelope(item, msg) {
+  const token = typeof msg.authToken === 'string' ? msg.authToken : '';
+  if (authMatchesHash(token, item.roomAuthTokenHash)) {
+    return { ok: true, expectedFrom: null, authMode: 'room_shared' };
+  }
+  if (authMatchesHash(token, item.initiatorTokenHash)) {
+    return { ok: true, expectedFrom: item.deviceId || null, authMode: 'initiator' };
+  }
+  if (authMatchesHash(token, item.responderTokenHash)) {
+    return { ok: true, expectedFrom: item.responderId || null, authMode: 'responder' };
+  }
+  return { ok: false, expectedFrom: null, authMode: null };
+}
+
+async function handleWebRTCEnvelope(ws, msg) {
+  const sid = normalizeSessionId(msg.sessionId);
+  const from = normalizeDeviceId(msg.from);
+  if (!sid || !from) return wsSendRaw(ws, makeWebRTCError('bad_envelope', sid || null));
+
+  const item = await signalingState.getConnection(sid);
+  if (!item) {
+    wsSendRaw(ws, makeWebRTCError('unknown_session', sid));
+    try { ws.close(1008, 'unknown_session'); } catch {}
+    return;
+  }
+  if (item.connectionKind !== 'webrtc_room_code' && item.connectionKind !== 'webrtc_room_session') {
+    wsSendRaw(ws, makeWebRTCError('session_mode_mismatch', sid));
+    try { ws.close(1008, 'session_mode_mismatch'); } catch {}
+    return;
+  }
+
+  const authResult = authWebRTCEnvelope(item, msg);
+  if (!authResult.ok && !ALLOW_INSECURE) {
+    wsSendRaw(ws, makeWebRTCError('unauthorized', sid));
+    try { ws.close(1008, 'unauthorized'); } catch {}
+    return;
+  }
+  if (authResult.expectedFrom && authResult.expectedFrom !== from) {
+    wsSendRaw(ws, makeWebRTCError('device_mismatch', sid));
+    try { ws.close(1008, 'device_mismatch'); } catch {}
+    return;
+  }
+
+  const room = getOrCreateRoom(sid);
+  if (!room) return wsSendRaw(ws, makeWebRTCError('bad_sessionId', sid));
+
+  const meta = wsMeta.get(ws) || { code: null, role: null, clientId: uuidv4(), rate: { t0: now(), c: 0 } };
+  if ((meta.sessionId && meta.sessionId !== sid) || (meta.deviceId && meta.deviceId !== from)) {
+    await removeFromAllRooms(ws);
+  }
+
+  if (!room.clients.has(ws)) {
+    if (room.clients.size >= WS_MAX_CLIENTS_PER_ROOM) {
+      return wsSendRaw(ws, makeWebRTCError('room_full', sid));
+    }
+    room.clients.add(ws);
+  }
+  const existingClient = room.clientsByDeviceId.get(from);
+  if (existingClient && existingClient !== ws) {
+    if (existingClient.readyState === existingClient.OPEN) {
+      return wsSendRaw(ws, makeWebRTCError('device_conflict', sid));
+    }
+    room.clients.delete(existingClient);
+    room.clientsByDeviceId.delete(from);
+  }
+  room.clientsByDeviceId.set(from, ws);
+  wsMeta.set(ws, { ...meta, sessionId: sid, deviceId: from, webrtcAuthMode: authResult.authMode });
+
+  const updatedAt = now();
+  await signalingState.upsertRoomMember(sid, {
+    deviceId: from,
+    instanceId: INSTANCE_ID,
+    clientId: meta.clientId,
+    updatedAt,
+    expiresAt: updatedAt + ROOM_MEMBERSHIP_TTL_MS
+  });
+
+  if (msg.type === 'leave') {
+    await signalingState.removeRoomMember(sid, from, meta.clientId || '');
+    room.clients.delete(ws);
+    if (room.clientsByDeviceId.get(from) === ws) {
+      room.clientsByDeviceId.delete(from);
+    }
+    if (room.clients.size === 0) rooms.delete(sid);
+  }
+
+  deliverEnvelopeLocally(ws, msg);
+  await forwardEnvelopeToRemoteInstances(msg);
+}
+
+async function handleBackendInstanceMessage(payload) {
+  if (!payload || typeof payload !== 'object') return;
+  switch (payload.kind) {
+    case 'webrtc-envelope':
+      if (payload.envelope && typeof payload.envelope === 'object') {
+        deliverEnvelopeLocally(null, payload.envelope);
+      }
+      break;
+    case 'legacy-forward': {
+      const target = getLocalLegacyBinding(payload.code, payload.targetRole);
+      if (target && payload.message && typeof payload.message === 'object') {
+        wsSendRaw(target, payload.message);
+      }
+      break;
+    }
+    case 'drop-code': {
+      const code = safeUpperCode(payload.code);
+      const bindings = legacyBindings.get(code);
+      if (!bindings) return;
+      for (const role of ['initiator', 'responder']) {
+        const ws = bindings[role];
+        if (!ws) continue;
+        try { ws.close(1000, payload.reason || 'remote_cleanup'); } catch {}
+      }
+      legacyBindings.delete(code);
+      break;
+    }
+    default:
+      break;
   }
 }
 
@@ -292,6 +543,14 @@ const app = express();
 if (TRUST_PROXY) app.set('trust proxy', 1);
 
 app.disable('x-powered-by');
+app.use((req, res, next) => {
+  res.setHeader('X-SkyBridge-Instance', INSTANCE_ID);
+  res.setHeader('X-SkyBridge-State-Backend', SIGNALING_STATE_BACKEND);
+  if (INSTANCE_CODE_PREFIXES) {
+    res.setHeader('X-SkyBridge-Code-Prefixes', INSTANCE_CODE_PREFIXES);
+  }
+  next();
+});
 app.use(express.json({ limit: JSON_LIMIT }));
 
 // CORS + basic security headers (lightweight)
@@ -303,7 +562,7 @@ app.use((req, res, next) => {
     if (allowList.includes(origin)) res.setHeader('Access-Control-Allow-Origin', origin);
   }
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Key');
   if (req.method === 'OPTIONS') return res.sendStatus(204);
 
   // Simple hardening
@@ -313,24 +572,51 @@ app.use((req, res, next) => {
 });
 
 // -------------------- Health & Root --------------------
-app.get('/', (req, res) => {
+app.get('/', asyncRoute(async (req, res) => {
+  const backendHealth = await signalingState.getHealth();
   // 之前你 curl -I https://api... 之所以 404，就是没这个路由
   res.status(200).json({
     ok: true,
     service: 'skybridge-signaling',
     time: new Date().toISOString(),
-    endpoints: ['/health', '/healthz', '/api/register', '/api/lookup/:code', '/api/answer/:code', '/api/ice/:sessionId', '/api/turn/credentials', '/ws']
+    instanceId: INSTANCE_ID,
+    stateBackend: SIGNALING_STATE_BACKEND,
+    stickyHintCookieEnabled: ENABLE_STICKY_HINT_COOKIE,
+    instanceCodePrefixes: INSTANCE_CODE_PREFIXES || null,
+    backendHealth,
+    endpoints: [
+      '/health',
+      '/healthz',
+      '/api/register',
+      '/api/lookup/:code',
+      '/api/answer/:code',
+      '/api/ice/:sessionId',
+      '/api/turn/credentials',
+      '/api/webrtc/register-code',
+      '/api/webrtc/lookup/:code',
+      '/api/webrtc/register-session',
+      '/ws'
+    ]
   });
-});
+}));
 
-app.get('/health', (req, res) => {
+app.get('/health', asyncRoute(async (req, res) => {
+  const backendHealth = await signalingState.getHealth();
   res.json({
     status: 'ok',
-    connections: connectionCodes.size,
-    iceSessions: iceCandidates.size,
-    wsClients: wss ? wss.clients.size : 0
+    connections: backendHealth.connections,
+    iceSessions: backendHealth.iceSessions,
+    wsClients: wss ? wss.clients.size : 0,
+    instanceId: INSTANCE_ID,
+    stateBackend: SIGNALING_STATE_BACKEND,
+    stickyHintCookieEnabled: ENABLE_STICKY_HINT_COOKIE,
+    instanceCodePrefixes: INSTANCE_CODE_PREFIXES || null,
+    roomMembers: backendHealth.roomMembers,
+    legacyBindings: backendHealth.legacyBindings,
+    backendReady: backendHealth.ready,
+    redisConnected: backendHealth.redisConnected
   });
-});
+}));
 
 app.get('/healthz', (req, res) => res.status(200).send('ok'));
 
@@ -342,11 +628,45 @@ const rlAnswer   = rateLimit({ windowMs: 60_000, max: 60 });
 const rlIce      = rateLimit({ windowMs: 60_000, max: 240 });
 const rlTurn     = rateLimit({ windowMs: 60_000, max: 120 });
 
+function clampSessionTtlMs(rawSeconds, fallbackMs = CODE_TTL_MS) {
+  const seconds = Number(rawSeconds);
+  if (!Number.isFinite(seconds)) return fallbackMs;
+  return Math.max(60_000, Math.min(24 * 3600_000, Math.trunc(seconds * 1000)));
+}
+
+function buildConnectionRecord({
+  deviceId,
+  offer = null,
+  expiresAt,
+  initiatorTokenHash = '',
+  responderTokenHash = null,
+  roomAuthTokenHash = null,
+  responderId = null,
+  connectionKind = 'legacy_offer_answer'
+}) {
+  return {
+    deviceId,
+    offer,
+    createdAt: now(),
+    expiresAt,
+    initiatorTokenHash,
+    responderTokenHash,
+    roomAuthTokenHash,
+    responderId,
+    answer: null,
+    answerFrom: null,
+    connectionKind
+  };
+}
+
 // -------------------- REST API: dynamic TURN credentials --------------------
 app.get('/api/turn/credentials', rlTurn, (req, res) => {
   if (TURN_ENFORCE_API_KEY) {
+    if (!TURN_CLIENT_API_KEY) {
+      return res.status(503).json({ error: 'turn_api_key_not_configured' });
+    }
     const apiKey = String(req.get('X-API-Key') || '').trim();
-    if (!apiKey || apiKey !== TURN_CLIENT_API_KEY) {
+    if (!secureStringEqual(apiKey, TURN_CLIENT_API_KEY)) {
       return res.status(401).json({ error: 'unauthorized' });
     }
   }
@@ -392,8 +712,102 @@ app.get('/api/turn/credentials', rlTurn, (req, res) => {
   return res.status(503).json({ error: 'turn_credentials_not_configured' });
 });
 
+// -------------------- REST API: current WebRTC room flow --------------------
+app.post('/api/webrtc/register-code', rlRegister, asyncRoute(async (req, res) => {
+  const { deviceId, deviceName, ttlSeconds } = req.body || {};
+  if (typeof deviceId !== 'string' || deviceId.length < 1 || deviceId.length > 128) {
+    return res.status(400).json({ error: 'bad_deviceId' });
+  }
+  const initiatorToken = newToken();
+  const expiresAt = now() + clampSessionTtlMs(ttlSeconds, CODE_TTL_MS);
+  const code = await signalingState.createConnectionCode(generateCode, 10, buildConnectionRecord({
+    deviceId,
+    offer: {
+      mode: 'webrtc_room_code',
+      deviceName: typeof deviceName === 'string' ? deviceName.slice(0, 128) : null
+    },
+    expiresAt,
+    initiatorTokenHash: sha256Hex(initiatorToken),
+    connectionKind: 'webrtc_room_code'
+  }));
+  if (!code) {
+    return res.status(500).json({ error: 'code_generation_failed' });
+  }
+  issueStickyHintCookie(res, code, Math.max(60, Math.round((expiresAt - now()) / 1000)));
+  res.json({
+    code,
+    sessionId: code,
+    initiatorToken,
+    expiresIn: Math.max(0, Math.round((expiresAt - now()) / 1000)),
+    wsPath: '/ws'
+  });
+}));
+
+app.get('/api/webrtc/lookup/:code', rlLookup, asyncRoute(async (req, res) => {
+  const ip = (req.ip || req.connection.remoteAddress || 'unknown');
+  if (invalidLookupLimited(ip)) {
+    return res.status(429).json({ error: 'rate_limited' });
+  }
+  const code = safeUpperCode(req.params.code);
+  const responderId = (typeof req.query.deviceId === 'string' && req.query.deviceId.length <= 128)
+    ? req.query.deviceId
+    : null;
+  if (!responderId) {
+    return res.status(400).json({ error: 'bad_deviceId' });
+  }
+  const responderToken = newToken();
+  const result = await signalingState.ensureResponderToken(code, sha256Hex(responderToken), responderId);
+  if (!result?.item || result.item.connectionKind !== 'webrtc_room_code') {
+    recordInvalidLookup(ip);
+    return res.status(404).json({ found: false });
+  }
+  const { item } = result;
+  issueStickyHintCookie(res, code, Math.max(60, Math.round((item.expiresAt - now()) / 1000)));
+  res.json({
+    found: true,
+    sessionId: code,
+    initiatorDeviceId: item.deviceId,
+    responderToken,
+    expiresIn: Math.max(0, Math.round((item.expiresAt - now()) / 1000))
+  });
+}));
+
+app.post('/api/webrtc/register-session', rlRegister, asyncRoute(async (req, res) => {
+  const requestedSessionId = normalizeRecordId(req.body?.sessionId);
+  const deviceId = normalizeDeviceId(req.body?.deviceId);
+  const ttlMs = clampSessionTtlMs(req.body?.ttlSeconds, CODE_TTL_MS);
+  if (!deviceId || deviceId.length > 128) {
+    return res.status(400).json({ error: 'bad_deviceId' });
+  }
+  const sessionId = (SIGNALING_STATE_BACKEND === 'redis' && requestedSessionId)
+    ? requestedSessionId
+    : generateCode(Math.max(CODE_LEN + 8, 16));
+  if (!sessionId || sessionId.length > 160) {
+    return res.status(400).json({ error: 'bad_sessionId' });
+  }
+  const signalingToken = newToken();
+  const expiresAt = now() + ttlMs;
+  const created = await signalingState.createConnectionRecord(sessionId, buildConnectionRecord({
+    deviceId,
+    offer: { mode: 'webrtc_room_session' },
+    expiresAt,
+    roomAuthTokenHash: sha256Hex(signalingToken),
+    connectionKind: 'webrtc_room_session'
+  }));
+  if (!created) {
+    return res.status(409).json({ error: 'session_exists' });
+  }
+  issueStickyHintCookie(res, sessionId, Math.max(60, Math.round((expiresAt - now()) / 1000)));
+  res.json({
+    sessionId,
+    signalingToken,
+    expiresIn: Math.max(0, Math.round((expiresAt - now()) / 1000)),
+    wsPath: '/ws'
+  });
+}));
+
 // -------------------- REST API: register --------------------
-app.post('/api/register', rlRegister, (req, res) => {
+app.post('/api/register', rlRegister, asyncRoute(async (req, res) => {
   const { deviceId, offer } = req.body || {};
 
   if (typeof deviceId !== 'string' || deviceId.length < 1 || deviceId.length > 128) {
@@ -403,84 +817,64 @@ app.post('/api/register', rlRegister, (req, res) => {
     return res.status(400).json({ error: 'bad_offer' });
   }
 
-  let code;
-  for (let i = 0; i < 10; i++) {
-    const c = generateCode();
-    if (!connectionCodes.has(c)) { code = c; break; }
-  }
-  if (!code) return res.status(500).json({ error: 'code_generation_failed' });
-
   const initiatorToken = newToken();
-  const createdAt = now();
-  const expiresAt = createdAt + CODE_TTL_MS;
+  const expiresAt = now() + CODE_TTL_MS;
 
-  connectionCodes.set(code, {
+  const code = await signalingState.createConnectionCode(generateCode, 10, buildConnectionRecord({
     deviceId,
     offer,
-    createdAt,
     expiresAt,
     initiatorTokenHash: sha256Hex(initiatorToken),
-    responderTokenHash: null,
-    responderId: null,
-    wsInitiator: null,
-    wsResponder: null,
-    answer: null,
-    answerFrom: null
-  });
+    connectionKind: 'legacy_offer_answer'
+  }));
+  if (!code) return res.status(500).json({ error: 'code_generation_failed' });
 
   console.log(`[Register] ${deviceId} code=${code} ttl=${Math.round(CODE_TTL_MS / 1000)}s`);
+  issueStickyHintCookie(res, code, Math.round(CODE_TTL_MS / 1000));
   res.json({
     code,
     initiatorToken,
     expiresIn: Math.round(CODE_TTL_MS / 1000),
     wsPath: '/ws'
   });
-});
+}));
 
 // -------------------- REST API: lookup --------------------
-app.get('/api/lookup/:code', rlLookup, (req, res) => {
+app.get('/api/lookup/:code', rlLookup, asyncRoute(async (req, res) => {
   const ip = (req.ip || req.connection.remoteAddress || 'unknown');
   if (invalidLookupLimited(ip)) {
     return res.status(429).json({ error: 'rate_limited' });
   }
   const code = safeUpperCode(req.params.code);
-  const item = connectionCodes.get(code);
-  if (!item || now() > item.expiresAt) {
-    if (item) connectionCodes.delete(code);
-    recordInvalidLookup(ip);
-    return res.status(404).json({ found: false });
-  }
-
-  // 给 responder 发一个 token（即使你旧客户端不用，也不影响）
-  let responderToken = null;
-  if (!item.responderTokenHash) {
-    responderToken = newToken();
-    item.responderTokenHash = sha256Hex(responderToken);
-  }
-
-  // 可选：记录 responderId（如果传了）
   const responderId = (typeof req.query.deviceId === 'string' && req.query.deviceId.length <= 128)
     ? req.query.deviceId
     : null;
-  if (responderId && !item.responderId) item.responderId = responderId;
 
+  const responderToken = newToken();
+  const result = await signalingState.ensureResponderToken(code, sha256Hex(responderToken), responderId);
+  if (!result?.item) {
+    recordInvalidLookup(ip);
+    return res.status(404).json({ found: false });
+  }
+  const { item } = result;
+
+  issueStickyHintCookie(res, code, Math.max(60, Math.round((item.expiresAt - now()) / 1000)));
   res.json({
     found: true,
     deviceId: item.deviceId,
     offer: item.offer,
     // 新增字段（安全模式用）
     sessionId: code,
-    responderToken,
+    responderToken: result.issued ? responderToken : null,
     expiresIn: Math.max(0, Math.round((item.expiresAt - now()) / 1000))
   });
-});
+}));
 
 // -------------------- REST API: answer --------------------
-app.post('/api/answer/:code', rlAnswer, (req, res) => {
+app.post('/api/answer/:code', rlAnswer, asyncRoute(async (req, res) => {
   const code = safeUpperCode(req.params.code);
-  const item = connectionCodes.get(code);
-  if (!item || now() > item.expiresAt) {
-    if (item) connectionCodes.delete(code);
+  const item = await signalingState.getConnection(code);
+  if (!item) {
     return res.status(404).json({ success: false, error: 'Code not found' });
   }
 
@@ -498,21 +892,34 @@ app.post('/api/answer/:code', rlAnswer, (req, res) => {
     return res.status(401).json({ success: false, error: 'unauthorized' });
   }
 
-  item.answer = answer;
-  item.answerFrom = deviceId;
-  if (!item.responderId) item.responderId = deviceId;
+  const updated = await signalingState.storeAnswer(code, answer, deviceId, deviceId);
+  if (!updated) {
+    return res.status(404).json({ success: false, error: 'Code not found' });
+  }
 
-  // WS 通知 initiator
-  if (item.wsInitiator && item.wsInitiator.readyState === item.wsInitiator.OPEN) {
-    item.wsInitiator.send(JSON.stringify({ type: 'answer', code, answer, from: deviceId }));
+  const answerMessage = { type: 'answer', code, answer, from: deviceId };
+  const localInitiator = getLocalLegacyBinding(code, 'initiator');
+  if (localInitiator && localInitiator.readyState === localInitiator.OPEN) {
+    localInitiator.send(JSON.stringify(answerMessage));
+  } else {
+    const initiatorBinding = await signalingState.getLegacyBinding(code, 'initiator');
+    if (initiatorBinding?.instanceId && initiatorBinding.instanceId !== INSTANCE_ID) {
+      await signalingState.publishToInstance(initiatorBinding.instanceId, {
+        kind: 'legacy-forward',
+        code,
+        targetRole: 'initiator',
+        message: answerMessage
+      });
+    }
   }
 
   console.log(`[Answer] code=${code} from=${deviceId} tokenOk=${tokenOk}`);
+  issueStickyHintCookie(res, code, Math.max(60, Math.round((updated.expiresAt - now()) / 1000)));
   res.json({ success: true });
-});
+}));
 
 // -------------------- REST API: ICE candidates (legacy sessionId) --------------------
-app.post('/api/ice/:sessionId', rlIce, (req, res) => {
+app.post('/api/ice/:sessionId', rlIce, asyncRoute(async (req, res) => {
   const sessionId = safeUpperCode(req.params.sessionId);
   const { candidate, from, token } = req.body || {};
 
@@ -524,7 +931,7 @@ app.post('/api/ice/:sessionId', rlIce, (req, res) => {
   }
 
   // 如果 sessionId 就是 code，则可做 token 校验（可选）
-  const item = connectionCodes.get(sessionId);
+  const item = await signalingState.getConnection(sessionId);
   if (item) {
     const okInitiator = typeof token === 'string' && sha256Hex(token) === item.initiatorTokenHash;
     const okResponder = typeof token === 'string' && item.responderTokenHash && sha256Hex(token) === item.responderTokenHash;
@@ -533,25 +940,19 @@ app.post('/api/ice/:sessionId', rlIce, (req, res) => {
     }
   }
 
-  if (!iceCandidates.has(sessionId)) iceCandidates.set(sessionId, []);
-  const arr = iceCandidates.get(sessionId);
-  arr.push({ candidate, from, timestamp: now() });
+  await signalingState.appendIceCandidate(sessionId, { candidate, from, timestamp: now() });
 
-  // 上限：丢旧的
-  if (arr.length > ICE_MAX_PER_SESSION) {
-    arr.splice(0, arr.length - ICE_MAX_PER_SESSION);
-  }
-
+  issueStickyHintCookie(res, sessionId, Math.max(60, Math.round(ICE_TTL_MS / 1000)));
   res.json({ success: true });
-});
+}));
 
-app.get('/api/ice/:sessionId', rlIce, (req, res) => {
+app.get('/api/ice/:sessionId', rlIce, asyncRoute(async (req, res) => {
   const sessionId = safeUpperCode(req.params.sessionId);
   const since = req.query.since ? Number(req.query.since) : 0;
 
   // SECURITY: if this sessionId corresponds to an active code, require a valid token in secure mode.
   // This prevents anyone who guesses a sessionId from polling ICE candidates.
-  const item = connectionCodes.get(sessionId);
+  const item = await signalingState.getConnection(sessionId);
   if (item) {
     const token = (typeof req.query.token === 'string') ? req.query.token : null;
     const okInitiator = token && sha256Hex(token) === item.initiatorTokenHash;
@@ -561,12 +962,10 @@ app.get('/api/ice/:sessionId', rlIce, (req, res) => {
     }
   }
 
-  let candidates = iceCandidates.get(sessionId) || [];
-  if (since && Number.isFinite(since)) {
-    candidates = candidates.filter(c => c.timestamp > since);
-  }
+  const candidates = await signalingState.listIceCandidates(sessionId, since);
+  issueStickyHintCookie(res, sessionId, Math.max(60, Math.round(ICE_TTL_MS / 1000)));
   res.json({ candidates });
-});
+}));
 
 // -------------------- Create server (HTTP or HTTPS) --------------------
 const server = (() => {
@@ -585,24 +984,33 @@ let wss = null;
 
 wss = new WebSocketServer({ server, path: '/ws' });
 
-function getItemByCode(code) {
+async function getItemByCode(code) {
   const c = safeUpperCode(code);
-  const item = connectionCodes.get(c);
-  if (!item) return null;
-  if (now() > item.expiresAt) {
-    dropCode(c, 'expired');
-    return null;
-  }
-  return item;
+  return signalingState.getConnection(c);
 }
 
-function dropCode(code, reason) {
-  const item = connectionCodes.get(code);
-  if (!item) return;
-  try { if (item.wsInitiator) item.wsInitiator.close(1000, reason); } catch {}
-  try { if (item.wsResponder) item.wsResponder.close(1000, reason); } catch {}
-  connectionCodes.delete(code);
-  iceCandidates.delete(code);
+async function dropCode(code, reason) {
+  const key = safeUpperCode(code);
+  const bindings = await signalingState.listLegacyBindings(key);
+  for (const binding of bindings) {
+    if (binding.instanceId && binding.instanceId !== INSTANCE_ID) {
+      await signalingState.publishToInstance(binding.instanceId, {
+        kind: 'drop-code',
+        code: key,
+        reason
+      });
+    }
+  }
+  const local = legacyBindings.get(key);
+  if (local) {
+    for (const role of ['initiator', 'responder']) {
+      const ws = local[role];
+      if (!ws) continue;
+      try { ws.close(1000, reason); } catch {}
+    }
+    legacyBindings.delete(key);
+  }
+  await signalingState.deleteConnection(key);
   console.log(`[Cleanup] code=${code} reason=${reason}`);
 }
 
@@ -630,6 +1038,7 @@ wss.on('connection', (ws, req) => {
   ws.on('pong', () => { ws.isAlive = true; });
 
   ws.on('message', (raw) => {
+    void (async () => {
     // Basic WS message size cap (prevents memory spikes).
     try {
       const buf = Buffer.isBuffer(raw) ? raw : Buffer.from(raw);
@@ -671,7 +1080,7 @@ wss.on('connection', (ws, req) => {
     // This is used by iOS/macOS `WebRTCSignalingEnvelope`.
     if (isWebRTCEnvelope(msg)) {
       try {
-        handleWebRTCEnvelope(ws, msg);
+        await handleWebRTCEnvelope(ws, msg);
       } catch (e) {
         wsSend(ws, { type: 'error', error: 'envelope_failed' });
       }
@@ -685,7 +1094,7 @@ wss.on('connection', (ws, req) => {
         // { type:'bind', code, role:'initiator'|'responder', token }
         const code = safeUpperCode(msg.code);
         const role = msg.role === 'responder' ? 'responder' : 'initiator';
-        const item = getItemByCode(code);
+        const item = await getItemByCode(code);
         if (!item) return wsSend(ws, { type: 'error', error: 'code_not_found' });
 
         const ok = authWsBind(item, role, msg.token);
@@ -694,11 +1103,17 @@ wss.on('connection', (ws, req) => {
           return;
         }
 
-        // 绑定
-        if (role === 'initiator') item.wsInitiator = ws;
-        else item.wsResponder = ws;
+        setLocalLegacyBinding(code, role, ws);
 
-        wsMeta.set(ws, { code, role, clientId });
+        const updatedMeta = { ...meta, code, role };
+        wsMeta.set(ws, updatedMeta);
+        await signalingState.upsertLegacyBinding(code, role, {
+          deviceId: role,
+          instanceId: INSTANCE_ID,
+          clientId,
+          updatedAt: now(),
+          expiresAt: now() + LEGACY_BINDING_TTL_MS
+        });
 
         wsSend(ws, { type: 'bound', code, role, clientId });
 
@@ -713,26 +1128,50 @@ wss.on('connection', (ws, req) => {
       case 'signal': {
         // { type:'signal', data, targetRole:'initiator'|'responder' }
         if (!meta.code || !meta.role) return wsSend(ws, { type: 'error', error: 'not_bound' });
-        const item = getItemByCode(meta.code);
+        const item = await getItemByCode(meta.code);
         if (!item) return wsSend(ws, { type: 'error', error: 'code_not_found' });
 
         const targetRole = msg.targetRole === 'initiator' ? 'initiator' : 'responder';
-        const target = targetRole === 'initiator' ? item.wsInitiator : item.wsResponder;
-
-        wsSend(target, { type: 'signal', code: meta.code, data: msg.data, from: meta.role, fromClientId: clientId });
+        const target = getLocalLegacyBinding(meta.code, targetRole);
+        const forwarded = { type: 'signal', code: meta.code, data: msg.data, from: meta.role, fromClientId: clientId };
+        if (target) {
+          wsSend(target, forwarded);
+        } else {
+          const binding = await signalingState.getLegacyBinding(meta.code, targetRole);
+          if (binding?.instanceId && binding.instanceId !== INSTANCE_ID) {
+            await signalingState.publishToInstance(binding.instanceId, {
+              kind: 'legacy-forward',
+              code: meta.code,
+              targetRole,
+              message: forwarded
+            });
+          }
+        }
         break;
       }
 
       case 'ice': {
         // { type:'ice', candidate, targetRole }
         if (!meta.code || !meta.role) return wsSend(ws, { type: 'error', error: 'not_bound' });
-        const item = getItemByCode(meta.code);
+        const item = await getItemByCode(meta.code);
         if (!item) return wsSend(ws, { type: 'error', error: 'code_not_found' });
 
         const targetRole = msg.targetRole === 'initiator' ? 'initiator' : 'responder';
-        const target = targetRole === 'initiator' ? item.wsInitiator : item.wsResponder;
-
-        wsSend(target, { type: 'ice', code: meta.code, candidate: msg.candidate, from: meta.role });
+        const target = getLocalLegacyBinding(meta.code, targetRole);
+        const forwarded = { type: 'ice', code: meta.code, candidate: msg.candidate, from: meta.role };
+        if (target) {
+          wsSend(target, forwarded);
+        } else {
+          const binding = await signalingState.getLegacyBinding(meta.code, targetRole);
+          if (binding?.instanceId && binding.instanceId !== INSTANCE_ID) {
+            await signalingState.publishToInstance(binding.instanceId, {
+              kind: 'legacy-forward',
+              code: meta.code,
+              targetRole,
+              message: forwarded
+            });
+          }
+        }
         break;
       }
 
@@ -742,14 +1181,28 @@ wss.on('connection', (ws, req) => {
         if (!meta.code || !meta.role) return wsSend(ws, { type: 'error', error: 'not_bound' });
         if (meta.role !== 'responder') return wsSend(ws, { type: 'error', error: 'bad_role' });
 
-        const item = getItemByCode(meta.code);
+        const item = await getItemByCode(meta.code);
         if (!item) return wsSend(ws, { type: 'error', error: 'code_not_found' });
         if (!isPlainObject(msg.answer)) return wsSend(ws, { type: 'error', error: 'bad_answer' });
 
-        item.answer = msg.answer;
-        item.answerFrom = (typeof msg.deviceId === 'string' && msg.deviceId.length <= 128) ? msg.deviceId : 'responder';
+        const answerFrom = (typeof msg.deviceId === 'string' && msg.deviceId.length <= 128) ? msg.deviceId : 'responder';
+        await signalingState.storeAnswer(meta.code, msg.answer, answerFrom, answerFrom);
 
-        wsSend(item.wsInitiator, { type: 'answer', code: meta.code, answer: item.answer, from: item.answerFrom });
+        const forwarded = { type: 'answer', code: meta.code, answer: msg.answer, from: answerFrom };
+        const target = getLocalLegacyBinding(meta.code, 'initiator');
+        if (target) {
+          wsSend(target, forwarded);
+        } else {
+          const binding = await signalingState.getLegacyBinding(meta.code, 'initiator');
+          if (binding?.instanceId && binding.instanceId !== INSTANCE_ID) {
+            await signalingState.publishToInstance(binding.instanceId, {
+              kind: 'legacy-forward',
+              code: meta.code,
+              targetRole: 'initiator',
+              message: forwarded
+            });
+          }
+        }
         wsSend(ws, { type: 'ok', what: 'answer_saved' });
         break;
       }
@@ -757,19 +1210,26 @@ wss.on('connection', (ws, req) => {
       default:
         wsSend(ws, { type: 'error', error: 'unknown_type' });
     }
+    })().catch((error) => {
+      console.error('[WS] message handling failed:', error);
+      try { wsSend(ws, { type: 'error', error: 'server_error' }); } catch {}
+    });
   });
 
   ws.on('close', () => {
+    void (async () => {
     const meta = wsMeta.get(ws);
     // Cleanup room membership for the new envelope protocol.
-    removeFromAllRooms(ws);
+    await removeFromAllRooms(ws);
     if (meta && meta.code) {
-      const item = connectionCodes.get(meta.code);
-      if (item) {
-        if (item.wsInitiator === ws) item.wsInitiator = null;
-        if (item.wsResponder === ws) item.wsResponder = null;
+      if (meta.role === 'initiator' || meta.role === 'responder') {
+        clearLocalLegacyBinding(meta.code, meta.role, ws);
+        await signalingState.removeLegacyBinding(meta.code, meta.role, meta.clientId || '');
       }
     }
+    })().catch((error) => {
+      console.error('[WS] close cleanup failed:', error);
+    });
   });
 
   ws.on('error', () => {});
@@ -789,34 +1249,47 @@ const heartbeatTimer = setInterval(() => {
 
 // -------------------- Sweeper --------------------
 const sweepTimer = setInterval(() => {
-  const t = now();
-
-  // expire codes
-  for (const [code, item] of connectionCodes) {
-    if (t > item.expiresAt) dropCode(code, 'expired');
-  }
-
-  // expire ICE sessions
-  for (const [sid, arr] of iceCandidates) {
-    const kept = arr.filter(x => (t - x.timestamp) <= ICE_TTL_MS);
-    if (kept.length === 0) iceCandidates.delete(sid);
-    else iceCandidates.set(sid, kept);
-  }
+  void signalingState.sweepExpired().catch((error) => {
+    console.error('[sweeper] failed:', error);
+  });
 }, SWEEP_INTERVAL_MS);
 
-process.on('SIGINT', () => {
+let shuttingDown = false;
+async function shutdown() {
+  if (shuttingDown) return;
+  shuttingDown = true;
   clearInterval(heartbeatTimer);
   clearInterval(sweepTimer);
+  await signalingState.close().catch((error) => {
+    console.error('[shutdown] backend close failed:', error);
+  });
   server.close(() => process.exit(0));
+}
+
+process.on('SIGINT', () => {
+  void shutdown();
+});
+process.on('SIGTERM', () => {
+  void shutdown();
 });
 
 // -------------------- Start --------------------
-server.listen(PORT, HOST, () => {
-  console.log('========================================');
-  console.log('SkyBridge Signaling Server');
-  console.log(`Mode: ${USE_NODE_HTTPS ? 'HTTPS' : 'HTTP'}  listening on ${HOST}:${PORT}`);
-  console.log(`WS:   ${USE_NODE_HTTPS ? 'wss' : 'ws'}://<host>:${PORT}/ws`);
-  console.log(`TTL:  code=${Math.round(CODE_TTL_MS / 1000)}s  ice=${Math.round(ICE_TTL_MS / 1000)}s`);
-  console.log(`Security: ALLOW_INSECURE=${ALLOW_INSECURE} WS_MAX_MSG_BYTES=${WS_MAX_MSG_BYTES} WS_MAX_MSGS_PER_10S=${WS_MAX_MSGS_PER_10S} WS_MAX_CLIENTS_PER_ROOM=${WS_MAX_CLIENTS_PER_ROOM}`);
-  console.log('========================================');
+(async () => {
+  await signalingState.init(handleBackendInstanceMessage);
+  server.listen(PORT, HOST, () => {
+    console.log('========================================');
+    console.log('SkyBridge Signaling Server');
+    console.log(`Mode: ${USE_NODE_HTTPS ? 'HTTPS' : 'HTTP'}  listening on ${HOST}:${PORT}`);
+    console.log(`Instance: ${INSTANCE_ID}  stateBackend=${SIGNALING_STATE_BACKEND}  stickyHintCookie=${ENABLE_STICKY_HINT_COOKIE ? STICKY_HINT_COOKIE_NAME : 'disabled'}  codePrefixes=${INSTANCE_CODE_PREFIXES || 'auto-any'}`);
+    if (SIGNALING_STATE_BACKEND === 'redis') {
+      console.log(`Redis: ${SIGNALING_REDIS_URL}  keyPrefix=${SIGNALING_REDIS_KEY_PREFIX}  channelPrefix=${SIGNALING_REDIS_CHANNEL_PREFIX}`);
+    }
+    console.log(`WS:   ${USE_NODE_HTTPS ? 'wss' : 'ws'}://<host>:${PORT}/ws`);
+    console.log(`TTL:  code=${Math.round(CODE_TTL_MS / 1000)}s  ice=${Math.round(ICE_TTL_MS / 1000)}s  room=${Math.round(ROOM_MEMBERSHIP_TTL_MS / 1000)}s`);
+    console.log(`Security: ALLOW_INSECURE=${ALLOW_INSECURE} WS_MAX_MSG_BYTES=${WS_MAX_MSG_BYTES} WS_MAX_MSGS_PER_10S=${WS_MAX_MSGS_PER_10S} WS_MAX_CLIENTS_PER_ROOM=${WS_MAX_CLIENTS_PER_ROOM}`);
+    console.log('========================================');
+  });
+})().catch((error) => {
+  console.error('[startup] failed:', error);
+  process.exit(1);
 });

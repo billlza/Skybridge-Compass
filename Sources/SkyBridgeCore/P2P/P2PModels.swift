@@ -293,8 +293,8 @@ public struct P2PDevice: Codable, Identifiable, Hashable, Sendable {
         self.port = deviceInfo.port
         self.osVersion = deviceInfo.osVersion
         self.capabilities = deviceInfo.capabilities
- // Swift 6.2.1：公钥数据在发现阶段暂不可用，将在安全握手时获取
- // 实际的公钥交换发生在 P2PSecurityManager.establishSessionKey 中
+ // Swift 6.2.1：公钥数据在发现阶段暂不可用，将在协议握手阶段获取
+ // 实际的公钥/身份绑定发生在 HandshakeDriver / TwoAttemptHandshakeManager 主路径中
         self.publicKey = Data()
         self.lastSeen = Date()
         self.lastMessageTimestamp = nil

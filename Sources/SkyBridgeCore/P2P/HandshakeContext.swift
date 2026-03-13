@@ -64,6 +64,8 @@ public actor HandshakeContext {
 
     private let cryptoPolicy: CryptoPolicy
 
+    private let kemIdentityStore: any HandshakeKEMIdentityStore
+
  /// 对端 KEM 身份公钥（按套件）
     private let peerKEMPublicKeys: [CryptoSuite: Data]
 
@@ -125,6 +127,7 @@ public actor HandshakeContext {
         sePoPSignatureProvider: (any SePoPSignatureProvider)?,
         classicProvider: any CryptoProvider,
         cryptoPolicy: CryptoPolicy,
+        kemIdentityStore: any HandshakeKEMIdentityStore,
         localCapabilities: CryptoCapabilities,
         peerKEMPublicKeys: [CryptoSuite: Data]
     ) {
@@ -136,6 +139,7 @@ public actor HandshakeContext {
         self.sePoPSignatureProvider = sePoPSignatureProvider
         self.classicProvider = classicProvider
         self.cryptoPolicy = cryptoPolicy
+        self.kemIdentityStore = kemIdentityStore
         self.localCapabilities = localCapabilities
         self.peerKEMPublicKeys = peerKEMPublicKeys
     }
@@ -161,6 +165,7 @@ public actor HandshakeContext {
         protocolSignatureProvider: (any ProtocolSignatureProvider)? = nil,
         sePoPSignatureProvider: (any SePoPSignatureProvider)? = nil,
         cryptoPolicy: CryptoPolicy = .default,
+        kemIdentityStore: (any HandshakeKEMIdentityStore)? = nil,
         peerKEMPublicKeys: [CryptoSuite: Data] = [:]
     ) async throws -> HandshakeContext {
  // 获取本地能力
@@ -194,6 +199,7 @@ public actor HandshakeContext {
             sePoPSignatureProvider: sePoPSignatureProvider,
             classicProvider: classicProvider,
             cryptoPolicy: cryptoPolicy,
+            kemIdentityStore: kemIdentityStore ?? DefaultHandshakeKEMIdentityStore(),
             localCapabilities: localCapabilities,
             peerKEMPublicKeys: peerKEMPublicKeys
         )
@@ -493,8 +499,7 @@ public actor HandshakeContext {
                 throw HandshakeError.invalidState("Missing KEM key share for \(selectedSuite.rawValue)")
             }
 
-            let keyManager = DeviceIdentityKeyManager.shared
-            let localKEM = try await keyManager.getOrCreateKEMIdentityKey(
+            let localKEM = try await kemIdentityStore.getOrCreateKEMIdentityKey(
                 for: selectedSuite.canonicalKEMSuite,
                 provider: provider
             )

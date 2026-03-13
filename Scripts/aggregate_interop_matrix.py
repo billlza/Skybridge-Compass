@@ -83,8 +83,16 @@ def load_measured_rows(path: Path) -> List[Dict[str, str]]:
 
 def load_static_rows(path: Path) -> List[Dict[str, str]]:
     if not path.exists():
-        return []
+        raise FileNotFoundError(
+            f"Missing interop consistency artifact: {path}. "
+            "Run Scripts/check_cross_platform_interop.py first."
+        )
     payload = json.loads(path.read_text(encoding="utf-8"))
+    if payload.get("status", "").lower() != "pass":
+        raise ValueError(
+            "Interop consistency artifact is not PASS; refusing to build a mixed evidence table. "
+            f"Blockers: {payload.get('blockers', [])}"
+        )
     is_pass = payload.get("status", "").lower() == "pass"
     success = "1.0000" if is_pass else "0.0000"
     source = path.name
@@ -227,7 +235,13 @@ def main() -> int:
     measured_rows: List[Dict[str, str]] = []
     for summary_path in summary_inputs:
         measured_rows.extend(load_measured_rows(summary_path))
-    static_rows = load_static_rows(interop_json)
+
+    try:
+        static_rows = load_static_rows(interop_json)
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"[interop-matrix] FAIL: {exc}")
+        return 1
+
     all_rows = measured_rows + static_rows
 
     write_csv(out_csv, all_rows)

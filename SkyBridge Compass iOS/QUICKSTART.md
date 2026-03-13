@@ -35,6 +35,14 @@ Xcode 会自动打开并配置项目。
 - **`Info.plist`**（Xcode 工程 App target 的 Info.plist 里写的键）
 - **`SupabaseConfig.plist`**（仅在 **打开 `Package.swift`** 作为 SwiftPM 运行时生效，`Bundle.module` 读取）
 
+## Nebula 配置（与 macOS 共用键名）
+
+- `NEBULA_BASE_URL`
+- `NEBULA_CLIENT_ID`
+- `NEBULA_CLIENT_SECRET`（可选）
+
+推荐只在客户端配置前两个；`NEBULA_CLIENT_SECRET` 仅用于旧后端兼容或本地联调。
+
 ## 🎯 第一次使用
 
 ### 应用启动后

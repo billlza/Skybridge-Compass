@@ -29,8 +29,8 @@
 
 /* Smart Code */
 "connection.smartCode.title" = "智能连接码";
-"connection.smartCode.fullDescription" = "生成6位字母数字连接码，适用于所有场景。支持 P2P 直连和智能中继。";
-"connection.smartCode.highlight" = "✨ 创新点：短码 + 智能路由 + 10分钟有效期";
+"connection.smartCode.fullDescription" = "生成服务端签发的短期连接码，适用于所有场景。支持 P2P 直连、TURN 中继与短期信令鉴权。";
+"connection.smartCode.highlight" = "✨ 创新点：短期连接码 + 智能路由 + 信令鉴权";
 "connection.device.this" = "在此设备上";
 "connection.smartCode.shareInstruction" = "分享此码以连接";
 "connection.copy" = "复制";
@@ -255,7 +255,7 @@
 
 /* Smart Code */
 "discovery.smartCode.title" = "智能连接码";
-"discovery.smartCode.description" = "6位短码，10分钟有效期，适用于远程协助";
+"discovery.smartCode.description" = "服务端签发的短期连接码，适用于远程协助";
 "discovery.smartCode.onThisDevice" = "在此设备上";
 "discovery.smartCode.shareInstruction" = "将此连接码告知对方";
 "discovery.smartCode.copy" = "复制";
@@ -272,7 +272,7 @@
 "discovery.mode.subtitle.localScan" = "同网络";
 "discovery.mode.subtitle.qrCode" = "扫一扫";
 "discovery.mode.subtitle.cloudLink" = "零配置";
-"discovery.mode.subtitle.connectionCode" = "6位短码";
+"discovery.mode.subtitle.connectionCode" = "短期连接码";
 
 /* Cloud Link Section */
 "discovery.icloud.status.syncing" = "同步中...";
@@ -300,7 +300,7 @@
 "discovery.capability.messages" = "消息";
 
 /* Smart Code Section (Additional) */
-"discovery.code.enterPrompt" = "输入6位连接码";
+"discovery.code.enterPrompt" = "输入连接码";
 "discovery.code.connect" = "连接";
 
 /* User Profile */

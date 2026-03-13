@@ -98,7 +98,6 @@ public enum HandshakePadding {
         let bundleId = Bundle.main.bundleIdentifier
         if cfg.debugLog {
             let msg = "🧪 HandshakePadding debug ON (bundle=\(bundleId ?? "unknown.bundle"), mode=\(cfg.mode.rawValue), fixed=\(cfg.fixedSizeBytes))"
-            SkyBridgeLogger.p2p.info("\(msg, privacy: .public)")
             print(msg)
         } else {
             // Useful when users enabled padding but forgot to enable debug logging in the correct defaults domain.
@@ -108,7 +107,6 @@ public enum HandshakePadding {
             } else {
                 msg = "ℹ️ HandshakePadding enabled (bundleId unavailable, mode=\(cfg.mode.rawValue)). Enable logs via App Group: defaults write group.com.skybridge.compass sb_handshake_padding_debug_log -bool true  (or set env: SB_HANDSHAKE_PADDING_DEBUG_LOG=1)"
             }
-            SkyBridgeLogger.p2p.info("\(msg, privacy: .public)")
             print(msg)
         }
     }
@@ -142,10 +140,6 @@ public enum HandshakePadding {
             let name = label ?? "handshake"
             let capDescription = effectiveCap.map { ", cap=\($0)B" } ?? ""
             let msg = "🧪 Padding[\(name)]: raw=\(payload.count)B -> padded=\(out.count)B (mode=\(cfg.mode.rawValue)\(capDescription))"
-            // debugOnly 可能在某些 Console/Xcode 过滤下不可见；这里额外用 info 输出（仅在开关打开时）
-            SkyBridgeLogger.p2p.debugOnly(msg)
-            SkyBridgeLogger.p2p.info("\(msg, privacy: .public)")
-            // 最稳：stdout 不受 OSLog 类型过滤影响（仅在开关打开时）
             print(msg)
         }
 
@@ -171,8 +165,6 @@ public enum HandshakePadding {
         if cfg.debugLog {
             let name = label ?? "handshake"
             let msg = "🧪 Unwrap[\(name)]: total=\(data.count)B -> raw=\(payload.count)B"
-            SkyBridgeLogger.p2p.debugOnly(msg)
-            SkyBridgeLogger.p2p.info("\(msg, privacy: .public)")
             print(msg)
         }
 

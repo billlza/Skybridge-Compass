@@ -19,100 +19,10 @@
 
 import Foundation
 import CryptoKit
+import SkyBridgeProtocolCore
 #if canImport(Security)
 import Security
 #endif
-
-// MARK: - SignatureAlgorithm
-
-/// 签名算法枚举（Wire 层，包含 P-256 用于 Codable 兼容）
-public enum SignatureAlgorithm: String, Codable, Sendable, Equatable {
- /// Ed25519（Classic suite）
-    case ed25519 = "Ed25519"
-
- /// ML-DSA-65（PQC suite）
-    case mlDSA65 = "ML-DSA-65"
-
- /// P-256 ECDSA（Legacy / SE PoP）
-    case p256ECDSA = "P-256-ECDSA"
-
- /// 根据 CryptoSuite 获取签名算法
- /// - Parameter suite: 加密套件
- /// - Returns: 对应的签名算法
-    public static func forSuite(_ suite: CryptoSuite) -> SignatureAlgorithm {
- // isPQC 涵盖 PQC + Hybrid suites
-        if suite.isPQC || suite.isHybrid {
-            return .mlDSA65
-        } else {
-            return .ed25519
-        }
-    }
-
- /// Wire code for canonical transcript encoding
-    public var wireCode: UInt16 {
-        switch self {
-        case .ed25519: return 0x0001
-        case .mlDSA65: return 0x0002
-        case .p256ECDSA: return 0x0003
-        }
-    }
-}
-
-// MARK: - ProtocolSigningAlgorithm
-
-/// 协议签名算法（类型层面排除 P-256）
-///
-/// **设计原则**: 从类型系统层面保证 P-256 不能参与主协议签名 (sigA/sigB)
-/// - 只有 ed25519 和 mlDSA65 两个 case
-/// - 比 runtime precondition 强一万倍
-/// - P-256 只能用于 seSig 和 legacy 验证
-///
-/// **Requirements: 1.1, 1.2, 3.4, 3.5**
-public enum ProtocolSigningAlgorithm: String, Codable, Sendable, Hashable {
- /// Ed25519（Classic suite）
-    case ed25519 = "Ed25519"
-
- /// ML-DSA-65（PQC suite）
-    case mlDSA65 = "ML-DSA-65"
-
- /// 转换为通用 SignatureAlgorithm（用于 wire 层）
-    public var wire: SignatureAlgorithm {
-        switch self {
-        case .ed25519: return .ed25519
-        case .mlDSA65: return .mlDSA65
-        }
-    }
-
- /// 从通用 SignatureAlgorithm 转换（可能失败）
- /// - Returns: nil if algorithm is .p256ECDSA
-    public init?(from wire: SignatureAlgorithm) {
-        switch wire {
-        case .ed25519: self = .ed25519
-        case .mlDSA65: self = .mlDSA65
-        case .p256ECDSA: return nil  // P-256 不允许用于协议签名
-        }
-    }
-
- /// Wire code for canonical transcript encoding
-    public var wireCode: UInt16 {
-        switch self {
-        case .ed25519: return 0x0001
-        case .mlDSA65: return 0x0002
-        }
-    }
-
- /// 根据 CryptoSuite 获取协议签名算法
- /// - Parameter suite: 加密套件
- /// - Returns: 对应的协议签名算法
-    public static func forSuite(_ suite: CryptoSuite) -> ProtocolSigningAlgorithm {
- // isPQC 涵盖 PQC + Hybrid suites (isPQCGroup 将在 3 实现)
-        if suite.isPQC || suite.isHybrid {
-            return .mlDSA65
-        } else {
-            return .ed25519
-        }
-    }
-}
 
 // MARK: - SignatureProvider Protocol
 

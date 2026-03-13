@@ -10,6 +10,7 @@ public struct APIKeyManagementView: View {
     @State private var supabaseURL = ""
     @State private var supabaseAnonKey = ""
     @State private var supabaseServiceKey = ""
+    @State private var nebulaBaseURL = ""
     @State private var nebulaClientID = ""
     @State private var nebulaClientSecret = ""
     @State private var smsAccessKeyID = ""
@@ -79,6 +80,17 @@ public struct APIKeyManagementView: View {
  // Nebula配置
                 Section("Nebula配置") {
                     APIKeyRow(
+                        title: "服务地址",
+                        value: $nebulaBaseURL,
+                        placeholder: "输入 Nebula Base URL",
+                        onSave: { _ in
+                            Task {
+                                await saveNebulaConfig()
+                            }
+                        }
+                    )
+
+                    APIKeyRow(
                         title: "客户端ID",
                         value: $nebulaClientID,
                         placeholder: "输入Nebula客户端ID",
@@ -90,10 +102,10 @@ public struct APIKeyManagementView: View {
                     )
                     
                     APIKeyRow(
-                        title: "客户端密钥",
+                        title: "客户端密钥（可选）",
                         value: $nebulaClientSecret,
-                        placeholder: "输入Nebula客户端密钥",
-                        onSave: { secret in
+                        placeholder: "旧后端兼容用，可留空",
+                        onSave: { _ in
                             Task {
                                 await saveNebulaConfig()
                             }
@@ -201,9 +213,11 @@ public struct APIKeyManagementView: View {
             
             do {
                 let nebulaConfig = try keychain.retrieveNebulaConfig()
+                nebulaBaseURL = nebulaConfig.baseURL.isEmpty ? "" : "••••••••"
                 nebulaClientID = nebulaConfig.clientId.isEmpty ? "" : "••••••••"
-                nebulaClientSecret = nebulaConfig.clientSecret.isEmpty ? "" : "••••••••"
+                nebulaClientSecret = (nebulaConfig.clientSecret?.isEmpty == false) ? "••••••••" : ""
             } catch {
+                nebulaBaseURL = ""
                 nebulaClientID = ""
                 nebulaClientSecret = ""
             }
@@ -278,18 +292,32 @@ public struct APIKeyManagementView: View {
         await MainActor.run {
             do {
  // 获取当前配置用于保留未修改的值
+                var currentBaseURL = ""
                 var currentClientId = ""
-                var currentClientSecret = ""
+                var currentClientSecret: String? = nil
                 
                 if let currentConfig = try? keychain.retrieveNebulaConfig() {
+                    currentBaseURL = currentConfig.baseURL
                     currentClientId = currentConfig.clientId
                     currentClientSecret = currentConfig.clientSecret
                 }
                 
+                let finalBaseURL = nebulaBaseURL == "••••••••" ? currentBaseURL : nebulaBaseURL
                 let finalClientId = nebulaClientID == "••••••••" ? currentClientId : nebulaClientID
-                let finalClientSecret = nebulaClientSecret == "••••••••" ? currentClientSecret : nebulaClientSecret
+                let finalClientSecret = nebulaClientSecret == "••••••••" ? currentClientSecret : (nebulaClientSecret.isEmpty ? nil : nebulaClientSecret)
+
+                guard let url = URL(string: finalBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)),
+                      let scheme = url.scheme?.lowercased(),
+                      (scheme == "https" || scheme == "http"),
+                      let host = url.host,
+                      !host.isEmpty else {
+                    throw NSError(domain: "NebulaConfig", code: -10, userInfo: [NSLocalizedDescriptionKey: "Nebula Base URL 无效"])
+                }
+                guard !finalClientId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    throw NSError(domain: "NebulaConfig", code: -11, userInfo: [NSLocalizedDescriptionKey: "Nebula 客户端ID不能为空"])
+                }
                 
-                try keychain.storeNebulaConfig(clientId: finalClientId, clientSecret: finalClientSecret)
+                try keychain.storeNebulaConfig(baseURL: finalBaseURL, clientId: finalClientId, clientSecret: finalClientSecret)
                 alertMessage = "Nebula配置保存成功"
                 logger.info("Nebula配置已保存到Keychain")
             } catch {
@@ -361,12 +389,17 @@ public struct APIKeyManagementView: View {
         }
         
  // 迁移Nebula配置
+        let nebulaBaseURL = ProcessInfo.processInfo.environment["NEBULA_BASE_URL"] ?? ""
         let nebulaClientID = ProcessInfo.processInfo.environment["NEBULA_CLIENT_ID"] ?? ""
         let nebulaClientSecret = ProcessInfo.processInfo.environment["NEBULA_CLIENT_SECRET"] ?? ""
         
-        if !nebulaClientID.isEmpty && !nebulaClientSecret.isEmpty {
+        if !nebulaBaseURL.isEmpty && !nebulaClientID.isEmpty {
             do {
-                try keychain.storeNebulaConfig(clientId: nebulaClientID, clientSecret: nebulaClientSecret)
+                try keychain.storeNebulaConfig(
+                    baseURL: nebulaBaseURL,
+                    clientId: nebulaClientID,
+                    clientSecret: nebulaClientSecret.isEmpty ? nil : nebulaClientSecret
+                )
                 migratedCount += 1
             } catch {
                 logger.error("迁移Nebula配置失败: \(error.localizedDescription)")
@@ -416,6 +449,7 @@ public struct APIKeyManagementView: View {
         }
         
         do {
+            try keychain.deleteAPIKey(service: "SkyBridge.Nebula", account: "BaseURL")
             try keychain.deleteAPIKey(service: "SkyBridge.Nebula", account: "ClientId")
             try keychain.deleteAPIKey(service: "SkyBridge.Nebula", account: "ClientSecret")
             clearedCount += 1

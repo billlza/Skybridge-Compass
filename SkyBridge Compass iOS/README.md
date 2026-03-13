@@ -132,6 +132,22 @@ open SkyBridgeCompass-iOS.xcodeproj
 
 注意：`SUPABASE_SERVICE_ROLE_KEY` 属于服务端密钥，**不建议放在客户端**；如需调试，请仅在本地 Keychain 配置并避免提交到仓库。
 
+## Nebula 配置
+
+iOS 端已与 macOS 对齐同一组 Nebula 键：
+
+- `NEBULA_BASE_URL`
+- `NEBULA_CLIENT_ID`
+- `NEBULA_CLIENT_SECRET`（可选，仅兼容旧后端）
+
+读取优先级：
+
+- Keychain
+- 环境变量
+- `Info.plist`
+
+建议默认只配置 `NEBULA_BASE_URL` 和 `NEBULA_CLIENT_ID`；不要把长期 `NEBULA_CLIENT_SECRET` 打进客户端包体。
+
 ## 核心功能实现状态
 
 - [x] 项目结构创建

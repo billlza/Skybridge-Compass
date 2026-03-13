@@ -36,13 +36,40 @@ SkyBridge Compass Pro 是一个以 **跨平台协议内核（SkyBridgeCore）** 
 
 `Scripts/build_with_widgets.sh` 与 `run_app.sh` 会自动检测 macOS SDK 版本（>=26）并设置该变量。
 
+## Nebula 配置最佳实践
+
+Nebula 原生客户端现统一使用以下配置键：
+
+- `NEBULA_BASE_URL`
+- `NEBULA_CLIENT_ID`
+- `NEBULA_CLIENT_SECRET`（可选，仅兼容旧后端）
+
+读取优先级：
+
+- Keychain
+- 环境变量
+- `Info.plist`
+- `NebulaConfig.plist`（可选）
+
+推荐做法：
+
+- 在客户端把 `NEBULA_BASE_URL` 和 `NEBULA_CLIENT_ID` 作为常规配置。
+- 不要把长期 `NEBULA_CLIENT_SECRET` 固化进仓库或 App 包；仅在本地调试或旧后端过渡期通过环境变量/Keychain 注入。
+- 真实 Nebula 后端应迁移为 OAuth 2.1 public client + PKCE；本仓库提供迁移说明 [Docs/Nebula-Public-Client-PKCE-Migration.md](Docs/Nebula-Public-Client-PKCE-Migration.md) 与参考服务 [Server/nebula-auth-reference/README.md](Server/nebula-auth-reference/README.md)。
+
 ## 跨网连接（WebRTC + TURN，面向“普通用户零配置”路线）
 
 本项目的跨网连接方向是 **WebRTC DataChannel + ICE**（优先直连，失败自动走 TURN 中继），避免让用户安装 VPN 或导入配置文件。
 
-- **实现入口**：`Sources/SkyBridgeCore/RemoteConnection/CrossNetworkConnectionManager.swift`（已开始落地 offer/answer/ICE 信令与 DataChannel 传输层）
+- **实现入口**：`Sources/SkyBridgeCore/RemoteConnection/CrossNetworkConnectionManager.swift`（当前主路径已使用服务端签发短期 token 的 offer/answer/ICE 信令与 DataChannel 传输层）
 - **信令地址**：`Sources/SkyBridgeCore/Config/ServerConfig.swift` 中的 `SkyBridgeServerConfig.signalingWebSocketURL`
 - **TURN/STUN**：同上 `SkyBridgeServerConfig.stunURL / turnURLs`（默认 `turns:5349` 优先，`turn:3478` 兜底）
+
+当前 WebRTC 信令主路径：
+
+- **连接码模式**：发起端先调用 `/api/webrtc/register-code` 获取服务端签发的短期连接码（默认 8 位）和 `initiatorToken`；输入端调用 `/api/webrtc/lookup/:code` 获取 `responderToken`。
+- **二维码模式**：发起端先调用 `/api/webrtc/register-session` 获取服务端签发的 `sessionId` 与短期 `signalingToken`，再把它封装进二维码 payload。
+- **WebSocket 鉴权**：`/ws?shard=<sessionId>` 只转发已注册会话；每个 WebRTC envelope 都携带短期 token，服务端验证后才允许 `join/offer/answer/ice/leave`。
 
 ### 服务器端口（EC2 安全组建议）
 
@@ -77,7 +104,7 @@ bash Server/skybridge-signaling/deploy/scripts/deploy_remote.sh \
 上线前建议额外执行 TURN/TLS 回归脚本：
 
 ```bash
-TURN_CLIENT_API_KEY=<same-as-production.env> \
+TURN_CLIENT_API_KEY=<deployment-specific value from production.env> \
 bash Scripts/check_turn_tls_regression.sh https://api.nebula-technologies.net
 ```
 
@@ -110,20 +137,23 @@ swift test
 论文中标注的 artifact 信息如下（供 reviewer/编辑核对）：
 
 - URL：`https://github.com/billlza/Skybridge-Compass`
-- Git ref：`7df9344ca0b0`
-- Commit：`7df9344ca0b03779cef27d9c9dc2429422c16254`（short=`7df9344ca0b0`）
+- Git ref：`6576e954a5bb`
+- Commit：`6576e954a5bb7b9c42a367ba43f086d383e5f495`（short=`6576e954a5bb`）
 
 Source archive checksums（immutability 辅助证据）：
 
-- `7df9344ca0b0.zip`：`SHA256=3e1cbfaca17856f9632b26d66e13d29380a3831be74999a4e343e577376d988e`
-- `7df9344ca0b0.tar.gz`：`SHA256=ae0b77b2eff3496772ae49aea92cac24782628849c1eaa0968a75a50a15880b5`
+- `6576e954a5bb.zip`：`SHA256=8b56831681518171af8466910bd8893a8831293626241f7a416b2522afe4ef42`
+- `6576e954a5bb.tar.gz`：`SHA256=fe6088e46a9da6103ad6d1d58aebb6543cbb1a0c5370232b53a6e24687fa3b33`
+
+说明：
+- 本仓库仍在持续演进；如需形成新的投稿/归档快照，请在最终提交前重新刷新 `artifact` pin 与归档校验和。
 
 最小复核流程（需要本机已安装 Xcode/Swift 与 TeXLive；PQC SDK 仅在 macOS 26+ 可用）：
 
 ```bash
 git clone https://github.com/billlza/Skybridge-Compass
 cd Skybridge-Compass
-git checkout 7df9344ca0b03779cef27d9c9dc2429422c16254
+git checkout 6576e954a5bb7b9c42a367ba43f086d383e5f495
 
 git rev-parse HEAD
 git describe --tags --always
@@ -217,8 +247,8 @@ ARTIFACT_DATE=2026-01-23 python3 Scripts/aggregate_kernel_emulation.py
 
 预期输出（关键点）：
 
-- `git rev-parse HEAD` 应为 `7df9344ca0b03779cef27d9c9dc2429422c16254`
-- `git describe --tags --always` 应包含 `7df9344`（等价短 SHA 形式也可）
+- `git rev-parse HEAD` 应为 `6576e954a5bb7b9c42a367ba43f086d383e5f495`
+- `git describe --tags --always` 应包含 `6576e954`（等价短 SHA 形式也可）
 - 生成的 PDF：`Docs/TDSC-2026-01-0318_IEEE_Paper_SkyBridge_Compass_patched.pdf` 与 `Docs/TDSC-2026-01-0318_supplementary.pdf`
 - CSV 输出目录：`Artifacts/`
 

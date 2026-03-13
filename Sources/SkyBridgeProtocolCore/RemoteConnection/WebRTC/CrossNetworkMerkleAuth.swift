@@ -1,11 +1,11 @@
 import Foundation
 import CryptoKit
 
-enum CrossNetworkMerkleAuth {
-    static let signatureAlgV1 = "hmac-sha256-session-v1"
+public enum CrossNetworkMerkleAuth {
+    public static let signatureAlgV1 = "hmac-sha256-session-v1"
 
     // Must match Android MerkleRootAuthV1.preimage
-    static func preimage(transferId: String, merkleRoot: Data, fileSha256: Data?) -> Data {
+    public static func preimage(transferId: String, merkleRoot: Data, fileSha256: Data?) -> Data {
         var out = Data()
         out.append("SkyBridge-MerkleRoot|v1|".data(using: .utf8)!)
 
@@ -22,7 +22,7 @@ enum CrossNetworkMerkleAuth {
         return out
     }
 
-    static func hmacSha256(key: Data, data: Data) -> Data {
+    public static func hmacSha256(key: Data, data: Data) -> Data {
         let k = SymmetricKey(data: key)
         let mac = HMAC<SHA256>.authenticationCode(for: data, using: k)
         return Data(mac)
@@ -33,5 +33,4 @@ enum CrossNetworkMerkleAuth {
         return Data(bytes: &x, count: 2)
     }
 }
-
 

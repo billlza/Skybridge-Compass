@@ -516,6 +516,7 @@ public struct ExtractionResult: Sendable {
         case depthExceeded = "depth_exceeded"
         case compressionRatioSuspicious = "compression_ratio_suspicious"
         case timeoutExceeded = "timeout_exceeded"
+        case unsafePath = "unsafe_path"
         case unsupportedFormat = "unsupported_format"
         case extractionError = "extraction_error"
     }
@@ -683,31 +684,25 @@ public actor ArchiveExtractor {
             )
         }
         
- // Extract using Foundation's Archive API (available in macOS 12+)
+        return await extractZipEntries(from: url, to: destination, compressedSize: compressedSize)
+    }
+    
+ /// Extract ZIP entries with limit checking
+    private func extractZipEntries(from url: URL, to destination: URL, compressedSize: Int64) async -> ExtractionResult {
+ // First, list entries to check limits before extraction.
+ // We only materialize validated relative paths and never ask `unzip` to recreate archive paths directly,
+ // which prevents malicious symlink and traversal entries from escaping the extraction root.
+        let entries: [ZipEntry]
         do {
-            let result = try await extractZipEntries(from: url, to: destination, compressedSize: compressedSize)
-            return result
-        } catch let error as ExtractionAbortError {
-            return .aborted(
-                urls: [],
-                reason: error.reason,
-                format: .zip,
-                stats: makeStats(compressedSize: compressedSize, ratio: calculateCurrentRatio(compressedSize: compressedSize))
-            )
+            entries = try listZipEntries(from: url)
         } catch {
             return .aborted(
                 urls: [],
                 reason: .extractionError,
                 format: .zip,
-                stats: makeStats(compressedSize: compressedSize, ratio: calculateCurrentRatio(compressedSize: compressedSize))
+                stats: makeStats(compressedSize: compressedSize, ratio: 0)
             )
         }
-    }
-    
- /// Extract ZIP entries with limit checking
-    private func extractZipEntries(from url: URL, to destination: URL, compressedSize: Int64) async throws -> ExtractionResult {
- // First, list entries to check limits before extraction
-        let entries = try listZipEntries(from: url)
         
  // Pre-check limits
         var totalBytes: Int64 = 0
@@ -715,11 +710,19 @@ public actor ArchiveExtractor {
         var fileCount = 0
         
         for entry in entries {
+            guard let validatedPath = validatedRelativePath(entry.path) else {
+                return .aborted(
+                    urls: [],
+                    reason: .unsafePath,
+                    format: .zip,
+                    stats: makeStats(compressedSize: compressedSize, ratio: 0)
+                )
+            }
             if !entry.isDirectory {
                 fileCount += 1
                 totalBytes += entry.uncompressedSize
             }
-            let depth = entry.path.components(separatedBy: "/").filter { !$0.isEmpty }.count - 1
+            let depth = max(0, validatedPath.components(separatedBy: "/").count - 1)
             maxDepth = max(maxDepth, depth)
         }
         
@@ -764,64 +767,53 @@ public actor ArchiveExtractor {
             )
         }
         
- // Extract all files at once using unzip
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
-        process.arguments = ["-o", "-q", url.path, "-d", destination.path]
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        
-        try process.run()
-        process.waitUntilExit()
-        
- // Check timeout after extraction
-        if let abortReason = checkLimits() {
- // Partial extraction - return what we have
-            let extractedURLs = collectExtractedFiles(in: destination)
-            return .aborted(
-                urls: extractedURLs,
-                reason: abortReason,
-                format: .zip,
-                stats: ExtractionResult.ExtractionStats(
-                    extractedFileCount: extractedURLs.count,
-                    extractedBytes: totalBytes,
-                    currentDepth: maxDepth,
-                    elapsedTime: elapsedTime(),
-                    compressedSize: compressedSize,
-                    estimatedCompressionRatio: ratio
+        var extractedURLs: [URL] = []
+
+        for entry in entries {
+            if let abortReason = checkLimits() {
+                return .aborted(
+                    urls: extractedURLs,
+                    reason: abortReason,
+                    format: .zip,
+                    stats: makeStats(compressedSize: compressedSize, ratio: ratio)
                 )
-            )
+            }
+
+            do {
+                if let extractedURL = try await extractSingleEntry(entry: entry, from: url, to: destination) {
+                    extractedURLs.append(extractedURL)
+                }
+            } catch let error as ExtractionAbortError {
+                return .aborted(
+                    urls: extractedURLs,
+                    reason: error.reason,
+                    format: .zip,
+                    stats: makeStats(compressedSize: compressedSize, ratio: ratio)
+                )
+            } catch {
+                return .aborted(
+                    urls: extractedURLs,
+                    reason: .extractionError,
+                    format: .zip,
+                    stats: makeStats(compressedSize: compressedSize, ratio: ratio)
+                )
+            }
+
+            if let abortReason = checkLimits() {
+                return .aborted(
+                    urls: extractedURLs,
+                    reason: abortReason,
+                    format: .zip,
+                    stats: makeStats(compressedSize: compressedSize, ratio: ratio)
+                )
+            }
         }
-        
- // Collect extracted files
-        let extractedURLs = collectExtractedFiles(in: destination)
-        extractedFiles = extractedURLs.count
-        extractedBytes = totalBytes
-        currentDepth = maxDepth
         
         return .success(
             urls: extractedURLs,
             format: .zip,
             stats: makeStats(compressedSize: compressedSize, ratio: ratio)
         )
-    }
-    
- /// Collect all files in a directory recursively
-    private func collectExtractedFiles(in directory: URL) -> [URL] {
-        var files: [URL] = []
-        let fm = FileManager.default
-        
-        guard let enumerator = fm.enumerator(at: directory, includingPropertiesForKeys: [.isRegularFileKey]) else {
-            return files
-        }
-        
-        for case let fileURL as URL in enumerator {
-            if let isFile = try? fileURL.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile, isFile {
-                files.append(fileURL)
-            }
-        }
-        
-        return files
     }
     
  /// Get elapsed time since start
@@ -846,6 +838,9 @@ public actor ArchiveExtractor {
         
         try process.run()
         process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            throw ExtractionAbortError(reason: .extractionError)
+        }
         
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         guard let output = String(data: data, encoding: .utf8) else {
@@ -906,7 +901,7 @@ public actor ArchiveExtractor {
         guard let size = Int64(components[0]) else { return nil }
         
  // Last component is the path (may contain spaces)
-        let path = String(components[3])
+        let path = String(components[3]).trimmingCharacters(in: .whitespacesAndNewlines)
         
         guard !path.isEmpty else { return nil }
         
@@ -918,51 +913,88 @@ public actor ArchiveExtractor {
     
  /// Extract a single ZIP entry
     private func extractSingleEntry(entry: ZipEntry, from archiveURL: URL, to destination: URL) async throws -> URL? {
- // Skip directories
+        guard let validatedPath = validatedRelativePath(entry.path),
+              let targetURL = safeDestinationURL(for: validatedPath, within: destination) else {
+            throw ExtractionAbortError(reason: .unsafePath)
+        }
+
+        currentDepth = max(currentDepth, max(0, validatedPath.components(separatedBy: "/").count - 1))
+
+ // Skip directories after creating the sanitized destination path.
         if entry.isDirectory {
-            let sanitizedPath = sanitizePath(entry.path)
-            let dirURL = destination.appendingPathComponent(sanitizedPath)
-            try FileManager.default.createDirectory(at: dirURL, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: targetURL, withIntermediateDirectories: true)
             return nil
         }
-        
- // Sanitize path to prevent directory traversal
-        let sanitizedPath = sanitizePath(entry.path)
-        let targetURL = destination.appendingPathComponent(sanitizedPath)
-        
- // Ensure parent directory exists
+
         let parentDir = targetURL.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: parentDir, withIntermediateDirectories: true)
-        
- // Extract using unzip command - extract to destination preserving structure
+
+ // `unzip -p` writes raw entry bytes to stdout instead of recreating archive metadata on disk.
+ // This keeps symlink entries as plain file payloads and avoids path-based escapes.
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
-        process.arguments = ["-o", "-q", archiveURL.path, entry.path, "-d", destination.path]
-        process.standardOutput = FileHandle.nullDevice
+        process.arguments = ["-p", archiveURL.path, entry.path]
+        let outputPipe = Pipe()
+        process.standardOutput = outputPipe
         process.standardError = FileHandle.nullDevice
-        
-        try process.run()
-        process.waitUntilExit()
-        
- // Verify extraction - check the full path as extracted
-        let extractedPath = destination.appendingPathComponent(entry.path)
-        if FileManager.default.fileExists(atPath: extractedPath.path) {
-            return extractedPath
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            try? FileManager.default.removeItem(at: targetURL)
+            throw ExtractionAbortError(reason: .extractionError)
         }
-        
- // Also check sanitized path
-        if FileManager.default.fileExists(atPath: targetURL.path) {
-            return targetURL
+
+        guard process.terminationStatus == 0 else {
+            try? FileManager.default.removeItem(at: targetURL)
+            throw ExtractionAbortError(reason: .extractionError)
         }
-        
-        return nil
+
+        let extractedData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+        try extractedData.write(to: targetURL, options: .atomic)
+
+        extractedFiles += 1
+        extractedBytes += entry.uncompressedSize
+
+        return targetURL
     }
-    
- /// Sanitize path to prevent directory traversal attacks
-    private func sanitizePath(_ path: String) -> String {
-        var components = path.components(separatedBy: "/")
-        components = components.filter { $0 != ".." && $0 != "." && !$0.isEmpty }
-        return components.joined(separator: "/")
+
+    private func validatedRelativePath(_ rawPath: String) -> String? {
+        let normalized = rawPath.replacingOccurrences(of: "\\", with: "/")
+        guard !normalized.isEmpty,
+              !normalized.hasPrefix("/"),
+              !normalized.contains("\0") else {
+            return nil
+        }
+
+        let components = normalized.split(separator: "/", omittingEmptySubsequences: false)
+        var safeComponents: [Substring] = []
+        safeComponents.reserveCapacity(components.count)
+
+        for component in components {
+            if component.isEmpty { continue }
+            if component == "." || component == ".." {
+                return nil
+            }
+            safeComponents.append(component)
+        }
+
+        guard !safeComponents.isEmpty else {
+            return nil
+        }
+
+        return safeComponents.joined(separator: "/")
+    }
+
+    private func safeDestinationURL(for relativePath: String, within destination: URL) -> URL? {
+        let rootURL = destination.resolvingSymlinksInPath().standardizedFileURL
+        let candidate = rootURL.appendingPathComponent(relativePath).standardizedFileURL
+        let rootPath = rootURL.path.hasSuffix("/") ? rootURL.path : rootURL.path + "/"
+        guard candidate.path == rootURL.path || candidate.path.hasPrefix(rootPath) else {
+            return nil
+        }
+        return candidate
     }
     
  /// Check all limits and return abort reason if any exceeded

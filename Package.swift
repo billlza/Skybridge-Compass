@@ -96,6 +96,8 @@ let package = Package(
         .executable(name: "BaselineBenchRunner", targets: ["BaselineBenchRunner"]),
         .executable(name: "HandshakeBenchRunner", targets: ["HandshakeBenchRunner"]),
         .executable(name: "MessageSizeBenchRunner", targets: ["MessageSizeBenchRunner"]),
+        .library(name: "SkyBridgeProtocolCore", targets: ["SkyBridgeProtocolCore"]),
+        .library(name: "SkyBridgeAppleTransport", targets: ["SkyBridgeAppleTransport"]),
         .library(name: "SkyBridgeCore", targets: ["SkyBridgeCore"]),
         .library(name: "SkyBridgeUI", targets: ["SkyBridgeUI"]),
         // 中文注释：导出 OQSRAII 作为示例静态库，便于独立链接与集成
@@ -160,8 +162,34 @@ let package = Package(
             path: "Sources/NoiseKit"
         ),
         .target(
+            name: "SkyBridgeProtocolCore",
+            dependencies: [],
+            path: "Sources/SkyBridgeProtocolCore",
+            swiftSettings: [
+                .enableUpcomingFeature("StrictConcurrency")
+            ],
+            linkerSettings: [
+                .linkedFramework("CryptoKit")
+            ]
+        ),
+        .target(
+            name: "SkyBridgeAppleTransport",
+            dependencies: [
+                "SkyBridgeProtocolCore"
+            ],
+            path: "Sources/SkyBridgeAppleTransport",
+            swiftSettings: [
+                .enableUpcomingFeature("StrictConcurrency")
+            ],
+            linkerSettings: [
+                .linkedFramework("Network")
+            ]
+        ),
+        .target(
             name: "SkyBridgeCore",
             dependencies: [
+                "SkyBridgeProtocolCore",
+                "SkyBridgeAppleTransport",
                 "FreeRDPBridge",
                 .product(name: "OrderedCollections", package: "swift-collections"),
                 .product(name: "NIOSSH", package: "swift-nio-ssh"),
@@ -173,7 +201,10 @@ let package = Package(
             ],
             path: "Sources/SkyBridgeCore",
             // 排除文档文件，避免未处理文件警告 - 符合Swift 6.2.3最佳实践
-            exclude: ["RemoteDesktop/UltraStream/README.md", "Weather/PerformanceOptimization.md"],
+            exclude: [
+                "RemoteDesktop/UltraStream/README.md",
+                "Weather/PerformanceOptimization.md"
+            ],
             resources: [
                 .process("Resources"),
                 .process("RemoteDesktop/RemoteDesktopShaders.metal"),

@@ -1,6 +1,7 @@
 import Foundation
 import OSLog
 import Network
+import SkyBridgeProtocolCore
 
 /// 基于 `NativeWebSocketClient` 的 WebRTC 信令客户端（macOS 侧）
 ///
@@ -8,9 +9,27 @@ import Network
 /// - 只提供最小能力：connect / send / onEnvelope
 /// - 具体 session join/leave 逻辑由上层管理器处理
 public actor WebSocketSignalingClient {
+    public enum InboundMessage: Sendable, Equatable {
+        case envelope(WebRTCSignalingEnvelope)
+        case serverFrame(SignalingServerFrame)
+        case unknown
+    }
+
+    public struct SignalingServerFrame: Decodable, Sendable, Equatable {
+        public let type: String
+        public let error: String?
+        public let sessionId: String?
+        public let what: String?
+
+        public var isError: Bool {
+            type == "error" && !(error?.isEmpty ?? true)
+        }
+    }
+
     public enum SignalingError: LocalizedError {
         case notConnected
         case connectTimedOut
+        case serverRejected(String)
 
         public var errorDescription: String? {
             switch self {
@@ -18,6 +37,8 @@ public actor WebSocketSignalingClient {
                 return "信令 WebSocket 未连接"
             case .connectTimedOut:
                 return "信令 WebSocket 连接超时"
+            case .serverRejected(let reason):
+                return "信令服务器拒绝请求: \(reason)"
             }
         }
     }
@@ -31,6 +52,7 @@ public actor WebSocketSignalingClient {
     private var readyWaiters: [CheckedContinuation<Void, Error>] = []
     
     public var onEnvelope: (@Sendable (WebRTCSignalingEnvelope) -> Void)?
+    public var onServerFrame: (@Sendable (SignalingServerFrame) -> Void)?
     
     public init(url: URL) {
         self.url = url
@@ -38,6 +60,10 @@ public actor WebSocketSignalingClient {
     
     public func setOnEnvelope(_ handler: (@Sendable (WebRTCSignalingEnvelope) -> Void)?) {
         self.onEnvelope = handler
+    }
+
+    public func setOnServerFrame(_ handler: (@Sendable (SignalingServerFrame) -> Void)?) {
+        self.onServerFrame = handler
     }
     
     public func connect() async {
@@ -90,14 +116,31 @@ public actor WebSocketSignalingClient {
     }
     
     private func handleText(_ text: String) {
-        guard let data = text.data(using: .utf8) else { return }
-        do {
-            let env = try JSONDecoder().decode(WebRTCSignalingEnvelope.self, from: data)
+        switch Self.parseInboundText(text) {
+        case .envelope(let env):
             onEnvelope?(env)
-        } catch {
+        case .serverFrame(let frame):
+            onServerFrame?(frame)
+            if frame.isError {
+                logger.error("❌ signaling server error: \(frame.error ?? "unknown", privacy: .public)")
+            } else {
+                logger.debug("ℹ️ signaling server frame: type=\(frame.type, privacy: .public)")
+            }
+        case .unknown:
             // 服务端可能会推非 JSON 的日志/提示，忽略
             logger.debug("ignoring non-envelope message: \(text.prefix(200), privacy: .public)")
         }
+    }
+
+    public static func parseInboundText(_ text: String) -> InboundMessage {
+        guard let data = text.data(using: .utf8) else { return .unknown }
+        if let env = try? JSONDecoder().decode(WebRTCSignalingEnvelope.self, from: data) {
+            return .envelope(env)
+        }
+        if let frame = try? JSONDecoder().decode(SignalingServerFrame.self, from: data) {
+            return .serverFrame(frame)
+        }
+        return .unknown
     }
 
     private func connectOrThrow(timeout: Duration) async throws {

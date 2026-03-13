@@ -2,7 +2,7 @@
 set -euo pipefail
 
 BASE_URL="${1:-http://127.0.0.1:8443}"
-API_KEY="${2:-${SKYBRIDGE_CLIENT_API_KEY:-skybridge-client-v1}}"
+API_KEY="${2:-${SKYBRIDGE_CLIENT_API_KEY:-}}"
 
 check_status() {
     local url="$1"
@@ -60,6 +60,12 @@ if [[ "$turn_no_key_status" != "200" && "$turn_no_key_status" != "401" && "$turn
 fi
 
 echo "[smoke] PASS: GET /api/turn/credentials without key status=$turn_no_key_status"
+
+if [[ -z "$API_KEY" ]]; then
+    echo "[smoke] SKIP: authenticated TURN credential check (set SKYBRIDGE_CLIENT_API_KEY or pass arg #2)"
+    echo "[smoke] All checks passed"
+    exit 0
+fi
 
 turn_with_key_status="$(curl -sS -H "X-API-Key: $API_KEY" -o /tmp/skybridge-smoke-last.$$ -w '%{http_code}' "$BASE_URL/api/turn/credentials" || true)"
 if [[ "$turn_with_key_status" == "404" || "$turn_with_key_status" == "401" ]]; then

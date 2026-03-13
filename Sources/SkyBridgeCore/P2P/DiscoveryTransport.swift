@@ -15,10 +15,10 @@ import Foundation
 import Network
 import Atomics
 
-// MARK: - DiscoveryTransport Protocol
+// MARK: - DiscoveryTransport Implementations
 
-// Note: DiscoveryTransport protocol is defined in HandshakeDriver.swift
-// This file provides concrete implementations
+// The protocol contract now lives in SkyBridgeProtocolCore/P2P/HandshakeRuntimeContracts.swift.
+// This file provides Apple runtime implementations only.
 
 // MARK: - Transport Error
 

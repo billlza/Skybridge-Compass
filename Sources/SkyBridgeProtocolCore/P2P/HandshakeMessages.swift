@@ -692,7 +692,7 @@ public struct HandshakeMessageA: Sendable {
         return data
     }
 
-    var secureEnclaveSignaturePreimage: Data {
+    public var secureEnclaveSignaturePreimage: Data {
         makeSecureEnclavePreimage(
             domain: HandshakeSignatureDomain.secureEnclaveA,
             signaturePreimage: signaturePreimage
@@ -707,7 +707,7 @@ public struct HandshakeMessageA: Sendable {
     /// Canonical MessageA payload encoding:
     /// version -> suites -> keyShares -> nonce -> capabilities -> policy -> identity -> v2 contribution -> extensionsRaw
     /// Unknown TLVs are preserved as raw bytes in `extensionsRaw` and emitted without normalization.
-    func encodedWithoutSignature() -> Data {
+    public func encodedWithoutSignature() -> Data {
         var data = Data()
         data.append(version)
         data.append(HandshakeEncoding.encodeSuites(supportedSuites))
@@ -998,7 +998,7 @@ public struct HandshakeMessageB: Sendable {
         return data
     }
 
-    func secureEnclaveSignaturePreimage(transcriptHashA: Data) -> Data {
+    public func secureEnclaveSignaturePreimage(transcriptHashA: Data) -> Data {
         makeSecureEnclavePreimage(
             domain: HandshakeSignatureDomain.secureEnclaveB,
             signaturePreimage: signaturePreimage(transcriptHashA: transcriptHashA)
@@ -1010,7 +1010,7 @@ public struct HandshakeMessageB: Sendable {
         encodedWithoutSignature()
     }
 
-    func encodedWithoutSignature() -> Data {
+    public func encodedWithoutSignature() -> Data {
         var data = Data()
         data.append(version)
         HandshakeEncoding.appendUInt16LE(selectedSuite.wireId, to: &data)
@@ -1097,7 +1097,6 @@ extension HandshakeMessageB: TranscriptEncodable {
 
 // MARK: - Helper Functions
 
-/// 解码 CryptoCapabilities（确定性编码）
 private func decodeCapabilities(from data: Data) throws -> CryptoCapabilities {
     do {
         var decoder = DeterministicDecoder(data: data)
@@ -1128,7 +1127,6 @@ private func decodeCapabilities(from data: Data) throws -> CryptoCapabilities {
     }
 }
 
-/// 解码 HandshakePolicy（确定性编码）
 private func decodePolicy(from data: Data) throws -> HandshakePolicy {
     do {
         var decoder = DeterministicDecoder(data: data)
