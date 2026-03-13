@@ -189,7 +189,8 @@ struct SkyBridgeCompassApp: App {
     @MainActor
     private func openCrossNetworkWindow() {
         #if os(macOS)
-            NSWorkspace.shared.open(URL(string: "skybridge://cross-network")!)
+            guard let url = URL(string: "skybridge://cross-network") else { return }
+            NSWorkspace.shared.open(url)
         #endif
     }
 
@@ -199,7 +200,8 @@ struct SkyBridgeCompassApp: App {
         #if os(macOS)
  // 使用 SwiftUI 的 openWindow 环境动作
  // 这是 macOS 14+ 的标准方式
-            NSWorkspace.shared.open(URL(string: "skybridge://near-field")!)
+            guard let url = URL(string: "skybridge://near-field") else { return }
+            NSWorkspace.shared.open(url)
         #endif
     }
 
@@ -491,7 +493,8 @@ struct SkyBridgeCompassApp: App {
             queue: nil
         ) { _ in
             Task { @MainActor in
-                NSWorkspace.shared.open(URL(string: "skybridge://near-field")!)
+                guard let url = URL(string: "skybridge://near-field") else { return }
+                NSWorkspace.shared.open(url)
             }
         }
 

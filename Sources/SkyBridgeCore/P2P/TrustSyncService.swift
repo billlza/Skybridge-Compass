@@ -26,6 +26,13 @@ public enum TrustRecordType: String, Codable, Sendable {
     case revoke = "revoke"
 }
 
+public enum TrustLifecycleState: String, Codable, Sendable {
+    case active
+    case reverificationRequired
+    case quarantined
+    case revoked
+}
+
 // MARK: - Trust Record
 
 /// 信任记录
@@ -50,7 +57,9 @@ public struct TrustRecord: Codable, Sendable, Equatable, Identifiable {
  /// 新版本使用此字段存储协议签名公钥。
  /// 如果为 nil，回退到 `publicKey` 字段。
     public let protocolPublicKey: Data?
-    
+    public let protocolSigningAlgorithm: ProtocolSigningAlgorithm?
+    public let protocolPublicKeyFingerprint: String?
+
  /// Legacy P-256 身份公钥（ 7.2）
  ///
  /// 迁移期保留，用于向后兼容验证。
@@ -89,6 +98,11 @@ public struct TrustRecord: Codable, Sendable, Equatable, Identifiable {
     
  /// 撤销时间（tombstone）
     public let revokedAt: Date?
+
+ /// current-path 非权威 metadata
+    public let currentDeviceIdMetadata: String?
+    public let knownDeviceIdsMetadata: [String]?
+    public let lifecycleStateMetadata: TrustLifecycleState?
     
  /// 设备名称（用于 UI 显示）
     public let deviceName: String?
@@ -108,6 +122,23 @@ public struct TrustRecord: Codable, Sendable, Equatable, Identifiable {
         guard let revokedAt = revokedAt else { return false }
         let expirationDate = revokedAt.addingTimeInterval(30 * 24 * 60 * 60) // 30 天
         return Date() > expirationDate
+    }
+
+    public var currentDeviceId: String {
+        currentDeviceIdMetadata ?? deviceId
+    }
+
+    public var knownDeviceIds: [String] {
+        let base = knownDeviceIdsMetadata ?? [currentDeviceId]
+        return Array(Set(base + [currentDeviceId])).sorted()
+    }
+
+    public var lifecycleState: TrustLifecycleState {
+        lifecycleStateMetadata ?? (isTombstone ? .revoked : .active)
+    }
+
+    public var currentPathAuthorityFingerprint: String? {
+        protocolPublicKeyFingerprint?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
     
  /// 是否允许 legacy P-256 fallback（ 7.2）
@@ -140,6 +171,8 @@ public struct TrustRecord: Codable, Sendable, Equatable, Identifiable {
         publicKey: Data,
         secureEnclavePublicKey: Data? = nil,
         protocolPublicKey: Data? = nil,
+        protocolSigningAlgorithm: ProtocolSigningAlgorithm? = nil,
+        protocolPublicKeyFingerprint: String? = nil,
         legacyP256PublicKey: Data? = nil,
         signatureAlgorithm: SignatureAlgorithm? = nil,
         kemPublicKeys: [KEMPublicKeyInfo]? = nil,
@@ -152,13 +185,18 @@ public struct TrustRecord: Codable, Sendable, Equatable, Identifiable {
         signature: Data,
         recordType: TrustRecordType = .add,
         revokedAt: Date? = nil,
-        deviceName: String? = nil
+        deviceName: String? = nil,
+        currentDeviceId: String? = nil,
+        knownDeviceIds: [String]? = nil,
+        lifecycleState: TrustLifecycleState? = nil
     ) {
         self.deviceId = deviceId
         self.pubKeyFP = pubKeyFP
         self.publicKey = publicKey
         self.secureEnclavePublicKey = secureEnclavePublicKey
         self.protocolPublicKey = protocolPublicKey
+        self.protocolSigningAlgorithm = protocolSigningAlgorithm
+        self.protocolPublicKeyFingerprint = protocolPublicKeyFingerprint
         self.legacyP256PublicKey = legacyP256PublicKey
         self.signatureAlgorithm = signatureAlgorithm
         self.kemPublicKeys = kemPublicKeys
@@ -172,6 +210,9 @@ public struct TrustRecord: Codable, Sendable, Equatable, Identifiable {
         self.recordType = recordType
         self.revokedAt = revokedAt
         self.deviceName = deviceName
+        self.currentDeviceIdMetadata = currentDeviceId
+        self.knownDeviceIdsMetadata = knownDeviceIds
+        self.lifecycleStateMetadata = lifecycleState
     }
     
  /// 创建撤销记录（tombstone）
@@ -182,6 +223,8 @@ public struct TrustRecord: Codable, Sendable, Equatable, Identifiable {
             publicKey: publicKey,
             secureEnclavePublicKey: secureEnclavePublicKey,
             protocolPublicKey: protocolPublicKey,
+            protocolSigningAlgorithm: protocolSigningAlgorithm,
+            protocolPublicKeyFingerprint: protocolPublicKeyFingerprint,
             legacyP256PublicKey: legacyP256PublicKey,
             signatureAlgorithm: signatureAlgorithm,
             kemPublicKeys: kemPublicKeys,
@@ -194,7 +237,10 @@ public struct TrustRecord: Codable, Sendable, Equatable, Identifiable {
             signature: signature,
             recordType: .revoke,
             revokedAt: Date(),
-            deviceName: deviceName
+            deviceName: deviceName,
+            currentDeviceId: currentDeviceId,
+            knownDeviceIds: knownDeviceIds,
+            lifecycleState: .revoked
         )
     }
 }
@@ -280,6 +326,13 @@ public enum TrustSyncError: Error, LocalizedError, Sendable {
             return "Decoding error: \(reason)"
         }
     }
+}
+
+public enum CurrentPathTrustConflict: Sendable, Equatable {
+    case identityConflict
+    case deviceIdMigrationRequired
+    case quarantinedIdentity
+    case revokedIdentity
 }
 
 
@@ -419,6 +472,58 @@ public final class TrustSyncService: ObservableObject {
         return localCache.values.contains { 
             $0.pubKeyFP == pubKeyFP && !$0.isTombstone && !$0.isExpired 
         }
+    }
+
+    public func getCurrentPathTrustRecord(fingerprint: String) -> TrustRecord? {
+        let normalized = fingerprint.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalized.isEmpty else { return nil }
+        return localCache.values.first { record in
+            guard !record.isTombstone, !record.isExpired else { return false }
+            guard record.lifecycleState == .active else { return false }
+            return record.currentPathAuthorityFingerprint == normalized
+        }
+    }
+
+    public func evaluateCurrentPathBinding(
+        deviceId: String,
+        protocolPublicKeyFingerprint: String
+    ) -> CurrentPathTrustConflict? {
+        let normalizedFingerprint = protocolPublicKeyFingerprint
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard !normalizedFingerprint.isEmpty else { return nil }
+
+        if let byFingerprint = localCache.values.first(where: {
+            !$0.isTombstone && !$0.isExpired && $0.currentPathAuthorityFingerprint == normalizedFingerprint
+        }) {
+            switch byFingerprint.lifecycleState {
+            case .active:
+                if byFingerprint.currentDeviceId != deviceId {
+                    return .deviceIdMigrationRequired
+                }
+            case .reverificationRequired, .quarantined:
+                return .quarantinedIdentity
+            case .revoked:
+                return .revokedIdentity
+            }
+        }
+
+        if let byDevice = localCache[deviceId],
+           !byDevice.isTombstone,
+           !byDevice.isExpired,
+           let pinnedFingerprint = byDevice.currentPathAuthorityFingerprint,
+           pinnedFingerprint != normalizedFingerprint {
+            switch byDevice.lifecycleState {
+            case .active:
+                return .identityConflict
+            case .reverificationRequired, .quarantined:
+                return .quarantinedIdentity
+            case .revoked:
+                return .revokedIdentity
+            }
+        }
+
+        return nil
     }
     
  /// 同步信任记录
@@ -566,6 +671,8 @@ public final class TrustSyncService: ObservableObject {
             publicKey: record.publicKey,
             secureEnclavePublicKey: record.secureEnclavePublicKey,
             protocolPublicKey: record.protocolPublicKey,
+            protocolSigningAlgorithm: record.protocolSigningAlgorithm,
+            protocolPublicKeyFingerprint: record.protocolPublicKeyFingerprint,
             legacyP256PublicKey: record.legacyP256PublicKey,
             signatureAlgorithm: record.signatureAlgorithm,
             kemPublicKeys: record.kemPublicKeys,
@@ -578,7 +685,10 @@ public final class TrustSyncService: ObservableObject {
             signature: signature,
             recordType: record.recordType,
             revokedAt: record.revokedAt,
-            deviceName: record.deviceName
+            deviceName: record.deviceName,
+            currentDeviceId: record.currentDeviceIdMetadata,
+            knownDeviceIds: record.knownDeviceIdsMetadata,
+            lifecycleState: record.lifecycleStateMetadata
         )
     }
     
@@ -594,6 +704,8 @@ public final class TrustSyncService: ObservableObject {
             publicKey: record.publicKey,
             secureEnclavePublicKey: record.secureEnclavePublicKey,
             protocolPublicKey: record.protocolPublicKey,
+            protocolSigningAlgorithm: record.protocolSigningAlgorithm,
+            protocolPublicKeyFingerprint: record.protocolPublicKeyFingerprint,
             legacyP256PublicKey: record.legacyP256PublicKey,
             signatureAlgorithm: record.signatureAlgorithm,
             kemPublicKeys: record.kemPublicKeys,
@@ -606,7 +718,10 @@ public final class TrustSyncService: ObservableObject {
             signature: Data(), // 将被签名
             recordType: .add,
             revokedAt: nil,
-            deviceName: record.deviceName
+            deviceName: record.deviceName,
+            currentDeviceId: record.currentDeviceIdMetadata,
+            knownDeviceIds: record.knownDeviceIdsMetadata,
+            lifecycleState: record.lifecycleStateMetadata
         )
         
         let signedRecord = try await signRecord(updatedRecord)
@@ -619,6 +734,48 @@ public final class TrustSyncService: ObservableObject {
     
  /// 创建待签名数据
     private func createDataToSign(for record: TrustRecord, revoked: Bool) throws -> Data {
+        var encoder = DeterministicEncoder()
+        encoder.encode(record.deviceId)
+        encoder.encode(record.pubKeyFP)
+        encoder.encode(record.publicKey)
+        if let seKey = record.secureEnclavePublicKey {
+            encoder.encode(seKey)
+        }
+        encoder.encode(record.protocolPublicKey) { enc, value in
+            enc.encode(value)
+        }
+        encoder.encode(record.protocolSigningAlgorithm?.rawValue) { enc, value in
+            enc.encode(value)
+        }
+        encoder.encode(record.protocolPublicKeyFingerprint?.lowercased()) { enc, value in
+            enc.encode(value)
+        }
+        encoder.encode(record.kemPublicKeys, encoder: { enc, keys in
+            let sorted = keys.sorted { $0.suiteWireId < $1.suiteWireId }
+            enc.encode(sorted, encoder: { inner, key in
+                inner.encode(key.suiteWireId)
+                inner.encode(key.publicKey)
+            })
+        })
+        encoder.encode(UInt8(record.attestationLevel.rawValue))
+        encoder.encode(record.capabilities)
+        encoder.encode(record.currentDeviceIdMetadata) { enc, value in
+            enc.encode(value)
+        }
+        encoder.encode(canonicalKnownDeviceIds(for: record)) { enc, values in
+            enc.encode(values)
+        }
+        encoder.encode(record.lifecycleStateMetadata?.rawValue) { enc, value in
+            enc.encode(value)
+        }
+        encoder.encode(record.createdAt)
+        encoder.encode(record.updatedAt)
+        encoder.encode(Int64(record.version))
+        encoder.encode(revoked ? "revoke" : "add")
+        return encoder.finalize()
+    }
+
+    private func createLegacyDataToSign(for record: TrustRecord, revoked: Bool) throws -> Data {
         var encoder = DeterministicEncoder()
         encoder.encode(record.deviceId)
         encoder.encode(record.pubKeyFP)
@@ -640,6 +797,13 @@ public final class TrustSyncService: ObservableObject {
         encoder.encode(Int64(record.version))
         encoder.encode(revoked ? "revoke" : "add")
         return encoder.finalize()
+    }
+
+    private func canonicalKnownDeviceIds(for record: TrustRecord) -> [String]? {
+        guard let knownDeviceIds = record.knownDeviceIdsMetadata, !knownDeviceIds.isEmpty else {
+            return nil
+        }
+        return Array(Set(knownDeviceIds)).sorted()
     }
     
  // MARK: - Keychain Operations
@@ -800,10 +964,19 @@ public final class TrustSyncService: ObservableObject {
     
  /// 验证记录签名
     public func verifyRecordSignature(_ record: TrustRecord) async throws -> Bool {
-        let dataToVerify = try createDataToSign(for: record, revoked: record.isTombstone)
         let signerPublicKey = try await keyManager.getOrCreateIdentityKey().publicKey
+        let currentPayload = try createDataToSign(for: record, revoked: record.isTombstone)
+        if try await keyManager.verify(
+            data: currentPayload,
+            signature: record.signature,
+            publicKey: signerPublicKey
+        ) {
+            return true
+        }
+
+        let legacyPayload = try createLegacyDataToSign(for: record, revoked: record.isTombstone)
         return try await keyManager.verify(
-            data: dataToVerify,
+            data: legacyPayload,
             signature: record.signature,
             publicKey: signerPublicKey
         )

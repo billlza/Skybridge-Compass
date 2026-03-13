@@ -91,7 +91,7 @@ run_xcodebuild_with_retry() {
 xcrun simctl boot "${SIM_ID}" >/dev/null 2>&1 || true
 xcrun simctl bootstatus "${SIM_ID}" -b >/dev/null 2>&1 || true
 
-echo "[iOS test lane] A(Unit): KEMTrustStoreTests, CapabilityResolutionParityTests"
+echo "[iOS test lane] A(Unit): KEMTrustStoreTests, CapabilityResolutionParityTests, CurrentPathTrustedDeviceStoreTests"
 echo "[iOS test lane] B(Integration): PolicyDecisionParityTests, FallbackSemanticsParityTests"
 echo "[iOS test lane] C(Observability): ObservabilityContractTests"
 
@@ -109,6 +109,7 @@ run_xcodebuild_with_retry \
   -derivedDataPath "${DERIVED_DATA_PATH}" \
   -only-testing:"${IOS_TEST_TARGET}/KEMTrustStoreTests" \
   -only-testing:"${IOS_TEST_TARGET}/CapabilityResolutionParityTests" \
+  -only-testing:"${IOS_TEST_TARGET}/CurrentPathTrustedDeviceStoreTests" \
   -only-testing:"${IOS_TEST_TARGET}/PolicyDecisionParityTests" \
   -only-testing:"${IOS_TEST_TARGET}/FallbackSemanticsParityTests" \
   -only-testing:"${IOS_TEST_TARGET}/ObservabilityContractTests" \

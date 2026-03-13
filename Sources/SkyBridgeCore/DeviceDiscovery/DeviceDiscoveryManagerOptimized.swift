@@ -2159,28 +2159,18 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                             offeredSuites = cryptoProvider.supportedSuites.filter { !$0.isPQCGroup }
                         }
 
-                        let keyManager = DeviceIdentityKeyManager.shared
-                        let (protocolPublicKey, signingKeyHandle): (Data, SigningKeyHandle)
-                        if sigAAlgorithm == .mlDSA65 {
-                            (protocolPublicKey, signingKeyHandle) = try await keyManager.getOrCreateMLDSASigningKey()
-                        } else {
-                            (protocolPublicKey, signingKeyHandle) = try await keyManager.getOrCreateProtocolSigningKey()
-                        }
-
-        let identityPublicKeyWire = ProtocolIdentityPublicKeys(
-                            protocolPublicKey: protocolPublicKey,
-                            protocolAlgorithm: sigAAlgorithm,
-            sePoPPublicKey: nil
-        ).asWire().encoded
+                        let identityProvider = DeviceIdentityHandshakeProvider(
+                            sigAAlgorithm: sigAAlgorithm,
+                            includeSecureEnclavePoP: effectivePolicy.requireSecureEnclavePoP
+                        )
 
         do {
             driver = try HandshakeDriver(
                 transport: transport,
                                 cryptoProvider: cryptoProvider,
                                 protocolSignatureProvider: ProtocolSignatureProviderSelector.select(for: sigAAlgorithm),
-                                protocolSigningKeyHandle: signingKeyHandle,
+                                identityProvider: identityProvider,
                                 sigAAlgorithm: sigAAlgorithm,
-                identityPublicKey: identityPublicKeyWire,
                 offeredSuites: offeredSuites,
                                 policy: effectivePolicy,
                                 localSOAPeerId: localSOAPeerId,

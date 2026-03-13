@@ -752,15 +752,10 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
                 }
             }()
 
-            let keyManager = DeviceIdentityKeyManager.shared
-            let signingKeyHandle = try await keyManager.getProtocolSigningKeyHandle(for: preparation.sigAAlgorithm)
-            let protocolPublicKey = try await keyManager.getProtocolSigningPublicKey(for: preparation.sigAAlgorithm)
-
-            let identityPublicKeyWire = ProtocolIdentityPublicKeys(
-                protocolPublicKey: protocolPublicKey,
-                protocolAlgorithm: preparation.sigAAlgorithm,
-                sePoPPublicKey: nil
-            ).asWire().encoded
+            let identityProvider = DeviceIdentityHandshakeProvider(
+                sigAAlgorithm: preparation.sigAAlgorithm,
+                includeSecureEnclavePoP: policy.requireSecureEnclavePoP
+            )
 
             let outboundSOA: HandshakeSOAMetadata? = {
                 guard shouldAdvertiseSOA,
@@ -779,9 +774,8 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
                 transport: transport,
                 cryptoProvider: cryptoProvider,
                 protocolSignatureProvider: ProtocolSignatureProviderSelector.select(for: preparation.sigAAlgorithm),
-                protocolSigningKeyHandle: signingKeyHandle,
+                identityProvider: identityProvider,
                 sigAAlgorithm: preparation.sigAAlgorithm,
-                identityPublicKey: identityPublicKeyWire,
                 offeredSuites: preparation.offeredSuites,
                 policy: policy,
                 cryptoPolicy: .default,
@@ -1247,8 +1241,11 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
 
             let peerEndpoint = capabilityValue(prefix: "peerEndpoint=", in: record.capabilities)
             let declared = capabilityValue(prefix: "declaredDeviceId=", in: record.capabilities)
-            if (peerEndpoint != nil && normalizedCandidates.contains(peerEndpoint!)) ||
-                (declared != nil && normalizedCandidates.contains(declared!)) {
+            if let peerEndpoint, normalizedCandidates.contains(peerEndpoint) {
+                matchedByDeviceId[record.deviceId] = record
+                continue
+            }
+            if let declared, normalizedCandidates.contains(declared) {
                 matchedByDeviceId[record.deviceId] = record
             }
         }

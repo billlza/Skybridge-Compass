@@ -543,6 +543,10 @@ public actor HandshakeDriver {
             // 处理 MessageA
             do {
                 try await ctx.processMessageA(messageA)
+                try await enforceIdentityPinning(
+                    deviceId: peer.deviceId,
+                    identityPublicKey: messageA.identityPublicKey
+                )
             } catch {
                 await handleHandshakeError(error, context: ctx)
                 return
@@ -674,6 +678,12 @@ public actor HandshakeDriver {
             
             // 处理 MessageB
             let sessionKeys = try await ctx.processMessageB(messageB)
+            if let pinnedDeviceId = currentPeer?.deviceId {
+                try await enforceIdentityPinning(
+                    deviceId: pinnedDeviceId,
+                    identityPublicKey: messageB.identityPublicKey
+                )
+            }
             
             guard case .processingMessageB(let currentEpoch) = state, currentEpoch == epoch else {
                 await ctx.zeroize()
@@ -722,6 +732,33 @@ public actor HandshakeDriver {
         }
         
         await transitionToFailed(.timeout, negotiatedSuite: suite)
+    }
+
+    private func enforceIdentityPinning(deviceId: String, identityPublicKey: Data) async throws {
+        guard let expectedFingerprint = await trustProvider.trustedFingerprint(for: deviceId) else {
+            return
+        }
+        let actualFingerprint = try authoritativeFingerprint(for: identityPublicKey)
+        guard expectedFingerprint == actualFingerprint else {
+            throw HandshakeError.failed(.identityMismatch(
+                expected: expectedFingerprint,
+                actual: actualFingerprint
+            ))
+        }
+    }
+
+    private func authoritativeFingerprint(for identityPublicKey: Data) throws -> String {
+        let identityKeys = try IdentityPublicKeys.decodeWithLegacyFallback(from: identityPublicKey)
+        let protocolIdentity = try identityKeys.asProtocolIdentityKeys()
+        let tagBytes = Array(protocolIdentity.protocolAlgorithm.rawValue.utf8)
+        var payload = Data()
+        var tagLength = UInt16(tagBytes.count).littleEndian
+        withUnsafeBytes(of: &tagLength) { payload.append(contentsOf: $0) }
+        payload.append(contentsOf: tagBytes)
+        var keyLength = UInt32(protocolIdentity.protocolPublicKey.count).littleEndian
+        withUnsafeBytes(of: &keyLength) { payload.append(contentsOf: $0) }
+        payload.append(protocolIdentity.protocolPublicKey)
+        return SHA256.hash(data: payload).map { String(format: "%02x", $0) }.joined()
     }
     
     private nonisolated func isFinishedMessage(_ data: Data) -> Bool {

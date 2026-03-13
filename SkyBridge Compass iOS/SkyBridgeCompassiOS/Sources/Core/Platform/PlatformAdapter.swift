@@ -247,7 +247,8 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
     public func createHandshakeDriver(
         transport: any DiscoveryTransport,
         localSOAPeerId: Data? = nil,
-        expectedRemoteSOAPeerId: Data? = nil
+        expectedRemoteSOAPeerId: Data? = nil,
+        trustProvider: (any HandshakeTrustProvider)? = nil
     ) throws -> HandshakeDriver {
         guard isInitialized,
               let provider = cryptoProvider,
@@ -265,6 +266,7 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
             sigAAlgorithm: sigProvider.signatureAlgorithm,
             identityPublicKey: publicKey,
             policy: handshakePolicy,
+            trustProvider: trustProvider,
             localSOAPeerId: localSOAPeerId,
             expectedRemoteSOAPeerId: expectedRemoteSOAPeerId
         )

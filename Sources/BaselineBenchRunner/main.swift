@@ -360,9 +360,14 @@ struct BaselineBenchRunner {
         guard shouldRun("Noise-XX", filter: config.protocolFilter) else { return [] }
         print("[BASELINE] Noise-XX bench start (iterations=\(config.iterations))")
         let queue = DispatchQueue(label: "baseline.noise")
-        let listener = try NWListener(using: .udp, on: NWEndpoint.Port(rawValue: config.noisePort)!)
+        guard let noisePort = NWEndpoint.Port(rawValue: config.noisePort) else {
+            throw NSError(domain: "BaselineBenchRunner", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "Invalid UDP port: \(config.noisePort)"
+            ])
+        }
+        let listener = try NWListener(using: .udp, on: noisePort)
         let clientConnection = NWConnection(
-            to: .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: config.noisePort)!),
+            to: .hostPort(host: "127.0.0.1", port: noisePort),
             using: .udp
         )
         listener.start(queue: queue)
@@ -430,7 +435,12 @@ struct BaselineBenchRunner {
         kickoffBytes: Int
     ) async throws -> [TimingSample] {
         let queue = DispatchQueue(label: "baseline.\(protocolName.lowercased())")
-        let listener = try NWListener(using: serverParameters, on: NWEndpoint.Port(rawValue: port)!)
+        guard let benchmarkPort = NWEndpoint.Port(rawValue: port) else {
+            throw NSError(domain: "BaselineBenchRunner", code: 2, userInfo: [
+                NSLocalizedDescriptionKey: "Invalid benchmark port: \(port)"
+            ])
+        }
+        let listener = try NWListener(using: serverParameters, on: benchmarkPort)
         listener.newConnectionHandler = { connection in
             connection.stateUpdateHandler = { state in
                 switch state {
@@ -451,7 +461,7 @@ struct BaselineBenchRunner {
         try await Task.sleep(for: .milliseconds(10))
 
         var samples: [TimingSample] = []
-        let endpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port)!)
+        let endpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: benchmarkPort)
         for iteration in 0..<(warmup + iterations) {
             let connection = NWConnection(to: endpoint, using: clientParameters)
             let start = Date().timeIntervalSince1970

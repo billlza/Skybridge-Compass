@@ -296,7 +296,8 @@ final class MappedTextField: NSTextField {
         case 97...122: // a-z
  // Ctrl-a -> 0x01, ... Ctrl-z -> 0x1A
             let codePoint = Int(ch.value - 96)
-            return String(UnicodeScalar(codePoint)!)
+            guard let scalar = UnicodeScalar(codePoint) else { return nil }
+            return String(scalar)
         case 91: // '[' -> ESC
             return "\u{001B}"
         case 92: // '\\' -> FS

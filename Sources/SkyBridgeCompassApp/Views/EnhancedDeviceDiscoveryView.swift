@@ -596,16 +596,12 @@ public struct EnhancedDeviceDiscoveryView: View {
                         }
 
                         Button(LocalizationManager.shared.localizedString("discovery.qrCode.regenerate")) {
-                            Task {
-                                try? await crossNetworkManager.generateDynamicQRCode()
-                            }
+                            Task { await generateDynamicQRCodeFromUI(trigger: "regenerate_qr") }
                         }
                         .buttonStyle(.bordered)
                     } else {
                         Button(action: {
-                            Task {
-                                try? await crossNetworkManager.generateDynamicQRCode()
-                            }
+                            Task { await generateDynamicQRCodeFromUI(trigger: "generate_qr") }
                         }) {
                             VStack(spacing: 12) {
                                 Image(systemName: "qrcode")
@@ -663,17 +659,9 @@ public struct EnhancedDeviceDiscoveryView: View {
  // - skybridge://connect/<base64>
  // - skybridge://connect?data=<base64>
                         if isCrossNetworkConnectLink(result) {
-                            Task {
-                                do {
-                                    let data = Data(result.utf8)
-                                    _ = try await crossNetworkManager.scanDynamicQRCode(data)
-                                } catch {
- // 记录错误并提示用户
-                                    scannerErrorMessage = String(format: LocalizationManager.shared.localizedString("discovery.qrCode.error.connectFailed"), error.localizedDescription)
-                                }
- // 无论成功失败均关闭弹窗
-                                showingScanner = false
-                            }
+                            let scannedContent = result
+                            showingScanner = false
+                            Task { await connectScannedQRCodeFromUI(scannedContent, trigger: "qr_scanner_sheet") }
                         } else {
  // 不识别的二维码内容
                             scannerErrorMessage = LocalizationManager.shared.localizedString("discovery.qrCode.error.unrecognized")
@@ -1708,6 +1696,37 @@ public struct EnhancedDeviceDiscoveryView: View {
             return !queryPayload.isEmpty
         }
         return false
+    }
+
+    private func generateDynamicQRCodeFromUI(trigger: String) async {
+        do {
+            scannerErrorMessage = nil
+            logger.info("📷 QR action started: \(trigger, privacy: .public)")
+            _ = try await crossNetworkManager.generateDynamicQRCode()
+            logger.info("✅ QR action succeeded: \(trigger, privacy: .public)")
+        } catch {
+            logger.error("❌ QR action failed: \(trigger, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
+            scannerErrorMessage = String(
+                format: LocalizationManager.shared.localizedString("discovery.qrCode.error.connectFailed"),
+                error.localizedDescription
+            )
+        }
+    }
+
+    private func connectScannedQRCodeFromUI(_ content: String, trigger: String) async {
+        do {
+            scannerErrorMessage = nil
+            logger.info("📷 QR scan connect started: \(trigger, privacy: .public)")
+            let data = Data(content.utf8)
+            _ = try await crossNetworkManager.scanDynamicQRCode(data)
+            logger.info("✅ QR scan connect succeeded: \(trigger, privacy: .public)")
+        } catch {
+            logger.error("❌ QR scan connect failed: \(trigger, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
+            scannerErrorMessage = String(
+                format: LocalizationManager.shared.localizedString("discovery.qrCode.error.connectFailed"),
+                error.localizedDescription
+            )
+        }
     }
 
     private func connectToLocalDevice(_ device: DiscoveredDevice) {

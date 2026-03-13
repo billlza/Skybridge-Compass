@@ -61,6 +61,18 @@ final class P2PTrustSyncTests: XCTestCase {
                            "recordType must survive round-trip")
             XCTAssertEqual(decoded.deviceName, record.deviceName,
                            "deviceName must survive round-trip")
+            XCTAssertEqual(decoded.protocolSigningAlgorithm, record.protocolSigningAlgorithm,
+                           "protocolSigningAlgorithm must survive round-trip")
+            XCTAssertEqual(decoded.protocolPublicKeyFingerprint, record.protocolPublicKeyFingerprint,
+                           "protocolPublicKeyFingerprint must survive round-trip")
+            XCTAssertEqual(decoded.protocolPublicKey, record.protocolPublicKey,
+                           "protocolPublicKey must survive round-trip")
+            XCTAssertEqual(decoded.currentDeviceIdMetadata, record.currentDeviceIdMetadata,
+                           "currentDeviceId must survive round-trip")
+            XCTAssertEqual(decoded.knownDeviceIdsMetadata, record.knownDeviceIdsMetadata,
+                           "knownDeviceIds must survive round-trip")
+            XCTAssertEqual(decoded.lifecycleStateMetadata, record.lifecycleStateMetadata,
+                           "lifecycleState must survive round-trip")
             
  // Date comparison with millisecond precision
             XCTAssertEqual(decoded.createdAt.timeIntervalSince1970,
@@ -290,6 +302,31 @@ final class P2PTrustSyncTests: XCTestCase {
         XCTAssertFalse(record.isExpired,
                        "Fresh record should not be expired")
     }
+
+    func testCurrentPathTrustMetadataComputedProperties() {
+        let record = TrustRecord(
+            deviceId: "legacy-device-id",
+            pubKeyFP: String(repeating: "b", count: 64),
+            publicKey: Data(repeating: 0x02, count: 32),
+            protocolPublicKey: Data(repeating: 0x11, count: 32),
+            protocolSigningAlgorithm: .ed25519,
+            protocolPublicKeyFingerprint: String(repeating: "c", count: 64),
+            attestationLevel: .none,
+            signature: Data(repeating: 0xAA, count: 64),
+            currentDeviceId: "authoritative-device-id",
+            knownDeviceIds: ["authoritative-device-id", "legacy-device-id", "authoritative-device-id"],
+            lifecycleState: .reverificationRequired
+        )
+
+        XCTAssertEqual(record.currentDeviceId, "authoritative-device-id",
+                       "currentDeviceId should prefer current-path metadata")
+        XCTAssertEqual(record.knownDeviceIds, ["authoritative-device-id", "legacy-device-id"],
+                       "knownDeviceIds should be de-duplicated and sorted")
+        XCTAssertEqual(record.lifecycleState, .reverificationRequired,
+                       "lifecycleState should expose stored metadata")
+        XCTAssertEqual(record.currentPathAuthorityFingerprint, String(repeating: "c", count: 64),
+                       "currentPathAuthorityFingerprint should normalize lowercase metadata")
+    }
     
  /// Test tombstone expiration
     func testTombstoneExpiration() {
@@ -380,6 +417,37 @@ final class P2PTrustSyncTests: XCTestCase {
         XCTAssertEqual(revoked.publicKey, original.publicKey,
                        "publicKey must be preserved")
     }
+
+    func testRevokedMethodPreservesCurrentPathMetadata() {
+        let original = TrustRecord(
+            deviceId: "revoke-current-path",
+            pubKeyFP: String(repeating: "d", count: 64),
+            publicKey: Data(repeating: 0x04, count: 32),
+            protocolPublicKey: Data(repeating: 0x55, count: 32),
+            protocolSigningAlgorithm: .ed25519,
+            protocolPublicKeyFingerprint: String(repeating: "e", count: 64),
+            attestationLevel: .none,
+            signature: Data(repeating: 0x11, count: 64),
+            currentDeviceId: "stable-current-device-id",
+            knownDeviceIds: ["stable-current-device-id", "legacy-device-id"],
+            lifecycleState: .quarantined
+        )
+
+        let revoked = original.revoked(signature: Data(repeating: 0x22, count: 64))
+
+        XCTAssertEqual(revoked.protocolSigningAlgorithm, .ed25519,
+                       "Revoked record should preserve protocol signing algorithm")
+        XCTAssertEqual(revoked.protocolPublicKeyFingerprint, String(repeating: "e", count: 64),
+                       "Revoked record should preserve authoritative fingerprint")
+        XCTAssertEqual(revoked.protocolPublicKey, Data(repeating: 0x55, count: 32),
+                       "Revoked record should preserve authoritative public key")
+        XCTAssertEqual(revoked.currentDeviceIdMetadata, "stable-current-device-id",
+                       "Revoked record should preserve current device metadata")
+        XCTAssertEqual(Set(revoked.knownDeviceIdsMetadata ?? []), Set(["stable-current-device-id", "legacy-device-id"]),
+                       "Revoked record should preserve known device ids")
+        XCTAssertEqual(revoked.lifecycleStateMetadata, .revoked,
+                       "Revoked record should force lifecycle state to revoked")
+    }
     
  // MARK: - Helper Methods
     
@@ -413,6 +481,20 @@ final class P2PTrustSyncTests: XCTestCase {
         records.append(createTestTrustRecord(
             deviceId: "test-device-5",
             deviceName: "iPhone 15 Pro"
+        ))
+
+        records.append(TrustRecord(
+            deviceId: "test-device-6",
+            pubKeyFP: String(repeating: "f", count: 64),
+            publicKey: Data(repeating: 0x09, count: 32),
+            protocolPublicKey: Data(repeating: 0x42, count: 32),
+            protocolSigningAlgorithm: .ed25519,
+            protocolPublicKeyFingerprint: String(repeating: "1", count: 64),
+            attestationLevel: .none,
+            signature: Data(repeating: 0xAA, count: 64),
+            currentDeviceId: "test-device-6-current",
+            knownDeviceIds: ["test-device-6-current", "test-device-6-legacy"],
+            lifecycleState: .active
         ))
         
         return records

@@ -29,14 +29,22 @@ function unique(values) {
 function connectionRecordToStorage(record) {
   return JSON.stringify({
     deviceId: record.deviceId,
+    initiatorDeviceName: record.initiatorDeviceName || null,
+    initiatorProtocolSigningAlgorithm: record.initiatorProtocolSigningAlgorithm || null,
+    initiatorProtocolPublicKeyFingerprint: record.initiatorProtocolPublicKeyFingerprint || null,
     offer: record.offer,
     createdAt: record.createdAt,
     expiresAt: record.expiresAt,
     initiatorTokenHash: record.initiatorTokenHash,
     responderTokenHash: record.responderTokenHash || null,
+    qrBootstrapTokenHash: record.qrBootstrapTokenHash || null,
+    qrBootstrapConsumedAt: record.qrBootstrapConsumedAt || null,
     roomAuthTokenHash: record.roomAuthTokenHash || null,
     connectionKind: typeof record.connectionKind === 'string' ? record.connectionKind : 'legacy_offer_answer',
     responderId: record.responderId || null,
+    responderProtocolSigningAlgorithm: record.responderProtocolSigningAlgorithm || null,
+    responderProtocolPublicKeyFingerprint: record.responderProtocolPublicKeyFingerprint || null,
+    signalingServerOrigin: record.signalingServerOrigin || null,
     answer: record.answer || null,
     answerFrom: record.answerFrom || null
   });
@@ -47,14 +55,22 @@ function connectionRecordFromStorage(raw) {
   if (!parsed || typeof parsed !== 'object') return null;
   return {
     deviceId: typeof parsed.deviceId === 'string' ? parsed.deviceId : '',
+    initiatorDeviceName: typeof parsed.initiatorDeviceName === 'string' ? parsed.initiatorDeviceName : null,
+    initiatorProtocolSigningAlgorithm: typeof parsed.initiatorProtocolSigningAlgorithm === 'string' ? parsed.initiatorProtocolSigningAlgorithm : null,
+    initiatorProtocolPublicKeyFingerprint: typeof parsed.initiatorProtocolPublicKeyFingerprint === 'string' ? parsed.initiatorProtocolPublicKeyFingerprint : null,
     offer: parsed.offer && typeof parsed.offer === 'object' ? parsed.offer : null,
     createdAt: toInteger(parsed.createdAt, 0),
     expiresAt: toInteger(parsed.expiresAt, 0),
     initiatorTokenHash: typeof parsed.initiatorTokenHash === 'string' ? parsed.initiatorTokenHash : '',
     responderTokenHash: typeof parsed.responderTokenHash === 'string' ? parsed.responderTokenHash : null,
+    qrBootstrapTokenHash: typeof parsed.qrBootstrapTokenHash === 'string' ? parsed.qrBootstrapTokenHash : null,
+    qrBootstrapConsumedAt: toInteger(parsed.qrBootstrapConsumedAt, 0),
     roomAuthTokenHash: typeof parsed.roomAuthTokenHash === 'string' ? parsed.roomAuthTokenHash : null,
     connectionKind: typeof parsed.connectionKind === 'string' ? parsed.connectionKind : 'legacy_offer_answer',
     responderId: typeof parsed.responderId === 'string' ? parsed.responderId : null,
+    responderProtocolSigningAlgorithm: typeof parsed.responderProtocolSigningAlgorithm === 'string' ? parsed.responderProtocolSigningAlgorithm : null,
+    responderProtocolPublicKeyFingerprint: typeof parsed.responderProtocolPublicKeyFingerprint === 'string' ? parsed.responderProtocolPublicKeyFingerprint : null,
+    signalingServerOrigin: typeof parsed.signalingServerOrigin === 'string' ? parsed.signalingServerOrigin : null,
     answer: parsed.answer && typeof parsed.answer === 'object' ? parsed.answer : null,
     answerFrom: typeof parsed.answerFrom === 'string' ? parsed.answerFrom : null
   };
@@ -128,23 +144,32 @@ class MemorySignalingStateBackend {
     return deepClone(item);
   }
 
-  async ensureResponderToken(code, responderTokenHash, responderId) {
+  async bindResponder(code, binding) {
     const item = await this.getConnection(code);
     if (!item) return null;
-    let issued = false;
-    const canRotateResponderToken = !item.responderTokenHash
-      || !item.responderId
-      || !responderId
-      || item.responderId === responderId;
-    if (responderTokenHash && canRotateResponderToken) {
-      item.responderTokenHash = responderTokenHash;
-      issued = true;
+    if (binding.qrBootstrapTokenHash) {
+      if (!item.qrBootstrapTokenHash || item.qrBootstrapTokenHash !== binding.qrBootstrapTokenHash) {
+        return { item, issued: false, error: 'bootstrap_token_invalid' };
+      }
+      if (item.qrBootstrapConsumedAt) {
+        return { item, issued: false, error: 'bootstrap_token_consumed' };
+      }
     }
-    if (responderId && !item.responderId) {
-      item.responderId = responderId;
+    const sameResponder = !item.responderId || item.responderId === binding.responderId;
+    const sameFingerprint = !item.responderProtocolPublicKeyFingerprint
+      || item.responderProtocolPublicKeyFingerprint === binding.responderProtocolPublicKeyFingerprint;
+    if (!sameResponder || !sameFingerprint) {
+      return { item, issued: false, error: 'responder_binding_conflict' };
+    }
+    item.responderTokenHash = binding.responderTokenHash || item.responderTokenHash;
+    item.responderId = binding.responderId || item.responderId;
+    item.responderProtocolSigningAlgorithm = binding.responderProtocolSigningAlgorithm || item.responderProtocolSigningAlgorithm;
+    item.responderProtocolPublicKeyFingerprint = binding.responderProtocolPublicKeyFingerprint || item.responderProtocolPublicKeyFingerprint;
+    if (binding.qrBootstrapTokenHash) {
+      item.qrBootstrapConsumedAt = Date.now();
     }
     this.connectionCodes.set(code, deepClone(item));
-    return { item, issued };
+    return { item, issued: Boolean(binding.responderTokenHash), error: null };
   }
 
   async storeAnswer(code, answer, answerFrom, responderId) {
@@ -511,23 +536,46 @@ class RedisSignalingStateBackend {
     });
   }
 
-  async ensureResponderToken(code, responderTokenHash, responderId) {
+  async bindResponder(code, binding) {
     let issued = false;
+    let rejectedError = null;
     const item = await this.updateConnection(code, (nextItem) => {
-      const canRotateResponderToken = !nextItem.responderTokenHash
-        || !nextItem.responderId
-        || !responderId
-        || nextItem.responderId === responderId;
-      if (responderTokenHash && canRotateResponderToken) {
-        nextItem.responderTokenHash = responderTokenHash;
+      if (binding.qrBootstrapTokenHash) {
+        if (!nextItem.qrBootstrapTokenHash || nextItem.qrBootstrapTokenHash !== binding.qrBootstrapTokenHash) {
+          rejectedError = 'bootstrap_token_invalid';
+          return false;
+        }
+        if (nextItem.qrBootstrapConsumedAt) {
+          rejectedError = 'bootstrap_token_consumed';
+          return false;
+        }
+      }
+      const sameResponder = !nextItem.responderId || nextItem.responderId === binding.responderId;
+      const sameFingerprint = !nextItem.responderProtocolPublicKeyFingerprint
+        || nextItem.responderProtocolPublicKeyFingerprint === binding.responderProtocolPublicKeyFingerprint;
+      if (!sameResponder || !sameFingerprint) {
+        rejectedError = 'responder_binding_conflict';
+        return false;
+      }
+      if (binding.responderTokenHash) {
+        nextItem.responderTokenHash = binding.responderTokenHash;
         issued = true;
       }
-      if (responderId && !nextItem.responderId) {
-        nextItem.responderId = responderId;
+      if (binding.responderId) {
+        nextItem.responderId = binding.responderId;
+      }
+      if (binding.responderProtocolSigningAlgorithm) {
+        nextItem.responderProtocolSigningAlgorithm = binding.responderProtocolSigningAlgorithm;
+      }
+      if (binding.responderProtocolPublicKeyFingerprint) {
+        nextItem.responderProtocolPublicKeyFingerprint = binding.responderProtocolPublicKeyFingerprint;
+      }
+      if (binding.qrBootstrapTokenHash) {
+        nextItem.qrBootstrapConsumedAt = Date.now();
       }
     });
     if (!item) return null;
-    return { item, issued };
+    return { item, issued, error: rejectedError };
   }
 
   async storeAnswer(code, answer, answerFrom, responderId) {

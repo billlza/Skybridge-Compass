@@ -56,10 +56,12 @@
 
 - `HandshakeKEMIdentityStore`
 - `DefaultHandshakeKEMIdentityStore`（仍委托 `DeviceIdentityKeyManager`，不改变 Apple 当前密钥路径）
+- `HandshakeIdentityProvider`
+- `DeviceIdentityHandshakeProvider`（统一组装 `identityPublicKey` wire payload 与 `SigningKeyHandle`）
 
 下一步建议：
 
-1. 评估 `HandshakeDriver` 顶层构造是否还需要一个更高层的 `HandshakeIdentityProvider`，把 `identityPublicKey` / `SigningKeyHandle` 的拼装也标准化。
+1. 评估 `HandshakeIdentityProvider` 是否还需要再分成“协议签名身份”和“可选 SE PoP 身份”两个更细的 provider，以便 Android / Ubuntu 独立实现不同硬件能力。
 2. 评估 `DeviceIdentityKeyManager` 周边是否还能再抽出一个更薄的本地身份接口，而不把 Apple Keychain / Secure Enclave 细节泄漏到协议层。
 3. 把 `SignalServerClient`、`TURNCredentialService` 里的平台相关标识解析继续从控制面剥离。
 

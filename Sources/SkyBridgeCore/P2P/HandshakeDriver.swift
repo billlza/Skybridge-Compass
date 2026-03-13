@@ -80,14 +80,10 @@ public actor HandshakeDriver {
  /// MessageB 处理 epoch（防重入）
     private var messageBEpoch: UInt64 = 0
 
- /// 身份密钥句柄（用于签名）
-    private let identityKeyHandle: SigningKeyHandle?
+ /// 身份提供方（统一解析 identityPublicKey / key handles）
+    private let identityProvider: any HandshakeIdentityProvider
 
- /// Secure Enclave PoP 签名句柄（可选）
-    private let secureEnclaveKeyHandle: SigningKeyHandle?
-
- /// 身份公钥
-    private let identityPublicKey: Data
+    private var cachedResolvedIdentity: ResolvedHandshakeIdentity?
 
  /// 对端标识（用于日志）
     private var currentPeer: PeerIdentifier?
@@ -135,11 +131,9 @@ public actor HandshakeDriver {
  /// - transport: 传输层
  /// - cryptoProvider: 加密 Provider（用于 KEM/AEAD）
  /// - protocolSignatureProvider: 协议签名 Provider（用于 sigA/sigB）
- /// - protocolSigningKeyHandle: 协议签名密钥句柄
+ /// - identityProvider: 身份提供方（统一解析身份公钥与签名句柄）
  /// - sigAAlgorithm: sigA 使用的签名算法
- /// - identityPublicKey: 身份公钥
  /// - sePoPSignatureProvider: SE PoP 签名 Provider（可选）
- /// - sePoPSigningKeyHandle: SE PoP 签名密钥句柄（可选）
  /// - offeredSuites: 提供的 suite 列表（用于同质性验证）
  /// - policy: 握手策略
  /// - cryptoPolicy: 加密策略
@@ -159,11 +153,9 @@ public actor HandshakeDriver {
         transport: any DiscoveryTransport,
         cryptoProvider: any CryptoProvider,
         protocolSignatureProvider: any ProtocolSignatureProvider,
-        protocolSigningKeyHandle: SigningKeyHandle,
+        identityProvider: any HandshakeIdentityProvider,
         sigAAlgorithm: ProtocolSigningAlgorithm,
-        identityPublicKey: Data,
         sePoPSignatureProvider: (any SePoPSignatureProvider)? = nil,
-        sePoPSigningKeyHandle: SigningKeyHandle? = nil,
         offeredSuites: [CryptoSuite],
         policy: HandshakePolicy = .default,
         cryptoPolicy: CryptoPolicy = .default,
@@ -194,18 +186,13 @@ public actor HandshakeDriver {
             )
         }
 
- // 4. keyHandle 类型与 algorithm 匹配验证
-        try Self.validateKeyHandleCompatibility(keyHandle: protocolSigningKeyHandle, algorithm: sigAAlgorithm)
-
- // 5. 5.2: 防止 CryptoProvider 被当签名 provider（编译期已保证，这是运行时双保险）
+ // 4. 5.2: 防止 CryptoProvider 被当签名 provider（编译期已保证，这是运行时双保险）
  // 注意：由于 ProtocolSignatureProvider 和 CryptoProvider 是不同协议，
  // 编译期已经阻止了这种情况，但我们仍然添加运行时检查作为防御性编程
 
         self.transport = transport
         self.cryptoProvider = cryptoProvider
-        self.identityKeyHandle = protocolSigningKeyHandle
-        self.secureEnclaveKeyHandle = sePoPSigningKeyHandle
-        self.identityPublicKey = identityPublicKey
+        self.identityProvider = identityProvider
         self.signatureProvider = nil  // 新版本不使用旧的 signatureProvider
  // 5.3: 存储分流 provider
         self.protocolSignatureProvider = protocolSignatureProvider
@@ -222,6 +209,55 @@ public actor HandshakeDriver {
         self.localSOAPeerId = localSOAPeerId
         self.expectedRemoteSOAPeerId = expectedRemoteSOAPeerId
         self.sessionArbiter = sessionArbiter
+    }
+
+    public init(
+        transport: any DiscoveryTransport,
+        cryptoProvider: any CryptoProvider,
+        protocolSignatureProvider: any ProtocolSignatureProvider,
+        protocolSigningKeyHandle: SigningKeyHandle,
+        sigAAlgorithm: ProtocolSigningAlgorithm,
+        identityPublicKey: Data,
+        sePoPSignatureProvider: (any SePoPSignatureProvider)? = nil,
+        sePoPSigningKeyHandle: SigningKeyHandle? = nil,
+        offeredSuites: [CryptoSuite],
+        policy: HandshakePolicy = .default,
+        cryptoPolicy: CryptoPolicy = .default,
+        timeout: Duration = HandshakeConstants.defaultTimeout,
+        metricsCollector: HandshakeMetricsCollector? = nil,
+        trustProvider: (any HandshakeTrustProvider)? = nil,
+        kemIdentityStore: (any HandshakeKEMIdentityStore)? = nil,
+        soaMetadata: HandshakeSOAMetadata? = nil,
+        localSOAPeerId: Data? = nil,
+        expectedRemoteSOAPeerId: Data? = nil,
+        sessionArbiter: PeerSessionArbiter = .shared
+    ) throws {
+        try Self.validateKeyHandleCompatibility(keyHandle: protocolSigningKeyHandle, algorithm: sigAAlgorithm)
+        let staticIdentity = StaticHandshakeIdentityProvider(
+            identityPublicKey: identityPublicKey,
+            identityKeyHandle: protocolSigningKeyHandle,
+            secureEnclaveKeyHandle: sePoPSigningKeyHandle,
+            sigAAlgorithm: sigAAlgorithm.wire
+        )
+        try self.init(
+            transport: transport,
+            cryptoProvider: cryptoProvider,
+            protocolSignatureProvider: protocolSignatureProvider,
+            identityProvider: staticIdentity,
+            sigAAlgorithm: sigAAlgorithm,
+            sePoPSignatureProvider: sePoPSignatureProvider,
+            offeredSuites: offeredSuites,
+            policy: policy,
+            cryptoPolicy: cryptoPolicy,
+            timeout: timeout,
+            metricsCollector: metricsCollector,
+            trustProvider: trustProvider,
+            kemIdentityStore: kemIdentityStore,
+            soaMetadata: soaMetadata,
+            localSOAPeerId: localSOAPeerId,
+            expectedRemoteSOAPeerId: expectedRemoteSOAPeerId,
+            sessionArbiter: sessionArbiter
+        )
     }
 
  /// 验证 offeredSuites 同质性
@@ -302,12 +338,50 @@ public actor HandshakeDriver {
  /// - Parameters:
  /// - transport: 传输层
  /// - cryptoProvider: 加密 Provider
- /// - identityKeyHandle: 身份密钥句柄（可选）
- /// - identityPublicKey: 身份公钥
+ /// - identityProvider: 身份提供方
  /// - timeout: 超时时间
  /// - metricsCollector: 指标收集器
  ///
  /// **Requirements: 2.1, 2.2**
+    @available(*, deprecated, message: "Use init(transport:cryptoProvider:protocolSignatureProvider:protocolSigningKeyHandle:sigAAlgorithm:identityPublicKey:...) instead")
+    public init(
+        transport: any DiscoveryTransport,
+        cryptoProvider: any CryptoProvider,
+        identityProvider: any HandshakeIdentityProvider,
+        signatureProvider: (any CryptoProvider)? = nil,
+        sigAAlgorithm: SignatureAlgorithm? = nil,
+        policy: HandshakePolicy = .default,
+        cryptoPolicy: CryptoPolicy = .default,
+        timeout: Duration = HandshakeConstants.defaultTimeout,
+        metricsCollector: HandshakeMetricsCollector? = nil,
+        trustProvider: (any HandshakeTrustProvider)? = nil,
+        kemIdentityStore: (any HandshakeKEMIdentityStore)? = nil,
+        soaMetadata: HandshakeSOAMetadata? = nil,
+        localSOAPeerId: Data? = nil,
+        expectedRemoteSOAPeerId: Data? = nil,
+        sessionArbiter: PeerSessionArbiter = .shared
+    ) {
+        self.transport = transport
+        self.cryptoProvider = cryptoProvider
+        self.identityProvider = identityProvider
+        self.signatureProvider = signatureProvider
+ // 5.3: 旧版本不使用分流 provider
+        self.protocolSignatureProvider = nil
+        self.sePoPSignatureProvider = nil
+        self.sigAAlgorithm = sigAAlgorithm
+        self.policy = policy
+        self.cryptoPolicy = cryptoPolicy
+        self.offeredSuites = nil
+        self.timeout = timeout
+        self.metricsCollector = metricsCollector ?? HandshakeMetricsCollector()
+        self.trustProvider = trustProvider ?? DefaultHandshakeTrustProvider()
+        self.kemIdentityStore = kemIdentityStore ?? DefaultHandshakeKEMIdentityStore()
+        self.soaMetadata = soaMetadata
+        self.localSOAPeerId = localSOAPeerId
+        self.expectedRemoteSOAPeerId = expectedRemoteSOAPeerId
+        self.sessionArbiter = sessionArbiter
+    }
+
     @available(*, deprecated, message: "Use init(transport:cryptoProvider:protocolSignatureProvider:protocolSigningKeyHandle:sigAAlgorithm:identityPublicKey:...) instead")
     public init(
         transport: any DiscoveryTransport,
@@ -328,27 +402,29 @@ public actor HandshakeDriver {
         expectedRemoteSOAPeerId: Data? = nil,
         sessionArbiter: PeerSessionArbiter = .shared
     ) {
-        self.transport = transport
-        self.cryptoProvider = cryptoProvider
-        self.identityKeyHandle = identityKeyHandle
-        self.secureEnclaveKeyHandle = secureEnclaveKeyHandle
-        self.identityPublicKey = identityPublicKey
-        self.signatureProvider = signatureProvider
- // 5.3: 旧版本不使用分流 provider
-        self.protocolSignatureProvider = nil
-        self.sePoPSignatureProvider = nil
-        self.sigAAlgorithm = sigAAlgorithm
-        self.policy = policy
-        self.cryptoPolicy = cryptoPolicy
-        self.offeredSuites = nil
-        self.timeout = timeout
-        self.metricsCollector = metricsCollector ?? HandshakeMetricsCollector()
-        self.trustProvider = trustProvider ?? DefaultHandshakeTrustProvider()
-        self.kemIdentityStore = kemIdentityStore ?? DefaultHandshakeKEMIdentityStore()
-        self.soaMetadata = soaMetadata
-        self.localSOAPeerId = localSOAPeerId
-        self.expectedRemoteSOAPeerId = expectedRemoteSOAPeerId
-        self.sessionArbiter = sessionArbiter
+        let staticIdentity = StaticHandshakeIdentityProvider(
+            identityPublicKey: identityPublicKey,
+            identityKeyHandle: identityKeyHandle,
+            secureEnclaveKeyHandle: secureEnclaveKeyHandle,
+            sigAAlgorithm: sigAAlgorithm
+        )
+        self.init(
+            transport: transport,
+            cryptoProvider: cryptoProvider,
+            identityProvider: staticIdentity,
+            signatureProvider: signatureProvider,
+            sigAAlgorithm: sigAAlgorithm,
+            policy: policy,
+            cryptoPolicy: cryptoPolicy,
+            timeout: timeout,
+            metricsCollector: metricsCollector,
+            trustProvider: trustProvider,
+            kemIdentityStore: kemIdentityStore,
+            soaMetadata: soaMetadata,
+            localSOAPeerId: localSOAPeerId,
+            expectedRemoteSOAPeerId: expectedRemoteSOAPeerId,
+            sessionArbiter: sessionArbiter
+        )
     }
 
  // MARK: - Public API
@@ -399,6 +475,14 @@ public actor HandshakeDriver {
  // 13.2: 记录握手开始 (Requirement 6.1)
         metricsCollector.recordStart()
 
+        let resolvedIdentity: ResolvedHandshakeIdentity
+        do {
+            resolvedIdentity = try await resolveIdentity()
+        } catch {
+            await transitionToFailed(.cryptoError(error.localizedDescription))
+            throw error
+        }
+
  // 创建握手上下文
  // 5.3: 传递分流的签名 provider
         let peerKEMPublicKeys = await trustProvider.trustedKEMPublicKeys(for: peer.deviceId)
@@ -414,7 +498,7 @@ public actor HandshakeDriver {
         )
         context = ctx
 
-        if policy.requireSecureEnclavePoP, secureEnclaveKeyHandle == nil {
+        if policy.requireSecureEnclavePoP, resolvedIdentity.secureEnclaveKeyHandle == nil {
             await ctx.zeroize()
             context = nil
             throw HandshakeError.failed(.secureEnclavePoPRequired)
@@ -427,10 +511,10 @@ public actor HandshakeDriver {
  // 如果有签名回调，我们仍需要私钥用于 HandshakeContext
  // 签名回调将在未来版本中集成到 HandshakeContext
             messageA = try await ctx.buildMessageA(
-                identityKeyHandle: identityKeyHandle,
-                identityPublicKey: identityPublicKey,
+                identityKeyHandle: resolvedIdentity.identityKeyHandle,
+                identityPublicKey: resolvedIdentity.identityPublicKey,
                 policy: policy,
-                secureEnclaveKeyHandle: secureEnclaveKeyHandle,
+                secureEnclaveKeyHandle: resolvedIdentity.secureEnclaveKeyHandle,
                 offeredSuites: offeredSuites,
                 extensionsRaw: outboundSOA?.extensionRaw ?? Data()
             )
@@ -633,6 +717,7 @@ public actor HandshakeDriver {
 
         do {
             let messageA = try HandshakeMessageA.decode(from: data)
+            let resolvedIdentity = try await resolveIdentity()
 
  // 创建响应方上下文
  // 5.3: 传递分流的签名 provider
@@ -653,7 +738,7 @@ public actor HandshakeDriver {
 
  // 处理 MessageA
             do {
-                if policy.requireSecureEnclavePoP, secureEnclaveKeyHandle == nil {
+                if policy.requireSecureEnclavePoP, resolvedIdentity.secureEnclaveKeyHandle == nil {
                     throw HandshakeError.failed(.secureEnclavePoPRequired)
                 }
                 let pinnedSEPublicKey = await trustProvider.trustedSecureEnclavePublicKey(for: peer.deviceId)
@@ -722,10 +807,10 @@ public actor HandshakeDriver {
             do {
  // 获取用于签名的私钥
                 let result = try await ctx.buildMessageB(
-                    identityKeyHandle: identityKeyHandle,
-                    identityPublicKey: identityPublicKey,
+                    identityKeyHandle: resolvedIdentity.identityKeyHandle,
+                    identityPublicKey: resolvedIdentity.identityPublicKey,
                     policy: policy,
-                    secureEnclaveKeyHandle: secureEnclaveKeyHandle
+                    secureEnclaveKeyHandle: resolvedIdentity.secureEnclaveKeyHandle
                 )
                 messageB = result.message
                 messageBSecret = result.sharedSecret
@@ -1184,7 +1269,8 @@ public actor HandshakeDriver {
  /// - Returns: 签名结果
  /// - Throws: HandshakeError.noSigningCapability 或签名失败错误
     func signData(_ data: Data) async throws -> Data {
-        if let identityKeyHandle {
+        let resolvedIdentity = try await resolveIdentity()
+        if let identityKeyHandle = resolvedIdentity.identityKeyHandle {
             let provider = await selectSignatureProvider()
             return try await provider.sign(data: data, using: identityKeyHandle)
         }
@@ -1245,7 +1331,7 @@ public actor HandshakeDriver {
             return
         }
 
-        let actualFingerprint = computeFingerprint(identityPublicKey)
+        let actualFingerprint = try authoritativeFingerprint(for: identityPublicKey)
         guard expectedFingerprint == actualFingerprint else {
             throw HandshakeError.failed(.identityMismatch(
                 expected: expectedFingerprint,
@@ -1254,9 +1340,41 @@ public actor HandshakeDriver {
         }
     }
 
-    private func computeFingerprint(_ publicKey: Data) -> String {
-        let digest = SHA256.hash(data: publicKey)
-        return digest.map { String(format: "%02x", $0) }.joined()
+    private func authoritativeFingerprint(for identityPublicKey: Data) throws -> String {
+        let identityKeys = try IdentityPublicKeys.decodeWithLegacyFallback(from: identityPublicKey)
+        let protocolIdentity = try identityKeys.asProtocolIdentityKeys()
+        return ProtocolIdentityBinding.computeFingerprint(
+            algorithm: protocolIdentity.protocolAlgorithm,
+            publicKeyBytes: protocolIdentity.protocolPublicKey
+        )
+    }
+
+    private func resolveIdentity() async throws -> ResolvedHandshakeIdentity {
+        if let cachedResolvedIdentity {
+            return cachedResolvedIdentity
+        }
+
+        let resolvedIdentity = try await identityProvider.resolveIdentity()
+
+        if let expectedAlgorithm = sigAAlgorithm,
+           let actualAlgorithm = resolvedIdentity.sigAAlgorithm,
+           actualAlgorithm != expectedAlgorithm {
+            throw HandshakeError.providerAlgorithmMismatch(
+                provider: String(describing: type(of: identityProvider)),
+                algorithm: expectedAlgorithm.rawValue
+            )
+        }
+
+        if let expectedProtocolAlgorithm = sigAAlgorithm.flatMap(ProtocolSigningAlgorithm.init(from:)),
+           let keyHandle = resolvedIdentity.identityKeyHandle {
+            try Self.validateKeyHandleCompatibility(
+                keyHandle: keyHandle,
+                algorithm: expectedProtocolAlgorithm
+            )
+        }
+
+        cachedResolvedIdentity = resolvedIdentity
+        return resolvedIdentity
     }
 
     private func handleHandshakeError(_ error: Error, context: HandshakeContext? = nil) async {

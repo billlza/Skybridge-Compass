@@ -86,6 +86,10 @@ const TURN_URIS = (process.env.TURN_URIS || process.env.TURN_URLS || 'turns:54.9
 const LOOKUP_INVALID_WINDOW_MS = Number(process.env.LOOKUP_INVALID_WINDOW_MS || 60_000);
 const LOOKUP_INVALID_MAX = Number(process.env.LOOKUP_INVALID_MAX || 20); // per IP per window
 const lookupInvalidHits = new Map(); // ip -> {count, resetAt}
+const SIGNALING_SERVER_ORIGIN = String(process.env.SIGNALING_SERVER_ORIGIN || '').trim();
+const STRICT_DEVICE_ID_RE = /^[A-Za-z0-9._:-]{16,128}$/;
+const FINGERPRINT_RE = /^[0-9a-f]{64}$/;
+const ALLOWED_PROTOCOL_SIGNING_ALGORITHMS = new Set(['Ed25519', 'ML-DSA-65']);
 
 function recordInvalidLookup(ip) {
   const t = now();
@@ -137,6 +141,100 @@ function secureStringEqual(left, right) {
   const rightBuf = Buffer.from(right, 'utf8');
   if (leftBuf.length !== rightBuf.length) return false;
   return crypto.timingSafeEqual(leftBuf, rightBuf);
+}
+
+function canonicalizeOrigin(raw) {
+  let parsed;
+  try {
+    parsed = new URL(String(raw || ''));
+  } catch (_) {
+    return null;
+  }
+  const scheme = String(parsed.protocol || '').replace(/:$/, '').toLowerCase();
+  const host = String(parsed.hostname || '').toLowerCase();
+  if (!host || (scheme !== 'https' && scheme !== 'http')) return null;
+  if (parsed.pathname && parsed.pathname !== '/') return null;
+  if (parsed.search || parsed.hash) return null;
+  const port = parsed.port ? Number(parsed.port) : null;
+  if ((scheme === 'https' && (!port || port === 443)) || (scheme === 'http' && (!port || port === 80))) {
+    return `${scheme}://${host}`;
+  }
+  return `${scheme}://${host}:${port}`;
+}
+
+function resolvedSignalingServerOrigin(req) {
+  const configured = canonicalizeOrigin(SIGNALING_SERVER_ORIGIN);
+  if (configured) return configured;
+  const forwardedProto = String(req.get('X-Forwarded-Proto') || '').split(',')[0].trim().toLowerCase();
+  const scheme = forwardedProto || String(req.protocol || 'https').toLowerCase();
+  const host = String(req.get('host') || '').trim();
+  const derived = canonicalizeOrigin(`${scheme}://${host}`);
+  if (!derived) {
+    throw new Error('invalid_signaling_server_origin');
+  }
+  return derived;
+}
+
+function isStrictDeviceId(value) {
+  return typeof value === 'string' && STRICT_DEVICE_ID_RE.test(value);
+}
+
+function normalizeProtocolSigningAlgorithm(raw) {
+  const value = String(raw || '').trim();
+  if (ALLOWED_PROTOCOL_SIGNING_ALGORITHMS.has(value)) {
+    return value;
+  }
+  const folded = value.toLowerCase().replace(/[^a-z0-9]/g, '');
+  switch (folded) {
+    case 'ed25519':
+      return 'Ed25519';
+    case 'mldsa65':
+      return 'ML-DSA-65';
+    default:
+      return '';
+  }
+}
+
+function normalizeFingerprint(raw) {
+  const value = String(raw || '').trim().toLowerCase();
+  return FINGERPRINT_RE.test(value) ? value : '';
+}
+
+function normalizeIdentityBinding(raw, { requirePublicKey = false } = {}) {
+  if (!raw || typeof raw !== 'object') return null;
+  const deviceId = normalizeDeviceId(raw.deviceId);
+  const protocolSigningAlgorithm = normalizeProtocolSigningAlgorithm(raw.protocolSigningAlgorithm);
+  const protocolPublicKeyFingerprint = normalizeFingerprint(raw.protocolPublicKeyFingerprint);
+  if (!isStrictDeviceId(deviceId) || !protocolSigningAlgorithm || !protocolPublicKeyFingerprint) {
+    return null;
+  }
+  const binding = {
+    deviceId,
+    protocolSigningAlgorithm,
+    protocolPublicKeyFingerprint
+  };
+  if (requirePublicKey) {
+    binding.protocolPublicKeyBytes = raw.protocolPublicKeyBytes || null;
+  }
+  return binding;
+}
+
+function auditCurrentPath(event, fields = {}) {
+  const parts = [
+    `event=${event}`,
+    `session=${fields.sessionId || '-'}`,
+    `role=${fields.role || '-'}`,
+    `fingerprint=${fields.protocolPublicKeyFingerprint || '-'}`,
+    `failure=${fields.failure || '-'}`,
+    `reason=${fields.reason || '-'}`
+  ];
+  if (fields.boundIdentity) {
+    parts.push(`bound=${fields.boundIdentity.deviceId || '-'}:${fields.boundIdentity.protocolPublicKeyFingerprint || '-'}`);
+  }
+  if (fields.presentedIdentity) {
+    parts.push(`presented=${fields.presentedIdentity.deviceId || '-'}:${fields.presentedIdentity.protocolPublicKeyFingerprint || '-'}`);
+  }
+  console.warn(`[audit.current-path] ${parts.join(' ')}`);
 }
 
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no 0/O/1/I
@@ -354,10 +452,10 @@ function makeWebRTCError(error, sessionId = null) {
   return payload;
 }
 
-function sanitizeEnvelopeForPeer(msg) {
+function sanitizeEnvelopeForPeer(msg, overrideFrom = null) {
   return {
     sessionId: normalizeSessionId(msg.sessionId),
-    from: normalizeDeviceId(msg.from),
+    from: normalizeDeviceId(overrideFrom || msg.from),
     to: typeof msg.to === 'string' ? normalizeDeviceId(msg.to) || undefined : undefined,
     type: msg.type,
     payload: isPlainObject(msg.payload) ? msg.payload : null,
@@ -413,21 +511,37 @@ async function forwardEnvelopeToRemoteInstances(msg) {
 }
 
 function authMatchesHash(token, hash) {
-  return typeof token === 'string' && Boolean(hash) && sha256Hex(token) === hash;
+  if (typeof token !== 'string' || typeof hash !== 'string' || !hash) return false;
+  return secureStringEqual(sha256Hex(token), hash);
+}
+
+function boundIdentityForRole(item, role) {
+  if (role === 'initiator') {
+    return {
+      deviceId: item.deviceId || null,
+      protocolSigningAlgorithm: item.initiatorProtocolSigningAlgorithm || null,
+      protocolPublicKeyFingerprint: item.initiatorProtocolPublicKeyFingerprint || null
+    };
+  }
+  if (role === 'responder') {
+    return {
+      deviceId: item.responderId || null,
+      protocolSigningAlgorithm: item.responderProtocolSigningAlgorithm || null,
+      protocolPublicKeyFingerprint: item.responderProtocolPublicKeyFingerprint || null
+    };
+  }
+  return null;
 }
 
 function authWebRTCEnvelope(item, msg) {
   const token = typeof msg.authToken === 'string' ? msg.authToken : '';
-  if (authMatchesHash(token, item.roomAuthTokenHash)) {
-    return { ok: true, expectedFrom: null, authMode: 'room_shared' };
-  }
   if (authMatchesHash(token, item.initiatorTokenHash)) {
-    return { ok: true, expectedFrom: item.deviceId || null, authMode: 'initiator' };
+    return { ok: true, role: 'initiator', boundIdentity: boundIdentityForRole(item, 'initiator') };
   }
   if (authMatchesHash(token, item.responderTokenHash)) {
-    return { ok: true, expectedFrom: item.responderId || null, authMode: 'responder' };
+    return { ok: true, role: 'responder', boundIdentity: boundIdentityForRole(item, 'responder') };
   }
-  return { ok: false, expectedFrom: null, authMode: null };
+  return { ok: false, role: null, boundIdentity: null };
 }
 
 async function handleWebRTCEnvelope(ws, msg) {
@@ -449,11 +563,29 @@ async function handleWebRTCEnvelope(ws, msg) {
 
   const authResult = authWebRTCEnvelope(item, msg);
   if (!authResult.ok && !ALLOW_INSECURE) {
+    auditCurrentPath('webrtc-envelope-rejected', {
+      sessionId: sid,
+      failure: 'authTokenRejected',
+      reason: 'token_not_bound'
+    });
     wsSendRaw(ws, makeWebRTCError('unauthorized', sid));
     try { ws.close(1008, 'unauthorized'); } catch {}
     return;
   }
-  if (authResult.expectedFrom && authResult.expectedFrom !== from) {
+  const boundIdentity = authResult.boundIdentity;
+  if (boundIdentity?.deviceId && boundIdentity.deviceId !== from) {
+    auditCurrentPath('webrtc-envelope-rejected', {
+      sessionId: sid,
+      role: authResult.role,
+      protocolPublicKeyFingerprint: boundIdentity.protocolPublicKeyFingerprint,
+      failure: 'identityConflict',
+      reason: 'presented_from_mismatch',
+      boundIdentity,
+      presentedIdentity: {
+        deviceId: from,
+        protocolPublicKeyFingerprint: boundIdentity.protocolPublicKeyFingerprint
+      }
+    });
     wsSendRaw(ws, makeWebRTCError('device_mismatch', sid));
     try { ws.close(1008, 'device_mismatch'); } catch {}
     return;
@@ -463,7 +595,8 @@ async function handleWebRTCEnvelope(ws, msg) {
   if (!room) return wsSendRaw(ws, makeWebRTCError('bad_sessionId', sid));
 
   const meta = wsMeta.get(ws) || { code: null, role: null, clientId: uuidv4(), rate: { t0: now(), c: 0 } };
-  if ((meta.sessionId && meta.sessionId !== sid) || (meta.deviceId && meta.deviceId !== from)) {
+  const authoritativeFrom = boundIdentity?.deviceId || from;
+  if ((meta.sessionId && meta.sessionId !== sid) || (meta.deviceId && meta.deviceId !== authoritativeFrom)) {
     await removeFromAllRooms(ws);
   }
 
@@ -473,20 +606,20 @@ async function handleWebRTCEnvelope(ws, msg) {
     }
     room.clients.add(ws);
   }
-  const existingClient = room.clientsByDeviceId.get(from);
+  const existingClient = room.clientsByDeviceId.get(authoritativeFrom);
   if (existingClient && existingClient !== ws) {
     if (existingClient.readyState === existingClient.OPEN) {
       return wsSendRaw(ws, makeWebRTCError('device_conflict', sid));
     }
     room.clients.delete(existingClient);
-    room.clientsByDeviceId.delete(from);
+    room.clientsByDeviceId.delete(authoritativeFrom);
   }
-  room.clientsByDeviceId.set(from, ws);
-  wsMeta.set(ws, { ...meta, sessionId: sid, deviceId: from, webrtcAuthMode: authResult.authMode });
+  room.clientsByDeviceId.set(authoritativeFrom, ws);
+  wsMeta.set(ws, { ...meta, sessionId: sid, deviceId: authoritativeFrom, webrtcAuthMode: authResult.role });
 
   const updatedAt = now();
   await signalingState.upsertRoomMember(sid, {
-    deviceId: from,
+    deviceId: authoritativeFrom,
     instanceId: INSTANCE_ID,
     clientId: meta.clientId,
     updatedAt,
@@ -494,16 +627,17 @@ async function handleWebRTCEnvelope(ws, msg) {
   });
 
   if (msg.type === 'leave') {
-    await signalingState.removeRoomMember(sid, from, meta.clientId || '');
+    await signalingState.removeRoomMember(sid, authoritativeFrom, meta.clientId || '');
     room.clients.delete(ws);
-    if (room.clientsByDeviceId.get(from) === ws) {
-      room.clientsByDeviceId.delete(from);
+    if (room.clientsByDeviceId.get(authoritativeFrom) === ws) {
+      room.clientsByDeviceId.delete(authoritativeFrom);
     }
     if (room.clients.size === 0) rooms.delete(sid);
   }
 
-  deliverEnvelopeLocally(ws, msg);
-  await forwardEnvelopeToRemoteInstances(msg);
+  const sanitized = sanitizeEnvelopeForPeer(msg, authoritativeFrom);
+  deliverEnvelopeLocally(ws, sanitized);
+  await forwardEnvelopeToRemoteInstances(sanitized);
 }
 
 async function handleBackendInstanceMessage(payload) {
@@ -595,6 +729,7 @@ app.get('/', asyncRoute(async (req, res) => {
       '/api/webrtc/register-code',
       '/api/webrtc/lookup/:code',
       '/api/webrtc/register-session',
+      '/api/webrtc/redeem-session',
       '/ws'
     ]
   });
@@ -635,28 +770,53 @@ function clampSessionTtlMs(rawSeconds, fallbackMs = CODE_TTL_MS) {
 }
 
 function buildConnectionRecord({
-  deviceId,
+  initiatorBinding,
+  deviceId = null,
+  initiatorDeviceName = null,
   offer = null,
   expiresAt,
   initiatorTokenHash = '',
   responderTokenHash = null,
+  qrBootstrapTokenHash = null,
   roomAuthTokenHash = null,
   responderId = null,
+  responderProtocolSigningAlgorithm = null,
+  responderProtocolPublicKeyFingerprint = null,
+  signalingServerOrigin = null,
   connectionKind = 'legacy_offer_answer'
 }) {
+  const effectiveDeviceId = initiatorBinding?.deviceId || deviceId || '';
   return {
-    deviceId,
+    deviceId: effectiveDeviceId,
+    initiatorDeviceName,
+    initiatorProtocolSigningAlgorithm: initiatorBinding?.protocolSigningAlgorithm || null,
+    initiatorProtocolPublicKeyFingerprint: initiatorBinding?.protocolPublicKeyFingerprint || null,
     offer,
     createdAt: now(),
     expiresAt,
     initiatorTokenHash,
     responderTokenHash,
+    qrBootstrapTokenHash,
+    qrBootstrapConsumedAt: 0,
     roomAuthTokenHash,
     responderId,
+    responderProtocolSigningAlgorithm,
+    responderProtocolPublicKeyFingerprint,
+    signalingServerOrigin,
     answer: null,
     answerFrom: null,
     connectionKind
   };
+}
+
+function assertUniqueSessionParticipant(item, responderBinding) {
+  if (item.deviceId === responderBinding.deviceId) {
+    return 'device_id_conflict';
+  }
+  if (item.initiatorProtocolPublicKeyFingerprint === responderBinding.protocolPublicKeyFingerprint) {
+    return 'identity_conflict';
+  }
+  return null;
 }
 
 // -------------------- REST API: dynamic TURN credentials --------------------
@@ -714,20 +874,25 @@ app.get('/api/turn/credentials', rlTurn, (req, res) => {
 
 // -------------------- REST API: current WebRTC room flow --------------------
 app.post('/api/webrtc/register-code', rlRegister, asyncRoute(async (req, res) => {
-  const { deviceId, deviceName, ttlSeconds } = req.body || {};
-  if (typeof deviceId !== 'string' || deviceId.length < 1 || deviceId.length > 128) {
+  const initiatorBinding = normalizeIdentityBinding(req.body || {});
+  const deviceName = typeof req.body?.deviceName === 'string' ? req.body.deviceName.slice(0, 128) : null;
+  const ttlSeconds = req.body?.ttlSeconds;
+  if (!initiatorBinding) {
     return res.status(400).json({ error: 'bad_deviceId' });
   }
   const initiatorToken = newToken();
   const expiresAt = now() + clampSessionTtlMs(ttlSeconds, CODE_TTL_MS);
+  const signalingServerOrigin = resolvedSignalingServerOrigin(req);
   const code = await signalingState.createConnectionCode(generateCode, 10, buildConnectionRecord({
-    deviceId,
+    initiatorBinding,
+    initiatorDeviceName: deviceName,
     offer: {
       mode: 'webrtc_room_code',
-      deviceName: typeof deviceName === 'string' ? deviceName.slice(0, 128) : null
+      deviceName
     },
     expiresAt,
     initiatorTokenHash: sha256Hex(initiatorToken),
+    signalingServerOrigin,
     connectionKind: 'webrtc_room_code'
   }));
   if (!code) {
@@ -739,6 +904,7 @@ app.post('/api/webrtc/register-code', rlRegister, asyncRoute(async (req, res) =>
     sessionId: code,
     initiatorToken,
     expiresIn: Math.max(0, Math.round((expiresAt - now()) / 1000)),
+    signalingServerOrigin,
     wsPath: '/ws'
   });
 }));
@@ -749,17 +915,45 @@ app.get('/api/webrtc/lookup/:code', rlLookup, asyncRoute(async (req, res) => {
     return res.status(429).json({ error: 'rate_limited' });
   }
   const code = safeUpperCode(req.params.code);
-  const responderId = (typeof req.query.deviceId === 'string' && req.query.deviceId.length <= 128)
-    ? req.query.deviceId
-    : null;
-  if (!responderId) {
+  const responderBinding = normalizeIdentityBinding({
+    deviceId: req.query.deviceId,
+    protocolSigningAlgorithm: req.query.protocolSigningAlgorithm,
+    protocolPublicKeyFingerprint: req.query.protocolPublicKeyFingerprint
+  });
+  if (!responderBinding) {
     return res.status(400).json({ error: 'bad_deviceId' });
   }
-  const responderToken = newToken();
-  const result = await signalingState.ensureResponderToken(code, sha256Hex(responderToken), responderId);
-  if (!result?.item || result.item.connectionKind !== 'webrtc_room_code') {
+  const existing = await signalingState.getConnection(code);
+  if (!existing || existing.connectionKind !== 'webrtc_room_code') {
     recordInvalidLookup(ip);
     return res.status(404).json({ found: false });
+  }
+  const uniquenessError = assertUniqueSessionParticipant(existing, responderBinding);
+  if (uniquenessError) {
+    auditCurrentPath('lookup-rejected', {
+      sessionId: code,
+      role: 'responder',
+      protocolPublicKeyFingerprint: responderBinding.protocolPublicKeyFingerprint,
+      failure: uniquenessError === 'identity_conflict' ? 'identityConflict' : 'deviceIdMigrationRequired',
+      reason: uniquenessError,
+      boundIdentity: boundIdentityForRole(existing, 'initiator'),
+      presentedIdentity: responderBinding
+    });
+    return res.status(409).json({ error: uniquenessError });
+  }
+  const responderToken = newToken();
+  const result = await signalingState.bindResponder(code, {
+    responderTokenHash: sha256Hex(responderToken),
+    responderId: responderBinding.deviceId,
+    responderProtocolSigningAlgorithm: responderBinding.protocolSigningAlgorithm,
+    responderProtocolPublicKeyFingerprint: responderBinding.protocolPublicKeyFingerprint
+  });
+  if (!result?.item) {
+    recordInvalidLookup(ip);
+    return res.status(404).json({ found: false });
+  }
+  if (result.error) {
+    return res.status(409).json({ error: result.error });
   }
   const { item } = result;
   issueStickyHintCookie(res, code, Math.max(60, Math.round((item.expiresAt - now()) / 1000)));
@@ -767,16 +961,21 @@ app.get('/api/webrtc/lookup/:code', rlLookup, asyncRoute(async (req, res) => {
     found: true,
     sessionId: code,
     initiatorDeviceId: item.deviceId,
+    initiatorProtocolSigningAlgorithm: item.initiatorProtocolSigningAlgorithm,
+    initiatorProtocolPublicKeyFingerprint: item.initiatorProtocolPublicKeyFingerprint,
+    initiatorDeviceName: item.initiatorDeviceName,
     responderToken,
     expiresIn: Math.max(0, Math.round((item.expiresAt - now()) / 1000))
+    ,
+    signalingServerOrigin: item.signalingServerOrigin || resolvedSignalingServerOrigin(req)
   });
 }));
 
 app.post('/api/webrtc/register-session', rlRegister, asyncRoute(async (req, res) => {
   const requestedSessionId = normalizeRecordId(req.body?.sessionId);
-  const deviceId = normalizeDeviceId(req.body?.deviceId);
+  const initiatorBinding = normalizeIdentityBinding(req.body || {});
   const ttlMs = clampSessionTtlMs(req.body?.ttlSeconds, CODE_TTL_MS);
-  if (!deviceId || deviceId.length > 128) {
+  if (!initiatorBinding) {
     return res.status(400).json({ error: 'bad_deviceId' });
   }
   const sessionId = (SIGNALING_STATE_BACKEND === 'redis' && requestedSessionId)
@@ -785,13 +984,17 @@ app.post('/api/webrtc/register-session', rlRegister, asyncRoute(async (req, res)
   if (!sessionId || sessionId.length > 160) {
     return res.status(400).json({ error: 'bad_sessionId' });
   }
-  const signalingToken = newToken();
+  const initiatorSignalingToken = newToken();
+  const qrBootstrapToken = newToken();
   const expiresAt = now() + ttlMs;
+  const signalingServerOrigin = resolvedSignalingServerOrigin(req);
   const created = await signalingState.createConnectionRecord(sessionId, buildConnectionRecord({
-    deviceId,
+    initiatorBinding,
     offer: { mode: 'webrtc_room_session' },
     expiresAt,
-    roomAuthTokenHash: sha256Hex(signalingToken),
+    initiatorTokenHash: sha256Hex(initiatorSignalingToken),
+    qrBootstrapTokenHash: sha256Hex(qrBootstrapToken),
+    signalingServerOrigin,
     connectionKind: 'webrtc_room_session'
   }));
   if (!created) {
@@ -800,9 +1003,72 @@ app.post('/api/webrtc/register-session', rlRegister, asyncRoute(async (req, res)
   issueStickyHintCookie(res, sessionId, Math.max(60, Math.round((expiresAt - now()) / 1000)));
   res.json({
     sessionId,
-    signalingToken,
+    initiatorSignalingToken,
+    qrBootstrapToken,
     expiresIn: Math.max(0, Math.round((expiresAt - now()) / 1000)),
+    signalingServerOrigin,
     wsPath: '/ws'
+  });
+}));
+
+app.post('/api/webrtc/redeem-session', rlRegister, asyncRoute(async (req, res) => {
+  const sessionId = normalizeSessionId(req.body?.sessionId);
+  const qrBootstrapToken = typeof req.body?.qrBootstrapToken === 'string' ? req.body.qrBootstrapToken.trim() : '';
+  const responderBinding = normalizeIdentityBinding(req.body || {});
+  if (!sessionId) {
+    return res.status(400).json({ error: 'bad_sessionId' });
+  }
+  if (!qrBootstrapToken) {
+    return res.status(400).json({ error: 'bad_qrBootstrapToken' });
+  }
+  if (!responderBinding) {
+    return res.status(400).json({ error: 'bad_deviceId' });
+  }
+  const item = await signalingState.getConnection(sessionId);
+  if (!item || item.connectionKind !== 'webrtc_room_session') {
+    return res.status(404).json({ error: 'session_expired' });
+  }
+  const uniquenessError = assertUniqueSessionParticipant(item, responderBinding);
+  if (uniquenessError) {
+    auditCurrentPath('redeem-session-rejected', {
+      sessionId,
+      role: 'responder',
+      protocolPublicKeyFingerprint: responderBinding.protocolPublicKeyFingerprint,
+      failure: uniquenessError === 'identity_conflict' ? 'identityConflict' : 'deviceIdMigrationRequired',
+      reason: uniquenessError,
+      boundIdentity: boundIdentityForRole(item, 'initiator'),
+      presentedIdentity: responderBinding
+    });
+    return res.status(409).json({ error: uniquenessError });
+  }
+  const responderSignalingToken = newToken();
+  const result = await signalingState.bindResponder(sessionId, {
+    qrBootstrapTokenHash: sha256Hex(qrBootstrapToken),
+    responderTokenHash: sha256Hex(responderSignalingToken),
+    responderId: responderBinding.deviceId,
+    responderProtocolSigningAlgorithm: responderBinding.protocolSigningAlgorithm,
+    responderProtocolPublicKeyFingerprint: responderBinding.protocolPublicKeyFingerprint
+  });
+  if (!result?.item) {
+    return res.status(404).json({ error: 'session_expired' });
+  }
+  if (result.error === 'bootstrap_token_consumed') {
+    return res.status(409).json({ error: 'bootstrap_token_consumed' });
+  }
+  if (result.error === 'bootstrap_token_invalid') {
+    return res.status(401).json({ error: 'auth_token_rejected' });
+  }
+  if (result.error) {
+    return res.status(409).json({ error: result.error });
+  }
+  res.json({
+    sessionId,
+    responderSignalingToken,
+    expiresIn: Math.max(0, Math.round((result.item.expiresAt - now()) / 1000)),
+    signalingServerOrigin: result.item.signalingServerOrigin || resolvedSignalingServerOrigin(req),
+    initiatorDeviceId: result.item.deviceId,
+    initiatorProtocolSigningAlgorithm: result.item.initiatorProtocolSigningAlgorithm,
+    initiatorProtocolPublicKeyFingerprint: result.item.initiatorProtocolPublicKeyFingerprint
   });
 }));
 
@@ -851,7 +1117,10 @@ app.get('/api/lookup/:code', rlLookup, asyncRoute(async (req, res) => {
     : null;
 
   const responderToken = newToken();
-  const result = await signalingState.ensureResponderToken(code, sha256Hex(responderToken), responderId);
+  const result = await signalingState.bindResponder(code, {
+    responderTokenHash: sha256Hex(responderToken),
+    responderId
+  });
   if (!result?.item) {
     recordInvalidLookup(ip);
     return res.status(404).json({ found: false });
@@ -887,7 +1156,7 @@ app.post('/api/answer/:code', rlAnswer, asyncRoute(async (req, res) => {
   }
 
   // token 校验（强烈建议用；兼容旧客户端可关闭）
-  const tokenOk = (typeof token === 'string' && item.responderTokenHash && sha256Hex(token) === item.responderTokenHash);
+  const tokenOk = authMatchesHash(token, item.responderTokenHash);
   if (!tokenOk && !ALLOW_INSECURE) {
     return res.status(401).json({ success: false, error: 'unauthorized' });
   }
@@ -933,8 +1202,8 @@ app.post('/api/ice/:sessionId', rlIce, asyncRoute(async (req, res) => {
   // 如果 sessionId 就是 code，则可做 token 校验（可选）
   const item = await signalingState.getConnection(sessionId);
   if (item) {
-    const okInitiator = typeof token === 'string' && sha256Hex(token) === item.initiatorTokenHash;
-    const okResponder = typeof token === 'string' && item.responderTokenHash && sha256Hex(token) === item.responderTokenHash;
+    const okInitiator = authMatchesHash(token, item.initiatorTokenHash);
+    const okResponder = authMatchesHash(token, item.responderTokenHash);
     if (!okInitiator && !okResponder && !ALLOW_INSECURE) {
       return res.status(401).json({ success: false, error: 'unauthorized' });
     }
@@ -955,8 +1224,8 @@ app.get('/api/ice/:sessionId', rlIce, asyncRoute(async (req, res) => {
   const item = await signalingState.getConnection(sessionId);
   if (item) {
     const token = (typeof req.query.token === 'string') ? req.query.token : null;
-    const okInitiator = token && sha256Hex(token) === item.initiatorTokenHash;
-    const okResponder = token && item.responderTokenHash && sha256Hex(token) === item.responderTokenHash;
+    const okInitiator = authMatchesHash(token, item.initiatorTokenHash);
+    const okResponder = authMatchesHash(token, item.responderTokenHash);
     if (!okInitiator && !okResponder && !ALLOW_INSECURE) {
       return res.status(401).json({ success: false, error: 'unauthorized' });
     }
@@ -1022,10 +1291,10 @@ function wsSend(ws, obj) {
 
 function authWsBind(item, role, token) {
   if (role === 'initiator') {
-    return typeof token === 'string' && sha256Hex(token) === item.initiatorTokenHash;
+    return authMatchesHash(token, item.initiatorTokenHash);
   }
   if (role === 'responder') {
-    return typeof token === 'string' && item.responderTokenHash && sha256Hex(token) === item.responderTokenHash;
+    return authMatchesHash(token, item.responderTokenHash);
   }
   return false;
 }

@@ -13,35 +13,65 @@ public actor SignalServerClient {
     public struct RegisterSessionRequestBody: Encodable, Sendable {
         public let sessionId: String?
         public let deviceId: String
+        public let protocolSigningAlgorithm: ProtocolSigningAlgorithm
+        public let protocolPublicKeyFingerprint: String
         public let ttlSeconds: Int
 
-        public init(sessionId: String?, deviceId: String, ttlSeconds: Int) {
+        public init(
+            sessionId: String?,
+            deviceId: String,
+            protocolSigningAlgorithm: ProtocolSigningAlgorithm,
+            protocolPublicKeyFingerprint: String,
+            ttlSeconds: Int
+        ) {
             self.sessionId = sessionId
             self.deviceId = deviceId
+            self.protocolSigningAlgorithm = protocolSigningAlgorithm
+            self.protocolPublicKeyFingerprint = protocolPublicKeyFingerprint
             self.ttlSeconds = ttlSeconds
         }
     }
 
     public struct RegisterSessionResponseBody: Codable, Sendable {
         public let sessionId: String
-        public let signalingToken: String
+        public let initiatorSignalingToken: String
+        public let qrBootstrapToken: String
         public let expiresIn: Int
+        public let signalingServerOrigin: String
 
-        public init(sessionId: String, signalingToken: String, expiresIn: Int) {
+        public init(
+            sessionId: String,
+            initiatorSignalingToken: String,
+            qrBootstrapToken: String,
+            expiresIn: Int,
+            signalingServerOrigin: String
+        ) {
             self.sessionId = sessionId
-            self.signalingToken = signalingToken
+            self.initiatorSignalingToken = initiatorSignalingToken
+            self.qrBootstrapToken = qrBootstrapToken
             self.expiresIn = expiresIn
+            self.signalingServerOrigin = signalingServerOrigin
         }
     }
 
     public struct RegisterCodeRequestBody: Encodable, Sendable {
         public let deviceId: String
         public let deviceName: String
+        public let protocolSigningAlgorithm: ProtocolSigningAlgorithm
+        public let protocolPublicKeyFingerprint: String
         public let ttlSeconds: Int
 
-        public init(deviceId: String, deviceName: String, ttlSeconds: Int) {
+        public init(
+            deviceId: String,
+            deviceName: String,
+            protocolSigningAlgorithm: ProtocolSigningAlgorithm,
+            protocolPublicKeyFingerprint: String,
+            ttlSeconds: Int
+        ) {
             self.deviceId = deviceId
             self.deviceName = deviceName
+            self.protocolSigningAlgorithm = protocolSigningAlgorithm
+            self.protocolPublicKeyFingerprint = protocolPublicKeyFingerprint
             self.ttlSeconds = ttlSeconds
         }
     }
@@ -51,12 +81,20 @@ public actor SignalServerClient {
         public let sessionId: String
         public let initiatorToken: String
         public let expiresIn: Int
+        public let signalingServerOrigin: String
 
-        public init(code: String, sessionId: String, initiatorToken: String, expiresIn: Int) {
+        public init(
+            code: String,
+            sessionId: String,
+            initiatorToken: String,
+            expiresIn: Int,
+            signalingServerOrigin: String
+        ) {
             self.code = code
             self.sessionId = sessionId
             self.initiatorToken = initiatorToken
             self.expiresIn = expiresIn
+            self.signalingServerOrigin = signalingServerOrigin
         }
     }
 
@@ -65,12 +103,82 @@ public actor SignalServerClient {
         public let sessionId: String
         public let responderToken: String
         public let expiresIn: Int
+        public let signalingServerOrigin: String
+        public let initiatorDeviceId: String
+        public let initiatorProtocolSigningAlgorithm: ProtocolSigningAlgorithm
+        public let initiatorProtocolPublicKeyFingerprint: String
+        public let initiatorDeviceName: String?
 
-        public init(found: Bool, sessionId: String, responderToken: String, expiresIn: Int) {
+        public init(
+            found: Bool,
+            sessionId: String,
+            responderToken: String,
+            expiresIn: Int,
+            signalingServerOrigin: String,
+            initiatorDeviceId: String,
+            initiatorProtocolSigningAlgorithm: ProtocolSigningAlgorithm,
+            initiatorProtocolPublicKeyFingerprint: String,
+            initiatorDeviceName: String? = nil
+        ) {
             self.found = found
             self.sessionId = sessionId
             self.responderToken = responderToken
             self.expiresIn = expiresIn
+            self.signalingServerOrigin = signalingServerOrigin
+            self.initiatorDeviceId = initiatorDeviceId
+            self.initiatorProtocolSigningAlgorithm = initiatorProtocolSigningAlgorithm
+            self.initiatorProtocolPublicKeyFingerprint = initiatorProtocolPublicKeyFingerprint
+            self.initiatorDeviceName = initiatorDeviceName
+        }
+    }
+
+    public struct RedeemSessionRequestBody: Encodable, Sendable {
+        public let sessionId: String
+        public let qrBootstrapToken: String
+        public let deviceId: String
+        public let protocolSigningAlgorithm: ProtocolSigningAlgorithm
+        public let protocolPublicKeyFingerprint: String
+
+        public init(
+            sessionId: String,
+            qrBootstrapToken: String,
+            deviceId: String,
+            protocolSigningAlgorithm: ProtocolSigningAlgorithm,
+            protocolPublicKeyFingerprint: String
+        ) {
+            self.sessionId = sessionId
+            self.qrBootstrapToken = qrBootstrapToken
+            self.deviceId = deviceId
+            self.protocolSigningAlgorithm = protocolSigningAlgorithm
+            self.protocolPublicKeyFingerprint = protocolPublicKeyFingerprint
+        }
+    }
+
+    public struct RedeemSessionResponseBody: Codable, Sendable {
+        public let sessionId: String
+        public let responderSignalingToken: String
+        public let expiresIn: Int
+        public let signalingServerOrigin: String
+        public let initiatorDeviceId: String
+        public let initiatorProtocolSigningAlgorithm: ProtocolSigningAlgorithm
+        public let initiatorProtocolPublicKeyFingerprint: String
+
+        public init(
+            sessionId: String,
+            responderSignalingToken: String,
+            expiresIn: Int,
+            signalingServerOrigin: String,
+            initiatorDeviceId: String,
+            initiatorProtocolSigningAlgorithm: ProtocolSigningAlgorithm,
+            initiatorProtocolPublicKeyFingerprint: String
+        ) {
+            self.sessionId = sessionId
+            self.responderSignalingToken = responderSignalingToken
+            self.expiresIn = expiresIn
+            self.signalingServerOrigin = signalingServerOrigin
+            self.initiatorDeviceId = initiatorDeviceId
+            self.initiatorProtocolSigningAlgorithm = initiatorProtocolSigningAlgorithm
+            self.initiatorProtocolPublicKeyFingerprint = initiatorProtocolPublicKeyFingerprint
         }
     }
 
@@ -79,12 +187,20 @@ public actor SignalServerClient {
         public let sessionID: String
         public let initiatorToken: String
         public let expiresIn: TimeInterval
+        public let signalingServerOrigin: String
 
-        public init(code: String, sessionID: String, initiatorToken: String, expiresIn: TimeInterval) {
+        public init(
+            code: String,
+            sessionID: String,
+            initiatorToken: String,
+            expiresIn: TimeInterval,
+            signalingServerOrigin: String
+        ) {
             self.code = code
             self.sessionID = sessionID
             self.initiatorToken = initiatorToken
             self.expiresIn = expiresIn
+            self.signalingServerOrigin = signalingServerOrigin
         }
     }
 
@@ -92,23 +208,82 @@ public actor SignalServerClient {
         public let sessionID: String
         public let responderToken: String
         public let expiresIn: TimeInterval
+        public let signalingServerOrigin: String
+        public let initiatorDeviceId: String
+        public let initiatorProtocolSigningAlgorithm: ProtocolSigningAlgorithm
+        public let initiatorProtocolPublicKeyFingerprint: String
+        public let initiatorDeviceName: String?
 
-        public init(sessionID: String, responderToken: String, expiresIn: TimeInterval) {
+        public init(
+            sessionID: String,
+            responderToken: String,
+            expiresIn: TimeInterval,
+            signalingServerOrigin: String,
+            initiatorDeviceId: String,
+            initiatorProtocolSigningAlgorithm: ProtocolSigningAlgorithm,
+            initiatorProtocolPublicKeyFingerprint: String,
+            initiatorDeviceName: String? = nil
+        ) {
             self.sessionID = sessionID
             self.responderToken = responderToken
             self.expiresIn = expiresIn
+            self.signalingServerOrigin = signalingServerOrigin
+            self.initiatorDeviceId = initiatorDeviceId
+            self.initiatorProtocolSigningAlgorithm = initiatorProtocolSigningAlgorithm
+            self.initiatorProtocolPublicKeyFingerprint = initiatorProtocolPublicKeyFingerprint
+            self.initiatorDeviceName = initiatorDeviceName
         }
     }
 
     public struct SessionLease: Sendable, Equatable {
         public let sessionID: String
-        public let signalingToken: String
+        public let initiatorSignalingToken: String
+        public let qrBootstrapToken: String
         public let expiresIn: TimeInterval
+        public let signalingServerOrigin: String
 
-        public init(sessionID: String, signalingToken: String, expiresIn: TimeInterval) {
+        public init(
+            sessionID: String,
+            initiatorSignalingToken: String,
+            qrBootstrapToken: String,
+            expiresIn: TimeInterval,
+            signalingServerOrigin: String
+        ) {
             self.sessionID = sessionID
-            self.signalingToken = signalingToken
+            self.initiatorSignalingToken = initiatorSignalingToken
+            self.qrBootstrapToken = qrBootstrapToken
             self.expiresIn = expiresIn
+            self.signalingServerOrigin = signalingServerOrigin
+        }
+
+        public var signalingToken: String { initiatorSignalingToken }
+    }
+
+    public struct RedeemedSessionLease: Sendable, Equatable {
+        public let sessionID: String
+        public let responderSignalingToken: String
+        public let expiresIn: TimeInterval
+        public let signalingServerOrigin: String
+        public let initiatorDeviceId: String
+        public let initiatorProtocolSigningAlgorithm: ProtocolSigningAlgorithm
+        public let initiatorProtocolPublicKeyFingerprint: String
+
+        public init(
+            sessionID: String,
+            responderSignalingToken: String,
+            expiresIn: TimeInterval,
+            signalingServerOrigin: String,
+            initiatorDeviceId: String,
+            initiatorProtocolSigningAlgorithm: ProtocolSigningAlgorithm,
+            initiatorProtocolPublicKeyFingerprint: String
+        ) {
+            self.sessionID = sessionID
+            self.responderSignalingToken = responderSignalingToken
+            self.expiresIn = expiresIn
+            self.signalingServerOrigin = signalingServerOrigin
+            self.initiatorDeviceId = initiatorDeviceId
+            self.initiatorProtocolSigningAlgorithm = initiatorProtocolSigningAlgorithm
+            self.initiatorProtocolPublicKeyFingerprint = initiatorProtocolPublicKeyFingerprint
         }
     }
 
@@ -138,6 +313,7 @@ public actor SignalServerClient {
 
     public static let registerCodePath = "/api/webrtc/register-code"
     public static let registerSessionPath = "/api/webrtc/register-session"
+    public static let redeemSessionPath = "/api/webrtc/redeem-session"
 
     public init(
         urlSession: URLSession = .shared,
@@ -149,10 +325,14 @@ public actor SignalServerClient {
         self.apiKeyProvider = apiKeyProvider
     }
 
-    public func registerSession(sessionID: String? = nil, deviceFingerprint: String, validDuration: TimeInterval) async throws -> SessionLease {
+    public func registerSession(
+        sessionID: String? = nil,
+        binding: ProtocolIdentityBinding,
+        validDuration: TimeInterval
+    ) async throws -> SessionLease {
         let requestBody = Self.makeRegisterSessionRequestBody(
             sessionId: sessionID,
-            deviceId: deviceFingerprint,
+            binding: binding,
             ttlSeconds: max(60, Int(validDuration.rounded()))
         )
         let response: RegisterSessionResponseBody = try await performJSONRequest(
@@ -164,12 +344,12 @@ public actor SignalServerClient {
     }
 
     public func registerConnectionCode(
-        deviceFingerprint: String,
+        binding: ProtocolIdentityBinding,
         deviceName: String,
         validDuration: TimeInterval
     ) async throws -> ConnectionCodeLease {
         let requestBody = Self.makeRegisterCodeRequestBody(
-            deviceId: deviceFingerprint,
+            binding: binding,
             deviceName: deviceName,
             ttlSeconds: max(60, Int(validDuration.rounded()))
         )
@@ -181,12 +361,44 @@ public actor SignalServerClient {
         return try Self.decodeRegisterCodeResponse(from: try JSONEncoder().encode(response))
     }
 
-    public func lookupConnectionCode(code: String, deviceFingerprint: String) async throws -> ConnectionCodeLookup {
+    public func lookupConnectionCode(code: String, binding: ProtocolIdentityBinding) async throws -> ConnectionCodeLookup {
         let response: LookupCodeResponseBody = try await performJSONRequest(
             path: Self.lookupCodePath(for: code),
-            queryItems: [URLQueryItem(name: "deviceId", value: deviceFingerprint)]
+            queryItems: [
+                URLQueryItem(name: "deviceId", value: binding.deviceId),
+                URLQueryItem(name: "protocolSigningAlgorithm", value: binding.protocolSigningAlgorithm.rawValue),
+                URLQueryItem(name: "protocolPublicKeyFingerprint", value: binding.protocolPublicKeyFingerprint)
+            ]
         )
         return try Self.decodeLookupCodeResponse(from: try JSONEncoder().encode(response))
+    }
+
+    public func redeemSession(
+        sessionID: String,
+        qrBootstrapToken: String,
+        binding: ProtocolIdentityBinding
+    ) async throws -> RedeemedSessionLease {
+        let requestBody = RedeemSessionRequestBody(
+            sessionId: sessionID,
+            qrBootstrapToken: qrBootstrapToken,
+            deviceId: binding.deviceId,
+            protocolSigningAlgorithm: binding.protocolSigningAlgorithm,
+            protocolPublicKeyFingerprint: binding.protocolPublicKeyFingerprint
+        )
+        let response: RedeemSessionResponseBody = try await performJSONRequest(
+            path: Self.redeemSessionPath,
+            method: "POST",
+            body: try JSONEncoder().encode(requestBody)
+        )
+        return RedeemedSessionLease(
+            sessionID: response.sessionId,
+            responderSignalingToken: response.responderSignalingToken,
+            expiresIn: TimeInterval(response.expiresIn),
+            signalingServerOrigin: response.signalingServerOrigin,
+            initiatorDeviceId: response.initiatorDeviceId,
+            initiatorProtocolSigningAlgorithm: response.initiatorProtocolSigningAlgorithm,
+            initiatorProtocolPublicKeyFingerprint: response.initiatorProtocolPublicKeyFingerprint
+        )
     }
 
     public static func lookupCodePath(for code: String) -> String {
@@ -194,12 +406,32 @@ public actor SignalServerClient {
         return "/api/webrtc/lookup/\(encoded)"
     }
 
-    public static func makeRegisterCodeRequestBody(deviceId: String, deviceName: String, ttlSeconds: Int) -> RegisterCodeRequestBody {
-        RegisterCodeRequestBody(deviceId: deviceId, deviceName: deviceName, ttlSeconds: ttlSeconds)
+    public static func makeRegisterCodeRequestBody(
+        binding: ProtocolIdentityBinding,
+        deviceName: String,
+        ttlSeconds: Int
+    ) -> RegisterCodeRequestBody {
+        RegisterCodeRequestBody(
+            deviceId: binding.deviceId,
+            deviceName: deviceName,
+            protocolSigningAlgorithm: binding.protocolSigningAlgorithm,
+            protocolPublicKeyFingerprint: binding.protocolPublicKeyFingerprint,
+            ttlSeconds: ttlSeconds
+        )
     }
 
-    public static func makeRegisterSessionRequestBody(sessionId: String? = nil, deviceId: String, ttlSeconds: Int) -> RegisterSessionRequestBody {
-        RegisterSessionRequestBody(sessionId: sessionId, deviceId: deviceId, ttlSeconds: ttlSeconds)
+    public static func makeRegisterSessionRequestBody(
+        sessionId: String? = nil,
+        binding: ProtocolIdentityBinding,
+        ttlSeconds: Int
+    ) -> RegisterSessionRequestBody {
+        RegisterSessionRequestBody(
+            sessionId: sessionId,
+            deviceId: binding.deviceId,
+            protocolSigningAlgorithm: binding.protocolSigningAlgorithm,
+            protocolPublicKeyFingerprint: binding.protocolPublicKeyFingerprint,
+            ttlSeconds: ttlSeconds
+        )
     }
 
     public static func decodeRegisterCodeResponse(from data: Data) throws -> ConnectionCodeLease {
@@ -208,7 +440,8 @@ public actor SignalServerClient {
             code: response.code,
             sessionID: response.sessionId,
             initiatorToken: response.initiatorToken,
-            expiresIn: TimeInterval(response.expiresIn)
+            expiresIn: TimeInterval(response.expiresIn),
+            signalingServerOrigin: response.signalingServerOrigin
         )
     }
 
@@ -223,7 +456,12 @@ public actor SignalServerClient {
         return ConnectionCodeLookup(
             sessionID: response.sessionId,
             responderToken: response.responderToken,
-            expiresIn: TimeInterval(response.expiresIn)
+            expiresIn: TimeInterval(response.expiresIn),
+            signalingServerOrigin: response.signalingServerOrigin,
+            initiatorDeviceId: response.initiatorDeviceId,
+            initiatorProtocolSigningAlgorithm: response.initiatorProtocolSigningAlgorithm,
+            initiatorProtocolPublicKeyFingerprint: response.initiatorProtocolPublicKeyFingerprint,
+            initiatorDeviceName: response.initiatorDeviceName
         )
     }
 
@@ -231,8 +469,10 @@ public actor SignalServerClient {
         let response = try JSONDecoder().decode(RegisterSessionResponseBody.self, from: data)
         return SessionLease(
             sessionID: response.sessionId,
-            signalingToken: response.signalingToken,
-            expiresIn: TimeInterval(response.expiresIn)
+            initiatorSignalingToken: response.initiatorSignalingToken,
+            qrBootstrapToken: response.qrBootstrapToken,
+            expiresIn: TimeInterval(response.expiresIn),
+            signalingServerOrigin: response.signalingServerOrigin
         )
     }
 

@@ -1,6 +1,7 @@
 import SwiftUI
 import SkyBridgeCore
 import CoreImage.CIFilterBuiltins
+import OSLog
 
 /// 跨网络连接视图 - 三维连接矩阵
 /// 2025年创新设计 - 比传统连接码更优雅
@@ -10,7 +11,9 @@ struct CrossNetworkConnectionView: View {
     @State private var selectedMethod: ConnectionMethod = .qrCode
     @State private var inputCode: String = ""
     @State private var showingScanner = false
+    @State private var qrCodeErrorMessage: String?
     @State private var hoveredMethod: ConnectionMethod? = nil
+    private let logger = Logger(subsystem: "com.skybridge.SkyBridgeCompassApp", category: "CrossNetworkConnection")
 
     var body: some View {
         VStack(spacing: 0) {
@@ -44,6 +47,40 @@ struct CrossNetworkConnectionView: View {
         .task {
  // 自动发现 iCloud 设备
             try? await connectionManager.discoverCloudDevices()
+        }
+        .sheet(isPresented: $showingScanner) {
+            QRCodeScannerView(
+                onResult: { result in
+                    if isCrossNetworkConnectLink(result) {
+                        let scannedContent = result
+                        showingScanner = false
+                        Task { await connectScannedQRCodeFromUI(scannedContent, trigger: "cross_network_window_scanner") }
+                    } else {
+                        qrCodeErrorMessage = LocalizationManager.shared.localizedString("discovery.qrCode.error.unrecognized")
+                        showingScanner = false
+                    }
+                },
+                onError: { message in
+                    qrCodeErrorMessage = message
+                    showingScanner = false
+                }
+            )
+            .frame(minWidth: 500, minHeight: 320)
+        }
+        .alert(
+            LocalizationManager.shared.localizedString("discovery.qrCode.error.title"),
+            isPresented: Binding(
+                get: { qrCodeErrorMessage != nil },
+                set: { newValue in
+                    if !newValue { qrCodeErrorMessage = nil }
+                }
+            )
+        ) {
+            Button(LocalizationManager.shared.localizedString("discovery.qrCode.error.ok")) {
+                qrCodeErrorMessage = nil
+            }
+        } message: {
+            Text(qrCodeErrorMessage ?? "")
         }
     }
 
@@ -160,9 +197,7 @@ struct CrossNetworkConnectionView: View {
                         }
                     } else {
                         Button(action: {
-                            Task {
-                                try? await connectionManager.generateDynamicQRCode()
-                            }
+                            Task { await generateDynamicQRCodeFromUI(trigger: "cross_network_window_generate_qr") }
                         }) {
                             VStack(spacing: 8) {
                                 Image(systemName: "qrcode")
@@ -520,6 +555,46 @@ struct CrossNetworkConnectionView: View {
         case .connecting: return LocalizationManager.shared.localizedString("status.connecting")
         case .connected: return LocalizationManager.shared.localizedString("status.connected")
         case .failed(let error): return String(format: LocalizationManager.shared.localizedString("status.failed"), error)
+        }
+    }
+
+    private func isCrossNetworkConnectLink(_ raw: String) -> Bool {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix("skybridge://connect/") { return true }
+        guard let url = URL(string: trimmed), url.scheme == "skybridge", url.host == "connect" else {
+            return false
+        }
+        let pathPayload = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        if !pathPayload.isEmpty { return true }
+        if let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+           let queryPayload = components.queryItems?.first(where: { $0.name == "data" })?.value {
+            return !queryPayload.isEmpty
+        }
+        return false
+    }
+
+    private func generateDynamicQRCodeFromUI(trigger: String) async {
+        do {
+            qrCodeErrorMessage = nil
+            logger.info("📷 QR action started: \(trigger, privacy: .public)")
+            _ = try await connectionManager.generateDynamicQRCode()
+            logger.info("✅ QR action succeeded: \(trigger, privacy: .public)")
+        } catch {
+            logger.error("❌ QR action failed: \(trigger, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
+            qrCodeErrorMessage = error.localizedDescription
+        }
+    }
+
+    private func connectScannedQRCodeFromUI(_ content: String, trigger: String) async {
+        do {
+            qrCodeErrorMessage = nil
+            logger.info("📷 QR scan connect started: \(trigger, privacy: .public)")
+            let data = Data(content.utf8)
+            _ = try await connectionManager.scanDynamicQRCode(data)
+            logger.info("✅ QR scan connect succeeded: \(trigger, privacy: .public)")
+        } catch {
+            logger.error("❌ QR scan connect failed: \(trigger, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
+            qrCodeErrorMessage = error.localizedDescription
         }
     }
 }
