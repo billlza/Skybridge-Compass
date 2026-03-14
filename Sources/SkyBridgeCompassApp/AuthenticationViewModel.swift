@@ -127,7 +127,11 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
            !value.isEmpty {
             return value
         }
-        return currentSession?.userIdentifier ?? "未知"
+        if let fallback = currentSession?.userIdentifier.trimmingCharacters(in: .whitespacesAndNewlines),
+           Self.isCanonicalNebulaId(fallback) {
+            return fallback
+        }
+        return "未同步"
     }
 
  // MARK: - 初始化
@@ -141,6 +145,10 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] session in
                 self?.currentSession = session
+                guard let self, let session else { return }
+                Task {
+                    await self.loadUserNebulaIdAfterLogin(session: session)
+                }
             }
             .store(in: &cancellables)
 
@@ -1336,6 +1344,10 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
             // 不阻塞登录流程
             SkyBridgeLogger.ui.debugOnly("ℹ️ [AuthenticationViewModel] NebulaID 加载失败（忽略）: \(error.localizedDescription)")
         }
+    }
+
+    private static func isCanonicalNebulaId(_ value: String) -> Bool {
+        value.hasPrefix("NEBULA-")
     }
 
  /// 切换星云注册/登录模式
