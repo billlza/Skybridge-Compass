@@ -17,14 +17,24 @@ struct RemoteDesktopView: View {
     @State private var isFullScreen = false
     @State private var lastAutoConnectedCrossNetworkSessionID: String?
     @State private var showRemoteDesktopSettings = false
+    @State private var didAutoConnectUITestFixture = false
+    @State private var showUITestRemoteStream = false
+
+    private var shouldAutoConnectUITestFixture: Bool {
+        ProcessInfo.processInfo.arguments.contains("UITEST_SCENARIO_REMOTE")
+    }
     
     var body: some View {
+        let displayedConnection = selectedConnection ?? (
+            shouldAutoConnectUITestFixture ? connectionManager.activeConnections.first : nil
+        )
+
         NavigationStack {
             ZStack {
                 DashboardView.QuantumGlassBackground()
 
-                if let connection = selectedConnection,
-                   remoteDesktopManager.isStreaming {
+                if let connection = displayedConnection,
+                   (remoteDesktopManager.isStreaming || showUITestRemoteStream || shouldAutoConnectUITestFixture) {
                     // 远程桌面流
                     RemoteDesktopStreamView(
                         connection: connection,
@@ -49,6 +59,7 @@ struct RemoteDesktopView: View {
                     .transition(.opacity)
                 }
             }
+            .accessibilityIdentifier("remote.root")
             .navigationTitle(RuntimeLocalization.string("远程桌面"))
             .navigationBarTitleDisplayMode(.inline)
             .navigationBarHidden(isFullScreen)
@@ -69,9 +80,13 @@ struct RemoteDesktopView: View {
         }
         .onAppear {
             attemptAutoConnectCrossNetworkSession()
+            attemptAutoConnectUITestFixture()
         }
         .onChange(of: crossNetworkManager.state) { _, _ in
             attemptAutoConnectCrossNetworkSession()
+        }
+        .onChange(of: connectionManager.activeConnections.count) { _, _ in
+            attemptAutoConnectUITestFixture()
         }
     }
     
@@ -99,16 +114,24 @@ struct RemoteDesktopView: View {
                 ScrollView {
                     LazyVStack(spacing: 12) {
                         if let crossNetworkConnection {
-                            ConnectionCardView(connection: crossNetworkConnection)
-                                .onTapGesture {
-                                    connectToDevice(crossNetworkConnection)
-                                }
+                            Button {
+                                connectToDevice(crossNetworkConnection)
+                            } label: {
+                                ConnectionCardView(connection: crossNetworkConnection)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("remote.connection.\(crossNetworkConnection.device.id)")
+                            .accessibilityElement(children: .combine)
                         }
                         ForEach(connectionManager.activeConnections) { connection in
-                            ConnectionCardView(connection: connection)
-                                .onTapGesture {
-                                    connectToDevice(connection)
-                                }
+                            Button {
+                                connectToDevice(connection)
+                            } label: {
+                                ConnectionCardView(connection: connection)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("remote.connection.\(connection.device.id)")
+                            .accessibilityElement(children: .combine)
                         }
                     }
                     .padding()
@@ -118,6 +141,7 @@ struct RemoteDesktopView: View {
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .accessibilityIdentifier("remote.selection")
     }
 
     private var crossNetworkConnection: Connection? {
@@ -148,16 +172,20 @@ struct RemoteDesktopView: View {
             encryptionType: .pqc
         )
     }
-    
+
     private func connectToDevice(_ connection: Connection) {
         selectedConnection = connection
+        if shouldAutoConnectUITestFixture {
+            showUITestRemoteStream = true
+        }
         Task {
             do {
                 try await remoteDesktopManager.startStreaming(from: connection)
             } catch {
                 await MainActor.run {
                     if selectedConnection?.id == connection.id,
-                       !remoteDesktopManager.isStreaming {
+                       !remoteDesktopManager.isStreaming,
+                       !showUITestRemoteStream {
                         selectedConnection = nil
                     }
                     if lastAutoConnectedCrossNetworkSessionID == connection.id {
@@ -177,6 +205,17 @@ struct RemoteDesktopView: View {
 
         lastAutoConnectedCrossNetworkSessionID = connection.id
         connectToDevice(connection)
+    }
+
+    private func attemptAutoConnectUITestFixture() {
+        guard shouldAutoConnectUITestFixture else { return }
+        guard !didAutoConnectUITestFixture else { return }
+        guard !remoteDesktopManager.isStreaming else { return }
+        guard selectedConnection == nil else { return }
+        guard let firstConnection = connectionManager.activeConnections.first else { return }
+
+        didAutoConnectUITestFixture = true
+        connectToDevice(firstConnection)
     }
 }
 
@@ -201,12 +240,24 @@ struct RemoteDesktopStreamView: View {
     @State private var dragMouseDownSent = false
     @State private var lastScrollTranslationHeight: CGFloat = 0
     @State private var scrollAccumulator: CGFloat = 0
+
+    private var isUITesting: Bool {
+        ProcessInfo.processInfo.arguments.contains("UITEST_MODE")
+    }
     
     var body: some View {
         GeometryReader { geometry in
             ZStack {
                 // 远程屏幕显示
                 remoteScreenView(geometry: geometry)
+
+                if isUITesting {
+                    Color.clear
+                        .frame(width: 1, height: 1)
+                        .accessibilityElement()
+                        .accessibilityLabel("remote.stream.ready")
+                        .accessibilityIdentifier("remote.stream.ready")
+                }
                 
                 // 触摸控制层
                 touchControlOverlay(geometry: geometry)
@@ -218,6 +269,7 @@ struct RemoteDesktopStreamView: View {
                 }
             }
         }
+        .accessibilityIdentifier("remote.stream.root")
         .background(Color.black)
         .statusBarHidden(isFullScreen)
         .persistentSystemOverlays(isFullScreen ? .hidden : .visible)
@@ -343,6 +395,7 @@ struct RemoteDesktopStreamView: View {
                             .background(.ultraThinMaterial)
                             .cornerRadius(10)
                     }
+                    .accessibilityIdentifier("remote.stream.disconnect")
                 }
 
                 Picker(RuntimeLocalization.string("触摸模式"), selection: $touchMode) {
@@ -436,6 +489,8 @@ struct RemoteDesktopStreamView: View {
     private func resetControlsTimer() {
         controlsTimer?.invalidate()
         showControls = true
+
+        guard !isUITesting else { return }
         
         controlsTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: false) { _ in
             Task { @MainActor in

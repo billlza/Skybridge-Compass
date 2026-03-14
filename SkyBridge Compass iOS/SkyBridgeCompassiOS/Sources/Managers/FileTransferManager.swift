@@ -1920,3 +1920,53 @@ public class FileTransferManager: ObservableObject {
         UserDefaults.standard.set(data, forKey: "transfer_history")
     }
 }
+
+@available(iOS 17.0, *)
+extension FileTransferManager {
+    func installUITestHistoryFixture(for deviceName: String) {
+        let fixtureURL = downloadsDirectory.appendingPathComponent("UITest-Transfer-Guide.txt")
+        let fixtureData = Data("SkyBridge UI test fixture file".utf8)
+        if !fileManager.fileExists(atPath: fixtureURL.path) {
+            try? fixtureData.write(to: fixtureURL, options: .atomic)
+        }
+
+        transferHistory = [
+            FileTransfer(
+                id: "uitest-history-transfer",
+                fileName: fixtureURL.lastPathComponent,
+                fileSize: Int64(fixtureData.count),
+                fileType: .document,
+                progress: 1.0,
+                speed: 0,
+                status: .completed,
+                isIncoming: true,
+                remotePeer: deviceName,
+                timestamp: Date().addingTimeInterval(-90),
+                localPath: fixtureURL.path
+            )
+        ]
+        activeTransfers = []
+        isTransferring = false
+        totalProgress = 0
+        saveHistory()
+    }
+
+    func performUITestQuickSend(to device: DiscoveredDevice) {
+        let transfer = FileTransfer(
+            id: "uitest-active-transfer",
+            fileName: "UITest-Smoke.pdf",
+            fileSize: 1_048_576,
+            fileType: .document,
+            progress: 0.42,
+            speed: 393_216,
+            status: .transferring,
+            isIncoming: false,
+            remotePeer: device.name,
+            timestamp: Date(),
+            localPath: nil
+        )
+        activeTransfers = [transfer]
+        isTransferring = true
+        totalProgress = transfer.progress
+    }
+}

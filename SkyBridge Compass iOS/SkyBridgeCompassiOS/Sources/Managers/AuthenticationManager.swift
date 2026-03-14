@@ -19,6 +19,10 @@ public class AuthenticationManager: ObservableObject {
         ProcessInfo.processInfo.arguments.contains("UITEST_RESET_STATE")
     }
 
+    private static var shouldAutoAuthenticateAsGuestForUITests: Bool {
+        ProcessInfo.processInfo.arguments.contains("UITEST_AUTH_GUEST")
+    }
+
     public enum AuthFlowError: LocalizedError {
         case emailVerificationRequired
 
@@ -33,6 +37,12 @@ public class AuthenticationManager: ObservableObject {
     private init() {
         if Self.shouldResetStateForUITests {
             clearSession()
+        }
+        if Self.shouldAutoAuthenticateAsGuestForUITests {
+            applyUITestGuestSession()
+            return
+        }
+        if Self.shouldResetStateForUITests {
             return
         }
         loadSession()
@@ -203,6 +213,17 @@ public class AuthenticationManager: ObservableObject {
     
     private func clearSession() {
         KeychainManager.shared.deleteAuthSession()
+    }
+
+    private func applyUITestGuestSession() {
+        currentUser = User(
+            id: "uitest-guest",
+            email: "guest@skybridge.local",
+            displayName: "游客"
+        )
+        isAuthenticated = true
+        isGuestMode = true
+        session = nil
     }
 
     private func applySession(_ session: AuthSession, emailFallback: String) {

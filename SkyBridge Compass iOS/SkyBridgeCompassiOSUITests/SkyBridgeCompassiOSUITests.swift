@@ -5,14 +5,6 @@ final class SkyBridgeCompassiOSUITests: XCTestCase {
 
     override func setUpWithError() throws {
         continueAfterFailure = false
-
-        app = XCUIApplication()
-        app.launchArguments += [
-            "UITEST_MODE",
-            "UITEST_RESET_STATE",
-            "UITEST_DISABLE_ANIMATIONS",
-        ]
-        app.launch()
     }
 
     override func tearDownWithError() throws {
@@ -21,6 +13,7 @@ final class SkyBridgeCompassiOSUITests: XCTestCase {
     }
 
     func testGuestModeLaunchesDashboard() throws {
+        launchApp()
         enterDashboardIfNeeded()
 
         XCTAssertTrue(app.tabBars.firstMatch.waitForExistence(timeout: 5))
@@ -28,6 +21,7 @@ final class SkyBridgeCompassiOSUITests: XCTestCase {
     }
 
     func testMainTabNavigationSmoke() throws {
+        launchApp()
         enterDashboardIfNeeded()
 
         let tabBar = app.tabBars.firstMatch
@@ -55,6 +49,67 @@ final class SkyBridgeCompassiOSUITests: XCTestCase {
                 "Expected tab root \(tab.rootIdentifier) after tapping \(tab.label)"
             )
         }
+    }
+
+    func testPairingTrustPromptHappyPath() throws {
+        launchApp(additionalArguments: ["UITEST_AUTH_GUEST", "UITEST_SCENARIO_PAIRING"])
+
+        let allowOnceButton = app.buttons["pairing.allowOnce"].firstMatch
+        XCTAssertTrue(allowOnceButton.waitForExistence(timeout: 5))
+        allowOnceButton.tap()
+
+        XCTAssertFalse(allowOnceButton.waitForExistence(timeout: 1))
+        XCTAssertTrue(app.tabBars.firstMatch.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.otherElements["dashboard.tab.home"].waitForExistence(timeout: 5))
+    }
+
+    func testFilesHappyPathShowsQuickSendAndTransferState() throws {
+        launchApp(additionalArguments: ["UITEST_SCENARIO_FILES"])
+        enterDashboardIfNeeded()
+
+        let tabBar = app.tabBars.firstMatch
+        let filesButton = tabButton(
+            in: tabBar,
+            index: 2,
+            accessibilityIdentifier: "dashboard.tab.button.files",
+            fallbackLabel: "文件"
+        )
+        XCTAssertTrue(filesButton.waitForExistence(timeout: 5))
+        filesButton.tap()
+
+        let quickSendCard = app.buttons["files.quickSend.uitest-files-device"].firstMatch
+        XCTAssertTrue(quickSendCard.waitForExistence(timeout: 5))
+        quickSendCard.tap()
+
+        XCTAssertTrue(app.otherElements["files.active.ready"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.otherElements["files.history.ready"].waitForExistence(timeout: 5))
+    }
+
+    func testRemoteEntryHappyPathConnectsToViewer() throws {
+        launchApp(additionalArguments: ["UITEST_SCENARIO_REMOTE"])
+        enterDashboardIfNeeded()
+
+        let tabBar = app.tabBars.firstMatch
+        let remoteButton = tabButton(
+            in: tabBar,
+            index: 3,
+            accessibilityIdentifier: "dashboard.tab.button.remote",
+            fallbackLabel: "远程"
+        )
+        XCTAssertTrue(remoteButton.waitForExistence(timeout: 5))
+        remoteButton.tap()
+
+        XCTAssertTrue(app.otherElements["remote.stream.ready"].waitForExistence(timeout: 5))
+    }
+
+    private func launchApp(additionalArguments: [String] = []) {
+        app = XCUIApplication()
+        app.launchArguments += [
+            "UITEST_MODE",
+            "UITEST_RESET_STATE",
+            "UITEST_DISABLE_ANIMATIONS",
+        ] + additionalArguments
+        app.launch()
     }
 
     private func enterDashboardIfNeeded() {

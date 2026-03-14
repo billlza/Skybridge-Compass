@@ -153,6 +153,9 @@ xcodebuild test \
 - app 启动
 - 游客入口进入 dashboard
 - 主 tab 导航切换
+- 配对信任弹窗最短 happy path
+- 文件传输入口与预置传输态 smoke
+- 远程桌面入口与 viewer 切入 smoke
 
 ### Xcode 内测试
 

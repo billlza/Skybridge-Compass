@@ -36,7 +36,7 @@
 - iOS 主 scheme simulator build
 - iOS 主 scheme simulator test
 - `SkyBridgeCompassiOSTests` 35 项 XCTest
-- `SkyBridgeCompassiOSUITests` 启动与主导航 smoke
+- `SkyBridgeCompassiOSUITests` 启动、主导航、配对/文件/远程入口 smoke
 - macOS 共享核心 `swift test`
 
 ## Known Non-Issues That Used To Look Like Issues

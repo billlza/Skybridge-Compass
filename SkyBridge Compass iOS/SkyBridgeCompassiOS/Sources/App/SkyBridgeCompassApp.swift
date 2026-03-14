@@ -34,6 +34,7 @@ struct SkyBridgeCompassApp: App {
     @Environment(\.scenePhase) private var scenePhase
     @State private var backgroundTeardownTask: Task<Void, Never>?
     @State private var didStartServices = false
+    @State private var didInstallUITestFixtures = false
 
     private var isUITesting: Bool {
         ProcessInfo.processInfo.arguments.contains("UITEST_MODE")
@@ -102,6 +103,8 @@ struct SkyBridgeCompassApp: App {
             SettingsManager.instance.enableRealTimeWeather = false
         }
 
+        installUITestFixturesIfNeeded()
+
         // BUILD FINGERPRINT (must be unmistakable in device logs)
         SkyBridgeLogger.shared.info("🧪 BUILD_FINGERPRINT 2026-01-25 iOS Supabase-config-fix v2")
         print("🧪 BUILD_FINGERPRINT 2026-01-25 iOS Supabase-config-fix v2")
@@ -141,6 +144,108 @@ struct SkyBridgeCompassApp: App {
             SkyBridgeLogger.shared.info("ℹ️ Supabase 未配置（当前为离线认证模式，可在设置页填写 SUPABASE_URL/SUPABASE_ANON_KEY）")
             print("ℹ️ Supabase 未配置（当前为离线认证模式，可在设置页填写 SUPABASE_URL/SUPABASE_ANON_KEY）")
         }
+    }
+
+    private func installUITestFixturesIfNeeded() {
+        guard isUITesting, !didInstallUITestFixtures else { return }
+        didInstallUITestFixtures = true
+
+        let arguments = Set(ProcessInfo.processInfo.arguments)
+        SkyBridgeLogger.shared.info("🧪 Installing UI test fixtures: \(Array(arguments).sorted().joined(separator: ","))")
+        var fixtureConnections: [Connection] = []
+
+        if arguments.contains("UITEST_SCENARIO_FILES") || arguments.contains("UITEST_SCENARIO_REMOTE") {
+            SettingsManager.instance.enableExperimentalFeatures = true
+        }
+
+        if arguments.contains("UITEST_SCENARIO_FILES") {
+            let fileConnection = makeUITestConnection(
+                id: "uitest-files-connection",
+                deviceID: "uitest-files-device",
+                name: "MacBook Pro",
+                modelName: "macOS Test Host",
+                capabilities: ["file_transfer"],
+                services: [DiscoveredDevice.fileTransferServiceType],
+                portMap: [DiscoveredDevice.fileTransferServiceType: 8080]
+            )
+            fixtureConnections.append(fileConnection)
+            FileTransferManager.instance.installUITestHistoryFixture(for: fileConnection.device.name)
+        }
+
+        if arguments.contains("UITEST_SCENARIO_REMOTE") {
+            let remoteConnection = makeUITestConnection(
+                id: "uitest-remote-connection",
+                deviceID: "uitest-remote-device",
+                name: "Studio Mac",
+                modelName: "macOS Remote Host",
+                capabilities: ["remote_desktop"],
+                services: [DiscoveredDevice.remoteControlServiceType],
+                portMap: [DiscoveredDevice.remoteControlServiceType: RemoteDesktopConstants.defaultPort]
+            )
+            fixtureConnections.append(remoteConnection)
+        }
+
+        if !fixtureConnections.isEmpty {
+            connectionManager.installUITestActiveConnections(fixtureConnections)
+            SkyBridgeLogger.shared.info("🧪 Installed UI test connections: \(fixtureConnections.map { $0.device.id }.joined(separator: ","))")
+        }
+
+        if arguments.contains("UITEST_SCENARIO_PAIRING") {
+            connectionManager.installUITestPairingPrompt(
+                request: .init(
+                    id: UUID(uuidString: "11111111-2222-3333-4444-555555555555") ?? UUID(),
+                    peerId: "uitest-pairing-peer",
+                    declaredDeviceId: "uitest-pairing-device",
+                    deviceName: "SkyBridge Mac",
+                    platform: .macOS,
+                    modelName: "MacBook Pro",
+                    osVersion: "macOS 26.0",
+                    kemKeyCount: 1,
+                    receivedAt: Date()
+                )
+            )
+            SkyBridgeLogger.shared.info("🧪 Installed UI test pairing prompt")
+        }
+    }
+
+    private func makeUITestConnection(
+        id: String,
+        deviceID: String,
+        name: String,
+        modelName: String,
+        capabilities: [String],
+        services: [String],
+        portMap: [String: UInt16]
+    ) -> Connection {
+        let device = DiscoveredDevice(
+            id: deviceID,
+            name: name,
+            bonjourServiceName: name,
+            modelName: modelName,
+            platform: .macOS,
+            osVersion: "26.0",
+            ipAddress: "192.168.1.10",
+            bonjourServiceType: services.first,
+            bonjourServiceDomain: "local.",
+            services: services,
+            portMap: portMap,
+            signalStrength: -42,
+            lastSeen: Date(),
+            isConnected: true,
+            isTrusted: true,
+            publicKey: nil,
+            advertisedCapabilities: capabilities,
+            capabilities: capabilities
+        )
+        return Connection(
+            id: id,
+            device: device,
+            status: .connected,
+            encryptionType: .pqc,
+            latency: 0.012,
+            bandwidth: 250_000_000,
+            connectedAt: Date()
+        )
     }
     
     /// 初始化核心服务

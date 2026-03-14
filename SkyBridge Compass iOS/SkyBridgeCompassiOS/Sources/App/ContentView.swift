@@ -77,6 +77,7 @@ private struct PairingTrustRequestSheet: View {
                     } label: {
                         Text(RuntimeLocalization.string("始终允许"))
                     }
+                    .accessibilityIdentifier("pairing.alwaysAllow")
                     
                     Button {
                         onDecision(.allowOnce)
@@ -84,6 +85,7 @@ private struct PairingTrustRequestSheet: View {
                     } label: {
                         Text(RuntimeLocalization.string("允许本次"))
                     }
+                    .accessibilityIdentifier("pairing.allowOnce")
                     
                     Button(role: .destructive) {
                         onDecision(.reject)
@@ -91,10 +93,12 @@ private struct PairingTrustRequestSheet: View {
                     } label: {
                         Text(RuntimeLocalization.string("拒绝"))
                     }
+                    .accessibilityIdentifier("pairing.reject")
                 } footer: {
                     Text(RuntimeLocalization.string("这是对端发起的配对/受信任申请。若选择“始终允许”，系统会记住该设备并允许后续的 PQC 引导流程。"))
                 }
             }
+            .accessibilityIdentifier("pairing.sheet")
             .navigationTitle(RuntimeLocalization.string("受信任申请"))
 #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)

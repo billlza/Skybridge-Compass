@@ -16,7 +16,7 @@
 - `xcodebuild -project "SkyBridgeCompass-iOS.xcodeproj" -scheme "SkyBridgeCompass-iOS" ... build` 通过
 - `xcodebuild test -project "SkyBridgeCompass-iOS.xcodeproj" -scheme "SkyBridgeCompass-iOS" ...` 通过
 - `SkyBridgeCompassiOSTests` 共 35 个测试通过
-- `SkyBridgeCompassiOSUITests` 最小 smoke 通过（启动 + 游客入站 + 主 tab 导航）
+- `SkyBridgeCompassiOSUITests` smoke 通过（启动 + 游客入站 + 主 tab 导航 + 配对/文件/远程入口 happy path）
 - 主 scheme 的 shared test plan 已修正，可直接在 Xcode 中 `⌘U`
 - Apple PQC 路径在 iOS 26 SDK 模拟器构建下可用
 - handshake identity pinning 契约已与共享核心收口

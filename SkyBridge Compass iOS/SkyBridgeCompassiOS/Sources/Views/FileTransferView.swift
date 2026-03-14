@@ -13,6 +13,10 @@ struct FileTransferView: View {
     @State private var targetDevice: DiscoveredDevice?
     @State private var previewItem: FilePreviewItem?
     @State private var fileOpenErrorMessage: String?
+
+    private var isUITestFilesScenario: Bool {
+        ProcessInfo.processInfo.arguments.contains("UITEST_SCENARIO_FILES")
+    }
     
     var body: some View {
         NavigationStack {
@@ -37,6 +41,7 @@ struct FileTransferView: View {
                 .padding(.vertical, 8)
             }
             .background(DashboardView.QuantumGlassBackground())
+            .accessibilityIdentifier("files.root")
             .scrollContentBackground(.hidden)
             .navigationTitle(RuntimeLocalization.string("文件传输"))
             .navigationBarTitleDisplayMode(.large)
@@ -125,8 +130,7 @@ struct FileTransferView: View {
                             DeviceQuickSendCard(
                                 device: pseudo,
                                 onTap: {
-                                    targetDevice = pseudo
-                                    showFilePicker = true
+                                    handleQuickSendTargetSelection(pseudo)
                                 }
                             )
                         }
@@ -134,8 +138,7 @@ struct FileTransferView: View {
                             DeviceQuickSendCard(
                                 device: connection.device,
                                 onTap: {
-                                    targetDevice = connection.device
-                                    showFilePicker = true
+                                    handleQuickSendTargetSelection(connection.device)
                                 }
                             )
                         }
@@ -144,6 +147,7 @@ struct FileTransferView: View {
             }
         }
         .padding(16)
+        .accessibilityIdentifier("files.quickSend.section")
         .background(.ultraThinMaterial)
         .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .overlay(
@@ -174,6 +178,12 @@ struct FileTransferView: View {
     
     private var activeTransfersSection: some View {
         VStack(alignment: .leading, spacing: 14) {
+            Color.clear
+                .frame(width: 1, height: 1)
+                .accessibilityElement()
+                .accessibilityLabel("files.active.ready")
+                .accessibilityIdentifier("files.active.ready")
+
             HStack {
                 Image(systemName: "arrow.left.arrow.right.circle.fill")
                     .foregroundStyle(.green)
@@ -187,6 +197,7 @@ struct FileTransferView: View {
             }
         }
         .padding(16)
+        .accessibilityIdentifier("files.active.section")
         .background(.ultraThinMaterial)
         .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .overlay(
@@ -222,6 +233,12 @@ struct FileTransferView: View {
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 30)
             } else {
+                Color.clear
+                    .frame(width: 1, height: 1)
+                    .accessibilityElement()
+                    .accessibilityLabel("files.history.ready")
+                    .accessibilityIdentifier("files.history.ready")
+
                 ForEach(fileTransferManager.transferHistory) { transfer in
                     FileTransferHistoryCard(
                         transfer: transfer,
@@ -231,6 +248,7 @@ struct FileTransferView: View {
             }
         }
         .padding(16)
+        .accessibilityIdentifier("files.history.section")
         .background(.ultraThinMaterial)
         .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .overlay(
@@ -274,6 +292,15 @@ struct FileTransferView: View {
     
     private func clearHistory() {
         fileTransferManager.clearHistory()
+    }
+
+    private func handleQuickSendTargetSelection(_ device: DiscoveredDevice) {
+        targetDevice = device
+        if isUITestFilesScenario {
+            fileTransferManager.performUITestQuickSend(to: device)
+        } else {
+            showFilePicker = true
+        }
     }
 
     private func openLocalFile(_ url: URL) {
@@ -322,6 +349,7 @@ struct DeviceQuickSendCard: View {
             .frame(width: 72)
         }
         .buttonStyle(.plain)
+        .accessibilityIdentifier("files.quickSend.\(device.id)")
     }
 }
 
@@ -405,6 +433,8 @@ struct FileTransferCard: View {
         .padding(12)
         .background(Color.white.opacity(0.04))
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("files.active.\(transfer.id)")
     }
     
     private var iconColor: Color {
@@ -537,6 +567,8 @@ struct FileTransferHistoryCard: View {
         .padding(12)
         .background(Color.white.opacity(0.04))
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("files.history.\(transfer.id)")
     }
 
     private func displayLocation(path: String) -> String {

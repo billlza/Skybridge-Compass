@@ -1820,6 +1820,24 @@ public class RemoteDesktopManager: ObservableObject {
 
     /// 便捷入口：从 Connection 启动远程桌面（UI 侧直接调用）
     public func startStreaming(from connection: Connection) async throws {
+        if ProcessInfo.processInfo.arguments.contains("UITEST_SCENARIO_REMOTE") {
+            currentConnection = connection
+            activeTransportMode = .none
+            isStreaming = true
+            state = .streaming
+            transportStatusText = "UITest Fixture"
+            frameRate = 30
+            latency = 12
+            resolution = CGSize(width: 1440, height: 900)
+            renderPipelineStatus = .stillImageFallback
+            lastDamageRectCount = 0
+            lastDamageUsesFullFrameFallback = false
+            currentFrame = nil
+            videoFrameFeed.flush()
+            configureSessionClipboardSync()
+            return
+        }
+
         if currentConnection?.device.id == connection.device.id, state == .streaming {
             await pushViewerStreamConfiguration(force: true)
             return

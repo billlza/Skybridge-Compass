@@ -137,7 +137,7 @@ open SkyBridgeCompass-iOS.xcodeproj
 ### 5. 当前自动化测试入口
 
 - `SkyBridgeCompassiOSTests`：单元 / 集成层 XCTest
-- `SkyBridgeCompassiOSUITests`：最小 XCUITest smoke（启动、游客入站、主 tab 导航）
+- `SkyBridgeCompassiOSUITests`：XCUITest smoke（启动、游客入站、主 tab 导航、配对/文件/远程入口）
 
 推荐直接使用：
 

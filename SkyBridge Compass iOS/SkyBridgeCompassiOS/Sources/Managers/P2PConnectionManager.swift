@@ -88,6 +88,7 @@ public class P2PConnectionManager: ObservableObject {
         let payload: AppMessage.PairingIdentityExchangePayload
     }
     private var pendingPairingContextByRequestId: [UUID: PendingPairingContext] = [:]
+    private var uiTestPairingRequestIDs: Set<UUID> = []
     
     private let pairingPolicyStorageKey = "pairing_policy.v1"
     /// peerId -> decisionRawValue (only persists "alwaysAllow" and "reject"; allowOnce is not persisted)
@@ -181,6 +182,21 @@ public class P2PConnectionManager: ObservableObject {
     
     /// Called by UI to resolve a pending pairing/trust request.
     public func resolvePairingTrustRequest(_ request: PairingTrustRequest, decision: PairingTrustDecision) async {
+        if uiTestPairingRequestIDs.remove(request.id) != nil {
+            pendingPairingTrustRequest = nil
+            switch decision {
+            case .alwaysAllow:
+                pairingPolicyByPeerId[request.peerId] = PairingTrustDecision.alwaysAllow.rawValue
+                savePairingPolicy()
+            case .reject:
+                pairingPolicyByPeerId[request.peerId] = PairingTrustDecision.reject.rawValue
+                savePairingPolicy()
+            case .allowOnce:
+                break
+            }
+            return
+        }
+
         guard let ctx = pendingPairingContextByRequestId.removeValue(forKey: request.id) else {
             pendingPairingTrustRequest = nil
             return
@@ -2091,6 +2107,26 @@ public class P2PConnectionManager: ObservableObject {
                 }
             }
         }
+    }
+}
+
+@available(iOS 17.0, *)
+extension P2PConnectionManager {
+    func installUITestActiveConnections(_ connections: [Connection]) {
+        activeConnections = connections
+        connectionStatusByDeviceId = Dictionary(
+            uniqueKeysWithValues: connections.map { ($0.device.id, $0.status) }
+        )
+        lastKnownDevices = Dictionary(
+            uniqueKeysWithValues: connections.map { ($0.device.id, $0.device) }
+        )
+        lastError = nil
+        currentHandshakeState = "UITest Fixture"
+    }
+
+    func installUITestPairingPrompt(request: PairingTrustRequest) {
+        pendingPairingTrustRequest = request
+        uiTestPairingRequestIDs.insert(request.id)
     }
 }
 
