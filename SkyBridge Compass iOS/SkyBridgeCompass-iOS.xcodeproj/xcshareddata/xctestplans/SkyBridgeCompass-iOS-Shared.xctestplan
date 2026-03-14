@@ -23,6 +23,13 @@
         "identifier" : "C67CFB04F930238C86B4F49F",
         "name" : "SkyBridgeCompassiOSTests"
       }
+    },
+    {
+      "target" : {
+        "containerPath" : "container:SkyBridgeCompass-iOS.xcodeproj",
+        "identifier" : "A1B2C3D4E5F6099999999999",
+        "name" : "SkyBridgeCompassiOSUITests"
+      }
     }
   ],
   "version" : 1

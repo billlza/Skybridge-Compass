@@ -37,6 +37,10 @@ public struct DashboardView: View {
     @State private var crossNetworkAlertMessage: String?
     
     @Namespace private var animation
+
+    private var isUITesting: Bool {
+        ProcessInfo.processInfo.arguments.contains("UITEST_MODE")
+    }
     
     // MARK: - Body
     
@@ -48,6 +52,7 @@ public struct DashboardView: View {
             }
             .tabItem {
                 Label("首页", systemImage: "house.fill")
+                    .accessibilityIdentifier(DashboardTab.home.tabButtonAccessibilityIdentifier)
             }
             .tag(DashboardTab.home)
 
@@ -57,6 +62,7 @@ public struct DashboardView: View {
             }
             .tabItem {
                 Label("设备", systemImage: "laptopcomputer.and.iphone")
+                    .accessibilityIdentifier(DashboardTab.devices.tabButtonAccessibilityIdentifier)
             }
             .tag(DashboardTab.devices)
 
@@ -66,6 +72,7 @@ public struct DashboardView: View {
             }
             .tabItem {
                 Label("文件", systemImage: "folder.fill")
+                    .accessibilityIdentifier(DashboardTab.files.tabButtonAccessibilityIdentifier)
             }
             .tag(DashboardTab.files)
 
@@ -75,6 +82,7 @@ public struct DashboardView: View {
             }
             .tabItem {
                 Label("远程", systemImage: "display")
+                    .accessibilityIdentifier(DashboardTab.remote.tabButtonAccessibilityIdentifier)
             }
             .tag(DashboardTab.remote)
 
@@ -84,9 +92,11 @@ public struct DashboardView: View {
             }
             .tabItem {
                 Label("设置", systemImage: "gearshape.fill")
+                    .accessibilityIdentifier(DashboardTab.settings.tabButtonAccessibilityIdentifier)
             }
             .tag(DashboardTab.settings)
         }
+        .accessibilityIdentifier("dashboard.root")
         .tint(.cyan)
         .preferredColorScheme(.dark)
         .onChange(of: selectedTab) { _, newValue in
@@ -94,9 +104,11 @@ public struct DashboardView: View {
         }
         .task {
             loadedTabs.insert(selectedTab)
+            guard !isUITesting else { return }
             await viewModel.start()
         }
         .onDisappear {
+            guard !isUITesting else { return }
             viewModel.stop()
         }
         .sheet(isPresented: $showingQRScanner) {
@@ -148,6 +160,7 @@ public struct DashboardView: View {
     private func tabRoot<Content: View>(for tab: DashboardTab, @ViewBuilder content: () -> Content) -> some View {
         if loadedTabs.contains(tab) {
             content()
+                .accessibilityIdentifier(tab.accessibilityIdentifier)
         } else {
             Color.clear
         }
@@ -2374,6 +2387,36 @@ public enum DashboardTab: String, CaseIterable {
     case files
     case remote
     case settings
+
+    var accessibilityIdentifier: String {
+        switch self {
+        case .home:
+            return "dashboard.tab.home"
+        case .devices:
+            return "dashboard.tab.devices"
+        case .files:
+            return "dashboard.tab.files"
+        case .remote:
+            return "dashboard.tab.remote"
+        case .settings:
+            return "dashboard.tab.settings"
+        }
+    }
+
+    var tabButtonAccessibilityIdentifier: String {
+        switch self {
+        case .home:
+            return "dashboard.tab.button.home"
+        case .devices:
+            return "dashboard.tab.button.devices"
+        case .files:
+            return "dashboard.tab.button.files"
+        case .remote:
+            return "dashboard.tab.button.remote"
+        case .settings:
+            return "dashboard.tab.button.settings"
+        }
+    }
 }
 
 // MARK: - Preview

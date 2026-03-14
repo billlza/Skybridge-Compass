@@ -51,6 +51,7 @@ struct AuthenticationView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .scrollDismissesKeyboard(.interactively)
         .onTapGesture { hideKeyboard() }
+        .accessibilityIdentifier("auth.root")
         .alert("错误", isPresented: $showError) {
             Button("确定", role: .cancel) {}
         } message: {
@@ -245,6 +246,7 @@ struct AuthenticationView: View {
                     .stroke(LinearGradient(colors: [.white.opacity(0.3), .clear], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1)
             )
         }
+        .accessibilityIdentifier("auth.guest")
     }
 
     private var supabaseSettingsEntry: some View {

@@ -136,8 +136,23 @@ xcodebuild test \
 ```
 
 说明：
-- 这是当前最接近真实 app 入口的验证方式，会同时覆盖主 app scheme 与 `SkyBridgeCompassiOSTests`
+- 这是当前最接近真实 app 入口的验证方式，会同时覆盖主 app scheme、`SkyBridgeCompassiOSTests` 与最小 `SkyBridgeCompassiOSUITests` smoke
 - `swift test` 或直接 `swift build --package-path ...` 只适合检查 SwiftPM 路径，不等价于完整 iOS app 工程验证
+
+### 仅运行最小 UI smoke
+
+```bash
+xcodebuild test \
+  -project "SkyBridgeCompass-iOS.xcodeproj" \
+  -scheme "SkyBridgeCompass-iOS" \
+  -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.2' \
+  -only-testing:SkyBridgeCompassiOSUITests
+```
+
+当前 UI smoke 覆盖：
+- app 启动
+- 游客入口进入 dashboard
+- 主 tab 导航切换
 
 ### Xcode 内测试
 
@@ -147,7 +162,7 @@ xcodebuild test \
 
 当前状态：
 - 已有 `SkyBridgeCompassiOSTests` XCTest suite
-- 当前仓库里**没有单独的 XCUITest bundle**；如果后续需要端到端 UI 自动化，需要新增 UI test target
+- 已有 `SkyBridgeCompassiOSUITests` 最小 XCUITest bundle，用于启动与主导航 smoke
 
 ### 与 macOS 版本互通测试
 

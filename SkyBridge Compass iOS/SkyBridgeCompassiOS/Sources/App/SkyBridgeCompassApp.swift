@@ -2,6 +2,7 @@ import SwiftUI
 import ActivityKit
 #if os(iOS)
 import UserNotifications
+import UIKit
 #endif
 
 /// SkyBridge Compass iOS 主应用入口
@@ -33,6 +34,23 @@ struct SkyBridgeCompassApp: App {
     @Environment(\.scenePhase) private var scenePhase
     @State private var backgroundTeardownTask: Task<Void, Never>?
     @State private var didStartServices = false
+
+    private var isUITesting: Bool {
+        ProcessInfo.processInfo.arguments.contains("UITEST_MODE")
+    }
+
+    private var isRunningUnderXCTest: Bool {
+        let environment = ProcessInfo.processInfo.environment
+        return environment["XCTestConfigurationFilePath"] != nil || NSClassFromString("XCTestCase") != nil
+    }
+
+    private var shouldSkipInteractiveStartup: Bool {
+        isUITesting || isRunningUnderXCTest
+    }
+
+    private var shouldDisableAnimationsForUITests: Bool {
+        ProcessInfo.processInfo.arguments.contains("UITEST_DISABLE_ANIMATIONS")
+    }
     
     // MARK: - Scene Configuration
     
@@ -66,6 +84,7 @@ struct SkyBridgeCompassApp: App {
                     }
                 }
                 .onChange(of: localizationManager.currentLanguage) { _, _ in
+                    guard !shouldSkipInteractiveStartup else { return }
                     configureNotifications()
                 }
         }
@@ -75,6 +94,14 @@ struct SkyBridgeCompassApp: App {
     
     /// 设置应用初始化
     private func setupApplication() {
+        if isUITesting && shouldDisableAnimationsForUITests {
+            UIView.setAnimationsEnabled(false)
+        }
+
+        if shouldSkipInteractiveStartup {
+            SettingsManager.instance.enableRealTimeWeather = false
+        }
+
         // BUILD FINGERPRINT (must be unmistakable in device logs)
         SkyBridgeLogger.shared.info("🧪 BUILD_FINGERPRINT 2026-01-25 iOS Supabase-config-fix v2")
         print("🧪 BUILD_FINGERPRINT 2026-01-25 iOS Supabase-config-fix v2")
@@ -83,14 +110,18 @@ struct SkyBridgeCompassApp: App {
         SkyBridgeLogger.shared.configure(level: .debug)
         
         // 请求必要的权限
-        if LocalWebRTCSmokeHarness.shared.isEnabled {
+        if shouldSkipInteractiveStartup {
+            SkyBridgeLogger.shared.info("🧪 Test host mode: 跳过交互式权限弹窗")
+        } else if LocalWebRTCSmokeHarness.shared.isEnabled {
             SkyBridgeLogger.shared.info("🧪 Local WebRTC smoke: 跳过交互式权限弹窗")
         } else {
             requestPermissions()
         }
         
         // 配置通知
-        configureNotifications()
+        if !shouldSkipInteractiveStartup {
+            configureNotifications()
+        }
         
         SkyBridgeLogger.shared.info("🚀 SkyBridge Compass iOS 已启动")
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
@@ -114,6 +145,11 @@ struct SkyBridgeCompassApp: App {
     
     /// 初始化核心服务
     private func initializeServices() async {
+        if shouldSkipInteractiveStartup {
+            SkyBridgeLogger.shared.info("🧪 Test host mode: 跳过后台服务初始化")
+            return
+        }
+
         do {
             // 1. 初始化 PQC 加密系统
             SkyBridgeLogger.shared.info("⏱️ 启动步骤开始：PQC 初始化")

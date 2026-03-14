@@ -9,6 +9,7 @@
 - App 工程：`SkyBridgeCompass-iOS.xcodeproj`
 - 主 scheme：`SkyBridgeCompass-iOS`
 - XCTest target：`SkyBridgeCompassiOSTests`
+- XCUITest target：`SkyBridgeCompassiOSUITests`
 - 主文档：`README.md`
 - 构建/签名/测试：`BUILD.md`
 - 快速启动：`QUICKSTART.md`
@@ -35,6 +36,7 @@
 - iOS 主 scheme simulator build
 - iOS 主 scheme simulator test
 - `SkyBridgeCompassiOSTests` 35 项 XCTest
+- `SkyBridgeCompassiOSUITests` 启动与主导航 smoke
 - macOS 共享核心 `swift test`
 
 ## Known Non-Issues That Used To Look Like Issues
@@ -45,6 +47,6 @@
 
 ## Remaining Practical Gaps
 
-- 当前没有单独的 XCUITest bundle
+- 当前 XCUITest 仍是最小 smoke 骨架，尚未覆盖更深的交互链路
 - 真机权限、局域网发现、Widget 行为仍建议做设备侧 smoke
 - PQC-only 首次建联仍取决于对端 KEM 公钥是否已进入信任存储

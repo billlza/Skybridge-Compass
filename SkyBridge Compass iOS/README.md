@@ -134,6 +134,20 @@ open SkyBridgeCompass-iOS.xcodeproj
 - ⌘R 运行
 - ⌘U 运行测试
 
+### 5. 当前自动化测试入口
+
+- `SkyBridgeCompassiOSTests`：单元 / 集成层 XCTest
+- `SkyBridgeCompassiOSUITests`：最小 XCUITest smoke（启动、游客入站、主 tab 导航）
+
+推荐直接使用：
+
+```bash
+xcodebuild test \
+  -project "SkyBridgeCompass-iOS.xcodeproj" \
+  -scheme "SkyBridgeCompass-iOS" \
+  -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.2'
+```
+
 ## 🔑 Supabase 配置
 
 如果你在登录/注册时看到 **“Supabase 配置缺失（SUPABASE_URL / SUPABASE_ANON_KEY）”**：

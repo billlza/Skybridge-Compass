@@ -7,18 +7,24 @@ struct ContentView: View {
     @EnvironmentObject private var authManager: AuthenticationManager
     @EnvironmentObject private var themeConfiguration: ThemeConfiguration
     @EnvironmentObject private var connectionManager: P2PConnectionManager
+
+    private var contentTransitionAnimation: Animation? {
+        ProcessInfo.processInfo.arguments.contains("UITEST_DISABLE_ANIMATIONS") ? nil : .easeInOut
+    }
     
     var body: some View {
         Group {
             if authManager.isAuthenticated {
                 // 已认证 - 显示主控制台
                 DashboardView()
+                    .accessibilityIdentifier("content.dashboard")
             } else {
                 // 未认证 - 显示登录界面
                 AuthenticationView()
+                    .accessibilityIdentifier("content.authentication")
             }
         }
-        .animation(.easeInOut, value: authManager.isAuthenticated)
+        .animation(contentTransitionAnimation, value: authManager.isAuthenticated)
         .sheet(
             item: Binding(
                 get: { connectionManager.pendingPairingTrustRequest },

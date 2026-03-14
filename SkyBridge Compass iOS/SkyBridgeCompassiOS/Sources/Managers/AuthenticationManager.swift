@@ -15,6 +15,10 @@ public class AuthenticationManager: ObservableObject {
     private var didLogSupabaseConfigMissing = false
     private var lastTokenRefreshAttemptAt: Date?
 
+    private static var shouldResetStateForUITests: Bool {
+        ProcessInfo.processInfo.arguments.contains("UITEST_RESET_STATE")
+    }
+
     public enum AuthFlowError: LocalizedError {
         case emailVerificationRequired
 
@@ -27,6 +31,10 @@ public class AuthenticationManager: ObservableObject {
     }
     
     private init() {
+        if Self.shouldResetStateForUITests {
+            clearSession()
+            return
+        }
         loadSession()
     }
     

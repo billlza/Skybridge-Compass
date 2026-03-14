@@ -7,6 +7,7 @@
 - iOS 工程入口：`SkyBridgeCompass-iOS.xcodeproj`
 - 主 scheme：`SkyBridgeCompass-iOS`
 - 测试 target：`SkyBridgeCompassiOSTests`
+- UI 测试 target：`SkyBridgeCompassiOSUITests`
 - 共享协议/握手契约：已与 macOS 核心对齐
 - 文档状态：`README.md`、`BUILD.md`、`QUICKSTART.md` 为当前权威说明
 
@@ -15,6 +16,7 @@
 - `xcodebuild -project "SkyBridgeCompass-iOS.xcodeproj" -scheme "SkyBridgeCompass-iOS" ... build` 通过
 - `xcodebuild test -project "SkyBridgeCompass-iOS.xcodeproj" -scheme "SkyBridgeCompass-iOS" ...` 通过
 - `SkyBridgeCompassiOSTests` 共 35 个测试通过
+- `SkyBridgeCompassiOSUITests` 最小 smoke 通过（启动 + 游客入站 + 主 tab 导航）
 - 主 scheme 的 shared test plan 已修正，可直接在 Xcode 中 `⌘U`
 - Apple PQC 路径在 iOS 26 SDK 模拟器构建下可用
 - handshake identity pinning 契约已与共享核心收口
@@ -29,7 +31,7 @@
 ## 仍需了解的边界
 
 - 本地网络发现与部分系统权限行为在模拟器上天然受限，真机联调仍然重要
-- 当前有 XCTest suite，但**没有单独的 XCUITest target**
+- 当前 XCUITest 只覆盖最小 smoke，尚未覆盖配对、传输、远程控制等深层流程
 - PQC-only 握手仍依赖对端 KEM 公钥信任材料；首次配对未完成时，可能仍看到 bootstrap/fallback 提示
 
 ## 建议使用方式
