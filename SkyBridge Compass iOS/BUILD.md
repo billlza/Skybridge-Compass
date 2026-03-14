@@ -15,19 +15,19 @@
 
 ## 🚀 快速开始
 
-### 1. 克隆项目
+### 1. 进入项目目录
 
 ```bash
 cd "/path/to/SkyBridge Compass iOS"
 ```
 
-### 3. 使用 Xcode 打开
+### 2. 使用 Xcode 打开
 
 ```bash
 open SkyBridgeCompass-iOS.xcodeproj
 ```
 
-### 4. 配置签名
+### 3. 配置签名
 
 1. 在 Xcode 中，选择项目文件
 2. 选择 "SkyBridgeCompassiOS" target
@@ -35,7 +35,7 @@ open SkyBridgeCompass-iOS.xcodeproj
    - Team: 选择你的 Apple 开发团队
    - Bundle Identifier: 修改为唯一值（如 `com.yourcompany.skybridge.ios`）
 
-### 5. 配置 Capabilities
+### 4. 配置 Capabilities
 
 确保启用以下功能：
 
@@ -51,7 +51,7 @@ open SkyBridgeCompass-iOS.xcodeproj
 - [x] **Keychain Sharing**
 - [x] **App Groups** (用于 Widget)
 
-### 6. 运行项目
+### 5. 运行项目
 
 #### 模拟器
 
@@ -69,7 +69,8 @@ open SkyBridgeCompass-iOS.xcodeproj
 
 ### 需要在哪里声明？
 
-- **必须在 Xcode 工程的 Target Build Settings 里声明（编译期宏）**：`SWIFT_ACTIVE_COMPILATION_CONDITIONS` 添加 `HAS_APPLE_PQC_SDK`
+- **在当前仓库提交的 `SkyBridgeCompass-iOS.xcodeproj` 里，已经为 `iphoneos26*` / `iphonesimulator26*` 自动配置了** `SWIFT_ACTIVE_COMPILATION_CONDITIONS += HAS_APPLE_PQC_SDK`
+- **如果你复制 target、重建工程，或使用不同构建入口**，才需要手动确认这个编译期宏是否仍然存在
 - **不需要、也不应该在 Info.plist 里声明**：Info.plist 只负责权限/能力（如相机、本地网络、定位、Live Activities），不影响编译期是否包含 `MLKEM768/MLDSA65` 类型
 
 ### 何时需要打开？
@@ -125,17 +126,28 @@ open SkyBridgeCompass-iOS.xcodeproj
 
 ## 🧪 测试
 
-### 单元测试
+### 自动化测试（推荐）
 
 ```bash
-swift test
+xcodebuild test \
+  -project "SkyBridgeCompass-iOS.xcodeproj" \
+  -scheme "SkyBridgeCompass-iOS" \
+  -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.2'
 ```
 
-### UI 测试
+说明：
+- 这是当前最接近真实 app 入口的验证方式，会同时覆盖主 app scheme 与 `SkyBridgeCompassiOSTests`
+- `swift test` 或直接 `swift build --package-path ...` 只适合检查 SwiftPM 路径，不等价于完整 iOS app 工程验证
+
+### Xcode 内测试
 
 在 Xcode 中：
 1. Product → Test (⌘U)
 2. 或选择特定的测试文件运行
+
+当前状态：
+- 已有 `SkyBridgeCompassiOSTests` XCTest suite
+- 当前仓库里**没有单独的 XCUITest bundle**；如果后续需要端到端 UI 自动化，需要新增 UI test target
 
 ### 与 macOS 版本互通测试
 
@@ -167,7 +179,7 @@ swift test
 
 ### 使用 liboqs (可选)
 
-如果要使用真实的 PQC 实现而不是模拟：
+如果要替换当前仓库中的 `Vendor/liboqs.xcframework`，可以自行重新编译并覆盖 vendored 产物：
 
 ```bash
 # 下载 liboqs
@@ -179,21 +191,14 @@ mkdir build-ios && cd build-ios
 cmake .. -DCMAKE_TOOLCHAIN_FILE=../cmake/ios.toolchain.cmake
 make
 
-# 将编译的库复制到项目
-cp lib/liboqs.a ../SkyBridge\ Compass\ iOS/Shared/Libraries/
+# 将编译产物整理成 xcframework 后替换当前 vendored 版本
+# 目标位置示例：
+#   SkyBridge Compass iOS/Vendor/liboqs.xcframework
 ```
 
-然后在 Package.swift 中链接：
-
-```swift
-.target(
-    name: "SkyBridgeCore",
-    dependencies: [],
-    linkerSettings: [
-        .linkedLibrary("oqs")
-    ]
-)
-```
+说明：
+- 当前工程已经通过本地 vendor / local package 路径接入 liboqs 相关依赖
+- 不再使用旧文档里 `Shared/Libraries/` 这类目录布局
 
 ## 📚 更多资源
 

@@ -64,18 +64,20 @@ SkyBridge Compass iOS/
 ## 与 macOS 版本的互通性
 
 ### PQC 握手协议
-目标是让 iOS 和 macOS 使用相同的后量子密码学协议。但请注意：**当前 iOS 端默认会落到 Classic suite**，除非你满足 Apple PQC 的编译/运行条件并且具备对端 KEM 公钥的信任记录（见下方说明）。
+目标是让 iOS 和 macOS 使用相同的后量子密码学协议。当前仓库中随附的 **Xcode 工程** 已经对 `iphoneos26*` / `iphonesimulator26*` 自动启用 `HAS_APPLE_PQC_SDK`，因此在 iOS 26 SDK 下构建时会优先走 Apple CryptoKit PQC 路径；若改用旧 SDK 或其它构建入口，再按能力与信任材料回落。
 
 - **密钥交换**: ML-KEM-768 / Kyber768
 - **签名验证**: ML-DSA-65 / Dilithium3
 - **混合加密**: X-Wing (Kyber768 + X25519)
 
 #### 当前“实际协商”的 suite（你现在跑起来看到的）
-- **默认**：`x25519Ed25519`（Classic），因为 iOS 项目默认不定义 `HAS_APPLE_PQC_SDK`，并且 iOS 26 的 CryptoKit PQC 类型在旧 SDK 下不可用。
-- **启用 Apple PQC 的前提**：
-  - 使用包含 **iOS 26 SDK** 的 Xcode（否则编译期没有 `MLKEM768/MLDSA65` 类型）
-  - 在 Xcode Target -> Build Settings 里添加 `SWIFT_ACTIVE_COMPILATION_CONDITIONS`：`HAS_APPLE_PQC_SDK`
-  - 运行时满足 `#available(iOS 26.0, *)`
+- **在随仓库提交的 `SkyBridgeCompass-iOS.xcodeproj` 中**：
+  - 使用 **iOS 26 SDK** 构建时，会自动定义 `HAS_APPLE_PQC_SDK`
+  - 运行时满足 `#available(iOS 26.0, *)` 时，优先尝试 Apple PQC provider
+- **仍可能看到 Classic**：
+  - 使用旧 SDK 构建
+  - 改用未带该编译条件的其它构建入口
+  - 或虽然 provider 可用，但缺少对端 KEM 公钥信任材料
 
 #### 为什么“有 ApplePQCCryptoProvider 还不一定能走 PQC suite”
 PQC 握手（按 macOS SkyBridgeCore 的设计）需要 **对端的 KEM 身份公钥**（TrustRecord.kemPublicKeys）用于 initiator 端 `kemEncapsulate()`，以及 responder 端用本地 KEM 身份私钥 `kemDecapsulate()`。
