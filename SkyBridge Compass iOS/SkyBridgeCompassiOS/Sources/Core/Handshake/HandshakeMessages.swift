@@ -220,6 +220,11 @@ public struct IdentityPublicKeys: Sendable, Equatable, Codable {
             sePoPPublicKey: secureEnclavePublicKey
         )
     }
+
+    /// Returns the canonical fingerprint for protocol identity pinning.
+    public func authoritativeProtocolFingerprint() throws -> String {
+        try asProtocolIdentityKeys().authoritativeFingerprint
+    }
 }
 
 // MARK: - IdentityPublicKeysWire
@@ -257,6 +262,19 @@ public struct ProtocolIdentityPublicKeys: Sendable, Equatable {
             protocolAlgorithm: protocolAlgorithm.wire,
             secureEnclavePublicKey: sePoPPublicKey
         )
+    }
+
+    /// Canonical lowercase fingerprint used for handshake identity pinning.
+    public var authoritativeFingerprint: String {
+        let tagBytes = Array(protocolAlgorithm.rawValue.utf8)
+        var payload = Data()
+        var tagLength = UInt16(tagBytes.count).littleEndian
+        withUnsafeBytes(of: &tagLength) { payload.append(contentsOf: $0) }
+        payload.append(contentsOf: tagBytes)
+        var keyLength = UInt32(protocolPublicKey.count).littleEndian
+        withUnsafeBytes(of: &keyLength) { payload.append(contentsOf: $0) }
+        payload.append(protocolPublicKey)
+        return SHA256.hash(data: payload).map { String(format: "%02x", $0) }.joined()
     }
 }
 

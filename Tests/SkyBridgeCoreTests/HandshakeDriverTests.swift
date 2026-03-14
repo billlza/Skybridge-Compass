@@ -128,9 +128,14 @@ final class HandshakeDriverTests: XCTestCase {
         try await super.tearDown()
     }
 
-    private func fingerprint(_ data: Data) -> String {
-        let digest = SHA256.hash(data: data)
-        return digest.map { String(format: "%02x", $0) }.joined()
+    private func authoritativeFingerprint(
+        _ data: Data,
+        algorithm: ProtocolSigningAlgorithm = .ed25519
+    ) -> String {
+        ProtocolIdentityPublicKeys(
+            protocolPublicKey: data,
+            protocolAlgorithm: algorithm
+        ).authoritativeFingerprint
     }
 
     private func makeDriver(
@@ -252,9 +257,11 @@ final class HandshakeDriverTests: XCTestCase {
     func testIdentityPinningMismatchFailsHandshake() async throws {
         let trustedKeyPair = try await provider.generateKeyPair(for: .signing)
         let untrustedKeyPair = try await provider.generateKeyPair(for: .signing)
+        let expectedFingerprint = authoritativeFingerprint(trustedKeyPair.publicKey.bytes)
+        let actualFingerprint = authoritativeFingerprint(untrustedKeyPair.publicKey.bytes)
         let trustProvider = StaticTrustProvider(
             deviceId: "test-peer",
-            fingerprint: fingerprint(trustedKeyPair.publicKey.bytes)
+            fingerprint: expectedFingerprint
         )
 
         let driver = try makeDriver(trustProvider: trustProvider)
@@ -277,10 +284,97 @@ final class HandshakeDriverTests: XCTestCase {
             return
         }
 
-        guard case .identityMismatch = reason else {
+        guard case .identityMismatch(let expected, let actual) = reason else {
             XCTFail("Expected identityMismatch, got \(reason)")
             return
         }
+
+        XCTAssertEqual(expected, expectedFingerprint)
+        XCTAssertEqual(actual, actualFingerprint)
+    }
+
+    func testInitiatorIdentityPinningMismatchFailsHandshake() async throws {
+        let initiatorTransport = MockDiscoveryTransport()
+        let responderTransport = MockDiscoveryTransport()
+        let trustedResponderKeyPair = try await provider.generateKeyPair(for: .signing)
+        let actualResponderKeyPair = try await provider.generateKeyPair(for: .signing)
+        let expectedFingerprint = authoritativeFingerprint(trustedResponderKeyPair.publicKey.bytes)
+        let actualFingerprint = authoritativeFingerprint(actualResponderKeyPair.publicKey.bytes)
+        let trustProvider = StaticTrustProvider(
+            deviceId: "test-peer",
+            fingerprint: expectedFingerprint
+        )
+
+        let initiator = try makeDriver(
+            transport: initiatorTransport,
+            timeout: .seconds(1),
+            trustProvider: trustProvider
+        )
+        let responder = try makeDriver(
+            transport: responderTransport,
+            identityKeyHandle: .softwareKey(actualResponderKeyPair.privateKey.bytes),
+            identityPublicKey: encodeIdentityPublicKey(actualResponderKeyPair.publicKey.bytes),
+            timeout: .seconds(1)
+        )
+
+        let peer = PeerIdentifier(deviceId: "test-peer")
+        let handshakeTask = Task {
+            try await initiator.initiateHandshake(with: peer)
+        }
+
+        while await initiatorTransport.getSentMessageCount() == 0 {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+
+        let initiatorMessages = await initiatorTransport.getSentMessages()
+        await responder.handleMessage(initiatorMessages[0].1, from: peer)
+
+        while await responderTransport.getSentMessageCount() == 0 {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+
+        let responderMessages = await responderTransport.getSentMessages()
+        await initiator.handleMessage(responderMessages[0].1, from: peer)
+
+        try await Task.sleep(for: .milliseconds(50))
+
+        let state = await initiator.getCurrentState()
+        guard case .failed(let reason) = state else {
+            XCTFail("Expected failed state, got \(state)")
+            await responder.cancel()
+            handshakeTask.cancel()
+            return
+        }
+
+        guard case .identityMismatch(let expected, let actual) = reason else {
+            XCTFail("Expected identityMismatch, got \(reason)")
+            await responder.cancel()
+            handshakeTask.cancel()
+            return
+        }
+
+        XCTAssertEqual(expected, expectedFingerprint)
+        XCTAssertEqual(actual, actualFingerprint)
+
+        do {
+            _ = try await handshakeTask.value
+            XCTFail("Expected handshake task to fail")
+        } catch let error as HandshakeError {
+            guard case .failed(let taskReason) = error else {
+                XCTFail("Expected failed handshake error, got \(error)")
+                await responder.cancel()
+                return
+            }
+            guard case .identityMismatch(let taskExpected, let taskActual) = taskReason else {
+                XCTFail("Expected task failure reason identityMismatch, got \(taskReason)")
+                await responder.cancel()
+                return
+            }
+            XCTAssertEqual(taskExpected, expectedFingerprint)
+            XCTAssertEqual(taskActual, actualFingerprint)
+        }
+
+        await responder.cancel()
     }
 
     func testResponderCompletesHandshakeWithSessionKeys() async throws {

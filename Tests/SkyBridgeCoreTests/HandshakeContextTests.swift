@@ -12,6 +12,19 @@ import CryptoKit
 @testable import SkyBridgeCore
 
 @available(macOS 14.0, iOS 17.0, *)
+private actor IdentityCapture {
+    private var captured: IdentityPublicKeys?
+
+    func store(_ identityKeys: IdentityPublicKeys) {
+        captured = identityKeys
+    }
+
+    func snapshot() -> IdentityPublicKeys? {
+        captured
+    }
+}
+
+@available(macOS 14.0, iOS 17.0, *)
 final class HandshakeContextTests: XCTestCase {
     
  // MARK: - Property 5: Handshake Context Isolation
@@ -540,6 +553,90 @@ final class HandshakeContextTests: XCTestCase {
         await initiator.zeroize()
         await responder.zeroize()
     }
+
+    func testProcessMessageAPostSignatureValidationReceivesDecodedIdentityKeys() async throws {
+        let provider = ClassicCryptoProvider()
+        let initiator = try await HandshakeContext.create(
+            role: .initiator,
+            cryptoProvider: provider
+        )
+        let responder = try await HandshakeContext.create(
+            role: .responder,
+            cryptoProvider: provider
+        )
+
+        let initiatorSigningKey = try await provider.generateKeyPair(for: .signing)
+        let expectedIdentity = IdentityPublicKeys(
+            protocolPublicKey: initiatorSigningKey.publicKey.bytes,
+            protocolAlgorithm: .ed25519,
+            secureEnclavePublicKey: nil
+        )
+        let messageA = try await initiator.buildMessageA(
+            identityKeyHandle: .softwareKey(initiatorSigningKey.privateKey.bytes),
+            identityPublicKey: encodeIdentityPublicKey(initiatorSigningKey.publicKey.bytes)
+        )
+        let capture = IdentityCapture()
+
+        try await responder.processMessageA(
+            messageA,
+            postSignatureValidation: { identityKeys in
+                await capture.store(identityKeys)
+            }
+        )
+
+        let capturedIdentity = await capture.snapshot()
+        XCTAssertEqual(capturedIdentity, expectedIdentity)
+
+        await initiator.zeroize()
+        await responder.zeroize()
+    }
+
+    func testProcessMessageBPostSignatureValidationReceivesDecodedIdentityKeys() async throws {
+        let provider = ClassicCryptoProvider()
+        let initiator = try await HandshakeContext.create(
+            role: .initiator,
+            cryptoProvider: provider
+        )
+        let responder = try await HandshakeContext.create(
+            role: .responder,
+            cryptoProvider: provider
+        )
+
+        let initiatorSigningKey = try await provider.generateKeyPair(for: .signing)
+        let responderSigningKey = try await provider.generateKeyPair(for: .signing)
+        let expectedIdentity = IdentityPublicKeys(
+            protocolPublicKey: responderSigningKey.publicKey.bytes,
+            protocolAlgorithm: .ed25519,
+            secureEnclavePublicKey: nil
+        )
+
+        let messageA = try await initiator.buildMessageA(
+            identityKeyHandle: .softwareKey(initiatorSigningKey.privateKey.bytes),
+            identityPublicKey: encodeIdentityPublicKey(initiatorSigningKey.publicKey.bytes)
+        )
+        try await responder.processMessageA(messageA)
+
+        let buildResult = try await responder.buildMessageB(
+            identityKeyHandle: .softwareKey(responderSigningKey.privateKey.bytes),
+            identityPublicKey: encodeIdentityPublicKey(responderSigningKey.publicKey.bytes)
+        )
+        let messageB = buildResult.message
+        buildResult.sharedSecret.zeroize()
+
+        let capture = IdentityCapture()
+        _ = try await initiator.processMessageB(
+            messageB,
+            postSignatureValidation: { identityKeys in
+                await capture.store(identityKeys)
+            }
+        )
+
+        let capturedIdentity = await capture.snapshot()
+        XCTAssertEqual(capturedIdentity, expectedIdentity)
+
+        await initiator.zeroize()
+        await responder.zeroize()
+    }
 }
 
 private struct P256SigningCallback: SigningCallback {
@@ -763,7 +860,7 @@ final class HandshakeMessagesTests: XCTestCase {
             }
         }
     }
-    
+
  /// Test MessageA rejects truncated data
     func testMessageARejectsTruncatedData() {
         let shortData = Data([1, 0x10, 0x01]) // Only version and suite

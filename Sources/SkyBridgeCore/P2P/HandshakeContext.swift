@@ -396,7 +396,7 @@ public actor HandshakeContext {
     public func processMessageA(
         _ messageA: HandshakeMessageA,
         policy: HandshakePolicy = .default,
-        postSignatureValidation: (@Sendable (Data) async throws -> Void)? = nil,
+        postSignatureValidation: (@Sendable (IdentityPublicKeys) async throws -> Void)? = nil,
         secureEnclavePublicKey: Data? = nil
     ) async throws {
         guard !isZeroized else {
@@ -426,7 +426,7 @@ public actor HandshakeContext {
         }
 
         if let postSignatureValidation {
-            try await postSignatureValidation(identityKeys.protocolPublicKey)
+            try await postSignatureValidation(identityKeys)
         }
 
         if policy.requireSecureEnclavePoP, messageA.secureEnclaveSignature == nil {
@@ -674,7 +674,7 @@ public actor HandshakeContext {
     public func processMessageB(
         _ messageB: HandshakeMessageB,
         policy: HandshakePolicy = .default,
-        postSignatureValidation: (@Sendable (Data) async throws -> Void)? = nil,
+        postSignatureValidation: (@Sendable (IdentityPublicKeys) async throws -> Void)? = nil,
         secureEnclavePublicKey: Data? = nil
     ) async throws -> SessionKeys {
         guard !isZeroized else {
@@ -716,7 +716,7 @@ public actor HandshakeContext {
         }
 
         if let postSignatureValidation {
-            try await postSignatureValidation(identityKeys.protocolPublicKey)
+            try await postSignatureValidation(identityKeys)
         }
 
         if policy.requireSecureEnclavePoP, messageB.secureEnclaveSignature == nil {

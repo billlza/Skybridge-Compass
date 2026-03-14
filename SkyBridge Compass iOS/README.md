@@ -82,6 +82,15 @@ PQC 握手（按 macOS SkyBridgeCore 的设计）需要 **对端的 KEM 身份�
 
 macOS 端已经有 `TrustSyncService/TrustRecord`；iOS 端目前还没有完整的 TrustRecord 同步/持久化链路，所以即使启用了 Apple PQC provider，也可能会因为缺少对端 KEM 公钥而无法进行 PQC-only attempt，最终回落到 Classic。
 
+#### Identity pinning 契约
+`HandshakeTrustProvider.trustedFingerprint(for:)` 返回的必须是**规范化协议身份指纹**：
+
+- 输入为：`protocol signing algorithm tag + raw protocol public key bytes`
+- 输出为：**64 字符小写十六进制**
+- 参考实现：`IdentityPublicKeys.authoritativeProtocolFingerprint()`
+
+不要把裸 `protocolPublicKey` 直接做 `SHA256` 当成 pinning 指纹，也不要把 `IdentityPublicKeys` 的 wire blob 当成裸公钥处理。iOS 端当前镜像实现已与 macOS 核心对齐到这条契约。
+
 ### P2P 通信
 使用 Network Framework 的 P2P 功能：
 

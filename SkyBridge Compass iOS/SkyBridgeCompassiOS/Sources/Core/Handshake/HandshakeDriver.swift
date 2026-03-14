@@ -22,6 +22,12 @@ public protocol DiscoveryTransport: Sendable {
 /// Identity pinning provider for handshake trust checks
 @available(iOS 17.0, *)
 public protocol HandshakeTrustProvider: Sendable {
+    /// Returns the canonical protocol identity fingerprint for `deviceId`.
+    ///
+    /// Implementations must use the same construction as
+    /// `IdentityPublicKeys.authoritativeProtocolFingerprint()`: lowercase hex
+    /// over the protocol signing algorithm tag plus the raw protocol public key
+    /// bytes. Do not return a raw SHA-256 of the wire blob or bare public key.
     func trustedFingerprint(for deviceId: String) async -> String?
     func trustedKEMPublicKeys(for deviceId: String) async -> [CryptoSuite: Data]
     func trustedSecureEnclavePublicKey(for deviceId: String) async -> Data?
@@ -735,7 +741,10 @@ public actor HandshakeDriver {
     }
 
     private func enforceIdentityPinning(deviceId: String, identityPublicKey: Data) async throws {
-        guard let expectedFingerprint = await trustProvider.trustedFingerprint(for: deviceId) else {
+        guard let expectedFingerprint = await trustProvider.trustedFingerprint(for: deviceId)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased(),
+              !expectedFingerprint.isEmpty else {
             return
         }
         let actualFingerprint = try authoritativeFingerprint(for: identityPublicKey)
@@ -749,16 +758,7 @@ public actor HandshakeDriver {
 
     private func authoritativeFingerprint(for identityPublicKey: Data) throws -> String {
         let identityKeys = try IdentityPublicKeys.decodeWithLegacyFallback(from: identityPublicKey)
-        let protocolIdentity = try identityKeys.asProtocolIdentityKeys()
-        let tagBytes = Array(protocolIdentity.protocolAlgorithm.rawValue.utf8)
-        var payload = Data()
-        var tagLength = UInt16(tagBytes.count).littleEndian
-        withUnsafeBytes(of: &tagLength) { payload.append(contentsOf: $0) }
-        payload.append(contentsOf: tagBytes)
-        var keyLength = UInt32(protocolIdentity.protocolPublicKey.count).littleEndian
-        withUnsafeBytes(of: &keyLength) { payload.append(contentsOf: $0) }
-        payload.append(protocolIdentity.protocolPublicKey)
-        return SHA256.hash(data: payload).map { String(format: "%02x", $0) }.joined()
+        return try identityKeys.authoritativeProtocolFingerprint()
     }
     
     private nonisolated func isFinishedMessage(_ data: Data) -> Bool {

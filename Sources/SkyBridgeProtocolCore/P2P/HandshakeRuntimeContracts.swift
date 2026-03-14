@@ -16,6 +16,12 @@ public protocol DiscoveryTransport: Sendable {
 /// KEM bootstrap.
 @available(macOS 14.0, iOS 17.0, *)
 public protocol HandshakeTrustProvider: Sendable {
+    /// Returns the canonical protocol identity fingerprint for `deviceId`.
+    ///
+    /// Implementations must use the same construction as
+    /// `IdentityPublicKeys.authoritativeProtocolFingerprint()`: lowercase hex
+    /// over the protocol signing algorithm tag plus the raw protocol public key
+    /// bytes. Do not return a raw SHA-256 of the wire blob or bare public key.
     func trustedFingerprint(for deviceId: String) async -> String?
     func trustedKEMPublicKeys(for deviceId: String) async -> [CryptoSuite: Data]
     func trustedSecureEnclavePublicKey(for deviceId: String) async -> Data?

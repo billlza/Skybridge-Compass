@@ -36,6 +36,17 @@ SkyBridge Compass Pro 是一个以 **跨平台协议内核（SkyBridgeCore）** 
 
 `Scripts/build_with_widgets.sh` 与 `run_app.sh` 会自动检测 macOS SDK 版本（>=26）并设置该变量。
 
+## 握手信任钉扎契约（跨平台接入前必读）
+
+`HandshakeTrustProvider.trustedFingerprint(for:)` 返回的必须是**规范化协议身份指纹**，不能是任意 `SHA256(publicKey)`。
+
+- 指纹输入为：`protocol signing algorithm tag + raw protocol public key bytes`
+- 输出格式为：**64 字符小写十六进制**
+- 本仓库的权威实现位于 `IdentityPublicKeys.authoritativeProtocolFingerprint()`
+- `MessageA` 与 `MessageB` 的验签后 pinning 都以解码后的 `IdentityPublicKeys` 为准，不再接受“裸公钥 Data”与“wire blob Data”混用
+
+这条契约是后续 **macOS / iOS / Ubuntu / Android** 对齐时的硬要求；新平台接入如果沿用旧的裸公钥哈希，会在首次信任同步或 pinning 校验时产生系统性误报。
+
 ## Nebula 配置最佳实践
 
 Nebula 原生客户端现统一使用以下配置键：

@@ -745,10 +745,10 @@ public actor HandshakeDriver {
                 try await ctx.processMessageA(
                     messageA,
                     policy: policy,
-                    postSignatureValidation: { identityPublicKey in
+                    postSignatureValidation: { identityKeys in
                         try await self.enforceIdentityPinning(
                             deviceId: peer.deviceId,
-                            identityPublicKey: identityPublicKey
+                            identityKeys: identityKeys
                         )
                     },
                     secureEnclavePublicKey: pinnedSEPublicKey
@@ -929,12 +929,12 @@ public actor HandshakeDriver {
             }
 
             let pinnedDeviceId = currentPeer?.deviceId
-            let postSignatureValidation: (@Sendable (Data) async throws -> Void)?
+            let postSignatureValidation: (@Sendable (IdentityPublicKeys) async throws -> Void)?
             if let pinnedDeviceId {
-                postSignatureValidation = { identityPublicKey in
+                postSignatureValidation = { identityKeys in
                     try await self.enforceIdentityPinning(
                         deviceId: pinnedDeviceId,
-                        identityPublicKey: identityPublicKey
+                        identityKeys: identityKeys
                     )
                 }
             } else {
@@ -1326,12 +1326,15 @@ public actor HandshakeDriver {
         return cryptoProvider.tier == .liboqsPQC || cryptoProvider.tier == .nativePQC
     }
 
-    private func enforceIdentityPinning(deviceId: String, identityPublicKey: Data) async throws {
-        guard let expectedFingerprint = await trustProvider.trustedFingerprint(for: deviceId) else {
+    private func enforceIdentityPinning(deviceId: String, identityKeys: IdentityPublicKeys) async throws {
+        guard let expectedFingerprint = await trustProvider.trustedFingerprint(for: deviceId)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased(),
+              !expectedFingerprint.isEmpty else {
             return
         }
 
-        let actualFingerprint = try authoritativeFingerprint(for: identityPublicKey)
+        let actualFingerprint = try authoritativeFingerprint(for: identityKeys)
         guard expectedFingerprint == actualFingerprint else {
             throw HandshakeError.failed(.identityMismatch(
                 expected: expectedFingerprint,
@@ -1340,13 +1343,8 @@ public actor HandshakeDriver {
         }
     }
 
-    private func authoritativeFingerprint(for identityPublicKey: Data) throws -> String {
-        let identityKeys = try IdentityPublicKeys.decodeWithLegacyFallback(from: identityPublicKey)
-        let protocolIdentity = try identityKeys.asProtocolIdentityKeys()
-        return ProtocolIdentityBinding.computeFingerprint(
-            algorithm: protocolIdentity.protocolAlgorithm,
-            publicKeyBytes: protocolIdentity.protocolPublicKey
-        )
+    private func authoritativeFingerprint(for identityKeys: IdentityPublicKeys) throws -> String {
+        try identityKeys.authoritativeProtocolFingerprint()
     }
 
     private func resolveIdentity() async throws -> ResolvedHandshakeIdentity {
