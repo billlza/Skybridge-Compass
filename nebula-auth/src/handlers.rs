@@ -65,12 +65,12 @@ async fn ensure_consistent_nebula_id(
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
 
-    let canonical_nebula_id = users_row_nebula_id
+    let canonical_nebula_id = metadata_nebula_id
         .clone()
-        .or(metadata_nebula_id.clone())
+        .or(users_row_nebula_id.clone())
         .unwrap_or_else(crate::nebula_id::generate_user_registration_id);
 
-    if metadata_nebula_id.as_deref() != Some(canonical_nebula_id.as_str()) {
+    if metadata_nebula_id.is_none() {
         let _ = state
             .supabase
             .update_user_metadata(
@@ -716,7 +716,7 @@ pub async fn get_profile(
     let mut avatar_url: Option<String> = None;
     let mut nebula_id: Option<String> = None;
     if let Ok(su) = state.supabase.get_user(&token).await {
-        if let Some(md) = su.user_metadata {
+        if let Some(md) = su.user_metadata.as_ref() {
             avatar_url = md
                 .get("avatar_url")
                 .and_then(|v| v.as_str())
@@ -726,16 +726,8 @@ pub async fn get_profile(
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string())
                 });
-            if nebula_id.is_none() {
-                nebula_id = md
-                    .get("nebula_id")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-            }
         }
-        if let Ok(nid) = state.supabase.get_nebula_id(&token, &su.id).await {
-            nebula_id = nid.or(nebula_id);
-        }
+        nebula_id = ensure_consistent_nebula_id(&state, &token, &su).await;
 
         // macOS parity: macOS uploads to `avatars/{userId}.jpg` but some flows may fail to persist avatar_url.
         // Best-effort: probe the canonical object and repair user_metadata so all clients can read it.
