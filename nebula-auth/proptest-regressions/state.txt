@@ -1,0 +1,11 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc f7efa7d6158b2e88f1991f8901818f4af7fbe50f3b940bd7a8d9920468236605 # shrinks to phone = "+1000000000"
+cc da55b356f4985e677eb5410ca06a0c282acfe67444a5eed402d3dae562d3a4cd # shrinks to phone = "+1000000000", num_requests = 1
+cc abffe7e1bbfbfb4cc393f952f2ee4e238e27ddde24d53d9c0d3fe2afaeba8730 # shrinks to phone1 = "+1000000000", phone2 = "+1000000001"
+cc 90f68dcc43c8fc0ddaf4555b98e6a01ad4536dcc4945b35984c26ddf171a75f1 # shrinks to device_fp = "0aa0000aaa0a0a0aaa000aaa00aaaa00"
+cc 446a5e0816147fa86a78e9ea5df429265a45a91bb4c07da55414c81b95a95c95 # shrinks to phone = "+1000000000", device_fp = "aaaaa0a0a0a00a0aa0a0aa0a00aaaa0a"

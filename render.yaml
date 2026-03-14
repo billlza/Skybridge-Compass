@@ -14,3 +14,25 @@ services:
         value: info
       - key: SKYBRIDGE_WEB_ORIGIN
         value: https://frontend-li-ziang-s-projects.vercel.app
+  - type: web
+    name: skybridge-nebula-auth
+    runtime: rust
+    plan: free
+    region: oregon
+    branch: codex/nebula-auth-issuer
+    rootDir: nebula-auth
+    buildCommand: cargo build --release
+    startCommand: ./target/release/backend
+    healthCheckPath: /health
+    autoDeploy: false
+    envVars:
+      - key: RUST_LOG
+        value: info
+      - key: NEBULA_WEB_ORIGINS
+        value: http://localhost:5173,http://127.0.0.1:5173,https://skybridge-compass.vercel.app,https://nebula-technologies.net,https://www.nebula-technologies.net
+      - key: SUPABASE_URL
+        value: https://hloqytmhjludmuhwyyzb.supabase.co
+      - key: SUPABASE_ANON_KEY
+        value: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imhsb3F5dG1oamx1ZG11aHd5eXpiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTUzNTE3ODUsImV4cCI6MjA3MDkyNzc4NX0.xmDCgBo5IpDlzIerIz7y2jruh34MEYrtcepeK3x_HT0
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
