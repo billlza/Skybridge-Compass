@@ -40,6 +40,65 @@ fn error_response(status: StatusCode, error: &str, message: &str) -> Response {
         .into_response()
 }
 
+fn metadata_string(user: &crate::supabase::SupabaseUser, key: &str) -> Option<String> {
+    user.user_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get(key))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+async fn ensure_consistent_nebula_id(
+    state: &AppState,
+    access_token: &str,
+    user: &crate::supabase::SupabaseUser,
+) -> Option<String> {
+    let metadata_nebula_id = metadata_string(user, "nebula_id");
+    let users_row_nebula_id = state
+        .supabase
+        .get_nebula_id(access_token, &user.id)
+        .await
+        .ok()
+        .flatten()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    let canonical_nebula_id = users_row_nebula_id
+        .clone()
+        .or(metadata_nebula_id.clone())
+        .unwrap_or_else(crate::nebula_id::generate_user_registration_id);
+
+    if metadata_nebula_id.as_deref() != Some(canonical_nebula_id.as_str()) {
+        let _ = state
+            .supabase
+            .update_user_metadata(
+                access_token,
+                serde_json::json!({
+                    "nebula_id": canonical_nebula_id.clone()
+                }),
+            )
+            .await;
+    }
+
+    if users_row_nebula_id.as_deref() != Some(canonical_nebula_id.as_str()) {
+        let _ = state
+            .supabase
+            .patch_users_row(
+                &user.id,
+                serde_json::json!({
+                    "nebula_id": canonical_nebula_id.clone(),
+                    "updated_at": Utc::now().to_rfc3339(),
+                }),
+                Some(access_token),
+            )
+            .await;
+    }
+
+    Some(canonical_nebula_id)
+}
+
 pub async fn login(State(state): State<AppState>, Json(payload): Json<LoginRequest>) -> Response {
     tracing::info!(
         "Login attempt: method={:?}, identifier={}",
@@ -90,6 +149,8 @@ pub async fn login(State(state): State<AppState>, Json(payload): Json<LoginReque
                     );
                 }
             };
+
+            let _ = ensure_consistent_nebula_id(&state, &auth_res.access_token, &auth_res.user).await;
 
             let metadata = auth_res.user.user_metadata.as_ref();
             let avatar_url = metadata
@@ -174,7 +235,7 @@ pub async fn login(State(state): State<AppState>, Json(payload): Json<LoginReque
                     );
                 }
             };
-
+            let _ = ensure_consistent_nebula_id(&state, &auth_res.access_token, &auth_res.user).await;
             let metadata = auth_res.user.user_metadata.as_ref();
             let avatar_url = metadata
                 .and_then(|md| {
@@ -421,30 +482,7 @@ pub async fn register(
                     );
                 }
             };
-
-            // Ensure user metadata contains a nebula_id (macOS/iOS parity).
-            let nebula_id = crate::nebula_id::generate_user_registration_id();
-            let _ = state
-                .supabase
-                .update_user_metadata(
-                    &auth_res.access_token,
-                    serde_json::json!({
-                        "registration_source": "SkyBridge Web",
-                        "nebula_id": nebula_id.clone()
-                    }),
-                )
-                .await;
-            let _ = state
-                .supabase
-                .patch_users_row(
-                    &auth_res.user.id,
-                    serde_json::json!({
-                        "nebula_id": nebula_id,
-                        "updated_at": Utc::now().to_rfc3339(),
-                    }),
-                    Some(&auth_res.access_token),
-                )
-                .await;
+            let _ = ensure_consistent_nebula_id(&state, &auth_res.access_token, &auth_res.user).await;
 
             let metadata = auth_res.user.user_metadata.as_ref();
             let avatar_url = metadata
