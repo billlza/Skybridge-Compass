@@ -2,11 +2,10 @@
 <Scheme
    LastUpgradeVersion = "2620"
    wasCreatedForAppExtension = "YES"
-   version = "1.7">
+   version = "2.0">
    <BuildAction
       parallelizeBuildables = "YES"
-      buildImplicitDependencies = "YES"
-      runPostActionsOnFailure = "NO">
+      buildImplicitDependencies = "YES">
       <BuildActionEntries>
          <BuildActionEntry
             buildForTesting = "YES"
@@ -56,15 +55,7 @@
       buildConfiguration = "Debug"
       selectedDebuggerIdentifier = "Xcode.DebuggerFoundation.Debugger.LLDB"
       selectedLauncherIdentifier = "Xcode.DebuggerFoundation.Launcher.LLDB"
-      shouldUseLaunchSchemeArgsEnv = "YES"
-      shouldAutocreateTestPlan = "NO"
-      onlyGenerateCoverageForSpecifiedTargets = "NO">
-      <TestPlans>
-         <TestPlanReference
-            default = "YES"
-            reference = "container:SkyBridgeCompass-iOS.xcodeproj/xcshareddata/xctestplans/SkyBridgeCompass-iOS-Shared.xctestplan">
-         </TestPlanReference>
-      </TestPlans>
+      shouldUseLaunchSchemeArgsEnv = "YES">
       <MacroExpansion>
          <BuildableReference
             BuildableIdentifier = "primary"
@@ -74,20 +65,37 @@
             ReferencedContainer = "container:SkyBridgeCompass-iOS.xcodeproj">
          </BuildableReference>
       </MacroExpansion>
+      <TestPlans>
+         <TestPlanReference
+            reference = "container:SkyBridgeCompass-iOS.xcodeproj/xcshareddata/xctestplans/SkyBridgeCompass-iOS-Shared.xctestplan"
+            default = "YES">
+         </TestPlanReference>
+      </TestPlans>
    </TestAction>
    <LaunchAction
       buildConfiguration = "Debug"
       selectedDebuggerIdentifier = ""
       selectedLauncherIdentifier = "Xcode.IDEFoundation.Launcher.PosixSpawn"
       launchStyle = "0"
+      askForAppToLaunch = "Yes"
       useCustomWorkingDirectory = "NO"
       ignoresPersistentStateOnLaunch = "NO"
       debugDocumentVersioning = "YES"
       debugServiceExtension = "internal"
       allowLocationSimulation = "YES"
       launchAutomaticallySubstyle = "2">
-      <BuildableProductRunnable
-         runnableDebuggingMode = "0">
+      <RemoteRunnable
+         runnableDebuggingMode = "2"
+         BundleIdentifier = "com.apple.springboard">
+         <BuildableReference
+            BuildableIdentifier = "primary"
+            BlueprintIdentifier = "225DF6CFF206BFB832FBB9A7"
+            BuildableName = "SkyBridgeCompass-Widgets.appex"
+            BlueprintName = "SkyBridgeCompass-Widgets"
+            ReferencedContainer = "container:SkyBridgeCompass-iOS.xcodeproj">
+         </BuildableReference>
+      </RemoteRunnable>
+      <MacroExpansion>
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "537E084BA6452ABCF8886C45"
@@ -95,9 +103,7 @@
             BlueprintName = "SkyBridgeCompass-iOS"
             ReferencedContainer = "container:SkyBridgeCompass-iOS.xcodeproj">
          </BuildableReference>
-      </BuildableProductRunnable>
-      <CommandLineArguments>
-      </CommandLineArguments>
+      </MacroExpansion>
    </LaunchAction>
    <ProfileAction
       buildConfiguration = "Release"
@@ -115,8 +121,6 @@
             ReferencedContainer = "container:SkyBridgeCompass-iOS.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
-      <CommandLineArguments>
-      </CommandLineArguments>
    </ProfileAction>
    <AnalyzeAction
       buildConfiguration = "Debug">

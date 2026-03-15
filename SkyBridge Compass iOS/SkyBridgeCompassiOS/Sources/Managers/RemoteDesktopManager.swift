@@ -627,21 +627,25 @@ actor VideoDecoder {
                 guard let spsBase = spsRaw.baseAddress else { return -1 }
                 return pps.withUnsafeBytes { ppsRaw -> OSStatus in
                     guard let ppsBase = ppsRaw.baseAddress else { return -1 }
-                    let pointers: [UnsafePointer<UInt8>] = [
-                        spsBase.assumingMemoryBound(to: UInt8.self),
-                        ppsBase.assumingMemoryBound(to: UInt8.self)
-                    ]
-                    let sizes: [Int] = [sps.count, pps.count]
-                    return pointers.withUnsafeBufferPointer { ptrs in
-                        sizes.withUnsafeBufferPointer { sz in
-                            CMVideoFormatDescriptionCreateFromH264ParameterSets(
-                                allocator: kCFAllocatorDefault,
-                                parameterSetCount: ptrs.count,
-                                parameterSetPointers: ptrs.baseAddress!,
-                                parameterSetSizes: sz.baseAddress!,
-                                nalUnitHeaderLength: 4,
-                                formatDescriptionOut: &out
-                            )
+	                    let pointers: [UnsafePointer<UInt8>] = [
+	                        spsBase.assumingMemoryBound(to: UInt8.self),
+	                        ppsBase.assumingMemoryBound(to: UInt8.self)
+	                    ]
+	                    let sizes: [Int] = [sps.count, pps.count]
+		                    return pointers.withUnsafeBufferPointer { ptrs in
+		                        sizes.withUnsafeBufferPointer { sz in
+	                                guard let parameterSetPointers = ptrs.baseAddress,
+	                                      let parameterSetSizes = sz.baseAddress else {
+	                                    return -1
+	                                }
+		                            return CMVideoFormatDescriptionCreateFromH264ParameterSets(
+		                                allocator: kCFAllocatorDefault,
+		                                parameterSetCount: ptrs.count,
+		                                parameterSetPointers: parameterSetPointers,
+		                                parameterSetSizes: parameterSetSizes,
+	                                nalUnitHeaderLength: 4,
+	                                formatDescriptionOut: &out
+	                            )
                         }
                     }
                 }
@@ -664,18 +668,22 @@ actor VideoDecoder {
                             vpsBase.assumingMemoryBound(to: UInt8.self),
                             spsBase.assumingMemoryBound(to: UInt8.self),
                             ppsBase.assumingMemoryBound(to: UInt8.self)
-                        ]
-                        let sizes: [Int] = [vps.count, sps.count, pps.count]
-                        return pointers.withUnsafeBufferPointer { ptrs in
-                            sizes.withUnsafeBufferPointer { sz in
-                                CMVideoFormatDescriptionCreateFromHEVCParameterSets(
-                                    allocator: kCFAllocatorDefault,
-                                    parameterSetCount: ptrs.count,
-                                    parameterSetPointers: ptrs.baseAddress!,
-                                    parameterSetSizes: sz.baseAddress!,
-                                    nalUnitHeaderLength: 4,
-                                    extensions: nil,
-                                    formatDescriptionOut: &out
+	                        ]
+	                        let sizes: [Int] = [vps.count, sps.count, pps.count]
+		                        return pointers.withUnsafeBufferPointer { ptrs in
+		                            sizes.withUnsafeBufferPointer { sz in
+	                                    guard let parameterSetPointers = ptrs.baseAddress,
+	                                          let parameterSetSizes = sz.baseAddress else {
+	                                        return -1
+	                                    }
+		                                return CMVideoFormatDescriptionCreateFromHEVCParameterSets(
+		                                    allocator: kCFAllocatorDefault,
+		                                    parameterSetCount: ptrs.count,
+		                                    parameterSetPointers: parameterSetPointers,
+		                                    parameterSetSizes: parameterSetSizes,
+	                                    nalUnitHeaderLength: 4,
+	                                    extensions: nil,
+	                                    formatDescriptionOut: &out
                                 )
                             }
                         }
@@ -2606,9 +2614,9 @@ public class RemoteDesktopManager: ObservableObject {
                 return
             }
             
-	            let length = Int(lengthData.withUnsafeBytes { raw -> UInt32 in
-	                raw.baseAddress!.loadUnaligned(as: UInt32.self).bigEndian
-	            })
+		            let length = Int(lengthData.withUnsafeBytes { raw -> UInt32 in
+		                raw.loadUnaligned(fromByteOffset: 0, as: UInt32.self).bigEndian
+		            })
 	            if length <= 0 || length > maxMessageBytes {
                 Task { @MainActor in
                     await self.handleTransportFailure("消息长度异常：\(length) bytes")

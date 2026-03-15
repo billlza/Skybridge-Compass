@@ -130,8 +130,8 @@ private enum CrossNetworkServerConfig {
         ProcessInfo.processInfo.environment["SKYBRIDGE_CLIENT_API_KEY"] ?? "skybridge-client-v1"
     }
 
-    static func dynamicICEConfig() async -> WebRTCSession.ICEConfig {
-        let creds = await CrossNetworkTURNCredentialService.shared.getCredentials()
+    static func dynamicICEConfig(turnAdmissionToken: String?) async -> WebRTCSession.ICEConfig {
+        let creds = await CrossNetworkTURNCredentialService.shared.getCredentials(turnAdmissionToken: turnAdmissionToken)
         let turnUsername = normalizedValue(creds.username)
         let turnPassword = normalizedValue(creds.password)
         let turnURIs = preferredTurnURIs(from: creds.uris, fallback: turnURLs)
@@ -316,17 +316,53 @@ private struct CurrentPathHandshakeTrustProviderCompat: HandshakeTrustProvider, 
 
 @available(iOS 17.0, macOS 14.0, *)
 private actor SignalServerClientCompat {
+    struct AdmissionChallenge: Sendable, Equatable {
+        let challengeID: String
+        let nonce: String
+        let tenantID: String
+        let userID: String
+        let deviceID: String
+        let clientIPHash: String
+        let clientVersion: String
+        let protocolVersion: String
+        let state: String
+        let issuedAt: Date
+        let expiresAt: Date
+
+        func signaturePayload() -> Data {
+            Data([
+                "SkyBridge-Admission-Challenge",
+                challengeID,
+                nonce,
+                tenantID,
+                userID,
+                deviceID,
+                clientVersion,
+                protocolVersion
+            ].joined(separator: "\n").utf8)
+        }
+    }
+
+    struct AdmissionLease: Sendable, Equatable {
+        let token: String
+        let state: String
+        let issuedAt: Date
+        let expiresAt: Date
+    }
+
     struct SessionLease: Sendable, Equatable {
         let sessionID: String
-        let initiatorSignalingToken: String
+        let sessionToken: String
         let qrBootstrapToken: String
+        let turnAdmissionToken: String
         let expiresIn: TimeInterval
         let signalingServerOrigin: String
     }
 
     struct RedeemedSessionLease: Sendable, Equatable {
         let sessionID: String
-        let responderSignalingToken: String
+        let sessionToken: String
+        let turnAdmissionToken: String
         let expiresIn: TimeInterval
         let signalingServerOrigin: String
         let initiatorDeviceId: String
@@ -337,14 +373,16 @@ private actor SignalServerClientCompat {
     struct ConnectionCodeLease: Sendable, Equatable {
         let code: String
         let sessionID: String
-        let initiatorToken: String
+        let sessionToken: String
+        let turnAdmissionToken: String
         let expiresIn: TimeInterval
         let signalingServerOrigin: String
     }
 
     struct ConnectionCodeLookup: Sendable, Equatable {
         let sessionID: String
-        let responderToken: String
+        let sessionToken: String
+        let turnAdmissionToken: String
         let expiresIn: TimeInterval
         let signalingServerOrigin: String
         let initiatorDeviceId: String
@@ -356,6 +394,8 @@ private actor SignalServerClientCompat {
     enum ClientError: LocalizedError {
         case invalidBaseURL
         case invalidResponse
+        case missingAuthentication
+        case missingTenantID
         case serverRejected(Int, String)
         case malformedResponse(String)
 
@@ -365,6 +405,10 @@ private actor SignalServerClientCompat {
                 return "信令服务器地址无效"
             case .invalidResponse:
                 return "信令服务器返回了非 HTTP 响应"
+            case .missingAuthentication:
+                return "缺少上游登录态，无法申请 admission"
+            case .missingTenantID:
+                return "缺少租户标识，无法访问当前租户的公网能力"
             case .serverRejected(let status, let body):
                 return "信令服务器拒绝请求 (\(status)): \(body)"
             case .malformedResponse(let reason):
@@ -373,18 +417,56 @@ private actor SignalServerClientCompat {
         }
     }
 
-    private struct RegisterSessionRequestBody: Encodable {
-        let sessionId: String?
+    private struct AdmissionChallengeRequestBody: Encodable {
         let deviceId: String
         let protocolSigningAlgorithm: String
         let protocolPublicKeyFingerprint: String
+        let clientVersion: String
+        let protocolVersion: String
+    }
+
+    private struct AdmissionChallengeResponseBody: Decodable {
+        let challengeId: String
+        let nonce: String
+        let tenantId: String
+        let userId: String
+        let deviceId: String
+        let clientIpHash: String
+        let clientVersion: String
+        let protocolVersion: String
+        let state: String
+        let issuedAt: Int64
+        let expiresAt: Int64
+    }
+
+    private struct AdmissionRequestBody: Encodable {
+        let challengeId: String
+        let signature: Data
+        let deviceId: String
+        let protocolSigningAlgorithm: String
+        let protocolPublicKeyFingerprint: String
+        let protocolPublicKeyBytes: Data
+        let clientVersion: String
+        let protocolVersion: String
+    }
+
+    private struct AdmissionResponseBody: Decodable {
+        let admissionToken: String
+        let state: String
+        let issuedAt: Int64
+        let expiresAt: Int64
+    }
+
+    private struct RegisterSessionRequestBody: Encodable {
+        let sessionId: String?
         let ttlSeconds: Int
     }
 
     private struct RegisterSessionResponseBody: Decodable {
         let sessionId: String
-        let initiatorSignalingToken: String
+        let sessionToken: String
         let qrBootstrapToken: String
+        let turnAdmissionToken: String
         let expiresIn: Int
         let signalingServerOrigin: String
     }
@@ -392,14 +474,12 @@ private actor SignalServerClientCompat {
     private struct RedeemSessionRequestBody: Encodable {
         let sessionId: String
         let qrBootstrapToken: String
-        let deviceId: String
-        let protocolSigningAlgorithm: String
-        let protocolPublicKeyFingerprint: String
     }
 
     private struct RedeemSessionResponseBody: Decodable {
         let sessionId: String
-        let responderSignalingToken: String
+        let sessionToken: String
+        let turnAdmissionToken: String
         let expiresIn: Int
         let signalingServerOrigin: String
         let initiatorDeviceId: String
@@ -408,17 +488,15 @@ private actor SignalServerClientCompat {
     }
 
     private struct RegisterCodeRequestBody: Encodable {
-        let deviceId: String
         let deviceName: String
-        let protocolSigningAlgorithm: String
-        let protocolPublicKeyFingerprint: String
         let ttlSeconds: Int
     }
 
     private struct RegisterCodeResponseBody: Decodable {
         let code: String
         let sessionId: String
-        let initiatorToken: String
+        let sessionToken: String
+        let turnAdmissionToken: String
         let expiresIn: Int
         let signalingServerOrigin: String
     }
@@ -426,7 +504,8 @@ private actor SignalServerClientCompat {
     private struct LookupCodeResponseBody: Decodable {
         let found: Bool
         let sessionId: String
-        let responderToken: String
+        let sessionToken: String
+        let turnAdmissionToken: String
         let expiresIn: Int
         let signalingServerOrigin: String
         let initiatorDeviceId: String
@@ -441,48 +520,108 @@ private actor SignalServerClientCompat {
         self.urlSession = urlSession
     }
 
-    func registerSession(binding: ProtocolIdentityBindingCompat, validDuration: TimeInterval) async throws -> SessionLease {
-        let body = RegisterSessionRequestBody(
-            sessionId: nil,
+    func requestAdmissionChallenge(binding: ProtocolIdentityBindingCompat) async throws -> AdmissionChallenge {
+        let body = AdmissionChallengeRequestBody(
             deviceId: binding.deviceId,
             protocolSigningAlgorithm: binding.protocolSigningAlgorithm.rawValue,
             protocolPublicKeyFingerprint: binding.protocolPublicKeyFingerprint,
+            clientVersion: clientVersion(),
+            protocolVersion: protocolVersion()
+        )
+        let response: AdmissionChallengeResponseBody = try await performJSONRequest(
+            path: "/api/webrtc/admission/challenge",
+            method: "POST",
+            body: try JSONEncoder().encode(body),
+            requiresUserAuthentication: true
+        )
+        return AdmissionChallenge(
+            challengeID: response.challengeId,
+            nonce: response.nonce,
+            tenantID: response.tenantId,
+            userID: response.userId,
+            deviceID: response.deviceId,
+            clientIPHash: response.clientIpHash,
+            clientVersion: response.clientVersion,
+            protocolVersion: response.protocolVersion,
+            state: response.state,
+            issuedAt: Date(timeIntervalSince1970: TimeInterval(response.issuedAt) / 1000),
+            expiresAt: Date(timeIntervalSince1970: TimeInterval(response.expiresAt) / 1000)
+        )
+    }
+
+    func completeAdmission(
+        challenge: AdmissionChallenge,
+        binding: ProtocolIdentityBindingCompat,
+        signature: Data
+    ) async throws -> AdmissionLease {
+        let body = AdmissionRequestBody(
+            challengeId: challenge.challengeID,
+            signature: signature,
+            deviceId: binding.deviceId,
+            protocolSigningAlgorithm: binding.protocolSigningAlgorithm.rawValue,
+            protocolPublicKeyFingerprint: binding.protocolPublicKeyFingerprint,
+            protocolPublicKeyBytes: binding.protocolPublicKeyBytes,
+            clientVersion: challenge.clientVersion,
+            protocolVersion: challenge.protocolVersion
+        )
+        let response: AdmissionResponseBody = try await performJSONRequest(
+            path: "/api/webrtc/admission",
+            method: "POST",
+            body: try JSONEncoder().encode(body),
+            requiresUserAuthentication: true
+        )
+        return AdmissionLease(
+            token: response.admissionToken,
+            state: response.state,
+            issuedAt: Date(timeIntervalSince1970: TimeInterval(response.issuedAt) / 1000),
+            expiresAt: Date(timeIntervalSince1970: TimeInterval(response.expiresAt) / 1000)
+        )
+    }
+
+    func registerSession(
+        admissionToken: String,
+        sessionId: String? = nil,
+        validDuration: TimeInterval
+    ) async throws -> SessionLease {
+        let body = RegisterSessionRequestBody(
+            sessionId: sessionId,
             ttlSeconds: max(60, Int(validDuration.rounded()))
         )
         let response: RegisterSessionResponseBody = try await performJSONRequest(
             path: "/api/webrtc/register-session",
             method: "POST",
-            body: try JSONEncoder().encode(body)
+            body: try JSONEncoder().encode(body),
+            extraHeaders: ["X-SkyBridge-Admission": admissionToken]
         )
         return SessionLease(
             sessionID: response.sessionId,
-            initiatorSignalingToken: response.initiatorSignalingToken,
+            sessionToken: response.sessionToken,
             qrBootstrapToken: response.qrBootstrapToken,
+            turnAdmissionToken: response.turnAdmissionToken,
             expiresIn: TimeInterval(response.expiresIn),
             signalingServerOrigin: response.signalingServerOrigin
         )
     }
 
     func redeemSession(
+        admissionToken: String,
         sessionId: String,
-        qrBootstrapToken: String,
-        binding: ProtocolIdentityBindingCompat
+        qrBootstrapToken: String
     ) async throws -> RedeemedSessionLease {
         let body = RedeemSessionRequestBody(
             sessionId: sessionId,
-            qrBootstrapToken: qrBootstrapToken,
-            deviceId: binding.deviceId,
-            protocolSigningAlgorithm: binding.protocolSigningAlgorithm.rawValue,
-            protocolPublicKeyFingerprint: binding.protocolPublicKeyFingerprint
+            qrBootstrapToken: qrBootstrapToken
         )
         let response: RedeemSessionResponseBody = try await performJSONRequest(
             path: "/api/webrtc/redeem-session",
             method: "POST",
-            body: try JSONEncoder().encode(body)
+            body: try JSONEncoder().encode(body),
+            extraHeaders: ["X-SkyBridge-Admission": admissionToken]
         )
         return RedeemedSessionLease(
             sessionID: response.sessionId,
-            responderSignalingToken: response.responderSignalingToken,
+            sessionToken: response.sessionToken,
+            turnAdmissionToken: response.turnAdmissionToken,
             expiresIn: TimeInterval(response.expiresIn),
             signalingServerOrigin: response.signalingServerOrigin,
             initiatorDeviceId: response.initiatorDeviceId,
@@ -492,49 +631,45 @@ private actor SignalServerClientCompat {
     }
 
     func registerConnectionCode(
-        binding: ProtocolIdentityBindingCompat,
+        admissionToken: String,
         deviceName: String,
         validDuration: TimeInterval
     ) async throws -> ConnectionCodeLease {
         let body = RegisterCodeRequestBody(
-            deviceId: binding.deviceId,
             deviceName: deviceName,
-            protocolSigningAlgorithm: binding.protocolSigningAlgorithm.rawValue,
-            protocolPublicKeyFingerprint: binding.protocolPublicKeyFingerprint,
             ttlSeconds: max(60, Int(validDuration.rounded()))
         )
         let response: RegisterCodeResponseBody = try await performJSONRequest(
             path: "/api/webrtc/register-code",
             method: "POST",
-            body: try JSONEncoder().encode(body)
+            body: try JSONEncoder().encode(body),
+            extraHeaders: ["X-SkyBridge-Admission": admissionToken]
         )
         return ConnectionCodeLease(
             code: response.code,
             sessionID: response.sessionId,
-            initiatorToken: response.initiatorToken,
+            sessionToken: response.sessionToken,
+            turnAdmissionToken: response.turnAdmissionToken,
             expiresIn: TimeInterval(response.expiresIn),
             signalingServerOrigin: response.signalingServerOrigin
         )
     }
 
-    func lookupConnectionCode(code: String, binding: ProtocolIdentityBindingCompat) async throws -> ConnectionCodeLookup {
+    func lookupConnectionCode(admissionToken: String, code: String) async throws -> ConnectionCodeLookup {
         let response: LookupCodeResponseBody = try await performJSONRequest(
             path: "/api/webrtc/lookup/\(code.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? code)",
-            queryItems: [
-                URLQueryItem(name: "deviceId", value: binding.deviceId),
-                URLQueryItem(name: "protocolSigningAlgorithm", value: binding.protocolSigningAlgorithm.rawValue),
-                URLQueryItem(name: "protocolPublicKeyFingerprint", value: binding.protocolPublicKeyFingerprint)
-            ]
+            extraHeaders: ["X-SkyBridge-Admission": admissionToken]
         )
         guard response.found else {
             throw ClientError.serverRejected(404, "code_not_found")
         }
-        guard !response.responderToken.isEmpty else {
-            throw ClientError.malformedResponse("missing responderToken")
+        guard !response.sessionToken.isEmpty else {
+            throw ClientError.malformedResponse("missing sessionToken")
         }
         return ConnectionCodeLookup(
             sessionID: response.sessionId,
-            responderToken: response.responderToken,
+            sessionToken: response.sessionToken,
+            turnAdmissionToken: response.turnAdmissionToken,
             expiresIn: TimeInterval(response.expiresIn),
             signalingServerOrigin: response.signalingServerOrigin,
             initiatorDeviceId: response.initiatorDeviceId,
@@ -549,6 +684,9 @@ private actor SignalServerClientCompat {
         method: String = "GET",
         queryItems: [URLQueryItem] = [],
         body: Data? = nil
+        ,
+        requiresUserAuthentication: Bool = false,
+        extraHeaders: [String: String] = [:]
     ) async throws -> Response {
         guard var components = URLComponents(string: CrossNetworkServerConfig.signalingServerURL) else {
             throw ClientError.invalidBaseURL
@@ -568,9 +706,26 @@ private actor SignalServerClientCompat {
         if !apiKey.isEmpty {
             request.setValue(apiKey, forHTTPHeaderField: "X-API-Key")
         }
+        let tenantID = currentTenantID().trimmingCharacters(in: .whitespacesAndNewlines)
+        if requiresUserAuthentication && tenantID.isEmpty {
+            throw ClientError.missingTenantID
+        }
+        if !tenantID.isEmpty {
+            request.setValue(tenantID, forHTTPHeaderField: "X-SkyBridge-Tenant-Id")
+        }
+        if requiresUserAuthentication {
+            let bearerToken = try await validAccessToken().trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !bearerToken.isEmpty else {
+                throw ClientError.missingAuthentication
+            }
+            request.setValue("Bearer \(bearerToken)", forHTTPHeaderField: "Authorization")
+        }
         if let body {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.httpBody = body
+        }
+        for (field, value) in extraHeaders {
+            request.setValue(value, forHTTPHeaderField: field)
         }
 
         let (data, response) = try await urlSession.data(for: request)
@@ -586,6 +741,82 @@ private actor SignalServerClientCompat {
         } catch {
             throw ClientError.malformedResponse(error.localizedDescription)
         }
+    }
+
+    private func currentTenantID() -> String {
+        if let session = KeychainManager.shared.loadAuthSession(),
+           !session.userIdentifier.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return session.userIdentifier
+        }
+        return ""
+    }
+
+    private func clientVersion() -> String {
+        if let value = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String {
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty { return trimmed }
+        }
+        return "0.0.0"
+    }
+
+    private func protocolVersion() -> String {
+        let value = ProcessInfo.processInfo.environment["SKYBRIDGE_PROTOCOL_VERSION"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return value.isEmpty ? "1" : value
+    }
+
+    private func validAccessToken(forceRefresh: Bool = false) async throws -> String {
+        guard let session = KeychainManager.shared.loadAuthSession(),
+              session.accessToken != "pending_verification",
+              !session.accessToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw ClientError.missingAuthentication
+        }
+
+        guard let refreshToken = session.refreshToken?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !refreshToken.isEmpty else {
+            return session.accessToken
+        }
+
+        if !forceRefresh && !shouldRefreshAccessToken(session.accessToken) {
+            return session.accessToken
+        }
+
+        let refreshed = try await SupabaseService.shared.refreshSession(refreshToken: refreshToken)
+        let merged = AuthSession(
+            accessToken: refreshed.accessToken,
+            refreshToken: refreshed.refreshToken ?? session.refreshToken,
+            userIdentifier: session.userIdentifier,
+            displayName: session.displayName,
+            email: session.email,
+            avatarURL: session.avatarURL,
+            nebulaId: session.nebulaId,
+            issuedAt: Date()
+        )
+        try? KeychainManager.shared.storeAuthSession(merged)
+        return merged.accessToken
+    }
+
+    private func shouldRefreshAccessToken(_ token: String, skewSeconds: TimeInterval = 300) -> Bool {
+        guard let claims = decodeJWTClaims(token),
+              let exp = claims["exp"] as? TimeInterval else {
+            return false
+        }
+        let expiryDate = Date(timeIntervalSince1970: exp)
+        return expiryDate.timeIntervalSinceNow <= skewSeconds
+    }
+
+    private func decodeJWTClaims(_ token: String) -> [String: Any]? {
+        let parts = token.split(separator: ".")
+        guard parts.count >= 2 else { return nil }
+        var base64 = String(parts[1])
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        let remainder = base64.count % 4
+        if remainder != 0 {
+            base64.append(String(repeating: "=", count: 4 - remainder))
+        }
+        guard let data = Data(base64Encoded: base64) else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
     }
 }
 
@@ -618,10 +849,10 @@ private actor CrossNetworkTURNCredentialService {
         let mode: String?
     }
 
-    func getCredentials() async -> TURNCredentials {
+    func getCredentials(turnAdmissionToken: String?) async -> TURNCredentials {
         if let cached, cached.isValid(buffer: buffer) { return cached }
         do {
-            let fresh = try await fetchFromServer()
+            let fresh = try await fetchFromServer(turnAdmissionToken: turnAdmissionToken)
             self.cached = fresh
             return fresh
         } catch {
@@ -630,7 +861,7 @@ private actor CrossNetworkTURNCredentialService {
         }
     }
 
-    private func fetchFromServer() async throws -> TURNCredentials {
+    private func fetchFromServer(turnAdmissionToken: String?) async throws -> TURNCredentials {
         guard let url = URL(string: "\(CrossNetworkServerConfig.signalingServerURL)/api/turn/credentials") else {
             throw URLError(.badURL)
         }
@@ -638,6 +869,10 @@ private actor CrossNetworkTURNCredentialService {
         req.httpMethod = "GET"
         req.setValue("application/json", forHTTPHeaderField: "Accept")
         req.setValue(CrossNetworkServerConfig.clientAPIKey, forHTTPHeaderField: "X-API-Key")
+        if let turnAdmissionToken = turnAdmissionToken?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !turnAdmissionToken.isEmpty {
+            req.setValue(turnAdmissionToken, forHTTPHeaderField: "X-SkyBridge-Turn-Admission")
+        }
         if let deviceId = resolvedDeviceIdentifier() {
             req.setValue(deviceId, forHTTPHeaderField: "X-Device-Id")
         }
@@ -768,6 +1003,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     private var connectionCodeBootstrapTask: Task<Void, Never>?
     private var localConnectionSessionId: String?
     private var webrtcSignalingAuthTokenBySessionId: [String: String] = [:]
+    private var webrtcTurnAdmissionTokenBySessionId: [String: String] = [:]
     private var latestLocalOfferBySessionId: [String: String] = [:]
     private var latestLocalAnswerBySessionId: [String: String] = [:]
     private var localICECandidatesBySessionId: [String: [WebRTCSignalingEnvelope.Payload]] = [:]
@@ -887,6 +1123,16 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         }
         return claimed
     }
+
+    private func requestAdmissionLease(for binding: ProtocolIdentityBindingCompat) async throws -> SignalServerClientCompat.AdmissionLease {
+        let challenge = try await signalServer.requestAdmissionChallenge(binding: binding)
+        let signatureKeyTag = "CrossNetwork.CurrentPath.Authority.Ed25519"
+        guard let privateKey = KeychainManager.shared.loadCurve25519SigningPrivateKey(tag: signatureKeyTag) else {
+            throw NSError(domain: "CrossNetworkWebRTCManager", code: 14, userInfo: [NSLocalizedDescriptionKey: "missing current-path signing key"])
+        }
+        let signature = try privateKey.signature(for: challenge.signaturePayload())
+        return try await signalServer.completeAdmission(challenge: challenge, binding: binding, signature: signature)
+    }
     
     public func connect(fromScannedString string: String) async {
         do {
@@ -906,13 +1152,15 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         do {
             let code = try normalizeConnectionCode(rawCode)
             let localBinding = try currentPathLocalBinding()
-            let lookup = try await signalServer.lookupConnectionCode(code: code, binding: localBinding)
+            let admission = try await requestAdmissionLease(for: localBinding)
+            let lookup = try await signalServer.lookupConnectionCode(admissionToken: admission.token, code: code)
             _ = try validateCurrentPathOrigin(lookup.signalingServerOrigin)
             try enforceCurrentPathTrustBinding(
                 deviceId: lookup.initiatorDeviceId,
                 protocolPublicKeyFingerprint: lookup.initiatorProtocolPublicKeyFingerprint
             )
-            webrtcSignalingAuthTokenBySessionId[lookup.sessionID] = lookup.responderToken
+            webrtcSignalingAuthTokenBySessionId[lookup.sessionID] = lookup.sessionToken
+            webrtcTurnAdmissionTokenBySessionId[lookup.sessionID] = lookup.turnAdmissionToken
             currentPathSignalingOriginBySessionId[lookup.sessionID] = lookup.signalingServerOrigin
             currentPathExpectedRemoteAuthorityBySessionId[lookup.sessionID] = CurrentPathRemoteAuthorityCompat(
                 deviceId: lookup.initiatorDeviceId,
@@ -951,17 +1199,19 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         }
         do {
             let localBinding = try currentPathLocalBinding()
+            let admission = try await requestAdmissionLease(for: localBinding)
             #if canImport(UIKit)
             let localDeviceName = UIDevice.current.name
             #else
             let localDeviceName = Host.current().localizedName ?? "Apple Device"
             #endif
             let lease = try await signalServer.registerConnectionCode(
-                binding: localBinding,
+                admissionToken: admission.token,
                 deviceName: localDeviceName,
                 validDuration: 600
             )
-            webrtcSignalingAuthTokenBySessionId[lease.sessionID] = lease.initiatorToken
+            webrtcSignalingAuthTokenBySessionId[lease.sessionID] = lease.sessionToken
+            webrtcTurnAdmissionTokenBySessionId[lease.sessionID] = lease.turnAdmissionToken
             currentPathSignalingOriginBySessionId[lease.sessionID] = lease.signalingServerOrigin
             localConnectionCode = lease.code
             localConnectionSessionId = lease.sessionID
@@ -1008,14 +1258,19 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     public func generateConnectLink(validDuration: TimeInterval = 300) async -> String? {
         do {
             let localBinding = try currentPathLocalBinding()
+            let admission = try await requestAdmissionLease(for: localBinding)
             #if canImport(UIKit)
             let localDeviceName = UIDevice.current.name
             #else
             let localDeviceName = Host.current().localizedName ?? "Apple Device"
             #endif
-            let lease = try await signalServer.registerSession(binding: localBinding, validDuration: validDuration)
+            let lease = try await signalServer.registerSession(
+                admissionToken: admission.token,
+                validDuration: validDuration
+            )
             _ = try validateCurrentPathOrigin(lease.signalingServerOrigin)
-            webrtcSignalingAuthTokenBySessionId[lease.sessionID] = lease.initiatorSignalingToken
+            webrtcSignalingAuthTokenBySessionId[lease.sessionID] = lease.sessionToken
+            webrtcTurnAdmissionTokenBySessionId[lease.sessionID] = lease.turnAdmissionToken
             currentPathSignalingOriginBySessionId[lease.sessionID] = lease.signalingServerOrigin
 
             let signatureKeyTag = "CrossNetwork.CurrentPath.Authority.Ed25519"
@@ -1123,6 +1378,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         latestLocalAnswerBySessionId.removeAll()
         localICECandidatesBySessionId.removeAll()
         webrtcSignalingAuthTokenBySessionId.removeAll()
+        webrtcTurnAdmissionTokenBySessionId.removeAll()
         currentPathExpectedRemoteAuthorityBySessionId.removeAll()
         currentPathSignalingOriginBySessionId.removeAll()
         handshakeStartedSessionIds.removeAll()
@@ -1159,7 +1415,23 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         }
         var queryItems = components.queryItems ?? []
         queryItems.removeAll { $0.name == "shard" }
+        queryItems.removeAll { $0.name == "st" }
+        queryItems.removeAll { $0.name == "cv" }
+        queryItems.removeAll { $0.name == "pv" }
         queryItems.append(URLQueryItem(name: "shard", value: shardKey))
+        if let token = webrtcSignalingAuthTokenBySessionId[shardKey]?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !token.isEmpty {
+            queryItems.append(URLQueryItem(name: "st", value: token))
+        }
+        if let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String {
+            let trimmed = version.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                queryItems.append(URLQueryItem(name: "cv", value: trimmed))
+            }
+        }
+        let protocolVersion = ProcessInfo.processInfo.environment["SKYBRIDGE_PROTOCOL_VERSION"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "1"
+        queryItems.append(URLQueryItem(name: "pv", value: protocolVersion.isEmpty ? "1" : protocolVersion))
         components.queryItems = queryItems
         return components.url ?? wsURL
     }
@@ -1657,10 +1929,11 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             throw ConnectLinkError.invalidSignature
         }
         let localBinding = try currentPathLocalBinding()
+        let admission = try await requestAdmissionLease(for: localBinding)
         let redeemed = try await signalServer.redeemSession(
+            admissionToken: admission.token,
             sessionId: qr.sessionID,
-            qrBootstrapToken: qr.qrBootstrapToken,
-            binding: localBinding
+            qrBootstrapToken: qr.qrBootstrapToken
         )
         _ = try validateCurrentPathOrigin(redeemed.signalingServerOrigin)
         guard redeemed.initiatorDeviceId == qr.deviceID,
@@ -1672,7 +1945,8 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             deviceId: qr.deviceID,
             protocolPublicKeyFingerprint: qr.protocolPublicKeyFingerprint
         )
-        webrtcSignalingAuthTokenBySessionId[qr.sessionID] = redeemed.responderSignalingToken
+        webrtcSignalingAuthTokenBySessionId[qr.sessionID] = redeemed.sessionToken
+        webrtcTurnAdmissionTokenBySessionId[qr.sessionID] = redeemed.turnAdmissionToken
         currentPathSignalingOriginBySessionId[qr.sessionID] = redeemed.signalingServerOrigin
         currentPathExpectedRemoteAuthorityBySessionId[qr.sessionID] = CurrentPathRemoteAuthorityCompat(
             deviceId: qr.deviceID,
@@ -1901,7 +2175,9 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
 
         // SECURITY: Never hardcode TURN credentials in the client app.
         // Use short-lived TURN REST credentials fetched from backend (with safe fallback).
-        let ice = await CrossNetworkServerConfig.dynamicICEConfig()
+        let ice = await CrossNetworkServerConfig.dynamicICEConfig(
+            turnAdmissionToken: webrtcTurnAdmissionTokenBySessionId[sessionId]
+        )
         
         let s = WebRTCSession(sessionId: sessionId, localDeviceId: localId, role: role, ice: ice)
         self.session = s

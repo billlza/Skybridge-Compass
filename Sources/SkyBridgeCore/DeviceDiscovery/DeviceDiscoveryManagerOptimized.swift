@@ -1235,7 +1235,8 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                 defer { interface = interface?.pointee.ifa_next }
 
                 guard let ifa = interface?.pointee,
-                      String(decoding: Data(bytes: ifa.ifa_name, count: Int(strlen(ifa.ifa_name))), as: UTF8.self) == interfaceName,
+                      let name = decodeOptionalCString(ifa.ifa_name),
+                      name == interfaceName,
                       let addr = ifa.ifa_addr else {
                     continue
                 }

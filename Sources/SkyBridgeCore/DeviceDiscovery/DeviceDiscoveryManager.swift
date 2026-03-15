@@ -1286,8 +1286,13 @@ public class DeviceDiscoveryManager: BaseManager {
         }
         defer { freeaddrinfo(result) }
 
+        guard let resolved = result,
+              let addressPtr = resolved.pointee.ai_addr else {
+            return nil
+        }
+
         var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-        if getnameinfo(result?.pointee.ai_addr, socklen_t(result?.pointee.ai_addrlen ?? 0),
+        if getnameinfo(addressPtr, socklen_t(resolved.pointee.ai_addrlen),
                        &hostname, socklen_t(hostname.count),
                        nil, 0, NI_NAMEREQD) == 0 {
             let bytes = Data(bytes: hostname, count: hostname.count)
@@ -1347,15 +1352,16 @@ public class DeviceDiscoveryManager: BaseManager {
         while ptr != nil {
             defer { ptr = ptr?.pointee.ifa_next }
 
-            guard let interface = ptr?.pointee else { continue }
-            let name = String(decoding: Data(bytes: interface.ifa_name, count: Int(strlen(interface.ifa_name))), as: UTF8.self)
+            guard let interface = ptr?.pointee,
+                  let name = decodeOptionalCString(interface.ifa_name),
+                  let addressPtr = interface.ifa_addr else { continue }
 
             if name == interfaceName || name.hasPrefix("en") || name.hasPrefix("awdl") {
-                let addr = interface.ifa_addr.pointee
+                let addr = addressPtr.pointee
 
                 if addr.sa_family == UInt8(AF_INET) {
                     var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-                    if getnameinfo(interface.ifa_addr, socklen_t(addr.sa_len),
+                    if getnameinfo(addressPtr, socklen_t(addr.sa_len),
                                    &hostname, socklen_t(hostname.count),
                                    nil, socklen_t(0), NI_NUMERICHOST) == 0 {
                         let data = Data(bytes: hostname, count: hostname.count)
@@ -1367,7 +1373,7 @@ public class DeviceDiscoveryManager: BaseManager {
                     }
                 } else if addr.sa_family == UInt8(AF_INET6) {
                     var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-                    if getnameinfo(interface.ifa_addr, socklen_t(addr.sa_len),
+                    if getnameinfo(addressPtr, socklen_t(addr.sa_len),
                                    &hostname, socklen_t(hostname.count),
                                    nil, socklen_t(0), NI_NUMERICHOST) == 0 {
                         let data = Data(bytes: hostname, count: hostname.count)
@@ -1472,13 +1478,14 @@ nonisolated private static func DDM_ExtractBonjourDeviceInfo(_ result: NWBrowser
     var ptr = ifaddr
     while ptr != nil {
         defer { ptr = ptr?.pointee.ifa_next }
-        guard let interface = ptr?.pointee else { continue }
-        let name = String(decoding: Data(bytes: interface.ifa_name, count: Int(strlen(interface.ifa_name))), as: UTF8.self)
+        guard let interface = ptr?.pointee,
+              let name = decodeOptionalCString(interface.ifa_name),
+              let addressPtr = interface.ifa_addr else { continue }
         if name == interfaceName || name.hasPrefix("en") || name.hasPrefix("awdl") {
-            let addr = interface.ifa_addr.pointee
+            let addr = addressPtr.pointee
             if addr.sa_family == UInt8(AF_INET) {
                 var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-                if getnameinfo(interface.ifa_addr, socklen_t(addr.sa_len), &hostname, socklen_t(hostname.count), nil, socklen_t(0), NI_NUMERICHOST) == 0 {
+                if getnameinfo(addressPtr, socklen_t(addr.sa_len), &hostname, socklen_t(hostname.count), nil, socklen_t(0), NI_NUMERICHOST) == 0 {
                     let data = Data(bytes: hostname, count: hostname.count)
                     let trimmed = data.prefix { $0 != 0 }
                     let address = String(decoding: trimmed, as: UTF8.self)
@@ -1486,7 +1493,7 @@ nonisolated private static func DDM_ExtractBonjourDeviceInfo(_ result: NWBrowser
                 }
             } else if addr.sa_family == UInt8(AF_INET6) {
                 var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-                if getnameinfo(interface.ifa_addr, socklen_t(addr.sa_len), &hostname, socklen_t(hostname.count), nil, socklen_t(0), NI_NUMERICHOST) == 0 {
+                if getnameinfo(addressPtr, socklen_t(addr.sa_len), &hostname, socklen_t(hostname.count), nil, socklen_t(0), NI_NUMERICHOST) == 0 {
                     let data = Data(bytes: hostname, count: hostname.count)
                     let trimmed = data.prefix { $0 != 0 }
                     let address = String(decoding: trimmed, as: UTF8.self)

@@ -350,7 +350,20 @@ public actor KeychainManager {
 // MARK: - 通用API密钥与服务配置
 @available(macOS 14.0, *)
 extension KeychainManager {
-    public struct SupabaseConfig: Codable { public let url: String; public let anonKey: String; public let serviceRoleKey: String? }
+    public struct SupabaseConfig: Codable {
+        public let url: String
+        public let anonKey: String
+
+        public init(url: String, anonKey: String) {
+            self.url = url
+            self.anonKey = anonKey
+        }
+
+        @available(*, deprecated, message: "Client-side Supabase configuration no longer exposes service role keys.")
+        public var serviceRoleKey: String? {
+            nil
+        }
+    }
     public struct NebulaConfig: Codable {
         public let baseURL: String
         public let clientId: String
@@ -400,20 +413,46 @@ extension KeychainManager {
         SecItemDelete(del as CFDictionary)
     }
 
-    public nonisolated func storeSupabaseConfig(url: String, anonKey: String, serviceRoleKey: String?) throws {
+    public nonisolated func storeSupabaseConfig(url: String, anonKey: String) throws {
         let base = "SkyBridge.Supabase"
-        let ok1 = storeKeyData(Data(url.utf8), service: base, account: "URL")
-        let ok2 = storeKeyData(Data(anonKey.utf8), service: base, account: "AnonKey")
-        let ok3 = serviceRoleKey.map { storeKeyData(Data($0.utf8), service: base, account: "ServiceRoleKey") } ?? true
-        if !ok1 || !ok2 || !ok3 { throw NSError(domain: "Keychain", code: -3) }
+        let trimmedURL = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedAnonKey = anonKey.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard let parsedURL = URL(string: trimmedURL),
+              let scheme = parsedURL.scheme?.lowercased(),
+              ["https", "http"].contains(scheme),
+              parsedURL.host != nil else {
+            throw NSError(
+                domain: "Keychain",
+                code: -30,
+                userInfo: [NSLocalizedDescriptionKey: "Supabase URL 无效"]
+            )
+        }
+        guard !trimmedAnonKey.isEmpty else {
+            throw NSError(
+                domain: "Keychain",
+                code: -31,
+                userInfo: [NSLocalizedDescriptionKey: "Supabase 匿名密钥不能为空"]
+            )
+        }
+
+        let ok1 = storeKeyData(Data(trimmedURL.utf8), service: base, account: "URL")
+        let ok2 = storeKeyData(Data(trimmedAnonKey.utf8), service: base, account: "AnonKey")
+        try purgeLegacySupabaseServiceRoleKey()
+        if !ok1 || !ok2 { throw NSError(domain: "Keychain", code: -3) }
+    }
+
+    @available(*, deprecated, message: "Supabase service role keys must remain server-side.")
+    public nonisolated func storeSupabaseConfig(url: String, anonKey: String, serviceRoleKey: String?) throws {
+        try storeSupabaseConfig(url: url, anonKey: anonKey)
     }
 
     public nonisolated func retrieveSupabaseConfig() throws -> SupabaseConfig {
         let base = "SkyBridge.Supabase"
         guard let url = loadKeyData(service: base, account: "URL").flatMap({ String(data: $0, encoding: .utf8) }),
               let anon = loadKeyData(service: base, account: "AnonKey").flatMap({ String(data: $0, encoding: .utf8) }) else { throw NSError(domain: "Keychain", code: -6) }
-        let sRole = loadKeyData(service: base, account: "ServiceRoleKey").flatMap({ String(data: $0, encoding: .utf8) })
-        return SupabaseConfig(url: url, anonKey: anon, serviceRoleKey: sRole)
+        try purgeLegacySupabaseServiceRoleKey()
+        return SupabaseConfig(url: url, anonKey: anon)
     }
 
     public nonisolated func storeNebulaConfig(baseURL: String, clientId: String, clientSecret: String?) throws {
@@ -467,6 +506,13 @@ extension KeychainManager {
     }
 
     public nonisolated func deleteAPIKey(service: String, account: String) throws {
+        if Self.useInMemoryKeychain {
+            let key = service + "|" + account
+            Self.inMemoryLock.lock()
+            Self.inMemoryStore.removeValue(forKey: key)
+            Self.inMemoryLock.unlock()
+            return
+        }
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -474,6 +520,10 @@ extension KeychainManager {
         ]
         let status = SecItemDelete(query as CFDictionary)
         if status != errSecSuccess && status != errSecItemNotFound { throw NSError(domain: "Keychain", code: Int(status)) }
+    }
+
+    private nonisolated func purgeLegacySupabaseServiceRoleKey() throws {
+        try deleteAPIKey(service: "SkyBridge.Supabase", account: "ServiceRoleKey")
     }
 }
 @available(macOS 14.0, *)

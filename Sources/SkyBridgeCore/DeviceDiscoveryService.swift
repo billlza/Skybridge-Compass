@@ -1442,10 +1442,10 @@ public final class DeviceDiscoveryService: ObservableObject {
 
             let addrFamily = addr.pointee.sa_family
 
- // 只处理IPv4地址
+        // 只处理IPv4地址
             if addrFamily == UInt8(AF_INET) {
  // ⚡ Swift 6.2.1：使用新的内存安全工具进行 C 字符串解码
-                let name = Swift621MemorySafety.decodeCString(interface.ifa_name)
+                guard let name = decodeOptionalCString(interface.ifa_name) else { continue }
 
  // 检查是否为活跃的网络接口（Wi-Fi或以太网）
                 if name.hasPrefix("en") || name == "wifi0" {

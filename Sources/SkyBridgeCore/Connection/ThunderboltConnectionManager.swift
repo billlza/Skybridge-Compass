@@ -32,21 +32,27 @@ public final class ThunderboltConnectionManager: @unchecked Sendable {
                     return
                 }
 
-                defer { freeifaddrs(ifaddr) }
+                guard let first = ifaddr else {
+                    continuation.resume(returning: false)
+                    return
+                }
 
-                var current = ifaddr
-                while current != nil {
-                    let interface = current!.pointee
+                defer { freeifaddrs(first) }
+
+                var current: UnsafeMutablePointer<ifaddrs>? = first
+                while let interfacePointer = current {
+                    let interface = interfacePointer.pointee
+                    current = interface.ifa_next
+
+                    guard let namePtr = interface.ifa_name else { continue }
  // 统一使用安全的 UTF8 C 字符串解码，替代已弃用的 String(cString:)
-                    let name = decodeCString(interface.ifa_name)
+                    let name = decodeCString(namePtr)
 
  // 检查是否为Thunderbolt Bridge接口
                     if name.hasPrefix("bridge") && (interface.ifa_flags & UInt32(IFF_UP)) != 0 {
                         continuation.resume(returning: true)
                         return
                     }
-
-                    current = interface.ifa_next
                 }
 
                 continuation.resume(returning: false)

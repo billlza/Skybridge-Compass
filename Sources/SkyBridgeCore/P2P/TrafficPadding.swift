@@ -211,8 +211,7 @@ public enum TrafficPadding {
         logConfigHintOnceIfNeeded(cfg: cfg)
 
         let len = data.withUnsafeBytes { raw -> UInt32 in
-            let base = raw.baseAddress!.advanced(by: 4)
-            return base.loadUnaligned(as: UInt32.self).bigEndian
+            raw.loadUnaligned(fromByteOffset: 4, as: UInt32.self).bigEndian
         }
 
         let actualLen = Int(len)
@@ -255,4 +254,3 @@ public enum TrafficPadding {
         return Data(bytes)
     }
 }
-

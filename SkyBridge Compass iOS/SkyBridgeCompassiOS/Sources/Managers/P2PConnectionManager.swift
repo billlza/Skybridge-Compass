@@ -658,9 +658,9 @@ public class P2PConnectionManager: ObservableObject {
                     return
                 }
                 
-	                let length = lengthData.withUnsafeBytes { raw -> UInt32 in
-	                    raw.baseAddress!.loadUnaligned(as: UInt32.self).bigEndian
-	                }
+		                let length = lengthData.withUnsafeBytes { raw -> UInt32 in
+		                    raw.loadUnaligned(fromByteOffset: 0, as: UInt32.self).bigEndian
+		                }
 	                let bodyLen = Int(length)
 	                guard bodyLen <= 2_000_000 else {
                     if self?.looksLikeTLSRecordHeader(lengthData) == true {

@@ -507,18 +507,20 @@ public final class RealConnectionManager: ObservableObject {
         }
         defer { freeifaddrs(ifaddr) }
         
-        var ptr = firstAddr
-        while true {
+        var current: UnsafeMutablePointer<ifaddrs>? = firstAddr
+        while let ptr = current {
             let interface = ptr.pointee
-            let addrFamily = interface.ifa_addr.pointee.sa_family
+            current = interface.ifa_next
+            guard let addressPtr = interface.ifa_addr,
+                  let name = decodeOptionalCString(interface.ifa_name) else { continue }
+            let addrFamily = addressPtr.pointee.sa_family
             
             if addrFamily == UInt8(AF_INET) { // IPv4
-                let name = String(cString: interface.ifa_name)
                 if name.hasPrefix("en") || name.hasPrefix("bridge") { // 以太网或桥接
                     var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
                     getnameinfo(
-                        interface.ifa_addr,
-                        socklen_t(interface.ifa_addr.pointee.sa_len),
+                        addressPtr,
+                        socklen_t(addressPtr.pointee.sa_len),
                         &hostname,
                         socklen_t(hostname.count),
                         nil,
@@ -531,9 +533,6 @@ public final class RealConnectionManager: ObservableObject {
                     }
                 }
             }
-            
-            guard let next = interface.ifa_next else { break }
-            ptr = next
         }
         
         return addresses
@@ -672,4 +671,3 @@ public enum CrossNetworkError: LocalizedError {
         }
     }
 }
-

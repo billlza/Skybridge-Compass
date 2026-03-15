@@ -274,11 +274,13 @@ public final class HardwareMonitorService: ObservableObject {
         defer { freeifaddrs(ifaddr) }
 
         var ptr = ifaddr
-        while ptr != nil {
-            let addr = ptr!.pointee
+        while let current = ptr {
+            let addr = current.pointee
+            ptr = addr.ifa_next
+            guard let addressPtr = addr.ifa_addr else { continue }
 
             // 只统计物理接口
-            if addr.ifa_addr.pointee.sa_family == UInt8(AF_LINK) {
+            if addressPtr.pointee.sa_family == UInt8(AF_LINK) {
                 if let data = addr.ifa_data {
                     let networkData = data.assumingMemoryBound(to: if_data.self).pointee
                     bytesIn += UInt64(networkData.ifi_ibytes)
@@ -287,7 +289,6 @@ public final class HardwareMonitorService: ObservableObject {
                     packetsOut += UInt64(networkData.ifi_opackets)
                 }
             }
-            ptr = addr.ifa_next
         }
 
         // 计算速率

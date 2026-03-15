@@ -278,11 +278,8 @@ struct NetworkInterfaceInspector {
             while interface != nil {
                 defer { interface = interface?.pointee.ifa_next }
                 
-                guard let ifa = interface?.pointee else { continue }
-                
- // 获取接口名称
-                let nameData = Data(bytes: ifa.ifa_name, count: Int(strlen(ifa.ifa_name)))
-                let name = String(decoding: nameData, as: UTF8.self)
+                guard let ifa = interface?.pointee,
+                      let name = decodeOptionalCString(ifa.ifa_name) else { continue }
                 
  // 只获取物理网卡（排除虚拟网卡、lo、utun 等）
                 guard isPhysicalInterface(name) else { continue }
@@ -350,11 +347,8 @@ struct NetworkInterfaceInspector {
             defer { interface = interface?.pointee.ifa_next }
             
             guard let ifa = interface?.pointee,
+                  let name = decodeOptionalCString(ifa.ifa_name),
                   let addr = ifa.ifa_addr else { continue }
-            
- // 获取接口名称
-            let nameData = Data(bytes: ifa.ifa_name, count: Int(strlen(ifa.ifa_name)))
-            let name = String(decoding: nameData, as: UTF8.self)
             
  // 只处理物理网卡
             guard isPhysicalInterface(name) else { continue }
@@ -407,4 +401,3 @@ struct NetworkInterfaceInspector {
         return result
     }
 }
-

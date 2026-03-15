@@ -177,9 +177,11 @@ public class DeviceNameResolver: ObservableObject {
                     }
                 }
                 
-                if status == 0, let addr = result {
+                if status == 0,
+                   let addr = result,
+                   let addressPtr = addr.pointee.ai_addr {
                     var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-                    let status = getnameinfo(addr.pointee.ai_addr, addr.pointee.ai_addrlen,
+                    let status = getnameinfo(addressPtr, addr.pointee.ai_addrlen,
                                            &hostname, socklen_t(hostname.count),
                                            nil, 0, NI_NAMEREQD)
                     

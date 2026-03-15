@@ -153,6 +153,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     private var signalingClient: WebSocketSignalingClient?
     private var signalingShardKey: String?
     private var webrtcSignalingAuthTokenBySessionId: [String: String] = [:]
+    private var webrtcTurnAdmissionLeaseBySessionId: [String: SignalServerClient.TurnAdmissionLease] = [:]
     private var webrtcSessionsBySessionId: [String: WebRTCSession] = [:]
     private var pendingWebRTCOfferSessionIds: Set<String> = []
     private var webrtcRemoteIdBySessionId: [String: String] = [:]
@@ -206,7 +207,28 @@ public final class CrossNetworkConnectionManager: ObservableObject {
  // MARK: - 初始化
 
     public init() {
-        self.signalServer = SignalServerClient()
+        self.signalServer = SignalServerClient(
+            bearerTokenProvider: {
+                if let token = try await AuthenticationService.shared.validAccessToken(),
+                   !token.isEmpty {
+                    return token
+                }
+                return await MainActor.run {
+                    TenantAccessController.shared.accessToken ?? ""
+                }
+            },
+            tenantIDProvider: {
+                await MainActor.run {
+                    let accessToken = AuthenticationService.shared.currentAccessToken()
+                        ?? TenantAccessController.shared.accessToken
+                    let derived = Self.deriveTenantIdentifier(accessToken: accessToken)
+                    if !derived.isEmpty {
+                        return derived
+                    }
+                    return TenantAccessController.shared.activeTenant?.id.uuidString ?? ""
+                }
+            }
+        )
         self.deviceFingerprint = Self.generateDeviceFingerprint()
 
         logger.info("跨网络连接管理器初始化完成")
@@ -605,6 +627,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         webrtcLatestAnswerBySessionId.removeValue(forKey: sessionID)
         webrtcLocalICECandidatesBySessionId.removeValue(forKey: sessionID)
         webrtcSignalingAuthTokenBySessionId.removeValue(forKey: sessionID)
+        webrtcTurnAdmissionLeaseBySessionId.removeValue(forKey: sessionID)
         webrtcRemoteIdBySessionId.removeValue(forKey: sessionID)
         currentPathExpectedRemoteAuthorityBySessionId.removeValue(forKey: sessionID)
         currentPathSignalingOriginBySessionId.removeValue(forKey: sessionID)
@@ -639,6 +662,9 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         if currentConnection?.id == sessionID {
             currentConnection = nil
             readiness = .idle
+        }
+        Task {
+            await TURNCredentialService.shared.clearCache(sessionID: sessionID)
         }
     }
 
@@ -730,6 +756,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         // 5) 清空会话密钥
         webrtcSessionKeysBySessionId.removeAll()
         webrtcSignalingAuthTokenBySessionId.removeAll()
+        webrtcTurnAdmissionLeaseBySessionId.removeAll()
         webrtcRemoteIdBySessionId.removeAll()
         currentPathExpectedRemoteAuthorityBySessionId.removeAll()
         currentPathSignalingOriginBySessionId.removeAll()
@@ -752,6 +779,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         }
         signalingClient = nil
         signalingShardKey = nil
+        await TURNCredentialService.shared.clearCache()
 
         // 7) 取消所有文件传输等待
         let waiters = webrtcFileTransferWaiters
@@ -814,6 +842,64 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         return claimedOrigin
     }
 
+    private func requestAdmissionLease(for binding: ProtocolIdentityBinding) async throws -> SignalServerClient.AdmissionLease {
+        let challenge = try await signalServer.requestAdmissionChallenge(binding: binding)
+        let signatureProvider = ProtocolSignatureProviderSelector.select(for: binding.protocolSigningAlgorithm)
+        let signingHandle = try await DeviceIdentityKeyManager.shared.getProtocolSigningKeyHandle(for: binding.protocolSigningAlgorithm)
+        let signature = try await signatureProvider.sign(challenge.signaturePayload(), key: signingHandle)
+        return try await signalServer.completeAdmission(
+            challenge: challenge,
+            binding: binding,
+            signature: signature
+        )
+    }
+
+    private static func deriveTenantIdentifier(accessToken: String?) -> String {
+        let explicit = ProcessInfo.processInfo.environment["SKYBRIDGE_TENANT_ID"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !explicit.isEmpty {
+            return explicit
+        }
+        guard let accessToken, !accessToken.isEmpty else {
+            return ""
+        }
+        guard let payload = accessToken.split(separator: ".").dropFirst().first else {
+            return ""
+        }
+        var base64 = payload.replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        let remainder = base64.count % 4
+        if remainder != 0 {
+            base64.append(String(repeating: "=", count: 4 - remainder))
+        }
+        guard let data = Data(base64Encoded: base64),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return ""
+        }
+        let appMetadata = object["app_metadata"] as? [String: Any]
+        let userMetadata = object["user_metadata"] as? [String: Any]
+        let candidates: [Any?] = [
+            appMetadata?["tenant_id"],
+            appMetadata?["tenantId"],
+            appMetadata?["org_id"],
+            appMetadata?["workspace_id"],
+            userMetadata?["tenant_id"],
+            userMetadata?["tenantId"],
+            userMetadata?["org_id"],
+            userMetadata?["workspace_id"],
+            object["tenant_id"],
+            object["tenantId"],
+            object["sub"]
+        ]
+        for candidate in candidates {
+            let value = String(describing: candidate ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if !value.isEmpty, value != "nil" {
+                return value
+            }
+        }
+        return ""
+    }
+
  // MARK: - 1️⃣ 动态二维码连接
 
  /// 生成动态加密二维码
@@ -842,12 +928,14 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 
             currentStage = "register_session"
             logQRCodeStage("generate", stage: "\(currentStage)_started")
+            let admissionLease = try await requestAdmissionLease(for: localBinding)
             let sessionLease = try await signalServer.registerSession(
-                binding: localBinding,
+                admissionToken: admissionLease.token,
                 validDuration: validDuration
             )
             let sessionID = sessionLease.sessionID
-            webrtcSignalingAuthTokenBySessionId[sessionLease.sessionID] = sessionLease.initiatorSignalingToken
+            webrtcSignalingAuthTokenBySessionId[sessionLease.sessionID] = sessionLease.sessionToken
+            webrtcTurnAdmissionLeaseBySessionId[sessionLease.sessionID] = sessionLease.turnAdmissionLease
             currentPathSignalingOriginBySessionId[sessionLease.sessionID] = sessionLease.signalingServerOrigin
             logQRCodeStage("generate", stage: "\(currentStage)_finished", sessionID: sessionID)
 
@@ -956,10 +1044,11 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             currentStage = "redeem_session"
             logQRCodeStage("scan", stage: "\(currentStage)_started", sessionID: qrData.sessionID)
             let localBinding = try await currentPathLocalBinding()
+            let admissionLease = try await requestAdmissionLease(for: localBinding)
             let redeemed = try await signalServer.redeemSession(
+                admissionToken: admissionLease.token,
                 sessionID: qrData.sessionID,
-                qrBootstrapToken: qrData.qrBootstrapToken,
-                binding: localBinding
+                qrBootstrapToken: qrData.qrBootstrapToken
             )
             _ = try validateCurrentPathOrigin(redeemed.signalingServerOrigin)
             guard redeemed.initiatorDeviceId == qrData.deviceID,
@@ -967,7 +1056,8 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                   redeemed.initiatorProtocolPublicKeyFingerprint == qrData.protocolPublicKeyFingerprint else {
                 throw CrossNetworkConnectionError.invalidSignature
             }
-            webrtcSignalingAuthTokenBySessionId[qrData.sessionID] = redeemed.responderSignalingToken
+            webrtcSignalingAuthTokenBySessionId[qrData.sessionID] = redeemed.sessionToken
+            webrtcTurnAdmissionLeaseBySessionId[qrData.sessionID] = redeemed.turnAdmissionLease
             currentPathSignalingOriginBySessionId[qrData.sessionID] = redeemed.signalingServerOrigin
             currentPathExpectedRemoteAuthorityBySessionId[qrData.sessionID] = CurrentPathRemoteAuthority(
                 deviceId: qrData.deviceID,
@@ -1064,13 +1154,15 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         readiness = .idle
 
         let localBinding = try await currentPathLocalBinding()
+        let admissionLease = try await requestAdmissionLease(for: localBinding)
         let lease = try await signalServer.registerConnectionCode(
-            binding: localBinding,
+            admissionToken: admissionLease.token,
             deviceName: Host.current().localizedName ?? "Mac",
             validDuration: 600
         )
         let code = lease.code
-        webrtcSignalingAuthTokenBySessionId[lease.sessionID] = lease.initiatorToken
+        webrtcSignalingAuthTokenBySessionId[lease.sessionID] = lease.sessionToken
+        webrtcTurnAdmissionLeaseBySessionId[lease.sessionID] = lease.turnAdmissionLease
         currentPathSignalingOriginBySessionId[lease.sessionID] = lease.signalingServerOrigin
 
         // 2) 当前主路径由服务端发放短期 code + initiator token，code 同时作为 WebRTC sessionId。
@@ -1110,9 +1202,14 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         readiness = .idle
 
         let localBinding = try await currentPathLocalBinding()
-        let lookup = try await signalServer.lookupConnectionCode(code: normalized, binding: localBinding)
+        let admissionLease = try await requestAdmissionLease(for: localBinding)
+        let lookup = try await signalServer.lookupConnectionCode(
+            admissionToken: admissionLease.token,
+            code: normalized
+        )
         _ = try validateCurrentPathOrigin(lookup.signalingServerOrigin)
-        webrtcSignalingAuthTokenBySessionId[lookup.sessionID] = lookup.responderToken
+        webrtcSignalingAuthTokenBySessionId[lookup.sessionID] = lookup.sessionToken
+        webrtcTurnAdmissionLeaseBySessionId[lookup.sessionID] = lookup.turnAdmissionLease
         currentPathSignalingOriginBySessionId[lookup.sessionID] = lookup.signalingServerOrigin
         currentPathExpectedRemoteAuthorityBySessionId[lookup.sessionID] = CurrentPathRemoteAuthority(
             deviceId: lookup.initiatorDeviceId,
@@ -1125,7 +1222,10 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         ensureSignalingConnected(shardKey: sessionID)
 
         // 动态获取 TURN 凭据（带缓存和回退）
-        let ice = await SkyBridgeServerConfig.dynamicICEConfig()
+        let ice = await SkyBridgeServerConfig.dynamicICEConfig(
+            sessionID: sessionID,
+            turnAdmissionLease: webrtcTurnAdmissionLeaseBySessionId[sessionID]
+        )
         logICEPlan(ice, context: "连接码模式")
 
         let localDeviceId = localBinding.deviceId
@@ -1227,12 +1327,28 @@ public final class CrossNetworkConnectionManager: ObservableObject {
               !shardKey.isEmpty else {
             return baseURL
         }
+        guard let sessionToken = webrtcSignalingAuthTokenBySessionId[shardKey]?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !sessionToken.isEmpty else {
+            return nil
+        }
         guard var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false) else {
             return baseURL
         }
         var queryItems = components.queryItems ?? []
         queryItems.removeAll { $0.name == "shard" }
+        queryItems.removeAll { $0.name == "st" }
+        queryItems.removeAll { $0.name == "cv" }
+        queryItems.removeAll { $0.name == "pv" }
         queryItems.append(URLQueryItem(name: "shard", value: shardKey.uppercased()))
+        queryItems.append(URLQueryItem(name: "st", value: sessionToken))
+        queryItems.append(URLQueryItem(
+            name: "cv",
+            value: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
+        ))
+        queryItems.append(URLQueryItem(
+            name: "pv",
+            value: ProcessInfo.processInfo.environment["SKYBRIDGE_PROTOCOL_VERSION"] ?? "1"
+        ))
         components.queryItems = queryItems
         return components.url ?? baseURL
     }
@@ -1307,8 +1423,17 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         let localDeviceId = localBinding.deviceId
 
         // 动态获取 TURN 凭据（带缓存和回退）
-        let ice = await SkyBridgeServerConfig.dynamicICEConfig()
+        let ice = await SkyBridgeServerConfig.dynamicICEConfig(
+            sessionID: sessionID,
+            turnAdmissionLease: webrtcTurnAdmissionLeaseBySessionId[sessionID]
+        )
         logICEPlan(ice, context: "连接码发起方")
+        if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
+            let relayOnly = ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_FORCE_RELAY_ICE"] == "1"
+            appendSmokeStatus(
+                "webrtc-config session=\(sessionID) role=offerer relayOnly=\(relayOnly) turn=\(ice.hasUsableTURNCredentials) turnUrls=\(ice.turnURLs.count)"
+            )
+        }
 
         let session = WebRTCSession(sessionId: sessionID, localDeviceId: localDeviceId, role: .offerer, ice: ice)
         session.onLocalOffer = { [weak self] sdp in
@@ -1376,8 +1501,17 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         }
 
         // 动态获取 TURN 凭据（带缓存和回退）
-        let ice = await SkyBridgeServerConfig.dynamicICEConfig()
+        let ice = await SkyBridgeServerConfig.dynamicICEConfig(
+            sessionID: sessionID,
+            turnAdmissionLease: webrtcTurnAdmissionLeaseBySessionId[sessionID]
+        )
         logICEPlan(ice, context: "二维码应答方")
+        if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
+            let relayOnly = ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_FORCE_RELAY_ICE"] == "1"
+            appendSmokeStatus(
+                "webrtc-config session=\(sessionID) role=answerer relayOnly=\(relayOnly) turn=\(ice.hasUsableTURNCredentials) turnUrls=\(ice.turnURLs.count)"
+            )
+        }
 
         let localBinding = try await currentPathLocalBinding()
         let localDeviceId = localBinding.deviceId
@@ -1437,20 +1571,13 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     }
 
     private func authenticatedEnvelope(_ env: WebRTCSignalingEnvelope) -> WebRTCSignalingEnvelope? {
-        if env.authToken?.isEmpty == false {
-            return env
-        }
-        guard let token = webrtcSignalingAuthTokenBySessionId[env.sessionId], !token.isEmpty else {
-            logger.error("❌ 缺少 signaling auth token: session=\(env.sessionId, privacy: .public)")
-            return nil
-        }
-        return WebRTCSignalingEnvelope(
+        WebRTCSignalingEnvelope(
             sessionId: env.sessionId,
             from: env.from,
             to: env.to,
             type: env.type,
             payload: env.payload,
-            authToken: token,
+            authToken: nil,
             sentAt: env.sentAt
         )
     }
@@ -4078,18 +4205,20 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         }
         defer { freeifaddrs(ifaddr) }
 
-        var ptr = firstAddr
-        while true {
+        var current: UnsafeMutablePointer<ifaddrs>? = firstAddr
+        while let ptr = current {
             let interface = ptr.pointee
-            let addrFamily = interface.ifa_addr.pointee.sa_family
+            current = interface.ifa_next
+            guard let addressPtr = interface.ifa_addr,
+                  let name = decodeOptionalCString(interface.ifa_name) else { continue }
+            let addrFamily = addressPtr.pointee.sa_family
 
             if addrFamily == UInt8(AF_INET) {
-                let name = String(cString: interface.ifa_name)
                 if name.hasPrefix("en") || name.hasPrefix("bridge") {
                     var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
                     getnameinfo(
-                        interface.ifa_addr,
-                        socklen_t(interface.ifa_addr.pointee.sa_len),
+                        addressPtr,
+                        socklen_t(addressPtr.pointee.sa_len),
                         &hostname,
                         socklen_t(hostname.count),
                         nil,
@@ -4102,9 +4231,6 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     }
                 }
             }
-
-            guard let next = interface.ifa_next else { break }
-            ptr = next
         }
 
         return addresses

@@ -274,7 +274,7 @@ final class RemoteDesktopInteractionTelemetrySampler {
         let rawValue else {
             return nil
         }
-        return (rawValue as! AXUIElement)
+        return axUIElement(from: rawValue)
     }
 
     private func focusRect(for element: AXUIElement) -> CGRect? {
@@ -300,11 +300,10 @@ final class RemoteDesktopInteractionTelemetrySampler {
                 &rawResult
             ) == .success,
             let rawResult,
-            CFGetTypeID(rawResult) == AXValueGetTypeID() else {
+            let rectValue = axValue(from: rawResult),
+            AXValueGetType(rectValue) == .cgRect else {
                 return nil
             }
-            let rectValue = rawResult as! AXValue
-            guard AXValueGetType(rectValue) == .cgRect else { return nil }
 
             var rect = CGRect.zero
             guard AXValueGetValue(rectValue, .cgRect, &rect) else { return nil }
@@ -316,12 +315,12 @@ final class RemoteDesktopInteractionTelemetrySampler {
         if let rawRanges = attributeValue(
             element,
             attribute: kAXSelectedTextRangesAttribute as CFString
-        ) as? [Any] {
-            let values = rawRanges.reduce(into: [AXValue]()) { result, item in
-                guard CFGetTypeID(item as CFTypeRef) == AXValueGetTypeID() else {
-                    return
+        ) as? [AnyObject] {
+            let values = rawRanges.compactMap { item -> AXValue? in
+                guard CFGetTypeID(item) == AXValueGetTypeID() else {
+                    return nil
                 }
-                result.append(item as! AXValue)
+                return unsafeDowncast(item, to: AXValue.self)
             }
             if !values.isEmpty {
                 return values
@@ -332,8 +331,7 @@ final class RemoteDesktopInteractionTelemetrySampler {
             element,
             attribute: kAXSelectedTextRangeAttribute as CFString
         ),
-        CFGetTypeID(rawRangeRef) == AXValueGetTypeID() {
-            let rawRange = rawRangeRef as! AXValue
+        let rawRange = axValue(from: rawRangeRef) {
             return [rawRange]
         }
 
@@ -349,27 +347,39 @@ final class RemoteDesktopInteractionTelemetrySampler {
     }
 
     private func attributeCGPoint(_ element: AXUIElement, attribute: CFString) -> CGPoint? {
-        guard let rawValue = attributeValue(element, attribute: attribute) else {
+        guard let rawValue = attributeValue(element, attribute: attribute),
+              let axValue = axValue(from: rawValue),
+              AXValueGetType(axValue) == .cgPoint else {
             return nil
         }
-        guard CFGetTypeID(rawValue) == AXValueGetTypeID() else { return nil }
-        let axValue = rawValue as! AXValue
-        guard AXValueGetType(axValue) == .cgPoint else { return nil }
         var point = CGPoint.zero
         guard AXValueGetValue(axValue, .cgPoint, &point) else { return nil }
         return point
     }
 
     private func attributeCGSize(_ element: AXUIElement, attribute: CFString) -> CGSize? {
-        guard let rawValue = attributeValue(element, attribute: attribute) else {
+        guard let rawValue = attributeValue(element, attribute: attribute),
+              let axValue = axValue(from: rawValue),
+              AXValueGetType(axValue) == .cgSize else {
             return nil
         }
-        guard CFGetTypeID(rawValue) == AXValueGetTypeID() else { return nil }
-        let axValue = rawValue as! AXValue
-        guard AXValueGetType(axValue) == .cgSize else { return nil }
         var size = CGSize.zero
         guard AXValueGetValue(axValue, .cgSize, &size) else { return nil }
         return size
+    }
+
+    private func axUIElement(from rawValue: CFTypeRef) -> AXUIElement? {
+        guard CFGetTypeID(rawValue) == AXUIElementGetTypeID() else {
+            return nil
+        }
+        return unsafeDowncast(rawValue, to: AXUIElement.self)
+    }
+
+    private func axValue(from rawValue: CFTypeRef) -> AXValue? {
+        guard CFGetTypeID(rawValue) == AXValueGetTypeID() else {
+            return nil
+        }
+        return unsafeDowncast(rawValue, to: AXValue.self)
     }
 
     private func normalizedSelectionRects(_ rects: [CGRect]) -> [CGRect] {

@@ -347,7 +347,8 @@ final class DashboardViewModel: ObservableObject {
             let (crossStatus, crossReadiness, crossConnection) = crossTuple
             let crossConnected = Self.isCrossNetworkConnected(
                 status: crossStatus,
-                readiness: crossReadiness
+                readiness: crossReadiness,
+                currentConnection: crossConnection
             )
             let crossSuite = Self.crossNetworkNegotiatedSuite(from: crossReadiness)
 
@@ -894,7 +895,8 @@ final class DashboardViewModel: ObservableObject {
             let hasUnifiedConnectedPeer = self.onlineDevices.contains { !$0.isLocalDevice && $0.connectionStatus == .connected }
             let hasCrossNetworkSession = Self.isCrossNetworkConnected(
                 status: self.crossNetworkManager.connectionStatus,
-                readiness: self.crossNetworkManager.readiness
+                readiness: self.crossNetworkManager.readiness,
+                currentConnection: self.crossNetworkManager.currentConnection
             )
             let crossNetworkPeerContribution = (hasCrossNetworkSession && !hasUnifiedConnectedPeer) ? 1 : 0
 
@@ -936,35 +938,67 @@ final class DashboardViewModel: ObservableObject {
 
  // 获取本机IPv4地址（优先en0）
     private func currentIPv4Address() -> String? {
-        var addr: String?
-        var ifaddr: UnsafeMutablePointer<ifaddrs>? = nil
-        if getifaddrs(&ifaddr) == 0 {
-            var p = ifaddr
-            while p != nil {
-                let name = String(cString: p!.pointee.ifa_name)
-                if let sa = p!.pointee.ifa_addr, sa.pointee.sa_family == UInt8(AF_INET) {
-                    var hostBuf = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-                    getnameinfo(sa, socklen_t(sa.pointee.sa_len), &hostBuf, socklen_t(hostBuf.count), nil, 0, NI_NUMERICHOST)
-                    let ip = hostBuf.withUnsafeBufferPointer { ptr -> String in
-                        if let base = ptr.baseAddress, let s = String(validatingCString: base) { return s }
-                        return ""
-                    }
-                    if name == "en0" { addr = ip; break }
-                    if addr == nil { addr = ip }
-                }
-                p = p!.pointee.ifa_next
-            }
-            freeifaddrs(ifaddr)
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddr) == 0, let first = ifaddr else {
+            return nil
         }
-        return addr
+        defer { freeifaddrs(first) }
+
+        var discoveredAddress: String?
+        var current: UnsafeMutablePointer<ifaddrs>? = first
+
+        while let interfacePointer = current {
+            let interface = interfacePointer.pointee
+            defer { current = interface.ifa_next }
+
+            guard let namePtr = interface.ifa_name,
+                  let sa = interface.ifa_addr,
+                  sa.pointee.sa_family == UInt8(AF_INET) else {
+                continue
+            }
+
+            var hostBuf = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            guard getnameinfo(
+                sa,
+                socklen_t(sa.pointee.sa_len),
+                &hostBuf,
+                socklen_t(hostBuf.count),
+                nil,
+                0,
+                NI_NUMERICHOST
+            ) == 0 else {
+                continue
+            }
+
+            let ip = hostBuf.withUnsafeBufferPointer { ptr -> String in
+                guard let base = ptr.baseAddress,
+                      let value = String(validatingCString: base) else {
+                    return ""
+                }
+                return value
+            }
+            guard !ip.isEmpty else { continue }
+
+            let name = decodeCString(namePtr)
+            if name == "en0" {
+                return ip
+            }
+            if discoveredAddress == nil {
+                discoveredAddress = ip
+            }
+        }
+
+        return discoveredAddress
     }
 
     private static func isCrossNetworkConnected(
         status: CrossNetworkConnectionManager.CrossNetworkConnectionStatus,
-        readiness: CrossNetworkConnectionManager.CrossNetworkReadiness
+        readiness: CrossNetworkConnectionManager.CrossNetworkReadiness,
+        currentConnection: RemoteConnection?
     ) -> Bool {
         if case .connected = status { return true }
         if case .handshakeComplete = readiness { return true }
+        if currentConnection != nil { return true }
         return false
     }
 

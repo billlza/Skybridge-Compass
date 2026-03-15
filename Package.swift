@@ -92,6 +92,7 @@ let package = Package(
     products: [
         .executable(name: "SkyBridgeCompassApp", targets: ["SkyBridgeCompassApp"]),
         .executable(name: "MacUIBaselineCapture", targets: ["MacUIBaselineCapture"]),
+        .executable(name: "LocalLanInteropHost", targets: ["LocalLanInteropHost"]),
         .executable(name: "LocalWebRTCSmokeHost", targets: ["LocalWebRTCSmokeHost"]),
         .executable(name: "BaselineBenchRunner", targets: ["BaselineBenchRunner"]),
         .executable(name: "HandshakeBenchRunner", targets: ["HandshakeBenchRunner"]),
@@ -154,6 +155,16 @@ let package = Package(
                 .linkedFramework("CoreVideo"),
                 .linkedFramework("VideoToolbox"),
                 .linkedFramework("CoreMedia")
+            ]
+        ),
+        .executableTarget(
+            name: "LocalLanInteropHost",
+            dependencies: [
+                "SkyBridgeCore"
+            ],
+            path: "Sources/LocalLanInteropHost",
+            swiftSettings: [
+                .enableUpcomingFeature("StrictConcurrency")
             ]
         ),
         .target(

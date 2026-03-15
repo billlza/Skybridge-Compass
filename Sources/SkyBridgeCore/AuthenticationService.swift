@@ -69,6 +69,33 @@ import Security
         sessionSubject.value?.accessToken
     }
 
+    public func validAccessToken(forceRefresh: Bool = false) async throws -> String? {
+        guard let currentSession = sessionSubject.value else {
+            return nil
+        }
+        guard let refreshToken = currentSession.refreshToken?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !refreshToken.isEmpty else {
+            return currentSession.accessToken
+        }
+
+        if !forceRefresh, !shouldRefreshAccessToken(currentSession.accessToken) {
+            return currentSession.accessToken
+        }
+
+        let refreshedSession: AuthSession
+        if isSupabaseMode || SupabaseService.shared.isSupabaseAccessToken(currentSession.accessToken) {
+            refreshedSession = try await SupabaseService.shared.refreshAccessToken(refreshToken)
+        } else {
+            let nebulaResult = try await NebulaService.shared.refreshAccessToken(refreshToken)
+            refreshedSession = try self.session(fromNebulaResult: nebulaResult)
+        }
+
+        try store(session: refreshedSession)
+        sessionSubject.send(refreshedSession)
+        await TenantAccessController.shared.bindAuthentication(session: refreshedSession)
+        return refreshedSession.accessToken
+    }
+
     private let sessionSubject = CurrentValueSubject<AuthSession?, Never>(nil)
     private let urlSession: URLSession
     private let keychainService = "com.skybridge.compass.authsession"
@@ -386,6 +413,29 @@ import Security
         }
 
         return nil
+    }
+
+    private func shouldRefreshAccessToken(_ token: String, skewSeconds: TimeInterval = 300) -> Bool {
+        guard let claims = decodeJWTClaims(token),
+              let exp = claims["exp"] as? TimeInterval else {
+            return false
+        }
+        let expiryDate = Date(timeIntervalSince1970: exp)
+        return expiryDate.timeIntervalSinceNow <= skewSeconds
+    }
+
+    private func decodeJWTClaims(_ token: String) -> [String: Any]? {
+        let parts = token.split(separator: ".")
+        guard parts.count >= 2 else { return nil }
+        var base64 = String(parts[1])
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        let remainder = base64.count % 4
+        if remainder != 0 {
+            base64.append(String(repeating: "=", count: 4 - remainder))
+        }
+        guard let data = Data(base64Encoded: base64) else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
     }
 }
 

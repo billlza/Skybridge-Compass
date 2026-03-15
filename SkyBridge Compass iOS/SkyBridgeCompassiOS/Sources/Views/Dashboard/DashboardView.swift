@@ -1466,19 +1466,22 @@ private enum LocalIP {
         defer { freeifaddrs(ifaddr) }
 
         for ptr in sequence(first: first, next: { $0.pointee.ifa_next }) {
-            let interface = String(cString: ptr.pointee.ifa_name)
-            let addrFamily = ptr.pointee.ifa_addr.pointee.sa_family
+            let record = ptr.pointee
+            guard let namePtr = record.ifa_name,
+                  let addressPtr = record.ifa_addr else { continue }
+            let interface = String(decoding: Data(bytes: namePtr, count: Int(strlen(namePtr))), as: UTF8.self)
+            let addrFamily = addressPtr.pointee.sa_family
             guard addrFamily == UInt8(AF_INET) else { continue }
 
             // 优先 Wi‑Fi (en0)，其次蜂窝/热点 (pdp_ip0)
             if interface == "en0" || interface.hasPrefix("pdp_ip") {
                 var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-	                getnameinfo(
-	                    ptr.pointee.ifa_addr,
-	                    socklen_t(ptr.pointee.ifa_addr.pointee.sa_len),
-	                    &hostname,
-	                    socklen_t(hostname.count),
-	                    nil,
+		                getnameinfo(
+		                    addressPtr,
+		                    socklen_t(addressPtr.pointee.sa_len),
+		                    &hostname,
+		                    socklen_t(hostname.count),
+		                    nil,
 	                    0,
 	                    NI_NUMERICHOST
 	                )

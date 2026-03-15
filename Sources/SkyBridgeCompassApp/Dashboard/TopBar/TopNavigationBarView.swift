@@ -141,6 +141,9 @@ public struct TopNavigationBarView: View {
         if case .handshakeComplete = crossNetworkManager.readiness {
             return true
         }
+        if crossNetworkManager.currentConnection != nil {
+            return true
+        }
         return unifiedDeviceManager.onlineDevices.contains { device in
             !device.isLocalDevice && device.connectionStatus == .connected
         }
@@ -170,6 +173,9 @@ public struct TopNavigationBarView: View {
         }
         if case .connected = crossNetworkManager.connectionStatus {
             return "跨网已连接"
+        }
+        if let currentConnection = crossNetworkManager.currentConnection {
+            return currentConnection.deviceName.isEmpty ? "跨网已连接" : currentConnection.deviceName
         }
         return nil
     }

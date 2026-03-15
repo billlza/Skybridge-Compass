@@ -2200,9 +2200,14 @@ public class P2PDiscoveryService: BaseManager {
         }
         defer { freeaddrinfo(result) }
 
+        guard let resolved = result,
+              let addressPtr = resolved.pointee.ai_addr else {
+            return nil
+        }
+
         var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-        if getnameinfo(result?.pointee.ai_addr,
-                       socklen_t(result?.pointee.ai_addrlen ?? 0),
+        if getnameinfo(addressPtr,
+                       socklen_t(resolved.pointee.ai_addrlen),
                        &hostname,
                        socklen_t(hostname.count),
                        nil, 0,
@@ -2278,20 +2283,19 @@ public class P2PDiscoveryService: BaseManager {
         while ptr != nil {
             defer { ptr = ptr?.pointee.ifa_next }
 
-            guard let interface = ptr?.pointee else { continue }
-            let name = String(decoding: Data(bytes: interface.ifa_name,
-                                             count: Int(strlen(interface.ifa_name))),
-                              as: UTF8.self)
+            guard let interface = ptr?.pointee,
+                  let name = decodeOptionalCString(interface.ifa_name),
+                  let addressPtr = interface.ifa_addr else { continue }
 
  // 匹配接口名（Wi-Fi / AWDL 等）
             if name == interfaceName || name.hasPrefix("en") || name.hasPrefix("awdl") {
-                let addr = interface.ifa_addr.pointee
+                let addr = addressPtr.pointee
 
                 if addr.sa_family == UInt8(AF_INET) {
  // IPv4
                     var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
                     if getnameinfo(
-                        interface.ifa_addr,
+                        addressPtr,
                         socklen_t(addr.sa_len),
                         &hostname,
                         socklen_t(hostname.count),
@@ -2358,13 +2362,14 @@ public class P2PDiscoveryService: BaseManager {
         while ptr != nil {
             defer { ptr = ptr?.pointee.ai_next }
 
-            guard let addr = ptr?.pointee else { continue }
+            guard let addr = ptr?.pointee,
+                  let addressPtr = addr.ai_addr else { continue }
 
             if addr.ai_family == AF_INET {
  // IPv4
                 var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
                 if getnameinfo(
-                    addr.ai_addr,
+                    addressPtr,
                     socklen_t(addr.ai_addrlen),
                     &hostname,
                     socklen_t(hostname.count),
@@ -2380,7 +2385,7 @@ public class P2PDiscoveryService: BaseManager {
  // IPv6
                 var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
                 if getnameinfo(
-                    addr.ai_addr,
+                    addressPtr,
                     socklen_t(addr.ai_addrlen),
                     &hostname,
                     socklen_t(hostname.count),
@@ -2688,13 +2693,14 @@ fileprivate func P2P_GetIPAddressesForInterface(_ interfaceName: String) -> (ipv
     var ptr = ifaddr
     while ptr != nil {
         defer { ptr = ptr?.pointee.ifa_next }
-        guard let interface = ptr?.pointee else { continue }
-        let name = String(decoding: Data(bytes: interface.ifa_name, count: Int(strlen(interface.ifa_name))), as: UTF8.self)
+        guard let interface = ptr?.pointee,
+              let name = decodeOptionalCString(interface.ifa_name),
+              let addressPtr = interface.ifa_addr else { continue }
         if name == interfaceName || name.hasPrefix("en") || name.hasPrefix("awdl") {
-            let addr = interface.ifa_addr.pointee
+            let addr = addressPtr.pointee
             if addr.sa_family == UInt8(AF_INET) {
                 var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-                if getnameinfo(interface.ifa_addr, socklen_t(addr.sa_len), &hostname, socklen_t(hostname.count), nil, socklen_t(0), NI_NUMERICHOST) == 0 {
+                if getnameinfo(addressPtr, socklen_t(addr.sa_len), &hostname, socklen_t(hostname.count), nil, socklen_t(0), NI_NUMERICHOST) == 0 {
                     let data = Data(bytes: hostname, count: hostname.count)
                     let trimmed = data.prefix { $0 != 0 }
                     let address = String(decoding: trimmed, as: UTF8.self)
@@ -2702,7 +2708,7 @@ fileprivate func P2P_GetIPAddressesForInterface(_ interfaceName: String) -> (ipv
                 }
             } else if addr.sa_family == UInt8(AF_INET6) {
                 var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-                if getnameinfo(interface.ifa_addr, socklen_t(addr.sa_len), &hostname, socklen_t(hostname.count), nil, socklen_t(0), NI_NUMERICHOST) == 0 {
+                if getnameinfo(addressPtr, socklen_t(addr.sa_len), &hostname, socklen_t(hostname.count), nil, socklen_t(0), NI_NUMERICHOST) == 0 {
                     let data = Data(bytes: hostname, count: hostname.count)
                     let trimmed = data.prefix { $0 != 0 }
                     let address = String(decoding: trimmed, as: UTF8.self)
@@ -2760,17 +2766,18 @@ fileprivate func P2P_ResolveHost(_ host: NWEndpoint.Host) -> (ipv4: String?, ipv
     var ptr = result
     while ptr != nil {
         defer { ptr = ptr?.pointee.ai_next }
-        guard let addr = ptr?.pointee else { continue }
+        guard let addr = ptr?.pointee,
+              let addressPtr = addr.ai_addr else { continue }
         if addr.ai_family == AF_INET {
             var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-            if getnameinfo(addr.ai_addr, socklen_t(addr.ai_addrlen), &hostname, socklen_t(hostname.count), nil, 0, NI_NUMERICHOST) == 0 {
+            if getnameinfo(addressPtr, socklen_t(addr.ai_addrlen), &hostname, socklen_t(hostname.count), nil, 0, NI_NUMERICHOST) == 0 {
                 let bytes4 = Data(bytes: hostname, count: hostname.count)
                 let trimmed4 = bytes4.prefix { $0 != 0 }
                 ipv4 = String(decoding: trimmed4, as: UTF8.self)
             }
         } else if addr.ai_family == AF_INET6 {
             var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-            if getnameinfo(addr.ai_addr, socklen_t(addr.ai_addrlen), &hostname, socklen_t(hostname.count), nil, 0, NI_NUMERICHOST) == 0 {
+            if getnameinfo(addressPtr, socklen_t(addr.ai_addrlen), &hostname, socklen_t(hostname.count), nil, 0, NI_NUMERICHOST) == 0 {
                 let bytes6 = Data(bytes: hostname, count: hostname.count)
                 let trimmed6 = bytes6.prefix { $0 != 0 }
                 ipv6 = String(decoding: trimmed6, as: UTF8.self)

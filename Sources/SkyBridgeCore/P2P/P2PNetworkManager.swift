@@ -350,19 +350,23 @@ public class P2PNetworkManager: ObservableObject, Sendable {
         var preferredIP: String?
         var fallbackIP: String?
         while let addr = cursor?.pointee {
-            if addr.ifa_addr.pointee.sa_family == sa_family_t(AF_INET) {
+            guard let addressPtr = addr.ifa_addr else {
+                cursor = addr.ifa_next
+                continue
+            }
+            if addressPtr.pointee.sa_family == sa_family_t(AF_INET) {
                 let flags = Int32(addr.ifa_flags)
                 let isLoopback = (flags & IFF_LOOPBACK) != 0
                 if !isLoopback {
                     var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-                    let result = getnameinfo(addr.ifa_addr, socklen_t(addr.ifa_addr.pointee.sa_len), &hostname, socklen_t(hostname.count), nil, 0, NI_NUMERICHOST)
+                    let result = getnameinfo(addressPtr, socklen_t(addressPtr.pointee.sa_len), &hostname, socklen_t(hostname.count), nil, 0, NI_NUMERICHOST)
                     if result == 0 {
  // 使用现代UTF8解码，先截断到首个空字符
                         let truncated = hostname.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }
                         let ip = String(decoding: truncated, as: UTF8.self)
                         if !ip.isEmpty {
  // 替换已弃用的 String(cString:)，使用统一的UTF8解码
-                            let name = decodeCString(addr.ifa_name)
+                            let name = decodeOptionalCString(addr.ifa_name) ?? ""
                             if name == "en0", preferredIP == nil {
                                 preferredIP = ip
                             } else if fallbackIP == nil {

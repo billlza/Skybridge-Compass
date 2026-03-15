@@ -16,12 +16,20 @@ public final class SupabaseService: BaseManager {
     public struct Configuration: Sendable {
         public let url: URL
         public let anonKey: String
-        public let serviceRoleKey: String?
         
-        public init(url: URL, anonKey: String, serviceRoleKey: String? = nil) {
+        public init(url: URL, anonKey: String) {
             self.url = url
             self.anonKey = anonKey
-            self.serviceRoleKey = serviceRoleKey
+        }
+
+        @available(*, deprecated, message: "Supabase service role keys must remain server-side.")
+        public init(url: URL, anonKey: String, serviceRoleKey: String? = nil) {
+            self.init(url: url, anonKey: anonKey)
+        }
+
+        @available(*, deprecated, message: "Client-side Supabase configuration no longer exposes service role keys.")
+        public var serviceRoleKey: String? {
+            nil
         }
         
  /// 从环境变量或Keychain加载配置
@@ -31,7 +39,7 @@ public final class SupabaseService: BaseManager {
             do {
                 let keychainConfig = try KeychainManager.shared.retrieveSupabaseConfig()
                 guard let url = URL(string: keychainConfig.url) else { return nil }
-                return Configuration(url: url, anonKey: keychainConfig.anonKey, serviceRoleKey: keychainConfig.serviceRoleKey)
+                return Configuration(url: url, anonKey: keychainConfig.anonKey)
             } catch {
  // 如果Keychain中没有配置，尝试从环境变量获取
                 guard let urlString = ProcessInfo.processInfo.environment["SUPABASE_URL"],
@@ -40,8 +48,7 @@ public final class SupabaseService: BaseManager {
                     return nil
                 }
                 
-                let serviceRoleKey = ProcessInfo.processInfo.environment["SUPABASE_SERVICE_ROLE_KEY"]
-                return Configuration(url: url, anonKey: anonKey, serviceRoleKey: serviceRoleKey)
+                return Configuration(url: url, anonKey: anonKey)
             }
         }
     }
@@ -1237,7 +1244,13 @@ extension SupabaseService {
         
         SkyBridgeLogger.ui.debugOnly("🔄 [SupabaseService] 开始刷新访问令牌")
         
-        let endpoint = config.url.appendingPathComponent("auth/v1/token")
+        guard var urlComponents = URLComponents(url: config.url.appendingPathComponent("auth/v1/token"), resolvingAgainstBaseURL: false) else {
+            throw SupabaseError.invalidResponse
+        }
+        urlComponents.queryItems = [URLQueryItem(name: "grant_type", value: "refresh_token")]
+        guard let endpoint = urlComponents.url else {
+            throw SupabaseError.invalidResponse
+        }
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -1245,7 +1258,6 @@ extension SupabaseService {
         request.setValue(config.anonKey, forHTTPHeaderField: "apikey")
         
         let payload = [
-            "grant_type": "refresh_token",
             "refresh_token": refreshToken
         ]
         

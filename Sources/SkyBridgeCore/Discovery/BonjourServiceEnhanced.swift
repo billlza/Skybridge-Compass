@@ -102,7 +102,7 @@ public struct BonjourTXTRecordBuilder: Sendable {
  /// 验证 TXT 记录是否包含所有必需字段
     public static func validate(_ dict: [String: String]) -> Bool {
         let requiredFields = ["deviceId", "pubKeyFP", "uniqueId"]
-        return requiredFields.allSatisfy { dict[$0] != nil && !dict[$0]!.isEmpty }
+        return requiredFields.allSatisfy { !(dict[$0] ?? "").isEmpty }
     }
 }
 

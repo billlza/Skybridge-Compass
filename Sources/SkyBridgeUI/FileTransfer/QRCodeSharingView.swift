@@ -440,18 +440,19 @@ struct QRCodeSharingView: View {
  // 遍历网络接口
         for ifptr in sequence(first: firstAddr, next: { $0.pointee.ifa_next }) {
             let interface = ifptr.pointee
+            guard let addressPtr = interface.ifa_addr,
+                  let name = decodeOptionalCString(interface.ifa_name) else { continue }
 
  // 检查接口族
-            let addrFamily = interface.ifa_addr.pointee.sa_family
+            let addrFamily = addressPtr.pointee.sa_family
             if addrFamily == UInt8(AF_INET) {
 
  // 检查接口名称（使用统一 UTF8 解码，替代已弃用的 String(cString:)）
-                let name = decodeCString(interface.ifa_name)
                 if name == "en0" || name == "en1" || name.hasPrefix("wlan") {
 
  // 获取IP地址
                     var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-                    getnameinfo(interface.ifa_addr, socklen_t(interface.ifa_addr.pointee.sa_len),
+                    getnameinfo(addressPtr, socklen_t(addressPtr.pointee.sa_len),
                                &hostname, socklen_t(hostname.count),
                                nil, socklen_t(0), NI_NUMERICHOST)
                                         let end = hostname.firstIndex(of: 0) ?? hostname.count

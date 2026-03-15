@@ -43,6 +43,12 @@
     <key>NSLocalNetworkUsageDescription</key>
     <string>SkyBridge Compass Pro 需要访问本地网络以发现和连接附近的设备，实现安全的点对点通信和文件传输功能。</string>
 
+    <!-- 摄像头/麦克风权限 -->
+    <key>NSCameraUsageDescription</key>
+    <string>SkyBridge Compass Pro 需要访问摄像头以扫描跨设备连接二维码。</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>SkyBridge Compass Pro 需要访问麦克风以支持远程音频功能。</string>
+
     <!-- 蓝牙权限配置 -->
     <key>NSBluetoothAlwaysUsageDescription</key>
     <string>SkyBridge Compass Pro 需要使用蓝牙来发现和连接附近的设备，提供无缝的设备间通信体验。</string>

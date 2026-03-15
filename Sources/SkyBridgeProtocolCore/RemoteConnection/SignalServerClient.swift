@@ -3,293 +3,231 @@ import Foundation
 import FoundationNetworking
 #endif
 
-/// HTTPS client for the SkyBridge signaling control plane.
-///
-/// Why this lives in `SkyBridgeProtocolCore`:
-/// - It only depends on Foundation networking primitives.
-/// - It is part of the cross-platform session bootstrap path, not an Apple-only transport.
-/// - It is off the media hot path, so modularizing it does not affect Apple-to-Apple throughput.
 public actor SignalServerClient {
-    public struct RegisterSessionRequestBody: Encodable, Sendable {
-        public let sessionId: String?
+    public struct AdmissionChallengeRequestBody: Encodable, Sendable {
         public let deviceId: String
         public let protocolSigningAlgorithm: ProtocolSigningAlgorithm
         public let protocolPublicKeyFingerprint: String
-        public let ttlSeconds: Int
-
-        public init(
-            sessionId: String?,
-            deviceId: String,
-            protocolSigningAlgorithm: ProtocolSigningAlgorithm,
-            protocolPublicKeyFingerprint: String,
-            ttlSeconds: Int
-        ) {
-            self.sessionId = sessionId
-            self.deviceId = deviceId
-            self.protocolSigningAlgorithm = protocolSigningAlgorithm
-            self.protocolPublicKeyFingerprint = protocolPublicKeyFingerprint
-            self.ttlSeconds = ttlSeconds
-        }
+        public let clientVersion: String
+        public let protocolVersion: String
     }
 
-    public struct RegisterSessionResponseBody: Codable, Sendable {
+    public struct AdmissionChallengeResponseBody: Decodable, Sendable {
+        public let challengeId: String
+        public let nonce: String
+        public let tenantId: String
+        public let userId: String
+        public let deviceId: String
+        public let clientIpHash: String
+        public let clientVersion: String
+        public let protocolVersion: String
+        public let state: String
+        public let issuedAt: Int64
+        public let expiresAt: Int64
+    }
+
+    public struct AdmissionRequestBody: Encodable, Sendable {
+        public let challengeId: String
+        public let signature: Data
+        public let deviceId: String
+        public let protocolSigningAlgorithm: ProtocolSigningAlgorithm
+        public let protocolPublicKeyFingerprint: String
+        public let protocolPublicKeyBytes: Data
+        public let clientVersion: String
+        public let protocolVersion: String
+    }
+
+    public struct AdmissionResponseBody: Decodable, Sendable {
+        public let admissionToken: String
+        public let state: String
+        public let issuedAt: Int64
+        public let expiresAt: Int64
+    }
+
+    public struct RegisterSessionRequestBody: Encodable, Sendable {
+        public let sessionId: String?
+        public let ttlSeconds: Int
+    }
+
+    public struct RegisterSessionResponseBody: Decodable, Sendable {
         public let sessionId: String
-        public let initiatorSignalingToken: String
+        public let sessionToken: String
         public let qrBootstrapToken: String
+        public let turnAdmissionToken: String
         public let expiresIn: Int
         public let signalingServerOrigin: String
-
-        public init(
-            sessionId: String,
-            initiatorSignalingToken: String,
-            qrBootstrapToken: String,
-            expiresIn: Int,
-            signalingServerOrigin: String
-        ) {
-            self.sessionId = sessionId
-            self.initiatorSignalingToken = initiatorSignalingToken
-            self.qrBootstrapToken = qrBootstrapToken
-            self.expiresIn = expiresIn
-            self.signalingServerOrigin = signalingServerOrigin
-        }
     }
 
     public struct RegisterCodeRequestBody: Encodable, Sendable {
-        public let deviceId: String
         public let deviceName: String
-        public let protocolSigningAlgorithm: ProtocolSigningAlgorithm
-        public let protocolPublicKeyFingerprint: String
         public let ttlSeconds: Int
-
-        public init(
-            deviceId: String,
-            deviceName: String,
-            protocolSigningAlgorithm: ProtocolSigningAlgorithm,
-            protocolPublicKeyFingerprint: String,
-            ttlSeconds: Int
-        ) {
-            self.deviceId = deviceId
-            self.deviceName = deviceName
-            self.protocolSigningAlgorithm = protocolSigningAlgorithm
-            self.protocolPublicKeyFingerprint = protocolPublicKeyFingerprint
-            self.ttlSeconds = ttlSeconds
-        }
     }
 
-    public struct RegisterCodeResponseBody: Codable, Sendable {
+    public struct RegisterCodeResponseBody: Decodable, Sendable {
         public let code: String
         public let sessionId: String
-        public let initiatorToken: String
+        public let sessionToken: String
+        public let turnAdmissionToken: String
         public let expiresIn: Int
         public let signalingServerOrigin: String
-
-        public init(
-            code: String,
-            sessionId: String,
-            initiatorToken: String,
-            expiresIn: Int,
-            signalingServerOrigin: String
-        ) {
-            self.code = code
-            self.sessionId = sessionId
-            self.initiatorToken = initiatorToken
-            self.expiresIn = expiresIn
-            self.signalingServerOrigin = signalingServerOrigin
-        }
     }
 
-    public struct LookupCodeResponseBody: Codable, Sendable {
+    public struct LookupCodeResponseBody: Decodable, Sendable {
         public let found: Bool
         public let sessionId: String
-        public let responderToken: String
+        public let sessionToken: String
+        public let turnAdmissionToken: String
         public let expiresIn: Int
         public let signalingServerOrigin: String
         public let initiatorDeviceId: String
         public let initiatorProtocolSigningAlgorithm: ProtocolSigningAlgorithm
         public let initiatorProtocolPublicKeyFingerprint: String
         public let initiatorDeviceName: String?
-
-        public init(
-            found: Bool,
-            sessionId: String,
-            responderToken: String,
-            expiresIn: Int,
-            signalingServerOrigin: String,
-            initiatorDeviceId: String,
-            initiatorProtocolSigningAlgorithm: ProtocolSigningAlgorithm,
-            initiatorProtocolPublicKeyFingerprint: String,
-            initiatorDeviceName: String? = nil
-        ) {
-            self.found = found
-            self.sessionId = sessionId
-            self.responderToken = responderToken
-            self.expiresIn = expiresIn
-            self.signalingServerOrigin = signalingServerOrigin
-            self.initiatorDeviceId = initiatorDeviceId
-            self.initiatorProtocolSigningAlgorithm = initiatorProtocolSigningAlgorithm
-            self.initiatorProtocolPublicKeyFingerprint = initiatorProtocolPublicKeyFingerprint
-            self.initiatorDeviceName = initiatorDeviceName
-        }
     }
 
     public struct RedeemSessionRequestBody: Encodable, Sendable {
         public let sessionId: String
         public let qrBootstrapToken: String
-        public let deviceId: String
-        public let protocolSigningAlgorithm: ProtocolSigningAlgorithm
-        public let protocolPublicKeyFingerprint: String
-
-        public init(
-            sessionId: String,
-            qrBootstrapToken: String,
-            deviceId: String,
-            protocolSigningAlgorithm: ProtocolSigningAlgorithm,
-            protocolPublicKeyFingerprint: String
-        ) {
-            self.sessionId = sessionId
-            self.qrBootstrapToken = qrBootstrapToken
-            self.deviceId = deviceId
-            self.protocolSigningAlgorithm = protocolSigningAlgorithm
-            self.protocolPublicKeyFingerprint = protocolPublicKeyFingerprint
-        }
     }
 
-    public struct RedeemSessionResponseBody: Codable, Sendable {
+    public struct RedeemSessionResponseBody: Decodable, Sendable {
         public let sessionId: String
-        public let responderSignalingToken: String
+        public let sessionToken: String
+        public let turnAdmissionToken: String
         public let expiresIn: Int
         public let signalingServerOrigin: String
         public let initiatorDeviceId: String
         public let initiatorProtocolSigningAlgorithm: ProtocolSigningAlgorithm
         public let initiatorProtocolPublicKeyFingerprint: String
+    }
+
+    public struct AdmissionChallenge: Sendable, Equatable {
+        public let challengeID: String
+        public let nonce: String
+        public let tenantID: String
+        public let userID: String
+        public let deviceID: String
+        public let clientIPHash: String
+        public let clientVersion: String
+        public let protocolVersion: String
+        public let state: String
+        public let issuedAt: Date
+        public let expiresAt: Date
 
         public init(
-            sessionId: String,
-            responderSignalingToken: String,
-            expiresIn: Int,
-            signalingServerOrigin: String,
-            initiatorDeviceId: String,
-            initiatorProtocolSigningAlgorithm: ProtocolSigningAlgorithm,
-            initiatorProtocolPublicKeyFingerprint: String
+            challengeID: String,
+            nonce: String,
+            tenantID: String,
+            userID: String,
+            deviceID: String,
+            clientIPHash: String,
+            clientVersion: String,
+            protocolVersion: String,
+            state: String,
+            issuedAt: Date,
+            expiresAt: Date
         ) {
-            self.sessionId = sessionId
-            self.responderSignalingToken = responderSignalingToken
+            self.challengeID = challengeID
+            self.nonce = nonce
+            self.tenantID = tenantID
+            self.userID = userID
+            self.deviceID = deviceID
+            self.clientIPHash = clientIPHash
+            self.clientVersion = clientVersion
+            self.protocolVersion = protocolVersion
+            self.state = state
+            self.issuedAt = issuedAt
+            self.expiresAt = expiresAt
+        }
+
+        public func signaturePayload() -> Data {
+            Data([
+                "SkyBridge-Admission-Challenge",
+                challengeID,
+                nonce,
+                tenantID,
+                userID,
+                deviceID,
+                clientVersion,
+                protocolVersion
+            ].joined(separator: "\n").utf8)
+        }
+    }
+
+    public struct AdmissionLease: Sendable, Equatable {
+        public let token: String
+        public let state: String
+        public let issuedAt: Date
+        public let expiresAt: Date
+
+        public init(token: String, state: String, issuedAt: Date, expiresAt: Date) {
+            self.token = token
+            self.state = state
+            self.issuedAt = issuedAt
+            self.expiresAt = expiresAt
+        }
+
+        public var expiresIn: TimeInterval {
+            max(0, expiresAt.timeIntervalSinceNow)
+        }
+    }
+
+    public struct TurnAdmissionLease: Sendable, Equatable {
+        public let token: String
+        public let expiresIn: TimeInterval
+
+        public init(token: String, expiresIn: TimeInterval) {
+            self.token = token
             self.expiresIn = expiresIn
-            self.signalingServerOrigin = signalingServerOrigin
-            self.initiatorDeviceId = initiatorDeviceId
-            self.initiatorProtocolSigningAlgorithm = initiatorProtocolSigningAlgorithm
-            self.initiatorProtocolPublicKeyFingerprint = initiatorProtocolPublicKeyFingerprint
         }
     }
 
     public struct ConnectionCodeLease: Sendable, Equatable {
         public let code: String
         public let sessionID: String
-        public let initiatorToken: String
+        public let sessionToken: String
+        public let turnAdmissionLease: TurnAdmissionLease
         public let expiresIn: TimeInterval
         public let signalingServerOrigin: String
-
-        public init(
-            code: String,
-            sessionID: String,
-            initiatorToken: String,
-            expiresIn: TimeInterval,
-            signalingServerOrigin: String
-        ) {
-            self.code = code
-            self.sessionID = sessionID
-            self.initiatorToken = initiatorToken
-            self.expiresIn = expiresIn
-            self.signalingServerOrigin = signalingServerOrigin
-        }
     }
 
     public struct ConnectionCodeLookup: Sendable, Equatable {
         public let sessionID: String
-        public let responderToken: String
+        public let sessionToken: String
+        public let turnAdmissionLease: TurnAdmissionLease
         public let expiresIn: TimeInterval
         public let signalingServerOrigin: String
         public let initiatorDeviceId: String
         public let initiatorProtocolSigningAlgorithm: ProtocolSigningAlgorithm
         public let initiatorProtocolPublicKeyFingerprint: String
         public let initiatorDeviceName: String?
-
-        public init(
-            sessionID: String,
-            responderToken: String,
-            expiresIn: TimeInterval,
-            signalingServerOrigin: String,
-            initiatorDeviceId: String,
-            initiatorProtocolSigningAlgorithm: ProtocolSigningAlgorithm,
-            initiatorProtocolPublicKeyFingerprint: String,
-            initiatorDeviceName: String? = nil
-        ) {
-            self.sessionID = sessionID
-            self.responderToken = responderToken
-            self.expiresIn = expiresIn
-            self.signalingServerOrigin = signalingServerOrigin
-            self.initiatorDeviceId = initiatorDeviceId
-            self.initiatorProtocolSigningAlgorithm = initiatorProtocolSigningAlgorithm
-            self.initiatorProtocolPublicKeyFingerprint = initiatorProtocolPublicKeyFingerprint
-            self.initiatorDeviceName = initiatorDeviceName
-        }
     }
 
     public struct SessionLease: Sendable, Equatable {
         public let sessionID: String
-        public let initiatorSignalingToken: String
+        public let sessionToken: String
         public let qrBootstrapToken: String
+        public let turnAdmissionLease: TurnAdmissionLease
         public let expiresIn: TimeInterval
         public let signalingServerOrigin: String
-
-        public init(
-            sessionID: String,
-            initiatorSignalingToken: String,
-            qrBootstrapToken: String,
-            expiresIn: TimeInterval,
-            signalingServerOrigin: String
-        ) {
-            self.sessionID = sessionID
-            self.initiatorSignalingToken = initiatorSignalingToken
-            self.qrBootstrapToken = qrBootstrapToken
-            self.expiresIn = expiresIn
-            self.signalingServerOrigin = signalingServerOrigin
-        }
-
-        public var signalingToken: String { initiatorSignalingToken }
     }
 
     public struct RedeemedSessionLease: Sendable, Equatable {
         public let sessionID: String
-        public let responderSignalingToken: String
+        public let sessionToken: String
+        public let turnAdmissionLease: TurnAdmissionLease
         public let expiresIn: TimeInterval
         public let signalingServerOrigin: String
         public let initiatorDeviceId: String
         public let initiatorProtocolSigningAlgorithm: ProtocolSigningAlgorithm
         public let initiatorProtocolPublicKeyFingerprint: String
-
-        public init(
-            sessionID: String,
-            responderSignalingToken: String,
-            expiresIn: TimeInterval,
-            signalingServerOrigin: String,
-            initiatorDeviceId: String,
-            initiatorProtocolSigningAlgorithm: ProtocolSigningAlgorithm,
-            initiatorProtocolPublicKeyFingerprint: String
-        ) {
-            self.sessionID = sessionID
-            self.responderSignalingToken = responderSignalingToken
-            self.expiresIn = expiresIn
-            self.signalingServerOrigin = signalingServerOrigin
-            self.initiatorDeviceId = initiatorDeviceId
-            self.initiatorProtocolSigningAlgorithm = initiatorProtocolSigningAlgorithm
-            self.initiatorProtocolPublicKeyFingerprint = initiatorProtocolPublicKeyFingerprint
-        }
     }
 
     public enum ClientError: LocalizedError {
         case invalidBaseURL
         case invalidResponse
+        case missingAuthentication
+        case missingTenantID
         case serverRejected(Int, String)
         case malformedResponse(String)
 
@@ -299,6 +237,10 @@ public actor SignalServerClient {
                 return "信令服务器地址无效"
             case .invalidResponse:
                 return "信令服务器返回了非 HTTP 响应"
+            case .missingAuthentication:
+                return "缺少上游登录态，无法申请 admission"
+            case .missingTenantID:
+                return "缺少租户标识，无法访问当前租户的公网能力"
             case .serverRejected(let status, let body):
                 return "信令服务器拒绝请求 (\(status)): \(body)"
             case .malformedResponse(let reason):
@@ -310,7 +252,13 @@ public actor SignalServerClient {
     private let urlSession: URLSession
     private let baseURLProvider: @Sendable () -> String
     private let apiKeyProvider: @Sendable () -> String
+    private let bearerTokenProvider: @Sendable () async throws -> String
+    private let tenantIDProvider: @Sendable () async -> String
+    private let clientVersionProvider: @Sendable () -> String
+    private let protocolVersionProvider: @Sendable () -> String
 
+    public static let admissionChallengePath = "/api/webrtc/admission/challenge"
+    public static let admissionPath = "/api/webrtc/admission"
     public static let registerCodePath = "/api/webrtc/register-code"
     public static let registerSessionPath = "/api/webrtc/register-session"
     public static let redeemSessionPath = "/api/webrtc/redeem-session"
@@ -318,81 +266,207 @@ public actor SignalServerClient {
     public init(
         urlSession: URLSession = .shared,
         baseURLProvider: @escaping @Sendable () -> String = { SkyBridgeServerConfig.signalingServerURL },
-        apiKeyProvider: @escaping @Sendable () -> String = { SkyBridgeServerConfig.clientAPIKey }
+        apiKeyProvider: @escaping @Sendable () -> String = { SkyBridgeServerConfig.clientAPIKey },
+        bearerTokenProvider: @escaping @Sendable () async throws -> String = { "" },
+        tenantIDProvider: @escaping @Sendable () async -> String = { "" },
+        clientVersionProvider: @escaping @Sendable () -> String = {
+            if let value = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String {
+                let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty { return trimmed }
+            }
+            return "0.0.0"
+        },
+        protocolVersionProvider: @escaping @Sendable () -> String = {
+            if let value = ProcessInfo.processInfo.environment["SKYBRIDGE_PROTOCOL_VERSION"]?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+               !value.isEmpty {
+                return value
+            }
+            return "1"
+        }
     ) {
         self.urlSession = urlSession
         self.baseURLProvider = baseURLProvider
         self.apiKeyProvider = apiKeyProvider
+        self.bearerTokenProvider = bearerTokenProvider
+        self.tenantIDProvider = tenantIDProvider
+        self.clientVersionProvider = clientVersionProvider
+        self.protocolVersionProvider = protocolVersionProvider
+    }
+
+    public func requestAdmissionChallenge(binding: ProtocolIdentityBinding) async throws -> AdmissionChallenge {
+        let requestBody = AdmissionChallengeRequestBody(
+            deviceId: binding.deviceId,
+            protocolSigningAlgorithm: binding.protocolSigningAlgorithm,
+            protocolPublicKeyFingerprint: binding.protocolPublicKeyFingerprint,
+            clientVersion: clientVersionProvider(),
+            protocolVersion: protocolVersionProvider()
+        )
+        let response: AdmissionChallengeResponseBody = try await performJSONRequest(
+            path: Self.admissionChallengePath,
+            method: "POST",
+            body: try JSONEncoder().encode(requestBody),
+            requiresUserAuthentication: true
+        )
+        return AdmissionChallenge(
+            challengeID: response.challengeId,
+            nonce: response.nonce,
+            tenantID: response.tenantId,
+            userID: response.userId,
+            deviceID: response.deviceId,
+            clientIPHash: response.clientIpHash,
+            clientVersion: response.clientVersion,
+            protocolVersion: response.protocolVersion,
+            state: response.state,
+            issuedAt: Date(timeIntervalSince1970: TimeInterval(response.issuedAt) / 1000),
+            expiresAt: Date(timeIntervalSince1970: TimeInterval(response.expiresAt) / 1000)
+        )
+    }
+
+    public func completeAdmission(
+        challenge: AdmissionChallenge,
+        binding: ProtocolIdentityBinding,
+        signature: Data
+    ) async throws -> AdmissionLease {
+        let requestBody = AdmissionRequestBody(
+            challengeId: challenge.challengeID,
+            signature: signature,
+            deviceId: binding.deviceId,
+            protocolSigningAlgorithm: binding.protocolSigningAlgorithm,
+            protocolPublicKeyFingerprint: binding.protocolPublicKeyFingerprint,
+            protocolPublicKeyBytes: binding.protocolPublicKeyBytes,
+            clientVersion: challenge.clientVersion,
+            protocolVersion: challenge.protocolVersion
+        )
+        let response: AdmissionResponseBody = try await performJSONRequest(
+            path: Self.admissionPath,
+            method: "POST",
+            body: try JSONEncoder().encode(requestBody),
+            requiresUserAuthentication: true
+        )
+        return AdmissionLease(
+            token: response.admissionToken,
+            state: response.state,
+            issuedAt: Date(timeIntervalSince1970: TimeInterval(response.issuedAt) / 1000),
+            expiresAt: Date(timeIntervalSince1970: TimeInterval(response.expiresAt) / 1000)
+        )
     }
 
     public func registerSession(
+        admissionToken: String,
         sessionID: String? = nil,
-        binding: ProtocolIdentityBinding,
         validDuration: TimeInterval
     ) async throws -> SessionLease {
-        let requestBody = Self.makeRegisterSessionRequestBody(
+        let requestBody = RegisterSessionRequestBody(
             sessionId: sessionID,
-            binding: binding,
             ttlSeconds: max(60, Int(validDuration.rounded()))
         )
         let response: RegisterSessionResponseBody = try await performJSONRequest(
             path: Self.registerSessionPath,
             method: "POST",
-            body: try JSONEncoder().encode(requestBody)
+            body: try JSONEncoder().encode(requestBody),
+            extraHeaders: [
+                "X-SkyBridge-Admission": admissionToken
+            ]
         )
-        return try Self.decodeRegisterSessionResponse(from: try JSONEncoder().encode(response))
+        return SessionLease(
+            sessionID: response.sessionId,
+            sessionToken: response.sessionToken,
+            qrBootstrapToken: response.qrBootstrapToken,
+            turnAdmissionLease: TurnAdmissionLease(
+                token: response.turnAdmissionToken,
+                expiresIn: min(TimeInterval(response.expiresIn), 60)
+            ),
+            expiresIn: TimeInterval(response.expiresIn),
+            signalingServerOrigin: response.signalingServerOrigin
+        )
     }
 
     public func registerConnectionCode(
-        binding: ProtocolIdentityBinding,
+        admissionToken: String,
         deviceName: String,
         validDuration: TimeInterval
     ) async throws -> ConnectionCodeLease {
-        let requestBody = Self.makeRegisterCodeRequestBody(
-            binding: binding,
+        let requestBody = RegisterCodeRequestBody(
             deviceName: deviceName,
             ttlSeconds: max(60, Int(validDuration.rounded()))
         )
         let response: RegisterCodeResponseBody = try await performJSONRequest(
             path: Self.registerCodePath,
             method: "POST",
-            body: try JSONEncoder().encode(requestBody)
-        )
-        return try Self.decodeRegisterCodeResponse(from: try JSONEncoder().encode(response))
-    }
-
-    public func lookupConnectionCode(code: String, binding: ProtocolIdentityBinding) async throws -> ConnectionCodeLookup {
-        let response: LookupCodeResponseBody = try await performJSONRequest(
-            path: Self.lookupCodePath(for: code),
-            queryItems: [
-                URLQueryItem(name: "deviceId", value: binding.deviceId),
-                URLQueryItem(name: "protocolSigningAlgorithm", value: binding.protocolSigningAlgorithm.rawValue),
-                URLQueryItem(name: "protocolPublicKeyFingerprint", value: binding.protocolPublicKeyFingerprint)
+            body: try JSONEncoder().encode(requestBody),
+            extraHeaders: [
+                "X-SkyBridge-Admission": admissionToken
             ]
         )
-        return try Self.decodeLookupCodeResponse(from: try JSONEncoder().encode(response))
+        return ConnectionCodeLease(
+            code: response.code,
+            sessionID: response.sessionId,
+            sessionToken: response.sessionToken,
+            turnAdmissionLease: TurnAdmissionLease(
+                token: response.turnAdmissionToken,
+                expiresIn: min(TimeInterval(response.expiresIn), 60)
+            ),
+            expiresIn: TimeInterval(response.expiresIn),
+            signalingServerOrigin: response.signalingServerOrigin
+        )
+    }
+
+    public func lookupConnectionCode(admissionToken: String, code: String) async throws -> ConnectionCodeLookup {
+        let response: LookupCodeResponseBody = try await performJSONRequest(
+            path: Self.lookupCodePath(for: code),
+            extraHeaders: [
+                "X-SkyBridge-Admission": admissionToken
+            ]
+        )
+        guard response.found else {
+            throw ClientError.serverRejected(404, "code_not_found")
+        }
+        return ConnectionCodeLookup(
+            sessionID: response.sessionId,
+            sessionToken: response.sessionToken,
+            turnAdmissionLease: TurnAdmissionLease(
+                token: response.turnAdmissionToken,
+                expiresIn: min(TimeInterval(response.expiresIn), 60)
+            ),
+            expiresIn: TimeInterval(response.expiresIn),
+            signalingServerOrigin: response.signalingServerOrigin,
+            initiatorDeviceId: response.initiatorDeviceId,
+            initiatorProtocolSigningAlgorithm: response.initiatorProtocolSigningAlgorithm,
+            initiatorProtocolPublicKeyFingerprint: response.initiatorProtocolPublicKeyFingerprint,
+            initiatorDeviceName: response.initiatorDeviceName
+        )
     }
 
     public func redeemSession(
+        admissionToken: String,
         sessionID: String,
         qrBootstrapToken: String,
-        binding: ProtocolIdentityBinding
+        idempotencyKey: String? = nil
     ) async throws -> RedeemedSessionLease {
         let requestBody = RedeemSessionRequestBody(
             sessionId: sessionID,
-            qrBootstrapToken: qrBootstrapToken,
-            deviceId: binding.deviceId,
-            protocolSigningAlgorithm: binding.protocolSigningAlgorithm,
-            protocolPublicKeyFingerprint: binding.protocolPublicKeyFingerprint
+            qrBootstrapToken: qrBootstrapToken
         )
+        var headers = [
+            "X-SkyBridge-Admission": admissionToken
+        ]
+        if let idempotencyKey, !idempotencyKey.isEmpty {
+            headers["Idempotency-Key"] = idempotencyKey
+        }
         let response: RedeemSessionResponseBody = try await performJSONRequest(
             path: Self.redeemSessionPath,
             method: "POST",
-            body: try JSONEncoder().encode(requestBody)
+            body: try JSONEncoder().encode(requestBody),
+            extraHeaders: headers
         )
         return RedeemedSessionLease(
             sessionID: response.sessionId,
-            responderSignalingToken: response.responderSignalingToken,
+            sessionToken: response.sessionToken,
+            turnAdmissionLease: TurnAdmissionLease(
+                token: response.turnAdmissionToken,
+                expiresIn: min(TimeInterval(response.expiresIn), 60)
+            ),
             expiresIn: TimeInterval(response.expiresIn),
             signalingServerOrigin: response.signalingServerOrigin,
             initiatorDeviceId: response.initiatorDeviceId,
@@ -406,81 +480,13 @@ public actor SignalServerClient {
         return "/api/webrtc/lookup/\(encoded)"
     }
 
-    public static func makeRegisterCodeRequestBody(
-        binding: ProtocolIdentityBinding,
-        deviceName: String,
-        ttlSeconds: Int
-    ) -> RegisterCodeRequestBody {
-        RegisterCodeRequestBody(
-            deviceId: binding.deviceId,
-            deviceName: deviceName,
-            protocolSigningAlgorithm: binding.protocolSigningAlgorithm,
-            protocolPublicKeyFingerprint: binding.protocolPublicKeyFingerprint,
-            ttlSeconds: ttlSeconds
-        )
-    }
-
-    public static func makeRegisterSessionRequestBody(
-        sessionId: String? = nil,
-        binding: ProtocolIdentityBinding,
-        ttlSeconds: Int
-    ) -> RegisterSessionRequestBody {
-        RegisterSessionRequestBody(
-            sessionId: sessionId,
-            deviceId: binding.deviceId,
-            protocolSigningAlgorithm: binding.protocolSigningAlgorithm,
-            protocolPublicKeyFingerprint: binding.protocolPublicKeyFingerprint,
-            ttlSeconds: ttlSeconds
-        )
-    }
-
-    public static func decodeRegisterCodeResponse(from data: Data) throws -> ConnectionCodeLease {
-        let response = try JSONDecoder().decode(RegisterCodeResponseBody.self, from: data)
-        return ConnectionCodeLease(
-            code: response.code,
-            sessionID: response.sessionId,
-            initiatorToken: response.initiatorToken,
-            expiresIn: TimeInterval(response.expiresIn),
-            signalingServerOrigin: response.signalingServerOrigin
-        )
-    }
-
-    public static func decodeLookupCodeResponse(from data: Data) throws -> ConnectionCodeLookup {
-        let response = try JSONDecoder().decode(LookupCodeResponseBody.self, from: data)
-        guard response.found else {
-            throw ClientError.serverRejected(404, "code_not_found")
-        }
-        guard !response.responderToken.isEmpty else {
-            throw ClientError.malformedResponse("missing responderToken")
-        }
-        return ConnectionCodeLookup(
-            sessionID: response.sessionId,
-            responderToken: response.responderToken,
-            expiresIn: TimeInterval(response.expiresIn),
-            signalingServerOrigin: response.signalingServerOrigin,
-            initiatorDeviceId: response.initiatorDeviceId,
-            initiatorProtocolSigningAlgorithm: response.initiatorProtocolSigningAlgorithm,
-            initiatorProtocolPublicKeyFingerprint: response.initiatorProtocolPublicKeyFingerprint,
-            initiatorDeviceName: response.initiatorDeviceName
-        )
-    }
-
-    public static func decodeRegisterSessionResponse(from data: Data) throws -> SessionLease {
-        let response = try JSONDecoder().decode(RegisterSessionResponseBody.self, from: data)
-        return SessionLease(
-            sessionID: response.sessionId,
-            initiatorSignalingToken: response.initiatorSignalingToken,
-            qrBootstrapToken: response.qrBootstrapToken,
-            expiresIn: TimeInterval(response.expiresIn),
-            signalingServerOrigin: response.signalingServerOrigin
-        )
-    }
-
     private func performJSONRequest<Response: Decodable>(
         path: String,
         method: String = "GET",
         queryItems: [URLQueryItem] = [],
-        body: Data? = nil
+        body: Data? = nil,
+        requiresUserAuthentication: Bool = false,
+        extraHeaders: [String: String] = [:]
     ) async throws -> Response {
         guard var components = URLComponents(string: baseURLProvider()) else {
             throw ClientError.invalidBaseURL
@@ -496,13 +502,35 @@ public actor SignalServerClient {
         var request = URLRequest(url: url)
         request.httpMethod = method
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        let apiKey = apiKeyProvider()
+
+        let apiKey = apiKeyProvider().trimmingCharacters(in: .whitespacesAndNewlines)
         if !apiKey.isEmpty {
             request.setValue(apiKey, forHTTPHeaderField: "X-API-Key")
         }
+
+        let tenantID = await tenantIDProvider().trimmingCharacters(in: .whitespacesAndNewlines)
+        if requiresUserAuthentication && tenantID.isEmpty {
+            throw ClientError.missingTenantID
+        }
+        if !tenantID.isEmpty {
+            request.setValue(tenantID, forHTTPHeaderField: "X-SkyBridge-Tenant-Id")
+        }
+
+        if requiresUserAuthentication {
+            let bearerToken = try await bearerTokenProvider().trimmingCharacters(in: .whitespacesAndNewlines)
+            if bearerToken.isEmpty {
+                throw ClientError.missingAuthentication
+            }
+            request.setValue("Bearer \(bearerToken)", forHTTPHeaderField: "Authorization")
+        }
+
         if let body {
             request.httpBody = body
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        }
+
+        for (field, value) in extraHeaders {
+            request.setValue(value, forHTTPHeaderField: field)
         }
 
         let (data, response) = try await urlSession.data(for: request)
