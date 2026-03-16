@@ -360,6 +360,7 @@ public final class SupabaseService: BaseManager {
                         accessToken: authResponse.accessToken,
                         refreshToken: authResponse.refreshToken,
                         userIdentifier: authResponse.user.id,
+                        nebulaId: authResponse.user.preferredNebulaId,
                         displayName: preferredDisplayName,
                         issuedAt: Date()
                     )
@@ -377,6 +378,7 @@ public final class SupabaseService: BaseManager {
                         accessToken: "pending_verification", // 临时令牌，表示等待验证
                         refreshToken: nil,
                         userIdentifier: signUpResponse.id,
+                        nebulaId: signUpResponse.preferredNebulaId,
                         displayName: signUpResponse.email ?? "新用户",
                         issuedAt: Date()
                     )
@@ -1027,6 +1029,7 @@ public final class SupabaseService: BaseManager {
                         accessToken: authResponse.accessToken,
                         refreshToken: authResponse.refreshToken,
                         userIdentifier: authResponse.user.id,
+                        nebulaId: authResponse.user.preferredNebulaId,
                         displayName: preferredDisplayName,
                         issuedAt: Date()
                     )
@@ -1102,6 +1105,7 @@ private struct SupabaseSignUpResponse: Codable {
     let createdAt: String
     let updatedAt: String
     let isAnonymous: Bool
+    let userMetadata: [String: AnyCodable]?
     
     enum CodingKeys: String, CodingKey {
         case id
@@ -1111,6 +1115,12 @@ private struct SupabaseSignUpResponse: Codable {
         case createdAt = "created_at"
         case updatedAt = "updated_at"
         case isAnonymous = "is_anonymous"
+        case userMetadata = "user_metadata"
+    }
+
+    fileprivate var preferredNebulaId: String? {
+        let raw = (userMetadata?["nebula_id"]?.value as? String) ?? (userMetadata?["nebulaId"]?.value as? String)
+        return NebulaIdentityContract.normalizedNebulaId(raw)
     }
 }
 
@@ -1140,6 +1150,11 @@ private struct SupabaseUser: Codable {
         // - display_name (SkyBridge primary)
         // - full_name / name (OIDC common)
         return read("display_name") ?? read("full_name") ?? read("name")
+    }
+
+    fileprivate var preferredNebulaId: String? {
+        let raw = (userMetadata?["nebula_id"]?.value as? String) ?? (userMetadata?["nebulaId"]?.value as? String)
+        return NebulaIdentityContract.normalizedNebulaId(raw)
     }
 }
 
@@ -1284,6 +1299,7 @@ extension SupabaseService {
                     accessToken: authResponse.accessToken,
                     refreshToken: authResponse.refreshToken,
                     userIdentifier: authResponse.user.id,
+                    nebulaId: authResponse.user.preferredNebulaId,
                     displayName: preferredDisplayName,
                     issuedAt: Date()
                 )

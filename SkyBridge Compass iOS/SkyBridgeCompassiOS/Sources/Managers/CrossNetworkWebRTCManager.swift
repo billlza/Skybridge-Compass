@@ -977,6 +977,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     @Published public private(set) var remoteDeviceId: String?
     @Published public private(set) var localConnectionCode: String?
     @Published public private(set) var currentConnectLink: String?
+    @Published public private(set) var activeSessionSnapshot: ActiveSessionSnapshot?
     private static let shortCodeAlphabet = Array("ABCDEFGHJKLMNPQRSTUVWXYZ23456789")
     private static let shortCodeAllowedCharacters = Set(shortCodeAlphabet)
     
@@ -1002,6 +1003,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     private var lastPairingIdentityExchangeSentAtByPeerId: [String: Date] = [:]
     private var connectionCodeBootstrapTask: Task<Void, Never>?
     private var localConnectionSessionId: String?
+    private var activeSessionReconnectTimeoutTask: Task<Void, Never>?
     private var webrtcSignalingAuthTokenBySessionId: [String: String] = [:]
     private var webrtcTurnAdmissionTokenBySessionId: [String: String] = [:]
     private var latestLocalOfferBySessionId: [String: String] = [:]
@@ -1013,6 +1015,14 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     
     // File transfer waiters (transferId|op|chunkIndex -> continuation)
     private var fileTransferWaiters: [String: CheckedContinuation<CrossNetworkFileTransferMessage, Error>] = [:]
+
+    private struct SessionSnapshotMetadata: Sendable {
+        let snapshotToken: UUID
+        let source: ActiveSessionSnapshotSource
+        let deviceId: String?
+        let deviceName: String?
+    }
+    private var sessionSnapshotMetadataBySessionId: [String: SessionSnapshotMetadata] = [:]
 
     private struct InboundFileTransferState {
         let transferId: String
@@ -1064,6 +1074,107 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     public var isHandshakeComplete: Bool {
         if case .handshakeComplete = readiness { return true }
         return false
+    }
+
+    @discardableResult
+    private func prepareSessionSnapshotMetadata(
+        sessionId: String,
+        source: ActiveSessionSnapshotSource,
+        deviceId: String?,
+        deviceName: String?
+    ) -> SessionSnapshotMetadata {
+        let metadata = SessionSnapshotMetadata(
+            snapshotToken: UUID(),
+            source: source,
+            deviceId: deviceId,
+            deviceName: deviceName
+        )
+        sessionSnapshotMetadataBySessionId[sessionId] = metadata
+        return metadata
+    }
+
+    @discardableResult
+    private func activatePreparedSessionSnapshot(
+        sessionId: String,
+        phase: ActiveSessionSnapshotPhase,
+        negotiatedSuite: String? = nil
+    ) -> UUID? {
+        guard let metadata = sessionSnapshotMetadataBySessionId[sessionId] else { return nil }
+        activeSessionReconnectTimeoutTask?.cancel()
+        activeSessionSnapshot = ActiveSessionSnapshotContract.activate(
+            sessionId: sessionId,
+            source: metadata.source,
+            phase: phase,
+            deviceId: metadata.deviceId,
+            deviceName: metadata.deviceName,
+            negotiatedSuite: negotiatedSuite,
+            snapshotToken: metadata.snapshotToken
+        )
+        return metadata.snapshotToken
+    }
+
+    private func updatePreparedSessionSnapshot(
+        sessionId: String,
+        phase: ActiveSessionSnapshotPhase,
+        deviceId: String? = nil,
+        deviceName: String? = nil,
+        negotiatedSuite: String? = nil,
+        snapshotToken: UUID? = nil
+    ) {
+        let token = snapshotToken ?? sessionSnapshotMetadataBySessionId[sessionId]?.snapshotToken
+        guard let token else { return }
+        activeSessionReconnectTimeoutTask?.cancel()
+        activeSessionSnapshot = ActiveSessionSnapshotContract.update(
+            current: activeSessionSnapshot,
+            sessionId: sessionId,
+            snapshotToken: token,
+            phase: phase,
+            deviceId: deviceId,
+            deviceName: deviceName,
+            negotiatedSuite: negotiatedSuite
+        )
+    }
+
+    private func applyActiveSessionDisconnect(
+        sessionId: String,
+        kind: SessionDisconnectKind,
+        snapshotToken: UUID? = nil
+    ) {
+        let token = snapshotToken ?? sessionSnapshotMetadataBySessionId[sessionId]?.snapshotToken
+        guard let token else { return }
+
+        let nextSnapshot = ActiveSessionSnapshotContract.disconnect(
+            current: activeSessionSnapshot,
+            sessionId: sessionId,
+            snapshotToken: token,
+            kind: kind
+        )
+        activeSessionSnapshot = nextSnapshot
+
+        switch kind {
+        case .transient:
+            if let nextSnapshot {
+                scheduleActiveSessionReconnectTimeout(for: nextSnapshot)
+            }
+        case .explicit, .remoteLeave:
+            activeSessionReconnectTimeoutTask?.cancel()
+            sessionSnapshotMetadataBySessionId.removeValue(forKey: sessionId)
+        }
+    }
+
+    private func scheduleActiveSessionReconnectTimeout(for snapshot: ActiveSessionSnapshot) {
+        activeSessionReconnectTimeoutTask?.cancel()
+        activeSessionReconnectTimeoutTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            try? await Task.sleep(for: .seconds(5))
+            guard let current = self.activeSessionSnapshot,
+                  current.snapshotToken == snapshot.snapshotToken,
+                  current.phase == .reconnecting else {
+                return
+            }
+            self.activeSessionSnapshot = nil
+            self.sessionSnapshotMetadataBySessionId.removeValue(forKey: snapshot.sessionId)
+        }
     }
 
     private func currentPathLocalBinding() throws -> ProtocolIdentityBindingCompat {
@@ -1173,6 +1284,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
                 sessionId: lookup.sessionID,
                 remoteName: lookup.initiatorDeviceName,
                 remotePeerDeviceId: lookup.initiatorDeviceId,
+                source: .code,
                 role: .answerer
             )
         } catch {
@@ -1227,7 +1339,13 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
                       self.localConnectionSessionId == lease.sessionID,
                       self.currentRole == .offerer else { return }
                 do {
-                    try await self.connect(sessionId: lease.sessionID, remoteName: nil, remotePeerDeviceId: nil, role: .offerer)
+                    try await self.connect(
+                        sessionId: lease.sessionID,
+                        remoteName: nil,
+                        remotePeerDeviceId: nil,
+                        source: .code,
+                        role: .offerer
+                    )
                     self.localConnectionCode = lease.code
                     self.localConnectionSessionId = lease.sessionID
                 } catch is CancellationError {
@@ -1330,7 +1448,13 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             connectionCodeBootstrapTask = Task { @MainActor [weak self] in
                 guard let self else { return }
                 do {
-                    try await self.connect(sessionId: lease.sessionID, remoteName: nil, remotePeerDeviceId: nil, role: .offerer)
+                    try await self.connect(
+                        sessionId: lease.sessionID,
+                        remoteName: nil,
+                        remotePeerDeviceId: nil,
+                        source: .code,
+                        role: .offerer
+                    )
                 } catch is CancellationError {
                 } catch {
                     self.lastError = error.localizedDescription
@@ -1348,7 +1472,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         }
     }
     
-    public func disconnect() async {
+    public func disconnect(clearSnapshot: Bool = true) async {
         if let signaling {
             await signaling.close()
         }
@@ -1394,6 +1518,12 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         inboundQueue = nil
         receiveTask?.cancel()
         receiveTask = nil
+        if clearSnapshot {
+            activeSessionReconnectTimeoutTask?.cancel()
+            activeSessionReconnectTimeoutTask = nil
+            activeSessionSnapshot = nil
+            sessionSnapshotMetadataBySessionId.removeAll()
+        }
         state = .idle
         readiness = .idle
     }
@@ -2122,6 +2252,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             sessionId: qr.sessionID,
             remoteName: qr.deviceName,
             remotePeerDeviceId: qr.deviceID,
+            source: .qr,
             role: .answerer
         )
     }
@@ -2130,6 +2261,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         sessionId: String,
         remoteName: String?,
         remotePeerDeviceId: String?,
+        source: ActiveSessionSnapshotSource,
         role: WebRTCSession.Role
     ) async throws {
         if signaling != nil || session != nil || currentSessionId != nil {
@@ -2144,6 +2276,13 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         remoteDeviceName = remoteName
         remoteDeviceId = remotePeerDeviceId
         currentRole = role
+        prepareSessionSnapshotMetadata(
+            sessionId: sessionId,
+            source: source,
+            deviceId: remotePeerDeviceId,
+            deviceName: remoteName
+        )
+        activatePreparedSessionSnapshot(sessionId: sessionId, phase: .connecting)
         if role != .offerer {
             localConnectionCode = nil
             localConnectionSessionId = nil
@@ -2154,6 +2293,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         do {
             wsURL = try signalingURL(shardKey: sessionId)
         } catch {
+            applyActiveSessionDisconnect(sessionId: sessionId, kind: .explicit)
             state = .failed("信令服务 URL 无效")
             readiness = .idle
             throw error
@@ -2248,7 +2388,8 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
                 guard self.currentSessionId == sessionId else { return }
                 let msg = "WebRTC 传输已断开: \(reason)"
                 self.lastError = msg
-                await self.disconnect()
+                self.applyActiveSessionDisconnect(sessionId: sessionId, kind: .transient)
+                await self.disconnect(clearSnapshot: false)
                 self.lastError = msg
                 self.state = .failed(msg)
                 self.readiness = .idle
@@ -2262,6 +2403,12 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
                 self.stopJoinHeartbeat()
                 self.stopOfferResendLoop()
                 self.readiness = .transportReady(sessionId: sessionId)
+                self.updatePreparedSessionSnapshot(
+                    sessionId: sessionId,
+                    phase: .transportReady,
+                    deviceId: self.remoteDeviceId,
+                    deviceName: self.remoteDeviceName
+                )
                 SkyBridgeLogger.shared.info("✅ WebRTC transport ready: session=\(sessionId), role=\(String(describing: role))")
 
                 // DataChannel opened; start handshake once per session.
@@ -2302,6 +2449,11 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         if remoteDeviceId == nil || remoteDeviceId?.hasPrefix("webrtc-") == true {
             remoteDeviceId = env.from
             handshakePeerId = env.from
+            updatePreparedSessionSnapshot(
+                sessionId: env.sessionId,
+                phase: .connecting,
+                deviceId: env.from
+            )
         }
         
         switch env.type {
@@ -2341,6 +2493,10 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         case .leave:
             stopJoinHeartbeat()
             stopOfferResendLoop()
+            applyActiveSessionDisconnect(sessionId: env.sessionId, kind: .remoteLeave)
+            Task { @MainActor [weak self] in
+                await self?.disconnect(clearSnapshot: false)
+            }
         }
     }
 }
@@ -3175,6 +3331,13 @@ private extension CrossNetworkWebRTCManager {
                     sessionId: sessionId,
                     negotiatedSuite: keys.negotiatedSuite.rawValue
                 )
+                self.updatePreparedSessionSnapshot(
+                    sessionId: sessionId,
+                    phase: .handshakeComplete,
+                    deviceId: self.remoteDeviceId,
+                    deviceName: self.remoteDeviceName,
+                    negotiatedSuite: keys.negotiatedSuite.rawValue
+                )
             }
             self.persistCurrentPathTrust(sessionId: sessionId)
             SkyBridgeLogger.shared.info(
@@ -3228,6 +3391,7 @@ private extension CrossNetworkWebRTCManager {
             SkyBridgeLogger.shared.error("❌ WebRTC 握手失败（DataChannel） session=\(sessionId): \(reason)")
             await MainActor.run {
                 self.lastError = "WebRTC 握手失败: \(reason)"
+                self.applyActiveSessionDisconnect(sessionId: sessionId, kind: .explicit)
                 self.state = .failed(self.lastError ?? "WebRTC handshake failed")
                 self.readiness = .idle
                 self.handshakeDriver = nil
@@ -3346,6 +3510,12 @@ private extension CrossNetworkWebRTCManager {
             await KEMTrustStore.shared.upsert(deviceId: peerDeviceId, kemPublicKeys: payload.kemPublicKeys)
             if remoteDeviceId == nil || remoteDeviceId?.hasPrefix("webrtc-") == true {
                 remoteDeviceId = payload.deviceId
+                updatePreparedSessionSnapshot(
+                    sessionId: sessionId,
+                    phase: .transportReady,
+                    deviceId: payload.deviceId,
+                    deviceName: remoteDeviceName
+                )
             }
             if handshakePeerId == nil || handshakePeerId?.hasPrefix("webrtc-") == true {
                 handshakePeerId = payload.deviceId
@@ -3492,6 +3662,13 @@ private extension CrossNetworkWebRTCManager {
                 state = .connected(sessionId: sessionId)
                 readiness = .handshakeComplete(
                     sessionId: sessionId,
+                    negotiatedSuite: rekeyed.negotiatedSuite.rawValue
+                )
+                updatePreparedSessionSnapshot(
+                    sessionId: sessionId,
+                    phase: .handshakeComplete,
+                    deviceId: remoteDeviceId,
+                    deviceName: remoteDeviceName,
                     negotiatedSuite: rekeyed.negotiatedSuite.rawValue
                 )
             }

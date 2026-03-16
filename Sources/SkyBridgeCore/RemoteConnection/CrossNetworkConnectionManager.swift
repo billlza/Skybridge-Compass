@@ -132,6 +132,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     @Published public private(set) var readiness: CrossNetworkReadiness = .idle
     @Published public private(set) var lastRekeyEvent: String?
     @Published public var currentConnection: RemoteConnection?
+    @Published public private(set) var activeSessionSnapshot: ActiveSessionSnapshot?
 
  // MARK: - 私有属性
 
@@ -147,6 +148,14 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     private var deviceFingerprint: String
     private static let shortCodeAlphabet = Array("ABCDEFGHJKLMNPQRSTUVWXYZ23456789")
     private static let shortCodeAllowedCharacters = Set(shortCodeAlphabet)
+    private var activeSessionReconnectTimeoutTask: Task<Void, Never>?
+
+    private struct SessionSnapshotMetadata: Sendable {
+        let snapshotToken: UUID
+        let source: ActiveSessionSnapshotSource
+        let deviceId: String?
+        let deviceName: String?
+    }
 
     // MARK: - WebRTC (ICE / DataChannel)
 
@@ -162,6 +171,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     private var webrtcLatestOfferBySessionId: [String: String] = [:]
     private var webrtcLatestAnswerBySessionId: [String: String] = [:]
     private var webrtcLocalICECandidatesBySessionId: [String: [WebRTCSignalingEnvelope.Payload]] = [:]
+    private var sessionSnapshotMetadataBySessionId: [String: SessionSnapshotMetadata] = [:]
     private var webrtcJoinHeartbeatTasksBySessionId: [String: Task<Void, Never>] = [:]
     private var webrtcOfferResendTasksBySessionId: [String: Task<Void, Never>] = [:]
     private var webrtcControlTasksBySessionId: [String: Task<Void, Never>] = [:]
@@ -617,7 +627,13 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         webrtcLocalICECandidatesBySessionId[sessionID] = cached
     }
 
-    private func cleanupWebRTCSession(_ sessionID: String, reason: String, closeSession: Bool = true) {
+    private func cleanupWebRTCSession(
+        _ sessionID: String,
+        reason: String,
+        disconnectKind: SessionDisconnectKind = .explicit,
+        snapshotToken: UUID? = nil,
+        closeSession: Bool = true
+    ) {
         logger.info("🧹 清理 WebRTC 会话: session=\(sessionID, privacy: .public) reason=\(reason, privacy: .public)")
 
         stopJoinHeartbeat(for: sessionID)
@@ -663,8 +679,114 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             currentConnection = nil
             readiness = .idle
         }
+        applyActiveSessionDisconnect(
+            sessionID: sessionID,
+            kind: disconnectKind,
+            snapshotToken: snapshotToken
+        )
         Task {
             await TURNCredentialService.shared.clearCache(sessionID: sessionID)
+        }
+    }
+
+    @discardableResult
+    private func prepareSessionSnapshotMetadata(
+        sessionID: String,
+        source: ActiveSessionSnapshotSource,
+        deviceId: String?,
+        deviceName: String?
+    ) -> SessionSnapshotMetadata {
+        let metadata = SessionSnapshotMetadata(
+            snapshotToken: UUID(),
+            source: source,
+            deviceId: deviceId,
+            deviceName: deviceName
+        )
+        sessionSnapshotMetadataBySessionId[sessionID] = metadata
+        return metadata
+    }
+
+    @discardableResult
+    private func activatePreparedSessionSnapshot(
+        sessionID: String,
+        phase: ActiveSessionSnapshotPhase,
+        negotiatedSuite: String? = nil
+    ) -> UUID? {
+        guard let metadata = sessionSnapshotMetadataBySessionId[sessionID] else { return nil }
+        activeSessionReconnectTimeoutTask?.cancel()
+        activeSessionSnapshot = ActiveSessionSnapshotContract.activate(
+            sessionId: sessionID,
+            source: metadata.source,
+            phase: phase,
+            deviceId: metadata.deviceId,
+            deviceName: metadata.deviceName,
+            negotiatedSuite: negotiatedSuite,
+            snapshotToken: metadata.snapshotToken
+        )
+        return metadata.snapshotToken
+    }
+
+    private func updatePreparedSessionSnapshot(
+        sessionID: String,
+        phase: ActiveSessionSnapshotPhase,
+        deviceId: String? = nil,
+        deviceName: String? = nil,
+        negotiatedSuite: String? = nil,
+        snapshotToken: UUID? = nil
+    ) {
+        let token = snapshotToken ?? sessionSnapshotMetadataBySessionId[sessionID]?.snapshotToken
+        guard let token else { return }
+        activeSessionReconnectTimeoutTask?.cancel()
+        activeSessionSnapshot = ActiveSessionSnapshotContract.update(
+            current: activeSessionSnapshot,
+            sessionId: sessionID,
+            snapshotToken: token,
+            phase: phase,
+            deviceId: deviceId,
+            deviceName: deviceName,
+            negotiatedSuite: negotiatedSuite
+        )
+    }
+
+    private func applyActiveSessionDisconnect(
+        sessionID: String,
+        kind: SessionDisconnectKind,
+        snapshotToken: UUID? = nil
+    ) {
+        let token = snapshotToken ?? sessionSnapshotMetadataBySessionId[sessionID]?.snapshotToken
+        guard let token else { return }
+
+        let nextSnapshot = ActiveSessionSnapshotContract.disconnect(
+            current: activeSessionSnapshot,
+            sessionId: sessionID,
+            snapshotToken: token,
+            kind: kind
+        )
+        activeSessionSnapshot = nextSnapshot
+
+        switch kind {
+        case .transient:
+            if let nextSnapshot {
+                scheduleActiveSessionReconnectTimeout(for: nextSnapshot)
+            }
+        case .explicit, .remoteLeave:
+            activeSessionReconnectTimeoutTask?.cancel()
+            sessionSnapshotMetadataBySessionId.removeValue(forKey: sessionID)
+        }
+    }
+
+    private func scheduleActiveSessionReconnectTimeout(for snapshot: ActiveSessionSnapshot) {
+        activeSessionReconnectTimeoutTask?.cancel()
+        activeSessionReconnectTimeoutTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            try? await Task.sleep(for: .seconds(5))
+            guard let current = self.activeSessionSnapshot,
+                  current.snapshotToken == snapshot.snapshotToken,
+                  current.phase == .reconnecting else {
+                return
+            }
+            self.activeSessionSnapshot = nil
+            self.sessionSnapshotMetadataBySessionId.removeValue(forKey: snapshot.sessionId)
         }
     }
 
@@ -792,6 +914,10 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         currentConnection = nil
         connectionCode = nil
         qrCodeData = nil
+        activeSessionReconnectTimeoutTask?.cancel()
+        activeSessionReconnectTimeoutTask = nil
+        activeSessionSnapshot = nil
+        sessionSnapshotMetadataBySessionId.removeAll()
         connectionStatus = .idle
         readiness = .idle
 
@@ -1119,30 +1245,56 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 
  // 1. 通过 iCloud KV Store 交换 ICE 候选
         let sessionID = UUID().uuidString
-        let offer = try await createConnectionOffer(sessionID: sessionID)
-
- // 2. 写入 offer 到 iCloud
-        let kvStore = NSUbiquitousKeyValueStore.default
-        if let offerData = try? JSONEncoder().encode(offer) {
-            kvStore.set(offerData, forKey: "skybridge.offer.\(device.id)")
-            kvStore.synchronize()
-        }
-
- // 3. 等待 answer（轮询或推送）
-        let answer = try await waitForAnswer(deviceID: device.id, timeout: 30)
-
- // 4. 建立连接
-        let connection = try await finalizeConnection(offer: offer, answer: answer)
-
-        self.currentConnection = connection
-        self.connectionStatus = .connected
-        self.readiness = .handshakeComplete(
-            sessionId: connection.id,
-            negotiatedSuite: "quic-transport"
+        let snapshotMetadata = prepareSessionSnapshotMetadata(
+            sessionID: sessionID,
+            source: .icloud,
+            deviceId: device.id,
+            deviceName: device.name
         )
+        activatePreparedSessionSnapshot(sessionID: sessionID, phase: .connecting)
+        do {
+            let offer = try await createConnectionOffer(sessionID: sessionID)
 
-        logger.info("✅ 通过 iCloud 连接成功")
-        return connection
+    // 2. 写入 offer 到 iCloud
+            let kvStore = NSUbiquitousKeyValueStore.default
+            if let offerData = try? JSONEncoder().encode(offer) {
+                kvStore.set(offerData, forKey: "skybridge.offer.\(device.id)")
+                kvStore.synchronize()
+            }
+
+    // 3. 等待 answer（轮询或推送）
+            let answer = try await waitForAnswer(deviceID: device.id, timeout: 30)
+
+    // 4. 建立连接
+            let connection = try await finalizeConnection(offer: offer, answer: answer)
+
+            self.currentConnection = connection
+            self.connectionStatus = .connected
+            self.readiness = .handshakeComplete(
+                sessionId: connection.id,
+                negotiatedSuite: "quic-transport"
+            )
+            updatePreparedSessionSnapshot(
+                sessionID: connection.id,
+                phase: .handshakeComplete,
+                deviceId: device.id,
+                deviceName: device.name,
+                negotiatedSuite: "quic-transport",
+                snapshotToken: snapshotMetadata.snapshotToken
+            )
+
+            logger.info("✅ 通过 iCloud 连接成功")
+            return connection
+        } catch {
+            cleanupWebRTCSession(
+                sessionID,
+                reason: "icloud_connect_failed",
+                disconnectKind: .explicit,
+                snapshotToken: snapshotMetadata.snapshotToken,
+                closeSession: false
+            )
+            throw error
+        }
     }
 
  // MARK: - 3️⃣ 智能连接码
@@ -1192,6 +1344,26 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         let sessionID = normalized
         if let existingSession = webrtcSessionsBySessionId[sessionID], canReuseWebRTCSession(sessionID) {
             logger.info("复用已有会话（避免重复创建）: \(sessionID, privacy: .public)")
+            prepareSessionSnapshotMetadata(
+                sessionID: sessionID,
+                source: .reused,
+                deviceId: currentPathExpectedRemoteAuthorityBySessionId[sessionID]?.deviceId,
+                deviceName: currentConnection?.deviceName ?? currentPathExpectedRemoteAuthorityBySessionId[sessionID]?.deviceName
+            )
+            let phase: ActiveSessionSnapshotPhase
+            let negotiatedSuite: String?
+            switch readiness {
+            case .handshakeComplete(let activeSessionID, let suite):
+                phase = activeSessionID == sessionID ? .handshakeComplete : .transportReady
+                negotiatedSuite = activeSessionID == sessionID ? suite : nil
+            case .transportReady(let activeSessionID):
+                phase = activeSessionID == sessionID ? .transportReady : .connecting
+                negotiatedSuite = nil
+            case .idle:
+                phase = .transportReady
+                negotiatedSuite = nil
+            }
+            activatePreparedSessionSnapshot(sessionID: sessionID, phase: phase, negotiatedSuite: negotiatedSuite)
             return RemoteConnection(id: sessionID, deviceName: "Remote Device", transport: .webrtc(existingSession))
         }
         if webrtcSessionsBySessionId[sessionID] != nil {
@@ -1218,6 +1390,13 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             protocolPublicKeyBytes: nil,
             deviceName: lookup.initiatorDeviceName
         )
+        let snapshotMetadata = prepareSessionSnapshotMetadata(
+            sessionID: sessionID,
+            source: .code,
+            deviceId: lookup.initiatorDeviceId,
+            deviceName: lookup.initiatorDeviceName
+        )
+        activatePreparedSessionSnapshot(sessionID: sessionID, phase: .connecting)
 
         ensureSignalingConnected(shardKey: sessionID)
 
@@ -1249,7 +1428,12 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             guard let self else { return }
             Task { @MainActor in
                 guard self.webrtcSessionsBySessionId[sessionID] != nil else { return }
-                self.cleanupWebRTCSession(sessionID, reason: "transport_disconnected:\(reason)")
+                self.cleanupWebRTCSession(
+                    sessionID,
+                    reason: "transport_disconnected:\(reason)",
+                    disconnectKind: .transient,
+                    snapshotToken: snapshotMetadata.snapshotToken
+                )
                 self.connectionStatus = .failed("WebRTC transport disconnected: \(reason)")
                 self.readiness = .idle
             }
@@ -1262,6 +1446,13 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 self.currentConnection = RemoteConnection(id: sessionID, deviceName: "Remote Device", transport: .webrtc(session))
                 self.connectionStatus = .connecting
                 self.readiness = .transportReady(sessionId: sessionID)
+                self.updatePreparedSessionSnapshot(
+                    sessionID: sessionID,
+                    phase: .transportReady,
+                    deviceId: lookup.initiatorDeviceId,
+                    deviceName: lookup.initiatorDeviceName,
+                    snapshotToken: snapshotMetadata.snapshotToken
+                )
                 self.startWebRTCInboundHandshakeAndControlLoop(sessionID: sessionID, session: session, endpointDescription: "webrtc:\(sessionID)")
             }
         }
@@ -1272,7 +1463,12 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             try session.start()
         } catch {
             logger.error("❌ connectWithCode(WebRTC) start failed: \(error.localizedDescription, privacy: .public)")
-            cleanupWebRTCSession(sessionID, reason: "answerer_start_failed")
+            cleanupWebRTCSession(
+                sessionID,
+                reason: "answerer_start_failed",
+                disconnectKind: .explicit,
+                snapshotToken: snapshotMetadata.snapshotToken
+            )
             connectionStatus = .failed(error.localizedDescription)
             readiness = .idle
             throw error
@@ -1411,6 +1607,12 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     private func startWebRTCOfferSessionWithDynamicCredentials(sessionID: String) async {
         defer { pendingWebRTCOfferSessionIds.remove(sessionID) }
         guard webrtcSessionsBySessionId[sessionID] == nil else { return }
+        let snapshotMetadata = prepareSessionSnapshotMetadata(
+            sessionID: sessionID,
+            source: .qr,
+            deviceId: currentPathExpectedRemoteAuthorityBySessionId[sessionID]?.deviceId,
+            deviceName: currentPathExpectedRemoteAuthorityBySessionId[sessionID]?.deviceName
+        )
         let localBinding: ProtocolIdentityBinding
         do {
             localBinding = try await currentPathLocalBinding()
@@ -1454,7 +1656,12 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             guard let self else { return }
             Task { @MainActor in
                 guard self.webrtcSessionsBySessionId[sessionID] != nil else { return }
-                self.cleanupWebRTCSession(sessionID, reason: "transport_disconnected:\(reason)")
+                self.cleanupWebRTCSession(
+                    sessionID,
+                    reason: "transport_disconnected:\(reason)",
+                    disconnectKind: .transient,
+                    snapshotToken: snapshotMetadata.snapshotToken
+                )
                 self.connectionStatus = .failed("WebRTC transport disconnected: \(reason)")
                 self.readiness = .idle
             }
@@ -1468,6 +1675,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 self.currentConnection = RemoteConnection(id: sessionID, deviceName: "Remote Device", transport: .webrtc(session))
                 self.connectionStatus = .connecting
                 self.readiness = .transportReady(sessionId: sessionID)
+                self.activatePreparedSessionSnapshot(sessionID: sessionID, phase: .transportReady)
 
                 // 启动“握手/控制通道”消费者：把 DataChannel 当作一条 length-framed byte stream，复用现有 HandshakeDriver / AppMessage 逻辑。
                 self.startWebRTCInboundHandshakeAndControlLoop(sessionID: sessionID, session: session, endpointDescription: "webrtc:\(sessionID)")
@@ -1483,7 +1691,12 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             startOfferResendLoop(for: sessionID)
         } catch {
             logger.error("❌ startWebRTCOfferSession failed: \(error.localizedDescription, privacy: .public)")
-            cleanupWebRTCSession(sessionID, reason: "offerer_start_failed")
+            cleanupWebRTCSession(
+                sessionID,
+                reason: "offerer_start_failed",
+                disconnectKind: .explicit,
+                snapshotToken: snapshotMetadata.snapshotToken
+            )
             connectionStatus = .failed(error.localizedDescription)
             readiness = .idle
         }
@@ -1496,6 +1709,13 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         ensureSignalingConnected(shardKey: qrData.sessionID)
 
         let sessionID = qrData.sessionID
+        let snapshotMetadata = prepareSessionSnapshotMetadata(
+            sessionID: sessionID,
+            source: .qr,
+            deviceId: qrData.deviceID,
+            deviceName: qrData.deviceName
+        )
+        activatePreparedSessionSnapshot(sessionID: sessionID, phase: .connecting)
         if webrtcSessionsBySessionId[sessionID] != nil, !canReuseWebRTCSession(sessionID) {
             cleanupWebRTCSession(sessionID, reason: "replace_stale_qr_answerer_session")
         }
@@ -1535,7 +1755,12 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             guard let self else { return }
             Task { @MainActor in
                 guard self.webrtcSessionsBySessionId[sessionID] != nil else { return }
-                self.cleanupWebRTCSession(sessionID, reason: "transport_disconnected:\(reason)")
+                self.cleanupWebRTCSession(
+                    sessionID,
+                    reason: "transport_disconnected:\(reason)",
+                    disconnectKind: .transient,
+                    snapshotToken: snapshotMetadata.snapshotToken
+                )
                 self.connectionStatus = .failed("WebRTC transport disconnected: \(reason)")
                 self.readiness = .idle
             }
@@ -1548,6 +1773,13 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 self.currentConnection = RemoteConnection(id: sessionID, deviceName: qrData.deviceName, transport: .webrtc(session))
                 self.connectionStatus = .connecting
                 self.readiness = .transportReady(sessionId: sessionID)
+                self.updatePreparedSessionSnapshot(
+                    sessionID: sessionID,
+                    phase: .transportReady,
+                    deviceId: qrData.deviceID,
+                    deviceName: qrData.deviceName,
+                    snapshotToken: snapshotMetadata.snapshotToken
+                )
                 self.startWebRTCInboundHandshakeAndControlLoop(sessionID: sessionID, session: session, endpointDescription: "webrtc:\(sessionID)")
             }
         }
@@ -1557,7 +1789,12 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         do {
             try session.start()
         } catch {
-            cleanupWebRTCSession(sessionID, reason: "qr_answerer_start_failed")
+            cleanupWebRTCSession(
+                sessionID,
+                reason: "qr_answerer_start_failed",
+                disconnectKind: .explicit,
+                snapshotToken: snapshotMetadata.snapshotToken
+            )
             connectionStatus = .failed(error.localizedDescription)
             readiness = .idle
             throw error
@@ -1634,7 +1871,11 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         appendSmokeStatus("signal-server-error session=\(sessionID ?? "-") error=\(reason)")
 
         if let sessionID, webrtcSessionsBySessionId[sessionID] != nil {
-            cleanupWebRTCSession(sessionID, reason: "signaling_server_error:\(reason)")
+            cleanupWebRTCSession(
+                sessionID,
+                reason: "signaling_server_error:\(reason)",
+                disconnectKind: .transient
+            )
         }
         connectionStatus = .failed("Signaling error: \(reason)")
         readiness = .idle
@@ -1654,6 +1895,13 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         // 记录对端 id（用于未来做定向路由）
         if webrtcRemoteIdBySessionId[env.sessionId] == nil {
             webrtcRemoteIdBySessionId[env.sessionId] = env.from
+            if let snapshot = activeSessionSnapshot, snapshot.sessionId == env.sessionId {
+                updatePreparedSessionSnapshot(
+                    sessionID: env.sessionId,
+                    phase: snapshot.phase,
+                    deviceId: env.from
+                )
+            }
         }
 
         switch env.type {
@@ -1686,7 +1934,11 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 await self?.resendCachedLocalICECandidatesIfNeeded(for: env.sessionId, reason: "remote-join")
             }
         case .leave:
-            cleanupWebRTCSession(env.sessionId, reason: "remote_leave")
+            cleanupWebRTCSession(
+                env.sessionId,
+                reason: "remote_leave",
+                disconnectKind: .remoteLeave
+            )
             if currentConnection == nil {
                 connectionStatus = .idle
                 readiness = .idle
@@ -2025,7 +2277,11 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 self.stopWebRTCScreenStreaming(sessionID: sessionID)
                 self.failAllFileTransferWaitersForSession(sessionID: sessionID, message: "WebRTC control channel closed")
                 if self.webrtcSessionsBySessionId[sessionID] != nil {
-                    self.cleanupWebRTCSession(sessionID, reason: "control_channel_closed")
+                    self.cleanupWebRTCSession(
+                        sessionID,
+                        reason: "control_channel_closed",
+                        disconnectKind: .transient
+                    )
                     self.connectionStatus = .failed("WebRTC control channel closed")
                     self.readiness = .idle
                 }
@@ -2332,7 +2588,11 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                             self.webrtcSessionKeysBySessionId[sessionID] = fallbackKeys
                             startScreenStreamingIfNeeded(keys: fallbackKeys)
                         } else {
-                            self.cleanupWebRTCSession(sessionID, reason: "handshake_failed")
+                            self.cleanupWebRTCSession(
+                                sessionID,
+                                reason: "handshake_failed",
+                                disconnectKind: .explicit
+                            )
                             self.connectionStatus = .failed("WebRTC handshake failed: \(error.localizedDescription)")
                             self.readiness = .idle
                         }
@@ -4106,6 +4366,11 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                         sessionId: sessionID,
                         negotiatedSuite: keys.negotiatedSuite.rawValue
                     )
+                    self.updatePreparedSessionSnapshot(
+                        sessionID: sessionID,
+                        phase: .handshakeComplete,
+                        negotiatedSuite: keys.negotiatedSuite.rawValue
+                    )
                     startScreenStreamingIfNeeded(keys: keys)
                 case .failed(let reason):
                     if let fallbackKeys = handshakeState.previousSessionKeysBeforeRekey {
@@ -4122,7 +4387,11 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                         continue
                     }
 
-                    self.cleanupWebRTCSession(sessionID, reason: "handshake_failed")
+                    self.cleanupWebRTCSession(
+                        sessionID,
+                        reason: "handshake_failed",
+                        disconnectKind: .explicit
+                    )
                     self.connectionStatus = .failed("WebRTC handshake failed: \(reason)")
                     self.readiness = .idle
                     return
@@ -4269,6 +4538,12 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                         sessionId: connection.id,
                         negotiatedSuite: "quic-transport"
                     )
+                    self.updatePreparedSessionSnapshot(
+                        sessionID: connection.id,
+                        phase: .handshakeComplete,
+                        deviceName: connection.deviceName,
+                        negotiatedSuite: "quic-transport"
+                    )
                 }
             }
         }
@@ -4288,6 +4563,12 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     self.connectionStatus = .connected
                     self.readiness = .handshakeComplete(
                         sessionId: connection.id,
+                        negotiatedSuite: "quic-transport"
+                    )
+                    self.updatePreparedSessionSnapshot(
+                        sessionID: connection.id,
+                        phase: .handshakeComplete,
+                        deviceName: connection.deviceName,
                         negotiatedSuite: "quic-transport"
                     )
                 }

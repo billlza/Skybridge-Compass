@@ -189,6 +189,10 @@ public actor SignalServerClient {
         public let turnAdmissionLease: TurnAdmissionLease
         public let expiresIn: TimeInterval
         public let signalingServerOrigin: String
+
+        public var initiatorToken: String {
+            sessionToken
+        }
     }
 
     public struct ConnectionCodeLookup: Sendable, Equatable {
@@ -201,6 +205,10 @@ public actor SignalServerClient {
         public let initiatorProtocolSigningAlgorithm: ProtocolSigningAlgorithm
         public let initiatorProtocolPublicKeyFingerprint: String
         public let initiatorDeviceName: String?
+
+        public var responderToken: String {
+            sessionToken
+        }
     }
 
     public struct SessionLease: Sendable, Equatable {
@@ -210,6 +218,10 @@ public actor SignalServerClient {
         public let turnAdmissionLease: TurnAdmissionLease
         public let expiresIn: TimeInterval
         public let signalingServerOrigin: String
+
+        public var signalingToken: String {
+            sessionToken
+        }
     }
 
     public struct RedeemedSessionLease: Sendable, Equatable {
@@ -478,6 +490,117 @@ public actor SignalServerClient {
     public static func lookupCodePath(for code: String) -> String {
         let encoded = code.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? code
         return "/api/webrtc/lookup/\(encoded)"
+    }
+
+    public struct LegacyRegisterCodeRequestBody: Encodable, Sendable {
+        public let deviceId: String
+        public let deviceName: String
+        public let protocolSigningAlgorithm: String
+        public let protocolPublicKeyFingerprint: String
+        public let ttlSeconds: Int
+    }
+
+    public static func makeRegisterCodeRequestBody(
+        binding: ProtocolIdentityBinding,
+        deviceName: String,
+        ttlSeconds: Int
+    ) -> LegacyRegisterCodeRequestBody {
+        LegacyRegisterCodeRequestBody(
+            deviceId: binding.deviceId,
+            deviceName: deviceName,
+            protocolSigningAlgorithm: binding.protocolSigningAlgorithm.rawValue,
+            protocolPublicKeyFingerprint: binding.protocolPublicKeyFingerprint,
+            ttlSeconds: ttlSeconds
+        )
+    }
+
+    public static func decodeRegisterCodeResponse(from data: Data) throws -> ConnectionCodeLease {
+        let object = try decodeJSONObject(from: data)
+        let sessionToken = (object["sessionToken"] as? String) ?? (object["initiatorToken"] as? String) ?? ""
+        let turnAdmissionToken = (object["turnAdmissionToken"] as? String) ?? ""
+        let expiresIn = (object["expiresIn"] as? Int) ?? 0
+        return ConnectionCodeLease(
+            code: (object["code"] as? String) ?? "",
+            sessionID: (object["sessionId"] as? String) ?? "",
+            sessionToken: sessionToken,
+            turnAdmissionLease: TurnAdmissionLease(
+                token: turnAdmissionToken,
+                expiresIn: min(TimeInterval(expiresIn), 60)
+            ),
+            expiresIn: TimeInterval(expiresIn),
+            signalingServerOrigin: (object["signalingServerOrigin"] as? String) ?? ""
+        )
+    }
+
+    public static func decodeLookupCodeResponse(from data: Data) throws -> ConnectionCodeLookup {
+        let object = try decodeJSONObject(from: data)
+        guard (object["found"] as? Bool) != false else {
+            throw ClientError.serverRejected(404, "code_not_found")
+        }
+        let turnAdmissionToken = (object["turnAdmissionToken"] as? String) ?? ""
+        let expiresIn = (object["expiresIn"] as? Int) ?? 0
+        let rawAlgorithm = (object["initiatorProtocolSigningAlgorithm"] as? String) ?? ProtocolSigningAlgorithm.ed25519.rawValue
+        return ConnectionCodeLookup(
+            sessionID: (object["sessionId"] as? String) ?? "",
+            sessionToken: (object["sessionToken"] as? String) ?? (object["responderToken"] as? String) ?? "",
+            turnAdmissionLease: TurnAdmissionLease(
+                token: turnAdmissionToken,
+                expiresIn: min(TimeInterval(expiresIn), 60)
+            ),
+            expiresIn: TimeInterval(expiresIn),
+            signalingServerOrigin: (object["signalingServerOrigin"] as? String) ?? "",
+            initiatorDeviceId: (object["initiatorDeviceId"] as? String) ?? "",
+            initiatorProtocolSigningAlgorithm: ProtocolSigningAlgorithm(rawValue: rawAlgorithm) ?? .ed25519,
+            initiatorProtocolPublicKeyFingerprint: (object["initiatorProtocolPublicKeyFingerprint"] as? String) ?? "",
+            initiatorDeviceName: object["initiatorDeviceName"] as? String
+        )
+    }
+
+    public struct LegacyRegisterSessionRequestBody: Encodable, Sendable {
+        public let sessionId: String
+        public let deviceId: String
+        public let protocolSigningAlgorithm: String
+        public let protocolPublicKeyFingerprint: String
+        public let ttlSeconds: Int
+    }
+
+    public static func makeRegisterSessionRequestBody(
+        sessionId: String,
+        binding: ProtocolIdentityBinding,
+        ttlSeconds: Int
+    ) -> LegacyRegisterSessionRequestBody {
+        LegacyRegisterSessionRequestBody(
+            sessionId: sessionId,
+            deviceId: binding.deviceId,
+            protocolSigningAlgorithm: binding.protocolSigningAlgorithm.rawValue,
+            protocolPublicKeyFingerprint: binding.protocolPublicKeyFingerprint,
+            ttlSeconds: ttlSeconds
+        )
+    }
+
+    public static func decodeRegisterSessionResponse(from data: Data) throws -> SessionLease {
+        let object = try decodeJSONObject(from: data)
+        let sessionToken = (object["sessionToken"] as? String) ?? (object["initiatorSignalingToken"] as? String) ?? ""
+        let turnAdmissionToken = (object["turnAdmissionToken"] as? String) ?? ""
+        let expiresIn = (object["expiresIn"] as? Int) ?? 0
+        return SessionLease(
+            sessionID: (object["sessionId"] as? String) ?? "",
+            sessionToken: sessionToken,
+            qrBootstrapToken: (object["qrBootstrapToken"] as? String) ?? "",
+            turnAdmissionLease: TurnAdmissionLease(
+                token: turnAdmissionToken,
+                expiresIn: min(TimeInterval(expiresIn), 60)
+            ),
+            expiresIn: TimeInterval(expiresIn),
+            signalingServerOrigin: (object["signalingServerOrigin"] as? String) ?? ""
+        )
+    }
+
+    private static func decodeJSONObject(from data: Data) throws -> [String: Any] {
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw ClientError.malformedResponse("expected_object")
+        }
+        return object
     }
 
     private func performJSONRequest<Response: Decodable>(

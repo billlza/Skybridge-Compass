@@ -145,9 +145,18 @@ struct RemoteDesktopView: View {
     }
 
     private var crossNetworkConnection: Connection? {
-        guard case .connected(let sessionId) = crossNetworkManager.state else { return nil }
-        let syntheticDeviceId = "webrtc-\(sessionId)"
-        let remoteName = crossNetworkManager.remoteDeviceName ?? RuntimeLocalization.string("跨网设备")
+        guard let snapshot = crossNetworkManager.activeSessionSnapshot else { return nil }
+        switch snapshot.phase {
+        case .handshakeComplete:
+            break
+        case .connecting, .reconnecting, .disconnecting:
+            return nil
+        case .transportReady:
+            return nil
+        }
+        let sessionId = snapshot.sessionId
+        let syntheticDeviceId = snapshot.deviceId ?? "webrtc-\(sessionId)"
+        let remoteName = snapshot.deviceName ?? crossNetworkManager.remoteDeviceName ?? RuntimeLocalization.string("跨网设备")
         let pseudoDevice = DiscoveredDevice(
             id: syntheticDeviceId,
             name: remoteName,

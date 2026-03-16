@@ -307,6 +307,7 @@ import Security
             accessToken: accessToken,
             refreshToken: result.refreshToken,
             userIdentifier: userInfo.userId,
+            nebulaId: NebulaIdentityContract.isCanonicalNebulaId(userInfo.userId) ? userInfo.userId : nil,
             displayName: userInfo.displayName,
             issuedAt: Date()
         )

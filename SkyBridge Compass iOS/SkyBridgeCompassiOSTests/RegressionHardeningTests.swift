@@ -487,4 +487,94 @@ final class RegressionHardeningTests: XCTestCase {
             defaults.removeObject(forKey: key)
         }
     }
+
+    func testConnectionPresentationContractTreatsTransportReadyAsConnected() {
+        let presentation = ConnectionPresentationContract.evaluate(
+            ConnectionPresentationInput(
+                labels: ConnectionPresentationLabels(
+                    connectedText: "已连接",
+                    disconnectedText: "离线",
+                    connectingText: "连接中",
+                    reconnectingText: "重连中",
+                    defaultGuardStatus: "守护中",
+                    crossNetworkGuardStatus: "跨网已连接"
+                ),
+                fileTransferActive: false,
+                latestPeerConnection: nil,
+                latestConnectedDevice: nil,
+                activeSessionSnapshot: ActiveSessionSnapshot(
+                    snapshotToken: UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!,
+                    sessionId: "session-1",
+                    source: .code,
+                    phase: .transportReady,
+                    deviceId: "peer-1",
+                    deviceName: "Mac mini",
+                    negotiatedSuite: "ML-KEM-768"
+                ),
+                defaultPQCModeLabel: "Apple PQC"
+            )
+        )
+
+        XCTAssertEqual(presentation.phase, .connected)
+        XCTAssertEqual(presentation.statusText, "Apple PQC已连接")
+    }
+
+    func testConnectionPresentationContractPrioritizesPeerOverCrossNetworkSnapshot() {
+        let presentation = ConnectionPresentationContract.evaluate(
+            ConnectionPresentationInput(
+                labels: ConnectionPresentationLabels(
+                    connectedText: "已连接",
+                    disconnectedText: "离线",
+                    connectingText: "连接中",
+                    reconnectingText: "重连中",
+                    defaultGuardStatus: "守护中",
+                    crossNetworkGuardStatus: "跨网已连接"
+                ),
+                fileTransferActive: false,
+                latestPeerConnection: ConnectionPresentationPeer(
+                    displayName: "Peer",
+                    cryptoKind: nil,
+                    suite: "X25519",
+                    guardStatus: "守护中"
+                ),
+                latestConnectedDevice: nil,
+                activeSessionSnapshot: ActiveSessionSnapshot(
+                    snapshotToken: UUID(uuidString: "11111111-2222-3333-4444-555555555555")!,
+                    sessionId: "session-2",
+                    source: .qr,
+                    phase: .handshakeComplete,
+                    deviceId: "peer-2",
+                    deviceName: "Remote Device",
+                    negotiatedSuite: "ML-KEM-768"
+                ),
+                defaultPQCModeLabel: "Apple PQC"
+            )
+        )
+
+        XCTAssertEqual(presentation.statusText, "Classic已连接")
+    }
+
+    func testLateCleanupTokenDoesNotClearNewSnapshot() {
+        let originalToken = UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!
+        let replacementToken = UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
+
+        let newerSnapshot = ActiveSessionSnapshotContract.activate(
+            sessionId: "session-1",
+            source: .reused,
+            phase: .handshakeComplete,
+            deviceId: "peer-1",
+            deviceName: "Peer A",
+            negotiatedSuite: "X-Wing",
+            snapshotToken: replacementToken
+        )
+
+        let afterLateCleanup = ActiveSessionSnapshotContract.disconnect(
+            current: newerSnapshot,
+            sessionId: "session-1",
+            snapshotToken: originalToken,
+            kind: .explicit
+        )
+
+        XCTAssertEqual(afterLateCleanup, newerSnapshot)
+    }
 }

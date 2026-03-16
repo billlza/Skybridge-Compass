@@ -556,91 +556,21 @@ private struct QuantumStarLayer: View {
     }
 
     private var primaryConnectionStatusText: String {
-        RuntimeLocalization.string(primaryConnectionStatusKey)
+        viewModel.topConnectionPresentation.statusText
     }
 
     private var primaryConnectionStatusColor: Color {
-        primaryConnectionStatusKey == "离线" ? .red : .green
-    }
-
-    private var primaryConnectionStatusKey: String {
-        if viewModel.networkStatus == .disconnected {
-            return "离线"
-        }
-
-        if connectionManager.activeConnections.isEmpty {
-            guard isCrossNetworkSessionActive else {
-                return "在线"
+        switch viewModel.topConnectionPresentation.phase {
+        case .connected:
+            return .green
+        case .connecting, .reconnecting:
+            return .orange
+        case .disconnected:
+            if viewModel.networkStatus == .disconnected {
+                return .red
             }
-            return crossNetworkStatusKey
+            return .green
         }
-
-        if activeNegotiatedSuites.contains(.xwing) {
-            return "X-Wing已连接"
-        }
-
-        if activeNegotiatedSuites.contains(where: { CryptoSuite.allClassicSuites.contains($0) }) {
-            return "Classic已连接"
-        }
-
-        let hasMLKEMConnected = activeNegotiatedSuites.contains { $0 == .mlkem768 || $0 == .mlkem768fs }
-        if hasMLKEMConnected {
-            switch SkyBridgeiOSCore.shared.cryptoProvider?.tier {
-            case .nativePQC?:
-                return "Apple PQC已连接"
-            case .liboqsPQC?:
-                return "liboqs已连接"
-            default:
-                return "已连接"
-            }
-        }
-
-        return "已连接"
-    }
-
-    private var isCrossNetworkSessionActive: Bool {
-        if case .connected = crossNetworkManager.state { return true }
-        if case .handshakeComplete = crossNetworkManager.readiness { return true }
-        return false
-    }
-
-    private var crossNetworkStatusKey: String {
-        guard let suite = crossNetworkNegotiatedSuite?.lowercased() else {
-            return "已连接"
-        }
-
-        if suite.contains("xwing") {
-            return "X-Wing已连接"
-        }
-
-        if suite.contains("x25519") || suite.contains("p256") {
-            return "Classic已连接"
-        }
-
-        if suite.contains("ml-kem") || suite.contains("mlkem") || suite.contains("mldsa") {
-            switch SkyBridgeiOSCore.shared.cryptoProvider?.tier {
-            case .nativePQC?:
-                return "Apple PQC已连接"
-            case .liboqsPQC?:
-                return "liboqs已连接"
-            default:
-                return "已连接"
-            }
-        }
-
-        return "已连接"
-    }
-
-    private var crossNetworkNegotiatedSuite: String? {
-        if case .handshakeComplete(_, let negotiatedSuite) = crossNetworkManager.readiness {
-            return negotiatedSuite
-        }
-        return nil
-    }
-
-    private var activeNegotiatedSuites: [CryptoSuite] {
-        let activeDeviceIds = Set(connectionManager.activeConnections.map { $0.device.id })
-        return activeDeviceIds.compactMap { connectionManager.negotiatedSuiteByDeviceId[$0] }
     }
     
     // MARK: - Stats Section
@@ -842,9 +772,16 @@ private struct QuantumStarLayer: View {
     }
 
     private var crossNetworkActiveConnection: Connection? {
-        guard case .connected(let sessionId) = crossNetworkManager.state else { return nil }
-        let remoteId = crossNetworkManager.remoteDeviceId ?? "webrtc-\(sessionId)"
-        let remoteName = crossNetworkManager.remoteDeviceName ?? RuntimeLocalization.string("跨网设备")
+        guard let snapshot = crossNetworkManager.activeSessionSnapshot else { return nil }
+        switch snapshot.phase {
+        case .transportReady, .handshakeComplete, .reconnecting:
+            break
+        case .connecting, .disconnecting:
+            return nil
+        }
+        let sessionId = snapshot.sessionId
+        let remoteId = snapshot.deviceId ?? crossNetworkManager.remoteDeviceId ?? "webrtc-\(sessionId)"
+        let remoteName = snapshot.deviceName ?? crossNetworkManager.remoteDeviceName ?? RuntimeLocalization.string("跨网设备")
         let pseudoDevice = DiscoveredDevice(
             id: remoteId,
             name: remoteName,
@@ -865,7 +802,7 @@ private struct QuantumStarLayer: View {
         return Connection(
             id: "webrtc-\(sessionId)",
             device: pseudoDevice,
-            status: .connected,
+            status: snapshot.phase == .reconnecting ? .connecting : .connected,
             encryptionType: .pqc
         )
     }

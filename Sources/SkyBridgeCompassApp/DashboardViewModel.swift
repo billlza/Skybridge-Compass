@@ -14,6 +14,12 @@ import Network
 final class DashboardViewModel: ObservableObject {
     @Published private(set) var metrics = DashboardMetrics()
     @Published private(set) var connectionStatus: ConnectionStatus = .disconnected
+    @Published private(set) var topConnectionPresentation = ConnectionPresentation(
+        phase: .disconnected,
+        isConnected: false,
+        statusText: LocalizationManager.shared.localizedString("status.disconnected"),
+        detailText: nil
+    )
     @Published private(set) var sessions: [RemoteSessionSummary] = []
     @Published private(set) var discoveredDevices: [DiscoveredDevice] = []
     @Published private(set) var transferTasks: [FileTransferTask] = []
@@ -332,85 +338,96 @@ final class DashboardViewModel: ObservableObject {
         
         let unified = unifiedDeviceManager.$onlineDevices
         
-        let crossNetwork = Publishers.CombineLatest3(
-            crossNetworkManager.$connectionStatus,
-            crossNetworkManager.$readiness,
-            crossNetworkManager.$currentConnection
-        )
+        let crossNetwork = crossNetworkManager.$activeSessionSnapshot
 
         Publishers.CombineLatest4(base, presence, unified, crossNetwork)
             .receive(on: DispatchQueue.main)
-        .sink { [weak self] baseTuple, presenceTuple, unifiedDevices, crossTuple in
+            .sink { [weak self] baseTuple, presenceTuple, unifiedDevices, crossSnapshot in
                 guard let self else { return }
-            let (baseStatus, p2pStatus, inboundCount, isTransferring) = baseTuple
-            let (presenceConnections, rekeyStatusByPeerId) = presenceTuple
-            let (crossStatus, crossReadiness, crossConnection) = crossTuple
-            let crossConnected = Self.isCrossNetworkConnected(
-                status: crossStatus,
-                readiness: crossReadiness,
-                currentConnection: crossConnection
-            )
-            let crossSuite = Self.crossNetworkNegotiatedSuite(from: crossReadiness)
+                let (baseStatus, p2pStatus, inboundCount, isTransferring) = baseTuple
+                let (presenceConnections, rekeyStatusByPeerId) = presenceTuple
 
-            // 统一“顶部连接态”判定：
-            // 只把明确的实时连接态(.connected)视为已连接，避免历史/扫描信息导致假阳性。
-            let unifiedLinkedPeers = unifiedDevices.filter { device in
-                !device.isLocalDevice && device.connectionStatus == .connected
-            }
+                let unifiedLinkedPeers = unifiedDevices
+                    .filter { device in
+                        !device.isLocalDevice && device.connectionStatus == .connected
+                    }
+                    .sorted { ($0.lastConnectedAt ?? .distantPast) > ($1.lastConnectedAt ?? .distantPast) }
 
-            // Detail string for UX: show crypto + guard when present.
-            if let newest = presenceConnections.sorted(by: { $0.connectedAt > $1.connectedAt }).first {
-                if let rekey = rekeyStatusByPeerId[newest.id] {
-                    self.connectionDetail = "Rekey 中 · \(rekey.fromKind)·\(rekey.fromSuite) → \(rekey.toKind)·\(rekey.toSuite)"
+                let latestPeerConnection: ConnectionPresentationPeer?
+                if let newest = presenceConnections.sorted(by: { $0.connectedAt > $1.connectedAt }).first {
+                    if let rekey = rekeyStatusByPeerId[newest.id] {
+                        latestPeerConnection = ConnectionPresentationPeer(
+                            displayName: newest.displayName,
+                            cryptoKind: "\(rekey.fromKind)·\(rekey.fromSuite) → \(rekey.toKind)·\(rekey.toSuite)",
+                            suite: nil,
+                            guardStatus: "Rekey 中",
+                            connectedAt: newest.connectedAt
+                        )
+                    } else {
+                        latestPeerConnection = ConnectionPresentationPeer(
+                            displayName: newest.displayName,
+                            cryptoKind: newest.cryptoKind,
+                            suite: newest.suite,
+                            guardStatus: "守护中",
+                            connectedAt: newest.connectedAt
+                        )
+                    }
+                } else if baseStatus == .connected || p2pStatus == .connected || inboundCount > 0 {
+                    latestPeerConnection = ConnectionPresentationPeer(
+                        displayName: "P2P",
+                        cryptoKind: nil,
+                        suite: nil,
+                        guardStatus: "守护中",
+                        connectedAt: Date()
+                    )
                 } else {
-                    self.connectionDetail = ConnectionCryptoPresentation.detailText(
-                        kind: newest.cryptoKind,
-                        suite: newest.suite,
-                        guardStatus: "守护中"
-                    ) ?? newest.displayName
+                    latestPeerConnection = nil
                 }
-            } else if let newestUnified = unifiedLinkedPeers.sorted(by: { ($0.lastConnectedAt ?? .distantPast) > ($1.lastConnectedAt ?? .distantPast) }).first {
-                self.connectionDetail = ConnectionCryptoPresentation.detailText(
-                    kind: newestUnified.lastCryptoKind,
-                    suite: newestUnified.lastCryptoSuite,
-                    guardStatus: newestUnified.guardStatus ?? "守护中"
-                ) ?? newestUnified.name
-            } else if crossConnected {
-                self.connectionDetail = ConnectionCryptoPresentation.detailText(
-                    kind: nil,
-                    suite: crossSuite,
-                    guardStatus: "跨网已连接"
-                ) ?? crossConnection?.deviceName ?? "跨网已连接"
-            } else {
-                self.connectionDetail = nil
-            }
 
-                // If we are actively transferring, treat as "connected" for top bar UX.
-                if isTransferring {
-                    self.connectionStatus = .connected
-                    return
+                let latestConnectedDevice = unifiedLinkedPeers.first.map { device in
+                    ConnectionPresentationPeer(
+                        displayName: device.name,
+                        cryptoKind: device.lastCryptoKind,
+                        suite: device.lastCryptoSuite,
+                        guardStatus: device.guardStatus ?? "守护中",
+                        connectedAt: device.lastConnectedAt ?? device.lastSeen
+                    )
                 }
-            if !presenceConnections.isEmpty {
-                self.connectionStatus = .connected
-                return
-            }
-            if !unifiedLinkedPeers.isEmpty {
-                self.connectionStatus = .connected
-                return
-            }
-                if crossConnected {
+
+                let presentation = ConnectionPresentationContract.evaluate(
+                    ConnectionPresentationInput(
+                        labels: ConnectionPresentationLabels(
+                            connectedText: LocalizationManager.shared.localizedString("device.status.connected"),
+                            disconnectedText: LocalizationManager.shared.localizedString("status.disconnected"),
+                            connectingText: ConnectionStatus.connecting.displayName,
+                            reconnectingText: ConnectionStatus.reconnecting.displayName,
+                            defaultGuardStatus: "守护中",
+                            crossNetworkGuardStatus: "跨网已连接"
+                        ),
+                        fileTransferActive: isTransferring,
+                        latestPeerConnection: latestPeerConnection,
+                        latestConnectedDevice: latestConnectedDevice,
+                        activeSessionSnapshot: crossSnapshot,
+                        defaultPQCModeLabel: ConnectionCryptoPresentation.inferredModeLabelForCurrentPolicy(
+                            compatibilityModeEnabled: SettingsManager.shared.enableCompatibilityMode
+                        ),
+                        compatibilityModeEnabled: SettingsManager.shared.enableCompatibilityMode
+                    )
+                )
+
+                self.topConnectionPresentation = presentation
+                self.connectionDetail = presentation.detailText
+
+                switch presentation.phase {
+                case .connected:
                     self.connectionStatus = .connected
-                    return
+                case .connecting:
+                    self.connectionStatus = .connecting
+                case .reconnecting:
+                    self.connectionStatus = .reconnecting
+                case .disconnected:
+                    self.connectionStatus = .disconnected
                 }
-                if inboundCount > 0 {
-                    self.connectionStatus = .connected
-                    return
-                }
-                if baseStatus == .connected || p2pStatus == .connected {
-                    self.connectionStatus = .connected
-                    return
-                }
-                self.connectionStatus = .disconnected
             }
             .store(in: &cancellables)
 
@@ -893,11 +910,17 @@ final class DashboardViewModel: ObservableObject {
             let connectedCount = self.deviceStats.connected
             let totalDevices = self.deviceStats.total
             let hasUnifiedConnectedPeer = self.onlineDevices.contains { !$0.isLocalDevice && $0.connectionStatus == .connected }
-            let hasCrossNetworkSession = Self.isCrossNetworkConnected(
-                status: self.crossNetworkManager.connectionStatus,
-                readiness: self.crossNetworkManager.readiness,
-                currentConnection: self.crossNetworkManager.currentConnection
-            )
+            let hasCrossNetworkSession: Bool
+            if let snapshot = self.crossNetworkManager.activeSessionSnapshot {
+                switch snapshot.phase {
+                case .transportReady, .handshakeComplete, .reconnecting:
+                    hasCrossNetworkSession = true
+                case .connecting, .disconnecting:
+                    hasCrossNetworkSession = false
+                }
+            } else {
+                hasCrossNetworkSession = false
+            }
             let crossNetworkPeerContribution = (hasCrossNetworkSession && !hasUnifiedConnectedPeer) ? 1 : 0
 
  // 兼容：如果统一设备列表为空，使用旧的计数逻辑
@@ -991,25 +1014,6 @@ final class DashboardViewModel: ObservableObject {
         return discoveredAddress
     }
 
-    private static func isCrossNetworkConnected(
-        status: CrossNetworkConnectionManager.CrossNetworkConnectionStatus,
-        readiness: CrossNetworkConnectionManager.CrossNetworkReadiness,
-        currentConnection: RemoteConnection?
-    ) -> Bool {
-        if case .connected = status { return true }
-        if case .handshakeComplete = readiness { return true }
-        if currentConnection != nil { return true }
-        return false
-    }
-
-    private static func crossNetworkNegotiatedSuite(
-        from readiness: CrossNetworkConnectionManager.CrossNetworkReadiness
-    ) -> String? {
-        if case .handshakeComplete(_, let negotiatedSuite) = readiness {
-            return negotiatedSuite
-        }
-        return nil
-    }
 }
 
 struct DashboardMetrics {
