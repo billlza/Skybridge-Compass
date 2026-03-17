@@ -57,6 +57,6 @@ extension SkyBridgeServerConfig {
                 return trimmed
             }
         }
-        return ""
+        return "skybridge-client-v1"
     }
 }

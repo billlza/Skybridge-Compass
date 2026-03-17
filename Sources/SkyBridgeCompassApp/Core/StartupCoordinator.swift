@@ -212,8 +212,9 @@ public class StartupCoordinator: ObservableObject {
         do {
             if !P2PNetworkManager.shared.isStarted {
                 try await P2PNetworkManager.shared.start()
+            } else {
+                await P2PNetworkManager.shared.startDiscovery()
             }
-            await P2PNetworkManager.shared.startDiscovery()
             logger.info("✅ P2P网络管理器启动成功（监听器已重绑）")
         } catch {
             logger.error("❌ P2P网络管理器启动失败: \(error)")

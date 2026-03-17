@@ -92,6 +92,7 @@ let package = Package(
     products: [
         .executable(name: "SkyBridgeCompassApp", targets: ["SkyBridgeCompassApp"]),
         .executable(name: "MacUIBaselineCapture", targets: ["MacUIBaselineCapture"]),
+        .executable(name: "LocalLanInteropHost", targets: ["LocalLanInteropHost"]),
         .executable(name: "LocalWebRTCSmokeHost", targets: ["LocalWebRTCSmokeHost"]),
         .executable(name: "BaselineBenchRunner", targets: ["BaselineBenchRunner"]),
         .executable(name: "HandshakeBenchRunner", targets: ["HandshakeBenchRunner"]),
@@ -154,6 +155,16 @@ let package = Package(
                 .linkedFramework("CoreVideo"),
                 .linkedFramework("VideoToolbox"),
                 .linkedFramework("CoreMedia")
+            ]
+        ),
+        .executableTarget(
+            name: "LocalLanInteropHost",
+            dependencies: [
+                "SkyBridgeCore"
+            ],
+            path: "Sources/LocalLanInteropHost",
+            swiftSettings: [
+                .enableUpcomingFeature("StrictConcurrency")
             ]
         ),
         .target(
@@ -335,7 +346,11 @@ let package = Package(
             ],
             path: "Sources/SkyBridgeCompassApp",
             // 排除配置文件和文档 - 符合Swift 6.2.1最佳实践
-            exclude: ["Info.plist", "SkyBridgeCompassApp.entitlements"],
+            exclude: [
+                "Info.plist",
+                "SkyBridgeCompassApp.entitlements",
+                "SkyBridgeCompassApp.packaging.entitlements"
+            ],
             resources: [
                 // 处理并打包目标内的 Resources 目录（例如 AppIcon.icns / AppIcon.png）
                 .process("Resources"),

@@ -19,8 +19,12 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 BUILD_DIR="$PROJECT_ROOT/.build/release"
 DIST_DIR="$PROJECT_ROOT/dist"
 APP_NAME="SkyBridge Compass Pro"
+APP_EXECUTABLE="SkyBridgeCompassApp"
+APP_INFO_PLIST_SOURCE="$PROJECT_ROOT/Sources/SkyBridgeCompassApp/Info.plist"
+APP_PACKAGING_ENTITLEMENTS="$PROJECT_ROOT/Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.packaging.entitlements"
 APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
 WIDGET_EXT_NAME="SkyBridgeCompassWidgetsExtension"
+BG_SRC_PNG="$PROJECT_ROOT/Sources/SkyBridgeCompassApp/Resources/AppIcon.png"
 
 # ============================================================================
 # 辅助函数
@@ -84,70 +88,49 @@ rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_BUNDLE/Contents/MacOS"
 mkdir -p "$APP_BUNDLE/Contents/Resources"
 mkdir -p "$APP_BUNDLE/Contents/PlugIns"
+mkdir -p "$APP_BUNDLE/Contents/Frameworks"
 
 # 复制可执行文件
-EXECUTABLE="$BUILD_DIR/SkyBridgeCompassApp"
+EXECUTABLE="$BUILD_DIR/$APP_EXECUTABLE"
 if [ ! -f "$EXECUTABLE" ]; then
     log_error "找不到可执行文件: $EXECUTABLE"
     exit 1
 fi
 
-cp "$EXECUTABLE" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
+cp "$EXECUTABLE" "$APP_BUNDLE/Contents/MacOS/$APP_EXECUTABLE"
+chmod +x "$APP_BUNDLE/Contents/MacOS/$APP_EXECUTABLE"
 
-# 创建 Info.plist
-VERSION="1.0.0"
-cat > "$APP_BUNDLE/Contents/Info.plist" << EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CFBundleDevelopmentRegion</key>
-    <string>zh_CN</string>
-    <key>CFBundleExecutable</key>
-    <string>$APP_NAME</string>
-    <key>CFBundleIconFile</key>
-    <string>AppIcon</string>
-    <key>CFBundleIdentifier</key>
-    <string>com.skybridge.compass</string>
-    <key>CFBundleInfoDictionaryVersion</key>
-    <string>6.0</string>
-    <key>CFBundleName</key>
-    <string>$APP_NAME</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleShortVersionString</key>
-    <string>$VERSION</string>
-    <key>CFBundleVersion</key>
-    <string>$VERSION</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>14.0</string>
-    <key>NSHighResolutionCapable</key>
-    <true/>
-    <key>NSPrincipalClass</key>
-    <string>NSApplication</string>
-    <key>LSUIElement</key>
-    <false/>
-    <key>NSSupportsAutomaticTermination</key>
-    <true/>
-    <key>NSSupportsSuddenTermination</key>
-    <false/>
-    <key>NSLocalNetworkUsageDescription</key>
-    <string>SkyBridge 需要访问本地网络以发现和连接附近设备。</string>
-    <key>NSBluetoothAlwaysUsageDescription</key>
-    <string>SkyBridge 需要蓝牙权限以发现和连接附近设备。</string>
-    <key>NSCameraUsageDescription</key>
-    <string>SkyBridge 需要摄像头权限以进行屏幕共享。</string>
-    <key>NSMicrophoneUsageDescription</key>
-    <string>SkyBridge 需要麦克风权限以进行音频传输。</string>
-</dict>
-</plist>
-EOF
+# 复制真实主应用 Info.plist，保持 bundle id / executable / entitlements 契约一致
+if [ ! -f "$APP_INFO_PLIST_SOURCE" ]; then
+    log_error "找不到主应用 Info.plist: $APP_INFO_PLIST_SOURCE"
+    exit 1
+fi
+cp "$APP_INFO_PLIST_SOURCE" "$APP_BUNDLE/Contents/Info.plist"
+
+VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_BUNDLE/Contents/Info.plist" 2>/dev/null || echo "1.0.0")
 
 # 复制图标
 ICON_SOURCE="$PROJECT_ROOT/Sources/SkyBridgeCompassApp/Resources/AppIcon.icns"
 if [ -f "$ICON_SOURCE" ]; then
     cp "$ICON_SOURCE" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
     log_info "已复制应用图标"
+fi
+
+# 复制 Frameworks（例如 WebRTC.framework）
+log_info "复制嵌入式 Frameworks..."
+for framework in "$BUILD_DIR"/*.framework; do
+    if [ -d "$framework" ]; then
+        framework_name=$(basename "$framework")
+        log_info "  复制 $framework_name"
+        cp -R "$framework" "$APP_BUNDLE/Contents/Frameworks/"
+    fi
+done
+
+# 确保主可执行文件可以从 Frameworks 目录加载动态框架
+APP_EXECUTABLE_PATH="$APP_BUNDLE/Contents/MacOS/$APP_EXECUTABLE"
+if ! otool -l "$APP_EXECUTABLE_PATH" 2>/dev/null | grep -q "@executable_path/../Frameworks"; then
+    log_info "注入 Frameworks rpath..."
+    install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP_EXECUTABLE_PATH" 2>/dev/null || true
 fi
 
 # 复制 SPM 资源 bundle
@@ -241,6 +224,13 @@ fi
 # 签名嵌入的库（必须先签名库，再签名应用）
 log_info "签名嵌入的库..."
 if [ -d "$APP_BUNDLE/Contents/Frameworks" ]; then
+    for framework in "$APP_BUNDLE/Contents/Frameworks"/*.framework; do
+        if [ -d "$framework" ]; then
+            log_info "  签名 $(basename "$framework")..."
+            codesign --force --sign "$SIGNING_IDENTITY" --options runtime "$framework" 2>/dev/null || \
+            codesign --force --sign - "$framework"
+        fi
+    done
     for lib in "$APP_BUNDLE/Contents/Frameworks"/*.dylib; do
         if [ -f "$lib" ]; then
             log_info "  签名 $(basename "$lib")..."
@@ -265,9 +255,9 @@ fi
 # 签名主应用
 log_info "签名主应用..."
 codesign --force --sign "$SIGNING_IDENTITY" --options runtime \
-    --entitlements "$PROJECT_ROOT/Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.entitlements" \
+    --entitlements "$APP_PACKAGING_ENTITLEMENTS" \
     "$APP_BUNDLE" 2>/dev/null || \
-codesign --force --sign - \
+codesign --force --sign - --entitlements "$APP_PACKAGING_ENTITLEMENTS" \
     "$APP_BUNDLE"
 log_success "主应用已签名"
 
@@ -302,15 +292,11 @@ rm -rf "$STAGING_DIR"
 mkdir -p "$BG_DIR"
 cp -R "$APP_BUNDLE" "$STAGING_DIR/"
 ln -s /Applications "$STAGING_DIR/Applications"
-
-SKYBRIDGE_DMG_BG_PATH="$BG_PNG" \
-SKYBRIDGE_DMG_BG_SIZE="2000x1200" \
-SKYBRIDGE_DMG_BG_DELAY="2.2" \
-"$APP_BUNDLE/Contents/MacOS/$APP_NAME"
-
-if [ ! -f "$BG_PNG" ]; then
-    log_error "DMG 背景渲染失败: $BG_PNG"
-    exit 1
+if [ -f "$BG_SRC_PNG" ]; then
+    cp "$BG_SRC_PNG" "$BG_PNG"
+    sips -Z 1600 "$BG_PNG" >/dev/null 2>&1 || true
+else
+    log_info "未找到背景源图：$BG_SRC_PNG（将使用默认白底）"
 fi
 
 hdiutil create -volname "$VOLUME_NAME" -srcfolder "$STAGING_DIR" -ov -format UDRW "$TEMP_DMG" >/dev/null

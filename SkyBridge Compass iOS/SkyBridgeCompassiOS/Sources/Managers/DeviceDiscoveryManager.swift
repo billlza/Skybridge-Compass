@@ -110,6 +110,73 @@ public enum DiscoveryMode: Sendable {
 }
 
 enum PeerIdentityAliasResolver {
+    static func normalizedIdentifier(_ raw: String?) -> String? {
+        guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else {
+            return nil
+        }
+        return raw.lowercased()
+    }
+
+    static func persistentDeviceId(from raw: String?) -> String? {
+        guard let normalized = normalizedIdentifier(raw) else { return nil }
+        if normalized.hasPrefix("id:") {
+            return normalized
+        }
+        if normalized.hasPrefix("host:")
+            || normalized.hasPrefix("peer:")
+            || normalized.hasPrefix("bonjour:")
+            || normalized.hasPrefix("recent:")
+            || normalized.contains("@") {
+            return nil
+        }
+        return "id:\(normalized)"
+    }
+
+    static func lookupCandidates(for identifier: String?) -> [String] {
+        var ordered: [String] = []
+        var seen = Set<String>()
+
+        func append(_ raw: String?) {
+            guard let normalized = normalizedIdentifier(raw),
+                  !normalized.isEmpty,
+                  seen.insert(normalized).inserted else {
+                return
+            }
+            ordered.append(normalized)
+        }
+
+        func appendDerived(_ raw: String?) {
+            guard let normalized = normalizedIdentifier(raw) else { return }
+            append(normalized)
+
+            if normalized.hasPrefix("recent:") {
+                appendDerived(String(normalized.dropFirst("recent:".count)))
+            }
+
+            if normalized.hasPrefix("id:") {
+                append(String(normalized.dropFirst("id:".count)))
+            } else if let persistent = persistentDeviceId(from: normalized) {
+                append(persistent)
+            }
+
+            if let alias = hostAlias(from: normalized) {
+                append(alias)
+            }
+
+            if let alias = hostAlias(fromIPAddress: normalized) {
+                append(alias)
+            }
+
+            if let alias = bonjourAlias(from: normalized) {
+                append(alias)
+            }
+        }
+
+        appendDerived(identifier)
+        return ordered
+    }
+
     static func aliasKeys(for device: DiscoveredDevice) -> [String] {
         var keys = Set<String>()
 

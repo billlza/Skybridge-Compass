@@ -412,19 +412,19 @@ public final class iCloudDeviceDiscoveryManager: ObservableObject, @unchecked Se
         while ptr != nil {
             defer { ptr = ptr?.pointee.ifa_next }
 
-            guard let interface = ptr?.pointee else { continue }
-            let addrFamily = interface.ifa_addr.pointee.sa_family
+            guard let interface = ptr?.pointee,
+                  let addressPtr = interface.ifa_addr,
+                  let namePtr = interface.ifa_name else { continue }
+            let addrFamily = addressPtr.pointee.sa_family
 
             if addrFamily == UInt8(AF_INET) {
  // 统一采用 UTF8 安全解码替代已弃用的 String(cString:)
- // 为避免隐式可选指针为 nil 导致崩溃，先进行空指针检查
-                guard let namePtr = interface.ifa_name else { continue }
                 let name = decodeCString(namePtr)
                 if name == "en0" {  // Wi-Fi interface
                     var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
                     getnameinfo(
-                        interface.ifa_addr,
-                        socklen_t(interface.ifa_addr.pointee.sa_len),
+                        addressPtr,
+                        socklen_t(addressPtr.pointee.sa_len),
                         &hostname,
                         socklen_t(hostname.count),
                         nil,
@@ -520,4 +520,3 @@ public enum NetworkType: String, Codable, Sendable {
         }
     }
 }
-

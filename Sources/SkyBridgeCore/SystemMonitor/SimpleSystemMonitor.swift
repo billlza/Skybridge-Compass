@@ -105,10 +105,11 @@ public class SimpleSystemMonitor {
         var totalBytesSent: UInt64 = 0
         var totalBytesReceived: UInt64 = 0
         
-        var ptr = firstAddr
-        while true {
+        var current: UnsafeMutablePointer<ifaddrs>? = firstAddr
+        while let ptr = current {
             let interface = ptr.pointee
-            let name = String(cString: interface.ifa_name)
+            current = interface.ifa_next
+            guard let name = decodeOptionalCString(interface.ifa_name) else { continue }
             
  // 只统计活跃的网络接口 (en0, en1, etc.)
             if name.hasPrefix("en") || name.hasPrefix("bridge") {
@@ -118,9 +119,6 @@ public class SimpleSystemMonitor {
                     totalBytesReceived += UInt64(networkData.ifi_ibytes)
                 }
             }
-            
-            guard let next = interface.ifa_next else { break }
-            ptr = next
         }
         
  // 计算速率（与上次采样的差值）

@@ -7,9 +7,6 @@ import os.log
 public struct TopNavigationBarView: View {
     @EnvironmentObject var appModel: DashboardViewModel
     @EnvironmentObject var themeConfiguration: ThemeConfiguration
-    @ObservedObject private var unifiedDeviceManager = UnifiedOnlineDeviceManager.shared
-    @ObservedObject private var presenceService = ConnectionPresenceService.shared
-    @ObservedObject private var crossNetworkManager = CrossNetworkConnectionManager.shared
     @StateObject private var settingsManager = SettingsManager.shared
 
     @Binding var showManualConnectSheet: Bool
@@ -106,20 +103,25 @@ public struct TopNavigationBarView: View {
 
  // MARK: - 连接状态指示器
     private var connectionStatusIndicator: some View {
-        HStack(spacing: 8) {
-            Circle()
-                .fill(isActuallyConnected ? Color.green : Color.red)
-                .frame(width: 8, height: 8)
-                .animation(themeConfiguration.easeAnimation, value: isActuallyConnected)
+        let presentation = appModel.topConnectionPresentation
 
-            if settingsManager.showConnectionStats, isActuallyConnected, let detail = connectionDetailText, !detail.isEmpty {
+        return HStack(spacing: 8) {
+            Circle()
+                .fill(connectionIndicatorColor(for: presentation.phase))
+                .frame(width: 8, height: 8)
+                .animation(themeConfiguration.easeAnimation, value: presentation.phase)
+
+            if settingsManager.showConnectionStats,
+               presentation.phase != .disconnected,
+               let detail = presentation.detailText,
+               !detail.isEmpty {
                 Text(detail)
                     .font(.caption)
                     .foregroundColor(themeConfiguration.secondaryTextColor)
             } else {
-            Text(isActuallyConnected ? connectedStatusText : LocalizationManager.shared.localizedString("status.disconnected"))
-                .font(.caption)
-                .foregroundColor(themeConfiguration.secondaryTextColor)
+                Text(presentation.statusText)
+                    .font(.caption)
+                    .foregroundColor(themeConfiguration.secondaryTextColor)
             }
         }
         .padding(.horizontal, 12)
@@ -131,103 +133,15 @@ public struct TopNavigationBarView: View {
         )
     }
 
-    private var isActuallyConnected: Bool {
-        if appModel.connectionStatus == .connected {
-            return true
+    private func connectionIndicatorColor(for phase: ConnectionPresentationPhase) -> Color {
+        switch phase {
+        case .connected:
+            return .green
+        case .connecting, .reconnecting:
+            return .orange
+        case .disconnected:
+            return .red
         }
-        if case .connected = crossNetworkManager.connectionStatus {
-            return true
-        }
-        if case .handshakeComplete = crossNetworkManager.readiness {
-            return true
-        }
-        return unifiedDeviceManager.onlineDevices.contains { device in
-            !device.isLocalDevice && device.connectionStatus == .connected
-        }
-    }
-
-    private var connectionDetailText: String? {
-        if let detail = appModel.connectionDetail, !detail.isEmpty {
-            return detail
-        }
-        let connectedPeer = unifiedDeviceManager.onlineDevices
-            .filter { !$0.isLocalDevice && $0.connectionStatus == .connected }
-            .sorted { ($0.lastConnectedAt ?? .distantPast) > ($1.lastConnectedAt ?? .distantPast) }
-            .first
-        if let connectedPeer {
-            return ConnectionCryptoPresentation.detailText(
-                kind: connectedPeer.lastCryptoKind,
-                suite: connectedPeer.lastCryptoSuite,
-                guardStatus: connectedPeer.guardStatus ?? "守护中"
-            ) ?? connectedPeer.name
-        }
-        if case .handshakeComplete(_, let negotiatedSuite) = crossNetworkManager.readiness {
-            return ConnectionCryptoPresentation.detailText(
-                kind: nil,
-                suite: negotiatedSuite,
-                guardStatus: "跨网已连接"
-            ) ?? "跨网已连接"
-        }
-        if case .connected = crossNetworkManager.connectionStatus {
-            return "跨网已连接"
-        }
-        return nil
-    }
-
-    private var latestPresenceConnection: ConnectionPresenceService.ActiveConnection? {
-        guard #available(macOS 14.0, iOS 17.0, *) else { return nil }
-        return presenceService.activeConnections.max(by: { $0.connectedAt < $1.connectedAt })
-    }
-
-    private var connectedStatusText: String {
-        let base = LocalizationManager.shared.localizedString("device.status.connected")
-
-        if let latestPresenceConnection {
-            return ConnectionCryptoPresentation.connectedStatusTextWithPolicyFallback(
-                kind: latestPresenceConnection.cryptoKind,
-                suite: latestPresenceConnection.suite,
-                baseConnectedText: base,
-                compatibilityModeEnabled: SettingsManager.shared.enableCompatibilityMode
-            )
-        }
-
-        if case .handshakeComplete(_, let negotiatedSuite) = crossNetworkManager.readiness {
-            return ConnectionCryptoPresentation.connectedStatusTextWithPolicyFallback(
-                kind: nil,
-                suite: negotiatedSuite,
-                baseConnectedText: base,
-                compatibilityModeEnabled: SettingsManager.shared.enableCompatibilityMode
-            )
-        }
-
-        let connectedPeer = unifiedDeviceManager.onlineDevices
-            .filter { !$0.isLocalDevice && $0.connectionStatus == .connected }
-            .sorted { ($0.lastConnectedAt ?? .distantPast) > ($1.lastConnectedAt ?? .distantPast) }
-            .first
-        if let connectedPeer {
-            return ConnectionCryptoPresentation.connectedStatusTextWithPolicyFallback(
-                kind: connectedPeer.lastCryptoKind,
-                suite: connectedPeer.lastCryptoSuite,
-                baseConnectedText: base,
-                compatibilityModeEnabled: SettingsManager.shared.enableCompatibilityMode
-            )
-        }
-
-        if let detail = appModel.connectionDetail, !detail.isEmpty {
-            return ConnectionCryptoPresentation.connectedStatusTextWithPolicyFallback(
-                kind: detail,
-                suite: nil,
-                baseConnectedText: base,
-                compatibilityModeEnabled: SettingsManager.shared.enableCompatibilityMode
-            )
-        }
-
-        return ConnectionCryptoPresentation.connectedStatusTextWithPolicyFallback(
-            kind: nil,
-            suite: nil,
-            baseConnectedText: base,
-            compatibilityModeEnabled: SettingsManager.shared.enableCompatibilityMode
-        )
     }
 
  // 实时FPS展示小控件（位于顶部导航栏中间）

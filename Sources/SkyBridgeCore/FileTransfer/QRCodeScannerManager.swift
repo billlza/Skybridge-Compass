@@ -138,30 +138,20 @@ public final class QRCodeScannerManager: NSObject, ObservableObject, Sendable {
  /// 处理扫描到的传输链接
     public func handleTransferLink(_ linkUrl: String) async -> Bool {
         isProcessing = true
-        
- // 验证链接格式
-        guard linkUrl.hasPrefix("http://") || linkUrl.hasPrefix("https://"),
-              linkUrl.contains("/link/") else {
+
+        guard let components = URLComponents(string: linkUrl),
+              let scheme = components.scheme?.lowercased(),
+              ["http", "https"].contains(scheme),
+              let host = components.host,
+              !host.isEmpty,
+              components.path.contains("/link/") else {
             errorMessage = "无效的传输链接格式"
             isProcessing = false
             return false
         }
-        
- // 解析链接ID
-        let components = linkUrl.components(separatedBy: "/")
-        guard let linkIndex = components.firstIndex(of: "link"),
-              linkIndex + 1 < components.count else {
-            errorMessage = "无法解析传输链接ID"
-            isProcessing = false
-            return false
-        }
-        
-        let linkId = components[linkIndex + 1]
-        
- // 验证链接有效性
-        let linkManager = TransferLinkManager.shared
-        let isValid = await linkManager.validateLinkAccess(linkId: linkId)
-        
+
+        let isValid = await probeTransferLink(linkUrl)
+
         if isValid {
             SkyBridgeLogger.ui.debugOnly("✅ 传输链接验证成功: \(linkUrl)")
         } else {
@@ -170,6 +160,39 @@ public final class QRCodeScannerManager: NSObject, ObservableObject, Sendable {
         isProcessing = false
         
         return isValid
+    }
+
+    private func probeTransferLink(_ linkUrl: String) async -> Bool {
+        guard let url = URL(string: linkUrl) else { return false }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 3
+        configuration.timeoutIntervalForResource = 3
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+
+        let session = URLSession(configuration: configuration)
+        defer {
+            session.invalidateAndCancel()
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 3
+
+        do {
+            let (_, response) = try await session.data(for: request)
+            guard let httpResponse = response as? HTTPURLResponse else {
+                return false
+            }
+            guard httpResponse.statusCode == 200 else {
+                return false
+            }
+            let marker = httpResponse.value(forHTTPHeaderField: "X-SkyBridge-Transfer")
+            let pageType = httpResponse.value(forHTTPHeaderField: "X-SkyBridge-Transfer-Page")
+            return marker == "v1" && (pageType == "preview" || pageType == "unlock")
+        } catch {
+            return false
+        }
     }
     
  // MARK: - 私有方法

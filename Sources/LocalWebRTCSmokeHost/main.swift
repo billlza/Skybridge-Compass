@@ -9,6 +9,7 @@ struct LocalWebRTCSmokeHost {
         let reporter = SmokeStatusReporter(statusURL: statusURL())
         reporter.reset()
         reporter.append("boot role=mac-host")
+        exportAuthContextIfRequested()
 
         let manager = CrossNetworkConnectionManager.shared
         await manager.disconnect()
@@ -121,6 +122,80 @@ struct LocalWebRTCSmokeHost {
             return nil
         }
         return URL(fileURLWithPath: raw)
+    }
+
+    private static func tokenURL() -> URL? {
+        guard let raw = ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_TOKEN_FILE"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else {
+            return nil
+        }
+        return URL(fileURLWithPath: raw)
+    }
+
+    private static func tenantURL() -> URL? {
+        guard let raw = ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_TENANT_FILE"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else {
+            return nil
+        }
+        return URL(fileURLWithPath: raw)
+    }
+
+    private static func exportAuthContextIfRequested() {
+        let accessToken = AuthenticationService.shared.currentAccessToken()?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if let tokenURL = tokenURL(), !accessToken.isEmpty {
+            try? writeText(accessToken, to: tokenURL)
+        }
+
+        let explicitTenant = ProcessInfo.processInfo.environment["SKYBRIDGE_TENANT_ID"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let effectiveTenant = !explicitTenant.isEmpty
+            ? explicitTenant
+            : (deriveTenantIdentifier(accessToken: accessToken) ?? "")
+        if let tenantURL = tenantURL(), !effectiveTenant.isEmpty {
+            try? writeText(effectiveTenant, to: tenantURL)
+        }
+    }
+
+    private static func deriveTenantIdentifier(accessToken: String) -> String? {
+        guard !accessToken.isEmpty else { return nil }
+        guard let payload = accessToken.split(separator: ".").dropFirst().first else {
+            return nil
+        }
+        var base64 = payload.replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        let remainder = base64.count % 4
+        if remainder != 0 {
+            base64.append(String(repeating: "=", count: 4 - remainder))
+        }
+        guard let data = Data(base64Encoded: base64),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        let appMetadata = object["app_metadata"] as? [String: Any]
+        let userMetadata = object["user_metadata"] as? [String: Any]
+        let candidates: [Any?] = [
+            appMetadata?["tenant_id"],
+            appMetadata?["tenantId"],
+            appMetadata?["org_id"],
+            appMetadata?["workspace_id"],
+            userMetadata?["tenant_id"],
+            userMetadata?["tenantId"],
+            userMetadata?["org_id"],
+            userMetadata?["workspace_id"],
+            object["tenant_id"],
+            object["tenantId"],
+            object["sub"]
+        ]
+        for candidate in candidates {
+            let value = String(describing: candidate ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if !value.isEmpty, value != "nil" {
+                return value
+            }
+        }
+        return nil
     }
 
     private static func writeText(_ text: String, to url: URL) throws {

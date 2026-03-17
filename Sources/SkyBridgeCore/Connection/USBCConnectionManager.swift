@@ -163,15 +163,19 @@ public final class USBCConnectionManager: ObservableObject {
                     return
                 }
 
-                defer { freeifaddrs(ifaddr) }
+                guard let first = ifaddr else {
+                    continuation.resume(returning: false)
+                    return
+                }
 
-                var current = ifaddr
-                while current != nil {
-                    let interface = current!.pointee
-                    guard let namePtr = interface.ifa_name else {
-                        current = current!.pointee.ifa_next
-                        continue
-                    }
+                defer { freeifaddrs(first) }
+
+                var current: UnsafeMutablePointer<ifaddrs>? = first
+                while let interfacePointer = current {
+                    let interface = interfacePointer.pointee
+                    current = interface.ifa_next
+
+                    guard let namePtr = interface.ifa_name else { continue }
  // 使用统一的 UTF8 安全解码替代已弃用的 String(cString:)
                     let name = decodeCString(namePtr)
 
@@ -181,8 +185,6 @@ public final class USBCConnectionManager: ObservableObject {
                         continuation.resume(returning: true)
                         return
                     }
-
-                    current = interface.ifa_next
                 }
 
                 continuation.resume(returning: false)
@@ -783,17 +785,16 @@ public final class USBCConnectionManager: ObservableObject {
     private func findInterface(named name: String) -> NWInterface? {
  // 使用系统调用查找接口
         var ifaddr: UnsafeMutablePointer<ifaddrs>?
-        guard getifaddrs(&ifaddr) == 0 else { return nil }
+        guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return nil }
 
-        defer { freeifaddrs(ifaddr) }
+        defer { freeifaddrs(first) }
 
-        var current = ifaddr
-        while current != nil {
-            let interface = current!.pointee
-            guard let namePtr = interface.ifa_name else {
-                current = current!.pointee.ifa_next
-                continue
-            }
+        var current: UnsafeMutablePointer<ifaddrs>? = first
+        while let interfacePointer = current {
+            let interface = interfacePointer.pointee
+            current = interface.ifa_next
+
+            guard let namePtr = interface.ifa_name else { continue }
  // 使用统一的 UTF8 安全解码替代已弃用的 String(cString:)
             let interfaceName = decodeCString(namePtr)
 
@@ -802,8 +803,6 @@ public final class USBCConnectionManager: ObservableObject {
  // 由于NWInterface的构造函数限制，我们返回nil让系统自动选择
                 return nil
             }
-
-            current = interface.ifa_next
         }
 
         return nil

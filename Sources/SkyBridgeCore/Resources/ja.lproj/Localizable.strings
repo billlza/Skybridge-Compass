@@ -29,7 +29,7 @@
 
 /* Smart Code */
 "connection.smartCode.title" = "スマート接続コード";
-"connection.smartCode.fullDescription" = "すべてのシナリオに対応する6桁の英数字コードを生成します。P2P直接接続とスマートリレーをサポート。";
+"connection.smartCode.fullDescription" = "すべてのシナリオに対応する短期英数字コードを生成します。P2P直接接続とスマートリレーをサポート。";
 "connection.smartCode.highlight" = "✨ 革新：ショートコード + スマートルーティング + 10分間有効";
 "connection.device.this" = "このデバイスで";
 "connection.smartCode.shareInstruction" = "このコードを共有して接続";
@@ -231,7 +231,7 @@
 
 /* Smart Code */
 "discovery.smartCode.title" = "スマート接続コード";
-"discovery.smartCode.description" = "6桁のショートコード、10分間有効、リモートアシスタンス用";
+"discovery.smartCode.description" = "短期コード、10分間有効、リモートアシスタンス用";
 "discovery.smartCode.onThisDevice" = "このデバイスで";
 "discovery.smartCode.shareInstruction" = "このコードを相手に共有してください";
 "discovery.smartCode.copy" = "コピー";
@@ -248,7 +248,7 @@
 "discovery.mode.subtitle.localScan" = "同ネットワーク";
 "discovery.mode.subtitle.qrCode" = "スキャン";
 "discovery.mode.subtitle.cloudLink" = "設定不要";
-"discovery.mode.subtitle.connectionCode" = "6桁コード";
+"discovery.mode.subtitle.connectionCode" = "短期コード";
 
 /* Cloud Link Section */
 "discovery.icloud.status.syncing" = "同期中...";
@@ -276,7 +276,7 @@
 "discovery.capability.messages" = "メッセージ";
 
 /* Smart Code Section (Additional) */
-"discovery.code.enterPrompt" = "6桁のコードを入力";
+"discovery.code.enterPrompt" = "接続コードを入力";
 "discovery.code.connect" = "接続";
 
 /* Settings - Network */

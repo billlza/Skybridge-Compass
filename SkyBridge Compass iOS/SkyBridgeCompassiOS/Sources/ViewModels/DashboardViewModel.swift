@@ -55,6 +55,14 @@ public class DashboardViewModel: ObservableObject {
     
     /// 系统性能状态
     @Published public var performanceStatus: PerformanceStatus = .excellent
+
+    /// 顶部主连接状态展示（唯一语义来源）
+    @Published public private(set) var topConnectionPresentation = ConnectionPresentation(
+        phase: .disconnected,
+        isConnected: false,
+        statusText: RuntimeLocalization.string("离线"),
+        detailText: nil
+    )
     
     /// 是否正在刷新
     @Published public var isRefreshing: Bool = false
@@ -188,13 +196,14 @@ public class DashboardViewModel: ObservableObject {
             }
             .store(in: &cancellables)
 
-        Publishers.CombineLatest3(
+        Publishers.CombineLatest4(
             crossNetworkManager.$state,
             crossNetworkManager.$readiness,
-            crossNetworkManager.$remoteDeviceId
+            crossNetworkManager.$remoteDeviceId,
+            crossNetworkManager.$activeSessionSnapshot
         )
         .receive(on: DispatchQueue.main)
-        .sink { [weak self] _, _, _ in
+        .sink { [weak self] _, _, _, _ in
             self?.updateMetrics()
         }
         .store(in: &cancellables)
@@ -211,6 +220,7 @@ public class DashboardViewModel: ObservableObject {
 
     private func updateNetworkStatus(isReachable: Bool) {
         networkStatus = isReachable ? .connected : .disconnected
+        updateConnectionPresentation()
     }
 
     private func updateMetrics() {
@@ -220,12 +230,17 @@ public class DashboardViewModel: ObservableObject {
         metrics.onlineDevices = discoveredDevices.count + (hasDistinctCrossNetworkPeer ? 1 : 0)
         metrics.activeSessions = activeConnections.count + (hasCrossNetworkSession ? 1 : 0)
         metrics.fileTransfers = FileTransferManager.instance.activeTransfers.count
+        updateConnectionPresentation()
     }
 
     private var isCrossNetworkSessionActive: Bool {
-        if case .connected = crossNetworkManager.state { return true }
-        if case .handshakeComplete = crossNetworkManager.readiness { return true }
-        return false
+        guard let snapshot = crossNetworkManager.activeSessionSnapshot else { return false }
+        switch snapshot.phase {
+        case .transportReady, .handshakeComplete, .reconnecting:
+            return true
+        case .connecting, .disconnecting:
+            return false
+        }
     }
 
     private var isCrossNetworkPeerAlreadyDiscovered: Bool {
@@ -249,6 +264,53 @@ public class DashboardViewModel: ObservableObject {
     private func stopAutoRefresh() {
         refreshTimer?.invalidate()
         refreshTimer = nil
+    }
+
+    private func updateConnectionPresentation() {
+        let latestPeerConnection = activeConnections
+            .sorted { $0.connectedAt > $1.connectedAt }
+            .first
+            .map { connection in
+                ConnectionPresentationPeer(
+                    displayName: connection.device.name,
+                    cryptoKind: nil,
+                    suite: P2PConnectionManager.instance.negotiatedSuiteByDeviceId[connection.device.id]?.rawValue,
+                    guardStatus: RuntimeLocalization.string("守护中"),
+                    connectedAt: connection.connectedAt
+                )
+            }
+
+        let disconnectedText = networkStatus == .disconnected
+            ? RuntimeLocalization.string("离线")
+            : RuntimeLocalization.string("在线")
+
+        let defaultPQCModeLabel: String?
+        switch SkyBridgeiOSCore.shared.cryptoProvider?.tier {
+        case .nativePQC?:
+            defaultPQCModeLabel = "Apple PQC"
+        case .liboqsPQC?:
+            defaultPQCModeLabel = "liboqs"
+        default:
+            defaultPQCModeLabel = nil
+        }
+
+        topConnectionPresentation = ConnectionPresentationContract.evaluate(
+            ConnectionPresentationInput(
+                labels: ConnectionPresentationLabels(
+                    connectedText: RuntimeLocalization.string("已连接"),
+                    disconnectedText: disconnectedText,
+                    connectingText: RuntimeLocalization.string("连接中"),
+                    reconnectingText: RuntimeLocalization.string("重连中"),
+                    defaultGuardStatus: RuntimeLocalization.string("守护中"),
+                    crossNetworkGuardStatus: RuntimeLocalization.string("跨网已连接")
+                ),
+                fileTransferActive: !FileTransferManager.instance.activeTransfers.isEmpty,
+                latestPeerConnection: latestPeerConnection,
+                latestConnectedDevice: nil,
+                activeSessionSnapshot: crossNetworkManager.activeSessionSnapshot,
+                defaultPQCModeLabel: defaultPQCModeLabel
+            )
+        )
     }
 }
 

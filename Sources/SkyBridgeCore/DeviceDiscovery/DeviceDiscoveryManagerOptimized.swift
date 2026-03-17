@@ -32,6 +32,9 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
  /// 中文说明：当启用TLS时，尝试在握手阶段通过验证回调获取协议与cipher suite，并发布到UI。
     @Published public var tlsHandshakeDetails: TLSHandshakeDetails? = nil
     @Published public var isScanning: Bool = false
+    /// `_skybridge._tcp` 入站控制通道广播由 `P2PDiscoveryService` 独占；
+    /// 本优化发现器默认只扫描，避免抢占 connection handler。
+    public var advertisesLocalSkyBridgeService: Bool = false
 
  // MARK: - 私有属性
 
@@ -205,10 +208,12 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             await self?.startBrowsersConcurrently()
         }
 
- // 异步启动广播（捕获服务类型，避免在后台线程读取 MainActor 隔离状态）
-        let serviceTypeForBroadcast = "_skybridge._tcp"
-        Task.detached(priority: .utility) { [weak self, serviceTypeForBroadcast] in
-            await self?.startAdvertisingBackground(serviceType: serviceTypeForBroadcast)
+ // `_skybridge._tcp` 广播由 P2PDiscoveryService 独占，避免监听器与入站处理权冲突。
+        if advertisesLocalSkyBridgeService {
+            let serviceTypeForBroadcast = "_skybridge._tcp"
+            Task.detached(priority: .utility) { [weak self, serviceTypeForBroadcast] in
+                await self?.startAdvertisingBackground(serviceType: serviceTypeForBroadcast)
+            }
         }
 
  // 扫描USB设备
@@ -1235,7 +1240,8 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                 defer { interface = interface?.pointee.ifa_next }
 
                 guard let ifa = interface?.pointee,
-                      String(decoding: Data(bytes: ifa.ifa_name, count: Int(strlen(ifa.ifa_name))), as: UTF8.self) == interfaceName,
+                      let name = decodeOptionalCString(ifa.ifa_name),
+                      name == interfaceName,
                       let addr = ifa.ifa_addr else {
                     continue
                 }

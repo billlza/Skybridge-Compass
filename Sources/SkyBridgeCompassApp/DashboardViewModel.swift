@@ -14,6 +14,12 @@ import Network
 final class DashboardViewModel: ObservableObject {
     @Published private(set) var metrics = DashboardMetrics()
     @Published private(set) var connectionStatus: ConnectionStatus = .disconnected
+    @Published private(set) var topConnectionPresentation = ConnectionPresentation(
+        phase: .disconnected,
+        isConnected: false,
+        statusText: LocalizationManager.shared.localizedString("status.disconnected"),
+        detailText: nil
+    )
     @Published private(set) var sessions: [RemoteSessionSummary] = []
     @Published private(set) var discoveredDevices: [DiscoveredDevice] = []
     @Published private(set) var transferTasks: [FileTransferTask] = []
@@ -47,8 +53,8 @@ final class DashboardViewModel: ObservableObject {
     var onNavigateToSettings: (() -> Void)?
 
  // 修改：避免重复初始化设备发现服务，使用单独的实例但检查是否已启动
-    private let discoveryService = DeviceDiscoveryService()
-    private let p2pDiscoveryService = P2PDiscoveryService()
+    private let discoveryService = DeviceDiscoveryService.shared
+    private let p2pDiscoveryService = P2PDiscoveryService.shared
     private let connectionManager = ConnectionManager()  // 添加连接管理器以支持USB设备扫描
     private let crossNetworkManager = CrossNetworkConnectionManager.shared
     private let usbcManager = USBCConnectionManager()    // 直接监听USB设备连接，计入在线设备
@@ -70,6 +76,8 @@ final class DashboardViewModel: ObservableObject {
     private var pendingUpdate: DispatchWorkItem? = nil
 
     private var cancellables = Set<AnyCancellable>()
+    private var presentationCancellables = Set<AnyCancellable>()
+    private var hasStartedServices = false
     private var isAuthenticated: Bool {
         tenantController.accessToken != nil
     }
@@ -89,6 +97,10 @@ final class DashboardViewModel: ObservableObject {
         ) { [weak self] _ in
             self?.openSettings()
         }
+    }
+
+    func bootstrapConnectionPresentationBindings() {
+        installConnectionPresentationBindingsIfNeeded()
     }
 
     deinit {
@@ -112,8 +124,10 @@ final class DashboardViewModel: ObservableObject {
 
  /// 根据当前认证状态启动各项后台服务。
     func start() async {
+        installConnectionPresentationBindingsIfNeeded()
+
  // 如果已经启动，只启动系统监控并返回
-        if !cancellables.isEmpty {
+        if hasStartedServices {
         #if DEBUG
         SkyBridgeLogger.ui.debugOnly("🔍 [DashboardViewModel] 服务已启动，仅启动系统监控")
         #endif
@@ -195,14 +209,14 @@ final class DashboardViewModel: ObservableObject {
 
         // 启动文件传输入站监听（iOS ↔ macOS 互传的最小闭环）
         do {
-            try fileTransferListener.start()
+            try await fileTransferListener.start()
         } catch {
             SkyBridgeLogger.ui.error("❌ 启动文件传输监听失败: \(error.localizedDescription, privacy: .public)")
         }
 
         // 启动 iPhone → Mac 远程桌面/控制服务（JPEG 流 + 输入注入）
         do {
-            try remoteControlServer.start()
+            try await remoteControlServer.start()
         } catch {
             SkyBridgeLogger.ui.error("❌ 启动远程控制服务失败: \(error.localizedDescription, privacy: .public)")
         }
@@ -317,102 +331,6 @@ final class DashboardViewModel: ObservableObject {
             .sink { [weak self] _ in self?.updateDashboardCounts() }
             .store(in: &cancellables)
 
-        // 监听连接状态（聚合：ConnectionManager + P2P（主动/被动） + 文件传输活动 + 统一在线设备连接态）
-        let base = Publishers.CombineLatest4(
-            connectionManager.$connectionStatus,
-            p2pDiscoveryService.$connectionStatus,
-            p2pDiscoveryService.$activeInboundSessions,
-            fileTransferService.$isTransferring
-        )
-
-        let presence = Publishers.CombineLatest(
-            ConnectionPresenceService.shared.$activeConnections,
-            ConnectionPresenceService.shared.$rekeyStatusByPeerId
-        )
-        
-        let unified = unifiedDeviceManager.$onlineDevices
-        
-        let crossNetwork = Publishers.CombineLatest3(
-            crossNetworkManager.$connectionStatus,
-            crossNetworkManager.$readiness,
-            crossNetworkManager.$currentConnection
-        )
-
-        Publishers.CombineLatest4(base, presence, unified, crossNetwork)
-            .receive(on: DispatchQueue.main)
-        .sink { [weak self] baseTuple, presenceTuple, unifiedDevices, crossTuple in
-                guard let self else { return }
-            let (baseStatus, p2pStatus, inboundCount, isTransferring) = baseTuple
-            let (presenceConnections, rekeyStatusByPeerId) = presenceTuple
-            let (crossStatus, crossReadiness, crossConnection) = crossTuple
-            let crossConnected = Self.isCrossNetworkConnected(
-                status: crossStatus,
-                readiness: crossReadiness
-            )
-            let crossSuite = Self.crossNetworkNegotiatedSuite(from: crossReadiness)
-
-            // 统一“顶部连接态”判定：
-            // 只把明确的实时连接态(.connected)视为已连接，避免历史/扫描信息导致假阳性。
-            let unifiedLinkedPeers = unifiedDevices.filter { device in
-                !device.isLocalDevice && device.connectionStatus == .connected
-            }
-
-            // Detail string for UX: show crypto + guard when present.
-            if let newest = presenceConnections.sorted(by: { $0.connectedAt > $1.connectedAt }).first {
-                if let rekey = rekeyStatusByPeerId[newest.id] {
-                    self.connectionDetail = "Rekey 中 · \(rekey.fromKind)·\(rekey.fromSuite) → \(rekey.toKind)·\(rekey.toSuite)"
-                } else {
-                    self.connectionDetail = ConnectionCryptoPresentation.detailText(
-                        kind: newest.cryptoKind,
-                        suite: newest.suite,
-                        guardStatus: "守护中"
-                    ) ?? newest.displayName
-                }
-            } else if let newestUnified = unifiedLinkedPeers.sorted(by: { ($0.lastConnectedAt ?? .distantPast) > ($1.lastConnectedAt ?? .distantPast) }).first {
-                self.connectionDetail = ConnectionCryptoPresentation.detailText(
-                    kind: newestUnified.lastCryptoKind,
-                    suite: newestUnified.lastCryptoSuite,
-                    guardStatus: newestUnified.guardStatus ?? "守护中"
-                ) ?? newestUnified.name
-            } else if crossConnected {
-                self.connectionDetail = ConnectionCryptoPresentation.detailText(
-                    kind: nil,
-                    suite: crossSuite,
-                    guardStatus: "跨网已连接"
-                ) ?? crossConnection?.deviceName ?? "跨网已连接"
-            } else {
-                self.connectionDetail = nil
-            }
-
-                // If we are actively transferring, treat as "connected" for top bar UX.
-                if isTransferring {
-                    self.connectionStatus = .connected
-                    return
-                }
-            if !presenceConnections.isEmpty {
-                self.connectionStatus = .connected
-                return
-            }
-            if !unifiedLinkedPeers.isEmpty {
-                self.connectionStatus = .connected
-                return
-            }
-                if crossConnected {
-                    self.connectionStatus = .connected
-                    return
-                }
-                if inboundCount > 0 {
-                    self.connectionStatus = .connected
-                    return
-                }
-                if baseStatus == .connected || p2pStatus == .connected {
-                    self.connectionStatus = .connected
-                    return
-                }
-                self.connectionStatus = .disconnected
-            }
-            .store(in: &cancellables)
-
         NotificationCenter.default.publisher(for: .skyBridgeIntentConnect)
             .compactMap { $0.userInfo?[SkyBridgeIntentPayloadKey.deviceName] as? String }
             .receive(on: DispatchQueue.main)
@@ -421,8 +339,6 @@ final class DashboardViewModel: ObservableObject {
                 Task { await self.handleSiriConnectRequest(targetName: target) }
             }
             .store(in: &cancellables)
-
-        await discoveryService.start()
         sessionService.bootstrap()
  // FileTransferManager 不需要prepare方法
  // 集中网络监控，订阅共享发布者
@@ -435,10 +351,224 @@ final class DashboardViewModel: ObservableObject {
                 self?.updateDashboardCounts()
             }
             .store(in: &cancellables)
+
+        hasStartedServices = true
+    }
+
+    private func synthesizedCrossNetworkSnapshot(
+        status: CrossNetworkConnectionManager.CrossNetworkConnectionStatus,
+        readiness: CrossNetworkConnectionManager.CrossNetworkReadiness,
+        activeSnapshot: ActiveSessionSnapshot?,
+        currentConnection: RemoteConnection?
+    ) -> ActiveSessionSnapshot? {
+        guard activeSnapshot == nil else { return nil }
+
+        switch readiness {
+        case .handshakeComplete(let sessionId, let negotiatedSuite):
+            return ActiveSessionSnapshot(
+                sessionId: sessionId,
+                source: .reused,
+                phase: .handshakeComplete,
+                deviceId: nil,
+                deviceName: currentConnection?.deviceName,
+                negotiatedSuite: negotiatedSuite
+            )
+        case .transportReady(let sessionId):
+            return ActiveSessionSnapshot(
+                sessionId: sessionId,
+                source: .reused,
+                phase: .transportReady,
+                deviceId: nil,
+                deviceName: currentConnection?.deviceName,
+                negotiatedSuite: nil
+            )
+        case .idle:
+            break
+        }
+
+        switch status {
+        case .connecting:
+            if let currentConnection {
+                return ActiveSessionSnapshot(
+                    sessionId: currentConnection.id,
+                    source: .reused,
+                    phase: .transportReady,
+                    deviceId: nil,
+                    deviceName: currentConnection.deviceName,
+                    negotiatedSuite: nil
+                )
+            }
+            return ActiveSessionSnapshot(
+                sessionId: "cross-network-pending",
+                source: .reused,
+                phase: .connecting,
+                deviceId: nil,
+                deviceName: nil,
+                negotiatedSuite: nil
+            )
+        case .connected:
+            return ActiveSessionSnapshot(
+                sessionId: currentConnection?.id ?? "cross-network-active",
+                source: .reused,
+                phase: .handshakeComplete,
+                deviceId: nil,
+                deviceName: currentConnection?.deviceName,
+                negotiatedSuite: nil
+            )
+        case .idle, .generating, .waiting, .failed:
+            return nil
+        }
+    }
+
+    private func installConnectionPresentationBindingsIfNeeded() {
+        guard presentationCancellables.isEmpty else { return }
+
+        let base = Publishers.CombineLatest4(
+            connectionManager.$connectionStatus,
+            p2pDiscoveryService.$connectionStatus,
+            p2pDiscoveryService.$activeInboundSessions,
+            fileTransferService.$isTransferring
+        )
+
+        let presence = Publishers.CombineLatest(
+            ConnectionPresenceService.shared.$activeConnections,
+            ConnectionPresenceService.shared.$rekeyStatusByPeerId
+        )
+
+        let unified = unifiedDeviceManager.$onlineDevices
+
+        let crossNetworkBase = Publishers.CombineLatest4(
+            crossNetworkManager.$connectionStatus,
+            crossNetworkManager.$readiness,
+            crossNetworkManager.$activeSessionSnapshot,
+            crossNetworkManager.$currentConnection
+        )
+        let crossNetwork = Publishers.CombineLatest(
+            crossNetworkBase,
+            crossNetworkManager.$signalingHealth
+        )
+
+        Publishers.CombineLatest4(base, presence, unified, crossNetwork)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] baseTuple, presenceTuple, unifiedDevices, crossNetworkTuple in
+                guard let self else { return }
+                let (baseStatus, p2pStatus, inboundCount, isTransferring) = baseTuple
+                let (presenceConnections, rekeyStatusByPeerId) = presenceTuple
+                let ((crossStatus, crossReadiness, crossSnapshot, crossConnection), crossSignalingHealth) = crossNetworkTuple
+
+                let unifiedLinkedPeers = unifiedDevices
+                    .filter { device in
+                        !device.isLocalDevice && device.connectionStatus == .connected
+                    }
+                    .sorted { ($0.lastConnectedAt ?? .distantPast) > ($1.lastConnectedAt ?? .distantPast) }
+
+                let activeCrossNetworkPresencePeerID: String? = {
+                    if let sessionId = crossSnapshot?.sessionId {
+                        return "cross-network:\(sessionId)"
+                    }
+                    if let sessionId = crossConnection?.id {
+                        return "cross-network:\(sessionId)"
+                    }
+                    return nil
+                }()
+
+                let filteredPresenceConnections = presenceConnections.filter { connection in
+                    guard let activeCrossNetworkPresencePeerID else { return true }
+                    return connection.id != activeCrossNetworkPresencePeerID
+                }
+
+                let latestPeerConnection: ConnectionPresentationPeer?
+                if let newest = filteredPresenceConnections.sorted(by: { $0.connectedAt > $1.connectedAt }).first {
+                    if let rekey = rekeyStatusByPeerId[newest.id] {
+                        latestPeerConnection = ConnectionPresentationPeer(
+                            displayName: newest.displayName,
+                            cryptoKind: "\(rekey.fromKind)·\(rekey.fromSuite) → \(rekey.toKind)·\(rekey.toSuite)",
+                            suite: nil,
+                            guardStatus: "Rekey 中",
+                            connectedAt: newest.connectedAt
+                        )
+                    } else {
+                        latestPeerConnection = ConnectionPresentationPeer(
+                            displayName: newest.displayName,
+                            cryptoKind: newest.cryptoKind,
+                            suite: newest.suite,
+                            guardStatus: "守护中",
+                            connectedAt: newest.connectedAt
+                        )
+                    }
+                } else if baseStatus == .connected || p2pStatus == .connected || inboundCount > 0 {
+                    latestPeerConnection = ConnectionPresentationPeer(
+                        displayName: "P2P",
+                        cryptoKind: nil,
+                        suite: nil,
+                        guardStatus: "守护中",
+                        connectedAt: Date()
+                    )
+                } else {
+                    latestPeerConnection = nil
+                }
+
+                let latestConnectedDevice = unifiedLinkedPeers.first.map { device in
+                    ConnectionPresentationPeer(
+                        displayName: device.name,
+                        cryptoKind: device.lastCryptoKind,
+                        suite: device.lastCryptoSuite,
+                        guardStatus: device.guardStatus ?? "守护中",
+                        connectedAt: device.lastConnectedAt ?? device.lastSeen
+                    )
+                }
+
+                let crossNetworkFallback = self.synthesizedCrossNetworkSnapshot(
+                    status: crossStatus,
+                    readiness: crossReadiness,
+                    activeSnapshot: crossSnapshot,
+                    currentConnection: crossConnection
+                )
+
+                let presentation = ConnectionPresentationContract.evaluate(
+                    ConnectionPresentationInput(
+                        labels: ConnectionPresentationLabels(
+                            connectedText: LocalizationManager.shared.localizedString("device.status.connected"),
+                            disconnectedText: LocalizationManager.shared.localizedString("status.disconnected"),
+                            connectingText: ConnectionStatus.connecting.displayName,
+                            reconnectingText: ConnectionStatus.reconnecting.displayName,
+                            defaultGuardStatus: "守护中",
+                            crossNetworkGuardStatus: "跨网已连接"
+                        ),
+                        fileTransferActive: isTransferring,
+                        latestPeerConnection: latestPeerConnection,
+                        latestConnectedDevice: latestConnectedDevice,
+                        activeSessionSnapshot: crossSnapshot,
+                        crossNetworkFallback: crossNetworkFallback,
+                        defaultPQCModeLabel: ConnectionCryptoPresentation.inferredModeLabelForCurrentPolicy(
+                            compatibilityModeEnabled: SettingsManager.shared.enableCompatibilityMode
+                        ),
+                        compatibilityModeEnabled: SettingsManager.shared.enableCompatibilityMode,
+                        signalingHealth: crossSignalingHealth
+                    )
+                )
+
+                self.topConnectionPresentation = presentation
+                self.connectionDetail = presentation.detailText
+
+                switch presentation.phase {
+                case .connected:
+                    self.connectionStatus = .connected
+                case .connecting:
+                    self.connectionStatus = .connecting
+                case .reconnecting:
+                    self.connectionStatus = .reconnecting
+                case .disconnected:
+                    self.connectionStatus = .disconnected
+                }
+            }
+            .store(in: &presentationCancellables)
     }
 
  /// 停止所有订阅并释放资源，通常在界面离开或退出登录时调用。
     func stop() {
+        hasStartedServices = false
+        presentationCancellables.removeAll()
         cancellables.removeAll()
         discoveryService.stop()
         p2pDiscoveryService.stopDiscovery()
@@ -892,10 +1022,17 @@ final class DashboardViewModel: ObservableObject {
             let connectedCount = self.deviceStats.connected
             let totalDevices = self.deviceStats.total
             let hasUnifiedConnectedPeer = self.onlineDevices.contains { !$0.isLocalDevice && $0.connectionStatus == .connected }
-            let hasCrossNetworkSession = Self.isCrossNetworkConnected(
-                status: self.crossNetworkManager.connectionStatus,
-                readiness: self.crossNetworkManager.readiness
-            )
+            let hasCrossNetworkSession: Bool
+            if let snapshot = self.crossNetworkManager.activeSessionSnapshot {
+                switch snapshot.phase {
+                case .transportReady, .handshakeComplete, .reconnecting:
+                    hasCrossNetworkSession = true
+                case .connecting, .disconnecting:
+                    hasCrossNetworkSession = false
+                }
+            } else {
+                hasCrossNetworkSession = false
+            }
             let crossNetworkPeerContribution = (hasCrossNetworkSession && !hasUnifiedConnectedPeer) ? 1 : 0
 
  // 兼容：如果统一设备列表为空，使用旧的计数逻辑
@@ -936,46 +1073,59 @@ final class DashboardViewModel: ObservableObject {
 
  // 获取本机IPv4地址（优先en0）
     private func currentIPv4Address() -> String? {
-        var addr: String?
-        var ifaddr: UnsafeMutablePointer<ifaddrs>? = nil
-        if getifaddrs(&ifaddr) == 0 {
-            var p = ifaddr
-            while p != nil {
-                let name = String(cString: p!.pointee.ifa_name)
-                if let sa = p!.pointee.ifa_addr, sa.pointee.sa_family == UInt8(AF_INET) {
-                    var hostBuf = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-                    getnameinfo(sa, socklen_t(sa.pointee.sa_len), &hostBuf, socklen_t(hostBuf.count), nil, 0, NI_NUMERICHOST)
-                    let ip = hostBuf.withUnsafeBufferPointer { ptr -> String in
-                        if let base = ptr.baseAddress, let s = String(validatingCString: base) { return s }
-                        return ""
-                    }
-                    if name == "en0" { addr = ip; break }
-                    if addr == nil { addr = ip }
-                }
-                p = p!.pointee.ifa_next
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddr) == 0, let first = ifaddr else {
+            return nil
+        }
+        defer { freeifaddrs(first) }
+
+        var discoveredAddress: String?
+        var current: UnsafeMutablePointer<ifaddrs>? = first
+
+        while let interfacePointer = current {
+            let interface = interfacePointer.pointee
+            defer { current = interface.ifa_next }
+
+            guard let namePtr = interface.ifa_name,
+                  let sa = interface.ifa_addr,
+                  sa.pointee.sa_family == UInt8(AF_INET) else {
+                continue
             }
-            freeifaddrs(ifaddr)
+
+            var hostBuf = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            guard getnameinfo(
+                sa,
+                socklen_t(sa.pointee.sa_len),
+                &hostBuf,
+                socklen_t(hostBuf.count),
+                nil,
+                0,
+                NI_NUMERICHOST
+            ) == 0 else {
+                continue
+            }
+
+            let ip = hostBuf.withUnsafeBufferPointer { ptr -> String in
+                guard let base = ptr.baseAddress,
+                      let value = String(validatingCString: base) else {
+                    return ""
+                }
+                return value
+            }
+            guard !ip.isEmpty else { continue }
+
+            let name = decodeCString(namePtr)
+            if name == "en0" {
+                return ip
+            }
+            if discoveredAddress == nil {
+                discoveredAddress = ip
+            }
         }
-        return addr
+
+        return discoveredAddress
     }
 
-    private static func isCrossNetworkConnected(
-        status: CrossNetworkConnectionManager.CrossNetworkConnectionStatus,
-        readiness: CrossNetworkConnectionManager.CrossNetworkReadiness
-    ) -> Bool {
-        if case .connected = status { return true }
-        if case .handshakeComplete = readiness { return true }
-        return false
-    }
-
-    private static func crossNetworkNegotiatedSuite(
-        from readiness: CrossNetworkConnectionManager.CrossNetworkReadiness
-    ) -> String? {
-        if case .handshakeComplete(_, let negotiatedSuite) = readiness {
-            return negotiatedSuite
-        }
-        return nil
-    }
 }
 
 struct DashboardMetrics {

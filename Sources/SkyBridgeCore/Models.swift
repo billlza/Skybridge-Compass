@@ -11,6 +11,8 @@ public struct AuthSession: Codable, Hashable, Sendable {
     public let refreshToken: String?
  /// 唯一的用户标识。
     public let userIdentifier: String
+ /// 规范化的 Nebula ID（若会话来源提供）。
+    public let nebulaId: String?
  /// 当前登录用户的展示名称。
     public let displayName: String
  /// 会话创建时间，便于判断过期策略。
@@ -19,11 +21,13 @@ public struct AuthSession: Codable, Hashable, Sendable {
     public init(accessToken: String,
                 refreshToken: String?,
                 userIdentifier: String,
+                nebulaId: String? = nil,
                 displayName: String,
                 issuedAt: Date = Date()) {
         self.accessToken = accessToken
         self.refreshToken = refreshToken
         self.userIdentifier = userIdentifier
+        self.nebulaId = nebulaId
         self.displayName = displayName
         self.issuedAt = issuedAt
     }

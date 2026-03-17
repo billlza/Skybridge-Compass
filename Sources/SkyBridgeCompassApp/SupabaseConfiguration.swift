@@ -79,8 +79,7 @@ public final class SupabaseConfiguration: ObservableObject {
             
             return SupabaseService.Configuration(
                 url: url,
-                anonKey: config.anonKey,
-                serviceRoleKey: config.serviceRoleKey
+                anonKey: config.anonKey
             )
         } catch {
             SkyBridgeLogger.ui.debugOnly("⚠️ 从 Keychain 加载失败: \(error.localizedDescription)")

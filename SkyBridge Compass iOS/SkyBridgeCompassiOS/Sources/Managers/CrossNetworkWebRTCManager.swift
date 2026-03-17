@@ -80,6 +80,18 @@ private enum CrossNetworkMerkleAuthCompat {
     }
 }
 
+private let currentPathWebRTCHandshakeMaxChunkBytes = 1024
+private let currentPathWebRTCHandshakeMaxPaddedPayloadBytes = (8 * 1024) - 4
+
+@available(iOS 17.0, *)
+private struct CurrentPathWebRTCHandshakeTransportCompat: DiscoveryTransport {
+    let sendFramed: @Sendable (Data) async throws -> Void
+
+    func send(to peer: PeerIdentifier, data: Data) async throws {
+        try await sendFramed(data)
+    }
+}
+
 @available(iOS 17.0, *)
 private enum CrossNetworkServerConfig {
     private static func environmentValue(_ name: String) -> String? {
@@ -130,8 +142,8 @@ private enum CrossNetworkServerConfig {
         ProcessInfo.processInfo.environment["SKYBRIDGE_CLIENT_API_KEY"] ?? "skybridge-client-v1"
     }
 
-    static func dynamicICEConfig() async -> WebRTCSession.ICEConfig {
-        let creds = await CrossNetworkTURNCredentialService.shared.getCredentials()
+    static func dynamicICEConfig(turnAdmissionToken: String?) async -> WebRTCSession.ICEConfig {
+        let creds = await CrossNetworkTURNCredentialService.shared.getCredentials(turnAdmissionToken: turnAdmissionToken)
         let turnUsername = normalizedValue(creds.username)
         let turnPassword = normalizedValue(creds.password)
         let turnURIs = preferredTurnURIs(from: creds.uris, fallback: turnURLs)
@@ -316,17 +328,53 @@ private struct CurrentPathHandshakeTrustProviderCompat: HandshakeTrustProvider, 
 
 @available(iOS 17.0, macOS 14.0, *)
 private actor SignalServerClientCompat {
+    struct AdmissionChallenge: Sendable, Equatable {
+        let challengeID: String
+        let nonce: String
+        let tenantID: String
+        let userID: String
+        let deviceID: String
+        let clientIPHash: String
+        let clientVersion: String
+        let protocolVersion: String
+        let state: String
+        let issuedAt: Date
+        let expiresAt: Date
+
+        func signaturePayload() -> Data {
+            Data([
+                "SkyBridge-Admission-Challenge",
+                challengeID,
+                nonce,
+                tenantID,
+                userID,
+                deviceID,
+                clientVersion,
+                protocolVersion
+            ].joined(separator: "\n").utf8)
+        }
+    }
+
+    struct AdmissionLease: Sendable, Equatable {
+        let token: String
+        let state: String
+        let issuedAt: Date
+        let expiresAt: Date
+    }
+
     struct SessionLease: Sendable, Equatable {
         let sessionID: String
-        let initiatorSignalingToken: String
+        let sessionToken: String
         let qrBootstrapToken: String
+        let turnAdmissionToken: String
         let expiresIn: TimeInterval
         let signalingServerOrigin: String
     }
 
     struct RedeemedSessionLease: Sendable, Equatable {
         let sessionID: String
-        let responderSignalingToken: String
+        let sessionToken: String
+        let turnAdmissionToken: String
         let expiresIn: TimeInterval
         let signalingServerOrigin: String
         let initiatorDeviceId: String
@@ -337,14 +385,16 @@ private actor SignalServerClientCompat {
     struct ConnectionCodeLease: Sendable, Equatable {
         let code: String
         let sessionID: String
-        let initiatorToken: String
+        let sessionToken: String
+        let turnAdmissionToken: String
         let expiresIn: TimeInterval
         let signalingServerOrigin: String
     }
 
     struct ConnectionCodeLookup: Sendable, Equatable {
         let sessionID: String
-        let responderToken: String
+        let sessionToken: String
+        let turnAdmissionToken: String
         let expiresIn: TimeInterval
         let signalingServerOrigin: String
         let initiatorDeviceId: String
@@ -356,6 +406,8 @@ private actor SignalServerClientCompat {
     enum ClientError: LocalizedError {
         case invalidBaseURL
         case invalidResponse
+        case missingAuthentication
+        case missingTenantID
         case serverRejected(Int, String)
         case malformedResponse(String)
 
@@ -365,6 +417,10 @@ private actor SignalServerClientCompat {
                 return "信令服务器地址无效"
             case .invalidResponse:
                 return "信令服务器返回了非 HTTP 响应"
+            case .missingAuthentication:
+                return "缺少上游登录态，无法申请 admission"
+            case .missingTenantID:
+                return "缺少租户标识，无法访问当前租户的公网能力"
             case .serverRejected(let status, let body):
                 return "信令服务器拒绝请求 (\(status)): \(body)"
             case .malformedResponse(let reason):
@@ -373,18 +429,56 @@ private actor SignalServerClientCompat {
         }
     }
 
-    private struct RegisterSessionRequestBody: Encodable {
-        let sessionId: String?
+    private struct AdmissionChallengeRequestBody: Encodable {
         let deviceId: String
         let protocolSigningAlgorithm: String
         let protocolPublicKeyFingerprint: String
+        let clientVersion: String
+        let protocolVersion: String
+    }
+
+    private struct AdmissionChallengeResponseBody: Decodable {
+        let challengeId: String
+        let nonce: String
+        let tenantId: String
+        let userId: String
+        let deviceId: String
+        let clientIpHash: String
+        let clientVersion: String
+        let protocolVersion: String
+        let state: String
+        let issuedAt: Int64
+        let expiresAt: Int64
+    }
+
+    private struct AdmissionRequestBody: Encodable {
+        let challengeId: String
+        let signature: Data
+        let deviceId: String
+        let protocolSigningAlgorithm: String
+        let protocolPublicKeyFingerprint: String
+        let protocolPublicKeyBytes: Data
+        let clientVersion: String
+        let protocolVersion: String
+    }
+
+    private struct AdmissionResponseBody: Decodable {
+        let admissionToken: String
+        let state: String
+        let issuedAt: Int64
+        let expiresAt: Int64
+    }
+
+    private struct RegisterSessionRequestBody: Encodable {
+        let sessionId: String?
         let ttlSeconds: Int
     }
 
     private struct RegisterSessionResponseBody: Decodable {
         let sessionId: String
-        let initiatorSignalingToken: String
+        let sessionToken: String
         let qrBootstrapToken: String
+        let turnAdmissionToken: String
         let expiresIn: Int
         let signalingServerOrigin: String
     }
@@ -392,14 +486,12 @@ private actor SignalServerClientCompat {
     private struct RedeemSessionRequestBody: Encodable {
         let sessionId: String
         let qrBootstrapToken: String
-        let deviceId: String
-        let protocolSigningAlgorithm: String
-        let protocolPublicKeyFingerprint: String
     }
 
     private struct RedeemSessionResponseBody: Decodable {
         let sessionId: String
-        let responderSignalingToken: String
+        let sessionToken: String
+        let turnAdmissionToken: String
         let expiresIn: Int
         let signalingServerOrigin: String
         let initiatorDeviceId: String
@@ -408,17 +500,15 @@ private actor SignalServerClientCompat {
     }
 
     private struct RegisterCodeRequestBody: Encodable {
-        let deviceId: String
         let deviceName: String
-        let protocolSigningAlgorithm: String
-        let protocolPublicKeyFingerprint: String
         let ttlSeconds: Int
     }
 
     private struct RegisterCodeResponseBody: Decodable {
         let code: String
         let sessionId: String
-        let initiatorToken: String
+        let sessionToken: String
+        let turnAdmissionToken: String
         let expiresIn: Int
         let signalingServerOrigin: String
     }
@@ -426,7 +516,8 @@ private actor SignalServerClientCompat {
     private struct LookupCodeResponseBody: Decodable {
         let found: Bool
         let sessionId: String
-        let responderToken: String
+        let sessionToken: String
+        let turnAdmissionToken: String
         let expiresIn: Int
         let signalingServerOrigin: String
         let initiatorDeviceId: String
@@ -441,48 +532,108 @@ private actor SignalServerClientCompat {
         self.urlSession = urlSession
     }
 
-    func registerSession(binding: ProtocolIdentityBindingCompat, validDuration: TimeInterval) async throws -> SessionLease {
-        let body = RegisterSessionRequestBody(
-            sessionId: nil,
+    func requestAdmissionChallenge(binding: ProtocolIdentityBindingCompat) async throws -> AdmissionChallenge {
+        let body = AdmissionChallengeRequestBody(
             deviceId: binding.deviceId,
             protocolSigningAlgorithm: binding.protocolSigningAlgorithm.rawValue,
             protocolPublicKeyFingerprint: binding.protocolPublicKeyFingerprint,
+            clientVersion: clientVersion(),
+            protocolVersion: protocolVersion()
+        )
+        let response: AdmissionChallengeResponseBody = try await performJSONRequest(
+            path: "/api/webrtc/admission/challenge",
+            method: "POST",
+            body: try JSONEncoder().encode(body),
+            requiresUserAuthentication: true
+        )
+        return AdmissionChallenge(
+            challengeID: response.challengeId,
+            nonce: response.nonce,
+            tenantID: response.tenantId,
+            userID: response.userId,
+            deviceID: response.deviceId,
+            clientIPHash: response.clientIpHash,
+            clientVersion: response.clientVersion,
+            protocolVersion: response.protocolVersion,
+            state: response.state,
+            issuedAt: Date(timeIntervalSince1970: TimeInterval(response.issuedAt) / 1000),
+            expiresAt: Date(timeIntervalSince1970: TimeInterval(response.expiresAt) / 1000)
+        )
+    }
+
+    func completeAdmission(
+        challenge: AdmissionChallenge,
+        binding: ProtocolIdentityBindingCompat,
+        signature: Data
+    ) async throws -> AdmissionLease {
+        let body = AdmissionRequestBody(
+            challengeId: challenge.challengeID,
+            signature: signature,
+            deviceId: binding.deviceId,
+            protocolSigningAlgorithm: binding.protocolSigningAlgorithm.rawValue,
+            protocolPublicKeyFingerprint: binding.protocolPublicKeyFingerprint,
+            protocolPublicKeyBytes: binding.protocolPublicKeyBytes,
+            clientVersion: challenge.clientVersion,
+            protocolVersion: challenge.protocolVersion
+        )
+        let response: AdmissionResponseBody = try await performJSONRequest(
+            path: "/api/webrtc/admission",
+            method: "POST",
+            body: try JSONEncoder().encode(body),
+            requiresUserAuthentication: true
+        )
+        return AdmissionLease(
+            token: response.admissionToken,
+            state: response.state,
+            issuedAt: Date(timeIntervalSince1970: TimeInterval(response.issuedAt) / 1000),
+            expiresAt: Date(timeIntervalSince1970: TimeInterval(response.expiresAt) / 1000)
+        )
+    }
+
+    func registerSession(
+        admissionToken: String,
+        sessionId: String? = nil,
+        validDuration: TimeInterval
+    ) async throws -> SessionLease {
+        let body = RegisterSessionRequestBody(
+            sessionId: sessionId,
             ttlSeconds: max(60, Int(validDuration.rounded()))
         )
         let response: RegisterSessionResponseBody = try await performJSONRequest(
             path: "/api/webrtc/register-session",
             method: "POST",
-            body: try JSONEncoder().encode(body)
+            body: try JSONEncoder().encode(body),
+            extraHeaders: ["X-SkyBridge-Admission": admissionToken]
         )
         return SessionLease(
             sessionID: response.sessionId,
-            initiatorSignalingToken: response.initiatorSignalingToken,
+            sessionToken: response.sessionToken,
             qrBootstrapToken: response.qrBootstrapToken,
+            turnAdmissionToken: response.turnAdmissionToken,
             expiresIn: TimeInterval(response.expiresIn),
             signalingServerOrigin: response.signalingServerOrigin
         )
     }
 
     func redeemSession(
+        admissionToken: String,
         sessionId: String,
-        qrBootstrapToken: String,
-        binding: ProtocolIdentityBindingCompat
+        qrBootstrapToken: String
     ) async throws -> RedeemedSessionLease {
         let body = RedeemSessionRequestBody(
             sessionId: sessionId,
-            qrBootstrapToken: qrBootstrapToken,
-            deviceId: binding.deviceId,
-            protocolSigningAlgorithm: binding.protocolSigningAlgorithm.rawValue,
-            protocolPublicKeyFingerprint: binding.protocolPublicKeyFingerprint
+            qrBootstrapToken: qrBootstrapToken
         )
         let response: RedeemSessionResponseBody = try await performJSONRequest(
             path: "/api/webrtc/redeem-session",
             method: "POST",
-            body: try JSONEncoder().encode(body)
+            body: try JSONEncoder().encode(body),
+            extraHeaders: ["X-SkyBridge-Admission": admissionToken]
         )
         return RedeemedSessionLease(
             sessionID: response.sessionId,
-            responderSignalingToken: response.responderSignalingToken,
+            sessionToken: response.sessionToken,
+            turnAdmissionToken: response.turnAdmissionToken,
             expiresIn: TimeInterval(response.expiresIn),
             signalingServerOrigin: response.signalingServerOrigin,
             initiatorDeviceId: response.initiatorDeviceId,
@@ -492,49 +643,45 @@ private actor SignalServerClientCompat {
     }
 
     func registerConnectionCode(
-        binding: ProtocolIdentityBindingCompat,
+        admissionToken: String,
         deviceName: String,
         validDuration: TimeInterval
     ) async throws -> ConnectionCodeLease {
         let body = RegisterCodeRequestBody(
-            deviceId: binding.deviceId,
             deviceName: deviceName,
-            protocolSigningAlgorithm: binding.protocolSigningAlgorithm.rawValue,
-            protocolPublicKeyFingerprint: binding.protocolPublicKeyFingerprint,
             ttlSeconds: max(60, Int(validDuration.rounded()))
         )
         let response: RegisterCodeResponseBody = try await performJSONRequest(
             path: "/api/webrtc/register-code",
             method: "POST",
-            body: try JSONEncoder().encode(body)
+            body: try JSONEncoder().encode(body),
+            extraHeaders: ["X-SkyBridge-Admission": admissionToken]
         )
         return ConnectionCodeLease(
             code: response.code,
             sessionID: response.sessionId,
-            initiatorToken: response.initiatorToken,
+            sessionToken: response.sessionToken,
+            turnAdmissionToken: response.turnAdmissionToken,
             expiresIn: TimeInterval(response.expiresIn),
             signalingServerOrigin: response.signalingServerOrigin
         )
     }
 
-    func lookupConnectionCode(code: String, binding: ProtocolIdentityBindingCompat) async throws -> ConnectionCodeLookup {
+    func lookupConnectionCode(admissionToken: String, code: String) async throws -> ConnectionCodeLookup {
         let response: LookupCodeResponseBody = try await performJSONRequest(
             path: "/api/webrtc/lookup/\(code.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? code)",
-            queryItems: [
-                URLQueryItem(name: "deviceId", value: binding.deviceId),
-                URLQueryItem(name: "protocolSigningAlgorithm", value: binding.protocolSigningAlgorithm.rawValue),
-                URLQueryItem(name: "protocolPublicKeyFingerprint", value: binding.protocolPublicKeyFingerprint)
-            ]
+            extraHeaders: ["X-SkyBridge-Admission": admissionToken]
         )
         guard response.found else {
             throw ClientError.serverRejected(404, "code_not_found")
         }
-        guard !response.responderToken.isEmpty else {
-            throw ClientError.malformedResponse("missing responderToken")
+        guard !response.sessionToken.isEmpty else {
+            throw ClientError.malformedResponse("missing sessionToken")
         }
         return ConnectionCodeLookup(
             sessionID: response.sessionId,
-            responderToken: response.responderToken,
+            sessionToken: response.sessionToken,
+            turnAdmissionToken: response.turnAdmissionToken,
             expiresIn: TimeInterval(response.expiresIn),
             signalingServerOrigin: response.signalingServerOrigin,
             initiatorDeviceId: response.initiatorDeviceId,
@@ -549,6 +696,9 @@ private actor SignalServerClientCompat {
         method: String = "GET",
         queryItems: [URLQueryItem] = [],
         body: Data? = nil
+        ,
+        requiresUserAuthentication: Bool = false,
+        extraHeaders: [String: String] = [:]
     ) async throws -> Response {
         guard var components = URLComponents(string: CrossNetworkServerConfig.signalingServerURL) else {
             throw ClientError.invalidBaseURL
@@ -568,9 +718,26 @@ private actor SignalServerClientCompat {
         if !apiKey.isEmpty {
             request.setValue(apiKey, forHTTPHeaderField: "X-API-Key")
         }
+        let tenantID = currentTenantID().trimmingCharacters(in: .whitespacesAndNewlines)
+        if requiresUserAuthentication && tenantID.isEmpty {
+            throw ClientError.missingTenantID
+        }
+        if !tenantID.isEmpty {
+            request.setValue(tenantID, forHTTPHeaderField: "X-SkyBridge-Tenant-Id")
+        }
+        if requiresUserAuthentication {
+            let bearerToken = try await validAccessToken().trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !bearerToken.isEmpty else {
+                throw ClientError.missingAuthentication
+            }
+            request.setValue("Bearer \(bearerToken)", forHTTPHeaderField: "Authorization")
+        }
         if let body {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.httpBody = body
+        }
+        for (field, value) in extraHeaders {
+            request.setValue(value, forHTTPHeaderField: field)
         }
 
         let (data, response) = try await urlSession.data(for: request)
@@ -586,6 +753,125 @@ private actor SignalServerClientCompat {
         } catch {
             throw ClientError.malformedResponse(error.localizedDescription)
         }
+    }
+
+    private func currentTenantID() -> String {
+        let explicitTenantID = ProcessInfo.processInfo.environment["SKYBRIDGE_TENANT_ID"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !explicitTenantID.isEmpty {
+            return explicitTenantID
+        }
+        let envAccessToken = ProcessInfo.processInfo.environment["SKYBRIDGE_ACCESS_TOKEN"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !envAccessToken.isEmpty,
+           let derived = deriveTenantIdentifier(accessToken: envAccessToken),
+           !derived.isEmpty {
+            return derived
+        }
+        if let session = KeychainManager.shared.loadAuthSession(),
+           !session.userIdentifier.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return session.userIdentifier
+        }
+        return ""
+    }
+
+    private func clientVersion() -> String {
+        if let value = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String {
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty { return trimmed }
+        }
+        return "0.0.0"
+    }
+
+    private func protocolVersion() -> String {
+        let value = ProcessInfo.processInfo.environment["SKYBRIDGE_PROTOCOL_VERSION"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return value.isEmpty ? "1" : value
+    }
+
+    private func validAccessToken(forceRefresh: Bool = false) async throws -> String {
+        let envAccessToken = ProcessInfo.processInfo.environment["SKYBRIDGE_ACCESS_TOKEN"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !envAccessToken.isEmpty {
+            return envAccessToken
+        }
+        guard let session = KeychainManager.shared.loadAuthSession(),
+              session.accessToken != "pending_verification",
+              !session.accessToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw ClientError.missingAuthentication
+        }
+
+        guard let refreshToken = session.refreshToken?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !refreshToken.isEmpty else {
+            return session.accessToken
+        }
+
+        if !forceRefresh && !shouldRefreshAccessToken(session.accessToken) {
+            return session.accessToken
+        }
+
+        let refreshed = try await SupabaseService.shared.refreshSession(refreshToken: refreshToken)
+        let merged = AuthSession(
+            accessToken: refreshed.accessToken,
+            refreshToken: refreshed.refreshToken ?? session.refreshToken,
+            userIdentifier: session.userIdentifier,
+            displayName: session.displayName,
+            email: session.email,
+            avatarURL: session.avatarURL,
+            nebulaId: session.nebulaId,
+            issuedAt: Date()
+        )
+        try? KeychainManager.shared.storeAuthSession(merged)
+        return merged.accessToken
+    }
+
+    private func shouldRefreshAccessToken(_ token: String, skewSeconds: TimeInterval = 300) -> Bool {
+        guard let claims = decodeJWTClaims(token),
+              let exp = claims["exp"] as? TimeInterval else {
+            return false
+        }
+        let expiryDate = Date(timeIntervalSince1970: exp)
+        return expiryDate.timeIntervalSinceNow <= skewSeconds
+    }
+
+    private func decodeJWTClaims(_ token: String) -> [String: Any]? {
+        let parts = token.split(separator: ".")
+        guard parts.count >= 2 else { return nil }
+        var base64 = String(parts[1])
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        let remainder = base64.count % 4
+        if remainder != 0 {
+            base64.append(String(repeating: "=", count: 4 - remainder))
+        }
+        guard let data = Data(base64Encoded: base64) else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    }
+
+    private func deriveTenantIdentifier(accessToken: String) -> String? {
+        guard let claims = decodeJWTClaims(accessToken) else { return nil }
+        let appMetadata = claims["app_metadata"] as? [String: Any]
+        let userMetadata = claims["user_metadata"] as? [String: Any]
+        let candidates: [Any?] = [
+            appMetadata?["tenant_id"],
+            appMetadata?["tenantId"],
+            appMetadata?["org_id"],
+            appMetadata?["workspace_id"],
+            userMetadata?["tenant_id"],
+            userMetadata?["tenantId"],
+            userMetadata?["org_id"],
+            userMetadata?["workspace_id"],
+            claims["tenant_id"],
+            claims["tenantId"],
+            claims["sub"]
+        ]
+        for candidate in candidates {
+            let value = String(describing: candidate ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if !value.isEmpty, value != "nil" {
+                return value
+            }
+        }
+        return nil
     }
 }
 
@@ -618,10 +904,10 @@ private actor CrossNetworkTURNCredentialService {
         let mode: String?
     }
 
-    func getCredentials() async -> TURNCredentials {
+    func getCredentials(turnAdmissionToken: String?) async -> TURNCredentials {
         if let cached, cached.isValid(buffer: buffer) { return cached }
         do {
-            let fresh = try await fetchFromServer()
+            let fresh = try await fetchFromServer(turnAdmissionToken: turnAdmissionToken)
             self.cached = fresh
             return fresh
         } catch {
@@ -630,7 +916,7 @@ private actor CrossNetworkTURNCredentialService {
         }
     }
 
-    private func fetchFromServer() async throws -> TURNCredentials {
+    private func fetchFromServer(turnAdmissionToken: String?) async throws -> TURNCredentials {
         guard let url = URL(string: "\(CrossNetworkServerConfig.signalingServerURL)/api/turn/credentials") else {
             throw URLError(.badURL)
         }
@@ -638,6 +924,10 @@ private actor CrossNetworkTURNCredentialService {
         req.httpMethod = "GET"
         req.setValue("application/json", forHTTPHeaderField: "Accept")
         req.setValue(CrossNetworkServerConfig.clientAPIKey, forHTTPHeaderField: "X-API-Key")
+        if let turnAdmissionToken = turnAdmissionToken?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !turnAdmissionToken.isEmpty {
+            req.setValue(turnAdmissionToken, forHTTPHeaderField: "X-SkyBridge-Turn-Admission")
+        }
         if let deviceId = resolvedDeviceIdentifier() {
             req.setValue(deviceId, forHTTPHeaderField: "X-Device-Id")
         }
@@ -742,8 +1032,12 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     @Published public private(set) var remoteDeviceId: String?
     @Published public private(set) var localConnectionCode: String?
     @Published public private(set) var currentConnectLink: String?
+    @Published public private(set) var activeSessionSnapshot: ActiveSessionSnapshot?
     private static let shortCodeAlphabet = Array("ABCDEFGHJKLMNPQRSTUVWXYZ23456789")
     private static let shortCodeAllowedCharacters = Set(shortCodeAlphabet)
+    public static let legacyConnectionCodeLength = 6
+    public static let preferredConnectionCodeLength = 8
+    public static let maximumConnectionCodeLength = 16
     
     private var signaling: WebSocketSignalingClient?
     private var signalingShardKey: String?
@@ -763,20 +1057,35 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     private var handshakeStartedSessionIds: Set<String> = []
     private var rekeyInProgressSessionIds: Set<String> = []
     private var rekeyCompletedSessionIds: Set<String> = []
+    private var inboundRekeyResponderSessionIds: Set<String> = []
     private var strictPQCRequestedBySessionId: [String: Bool] = [:]
     private var lastPairingIdentityExchangeSentAtByPeerId: [String: Date] = [:]
     private var connectionCodeBootstrapTask: Task<Void, Never>?
     private var localConnectionSessionId: String?
+    private var activeSessionReconnectTimeoutTask: Task<Void, Never>?
     private var webrtcSignalingAuthTokenBySessionId: [String: String] = [:]
+    private var webrtcTurnAdmissionTokenBySessionId: [String: String] = [:]
     private var latestLocalOfferBySessionId: [String: String] = [:]
     private var latestLocalAnswerBySessionId: [String: String] = [:]
     private var localICECandidatesBySessionId: [String: [WebRTCSignalingEnvelope.Payload]] = [:]
     private var joinHeartbeatTask: Task<Void, Never>?
     private var offerResendTask: Task<Void, Never>?
     private var remoteDesktopHeartbeatTask: Task<Void, Never>?
+    private var remotePeerPingTask: Task<Void, Never>?
+    private var remotePeerLivenessWatchdogTask: Task<Void, Never>?
+    private var remoteAppActivityAtBySessionId: [String: Date] = [:]
+    private var nextRemotePeerPingID: UInt64 = 1
     
     // File transfer waiters (transferId|op|chunkIndex -> continuation)
     private var fileTransferWaiters: [String: CheckedContinuation<CrossNetworkFileTransferMessage, Error>] = [:]
+
+    private struct SessionSnapshotMetadata: Sendable {
+        let snapshotToken: UUID
+        let source: ActiveSessionSnapshotSource
+        let deviceId: String?
+        let deviceName: String?
+    }
+    private var sessionSnapshotMetadataBySessionId: [String: SessionSnapshotMetadata] = [:]
 
     private struct InboundFileTransferState {
         let transferId: String
@@ -828,6 +1137,180 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     public var isHandshakeComplete: Bool {
         if case .handshakeComplete = readiness { return true }
         return false
+    }
+
+    @discardableResult
+    private func prepareSessionSnapshotMetadata(
+        sessionId: String,
+        source: ActiveSessionSnapshotSource,
+        deviceId: String?,
+        deviceName: String?
+    ) -> SessionSnapshotMetadata {
+        let metadata = SessionSnapshotMetadata(
+            snapshotToken: UUID(),
+            source: source,
+            deviceId: deviceId,
+            deviceName: deviceName
+        )
+        sessionSnapshotMetadataBySessionId[sessionId] = metadata
+        return metadata
+    }
+
+    @discardableResult
+    private func activatePreparedSessionSnapshot(
+        sessionId: String,
+        phase: ActiveSessionSnapshotPhase,
+        negotiatedSuite: String? = nil
+    ) -> UUID? {
+        guard let metadata = sessionSnapshotMetadataBySessionId[sessionId] else { return nil }
+        activeSessionReconnectTimeoutTask?.cancel()
+        activeSessionSnapshot = ActiveSessionSnapshotContract.activate(
+            sessionId: sessionId,
+            source: metadata.source,
+            phase: phase,
+            deviceId: metadata.deviceId,
+            deviceName: metadata.deviceName,
+            negotiatedSuite: negotiatedSuite,
+            snapshotToken: metadata.snapshotToken
+        )
+        return metadata.snapshotToken
+    }
+
+    private func updatePreparedSessionSnapshot(
+        sessionId: String,
+        phase: ActiveSessionSnapshotPhase,
+        deviceId: String? = nil,
+        deviceName: String? = nil,
+        negotiatedSuite: String? = nil,
+        snapshotToken: UUID? = nil
+    ) {
+        let token = snapshotToken ?? sessionSnapshotMetadataBySessionId[sessionId]?.snapshotToken
+        guard let token else { return }
+        activeSessionReconnectTimeoutTask?.cancel()
+        activeSessionSnapshot = ActiveSessionSnapshotContract.update(
+            current: activeSessionSnapshot,
+            sessionId: sessionId,
+            snapshotToken: token,
+            phase: phase,
+            deviceId: deviceId,
+            deviceName: deviceName,
+            negotiatedSuite: negotiatedSuite
+        )
+    }
+
+    private func applyActiveSessionDisconnect(
+        sessionId: String,
+        kind: SessionDisconnectKind,
+        snapshotToken: UUID? = nil
+    ) {
+        let token = snapshotToken ?? sessionSnapshotMetadataBySessionId[sessionId]?.snapshotToken
+        guard let token else { return }
+
+        let nextSnapshot = ActiveSessionSnapshotContract.disconnect(
+            current: activeSessionSnapshot,
+            sessionId: sessionId,
+            snapshotToken: token,
+            kind: kind
+        )
+        activeSessionSnapshot = nextSnapshot
+
+        switch kind {
+        case .transient:
+            if let nextSnapshot {
+                scheduleActiveSessionReconnectTimeout(for: nextSnapshot)
+            }
+        case .explicit, .remoteLeave:
+            activeSessionReconnectTimeoutTask?.cancel()
+            sessionSnapshotMetadataBySessionId.removeValue(forKey: sessionId)
+        }
+    }
+
+    private func scheduleActiveSessionReconnectTimeout(for snapshot: ActiveSessionSnapshot) {
+        activeSessionReconnectTimeoutTask?.cancel()
+        activeSessionReconnectTimeoutTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            try? await Task.sleep(for: .seconds(5))
+            guard let current = self.activeSessionSnapshot,
+                  current.snapshotToken == snapshot.snapshotToken,
+                  current.phase == .reconnecting else {
+                return
+            }
+            self.activeSessionSnapshot = nil
+            self.sessionSnapshotMetadataBySessionId.removeValue(forKey: snapshot.sessionId)
+        }
+    }
+
+    private func noteRemoteAppActivity(sessionId: String) {
+        remoteAppActivityAtBySessionId[sessionId] = Date()
+    }
+
+    private func startRemotePeerPingLoop(sessionId: String, session: WebRTCSession) {
+        remotePeerPingTask?.cancel()
+        remotePeerPingTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                guard self.currentSessionId == sessionId, self.session != nil else { break }
+                guard case .connected(let activeSessionId) = self.state, activeSessionId == sessionId else {
+                    try? await Task.sleep(for: .milliseconds(250))
+                    continue
+                }
+                guard self.sessionKeys != nil else {
+                    try? await Task.sleep(for: .milliseconds(250))
+                    continue
+                }
+                if self.rekeyInProgressSessionIds.contains(sessionId) {
+                    try? await Task.sleep(for: .milliseconds(250))
+                    continue
+                }
+
+                let pingId = self.nextRemotePeerPingID
+                self.nextRemotePeerPingID &+= 1
+
+                do {
+                    try await self.sendAppMessageOverWebRTC(
+                        .ping(.init(id: pingId)),
+                        sessionId: sessionId,
+                        session: session,
+                        label: "tx/webrtc-ping"
+                    )
+                } catch {
+                    SkyBridgeLogger.shared.debug("ℹ️ WebRTC ping send failed: \(error.localizedDescription)")
+                    break
+                }
+
+                try? await Task.sleep(for: .seconds(2))
+            }
+        }
+    }
+
+    private func startRemotePeerLivenessWatchdog(sessionId: String) {
+        remotePeerLivenessWatchdogTask?.cancel()
+        remotePeerLivenessWatchdogTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let timeoutSeconds: TimeInterval = 8.0
+            while !Task.isCancelled {
+                guard self.currentSessionId == sessionId, self.session != nil else { break }
+                guard case .connected(let activeSessionId) = self.state, activeSessionId == sessionId else {
+                    try? await Task.sleep(for: .milliseconds(250))
+                    continue
+                }
+
+                let lastActivityAt = self.remoteAppActivityAtBySessionId[sessionId] ?? .distantPast
+                if Date().timeIntervalSince(lastActivityAt) > timeoutSeconds {
+                    let msg = "远端连接已失活"
+                    SkyBridgeLogger.shared.warning("⚠️ WebRTC remote peer timeout: session=\(sessionId)")
+                    self.lastError = msg
+                    self.applyActiveSessionDisconnect(sessionId: sessionId, kind: .transient)
+                    await self.disconnect(clearSnapshot: false)
+                    self.lastError = msg
+                    self.state = .failed(msg)
+                    self.readiness = .idle
+                    break
+                }
+
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
     }
 
     private func currentPathLocalBinding() throws -> ProtocolIdentityBindingCompat {
@@ -887,6 +1370,16 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         }
         return claimed
     }
+
+    private func requestAdmissionLease(for binding: ProtocolIdentityBindingCompat) async throws -> SignalServerClientCompat.AdmissionLease {
+        let challenge = try await signalServer.requestAdmissionChallenge(binding: binding)
+        let signatureKeyTag = "CrossNetwork.CurrentPath.Authority.Ed25519"
+        guard let privateKey = KeychainManager.shared.loadCurve25519SigningPrivateKey(tag: signatureKeyTag) else {
+            throw NSError(domain: "CrossNetworkWebRTCManager", code: 14, userInfo: [NSLocalizedDescriptionKey: "missing current-path signing key"])
+        }
+        let signature = try privateKey.signature(for: challenge.signaturePayload())
+        return try await signalServer.completeAdmission(challenge: challenge, binding: binding, signature: signature)
+    }
     
     public func connect(fromScannedString string: String) async {
         do {
@@ -900,19 +1393,21 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         }
     }
     
-    /// 通过 6 位智能连接码连接（与 macOS 侧“智能连接码”保持一致）
+    /// 通过智能连接码连接（与 macOS 侧共享同一字母表与长度语义）
     /// - Note: 当前实现直接把 code 当作 WebRTC sessionId（同 signaling room）。
     public func connect(withCode rawCode: String) async {
         do {
             let code = try normalizeConnectionCode(rawCode)
             let localBinding = try currentPathLocalBinding()
-            let lookup = try await signalServer.lookupConnectionCode(code: code, binding: localBinding)
+            let admission = try await requestAdmissionLease(for: localBinding)
+            let lookup = try await signalServer.lookupConnectionCode(admissionToken: admission.token, code: code)
             _ = try validateCurrentPathOrigin(lookup.signalingServerOrigin)
             try enforceCurrentPathTrustBinding(
                 deviceId: lookup.initiatorDeviceId,
                 protocolPublicKeyFingerprint: lookup.initiatorProtocolPublicKeyFingerprint
             )
-            webrtcSignalingAuthTokenBySessionId[lookup.sessionID] = lookup.responderToken
+            webrtcSignalingAuthTokenBySessionId[lookup.sessionID] = lookup.sessionToken
+            webrtcTurnAdmissionTokenBySessionId[lookup.sessionID] = lookup.turnAdmissionToken
             currentPathSignalingOriginBySessionId[lookup.sessionID] = lookup.signalingServerOrigin
             currentPathExpectedRemoteAuthorityBySessionId[lookup.sessionID] = CurrentPathRemoteAuthorityCompat(
                 deviceId: lookup.initiatorDeviceId,
@@ -925,6 +1420,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
                 sessionId: lookup.sessionID,
                 remoteName: lookup.initiatorDeviceName,
                 remotePeerDeviceId: lookup.initiatorDeviceId,
+                source: .code,
                 role: .answerer
             )
         } catch {
@@ -936,7 +1432,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     }
 
     /// 生成本机连接码并等待对端（例如 macOS）输入连接。
-    /// - Returns: 6 位连接码；失败时返回 `nil` 且更新 `state/.failed`。
+    /// - Returns: 服务端签发的短期连接码；失败时返回 `nil` 且更新 `state/.failed`。
     @discardableResult
     public func generateConnectionCode() async -> String? {
         if let existing = localConnectionCode,
@@ -951,17 +1447,19 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         }
         do {
             let localBinding = try currentPathLocalBinding()
+            let admission = try await requestAdmissionLease(for: localBinding)
             #if canImport(UIKit)
             let localDeviceName = UIDevice.current.name
             #else
             let localDeviceName = Host.current().localizedName ?? "Apple Device"
             #endif
             let lease = try await signalServer.registerConnectionCode(
-                binding: localBinding,
+                admissionToken: admission.token,
                 deviceName: localDeviceName,
                 validDuration: 600
             )
-            webrtcSignalingAuthTokenBySessionId[lease.sessionID] = lease.initiatorToken
+            webrtcSignalingAuthTokenBySessionId[lease.sessionID] = lease.sessionToken
+            webrtcTurnAdmissionTokenBySessionId[lease.sessionID] = lease.turnAdmissionToken
             currentPathSignalingOriginBySessionId[lease.sessionID] = lease.signalingServerOrigin
             localConnectionCode = lease.code
             localConnectionSessionId = lease.sessionID
@@ -977,7 +1475,13 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
                       self.localConnectionSessionId == lease.sessionID,
                       self.currentRole == .offerer else { return }
                 do {
-                    try await self.connect(sessionId: lease.sessionID, remoteName: nil, remotePeerDeviceId: nil, role: .offerer)
+                    try await self.connect(
+                        sessionId: lease.sessionID,
+                        remoteName: nil,
+                        remotePeerDeviceId: nil,
+                        source: .code,
+                        role: .offerer
+                    )
                     self.localConnectionCode = lease.code
                     self.localConnectionSessionId = lease.sessionID
                 } catch is CancellationError {
@@ -1008,14 +1512,19 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     public func generateConnectLink(validDuration: TimeInterval = 300) async -> String? {
         do {
             let localBinding = try currentPathLocalBinding()
+            let admission = try await requestAdmissionLease(for: localBinding)
             #if canImport(UIKit)
             let localDeviceName = UIDevice.current.name
             #else
             let localDeviceName = Host.current().localizedName ?? "Apple Device"
             #endif
-            let lease = try await signalServer.registerSession(binding: localBinding, validDuration: validDuration)
+            let lease = try await signalServer.registerSession(
+                admissionToken: admission.token,
+                validDuration: validDuration
+            )
             _ = try validateCurrentPathOrigin(lease.signalingServerOrigin)
-            webrtcSignalingAuthTokenBySessionId[lease.sessionID] = lease.initiatorSignalingToken
+            webrtcSignalingAuthTokenBySessionId[lease.sessionID] = lease.sessionToken
+            webrtcTurnAdmissionTokenBySessionId[lease.sessionID] = lease.turnAdmissionToken
             currentPathSignalingOriginBySessionId[lease.sessionID] = lease.signalingServerOrigin
 
             let signatureKeyTag = "CrossNetwork.CurrentPath.Authority.Ed25519"
@@ -1075,7 +1584,13 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             connectionCodeBootstrapTask = Task { @MainActor [weak self] in
                 guard let self else { return }
                 do {
-                    try await self.connect(sessionId: lease.sessionID, remoteName: nil, remotePeerDeviceId: nil, role: .offerer)
+                    try await self.connect(
+                        sessionId: lease.sessionID,
+                        remoteName: nil,
+                        remotePeerDeviceId: nil,
+                        source: .code,
+                        role: .offerer
+                    )
                 } catch is CancellationError {
                 } catch {
                     self.lastError = error.localizedDescription
@@ -1093,7 +1608,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         }
     }
     
-    public func disconnect() async {
+    public func disconnect(clearSnapshot: Bool = true) async {
         if let signaling {
             await signaling.close()
         }
@@ -1119,15 +1634,22 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         offerResendTask = nil
         remoteDesktopHeartbeatTask?.cancel()
         remoteDesktopHeartbeatTask = nil
+        remotePeerPingTask?.cancel()
+        remotePeerPingTask = nil
+        remotePeerLivenessWatchdogTask?.cancel()
+        remotePeerLivenessWatchdogTask = nil
         latestLocalOfferBySessionId.removeAll()
         latestLocalAnswerBySessionId.removeAll()
         localICECandidatesBySessionId.removeAll()
         webrtcSignalingAuthTokenBySessionId.removeAll()
+        webrtcTurnAdmissionTokenBySessionId.removeAll()
         currentPathExpectedRemoteAuthorityBySessionId.removeAll()
         currentPathSignalingOriginBySessionId.removeAll()
+        remoteAppActivityAtBySessionId.removeAll()
         handshakeStartedSessionIds.removeAll()
         rekeyInProgressSessionIds.removeAll()
         rekeyCompletedSessionIds.removeAll()
+        inboundRekeyResponderSessionIds.removeAll()
         strictPQCRequestedBySessionId.removeAll()
         lastPairingIdentityExchangeSentAtByPeerId.removeAll()
         failAllFileTransferWaiters(FileTransferWaitError.cancelled)
@@ -1138,6 +1660,12 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         inboundQueue = nil
         receiveTask?.cancel()
         receiveTask = nil
+        if clearSnapshot {
+            activeSessionReconnectTimeoutTask?.cancel()
+            activeSessionReconnectTimeoutTask = nil
+            activeSessionSnapshot = nil
+            sessionSnapshotMetadataBySessionId.removeAll()
+        }
         state = .idle
         readiness = .idle
     }
@@ -1159,7 +1687,27 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         }
         var queryItems = components.queryItems ?? []
         queryItems.removeAll { $0.name == "shard" }
+        queryItems.removeAll { $0.name == "st" }
+        queryItems.removeAll { $0.name == "cv" }
+        queryItems.removeAll { $0.name == "pv" }
         queryItems.append(URLQueryItem(name: "shard", value: shardKey))
+        if let token = webrtcSignalingAuthTokenBySessionId[shardKey]?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !token.isEmpty {
+            queryItems.append(URLQueryItem(name: "st", value: token))
+        }
+        if let envVersion = ProcessInfo.processInfo.environment["SKYBRIDGE_CLIENT_VERSION"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !envVersion.isEmpty {
+            queryItems.append(URLQueryItem(name: "cv", value: envVersion))
+        } else if let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String {
+            let trimmed = version.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                queryItems.append(URLQueryItem(name: "cv", value: trimmed))
+            }
+        }
+        let protocolVersion = ProcessInfo.processInfo.environment["SKYBRIDGE_PROTOCOL_VERSION"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "1"
+        queryItems.append(URLQueryItem(name: "pv", value: protocolVersion.isEmpty ? "1" : protocolVersion))
         components.queryItems = queryItems
         return components.url ?? wsURL
     }
@@ -1183,6 +1731,11 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             await newSignaling.setOnEnvelope { [weak self] env in
                 Task { @MainActor in
                     self?.handleEnvelope(env)
+                }
+            }
+            await newSignaling.setOnServerFrame { [weak self] frame in
+                Task { @MainActor in
+                    self?.handleServerFrame(frame)
                 }
             }
             await newSignaling.connect()
@@ -1240,6 +1793,20 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         } catch {
             lastError = "信令发送失败: \(error.localizedDescription)"
         }
+    }
+
+    private func handleServerFrame(_ frame: WebSocketSignalingClient.SignalingServerFrame) {
+        guard frame.isError else { return }
+        let sessionId = frame.sessionId?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let reason = frame.error ?? "unknown_signaling_error"
+        SkyBridgeLogger.shared.error("❌ signaling server rejected frame: session=\(sessionId ?? "-") error=\(reason)")
+
+        if let sessionId, currentSessionId == sessionId {
+            applyActiveSessionDisconnect(sessionId: sessionId, kind: .transient)
+        }
+        lastError = "Signaling error: \(reason)"
+        state = .failed(lastError ?? "Signaling error")
+        readiness = .idle
     }
 
     private func stopJoinHeartbeat() {
@@ -1620,28 +2187,62 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         var errorDescription: String? {
             switch self {
             case .invalid:
-                return "连接码无效（需要 6 位字母数字）"
+                return "连接码无效（需要 8 位，兼容 6 位旧码）"
             }
         }
     }
-    
-    private func normalizeConnectionCode(_ raw: String) throws -> String {
-        let code = String(
+
+    public static func sanitizeConnectionCodeInput(_ raw: String) -> String {
+        String(
             raw
                 .uppercased()
-                .filter { Self.shortCodeAllowedCharacters.contains($0) }
+                .filter { shortCodeAllowedCharacters.contains($0) }
+                .prefix(maximumConnectionCodeLength)
         )
-        guard code.count == 6 else { throw ConnectionCodeError.invalid }
+    }
+
+    public static func isSupportedConnectionCodeLength(_ count: Int) -> Bool {
+        count == legacyConnectionCodeLength || (preferredConnectionCodeLength...maximumConnectionCodeLength).contains(count)
+    }
+
+    public static func canSubmitConnectionCode(_ raw: String) -> Bool {
+        isSupportedConnectionCodeLength(sanitizeConnectionCodeInput(raw).count)
+    }
+
+    nonisolated static func canonicalPQCRekeyElectionDeviceId(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        guard !trimmed.lowercased().hasPrefix("webrtc-") else { return nil }
+        return trimmed.lowercased()
+    }
+
+    nonisolated static func shouldInitiatePQCRekey(localDeviceId: String?, remoteDeviceId: String?) -> Bool? {
+        guard let local = canonicalPQCRekeyElectionDeviceId(localDeviceId),
+              let remote = canonicalPQCRekeyElectionDeviceId(remoteDeviceId) else {
+            return nil
+        }
+        guard local != remote else { return nil }
+        return local.lexicographicallyPrecedes(remote)
+    }
+    
+    private func normalizeConnectionCode(_ raw: String) throws -> String {
+        let code = Self.sanitizeConnectionCodeInput(raw)
+        guard Self.isSupportedConnectionCodeLength(code.count) else { throw ConnectionCodeError.invalid }
         return code
     }
 
     private static func generateShortCode() -> String {
-        String((0..<6).compactMap { _ in shortCodeAlphabet.randomElement() })
+        String((0..<preferredConnectionCodeLength).compactMap { _ in shortCodeAlphabet.randomElement() })
+    }
+
+    public static func isConnectLinkString(_ raw: String) -> Bool {
+        extractConnectPayloadString(from: raw.trimmingCharacters(in: .whitespacesAndNewlines)) != nil
     }
     
     private func parseSkybridgeConnectLink(_ string: String) async throws -> DynamicQRCodeData {
         let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let payload = extractConnectPayload(from: trimmed) else {
+        guard let payload = Self.extractConnectPayloadString(from: trimmed) else {
             throw ConnectLinkError.invalidFormat
         }
 
@@ -1657,10 +2258,11 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             throw ConnectLinkError.invalidSignature
         }
         let localBinding = try currentPathLocalBinding()
+        let admission = try await requestAdmissionLease(for: localBinding)
         let redeemed = try await signalServer.redeemSession(
+            admissionToken: admission.token,
             sessionId: qr.sessionID,
-            qrBootstrapToken: qr.qrBootstrapToken,
-            binding: localBinding
+            qrBootstrapToken: qr.qrBootstrapToken
         )
         _ = try validateCurrentPathOrigin(redeemed.signalingServerOrigin)
         guard redeemed.initiatorDeviceId == qr.deviceID,
@@ -1672,7 +2274,8 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             deviceId: qr.deviceID,
             protocolPublicKeyFingerprint: qr.protocolPublicKeyFingerprint
         )
-        webrtcSignalingAuthTokenBySessionId[qr.sessionID] = redeemed.responderSignalingToken
+        webrtcSignalingAuthTokenBySessionId[qr.sessionID] = redeemed.sessionToken
+        webrtcTurnAdmissionTokenBySessionId[qr.sessionID] = redeemed.turnAdmissionToken
         currentPathSignalingOriginBySessionId[qr.sessionID] = redeemed.signalingServerOrigin
         currentPathExpectedRemoteAuthorityBySessionId[qr.sessionID] = CurrentPathRemoteAuthorityCompat(
             deviceId: qr.deviceID,
@@ -1689,7 +2292,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         try JSONDecoder().decode(DynamicQRCodeData.self, from: jsonData)
     }
 
-    private func extractConnectPayload(from raw: String) -> String? {
+    private static func extractConnectPayloadString(from raw: String) -> String? {
         let prefix = "skybridge://connect/"
         if raw.hasPrefix(prefix) {
             return String(raw.dropFirst(prefix.count))
@@ -1848,6 +2451,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             sessionId: qr.sessionID,
             remoteName: qr.deviceName,
             remotePeerDeviceId: qr.deviceID,
+            source: .qr,
             role: .answerer
         )
     }
@@ -1856,6 +2460,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         sessionId: String,
         remoteName: String?,
         remotePeerDeviceId: String?,
+        source: ActiveSessionSnapshotSource,
         role: WebRTCSession.Role
     ) async throws {
         if signaling != nil || session != nil || currentSessionId != nil {
@@ -1870,6 +2475,13 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         remoteDeviceName = remoteName
         remoteDeviceId = remotePeerDeviceId
         currentRole = role
+        prepareSessionSnapshotMetadata(
+            sessionId: sessionId,
+            source: source,
+            deviceId: remotePeerDeviceId,
+            deviceName: remoteName
+        )
+        activatePreparedSessionSnapshot(sessionId: sessionId, phase: .connecting)
         if role != .offerer {
             localConnectionCode = nil
             localConnectionSessionId = nil
@@ -1880,6 +2492,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         do {
             wsURL = try signalingURL(shardKey: sessionId)
         } catch {
+            applyActiveSessionDisconnect(sessionId: sessionId, kind: .explicit)
             state = .failed("信令服务 URL 无效")
             readiness = .idle
             throw error
@@ -1893,6 +2506,11 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
                 self?.handleEnvelope(env)
             }
         }
+        await signaling.setOnServerFrame { [weak self] frame in
+            Task { @MainActor in
+                self?.handleServerFrame(frame)
+            }
+        }
         
         await signaling.connect()
         
@@ -1901,7 +2519,9 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
 
         // SECURITY: Never hardcode TURN credentials in the client app.
         // Use short-lived TURN REST credentials fetched from backend (with safe fallback).
-        let ice = await CrossNetworkServerConfig.dynamicICEConfig()
+        let ice = await CrossNetworkServerConfig.dynamicICEConfig(
+            turnAdmissionToken: webrtcTurnAdmissionTokenBySessionId[sessionId]
+        )
         
         let s = WebRTCSession(sessionId: sessionId, localDeviceId: localId, role: role, ice: ice)
         self.session = s
@@ -1972,7 +2592,8 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
                 guard self.currentSessionId == sessionId else { return }
                 let msg = "WebRTC 传输已断开: \(reason)"
                 self.lastError = msg
-                await self.disconnect()
+                self.applyActiveSessionDisconnect(sessionId: sessionId, kind: .transient)
+                await self.disconnect(clearSnapshot: false)
                 self.lastError = msg
                 self.state = .failed(msg)
                 self.readiness = .idle
@@ -1986,6 +2607,12 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
                 self.stopJoinHeartbeat()
                 self.stopOfferResendLoop()
                 self.readiness = .transportReady(sessionId: sessionId)
+                self.updatePreparedSessionSnapshot(
+                    sessionId: sessionId,
+                    phase: .transportReady,
+                    deviceId: self.remoteDeviceId,
+                    deviceName: self.remoteDeviceName
+                )
                 SkyBridgeLogger.shared.info("✅ WebRTC transport ready: session=\(sessionId), role=\(String(describing: role))")
 
                 // DataChannel opened; start handshake once per session.
@@ -2026,6 +2653,11 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         if remoteDeviceId == nil || remoteDeviceId?.hasPrefix("webrtc-") == true {
             remoteDeviceId = env.from
             handshakePeerId = env.from
+            updatePreparedSessionSnapshot(
+                sessionId: env.sessionId,
+                phase: .connecting,
+                deviceId: env.from
+            )
         }
         
         switch env.type {
@@ -2065,6 +2697,10 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         case .leave:
             stopJoinHeartbeat()
             stopOfferResendLoop()
+            applyActiveSessionDisconnect(sessionId: env.sessionId, kind: .remoteLeave)
+            Task { @MainActor [weak self] in
+                await self?.disconnect(clearSnapshot: false)
+            }
         }
     }
 }
@@ -2736,50 +3372,18 @@ private extension CrossNetworkWebRTCManager {
         session: WebRTCSession,
         inbound: InboundChunkQueue
     ) async {
-        let webRTCHandshakeMaxChunkBytes = 1024
-        let webRTCHandshakeMaxPaddedPayloadBytes = (8 * 1024) - 4
-
-        struct FramedWebRTCTransport: DiscoveryTransport {
-            let sendFramed: @Sendable (Data) async throws -> Void
-            func send(to peer: PeerIdentifier, data: Data) async throws { try await sendFramed(data) }
-        }
-        
-        @Sendable func sendFramed(_ data: Data) async throws {
-            let rawHandshake = HandshakePadding.unwrapIfNeeded(data, label: "tx/webrtc")
-            let tunedHandshake = HandshakePadding.wrapIfEnabled(
-                rawHandshake,
-                label: "tx/webrtc",
-                maxTotalBytes: webRTCHandshakeMaxPaddedPayloadBytes
-            )
-            if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
-                if let messageA = try? HandshakeMessageA.decode(from: rawHandshake) {
-                    let suites = messageA.supportedSuites.map(\.rawValue).joined(separator: ",")
-                    if let identity = try? messageA.decodedIdentityPublicKeys() {
-                        self.appendSmokeTrace(
-                            "tx messageA suites=\(suites) alg=\(identity.protocolAlgorithm.rawValue) pk=\(identity.protocolPublicKey.count)"
-                        )
-                    } else {
-                        self.appendSmokeTrace("tx messageA suites=\(suites) alg=unknown pk=0")
-                    }
-                    print("🧪 WebRTC rekey tx MessageA raw=\(rawHandshake.count) padded=\(tunedHandshake.count) suites=\(suites)")
-                } else if (try? HandshakeFinished.decode(from: rawHandshake)) != nil {
-                    print("🧪 WebRTC rekey tx Finished raw=\(rawHandshake.count) padded=\(tunedHandshake.count)")
-                }
-            }
-            try await session.sendFramedPayloadAsync(
-                tunedHandshake,
-                maxChunkBytes: webRTCHandshakeMaxChunkBytes,
-                maxBufferedAmountBytes: 0
-            )
-        }
-        
         do {
             let compatibilityModeEnabled = UserDefaults.standard.bool(forKey: "Settings.EnableCompatibilityMode")
             let strictPQCRequested = shouldRequestStrictPQC(compatibilityModeEnabled: compatibilityModeEnabled)
             strictPQCRequestedBySessionId[sessionId] = strictPQCRequested
             let capability = CryptoProviderFactory.detectCapability()
             var peerIdCandidates: [String] = []
-            for raw in [peerDeviceId, remoteDeviceId, handshakePeerId] {
+            for raw in [
+                currentPathExpectedRemoteAuthorityBySessionId[sessionId]?.deviceId,
+                peerDeviceId,
+                remoteDeviceId,
+                handshakePeerId
+            ] {
                 guard let id = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !id.isEmpty else { continue }
                 if !peerIdCandidates.contains(id) {
                     peerIdCandidates.append(id)
@@ -2826,7 +3430,7 @@ private extension CrossNetworkWebRTCManager {
                 "compatMode=\(compatibilityModeEnabled), hasApplePQC=\(capability.hasApplePQC), hasLiboqs=\(capability.hasLiboqs), " +
                 "peer=\(peerDeviceId), trustedKEM=\(hasTrustedPeerKEMKey), trustPeer=\(trustLookupPeerId)"
             )
-            let transport = FramedWebRTCTransport(sendFramed: { data in try await sendFramed(data) })
+            let transport = makeHandshakeTransport(over: session)
             let peer = PeerIdentifier(deviceId: peerDeviceId)
             let currentPathTrustProvider = CurrentPathHandshakeTrustProviderCompat(
                 expectedRemoteAuthority: currentPathExpectedRemoteAuthorityBySessionId[sessionId],
@@ -2899,6 +3503,16 @@ private extension CrossNetworkWebRTCManager {
                     sessionId: sessionId,
                     negotiatedSuite: keys.negotiatedSuite.rawValue
                 )
+                self.noteRemoteAppActivity(sessionId: sessionId)
+                self.startRemotePeerPingLoop(sessionId: sessionId, session: session)
+                self.startRemotePeerLivenessWatchdog(sessionId: sessionId)
+                self.updatePreparedSessionSnapshot(
+                    sessionId: sessionId,
+                    phase: .handshakeComplete,
+                    deviceId: self.remoteDeviceId,
+                    deviceName: self.remoteDeviceName,
+                    negotiatedSuite: keys.negotiatedSuite.rawValue
+                )
             }
             self.persistCurrentPathTrust(sessionId: sessionId)
             SkyBridgeLogger.shared.info(
@@ -2952,6 +3566,7 @@ private extension CrossNetworkWebRTCManager {
             SkyBridgeLogger.shared.error("❌ WebRTC 握手失败（DataChannel） session=\(sessionId): \(reason)")
             await MainActor.run {
                 self.lastError = "WebRTC 握手失败: \(reason)"
+                self.applyActiveSessionDisconnect(sessionId: sessionId, kind: .explicit)
                 self.state = .failed(self.lastError ?? "WebRTC handshake failed")
                 self.readiness = .idle
                 self.handshakeDriver = nil
@@ -3003,6 +3618,187 @@ private extension CrossNetworkWebRTCManager {
             }
         }
         return error.localizedDescription
+    }
+
+    private func resolvedPQCRekeyElectionRemoteDeviceId(
+        sessionId: String,
+        peerDeviceId: String
+    ) -> String? {
+        for raw in [
+            currentPathExpectedRemoteAuthorityBySessionId[sessionId]?.deviceId,
+            remoteDeviceId,
+            handshakePeerId,
+            peerDeviceId
+        ] {
+            guard let raw else { continue }
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard Self.canonicalPQCRekeyElectionDeviceId(trimmed) != nil else { continue }
+            return trimmed
+        }
+        return nil
+    }
+
+    private func sendHandshakeFrameOverWebRTC(
+        _ data: Data,
+        over session: WebRTCSession
+    ) async throws {
+        let rawHandshake = HandshakePadding.unwrapIfNeeded(data, label: "tx/webrtc")
+        let tunedHandshake = HandshakePadding.wrapIfEnabled(
+            rawHandshake,
+            label: "tx/webrtc",
+            maxTotalBytes: currentPathWebRTCHandshakeMaxPaddedPayloadBytes
+        )
+        if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
+            if let messageA = try? HandshakeMessageA.decode(from: rawHandshake) {
+                let suites = messageA.supportedSuites.map(\.rawValue).joined(separator: ",")
+                appendSmokeTrace("tx messageA suites=\(suites) raw=\(rawHandshake.count)")
+                print("🧪 WebRTC rekey tx MessageA raw=\(rawHandshake.count) padded=\(tunedHandshake.count) suites=\(suites)")
+            } else if let messageB = try? HandshakeMessageB.decode(from: rawHandshake) {
+                appendSmokeTrace("tx messageB suite=\(messageB.selectedSuite.rawValue) raw=\(rawHandshake.count)")
+                print("🧪 WebRTC rekey tx MessageB raw=\(rawHandshake.count) padded=\(tunedHandshake.count) suite=\(messageB.selectedSuite.rawValue)")
+            } else if (try? HandshakeFinished.decode(from: rawHandshake)) != nil {
+                appendSmokeTrace("tx finished raw=\(rawHandshake.count)")
+                print("🧪 WebRTC rekey tx Finished raw=\(rawHandshake.count) padded=\(tunedHandshake.count)")
+            }
+        }
+        try await session.sendFramedPayloadAsync(
+            tunedHandshake,
+            maxChunkBytes: currentPathWebRTCHandshakeMaxChunkBytes,
+            maxBufferedAmountBytes: 0
+        )
+    }
+
+    private func makeHandshakeTransport(
+        over session: WebRTCSession
+    ) -> CurrentPathWebRTCHandshakeTransportCompat {
+        CurrentPathWebRTCHandshakeTransportCompat(
+            sendFramed: { [weak self] data in
+                guard let self else { return }
+                try await self.sendHandshakeFrameOverWebRTC(data, over: session)
+            }
+        )
+    }
+
+    private func ensureInboundPQCRekeyDriverIfNeeded(
+        sessionId: String,
+        frame: Data,
+        peer: PeerIdentifier,
+        session: WebRTCSession,
+        strictPQCRequested: Bool
+    ) async -> HandshakeDriver? {
+        guard currentSessionId == sessionId else { return nil }
+        if inboundRekeyResponderSessionIds.contains(sessionId) {
+            return handshakeDriver
+        }
+        guard handshakeDriver == nil else { return nil }
+        guard sessionKeys != nil else { return nil }
+        guard let messageA = try? HandshakeMessageA.decode(from: frame),
+              !messageA.supportedSuites.isEmpty else {
+            return nil
+        }
+
+        let hasPQCGroup = messageA.supportedSuites.contains { $0.isPQCGroup }
+        let selection: CryptoProviderFactory.SelectionPolicy = {
+            if hasPQCGroup {
+                return strictPQCRequested ? .requirePQC : .preferPQC
+            }
+            return .classicOnly
+        }()
+
+        var fallbackPeerIDs: [String] = []
+        for raw in [
+            peer.deviceId,
+            remoteDeviceId,
+            handshakePeerId,
+            currentPathExpectedRemoteAuthorityBySessionId[sessionId]?.deviceId
+        ] {
+            guard let raw else { continue }
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            if !fallbackPeerIDs.contains(trimmed) {
+                fallbackPeerIDs.append(trimmed)
+            }
+        }
+
+        do {
+            try await SkyBridgeiOSCore.shared.initialize(policy: selection)
+            let trustProvider = CurrentPathHandshakeTrustProviderCompat(
+                expectedRemoteAuthority: currentPathExpectedRemoteAuthorityBySessionId[sessionId],
+                fallbackPeerIDs: fallbackPeerIDs
+            )
+            let driver = try SkyBridgeiOSCore.shared.createHandshakeDriver(
+                transport: makeHandshakeTransport(over: session),
+                trustProvider: hasPQCGroup ? nil : trustProvider
+            )
+            handshakeDriver = driver
+        } catch {
+            SkyBridgeLogger.shared.warning(
+                "⚠️ inbound WebRTC rekey driver 初始化失败: session=\(sessionId), err=\(error.localizedDescription)"
+            )
+            return nil
+        }
+
+        inboundRekeyResponderSessionIds.insert(sessionId)
+        rekeyInProgressSessionIds.insert(sessionId)
+        lastRekeyEvent = "received peer=\(peer.deviceId)"
+        SkyBridgeLogger.shared.info(
+            "🔁 收到对端 WebRTC rekey 请求，切换 responder: session=\(sessionId), peer=\(peer.deviceId), suites=\(messageA.supportedSuites.map(\.rawValue).joined(separator: ","))"
+        )
+        return handshakeDriver
+    }
+
+    private func syncInboundPQCRekeyState(sessionId: String) async {
+        guard inboundRekeyResponderSessionIds.contains(sessionId),
+              let driver = handshakeDriver else {
+            return
+        }
+
+        let currentState = await driver.getCurrentState()
+        switch currentState {
+        case .established(let keys):
+            sessionKeys = keys
+            handshakeDriver = nil
+            inboundRekeyResponderSessionIds.remove(sessionId)
+            rekeyInProgressSessionIds.remove(sessionId)
+            rekeyCompletedSessionIds.insert(sessionId)
+            lastRekeyEvent = "complete suite=\(keys.negotiatedSuite.rawValue)"
+
+            if currentSessionId == sessionId {
+                state = .connected(sessionId: sessionId)
+                readiness = .handshakeComplete(
+                    sessionId: sessionId,
+                    negotiatedSuite: keys.negotiatedSuite.rawValue
+                )
+                noteRemoteAppActivity(sessionId: sessionId)
+                if let activeSession = self.session {
+                    startRemotePeerPingLoop(sessionId: sessionId, session: activeSession)
+                }
+                startRemotePeerLivenessWatchdog(sessionId: sessionId)
+                updatePreparedSessionSnapshot(
+                    sessionId: sessionId,
+                    phase: .handshakeComplete,
+                    deviceId: remoteDeviceId,
+                    deviceName: remoteDeviceName,
+                    negotiatedSuite: keys.negotiatedSuite.rawValue
+                )
+            }
+            persistCurrentPathTrust(sessionId: sessionId)
+            SkyBridgeLogger.shared.info(
+                "✅ inbound WebRTC rekey 完成: session=\(sessionId), suite=\(keys.negotiatedSuite.rawValue)"
+            )
+
+        case .failed(let reason):
+            handshakeDriver = nil
+            inboundRekeyResponderSessionIds.remove(sessionId)
+            rekeyInProgressSessionIds.remove(sessionId)
+            lastRekeyEvent = "failed reason=\(reason)"
+            SkyBridgeLogger.shared.warning(
+                "⚠️ inbound WebRTC rekey 失败，保留既有会话: session=\(sessionId), reason=\(reason)"
+            )
+
+        default:
+            break
+        }
     }
 
     func sendAppMessageOverWebRTC(
@@ -3066,10 +3862,17 @@ private extension CrossNetworkWebRTCManager {
     ) async {
         switch message {
         case .pairingIdentityExchange(let payload):
+            noteRemoteAppActivity(sessionId: sessionId)
             await KEMTrustStore.shared.upsert(deviceId: payload.deviceId, kemPublicKeys: payload.kemPublicKeys)
             await KEMTrustStore.shared.upsert(deviceId: peerDeviceId, kemPublicKeys: payload.kemPublicKeys)
             if remoteDeviceId == nil || remoteDeviceId?.hasPrefix("webrtc-") == true {
                 remoteDeviceId = payload.deviceId
+                updatePreparedSessionSnapshot(
+                    sessionId: sessionId,
+                    phase: .transportReady,
+                    deviceId: payload.deviceId,
+                    deviceName: remoteDeviceName
+                )
             }
             if handshakePeerId == nil || handshakePeerId?.hasPrefix("webrtc-") == true {
                 handshakePeerId = payload.deviceId
@@ -3099,7 +3902,37 @@ private extension CrossNetworkWebRTCManager {
                     trigger: "pairing_exchange"
                 )
             }
+        case .heartbeat(let payload):
+            noteRemoteAppActivity(sessionId: sessionId)
+            if let deviceId = payload.deviceId?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !deviceId.isEmpty,
+               (remoteDeviceId == nil || remoteDeviceId?.hasPrefix("webrtc-") == true) {
+                remoteDeviceId = deviceId
+            }
+            if let deviceName = payload.deviceName?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !deviceName.isEmpty,
+               (remoteDeviceName == nil || remoteDeviceName?.isEmpty == true) {
+                remoteDeviceName = deviceName
+            }
+            updatePreparedSessionSnapshot(
+                sessionId: sessionId,
+                phase: {
+                    if case .handshakeComplete = readiness {
+                        return .handshakeComplete
+                    }
+                    return .transportReady
+                }(),
+                deviceId: remoteDeviceId,
+                deviceName: remoteDeviceName,
+                negotiatedSuite: {
+                    if case .handshakeComplete(_, let suite) = readiness {
+                        return suite
+                    }
+                    return nil
+                }()
+            )
         case .ping(let payload):
+            noteRemoteAppActivity(sessionId: sessionId)
             do {
                 try await sendAppMessageOverWebRTC(
                     .pong(.init(id: payload.id)),
@@ -3110,8 +3943,10 @@ private extension CrossNetworkWebRTCManager {
             } catch {
                 // Best-effort reply.
             }
-        case .clipboard, .heartbeat, .pong:
-            break
+        case .pong:
+            noteRemoteAppActivity(sessionId: sessionId)
+        case .clipboard:
+            noteRemoteAppActivity(sessionId: sessionId)
         }
     }
 
@@ -3129,6 +3964,34 @@ private extension CrossNetworkWebRTCManager {
         guard !rekeyInProgressSessionIds.contains(sessionId) else { return }
         guard !rekeyCompletedSessionIds.contains(sessionId) else { return }
 
+        guard let electionRemoteDeviceId = resolvedPQCRekeyElectionRemoteDeviceId(
+            sessionId: sessionId,
+            peerDeviceId: peerDeviceId
+        ) else {
+            lastRekeyEvent = "waiting peer=unknown election"
+            SkyBridgeLogger.shared.info(
+                "⏳ WebRTC rekey waiting for concrete remote device id: session=\(sessionId), trigger=\(trigger)"
+            )
+            return
+        }
+        guard let shouldInitiate = Self.shouldInitiatePQCRekey(
+            localDeviceId: localDeviceId,
+            remoteDeviceId: electionRemoteDeviceId
+        ) else {
+            lastRekeyEvent = "waiting peer=\(electionRemoteDeviceId) election"
+            SkyBridgeLogger.shared.info(
+                "⏳ WebRTC rekey waiting for stable initiator election: session=\(sessionId), trigger=\(trigger), peer=\(electionRemoteDeviceId)"
+            )
+            return
+        }
+        guard shouldInitiate else {
+            lastRekeyEvent = "await inbound peer=\(electionRemoteDeviceId)"
+            SkyBridgeLogger.shared.info(
+                "ℹ️ WebRTC rekey elected peer as initiator; waiting inbound rekey: session=\(sessionId), trigger=\(trigger), peer=\(electionRemoteDeviceId)"
+            )
+            return
+        }
+
         let capability = CryptoProviderFactory.detectCapability()
         let selection: CryptoProviderFactory.SelectionPolicy
         if capability.hasApplePQC || capability.hasLiboqs {
@@ -3142,7 +4005,12 @@ private extension CrossNetworkWebRTCManager {
         }
 
         var candidateIds: [String] = []
-        for raw in [peerDeviceId, remoteDeviceId, handshakePeerId] {
+        for raw in [
+            currentPathExpectedRemoteAuthorityBySessionId[sessionId]?.deviceId,
+            peerDeviceId,
+            remoteDeviceId,
+            handshakePeerId
+        ] {
             guard let id = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !id.isEmpty else { continue }
             if !candidateIds.contains(id) {
                 candidateIds.append(id)
@@ -3181,15 +4049,6 @@ private extension CrossNetworkWebRTCManager {
             return
         }
 
-        struct FramedWebRTCTransport: DiscoveryTransport {
-            let sendFramed: @Sendable (Data) async throws -> Void
-            func send(to peer: PeerIdentifier, data: Data) async throws { try await sendFramed(data) }
-        }
-
-        @Sendable func sendFramed(_ data: Data) async throws {
-            try await self.sendFramed(data, over: session)
-        }
-
         rekeyInProgressSessionIds.insert(sessionId)
         defer {
             rekeyInProgressSessionIds.remove(sessionId)
@@ -3198,7 +4057,7 @@ private extension CrossNetworkWebRTCManager {
 
         do {
             try await SkyBridgeiOSCore.shared.initialize(policy: selection)
-            let transport = FramedWebRTCTransport(sendFramed: { data in try await sendFramed(data) })
+            let transport = makeHandshakeTransport(over: session)
             let peer = PeerIdentifier(deviceId: selectedPeerId)
             let driver = try SkyBridgeiOSCore.shared.createHandshakeDriver(transport: transport)
             handshakeDriver = driver
@@ -3216,6 +4075,16 @@ private extension CrossNetworkWebRTCManager {
                 state = .connected(sessionId: sessionId)
                 readiness = .handshakeComplete(
                     sessionId: sessionId,
+                    negotiatedSuite: rekeyed.negotiatedSuite.rawValue
+                )
+                noteRemoteAppActivity(sessionId: sessionId)
+                startRemotePeerPingLoop(sessionId: sessionId, session: session)
+                startRemotePeerLivenessWatchdog(sessionId: sessionId)
+                updatePreparedSessionSnapshot(
+                    sessionId: sessionId,
+                    phase: .handshakeComplete,
+                    deviceId: remoteDeviceId,
+                    deviceName: remoteDeviceName,
                     negotiatedSuite: rekeyed.negotiatedSuite.rawValue
                 )
             }
@@ -3345,6 +4214,24 @@ private extension CrossNetworkWebRTCManager {
                             }
                         } catch {
                             // If it isn't decryptable business data, it might still be a handshake control frame; fall through.
+                            if let inboundDriver = await self.ensureInboundPQCRekeyDriverIfNeeded(
+                                sessionId: sessionId,
+                                frame: trafficUnwrapped,
+                                peer: peer,
+                                session: session,
+                                strictPQCRequested: strictPQCRequested
+                            ) {
+                                if let messageA = try? HandshakeMessageA.decode(from: trafficUnwrapped) {
+                                    let suites = messageA.supportedSuites.map(\.rawValue).joined(separator: ",")
+                                    self.appendSmokeTrace("rx messageA raw=\(trafficUnwrapped.count) suites=\(suites)")
+                                    if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
+                                        print("🧪 WebRTC rekey rx MessageA raw=\(trafficUnwrapped.count) suites=\(suites)")
+                                    }
+                                }
+                                await inboundDriver.handleMessage(trafficUnwrapped, from: peer)
+                                await self.syncInboundPQCRekeyState(sessionId: sessionId)
+                                continue
+                            }
                             if let driver = self.handshakeDriver {
                                 if let messageB = try? HandshakeMessageB.decode(from: trafficUnwrapped) {
                                     self.lastRekeyEvent = "messageB suite=\(messageB.selectedSuite.rawValue)"
@@ -3360,6 +4247,7 @@ private extension CrossNetworkWebRTCManager {
                                     }
                                 }
                                 await driver.handleMessage(trafficUnwrapped, from: peer)
+                                await self.syncInboundPQCRekeyState(sessionId: sessionId)
                             }
                         }
                     } else {
@@ -3378,6 +4266,7 @@ private extension CrossNetworkWebRTCManager {
                                 }
                             }
                             await driver.handleMessage(trafficUnwrapped, from: peer)
+                            await self.syncInboundPQCRekeyState(sessionId: sessionId)
                         }
                     }
                 }

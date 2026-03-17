@@ -569,6 +569,12 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         receiveTask = nil
         metricsTask?.cancel()
         metricsTask = nil
+        if #available(macOS 14.0, iOS 17.0, *) {
+            let peerId = handshakePeer.deviceId
+            Task { @MainActor in
+                ConnectionPresenceService.shared.markDisconnected(peerId: peerId)
+            }
+        }
 
         if #available(macOS 14.0, iOS 17.0, *) {
             handshakeDriverLock.withLock { $0 = nil }

@@ -2,6 +2,7 @@ import SwiftUI
 import SkyBridgeCore
 import CoreImage.CIFilterBuiltins
 import OSLog
+import AVFoundation
 
 /// 跨网络连接视图 - 三维连接矩阵
 /// 2025年创新设计 - 比传统连接码更优雅
@@ -13,6 +14,7 @@ struct CrossNetworkConnectionView: View {
     @State private var showingScanner = false
     @State private var qrCodeErrorMessage: String?
     @State private var hoveredMethod: ConnectionMethod? = nil
+    @StateObject private var qrScannerManager = QRCodeScannerManager.shared
     private let logger = Logger(subsystem: "com.skybridge.SkyBridgeCompassApp", category: "CrossNetworkConnection")
 
     var body: some View {
@@ -222,7 +224,16 @@ struct CrossNetworkConnectionView: View {
                         .fontWeight(.semibold)
 
                     Button(action: {
-                        showingScanner = true
+                        Task { @MainActor in
+                            let granted = await qrScannerManager.requestCameraPermission()
+                            if granted {
+                                showingScanner = true
+                            } else if let message = qrScannerManager.errorMessage {
+                                qrCodeErrorMessage = message
+                            } else {
+                                qrCodeErrorMessage = "摄像头权限被拒绝"
+                            }
+                        }
                     }) {
                         VStack(spacing: 16) {
                             Image(systemName: "camera.viewfinder")
@@ -467,13 +478,8 @@ struct CrossNetworkConnectionView: View {
                             .background(Color(NSColor.textBackgroundColor))
                             .cornerRadius(12)
                             .onChange(of: inputCode) { _, newValue in
- // 限制输入长度和字符
-                                inputCode = String(
-                                    newValue
-                                        .uppercased()
-                                        .filter { "ABCDEFGHJKLMNPQRSTUVWXYZ23456789".contains($0) }
-                                        .prefix(6)
-                                )
+ // 统一连接码过滤规则，避免 UI 与服务端长度语义漂移
+                                inputCode = CrossNetworkConnectionManager.sanitizeConnectionCodeInput(newValue)
                             }
 
                         Button(action: {
@@ -490,7 +496,7 @@ struct CrossNetworkConnectionView: View {
                             .padding(.vertical, 12)
                         }
                         .buttonStyle(.borderedProminent)
-                        .disabled(inputCode.count != 6)
+                        .disabled(!CrossNetworkConnectionManager.canSubmitConnectionCode(inputCode))
                         .frame(width: 280)
 
                     }

@@ -54,6 +54,65 @@ final class RegressionHardeningTests: XCTestCase {
         XCTAssertEqual(queue.failedMessages.first?.id, liveFailed.id)
     }
 
+    @MainActor
+    func testTrustedDeviceStoreTreatsDiscoveryIdAsTrustedAlias() {
+        let store = TrustedDeviceStore.shared
+        let original = store.trustedDevices
+        store.clearAll()
+        defer {
+            store.clearAll()
+            store.mergeFromCloud(original)
+        }
+
+        let rawDeviceId = UUID().uuidString.lowercased()
+        let trustedDevice = DiscoveredDevice(
+            id: "id:\(rawDeviceId)",
+            name: "Trusted Mac",
+            modelName: "Mac",
+            platform: .macOS,
+            osVersion: "15.0",
+            ipAddress: "192.168.1.20"
+        )
+
+        store.trust(trustedDevice)
+
+        XCTAssertTrue(store.isTrusted(deviceId: rawDeviceId))
+        XCTAssertTrue(store.isTrusted(deviceId: "id:\(rawDeviceId)"))
+    }
+
+    @MainActor
+    func testP2PConnectionManagerPromotesPresentationIdentityWithoutBreakingRuntimeLookup() {
+        let manager = P2PConnectionManager.instance
+        let runtimePeerId = "host:192.168.1.42"
+        let declaredDeviceId = UUID().uuidString.lowercased()
+        let stablePeerId = "id:\(declaredDeviceId)"
+
+        manager.installTestPeerRuntimeState(
+            runtimePeerId: runtimePeerId,
+            status: .connected,
+            name: "Host Alias Peer",
+            ipAddress: "192.168.1.42"
+        )
+
+        let resolvedRuntimePeerId = manager.testPromotePeerPresentationIdentity(
+            runtimePeerId: runtimePeerId,
+            declaredDeviceId: declaredDeviceId,
+            deviceName: "Stable Mac",
+            modelName: "MacBook Pro",
+            platform: "macOS",
+            osVersion: "15.0"
+        )
+
+        XCTAssertEqual(resolvedRuntimePeerId, runtimePeerId)
+        XCTAssertEqual(manager.connectionStatusByDeviceId[stablePeerId], .connected)
+        XCTAssertTrue(manager.activeConnections.contains(where: { $0.device.id == stablePeerId }))
+        XCTAssertEqual(
+            manager.activeConnections.first(where: { $0.device.id == stablePeerId })?.device.name,
+            "Stable Mac"
+        )
+        XCTAssertNil(manager.connectionErrorByDeviceId[stablePeerId])
+    }
+
     func testProcessMessageBWithoutTranscriptHashAFailsWithExplicitReason() async {
         let context = makeInitiatorContext()
         let messageB = makeMinimalMessageB()
@@ -344,6 +403,47 @@ final class RegressionHardeningTests: XCTestCase {
         )
     }
 
+    func testRemoteDesktopCodecGovernanceEscalatesRepeatedSyncFrameWaitsToH264Fallback() {
+        var governance = RemoteDesktopCodecGovernance()
+        let start = Date(timeIntervalSince1970: 1_700_000_200)
+
+        XCTAssertEqual(
+            governance.noteDecodeFailure(
+                format: "hevc",
+                reason: "waiting-for-sync-frame",
+                at: start
+            ),
+            .requestRefresh
+        )
+        XCTAssertEqual(
+            governance.noteDecodeFailure(
+                format: "hevc",
+                reason: "waiting-for-sync-frame",
+                at: start.addingTimeInterval(0.2)
+            ),
+            .requestRefresh
+        )
+
+        let event = governance.noteDecodeFailure(
+            format: "hevc",
+            reason: "waiting-for-sync-frame",
+            at: start.addingTimeInterval(0.4)
+        )
+
+        guard case .disableHEVC(let until) = event else {
+            return XCTFail("Expected repeated sync-frame waits to disable HEVC temporarily")
+        }
+
+        XCTAssertGreaterThan(until.timeIntervalSince(start), 10)
+        XCTAssertEqual(
+            governance.effectiveSupportedFormats(
+                from: ["hevc", "h264", "jpeg"],
+                at: start.addingTimeInterval(1)
+            ),
+            ["h264", "jpeg"]
+        )
+    }
+
     func testPeerIdentityAliasResolverMapsHostEndpointBackToStableDeviceID() {
         let endpoint = NWEndpoint.hostPort(
             host: NWEndpoint.Host("192.168.31.20"),
@@ -486,5 +586,95 @@ final class RegressionHardeningTests: XCTestCase {
         } else {
             defaults.removeObject(forKey: key)
         }
+    }
+
+    func testConnectionPresentationContractTreatsTransportReadyAsConnected() {
+        let presentation = ConnectionPresentationContract.evaluate(
+            ConnectionPresentationInput(
+                labels: ConnectionPresentationLabels(
+                    connectedText: "已连接",
+                    disconnectedText: "离线",
+                    connectingText: "连接中",
+                    reconnectingText: "重连中",
+                    defaultGuardStatus: "守护中",
+                    crossNetworkGuardStatus: "跨网已连接"
+                ),
+                fileTransferActive: false,
+                latestPeerConnection: nil,
+                latestConnectedDevice: nil,
+                activeSessionSnapshot: ActiveSessionSnapshot(
+                    snapshotToken: UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!,
+                    sessionId: "session-1",
+                    source: .code,
+                    phase: .transportReady,
+                    deviceId: "peer-1",
+                    deviceName: "Mac mini",
+                    negotiatedSuite: "ML-KEM-768"
+                ),
+                defaultPQCModeLabel: "Apple PQC"
+            )
+        )
+
+        XCTAssertEqual(presentation.phase, .connected)
+        XCTAssertEqual(presentation.statusText, "Apple PQC已连接")
+    }
+
+    func testConnectionPresentationContractPrioritizesPeerOverCrossNetworkSnapshot() {
+        let presentation = ConnectionPresentationContract.evaluate(
+            ConnectionPresentationInput(
+                labels: ConnectionPresentationLabels(
+                    connectedText: "已连接",
+                    disconnectedText: "离线",
+                    connectingText: "连接中",
+                    reconnectingText: "重连中",
+                    defaultGuardStatus: "守护中",
+                    crossNetworkGuardStatus: "跨网已连接"
+                ),
+                fileTransferActive: false,
+                latestPeerConnection: ConnectionPresentationPeer(
+                    displayName: "Peer",
+                    cryptoKind: nil,
+                    suite: "X25519",
+                    guardStatus: "守护中"
+                ),
+                latestConnectedDevice: nil,
+                activeSessionSnapshot: ActiveSessionSnapshot(
+                    snapshotToken: UUID(uuidString: "11111111-2222-3333-4444-555555555555")!,
+                    sessionId: "session-2",
+                    source: .qr,
+                    phase: .handshakeComplete,
+                    deviceId: "peer-2",
+                    deviceName: "Remote Device",
+                    negotiatedSuite: "ML-KEM-768"
+                ),
+                defaultPQCModeLabel: "Apple PQC"
+            )
+        )
+
+        XCTAssertEqual(presentation.statusText, "Classic已连接")
+    }
+
+    func testLateCleanupTokenDoesNotClearNewSnapshot() {
+        let originalToken = UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!
+        let replacementToken = UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
+
+        let newerSnapshot = ActiveSessionSnapshotContract.activate(
+            sessionId: "session-1",
+            source: .reused,
+            phase: .handshakeComplete,
+            deviceId: "peer-1",
+            deviceName: "Peer A",
+            negotiatedSuite: "X-Wing",
+            snapshotToken: replacementToken
+        )
+
+        let afterLateCleanup = ActiveSessionSnapshotContract.disconnect(
+            current: newerSnapshot,
+            sessionId: "session-1",
+            snapshotToken: originalToken,
+            kind: .explicit
+        )
+
+        XCTAssertEqual(afterLateCleanup, newerSnapshot)
     }
 }

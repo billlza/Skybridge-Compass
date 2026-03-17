@@ -136,6 +136,24 @@ public actor P2PConnectionService {
  /// - publisher: 在本地 `listenPort` 上监听 UDP，等待对端连接
  /// - subscriber: 这里只记录角色，不主动做事（真正连别人用 connect(toHost:port:)）
     public func start(role: Role, listenPort: UInt16? = nil) async throws {
+        let desiredPort = listenPort ?? defaultPort
+
+        if self.role == role {
+            switch (role, state) {
+            case (.publisher, .listening(let activePort)) where activePort == desiredPort:
+                logger.info("P2PConnectionService 已在 publisher 模式监听端口 \(activePort)，忽略重复启动")
+                return
+            case (.publisher, .connected):
+                logger.info("P2PConnectionService 已在 publisher 模式保持活跃连接，忽略重复启动")
+                return
+            case (.subscriber, .idle), (.subscriber, .connected):
+                logger.info("P2PConnectionService 已在 subscriber 模式运行，忽略重复启动")
+                return
+            default:
+                break
+            }
+        }
+
  // 先停掉之前的
         await stop()
 
@@ -143,8 +161,7 @@ public actor P2PConnectionService {
 
         switch role {
         case .publisher:
-            let port = listenPort ?? defaultPort
-            try await startListeningWithFallback(preferredPort: port)
+            try await startListeningWithFallback(preferredPort: desiredPort)
         case .subscriber:
             state = .idle
             logger.info("P2PConnectionService 启动为 subscriber（仅主动发起连接）")

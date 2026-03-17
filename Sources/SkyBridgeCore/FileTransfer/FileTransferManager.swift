@@ -198,22 +198,25 @@ public class FileTransferManager: BaseManager {
         )
     }
 
-    private struct ActivePeerRoute {
+    struct ActivePeerRoute: Sendable, Equatable {
         let deviceId: String
         let deviceName: String
         let ipAddress: String
         let port: Int
+        let routeSource: String
     }
 
-    private func resolveActivePeerRoutes() async -> [ActivePeerRoute] {
+    func resolveActivePeerRoutes() async -> [ActivePeerRoute] {
         var routes: [ActivePeerRoute] = []
         var dedupe = Set<String>()
+        var usedCompatibilityFallback = false
 
         func appendRoute(
             deviceId: String,
             deviceName: String,
             address: String?,
-            port: Int = 8080
+            port: Int = 8080,
+            routeSource: String
         ) {
             guard let address = sanitizeAddress(address) else { return }
             let key = "\(address.lowercased()):\(port)"
@@ -224,19 +227,33 @@ public class FileTransferManager: BaseManager {
                     deviceId: deviceId,
                     deviceName: deviceName.isEmpty ? "P2P Device" : deviceName,
                     ipAddress: address,
-                    port: port
+                    port: port,
+                    routeSource: routeSource
                 )
+            )
+        }
+
+        let routeDescriptors = ConnectionPresenceService.shared.activeRouteDescriptors()
+        for route in routeDescriptors {
+            appendRoute(
+                deviceId: route.peerId,
+                deviceName: route.deviceName,
+                address: route.transferAddress,
+                port: route.transferPort,
+                routeSource: "presence:\(route.routeSource.rawValue)"
             )
         }
 
         let presence = ConnectionPresenceService.shared.activeConnections
             .sorted(by: { $0.connectedAt > $1.connectedAt })
         for conn in presence {
+            usedCompatibilityFallback = true
             appendRoute(
                 deviceId: conn.id,
                 deviceName: conn.displayName,
                 address: conn.address ?? parseAddressFromPeerId(conn.id),
-                port: 8080
+                port: 8080,
+                routeSource: "presence:compatibility"
             )
         }
 
@@ -246,23 +263,31 @@ public class FileTransferManager: BaseManager {
                 .sorted { ($0.lastConnectedAt ?? .distantPast) > ($1.lastConnectedAt ?? .distantPast) }
             for device in connectedDevices {
                 let transferPort = device.portMap["_skybridge-transfer._tcp"] ?? 8080
+                usedCompatibilityFallback = true
                 appendRoute(
                     deviceId: device.uniqueIdentifier,
                     deviceName: device.name,
                     address: device.ipv4 ?? device.ipv6,
-                    port: transferPort
+                    port: transferPort,
+                    routeSource: "unified"
                 )
             }
         }
 
         let activeInfos = await P2PConnectionService.shared.currentConnections()
         for info in activeInfos where info.isReady {
+            usedCompatibilityFallback = true
             appendRoute(
                 deviceId: info.id.uuidString,
                 deviceName: "P2P Device",
                 address: parseAddressFromEndpoint(info.endpoint),
-                port: 8080
+                port: 8080,
+                routeSource: "p2p-service"
             )
+        }
+
+        if usedCompatibilityFallback, !routeDescriptors.isEmpty {
+            logger.warning("⚠️ 文件传输路由解析回退到兼容路径；首选应来自 PresenceRouteDescriptor")
         }
 
         return routes

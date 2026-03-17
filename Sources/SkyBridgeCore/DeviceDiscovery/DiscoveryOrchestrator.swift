@@ -358,22 +358,10 @@ public actor ServiceAdvertiserCenter {
             tcpOptions.keepaliveCount = 4
         }
 
-        let listener: NWListener
-        if serviceType == "_skybridge._tcp" {
-            do {
-                listener = try NWListener(
-                    using: parameters,
-                    on: NWEndpoint.Port(integerLiteral: 9527)
-                )
-            } catch {
-                logger.warning(
-                    "⚠️ _skybridge._tcp 绑定默认端口 9527 失败，回退动态端口: \(error.localizedDescription, privacy: .public)"
-                )
-                listener = try NWListener(using: parameters)
-            }
-        } else {
-            listener = try NWListener(using: parameters)
-        }
+        // `_skybridge._tcp` 通过 Bonjour 服务名与 TXT 记录暴露控制面能力；
+        // 固定绑定 9527 在实际设备上容易因旧实例/系统残留占用而异步失败。
+        // 这里统一使用系统分配端口，避免启动期 address-in-use 抖动。
+        let listener = try NWListener(using: parameters)
 
         // 默认携带基础 TXT（iOS 端用于显示系统版本等）；若调用方提供 TXT，则在此基础上覆盖/补充。
         let baseTXT = await makeDefaultTXTRecord()
@@ -389,8 +377,23 @@ public actor ServiceAdvertiserCenter {
             listener.newConnectionHandler = { conn in ch(conn) }
         }
         let log = self.logger
+        let baseTXTForReady = finalTXT
+        let resolvedServiceName = serviceName
+        let resolvedServiceType = serviceType
         listener.stateUpdateHandler = { state in
             stateHandler?(state)
+            if case .ready = state,
+               let actualPort = listener.port?.rawValue,
+               actualPort > 0 {
+                var updatedTXT = baseTXTForReady
+                updatedTXT["port"] = String(actualPort)
+                listener.service = NWListener.Service(
+                    name: resolvedServiceName,
+                    type: resolvedServiceType,
+                    domain: "local.",
+                    txtRecord: updatedTXT
+                )
+            }
             if case .failed(let error) = state {
                 log.error("❌ 广播监听失败: \(error.localizedDescription, privacy: .public)")
             }

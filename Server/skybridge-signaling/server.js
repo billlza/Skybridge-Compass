@@ -1,17 +1,5 @@
 'use strict';
 
-/**
- * SkyBridge Signaling Server (HTTP by default; optional HTTPS via env)
- *
- * Recommended deployment:
- *   Cloudflare (edge TLS) -> Nginx (origin TLS) -> Node (HTTP localhost:8443)
- *
- * Optional Node HTTPS:
- *   export TLS_CERT=/path/fullchain.pem
- *   export TLS_KEY=/path/privkey.pem
- *   node server.js
- */
-
 const http = require('http');
 const https = require('https');
 const fs = require('fs');
@@ -21,9 +9,11 @@ const os = require('os');
 const express = require('express');
 const { WebSocketServer } = require('ws');
 const { v4: uuidv4 } = require('uuid');
-const { createSignalingStateBackend, unique } = require('./lib/signaling_state_backend');
 
-// -------------------- Config --------------------
+const { createSignalingStateBackend, unique } = require('./lib/signaling_state_backend');
+const { RegistryStore } = require('./lib/registry_store');
+const { buildIdempotencyFingerprint, clientIPForRequest } = require('./lib/request_security');
+
 const PORT = Number(process.env.PORT || 8443);
 const HOST = process.env.HOST || '0.0.0.0';
 const INSTANCE_ID = String(process.env.INSTANCE_ID || `${os.hostname()}-${process.pid}`).trim();
@@ -33,106 +23,106 @@ const SIGNALING_REDIS_KEY_PREFIX = String(process.env.SIGNALING_REDIS_KEY_PREFIX
 const SIGNALING_REDIS_CHANNEL_PREFIX = String(process.env.SIGNALING_REDIS_CHANNEL_PREFIX || 'skybridge:signaling:channel:').trim() || 'skybridge:signaling:channel:';
 const SIGNALING_REDIS_CONNECT_TIMEOUT_MS = Number(process.env.SIGNALING_REDIS_CONNECT_TIMEOUT_MS || 5_000);
 
-// SECURITY: default to false. If you expose Node directly with trust-proxy enabled, attackers can spoof X-Forwarded-For
-// and bypass per-IP rate limits. Only enable when you're definitely behind a trusted reverse proxy (CF/nginx).
 const TRUST_PROXY = /^(1|true|yes)$/i.test(process.env.TRUST_PROXY || 'false');
-const JSON_LIMIT = process.env.JSON_LIMIT || '1mb';
+const JSON_LIMIT = process.env.JSON_LIMIT || '64kb';
+const CORS_ORIGIN = process.env.CORS_ORIGIN || '';
 
-// “人类码”长度：越长越不容易撞库（建议 >= 8）
 const CODE_LEN = Number(process.env.CODE_LEN || 8);
-const CODE_TTL_MS = Number(process.env.CODE_TTL_MS || 5 * 60_000); // 5 minutes
+const CODE_TTL_MS = Number(process.env.CODE_TTL_MS || 5 * 60_000);
 const SWEEP_INTERVAL_MS = Number(process.env.SWEEP_INTERVAL_MS || 10_000);
-
-const ICE_TTL_MS = Number(process.env.ICE_TTL_MS || 30 * 60_000); // 30 minutes
-const ICE_MAX_PER_SESSION = Number(process.env.ICE_MAX_PER_SESSION || 200);
 const ROOM_MEMBERSHIP_TTL_MS = Number(process.env.ROOM_MEMBERSHIP_TTL_MS || 120_000);
-const LEGACY_BINDING_TTL_MS = Number(process.env.LEGACY_BINDING_TTL_MS || CODE_TTL_MS);
 
-// 兼容旧客户端：允许 lookup/answer 不带 token（建议尽快关掉）
-// SECURITY: default MUST be false in production. If you need legacy compatibility, explicitly set ALLOW_INSECURE=true.
-const ALLOW_INSECURE = /^(1|true|yes)$/i.test(process.env.ALLOW_INSECURE || 'false');
+const REQUIRE_SHARED_STATE_FOR_PUBLIC_CAPABILITIES = !/^(0|false|no)$/i.test(process.env.REQUIRE_SHARED_STATE_FOR_PUBLIC_CAPABILITIES || 'true');
+const SESSION_RECLAIM_WINDOW_MS = Number(process.env.SESSION_RECLAIM_WINDOW_MS || 30_000);
 
-// WebSocket envelope hardening (DoS / resource exhaustion protection)
-const WS_MAX_MSG_BYTES = Number(process.env.WS_MAX_MSG_BYTES || 64 * 1024); // 64KB
-const WS_MAX_MSGS_PER_10S = Number(process.env.WS_MAX_MSGS_PER_10S || 200);
-const WS_MAX_CLIENTS_PER_ROOM = Number(process.env.WS_MAX_CLIENTS_PER_ROOM || 4);
+const CHALLENGE_TTL_MS = Number(process.env.CHALLENGE_TTL_MS || 90_000);
+const ADMISSION_TOKEN_TTL_MS = Number(process.env.ADMISSION_TOKEN_TTL_MS || 120_000);
+const TURN_ADMISSION_TOKEN_TTL_MS = Number(process.env.TURN_ADMISSION_TOKEN_TTL_MS || 60_000);
+const TURN_CRED_TTL_SECONDS = Number(process.env.TURN_CRED_TTL_SECONDS || 300);
 
-// Optional sticky affinity hint cookie.
-// This is deployment-facing only: it does not change signaling payloads or protocol semantics.
-const ENABLE_STICKY_HINT_COOKIE = /^(1|true|yes)$/i.test(process.env.ENABLE_STICKY_HINT_COOKIE || 'false');
-const STICKY_HINT_COOKIE_NAME = String(process.env.STICKY_HINT_COOKIE_NAME || 'skybridge_route').trim() || 'skybridge_route';
-const STICKY_HINT_COOKIE_MAX_AGE_SECONDS = Number(process.env.STICKY_HINT_COOKIE_MAX_AGE_SECONDS || Math.max(60, Math.round(CODE_TTL_MS / 1000)));
-const STICKY_HINT_COOKIE_SECURE = /^(1|true|yes)$/i.test(process.env.STICKY_HINT_COOKIE_SECURE || 'true');
-const STICKY_HINT_COOKIE_SAMESITE = String(process.env.STICKY_HINT_COOKIE_SAMESITE || 'Lax').trim() || 'Lax';
+const MAX_CHALLENGES_PER_DEVICE_PER_10M = Number(process.env.MAX_CHALLENGES_PER_DEVICE_PER_10M || 10);
+const MAX_CHALLENGES_PER_USER_PER_10M = Number(process.env.MAX_CHALLENGES_PER_USER_PER_10M || 20);
+const MAX_CHALLENGES_PER_IP_PER_10M = Number(process.env.MAX_CHALLENGES_PER_IP_PER_10M || 40);
 
-// CORS（原生 App 一般无 Origin，Web 端才有）
-// SECURITY: default to deny-by-default (no CORS header). Set explicitly if you have a browser client.
-const CORS_ORIGIN = process.env.CORS_ORIGIN || ''; // e.g. "https://app.example.com,https://admin.example.com"
+const WS_MAX_MSG_BYTES = Number(process.env.WS_MAX_MSG_BYTES || 16 * 1024);
+const WS_MAX_MSGS_PER_10S = Number(process.env.WS_MAX_MSGS_PER_10S || 60);
+const WS_MAX_BYTES_PER_10S = Number(process.env.WS_MAX_BYTES_PER_10S || 128 * 1024);
+const WS_MAX_CLIENTS_PER_ROOM = Number(process.env.WS_MAX_CLIENTS_PER_ROOM || 2);
 
-// TURN credential endpoint (RFC 7635-style short-lived credentials)
-const TURN_CLIENT_API_KEY = String(process.env.TURN_CLIENT_API_KEY || process.env.SKYBRIDGE_CLIENT_API_KEY || '').trim();
-const TURN_ENFORCE_API_KEY = /^(1|true|yes)$/i.test(process.env.TURN_ENFORCE_API_KEY || 'true');
-const TURN_CRED_TTL_SECONDS = Number(process.env.TURN_CRED_TTL_SECONDS || 3600);
-const TURN_SHARED_SECRET = process.env.TURN_SHARED_SECRET || '';
-const TURN_STATIC_USERNAME = process.env.TURN_USERNAME || process.env.SKYBRIDGE_TURN_USERNAME || '';
-const TURN_STATIC_PASSWORD = process.env.TURN_PASSWORD || process.env.SKYBRIDGE_TURN_PASSWORD || '';
-const TURN_ALLOW_STATIC_FALLBACK = /^(1|true|yes)$/i.test(process.env.TURN_ALLOW_STATIC_FALLBACK || 'false');
+const SDP_MAX_BYTES = Number(process.env.SDP_MAX_BYTES || 12 * 1024);
+const ICE_CANDIDATE_MAX_BYTES = Number(process.env.ICE_CANDIDATE_MAX_BYTES || 2048);
+const ICE_SDP_MID_MAX_BYTES = Number(process.env.ICE_SDP_MID_MAX_BYTES || 64);
+const ICE_MAX_PER_SESSION = Number(process.env.ICE_MAX_PER_SESSION || 40);
+const ICE_MAX_BYTES_PER_SESSION = Number(process.env.ICE_MAX_BYTES_PER_SESSION || 64 * 1024);
+const ICE_MAX_BYTES_PER_PEER_PER_SESSION = Number(process.env.ICE_MAX_BYTES_PER_PEER_PER_SESSION || 32 * 1024);
+
+const GLOBAL_MIN_CLIENT_VERSION = String(process.env.GLOBAL_MIN_CLIENT_VERSION || '0.0.0').trim();
+const GLOBAL_MIN_PROTOCOL_VERSION = String(process.env.GLOBAL_MIN_PROTOCOL_VERSION || '0').trim();
+const SIGNALING_BOOTSTRAP_TENANT_MODE = String(process.env.SIGNALING_BOOTSTRAP_TENANT_MODE || '').trim().toLowerCase();
+const SIGNALING_BOOTSTRAP_TENANT_ID = String(process.env.SIGNALING_BOOTSTRAP_TENANT_ID || '').trim();
+const SIGNALING_ALLOW_BOOTSTRAP_TENANT_POLICY = /^(1|true|yes)$/i.test(process.env.SIGNALING_ALLOW_BOOTSTRAP_TENANT_POLICY || 'false');
+const SIGNALING_ALLOW_BOOTSTRAP_DEVICE_AUTH = /^(1|true|yes)$/i.test(process.env.SIGNALING_ALLOW_BOOTSTRAP_DEVICE_AUTH || 'false');
+
+const TURN_SHARED_SECRET = String(process.env.TURN_SHARED_SECRET || '').trim();
+const TURN_OPAQUE_TAG_SECRET = String(process.env.TURN_OPAQUE_TAG_SECRET || TURN_SHARED_SECRET || '').trim();
 const TURN_URIS = (process.env.TURN_URIS || process.env.TURN_URLS || 'turns:54.92.79.99:5349?transport=tcp,turn:54.92.79.99:3478?transport=udp')
   .split(',')
   .map((s) => s.trim())
   .filter((s) => Boolean(s) && /^(turn:|turns:)/i.test(s));
 
-// Brute-force mitigation for /api/lookup (code enumeration)
-const LOOKUP_INVALID_WINDOW_MS = Number(process.env.LOOKUP_INVALID_WINDOW_MS || 60_000);
-const LOOKUP_INVALID_MAX = Number(process.env.LOOKUP_INVALID_MAX || 20); // per IP per window
-const lookupInvalidHits = new Map(); // ip -> {count, resetAt}
 const SIGNALING_SERVER_ORIGIN = String(process.env.SIGNALING_SERVER_ORIGIN || '').trim();
+const CLIENT_IP_HASH_SECRET = String(process.env.CLIENT_IP_HASH_SECRET || process.env.SIGNALING_IP_HASH_SECRET || 'skybridge-ip-hash').trim();
+const ALLOWLIST_TENANTS = new Set(
+  String(process.env.ALLOWLIST_TENANTS || '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean)
+);
+
+const REDIS_LATENCY_PROTECTION_P95_MS = Number(process.env.REDIS_LATENCY_PROTECTION_P95_MS || 150);
+const REDIS_LATENCY_PROTECTION_WINDOW_SAMPLES = Number(process.env.REDIS_LATENCY_PROTECTION_WINDOW_SAMPLES || 6);
+
+const ENV_DISABLE_CHALLENGE_ADMISSION = /^(1|true|yes)$/i.test(process.env.KILL_SWITCH_DISABLE_CHALLENGE_ADMISSION || 'false');
+const ENV_DISABLE_TURN_ISSUANCE = /^(1|true|yes)$/i.test(process.env.KILL_SWITCH_DISABLE_TURN_ISSUANCE || 'false');
+const ENV_DISABLE_CODE_FLOWS = /^(1|true|yes)$/i.test(process.env.KILL_SWITCH_DISABLE_CODE_FLOWS || 'false');
+const ENV_ALLOWLIST_ONLY = /^(1|true|yes)$/i.test(process.env.KILL_SWITCH_ALLOWLIST_ONLY || 'false');
+
 const STRICT_DEVICE_ID_RE = /^[A-Za-z0-9._:-]{16,128}$/;
 const FINGERPRINT_RE = /^[0-9a-f]{64}$/;
 const ALLOWED_PROTOCOL_SIGNING_ALGORITHMS = new Set(['Ed25519', 'ML-DSA-65']);
 
-function recordInvalidLookup(ip) {
-  const t = now();
-  let ent = lookupInvalidHits.get(ip);
-  if (!ent || t > ent.resetAt) {
-    ent = { count: 0, resetAt: t + LOOKUP_INVALID_WINDOW_MS };
-    lookupInvalidHits.set(ip, ent);
-  }
-  ent.count++;
-  return ent.count;
-}
-
-function invalidLookupLimited(ip) {
-  const t = now();
-  const ent = lookupInvalidHits.get(ip);
-  if (!ent) return false;
-  if (t > ent.resetAt) return false;
-  return ent.count > LOOKUP_INVALID_MAX;
-}
-
-// Optional TLS for Node itself
 const TLS_CERT = process.env.TLS_CERT || '';
 const TLS_KEY = process.env.TLS_KEY || '';
 const TLS_CA = process.env.TLS_CA || '';
 const USE_NODE_HTTPS = Boolean(TLS_CERT && TLS_KEY);
 
-// -------------------- Small helpers --------------------
 function now() { return Date.now(); }
 
 function base64url(buf) {
-  // compatible across Node versions
-  return buf.toString('base64')
+  return Buffer.from(buf).toString('base64')
     .replace(/\+/g, '-')
     .replace(/\//g, '_')
     .replace(/=+$/g, '');
 }
 
-function newToken() {
-  return base64url(crypto.randomBytes(32)); // 256-bit
+function base64urlToBuffer(raw) {
+  const value = String(raw || '').trim();
+  if (!value) return null;
+  const normalized = value.replace(/-/g, '+').replace(/_/g, '/');
+  const padded = normalized + '='.repeat((4 - (normalized.length % 4 || 4)) % 4);
+  try {
+    return Buffer.from(padded, 'base64');
+  } catch (_) {
+    return null;
+  }
 }
 
-function sha256Hex(s) {
-  return crypto.createHash('sha256').update(String(s)).digest('hex');
+function newOpaqueToken(bytes = 24) {
+  return base64url(crypto.randomBytes(bytes));
+}
+
+function sha256Hex(value) {
+  return crypto.createHash('sha256').update(String(value)).digest('hex');
 }
 
 function secureStringEqual(left, right) {
@@ -141,6 +131,66 @@ function secureStringEqual(left, right) {
   const rightBuf = Buffer.from(right, 'utf8');
   if (leftBuf.length !== rightBuf.length) return false;
   return crypto.timingSafeEqual(leftBuf, rightBuf);
+}
+
+function isPlainObject(value) {
+  return value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function safeUpperCode(value) {
+  return String(value || '').trim().toUpperCase();
+}
+
+function normalizeDeviceId(value) {
+  return String(value || '').trim();
+}
+
+function normalizeProtocolSigningAlgorithm(raw) {
+  const value = String(raw || '').trim();
+  if (ALLOWED_PROTOCOL_SIGNING_ALGORITHMS.has(value)) return value;
+  const folded = value.toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (folded === 'ed25519') return 'Ed25519';
+  if (folded === 'mldsa65') return 'ML-DSA-65';
+  return '';
+}
+
+function normalizeFingerprint(raw) {
+  const value = String(raw || '').trim().toLowerCase();
+  return FINGERPRINT_RE.test(value) ? value : '';
+}
+
+function normalizeIdentityBinding(raw, { requirePublicKey = false } = {}) {
+  if (!raw || typeof raw !== 'object') return null;
+  const deviceId = normalizeDeviceId(raw.deviceId);
+  const protocolSigningAlgorithm = normalizeProtocolSigningAlgorithm(raw.protocolSigningAlgorithm);
+  const protocolPublicKeyFingerprint = normalizeFingerprint(raw.protocolPublicKeyFingerprint);
+  if (!STRICT_DEVICE_ID_RE.test(deviceId) || !protocolSigningAlgorithm || !protocolPublicKeyFingerprint) {
+    return null;
+  }
+  const binding = {
+    deviceId,
+    protocolSigningAlgorithm,
+    protocolPublicKeyFingerprint
+  };
+  if (requirePublicKey) {
+    const publicKeyBytes = decodePublicKeyBytes(raw.protocolPublicKeyBytes);
+    if (!publicKeyBytes) {
+      return null;
+    }
+    binding.protocolPublicKeyBytes = publicKeyBytes;
+  }
+  return binding;
+}
+
+function decodePublicKeyBytes(value) {
+  if (Buffer.isBuffer(value)) return value;
+  if (value instanceof Uint8Array) return Buffer.from(value);
+  if (typeof value !== 'string') return null;
+  try {
+    return Buffer.from(value, 'base64');
+  } catch (_) {
+    return null;
+  }
 }
 
 function canonicalizeOrigin(raw) {
@@ -175,81 +225,111 @@ function resolvedSignalingServerOrigin(req) {
   return derived;
 }
 
-function isStrictDeviceId(value) {
-  return typeof value === 'string' && STRICT_DEVICE_ID_RE.test(value);
+function normalizeVersion(value, fallback = '0') {
+  const normalized = String(value || '').trim();
+  return normalized || fallback;
 }
 
-function normalizeProtocolSigningAlgorithm(raw) {
-  const value = String(raw || '').trim();
-  if (ALLOWED_PROTOCOL_SIGNING_ALGORITHMS.has(value)) {
-    return value;
+function compareVersions(left, right) {
+  const leftParts = String(left || '0').split('.').map((item) => Number(item));
+  const rightParts = String(right || '0').split('.').map((item) => Number(item));
+  const length = Math.max(leftParts.length, rightParts.length);
+  for (let index = 0; index < length; index += 1) {
+    const leftValue = Number.isFinite(leftParts[index]) ? leftParts[index] : 0;
+    const rightValue = Number.isFinite(rightParts[index]) ? rightParts[index] : 0;
+    if (leftValue > rightValue) return 1;
+    if (leftValue < rightValue) return -1;
   }
-  const folded = value.toLowerCase().replace(/[^a-z0-9]/g, '');
-  switch (folded) {
-    case 'ed25519':
-      return 'Ed25519';
-    case 'mldsa65':
-      return 'ML-DSA-65';
-    default:
-      return '';
+  return 0;
+}
+
+function effectiveMinVersion(globalMin, tenantMin) {
+  if (!tenantMin) return globalMin;
+  return compareVersions(tenantMin, globalMin) > 0 ? tenantMin : globalMin;
+}
+
+function assertVersionGates(clientVersion, protocolVersion, tenantPolicy) {
+  const minClientVersion = effectiveMinVersion(GLOBAL_MIN_CLIENT_VERSION, tenantPolicy?.min_supported_client_version || null);
+  const minProtocolVersion = effectiveMinVersion(GLOBAL_MIN_PROTOCOL_VERSION, tenantPolicy?.min_supported_protocol_version || null);
+  if (compareVersions(clientVersion, minClientVersion) < 0) {
+    const error = new Error('client_version_too_old');
+    error.statusCode = 426;
+    throw error;
+  }
+  if (compareVersions(protocolVersion, minProtocolVersion) < 0) {
+    const error = new Error('protocol_version_too_old');
+    error.statusCode = 426;
+    throw error;
   }
 }
 
-function normalizeFingerprint(raw) {
-  const value = String(raw || '').trim().toLowerCase();
-  return FINGERPRINT_RE.test(value) ? value : '';
+function clampSessionTtlMs(rawSeconds, fallbackMs = CODE_TTL_MS) {
+  const seconds = Number(rawSeconds);
+  if (!Number.isFinite(seconds)) return fallbackMs;
+  return Math.max(60_000, Math.min(24 * 3600_000, Math.trunc(seconds * 1000)));
 }
 
-function normalizeIdentityBinding(raw, { requirePublicKey = false } = {}) {
-  if (!raw || typeof raw !== 'object') return null;
-  const deviceId = normalizeDeviceId(raw.deviceId);
-  const protocolSigningAlgorithm = normalizeProtocolSigningAlgorithm(raw.protocolSigningAlgorithm);
-  const protocolPublicKeyFingerprint = normalizeFingerprint(raw.protocolPublicKeyFingerprint);
-  if (!isStrictDeviceId(deviceId) || !protocolSigningAlgorithm || !protocolPublicKeyFingerprint) {
+function payloadByteSize(payload) {
+  return Buffer.byteLength(JSON.stringify(payload || {}), 'utf8');
+}
+
+function makeIPHash(ip) {
+  return crypto.createHmac('sha256', CLIENT_IP_HASH_SECRET).update(String(ip || '')).digest('hex');
+}
+
+function challengeSignaturePayload(challenge) {
+  return Buffer.from([
+    'SkyBridge-Admission-Challenge',
+    challenge.challengeId,
+    challenge.nonce,
+    challenge.tenantId,
+    challenge.userId,
+    challenge.deviceId,
+    challenge.clientVersion,
+    challenge.protocolVersion
+  ].join('\n'), 'utf8');
+}
+
+function ed25519RawPublicKeyToSpki(rawKey) {
+  if (!Buffer.isBuffer(rawKey) || rawKey.length !== 32) {
     return null;
   }
-  const binding = {
-    deviceId,
-    protocolSigningAlgorithm,
-    protocolPublicKeyFingerprint
-  };
-  if (requirePublicKey) {
-    binding.protocolPublicKeyBytes = raw.protocolPublicKeyBytes || null;
-  }
-  return binding;
+  const prefix = Buffer.from('302a300506032b6570032100', 'hex');
+  return Buffer.concat([prefix, rawKey]);
 }
 
-function auditCurrentPath(event, fields = {}) {
-  const parts = [
-    `event=${event}`,
-    `session=${fields.sessionId || '-'}`,
-    `role=${fields.role || '-'}`,
-    `fingerprint=${fields.protocolPublicKeyFingerprint || '-'}`,
-    `failure=${fields.failure || '-'}`,
-    `reason=${fields.reason || '-'}`
-  ];
-  if (fields.boundIdentity) {
-    parts.push(`bound=${fields.boundIdentity.deviceId || '-'}:${fields.boundIdentity.protocolPublicKeyFingerprint || '-'}`);
+function verifyChallengeSignature(binding, signatureBase64, challenge) {
+  if (binding.protocolSigningAlgorithm !== 'Ed25519') {
+    return false;
   }
-  if (fields.presentedIdentity) {
-    parts.push(`presented=${fields.presentedIdentity.deviceId || '-'}:${fields.presentedIdentity.protocolPublicKeyFingerprint || '-'}`);
+  const signature = Buffer.from(String(signatureBase64 || '').trim(), 'base64');
+  if (!signature.length || !binding.protocolPublicKeyBytes) {
+    return false;
   }
-  console.warn(`[audit.current-path] ${parts.join(' ')}`);
+  const spki = ed25519RawPublicKeyToSpki(binding.protocolPublicKeyBytes);
+  if (!spki) return false;
+  try {
+    return crypto.verify(null, challengeSignaturePayload(challenge), { key: spki, format: 'der', type: 'spki' }, signature);
+  } catch (_) {
+    return false;
+  }
 }
 
-const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no 0/O/1/I
 function normalizeCodePrefixes(raw) {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   const text = String(raw || '').trim().toUpperCase();
   if (!text) return '';
   const seen = new Set();
   let out = '';
   for (const ch of text) {
-    if (!CODE_ALPHABET.includes(ch) || seen.has(ch)) continue;
+    if (!alphabet.includes(ch) || seen.has(ch)) continue;
     seen.add(ch);
     out += ch;
   }
   return out;
 }
+
+const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const INSTANCE_CODE_PREFIXES = normalizeCodePrefixes(process.env.INSTANCE_CODE_PREFIXES || '');
 function generateCode(len = CODE_LEN) {
   const bytes = crypto.randomBytes(len);
@@ -257,54 +337,39 @@ function generateCode(len = CODE_LEN) {
   let out = INSTANCE_CODE_PREFIXES
     ? INSTANCE_CODE_PREFIXES[bytes[0] % INSTANCE_CODE_PREFIXES.length]
     : CODE_ALPHABET[bytes[0] % CODE_ALPHABET.length];
-  for (let i = 1; i < len; i++) {
+  for (let i = 1; i < len; i += 1) {
     out += CODE_ALPHABET[bytes[i] % CODE_ALPHABET.length];
   }
   return out;
 }
 
-function isPlainObject(x) {
-  return x && typeof x === 'object' && !Array.isArray(x);
-}
-
-function safeUpperCode(x) {
-  return String(x || '').trim().toUpperCase();
-}
-
-function normalizeRecordId(x) {
-  return String(x || '').trim();
-}
-
-function safeClientTag(x) {
-  const normalized = String(x || '').trim().replace(/[^a-zA-Z0-9._:-]/g, '');
-  if (!normalized) return 'anon';
-  return normalized.slice(0, 64);
-}
-
-function issueStickyHintCookie(res, shardKey, maxAgeSeconds = STICKY_HINT_COOKIE_MAX_AGE_SECONDS) {
-  if (!ENABLE_STICKY_HINT_COOKIE || !res || !shardKey) return;
-  res.cookie(STICKY_HINT_COOKIE_NAME, String(shardKey), {
-    httpOnly: true,
-    secure: STICKY_HINT_COOKIE_SECURE,
-    sameSite: STICKY_HINT_COOKIE_SAMESITE,
-    path: '/',
-    maxAge: Math.max(1, Number(maxAgeSeconds || 0)) * 1000
-  });
-}
-
-// Simple in-memory rate limiter (per IP)
-function rateLimit({ windowMs, max, keyFn }) {
-  const hits = new Map(); // key -> {count, resetAt}
+function asyncRoute(handler) {
   return (req, res, next) => {
-    const key = keyFn ? keyFn(req) : (req.ip || req.connection.remoteAddress || 'unknown');
+    Promise.resolve(handler(req, res, next)).catch((error) => {
+      const statusCode = Number(error.statusCode || error.status || 500);
+      const errorCode = String(error.code || error.message || 'internal_error');
+      console.error(`[HTTP] ${req.method} ${req.path} failed:`, errorCode);
+      if (!res.headersSent) {
+        res.status(statusCode).json({ error: errorCode });
+      }
+      if (typeof next === 'function') next(error);
+    });
+  };
+}
+
+function rateLimit({ windowMs, max, keyFn }) {
+  const hits = new Map();
+  return (req, res, next) => {
+    const key = keyFn ? keyFn(req) : (clientIPForRequest(req, { trustProxy: currentTrustProxy }) || 'unknown');
     const t = now();
-    let ent = hits.get(key);
-    if (!ent || t > ent.resetAt) {
-      ent = { count: 0, resetAt: t + windowMs };
-      hits.set(key, ent);
+    let entry = hits.get(key);
+    if (!entry || t > entry.resetAt) {
+      entry = { count: 0, resetAt: t + windowMs };
+      hits.set(key, entry);
     }
-    ent.count++;
-    if (ent.count > max) {
+    entry.count += 1;
+    if (entry.count > max) {
+      incrementSecurityCounter('http_rate_limited');
       res.status(429).json({ error: 'rate_limited' });
       return;
     }
@@ -312,27 +377,14 @@ function rateLimit({ windowMs, max, keyFn }) {
   };
 }
 
-function asyncRoute(handler) {
-  return (req, res, next) => {
-    Promise.resolve(handler(req, res, next)).catch((error) => {
-      console.error(`[HTTP] ${req.method} ${req.originalUrl} failed:`, error);
-      if (!res.headersSent) {
-        res.status(500).json({ error: 'internal_error' });
-      }
-      if (typeof next === 'function') next(error);
-    });
-  };
-}
-
-// -------------------- Shared state backend --------------------
-const signalingState = createSignalingStateBackend({
+let signalingState = createSignalingStateBackend({
   backendName: SIGNALING_STATE_BACKEND,
   instanceId: INSTANCE_ID,
   codeTtlMs: CODE_TTL_MS,
-  iceTtlMs: ICE_TTL_MS,
+  iceTtlMs: CODE_TTL_MS,
   iceMaxPerSession: ICE_MAX_PER_SESSION,
   roomMembershipTtlMs: ROOM_MEMBERSHIP_TTL_MS,
-  legacyBindingTtlMs: LEGACY_BINDING_TTL_MS,
+  legacyBindingTtlMs: CODE_TTL_MS,
   redisUrl: SIGNALING_REDIS_URL,
   redisKeyPrefix: SIGNALING_REDIS_KEY_PREFIX,
   redisChannelPrefix: SIGNALING_REDIS_CHANNEL_PREFIX,
@@ -340,104 +392,404 @@ const signalingState = createSignalingStateBackend({
   log: console
 });
 
-/**
- * WebRTC envelope rooms (new protocol):
- * rooms: sessionId -> { clients:Set<ws>, clientsByDeviceId:Map<string, ws> }
- *
- * This supports the app-side `WebRTCSignalingEnvelope`:
- * - { sessionId, from, to?, type: join|offer|answer|iceCandidate|leave, payload?, sentAt }
- *
- * We keep the legacy “connection code + bind/role” protocol for backward compatibility.
- */
+let registryStore = new RegistryStore();
+let currentTrustProxy = TRUST_PROXY;
+let currentRequireSharedStateForPublicCapabilities = REQUIRE_SHARED_STATE_FOR_PUBLIC_CAPABILITIES;
+let currentAllowBootstrapDeviceAuth = SIGNALING_ALLOW_BOOTSTRAP_DEVICE_AUTH;
 const rooms = new Map();
-const legacyBindings = new Map(); // code -> { initiator?: ws, responder?: ws }
+const wsMeta = new WeakMap();
+const securityCounters = new Map();
+const runtimeProtection = {
+  redisAllowlistOnly: false,
+  lastControlFlags: {
+    allowlistOnly: false,
+    disableChallengeAdmission: false,
+    disableTurnIssuance: false,
+    disableCodeFlows: false,
+    allowlistTenants: []
+  },
+  redisLatencySamples: []
+};
 
-// ws metadata
-const wsMeta = new WeakMap(); // ws -> { code, role, clientId }
-
-function normalizeSessionId(x) {
-  return String(x || '').trim();
+function incrementSecurityCounter(name) {
+  const current = securityCounters.get(name) || 0;
+  securityCounters.set(name, current + 1);
 }
 
-function normalizeDeviceId(x) {
-  return String(x || '').trim();
+function currentSecurityCounters() {
+  return Object.fromEntries([...securityCounters.entries()].sort((left, right) => left[0].localeCompare(right[0])));
 }
 
-function isWebRTCEnvelope(msg) {
-  if (!isPlainObject(msg)) return false;
-  if (typeof msg.sessionId !== 'string') return false;
-  if (typeof msg.from !== 'string') return false;
-  if (typeof msg.type !== 'string') return false;
-  if (typeof msg.sentAt !== 'undefined' && typeof msg.sentAt !== 'number') return false;
-  if (typeof msg.authToken !== 'undefined' && typeof msg.authToken !== 'string') return false;
-  const t = msg.type;
-  return t === 'join' || t === 'offer' || t === 'answer' || t === 'iceCandidate' || t === 'leave';
+function makeError(code, statusCode = 400) {
+  const error = new Error(code);
+  error.code = code;
+  error.statusCode = statusCode;
+  return error;
 }
 
-function getOrCreateRoom(sessionId) {
-  const sid = normalizeSessionId(sessionId);
-  if (!sid) return null;
-  let room = rooms.get(sid);
-  if (!room) {
-    room = { clients: new Set(), clientsByDeviceId: new Map() };
-    rooms.set(sid, room);
+function appControlFlags() {
+  return {
+    allowlistOnly: ENV_ALLOWLIST_ONLY || runtimeProtection.lastControlFlags.allowlistOnly || runtimeProtection.redisAllowlistOnly,
+    disableChallengeAdmission: ENV_DISABLE_CHALLENGE_ADMISSION || runtimeProtection.lastControlFlags.disableChallengeAdmission,
+    disableTurnIssuance: ENV_DISABLE_TURN_ISSUANCE || runtimeProtection.lastControlFlags.disableTurnIssuance,
+    disableCodeFlows: ENV_DISABLE_CODE_FLOWS || runtimeProtection.lastControlFlags.disableCodeFlows,
+    allowlistTenants: unique([...ALLOWLIST_TENANTS, ...(runtimeProtection.lastControlFlags.allowlistTenants || [])])
+  };
+}
+
+function isTenantAllowlisted(tenantId) {
+  if (!tenantId) return false;
+  return appControlFlags().allowlistTenants.includes(tenantId);
+}
+
+async function refreshRuntimeProtection() {
+  try {
+    runtimeProtection.lastControlFlags = await signalingState.readControlFlags();
+  } catch (error) {
+    console.error('[ops] failed to refresh control flags:', error.message);
   }
-  return room;
+  if (SIGNALING_STATE_BACKEND !== 'redis') {
+    runtimeProtection.redisAllowlistOnly = false;
+    runtimeProtection.redisLatencySamples = [];
+    return;
+  }
+  try {
+    const latencyMs = await signalingState.measureLatency();
+    runtimeProtection.redisLatencySamples.push(latencyMs);
+    if (runtimeProtection.redisLatencySamples.length > REDIS_LATENCY_PROTECTION_WINDOW_SAMPLES) {
+      runtimeProtection.redisLatencySamples.shift();
+    }
+    const sorted = [...runtimeProtection.redisLatencySamples].sort((left, right) => left - right);
+    const p95Index = Math.max(0, Math.ceil(sorted.length * 0.95) - 1);
+    const p95 = sorted[p95Index] || 0;
+    runtimeProtection.redisAllowlistOnly = sorted.length >= REDIS_LATENCY_PROTECTION_WINDOW_SAMPLES && p95 > REDIS_LATENCY_PROTECTION_P95_MS;
+  } catch (error) {
+    console.error('[ops] failed to measure redis latency:', error.message);
+    runtimeProtection.redisAllowlistOnly = true;
+  }
 }
 
-function getOrCreateLegacyBindings(code) {
-  const key = safeUpperCode(code);
+async function assertPublicCapabilityAvailable(action, tenantId) {
+  const health = await signalingState.getHealth();
+  if (currentRequireSharedStateForPublicCapabilities) {
+    if (SIGNALING_STATE_BACKEND !== 'redis' || !health.ready || !health.redisConnected) {
+      incrementSecurityCounter(`fail_closed_${action}`);
+      throw makeError('shared_state_unavailable', 503);
+    }
+  }
+  if (appControlFlags().allowlistOnly && !isTenantAllowlisted(tenantId)) {
+    incrementSecurityCounter(`allowlist_only_${action}`);
+    throw makeError('allowlist_only_mode', 503);
+  }
+}
+
+function getBearerToken(req) {
+  const header = String(req.get('Authorization') || '').trim();
+  if (!header.toLowerCase().startsWith('bearer ')) return '';
+  return header.slice(7).trim();
+}
+
+function getOpaqueHeader(req, name) {
+  return String(req.get(name) || '').trim();
+}
+
+function tenantIdFromRequest(req) {
+  const headerTenant = String(req.get('X-SkyBridge-Tenant-Id') || '').trim();
+  if (headerTenant) return headerTenant;
+  if (typeof req.body?.tenantId === 'string' && req.body.tenantId.trim()) return req.body.tenantId.trim();
+  if (typeof req.query?.tenantId === 'string' && req.query.tenantId.trim()) return req.query.tenantId.trim();
+  return '';
+}
+
+function deriveTenantIdFromUser(user) {
+  const candidates = [
+    user?.appMetadata?.tenant_id,
+    user?.appMetadata?.tenantId,
+    user?.appMetadata?.org_id,
+    user?.appMetadata?.workspace_id,
+    user?.userMetadata?.tenant_id,
+    user?.userMetadata?.tenantId,
+    user?.userMetadata?.org_id,
+    user?.userMetadata?.workspace_id,
+    SIGNALING_BOOTSTRAP_TENANT_ID
+  ];
+  for (const candidate of candidates) {
+    const value = String(candidate || '').trim();
+    if (value) return value;
+  }
+  if (SIGNALING_BOOTSTRAP_TENANT_MODE === 'user_id') {
+    const userID = String(user?.id || '').trim();
+    if (userID) return userID;
+  }
+  return '';
+}
+
+function syntheticTenantPolicy(tenantId) {
+  return {
+    tenant_id: tenantId,
+    public_signaling_enabled: true,
+    allowlist_only: false,
+    min_supported_client_version: GLOBAL_MIN_CLIENT_VERSION,
+    min_supported_protocol_version: GLOBAL_MIN_PROTOCOL_VERSION,
+    synthetic: true
+  };
+}
+
+function syntheticDeviceRecord(ctx) {
+  return {
+    tenant_id: ctx.tenantId,
+    user_id: ctx.user.id,
+    device_id: ctx.binding.deviceId,
+    protocol_signing_algorithm: ctx.binding.protocolSigningAlgorithm,
+    protocol_public_key_fingerprint: ctx.binding.protocolPublicKeyFingerprint,
+    status: 'active',
+    synthetic: true
+  };
+}
+
+async function loadAuthenticatedDeviceContext(req, { requireRegisteredDevice = true } = {}) {
+  if (!registryStore.configured) {
+    throw makeError('registry_not_configured', 503);
+  }
+  const accessToken = getBearerToken(req);
+  if (!accessToken) {
+    throw makeError('missing_bearer_token', 401);
+  }
+  const binding = normalizeIdentityBinding(req.body || req.query || {}, { requirePublicKey: false });
+  if (!binding) {
+    throw makeError('bad_device_binding', 400);
+  }
+  const clientVersion = normalizeVersion(req.body?.clientVersion || req.query?.clientVersion || req.get('X-SkyBridge-Client-Version') || '0.0.0');
+  const protocolVersion = normalizeVersion(req.body?.protocolVersion || req.query?.protocolVersion || req.get('X-SkyBridge-Protocol-Version') || '0');
+
+  const user = await registryStore.verifyAccessToken(accessToken);
+  if (!user.id) {
+    throw makeError('invalid_user_session', 401);
+  }
+  if (user.isGuest) {
+    throw makeError('guest_forbidden', 403);
+  }
+  const tenantId = tenantIdFromRequest(req) || deriveTenantIdFromUser(user);
+  if (!tenantId) {
+    throw makeError('missing_tenant_id', 400);
+  }
+  const tenantPolicy = await registryStore.getTenantPolicy(tenantId);
+  const effectiveTenantPolicy = (!tenantPolicy && SIGNALING_ALLOW_BOOTSTRAP_TENANT_POLICY)
+    ? syntheticTenantPolicy(tenantId)
+    : tenantPolicy;
+  if (!effectiveTenantPolicy || !effectiveTenantPolicy.public_signaling_enabled) {
+    throw makeError('tenant_public_access_disabled', 403);
+  }
+  assertVersionGates(clientVersion, protocolVersion, effectiveTenantPolicy);
+  let deviceRecord = null;
+  if (requireRegisteredDevice) {
+    deviceRecord = await registryStore.getRegisteredDevice({
+      tenantId,
+      userId: user.id,
+      deviceId: binding.deviceId,
+      protocolSigningAlgorithm: binding.protocolSigningAlgorithm,
+      protocolPublicKeyFingerprint: binding.protocolPublicKeyFingerprint
+    });
+    if (!deviceRecord && currentAllowBootstrapDeviceAuth) {
+      deviceRecord = syntheticDeviceRecord({
+        tenantId,
+        user,
+        binding
+      });
+    }
+    if (!deviceRecord) {
+      throw makeError('device_not_registered', 403);
+    }
+    if (deviceRecord.status === 'revoked') {
+      throw makeError('device_revoked', 403);
+    }
+    if (deviceRecord.status === 'frozen') {
+      throw makeError('device_frozen', 403);
+    }
+  }
+  return {
+    accessToken,
+    tenantId,
+    user,
+    tenantPolicy: effectiveTenantPolicy,
+    deviceRecord,
+    binding,
+    clientVersion,
+    protocolVersion,
+    ipHash: makeIPHash(clientIPForRequest(req, { trustProxy: currentTrustProxy }) || 'unknown')
+  };
+}
+
+async function enforceChallengeQuotas(ctx) {
+  const windowMs = 10 * 60_000;
+  const [deviceCount, userCount, ipCount] = await Promise.all([
+    signalingState.incrementWindowCounter(`challenge:device:${ctx.tenantId}:${ctx.binding.deviceId}`, windowMs),
+    signalingState.incrementWindowCounter(`challenge:user:${ctx.tenantId}:${ctx.user.id}`, windowMs),
+    signalingState.incrementWindowCounter(`challenge:ip:${ctx.ipHash}`, windowMs)
+  ]);
+  if (deviceCount.count > MAX_CHALLENGES_PER_DEVICE_PER_10M) throw makeError('challenge_device_rate_limited', 429);
+  if (userCount.count > MAX_CHALLENGES_PER_USER_PER_10M) throw makeError('challenge_user_rate_limited', 429);
+  if (ipCount.count > MAX_CHALLENGES_PER_IP_PER_10M) throw makeError('challenge_ip_rate_limited', 429);
+}
+
+async function createIdempotencyGuard(action, key, fingerprint) {
   if (!key) return null;
-  let bindings = legacyBindings.get(key);
-  if (!bindings) {
-    bindings = { initiator: null, responder: null };
-    legacyBindings.set(key, bindings);
+  const scopedKey = `${action}:${key}`;
+  const existing = await signalingState.getEphemeral('idempotency', scopedKey);
+  if (existing?.fingerprint && existing.fingerprint !== fingerprint) {
+    throw makeError('idempotency_key_reused', 409);
   }
-  return bindings;
-}
-
-function setLocalLegacyBinding(code, role, ws) {
-  const bindings = getOrCreateLegacyBindings(code);
-  if (!bindings) return;
-  bindings[role] = ws;
-}
-
-function getLocalLegacyBinding(code, role) {
-  const bindings = legacyBindings.get(safeUpperCode(code));
-  return bindings ? bindings[role] : null;
-}
-
-function clearLocalLegacyBinding(code, role, ws) {
-  const key = safeUpperCode(code);
-  const bindings = legacyBindings.get(key);
-  if (!bindings) return;
-  if (!ws || bindings[role] === ws) {
-    bindings[role] = null;
+  if (existing?.state === 'completed') {
+    return { existing };
   }
-  if (!bindings.initiator && !bindings.responder) {
-    legacyBindings.delete(key);
-  }
-}
-
-async function removeFromAllRooms(ws) {
-  const meta = wsMeta.get(ws) || null;
-  const clientId = meta?.clientId || '';
-  for (const [sid, room] of rooms.entries()) {
-    if (!room.clients.has(ws)) continue;
-    room.clients.delete(ws);
-    const removedDeviceIds = [];
-    for (const [deviceId, boundWs] of room.clientsByDeviceId.entries()) {
-      if (boundWs !== ws) continue;
-      room.clientsByDeviceId.delete(deviceId);
-      removedDeviceIds.push(deviceId);
+  const created = await signalingState.createEphemeral('idempotency', scopedKey, {
+    state: 'in_progress',
+    action,
+    fingerprint,
+    issuedAt: now(),
+    expiresAt: now() + 10 * 60_000
+  });
+  if (!created) {
+    const latest = await signalingState.getEphemeral('idempotency', scopedKey);
+    if (latest?.fingerprint && latest.fingerprint !== fingerprint) {
+      throw makeError('idempotency_key_reused', 409);
     }
-    for (const deviceId of removedDeviceIds) {
-      await signalingState.removeRoomMember(sid, deviceId, clientId);
+    if (latest?.state === 'completed') {
+      return { existing: latest };
     }
-    if (room.clients.size === 0) {
-      rooms.delete(sid);
-    }
+    throw makeError('idempotency_in_progress', 409);
   }
+  return { id: scopedKey };
+}
+
+async function completeIdempotencyGuard(guard, responseBody) {
+  if (!guard?.id) return;
+  await signalingState.updateEphemeral('idempotency', guard.id, (record) => {
+    record.state = 'completed';
+    record.responseBody = responseBody;
+    record.completedAt = now();
+  });
+}
+
+async function cancelIdempotencyGuard(guard) {
+  if (!guard?.id) return;
+  await signalingState.deleteEphemeral('idempotency', guard.id);
+}
+
+function issueEphemeralTokenRecord({ kind, ttlMs, payload }) {
+  const token = newOpaqueToken(kind === 'turn_admission_token' ? 24 : 32);
+  const tokenHash = sha256Hex(token);
+  return {
+    token,
+    tokenHash,
+    record: {
+      kind,
+      state: 'issued',
+      tokenHashPrefix: tokenHash.slice(0, 12),
+      issuedAt: now(),
+      expiresAt: now() + ttlMs,
+      ...payload
+    }
+  };
+}
+
+async function issueSessionArtifacts({ sessionId, role, context, expiresAt }) {
+  const deviceSynthetic = Boolean(context.deviceSynthetic || context.deviceRecord?.synthetic);
+  const sessionToken = issueEphemeralTokenRecord({
+    kind: 'session_token',
+    ttlMs: Math.max(1, expiresAt - now()),
+    payload: {
+      sessionId,
+      role,
+      tenantId: context.tenantId,
+      userId: context.user.id,
+      deviceId: context.binding.deviceId,
+      protocolSigningAlgorithm: context.binding.protocolSigningAlgorithm,
+      protocolPublicKeyFingerprint: context.binding.protocolPublicKeyFingerprint,
+      deviceSynthetic,
+      clientVersion: context.clientVersion,
+      protocolVersion: context.protocolVersion,
+      reclaimWindowMs: SESSION_RECLAIM_WINDOW_MS
+    }
+  });
+  const turnAdmissionToken = issueEphemeralTokenRecord({
+    kind: 'turn_admission_token',
+    ttlMs: TURN_ADMISSION_TOKEN_TTL_MS,
+    payload: {
+      sessionId,
+      role,
+      tenantId: context.tenantId,
+      userId: context.user.id,
+      deviceId: context.binding.deviceId,
+      protocolSigningAlgorithm: context.binding.protocolSigningAlgorithm,
+      protocolPublicKeyFingerprint: context.binding.protocolPublicKeyFingerprint,
+      deviceSynthetic,
+      clientVersion: context.clientVersion,
+      protocolVersion: context.protocolVersion,
+      jti: base64url(crypto.randomBytes(16))
+    }
+  });
+  const sessionCreated = await signalingState.createEphemeral('session_token', sessionToken.tokenHash, sessionToken.record);
+  const turnCreated = await signalingState.createEphemeral('turn_admission_token', turnAdmissionToken.tokenHash, turnAdmissionToken.record);
+  if (!sessionCreated || !turnCreated) {
+    throw makeError('token_issue_failed', 500);
+  }
+  return {
+    sessionToken: sessionToken.token,
+    sessionTokenHash: sessionToken.tokenHash,
+    turnAdmissionToken: turnAdmissionToken.token,
+    turnAdmissionTokenHash: turnAdmissionToken.tokenHash
+  };
+}
+
+function buildConnectionRecord({
+  initiatorContext,
+  initiatorDeviceName = null,
+  expiresAt,
+  qrBootstrapTokenHash = null,
+  signalingServerOrigin,
+  connectionKind,
+  initiatorSessionTokenHash = null,
+  initiatorTurnAdmissionTokenHash = null
+}) {
+  return {
+    deviceId: initiatorContext.binding.deviceId,
+    initiatorDeviceName,
+    initiatorProtocolSigningAlgorithm: initiatorContext.binding.protocolSigningAlgorithm,
+    initiatorProtocolPublicKeyFingerprint: initiatorContext.binding.protocolPublicKeyFingerprint,
+    offer: { mode: connectionKind },
+    createdAt: now(),
+    expiresAt,
+    initiatorTokenHash: '',
+    responderTokenHash: null,
+    qrBootstrapTokenHash,
+    qrBootstrapConsumedAt: 0,
+    roomAuthTokenHash: null,
+    connectionKind,
+    responderId: null,
+    responderProtocolSigningAlgorithm: null,
+    responderProtocolPublicKeyFingerprint: null,
+    signalingServerOrigin,
+    answer: null,
+    answerFrom: null,
+    tenantId: initiatorContext.tenantId,
+    userId: initiatorContext.user.id,
+    initiatorSessionTokenHash,
+    initiatorTurnAdmissionTokenHash,
+    responderSessionTokenHash: null,
+    responderTurnAdmissionTokenHash: null,
+    revokedAt: 0
+  };
+}
+
+function assertUniqueSessionParticipant(item, binding) {
+  if (item.deviceId === binding.deviceId) {
+    return 'device_id_conflict';
+  }
+  if (item.initiatorProtocolPublicKeyFingerprint === binding.protocolPublicKeyFingerprint) {
+    return 'identity_conflict';
+  }
+  return null;
 }
 
 function wsSendRaw(ws, obj) {
@@ -446,43 +798,59 @@ function wsSendRaw(ws, obj) {
   return true;
 }
 
-function makeWebRTCError(error, sessionId = null) {
-  const payload = { type: 'error', error };
-  if (sessionId) payload.sessionId = sessionId;
-  return payload;
+function getOrCreateRoom(sessionId) {
+  let room = rooms.get(sessionId);
+  if (!room) {
+    room = { clients: new Set(), clientsByDeviceId: new Map() };
+    rooms.set(sessionId, room);
+  }
+  return room;
 }
 
-function sanitizeEnvelopeForPeer(msg, overrideFrom = null) {
+function sanitizeEnvelopeForPeer(message, authoritativeFrom) {
   return {
-    sessionId: normalizeSessionId(msg.sessionId),
-    from: normalizeDeviceId(overrideFrom || msg.from),
-    to: typeof msg.to === 'string' ? normalizeDeviceId(msg.to) || undefined : undefined,
-    type: msg.type,
-    payload: isPlainObject(msg.payload) ? msg.payload : null,
-    sentAt: typeof msg.sentAt === 'number' ? msg.sentAt : Math.floor(now() / 1000)
+    sessionId: String(message.sessionId || ''),
+    from: authoritativeFrom,
+    to: typeof message.to === 'string' ? message.to : undefined,
+    type: message.type,
+    payload: isPlainObject(message.payload) ? message.payload : null,
+    sentAt: typeof message.sentAt === 'number' ? message.sentAt : Math.floor(now() / 1000)
   };
 }
 
-function deliverEnvelopeLocally(ws, msg) {
-  const sid = normalizeSessionId(msg.sessionId);
-  const room = rooms.get(sid);
-  if (!room) return false;
-  const sanitized = sanitizeEnvelopeForPeer(msg);
-  const to = typeof msg.to === 'string' ? normalizeDeviceId(msg.to) : '';
-  if (to) {
-    const target = room.clientsByDeviceId.get(to);
-    if (target && target !== ws) {
-      wsSendRaw(target, sanitized);
-      return true;
-    }
-    return false;
-  }
+function isWebRTCEnvelope(message) {
+  if (!isPlainObject(message)) return false;
+  if (typeof message.sessionId !== 'string') return false;
+  if (typeof message.from !== 'string') return false;
+  if (typeof message.type !== 'string') return false;
+  if (typeof message.sentAt !== 'undefined' && typeof message.sentAt !== 'number') return false;
+  return ['join', 'offer', 'answer', 'iceCandidate', 'leave'].includes(message.type);
+}
 
-  for (const peer of room.clients) {
-    if (peer === ws) continue;
-    wsSendRaw(peer, sanitized);
+function validateEnvelopeSchema(message) {
+  const sessionId = String(message.sessionId || '').trim();
+  const from = normalizeDeviceId(message.from);
+  if (!sessionId || sessionId.length > 160) return 'bad_session_id';
+  if (!STRICT_DEVICE_ID_RE.test(from)) return 'bad_from';
+  if (typeof message.to === 'string' && message.to && !STRICT_DEVICE_ID_RE.test(message.to)) return 'bad_to';
+  if (!['join', 'offer', 'answer', 'iceCandidate', 'leave'].includes(message.type)) return 'bad_type';
+  if (message.payload != null && !isPlainObject(message.payload)) return 'bad_payload';
+  if (!message.payload) return null;
+  const payload = message.payload;
+  if ((message.type === 'offer' || message.type === 'answer')) {
+    if (typeof payload.sdp !== 'string' || Buffer.byteLength(payload.sdp, 'utf8') > SDP_MAX_BYTES) {
+      return 'bad_sdp';
+    }
   }
-  return true;
+  if (message.type === 'iceCandidate') {
+    if (typeof payload.candidate !== 'string' || Buffer.byteLength(payload.candidate, 'utf8') > ICE_CANDIDATE_MAX_BYTES) {
+      return 'bad_candidate';
+    }
+    if (typeof payload.sdpMid === 'string' && Buffer.byteLength(payload.sdpMid, 'utf8') > ICE_SDP_MID_MAX_BYTES) {
+      return 'bad_sdp_mid';
+    }
+  }
+  return null;
 }
 
 function remoteInstanceIdsForMembers(members, excludeInstanceId) {
@@ -493,151 +861,162 @@ function remoteInstanceIdsForMembers(members, excludeInstanceId) {
   );
 }
 
-async function forwardEnvelopeToRemoteInstances(msg) {
-  const to = typeof msg.to === 'string' ? normalizeDeviceId(msg.to) : '';
-  const members = await signalingState.listRoomMembers(msg.sessionId);
-  const sanitized = sanitizeEnvelopeForPeer(msg);
-  let targetInstances;
+function iceCandidateHash(from, payload) {
+  return sha256Hex(`${from}|${payload.sdpMid || ''}|${payload.sdpMLineIndex || ''}|${payload.candidate || ''}`);
+}
+
+async function forwardEnvelopeToRemoteInstances(message) {
+  const members = await signalingState.listRoomMembers(message.sessionId);
+  const to = typeof message.to === 'string' ? message.to : '';
+  let targetInstances = [];
   if (to) {
-    const directedMember = members.find((member) => member.deviceId === to);
-    targetInstances = directedMember ? [directedMember.instanceId] : [];
+    const target = members.find((member) => member.deviceId === to);
+    targetInstances = target ? [target.instanceId] : [];
   } else {
     targetInstances = remoteInstanceIdsForMembers(members, INSTANCE_ID);
   }
   await Promise.all(targetInstances.map((instanceId) => signalingState.publishToInstance(instanceId, {
     kind: 'webrtc-envelope',
-    envelope: sanitized
+    envelope: message
   })));
 }
 
-function authMatchesHash(token, hash) {
-  if (typeof token !== 'string' || typeof hash !== 'string' || !hash) return false;
-  return secureStringEqual(sha256Hex(token), hash);
-}
-
-function boundIdentityForRole(item, role) {
-  if (role === 'initiator') {
-    return {
-      deviceId: item.deviceId || null,
-      protocolSigningAlgorithm: item.initiatorProtocolSigningAlgorithm || null,
-      protocolPublicKeyFingerprint: item.initiatorProtocolPublicKeyFingerprint || null
-    };
-  }
-  if (role === 'responder') {
-    return {
-      deviceId: item.responderId || null,
-      protocolSigningAlgorithm: item.responderProtocolSigningAlgorithm || null,
-      protocolPublicKeyFingerprint: item.responderProtocolPublicKeyFingerprint || null
-    };
-  }
-  return null;
-}
-
-function authWebRTCEnvelope(item, msg) {
-  const token = typeof msg.authToken === 'string' ? msg.authToken : '';
-  if (authMatchesHash(token, item.initiatorTokenHash)) {
-    return { ok: true, role: 'initiator', boundIdentity: boundIdentityForRole(item, 'initiator') };
-  }
-  if (authMatchesHash(token, item.responderTokenHash)) {
-    return { ok: true, role: 'responder', boundIdentity: boundIdentityForRole(item, 'responder') };
-  }
-  return { ok: false, role: null, boundIdentity: null };
-}
-
-async function handleWebRTCEnvelope(ws, msg) {
-  const sid = normalizeSessionId(msg.sessionId);
-  const from = normalizeDeviceId(msg.from);
-  if (!sid || !from) return wsSendRaw(ws, makeWebRTCError('bad_envelope', sid || null));
-
-  const item = await signalingState.getConnection(sid);
-  if (!item) {
-    wsSendRaw(ws, makeWebRTCError('unknown_session', sid));
-    try { ws.close(1008, 'unknown_session'); } catch {}
-    return;
-  }
-  if (item.connectionKind !== 'webrtc_room_code' && item.connectionKind !== 'webrtc_room_session') {
-    wsSendRaw(ws, makeWebRTCError('session_mode_mismatch', sid));
-    try { ws.close(1008, 'session_mode_mismatch'); } catch {}
-    return;
-  }
-
-  const authResult = authWebRTCEnvelope(item, msg);
-  if (!authResult.ok && !ALLOW_INSECURE) {
-    auditCurrentPath('webrtc-envelope-rejected', {
-      sessionId: sid,
-      failure: 'authTokenRejected',
-      reason: 'token_not_bound'
-    });
-    wsSendRaw(ws, makeWebRTCError('unauthorized', sid));
-    try { ws.close(1008, 'unauthorized'); } catch {}
-    return;
-  }
-  const boundIdentity = authResult.boundIdentity;
-  if (boundIdentity?.deviceId && boundIdentity.deviceId !== from) {
-    auditCurrentPath('webrtc-envelope-rejected', {
-      sessionId: sid,
-      role: authResult.role,
-      protocolPublicKeyFingerprint: boundIdentity.protocolPublicKeyFingerprint,
-      failure: 'identityConflict',
-      reason: 'presented_from_mismatch',
-      boundIdentity,
-      presentedIdentity: {
-        deviceId: from,
-        protocolPublicKeyFingerprint: boundIdentity.protocolPublicKeyFingerprint
-      }
-    });
-    wsSendRaw(ws, makeWebRTCError('device_mismatch', sid));
-    try { ws.close(1008, 'device_mismatch'); } catch {}
-    return;
-  }
-
-  const room = getOrCreateRoom(sid);
-  if (!room) return wsSendRaw(ws, makeWebRTCError('bad_sessionId', sid));
-
-  const meta = wsMeta.get(ws) || { code: null, role: null, clientId: uuidv4(), rate: { t0: now(), c: 0 } };
-  const authoritativeFrom = boundIdentity?.deviceId || from;
-  if ((meta.sessionId && meta.sessionId !== sid) || (meta.deviceId && meta.deviceId !== authoritativeFrom)) {
-    await removeFromAllRooms(ws);
-  }
-
-  if (!room.clients.has(ws)) {
-    if (room.clients.size >= WS_MAX_CLIENTS_PER_ROOM) {
-      return wsSendRaw(ws, makeWebRTCError('room_full', sid));
+function deliverEnvelopeLocally(sourceWs, message) {
+  const room = rooms.get(message.sessionId);
+  if (!room) return;
+  if (typeof message.to === 'string' && message.to) {
+    const target = room.clientsByDeviceId.get(message.to);
+    if (target && target !== sourceWs) {
+      wsSendRaw(target, message);
     }
-    room.clients.add(ws);
+    return;
   }
-  const existingClient = room.clientsByDeviceId.get(authoritativeFrom);
-  if (existingClient && existingClient !== ws) {
-    if (existingClient.readyState === existingClient.OPEN) {
-      return wsSendRaw(ws, makeWebRTCError('device_conflict', sid));
-    }
-    room.clients.delete(existingClient);
-    room.clientsByDeviceId.delete(authoritativeFrom);
+  for (const peer of room.clients) {
+    if (peer === sourceWs) continue;
+    wsSendRaw(peer, message);
   }
-  room.clientsByDeviceId.set(authoritativeFrom, ws);
-  wsMeta.set(ws, { ...meta, sessionId: sid, deviceId: authoritativeFrom, webrtcAuthMode: authResult.role });
+}
 
-  const updatedAt = now();
-  await signalingState.upsertRoomMember(sid, {
-    deviceId: authoritativeFrom,
-    instanceId: INSTANCE_ID,
-    clientId: meta.clientId,
-    updatedAt,
-    expiresAt: updatedAt + ROOM_MEMBERSHIP_TTL_MS
-  });
-
-  if (msg.type === 'leave') {
-    await signalingState.removeRoomMember(sid, authoritativeFrom, meta.clientId || '');
+async function removeFromRooms(ws) {
+  const meta = wsMeta.get(ws);
+  if (!meta?.sessionId || !meta?.deviceId) return;
+  const room = rooms.get(meta.sessionId);
+  if (room) {
     room.clients.delete(ws);
-    if (room.clientsByDeviceId.get(authoritativeFrom) === ws) {
-      room.clientsByDeviceId.delete(authoritativeFrom);
+    if (room.clientsByDeviceId.get(meta.deviceId) === ws) {
+      room.clientsByDeviceId.delete(meta.deviceId);
     }
-    if (room.clients.size === 0) rooms.delete(sid);
+    if (room.clients.size === 0) {
+      rooms.delete(meta.sessionId);
+    }
   }
+  await signalingState.removeRoomMember(meta.sessionId, meta.deviceId, meta.clientId || '');
+}
 
-  const sanitized = sanitizeEnvelopeForPeer(msg, authoritativeFrom);
-  deliverEnvelopeLocally(ws, sanitized);
-  await forwardEnvelopeToRemoteInstances(sanitized);
+async function dropLocalClientById(clientId, reason = 'remote_reclaim') {
+  if (!wss) return;
+  for (const client of wss.clients) {
+    const meta = wsMeta.get(client);
+    if (!meta || meta.clientId !== clientId) continue;
+    try {
+      client.close(1008, reason);
+    } catch (_) {}
+  }
+}
+
+async function revokeEphemeralIfPresent(kind, tokenHash) {
+  if (!tokenHash) return;
+  await signalingState.updateEphemeral(kind, tokenHash, (record) => {
+    record.state = 'revoked';
+    record.revokedAt = now();
+  });
+}
+
+async function killSession(sessionId, reason) {
+  const record = await signalingState.updateConnection(sessionId, (item) => {
+    item.revokedAt = now();
+  });
+  if (record) {
+    await Promise.all([
+      revokeEphemeralIfPresent('session_token', record.initiatorSessionTokenHash),
+      revokeEphemeralIfPresent('session_token', record.responderSessionTokenHash),
+      revokeEphemeralIfPresent('turn_admission_token', record.initiatorTurnAdmissionTokenHash),
+      revokeEphemeralIfPresent('turn_admission_token', record.responderTurnAdmissionTokenHash)
+    ]);
+  }
+  const room = rooms.get(sessionId);
+  if (room) {
+    for (const ws of room.clients) {
+      try {
+        ws.close(1008, reason);
+      } catch (_) {}
+    }
+    rooms.delete(sessionId);
+  }
+  const members = await signalingState.listRoomMembers(sessionId);
+  await Promise.all(members.map((member) => {
+    if (member.instanceId && member.instanceId !== INSTANCE_ID) {
+      return signalingState.publishToInstance(member.instanceId, {
+        kind: 'close-session',
+        sessionId,
+        reason
+      });
+    }
+    return Promise.resolve();
+  }));
+}
+
+async function consumeAdmissionToken(req, action) {
+  const rawToken = getOpaqueHeader(req, 'X-SkyBridge-Admission');
+  if (!rawToken) {
+    throw makeError('missing_admission_token', 401);
+  }
+  const tokenHash = sha256Hex(rawToken);
+  let consumeError = null;
+  const record = await signalingState.updateEphemeral('admission_token', tokenHash, (current) => {
+    if (current.state !== 'issued') {
+      consumeError = 'admission_token_consumed';
+      return false;
+    }
+    current.state = 'consumed';
+    current.consumedAt = now();
+    current.consumedBy = action;
+  });
+  if (!record) throw makeError('admission_token_expired', 401);
+  if (consumeError) throw makeError(consumeError, 409);
+  return record;
+}
+
+function deriveTurnOpaqueTag(label, value, bytes = 12) {
+  if (!TURN_OPAQUE_TAG_SECRET) {
+    throw makeError('turn_tag_secret_not_configured', 503);
+  }
+  return base64url(
+    crypto.createHmac('sha256', TURN_OPAQUE_TAG_SECRET)
+      .update(`${label}:${value}`)
+      .digest()
+      .subarray(0, bytes)
+  );
+}
+
+async function getTurnTokenRecord(req) {
+  const rawToken = getOpaqueHeader(req, 'X-SkyBridge-Turn-Admission');
+  if (!rawToken) {
+    throw makeError('missing_turn_admission_token', 401);
+  }
+  const tokenHash = sha256Hex(rawToken);
+  let consumeError = null;
+  const record = await signalingState.updateEphemeral('turn_admission_token', tokenHash, (current) => {
+    if (current.state !== 'issued') {
+      consumeError = 'turn_admission_token_consumed';
+      return false;
+    }
+    current.state = 'consumed';
+    current.consumedAt = now();
+  });
+  if (!record) throw makeError('turn_admission_token_expired', 401);
+  if (consumeError) throw makeError(consumeError, 409);
+  return record;
 }
 
 async function handleBackendInstanceMessage(payload) {
@@ -648,89 +1027,74 @@ async function handleBackendInstanceMessage(payload) {
         deliverEnvelopeLocally(null, payload.envelope);
       }
       break;
-    case 'legacy-forward': {
-      const target = getLocalLegacyBinding(payload.code, payload.targetRole);
-      if (target && payload.message && typeof payload.message === 'object') {
-        wsSendRaw(target, payload.message);
-      }
+    case 'close-session':
+      await killSession(payload.sessionId, payload.reason || 'remote_kill');
       break;
-    }
-    case 'drop-code': {
-      const code = safeUpperCode(payload.code);
-      const bindings = legacyBindings.get(code);
-      if (!bindings) return;
-      for (const role of ['initiator', 'responder']) {
-        const ws = bindings[role];
-        if (!ws) continue;
-        try { ws.close(1000, payload.reason || 'remote_cleanup'); } catch {}
-      }
-      legacyBindings.delete(code);
+    case 'drop-client':
+      await dropLocalClientById(payload.clientId, payload.reason || 'remote_reclaim');
       break;
-    }
     default:
       break;
   }
 }
 
-// -------------------- App --------------------
 const app = express();
 if (TRUST_PROXY) app.set('trust proxy', 1);
-
 app.disable('x-powered-by');
 app.use((req, res, next) => {
   res.setHeader('X-SkyBridge-Instance', INSTANCE_ID);
   res.setHeader('X-SkyBridge-State-Backend', SIGNALING_STATE_BACKEND);
-  if (INSTANCE_CODE_PREFIXES) {
-    res.setHeader('X-SkyBridge-Code-Prefixes', INSTANCE_CODE_PREFIXES);
-  }
   next();
 });
 app.use(express.json({ limit: JSON_LIMIT }));
 
-// CORS + basic security headers (lightweight)
 app.use((req, res, next) => {
-  // CORS
   const origin = req.headers.origin;
   if (origin && CORS_ORIGIN) {
-    const allowList = CORS_ORIGIN.split(',').map(s => s.trim()).filter(Boolean);
-    if (allowList.includes(origin)) res.setHeader('Access-Control-Allow-Origin', origin);
+    const allowList = CORS_ORIGIN.split(',').map((item) => item.trim()).filter(Boolean);
+    if (allowList.includes(origin)) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+    }
   }
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Key');
-  if (req.method === 'OPTIONS') return res.sendStatus(204);
-
-  // Simple hardening
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Idempotency-Key, X-SkyBridge-Tenant-Id, X-SkyBridge-Admission, X-SkyBridge-Turn-Admission, X-SkyBridge-Client-Version, X-SkyBridge-Protocol-Version');
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Content-Security-Policy', "default-src 'none'");
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
 });
 
-// -------------------- Health & Root --------------------
+const rlControl = rateLimit({ windowMs: 60_000, max: 60 });
+const rlLookup = rateLimit({ windowMs: 60_000, max: 30 });
+const rlTurn = rateLimit({ windowMs: 60_000, max: 60 });
+const rlAdmission = rateLimit({ windowMs: 60_000, max: 60 });
+
 app.get('/', asyncRoute(async (req, res) => {
   const backendHealth = await signalingState.getHealth();
-  // 之前你 curl -I https://api... 之所以 404，就是没这个路由
   res.status(200).json({
     ok: true,
     service: 'skybridge-signaling',
     time: new Date().toISOString(),
     instanceId: INSTANCE_ID,
     stateBackend: SIGNALING_STATE_BACKEND,
-    stickyHintCookieEnabled: ENABLE_STICKY_HINT_COOKIE,
-    instanceCodePrefixes: INSTANCE_CODE_PREFIXES || null,
     backendHealth,
+    protection: {
+      ...appControlFlags(),
+      redisLatencySamples: runtimeProtection.redisLatencySamples
+    },
     endpoints: [
       '/health',
       '/healthz',
-      '/api/register',
-      '/api/lookup/:code',
-      '/api/answer/:code',
-      '/api/ice/:sessionId',
-      '/api/turn/credentials',
+      '/api/webrtc/admission/challenge',
+      '/api/webrtc/admission',
       '/api/webrtc/register-code',
       '/api/webrtc/lookup/:code',
       '/api/webrtc/register-session',
       '/api/webrtc/redeem-session',
-      '/ws'
+      '/api/turn/credentials',
+      '/api/devices/enroll/first',
+      '/api/devices/enroll/confirm',
+      '/ws?shard=<session_id>&st=<session_token>'
     ]
   });
 }));
@@ -739,826 +1103,828 @@ app.get('/health', asyncRoute(async (req, res) => {
   const backendHealth = await signalingState.getHealth();
   res.json({
     status: 'ok',
-    connections: backendHealth.connections,
-    iceSessions: backendHealth.iceSessions,
-    wsClients: wss ? wss.clients.size : 0,
     instanceId: INSTANCE_ID,
     stateBackend: SIGNALING_STATE_BACKEND,
-    stickyHintCookieEnabled: ENABLE_STICKY_HINT_COOKIE,
-    instanceCodePrefixes: INSTANCE_CODE_PREFIXES || null,
-    roomMembers: backendHealth.roomMembers,
-    legacyBindings: backendHealth.legacyBindings,
-    backendReady: backendHealth.ready,
-    redisConnected: backendHealth.redisConnected
+    backendHealth,
+    protection: {
+      ...appControlFlags(),
+      redisLatencySamples: runtimeProtection.redisLatencySamples
+    },
+    counters: currentSecurityCounters(),
+    wsClients: wss ? wss.clients.size : 0
   });
 }));
 
 app.get('/healthz', (req, res) => res.status(200).send('ok'));
 
-// -------------------- API rate limits --------------------
-const rlRegister = rateLimit({ windowMs: 60_000, max: 30 });
-// Lower default for lookup to reduce code enumeration pressure.
-const rlLookup   = rateLimit({ windowMs: 60_000, max: 30 });
-const rlAnswer   = rateLimit({ windowMs: 60_000, max: 60 });
-const rlIce      = rateLimit({ windowMs: 60_000, max: 240 });
-const rlTurn     = rateLimit({ windowMs: 60_000, max: 120 });
-
-function clampSessionTtlMs(rawSeconds, fallbackMs = CODE_TTL_MS) {
-  const seconds = Number(rawSeconds);
-  if (!Number.isFinite(seconds)) return fallbackMs;
-  return Math.max(60_000, Math.min(24 * 3600_000, Math.trunc(seconds * 1000)));
-}
-
-function buildConnectionRecord({
-  initiatorBinding,
-  deviceId = null,
-  initiatorDeviceName = null,
-  offer = null,
-  expiresAt,
-  initiatorTokenHash = '',
-  responderTokenHash = null,
-  qrBootstrapTokenHash = null,
-  roomAuthTokenHash = null,
-  responderId = null,
-  responderProtocolSigningAlgorithm = null,
-  responderProtocolPublicKeyFingerprint = null,
-  signalingServerOrigin = null,
-  connectionKind = 'legacy_offer_answer'
-}) {
-  const effectiveDeviceId = initiatorBinding?.deviceId || deviceId || '';
-  return {
-    deviceId: effectiveDeviceId,
-    initiatorDeviceName,
-    initiatorProtocolSigningAlgorithm: initiatorBinding?.protocolSigningAlgorithm || null,
-    initiatorProtocolPublicKeyFingerprint: initiatorBinding?.protocolPublicKeyFingerprint || null,
-    offer,
-    createdAt: now(),
-    expiresAt,
-    initiatorTokenHash,
-    responderTokenHash,
-    qrBootstrapTokenHash,
-    qrBootstrapConsumedAt: 0,
-    roomAuthTokenHash,
-    responderId,
-    responderProtocolSigningAlgorithm,
-    responderProtocolPublicKeyFingerprint,
-    signalingServerOrigin,
-    answer: null,
-    answerFrom: null,
-    connectionKind
+app.post('/api/webrtc/admission/challenge', rlAdmission, asyncRoute(async (req, res) => {
+  const context = await loadAuthenticatedDeviceContext(req, { requireRegisteredDevice: true });
+  await assertPublicCapabilityAvailable('challenge', context.tenantId);
+  if (appControlFlags().disableChallengeAdmission) {
+    throw makeError('challenge_disabled', 503);
+  }
+  await enforceChallengeQuotas(context);
+  const challengeId = uuidv4();
+  const challenge = {
+    challengeId,
+    nonce: newOpaqueToken(32),
+    tenantId: context.tenantId,
+    userId: context.user.id,
+    deviceId: context.binding.deviceId,
+    clientIpHash: context.ipHash,
+    clientVersion: context.clientVersion,
+    protocolVersion: context.protocolVersion,
+    state: 'issued',
+    issuedAt: now(),
+    expiresAt: now() + CHALLENGE_TTL_MS
   };
-}
-
-function assertUniqueSessionParticipant(item, responderBinding) {
-  if (item.deviceId === responderBinding.deviceId) {
-    return 'device_id_conflict';
+  const created = await signalingState.createEphemeral('challenge', challengeId, challenge);
+  if (!created) {
+    throw makeError('challenge_issue_failed', 500);
   }
-  if (item.initiatorProtocolPublicKeyFingerprint === responderBinding.protocolPublicKeyFingerprint) {
-    return 'identity_conflict';
-  }
-  return null;
-}
+  res.json(challenge);
+}));
 
-// -------------------- REST API: dynamic TURN credentials --------------------
-app.get('/api/turn/credentials', rlTurn, (req, res) => {
-  if (TURN_ENFORCE_API_KEY) {
-    if (!TURN_CLIENT_API_KEY) {
-      return res.status(503).json({ error: 'turn_api_key_not_configured' });
+app.post('/api/webrtc/admission', rlAdmission, asyncRoute(async (req, res) => {
+  const context = await loadAuthenticatedDeviceContext(req, { requireRegisteredDevice: true });
+  await assertPublicCapabilityAvailable('admission', context.tenantId);
+  if (appControlFlags().disableChallengeAdmission) {
+    throw makeError('admission_disabled', 503);
+  }
+  const challengeId = String(req.body?.challengeId || '').trim();
+  const signature = String(req.body?.signature || '').trim();
+  const publicBinding = normalizeIdentityBinding(req.body || {}, { requirePublicKey: true });
+  if (!challengeId || !signature || !publicBinding) {
+    throw makeError('bad_admission_request', 400);
+  }
+  if (!secureStringEqual(publicBinding.protocolPublicKeyFingerprint, context.binding.protocolPublicKeyFingerprint)) {
+    throw makeError('public_key_fingerprint_mismatch', 400);
+  }
+  let consumeError = null;
+  const challenge = await signalingState.updateEphemeral('challenge', challengeId, (current) => {
+    if (current.state !== 'issued') {
+      consumeError = 'challenge_consumed';
+      return false;
     }
-    const apiKey = String(req.get('X-API-Key') || '').trim();
-    if (!secureStringEqual(apiKey, TURN_CLIENT_API_KEY)) {
-      return res.status(401).json({ error: 'unauthorized' });
+    if (
+      current.tenantId !== context.tenantId
+      || current.userId !== context.user.id
+      || current.deviceId !== context.binding.deviceId
+      || current.clientIpHash !== context.ipHash
+      || current.clientVersion !== context.clientVersion
+      || current.protocolVersion !== context.protocolVersion
+    ) {
+      consumeError = 'challenge_context_mismatch';
+      return false;
     }
+    current.state = 'consumed';
+    current.consumedAt = now();
+  });
+  if (!challenge) throw makeError('challenge_expired', 401);
+  if (consumeError) throw makeError(consumeError, 409);
+  if (!verifyChallengeSignature(publicBinding, signature, challenge)) {
+    incrementSecurityCounter('admission_signature_rejected');
+    throw makeError('admission_signature_invalid', 401);
   }
+  const admission = issueEphemeralTokenRecord({
+    kind: 'admission_token',
+    ttlMs: ADMISSION_TOKEN_TTL_MS,
+    payload: {
+      tenantId: context.tenantId,
+      userId: context.user.id,
+      deviceId: context.binding.deviceId,
+      protocolSigningAlgorithm: context.binding.protocolSigningAlgorithm,
+      protocolPublicKeyFingerprint: context.binding.protocolPublicKeyFingerprint,
+      deviceSynthetic: Boolean(context.deviceRecord?.synthetic),
+      clientVersion: context.clientVersion,
+      protocolVersion: context.protocolVersion,
+      challengeId
+    }
+  });
+  const created = await signalingState.createEphemeral('admission_token', admission.tokenHash, admission.record);
+  if (!created) throw makeError('admission_issue_failed', 500);
+  res.json({
+    admissionToken: admission.token,
+    state: 'issued',
+    issuedAt: admission.record.issuedAt,
+    expiresAt: admission.record.expiresAt
+  });
+}));
 
-  const ttl = Math.max(60, Math.min(24 * 3600, Math.trunc(TURN_CRED_TTL_SECONDS || 3600)));
-  if (!TURN_URIS.length) {
-    return res.status(503).json({ error: 'turn_uris_not_configured' });
+app.post('/api/webrtc/register-code', rlControl, asyncRoute(async (req, res) => {
+  const admission = await consumeAdmissionToken(req, 'register-code');
+  await assertPublicCapabilityAvailable('register_code', admission.tenantId);
+  if (appControlFlags().disableCodeFlows) {
+    throw makeError('code_flows_disabled', 503);
   }
-
-  // Preferred mode: generate short-lived TURN REST credentials from shared secret.
-  if (TURN_SHARED_SECRET) {
-    const clientTag = safeClientTag(req.get('X-Device-Id') || req.query.deviceId || req.ip);
-    const expiresAtEpoch = Math.floor(now() / 1000) + ttl;
-    const username = `${expiresAtEpoch}:${clientTag}`;
-    const password = crypto.createHmac('sha1', TURN_SHARED_SECRET).update(username).digest('base64');
-    return res.json({
-      username,
-      password,
-      ttl,
-      expiresAt: expiresAtEpoch,
-      uris: TURN_URIS,
-      mode: 'shared_secret_hmac'
-    });
-  }
-
-  // Optional fallback mode: static long-term credentials.
-  // Disabled by default to avoid accidentally shipping long-lived shared credentials.
-  if (TURN_ALLOW_STATIC_FALLBACK && TURN_STATIC_USERNAME && TURN_STATIC_PASSWORD) {
-    return res.json({
-      username: TURN_STATIC_USERNAME,
-      password: TURN_STATIC_PASSWORD,
-      ttl,
-      expiresAt: null,
-      uris: TURN_URIS,
-      mode: 'static_fallback'
-    });
-  }
-
-  if (!TURN_SHARED_SECRET && TURN_STATIC_USERNAME && TURN_STATIC_PASSWORD && !TURN_ALLOW_STATIC_FALLBACK) {
-    return res.status(503).json({ error: 'turn_static_fallback_disabled' });
-  }
-
-  return res.status(503).json({ error: 'turn_credentials_not_configured' });
-});
-
-// -------------------- REST API: current WebRTC room flow --------------------
-app.post('/api/webrtc/register-code', rlRegister, asyncRoute(async (req, res) => {
-  const initiatorBinding = normalizeIdentityBinding(req.body || {});
   const deviceName = typeof req.body?.deviceName === 'string' ? req.body.deviceName.slice(0, 128) : null;
-  const ttlSeconds = req.body?.ttlSeconds;
-  if (!initiatorBinding) {
-    return res.status(400).json({ error: 'bad_deviceId' });
-  }
-  const initiatorToken = newToken();
-  const expiresAt = now() + clampSessionTtlMs(ttlSeconds, CODE_TTL_MS);
-  const signalingServerOrigin = resolvedSignalingServerOrigin(req);
-  const code = await signalingState.createConnectionCode(generateCode, 10, buildConnectionRecord({
-    initiatorBinding,
-    initiatorDeviceName: deviceName,
-    offer: {
-      mode: 'webrtc_room_code',
-      deviceName
+  const expiresAt = now() + clampSessionTtlMs(req.body?.ttlSeconds, CODE_TTL_MS);
+  const context = {
+    tenantId: admission.tenantId,
+    user: { id: admission.userId },
+    binding: {
+      deviceId: admission.deviceId,
+      protocolSigningAlgorithm: admission.protocolSigningAlgorithm,
+      protocolPublicKeyFingerprint: admission.protocolPublicKeyFingerprint
     },
+    deviceSynthetic: Boolean(admission.deviceSynthetic),
+    clientVersion: admission.clientVersion,
+    protocolVersion: admission.protocolVersion
+  };
+  const artifacts = await issueSessionArtifacts({ sessionId: '', role: 'initiator', context, expiresAt });
+  const code = await signalingState.createConnectionCode(generateCode, 10, buildConnectionRecord({
+    initiatorContext: context,
+    initiatorDeviceName: deviceName,
     expiresAt,
-    initiatorTokenHash: sha256Hex(initiatorToken),
-    signalingServerOrigin,
-    connectionKind: 'webrtc_room_code'
+    signalingServerOrigin: resolvedSignalingServerOrigin(req),
+    connectionKind: 'webrtc_room_code',
+    initiatorSessionTokenHash: artifacts.sessionTokenHash,
+    initiatorTurnAdmissionTokenHash: artifacts.turnAdmissionTokenHash
   }));
-  if (!code) {
-    return res.status(500).json({ error: 'code_generation_failed' });
-  }
-  issueStickyHintCookie(res, code, Math.max(60, Math.round((expiresAt - now()) / 1000)));
+  if (!code) throw makeError('code_generation_failed', 500);
+  await signalingState.updateEphemeral('session_token', artifacts.sessionTokenHash, (record) => {
+    record.sessionId = code;
+  });
+  await signalingState.updateEphemeral('turn_admission_token', artifacts.turnAdmissionTokenHash, (record) => {
+    record.sessionId = code;
+  });
   res.json({
     code,
     sessionId: code,
-    initiatorToken,
+    sessionToken: artifacts.sessionToken,
+    turnAdmissionToken: artifacts.turnAdmissionToken,
     expiresIn: Math.max(0, Math.round((expiresAt - now()) / 1000)),
-    signalingServerOrigin,
+    signalingServerOrigin: resolvedSignalingServerOrigin(req),
     wsPath: '/ws'
   });
 }));
 
 app.get('/api/webrtc/lookup/:code', rlLookup, asyncRoute(async (req, res) => {
-  const ip = (req.ip || req.connection.remoteAddress || 'unknown');
-  if (invalidLookupLimited(ip)) {
-    return res.status(429).json({ error: 'rate_limited' });
+  const admission = await consumeAdmissionToken(req, 'lookup-code');
+  await assertPublicCapabilityAvailable('lookup_code', admission.tenantId);
+  if (appControlFlags().disableCodeFlows) {
+    throw makeError('code_flows_disabled', 503);
   }
-  const code = safeUpperCode(req.params.code);
-  const responderBinding = normalizeIdentityBinding({
-    deviceId: req.query.deviceId,
-    protocolSigningAlgorithm: req.query.protocolSigningAlgorithm,
-    protocolPublicKeyFingerprint: req.query.protocolPublicKeyFingerprint
-  });
-  if (!responderBinding) {
-    return res.status(400).json({ error: 'bad_deviceId' });
-  }
-  const existing = await signalingState.getConnection(code);
-  if (!existing || existing.connectionKind !== 'webrtc_room_code') {
-    recordInvalidLookup(ip);
-    return res.status(404).json({ found: false });
-  }
-  const uniquenessError = assertUniqueSessionParticipant(existing, responderBinding);
-  if (uniquenessError) {
-    auditCurrentPath('lookup-rejected', {
-      sessionId: code,
-      role: 'responder',
-      protocolPublicKeyFingerprint: responderBinding.protocolPublicKeyFingerprint,
-      failure: uniquenessError === 'identity_conflict' ? 'identityConflict' : 'deviceIdMigrationRequired',
-      reason: uniquenessError,
-      boundIdentity: boundIdentityForRole(existing, 'initiator'),
-      presentedIdentity: responderBinding
-    });
-    return res.status(409).json({ error: uniquenessError });
-  }
-  const responderToken = newToken();
-  const result = await signalingState.bindResponder(code, {
-    responderTokenHash: sha256Hex(responderToken),
-    responderId: responderBinding.deviceId,
-    responderProtocolSigningAlgorithm: responderBinding.protocolSigningAlgorithm,
-    responderProtocolPublicKeyFingerprint: responderBinding.protocolPublicKeyFingerprint
-  });
-  if (!result?.item) {
-    recordInvalidLookup(ip);
-    return res.status(404).json({ found: false });
-  }
-  if (result.error) {
-    return res.status(409).json({ error: result.error });
-  }
-  const { item } = result;
-  issueStickyHintCookie(res, code, Math.max(60, Math.round((item.expiresAt - now()) / 1000)));
-  res.json({
-    found: true,
-    sessionId: code,
-    initiatorDeviceId: item.deviceId,
-    initiatorProtocolSigningAlgorithm: item.initiatorProtocolSigningAlgorithm,
-    initiatorProtocolPublicKeyFingerprint: item.initiatorProtocolPublicKeyFingerprint,
-    initiatorDeviceName: item.initiatorDeviceName,
-    responderToken,
-    expiresIn: Math.max(0, Math.round((item.expiresAt - now()) / 1000))
-    ,
-    signalingServerOrigin: item.signalingServerOrigin || resolvedSignalingServerOrigin(req)
-  });
-}));
-
-app.post('/api/webrtc/register-session', rlRegister, asyncRoute(async (req, res) => {
-  const requestedSessionId = normalizeRecordId(req.body?.sessionId);
-  const initiatorBinding = normalizeIdentityBinding(req.body || {});
-  const ttlMs = clampSessionTtlMs(req.body?.ttlSeconds, CODE_TTL_MS);
-  if (!initiatorBinding) {
-    return res.status(400).json({ error: 'bad_deviceId' });
-  }
-  const sessionId = (SIGNALING_STATE_BACKEND === 'redis' && requestedSessionId)
-    ? requestedSessionId
-    : generateCode(Math.max(CODE_LEN + 8, 16));
-  if (!sessionId || sessionId.length > 160) {
-    return res.status(400).json({ error: 'bad_sessionId' });
-  }
-  const initiatorSignalingToken = newToken();
-  const qrBootstrapToken = newToken();
-  const expiresAt = now() + ttlMs;
-  const signalingServerOrigin = resolvedSignalingServerOrigin(req);
-  const created = await signalingState.createConnectionRecord(sessionId, buildConnectionRecord({
-    initiatorBinding,
-    offer: { mode: 'webrtc_room_session' },
-    expiresAt,
-    initiatorTokenHash: sha256Hex(initiatorSignalingToken),
-    qrBootstrapTokenHash: sha256Hex(qrBootstrapToken),
-    signalingServerOrigin,
-    connectionKind: 'webrtc_room_session'
-  }));
-  if (!created) {
-    return res.status(409).json({ error: 'session_exists' });
-  }
-  issueStickyHintCookie(res, sessionId, Math.max(60, Math.round((expiresAt - now()) / 1000)));
-  res.json({
-    sessionId,
-    initiatorSignalingToken,
-    qrBootstrapToken,
-    expiresIn: Math.max(0, Math.round((expiresAt - now()) / 1000)),
-    signalingServerOrigin,
-    wsPath: '/ws'
-  });
-}));
-
-app.post('/api/webrtc/redeem-session', rlRegister, asyncRoute(async (req, res) => {
-  const sessionId = normalizeSessionId(req.body?.sessionId);
-  const qrBootstrapToken = typeof req.body?.qrBootstrapToken === 'string' ? req.body.qrBootstrapToken.trim() : '';
-  const responderBinding = normalizeIdentityBinding(req.body || {});
-  if (!sessionId) {
-    return res.status(400).json({ error: 'bad_sessionId' });
-  }
-  if (!qrBootstrapToken) {
-    return res.status(400).json({ error: 'bad_qrBootstrapToken' });
-  }
-  if (!responderBinding) {
-    return res.status(400).json({ error: 'bad_deviceId' });
-  }
-  const item = await signalingState.getConnection(sessionId);
-  if (!item || item.connectionKind !== 'webrtc_room_session') {
-    return res.status(404).json({ error: 'session_expired' });
-  }
-  const uniquenessError = assertUniqueSessionParticipant(item, responderBinding);
-  if (uniquenessError) {
-    auditCurrentPath('redeem-session-rejected', {
-      sessionId,
-      role: 'responder',
-      protocolPublicKeyFingerprint: responderBinding.protocolPublicKeyFingerprint,
-      failure: uniquenessError === 'identity_conflict' ? 'identityConflict' : 'deviceIdMigrationRequired',
-      reason: uniquenessError,
-      boundIdentity: boundIdentityForRole(item, 'initiator'),
-      presentedIdentity: responderBinding
-    });
-    return res.status(409).json({ error: uniquenessError });
-  }
-  const responderSignalingToken = newToken();
-  const result = await signalingState.bindResponder(sessionId, {
-    qrBootstrapTokenHash: sha256Hex(qrBootstrapToken),
-    responderTokenHash: sha256Hex(responderSignalingToken),
-    responderId: responderBinding.deviceId,
-    responderProtocolSigningAlgorithm: responderBinding.protocolSigningAlgorithm,
-    responderProtocolPublicKeyFingerprint: responderBinding.protocolPublicKeyFingerprint
-  });
-  if (!result?.item) {
-    return res.status(404).json({ error: 'session_expired' });
-  }
-  if (result.error === 'bootstrap_token_consumed') {
-    return res.status(409).json({ error: 'bootstrap_token_consumed' });
-  }
-  if (result.error === 'bootstrap_token_invalid') {
-    return res.status(401).json({ error: 'auth_token_rejected' });
-  }
-  if (result.error) {
-    return res.status(409).json({ error: result.error });
-  }
-  res.json({
-    sessionId,
-    responderSignalingToken,
-    expiresIn: Math.max(0, Math.round((result.item.expiresAt - now()) / 1000)),
-    signalingServerOrigin: result.item.signalingServerOrigin || resolvedSignalingServerOrigin(req),
-    initiatorDeviceId: result.item.deviceId,
-    initiatorProtocolSigningAlgorithm: result.item.initiatorProtocolSigningAlgorithm,
-    initiatorProtocolPublicKeyFingerprint: result.item.initiatorProtocolPublicKeyFingerprint
-  });
-}));
-
-// -------------------- REST API: register --------------------
-app.post('/api/register', rlRegister, asyncRoute(async (req, res) => {
-  const { deviceId, offer } = req.body || {};
-
-  if (typeof deviceId !== 'string' || deviceId.length < 1 || deviceId.length > 128) {
-    return res.status(400).json({ error: 'bad_deviceId' });
-  }
-  if (!isPlainObject(offer)) {
-    return res.status(400).json({ error: 'bad_offer' });
-  }
-
-  const initiatorToken = newToken();
-  const expiresAt = now() + CODE_TTL_MS;
-
-  const code = await signalingState.createConnectionCode(generateCode, 10, buildConnectionRecord({
-    deviceId,
-    offer,
-    expiresAt,
-    initiatorTokenHash: sha256Hex(initiatorToken),
-    connectionKind: 'legacy_offer_answer'
-  }));
-  if (!code) return res.status(500).json({ error: 'code_generation_failed' });
-
-  console.log(`[Register] ${deviceId} code=${code} ttl=${Math.round(CODE_TTL_MS / 1000)}s`);
-  issueStickyHintCookie(res, code, Math.round(CODE_TTL_MS / 1000));
-  res.json({
-    code,
-    initiatorToken,
-    expiresIn: Math.round(CODE_TTL_MS / 1000),
-    wsPath: '/ws'
-  });
-}));
-
-// -------------------- REST API: lookup --------------------
-app.get('/api/lookup/:code', rlLookup, asyncRoute(async (req, res) => {
-  const ip = (req.ip || req.connection.remoteAddress || 'unknown');
-  if (invalidLookupLimited(ip)) {
-    return res.status(429).json({ error: 'rate_limited' });
-  }
-  const code = safeUpperCode(req.params.code);
-  const responderId = (typeof req.query.deviceId === 'string' && req.query.deviceId.length <= 128)
-    ? req.query.deviceId
-    : null;
-
-  const responderToken = newToken();
-  const result = await signalingState.bindResponder(code, {
-    responderTokenHash: sha256Hex(responderToken),
-    responderId
-  });
-  if (!result?.item) {
-    recordInvalidLookup(ip);
-    return res.status(404).json({ found: false });
-  }
-  const { item } = result;
-
-  issueStickyHintCookie(res, code, Math.max(60, Math.round((item.expiresAt - now()) / 1000)));
-  res.json({
-    found: true,
-    deviceId: item.deviceId,
-    offer: item.offer,
-    // 新增字段（安全模式用）
-    sessionId: code,
-    responderToken: result.issued ? responderToken : null,
-    expiresIn: Math.max(0, Math.round((item.expiresAt - now()) / 1000))
-  });
-}));
-
-// -------------------- REST API: answer --------------------
-app.post('/api/answer/:code', rlAnswer, asyncRoute(async (req, res) => {
   const code = safeUpperCode(req.params.code);
   const item = await signalingState.getConnection(code);
-  if (!item) {
-    return res.status(404).json({ success: false, error: 'Code not found' });
+  if (!item || item.connectionKind !== 'webrtc_room_code') {
+    incrementSecurityCounter('lookup_not_found');
+    return res.status(404).json({ found: false });
   }
-
-  const { answer, deviceId, token } = req.body || {};
-  if (typeof deviceId !== 'string' || deviceId.length < 1 || deviceId.length > 128) {
-    return res.status(400).json({ success: false, error: 'bad_deviceId' });
+  const binding = {
+    deviceId: admission.deviceId,
+    protocolSigningAlgorithm: admission.protocolSigningAlgorithm,
+    protocolPublicKeyFingerprint: admission.protocolPublicKeyFingerprint
+  };
+  const uniquenessError = assertUniqueSessionParticipant(item, binding);
+  if (uniquenessError) {
+    throw makeError(uniquenessError, 409);
   }
-  if (!isPlainObject(answer)) {
-    return res.status(400).json({ success: false, error: 'bad_answer' });
+  const context = {
+    tenantId: admission.tenantId,
+    user: { id: admission.userId },
+    binding,
+    deviceSynthetic: Boolean(admission.deviceSynthetic),
+    clientVersion: admission.clientVersion,
+    protocolVersion: admission.protocolVersion
+  };
+  const artifacts = await issueSessionArtifacts({ sessionId: code, role: 'responder', context, expiresAt: item.expiresAt });
+  const result = await signalingState.bindResponder(code, {
+    responderId: binding.deviceId,
+    responderProtocolSigningAlgorithm: binding.protocolSigningAlgorithm,
+    responderProtocolPublicKeyFingerprint: binding.protocolPublicKeyFingerprint,
+    responderSessionTokenHash: artifacts.sessionTokenHash,
+    responderTurnAdmissionTokenHash: artifacts.turnAdmissionTokenHash
+  });
+  if (!result?.item) {
+    return res.status(404).json({ found: false });
   }
-
-  // token 校验（强烈建议用；兼容旧客户端可关闭）
-  const tokenOk = authMatchesHash(token, item.responderTokenHash);
-  if (!tokenOk && !ALLOW_INSECURE) {
-    return res.status(401).json({ success: false, error: 'unauthorized' });
+  if (result.error) {
+    throw makeError(result.error, 409);
   }
-
-  const updated = await signalingState.storeAnswer(code, answer, deviceId, deviceId);
-  if (!updated) {
-    return res.status(404).json({ success: false, error: 'Code not found' });
-  }
-
-  const answerMessage = { type: 'answer', code, answer, from: deviceId };
-  const localInitiator = getLocalLegacyBinding(code, 'initiator');
-  if (localInitiator && localInitiator.readyState === localInitiator.OPEN) {
-    localInitiator.send(JSON.stringify(answerMessage));
-  } else {
-    const initiatorBinding = await signalingState.getLegacyBinding(code, 'initiator');
-    if (initiatorBinding?.instanceId && initiatorBinding.instanceId !== INSTANCE_ID) {
-      await signalingState.publishToInstance(initiatorBinding.instanceId, {
-        kind: 'legacy-forward',
-        code,
-        targetRole: 'initiator',
-        message: answerMessage
-      });
-    }
-  }
-
-  console.log(`[Answer] code=${code} from=${deviceId} tokenOk=${tokenOk}`);
-  issueStickyHintCookie(res, code, Math.max(60, Math.round((updated.expiresAt - now()) / 1000)));
-  res.json({ success: true });
+  res.json({
+    found: true,
+    sessionId: code,
+    initiatorDeviceId: result.item.deviceId,
+    initiatorProtocolSigningAlgorithm: result.item.initiatorProtocolSigningAlgorithm,
+    initiatorProtocolPublicKeyFingerprint: result.item.initiatorProtocolPublicKeyFingerprint,
+    initiatorDeviceName: result.item.initiatorDeviceName,
+    sessionToken: artifacts.sessionToken,
+    turnAdmissionToken: artifacts.turnAdmissionToken,
+    expiresIn: Math.max(0, Math.round((result.item.expiresAt - now()) / 1000)),
+    signalingServerOrigin: result.item.signalingServerOrigin || resolvedSignalingServerOrigin(req)
+  });
 }));
 
-// -------------------- REST API: ICE candidates (legacy sessionId) --------------------
-app.post('/api/ice/:sessionId', rlIce, asyncRoute(async (req, res) => {
-  const sessionId = safeUpperCode(req.params.sessionId);
-  const { candidate, from, token } = req.body || {};
-
-  if (typeof from !== 'string' || from.length < 1 || from.length > 128) {
-    return res.status(400).json({ success: false, error: 'bad_from' });
+app.post('/api/webrtc/register-session', rlControl, asyncRoute(async (req, res) => {
+  const idempotencyKey = String(req.get('Idempotency-Key') || req.get('X-SkyBridge-Idempotency-Key') || '').trim();
+  const registerSessionFingerprint = buildIdempotencyFingerprint({
+    action: 'register-session',
+    body: req.body || {},
+    admissionToken: getOpaqueHeader(req, 'X-SkyBridge-Admission'),
+    backendName: SIGNALING_STATE_BACKEND,
+    fallbackTtlMs: CODE_TTL_MS
+  });
+  const idempotency = await createIdempotencyGuard('register-session', idempotencyKey, registerSessionFingerprint);
+  if (idempotency?.existing?.responseBody) {
+    return res.json(idempotency.existing.responseBody);
   }
-  if (!isPlainObject(candidate)) {
-    return res.status(400).json({ success: false, error: 'bad_candidate' });
-  }
-
-  // 如果 sessionId 就是 code，则可做 token 校验（可选）
-  const item = await signalingState.getConnection(sessionId);
-  if (item) {
-    const okInitiator = authMatchesHash(token, item.initiatorTokenHash);
-    const okResponder = authMatchesHash(token, item.responderTokenHash);
-    if (!okInitiator && !okResponder && !ALLOW_INSECURE) {
-      return res.status(401).json({ success: false, error: 'unauthorized' });
+  try {
+    const admission = await consumeAdmissionToken(req, 'register-session');
+    await assertPublicCapabilityAvailable('register_session', admission.tenantId);
+    if (appControlFlags().disableCodeFlows) {
+      throw makeError('code_flows_disabled', 503);
     }
+    const requestedSessionId = String(req.body?.sessionId || '').trim();
+    const sessionId = (SIGNALING_STATE_BACKEND === 'redis' && requestedSessionId) ? requestedSessionId : generateCode(Math.max(CODE_LEN + 8, 16));
+    const expiresAt = now() + clampSessionTtlMs(req.body?.ttlSeconds, CODE_TTL_MS);
+    const context = {
+      tenantId: admission.tenantId,
+      user: { id: admission.userId },
+      binding: {
+        deviceId: admission.deviceId,
+        protocolSigningAlgorithm: admission.protocolSigningAlgorithm,
+        protocolPublicKeyFingerprint: admission.protocolPublicKeyFingerprint
+      },
+      deviceSynthetic: Boolean(admission.deviceSynthetic),
+      clientVersion: admission.clientVersion,
+      protocolVersion: admission.protocolVersion
+    };
+    const artifacts = await issueSessionArtifacts({ sessionId, role: 'initiator', context, expiresAt });
+    const qrBootstrapToken = newOpaqueToken(24);
+    const created = await signalingState.createConnectionRecord(sessionId, buildConnectionRecord({
+      initiatorContext: context,
+      expiresAt,
+      qrBootstrapTokenHash: sha256Hex(qrBootstrapToken),
+      signalingServerOrigin: resolvedSignalingServerOrigin(req),
+      connectionKind: 'webrtc_room_session',
+      initiatorSessionTokenHash: artifacts.sessionTokenHash,
+      initiatorTurnAdmissionTokenHash: artifacts.turnAdmissionTokenHash
+    }));
+    if (!created) throw makeError('session_exists', 409);
+    const responseBody = {
+      sessionId,
+      sessionToken: artifacts.sessionToken,
+      qrBootstrapToken,
+      turnAdmissionToken: artifacts.turnAdmissionToken,
+      expiresIn: Math.max(0, Math.round((expiresAt - now()) / 1000)),
+      signalingServerOrigin: resolvedSignalingServerOrigin(req),
+      wsPath: '/ws'
+    };
+    await completeIdempotencyGuard(idempotency, responseBody);
+    res.json(responseBody);
+  } catch (error) {
+    await cancelIdempotencyGuard(idempotency);
+    throw error;
   }
-
-  await signalingState.appendIceCandidate(sessionId, { candidate, from, timestamp: now() });
-
-  issueStickyHintCookie(res, sessionId, Math.max(60, Math.round(ICE_TTL_MS / 1000)));
-  res.json({ success: true });
 }));
 
-app.get('/api/ice/:sessionId', rlIce, asyncRoute(async (req, res) => {
-  const sessionId = safeUpperCode(req.params.sessionId);
-  const since = req.query.since ? Number(req.query.since) : 0;
-
-  // SECURITY: if this sessionId corresponds to an active code, require a valid token in secure mode.
-  // This prevents anyone who guesses a sessionId from polling ICE candidates.
-  const item = await signalingState.getConnection(sessionId);
-  if (item) {
-    const token = (typeof req.query.token === 'string') ? req.query.token : null;
-    const okInitiator = authMatchesHash(token, item.initiatorTokenHash);
-    const okResponder = authMatchesHash(token, item.responderTokenHash);
-    if (!okInitiator && !okResponder && !ALLOW_INSECURE) {
-      return res.status(401).json({ success: false, error: 'unauthorized' });
-    }
+app.post('/api/webrtc/redeem-session', rlControl, asyncRoute(async (req, res) => {
+  const idempotencyKey = String(req.get('Idempotency-Key') || req.get('X-SkyBridge-Idempotency-Key') || '').trim();
+  const redeemSessionFingerprint = buildIdempotencyFingerprint({
+    action: 'redeem-session',
+    body: req.body || {},
+    admissionToken: getOpaqueHeader(req, 'X-SkyBridge-Admission'),
+    backendName: SIGNALING_STATE_BACKEND,
+    fallbackTtlMs: CODE_TTL_MS
+  });
+  const idempotency = await createIdempotencyGuard('redeem-session', idempotencyKey, redeemSessionFingerprint);
+  if (idempotency?.existing?.responseBody) {
+    return res.json(idempotency.existing.responseBody);
   }
-
-  const candidates = await signalingState.listIceCandidates(sessionId, since);
-  issueStickyHintCookie(res, sessionId, Math.max(60, Math.round(ICE_TTL_MS / 1000)));
-  res.json({ candidates });
+  try {
+    const admission = await consumeAdmissionToken(req, 'redeem-session');
+    await assertPublicCapabilityAvailable('redeem_session', admission.tenantId);
+    if (appControlFlags().disableCodeFlows) {
+      throw makeError('code_flows_disabled', 503);
+    }
+    const sessionId = String(req.body?.sessionId || '').trim();
+    const qrBootstrapToken = String(req.body?.qrBootstrapToken || '').trim();
+    if (!sessionId || !qrBootstrapToken) {
+      throw makeError('bad_redeem_request', 400);
+    }
+    const item = await signalingState.getConnection(sessionId);
+    if (!item || item.connectionKind !== 'webrtc_room_session') {
+      throw makeError('session_expired', 404);
+    }
+    const binding = {
+      deviceId: admission.deviceId,
+      protocolSigningAlgorithm: admission.protocolSigningAlgorithm,
+      protocolPublicKeyFingerprint: admission.protocolPublicKeyFingerprint
+    };
+    const uniquenessError = assertUniqueSessionParticipant(item, binding);
+    if (uniquenessError) {
+      throw makeError(uniquenessError, 409);
+    }
+    const context = {
+      tenantId: admission.tenantId,
+      user: { id: admission.userId },
+      binding,
+      deviceSynthetic: Boolean(admission.deviceSynthetic),
+      clientVersion: admission.clientVersion,
+      protocolVersion: admission.protocolVersion
+    };
+    const artifacts = await issueSessionArtifacts({ sessionId, role: 'responder', context, expiresAt: item.expiresAt });
+    const result = await signalingState.bindResponder(sessionId, {
+      qrBootstrapTokenHash: sha256Hex(qrBootstrapToken),
+      responderId: binding.deviceId,
+      responderProtocolSigningAlgorithm: binding.protocolSigningAlgorithm,
+      responderProtocolPublicKeyFingerprint: binding.protocolPublicKeyFingerprint,
+      responderSessionTokenHash: artifacts.sessionTokenHash,
+      responderTurnAdmissionTokenHash: artifacts.turnAdmissionTokenHash
+    });
+    if (!result?.item) throw makeError('session_expired', 404);
+    if (result.error) {
+      throw makeError(result.error === 'bootstrap_token_invalid' ? 'bootstrap_token_invalid' : result.error, result.error === 'bootstrap_token_invalid' ? 401 : 409);
+    }
+    const responseBody = {
+      sessionId,
+      sessionToken: artifacts.sessionToken,
+      turnAdmissionToken: artifacts.turnAdmissionToken,
+      expiresIn: Math.max(0, Math.round((result.item.expiresAt - now()) / 1000)),
+      signalingServerOrigin: result.item.signalingServerOrigin || resolvedSignalingServerOrigin(req),
+      initiatorDeviceId: result.item.deviceId,
+      initiatorProtocolSigningAlgorithm: result.item.initiatorProtocolSigningAlgorithm,
+      initiatorProtocolPublicKeyFingerprint: result.item.initiatorProtocolPublicKeyFingerprint
+    };
+    await completeIdempotencyGuard(idempotency, responseBody);
+    res.json(responseBody);
+  } catch (error) {
+    await cancelIdempotencyGuard(idempotency);
+    throw error;
+  }
 }));
 
-// -------------------- Create server (HTTP or HTTPS) --------------------
+app.get('/api/turn/credentials', rlTurn, asyncRoute(async (req, res) => {
+  if (appControlFlags().disableTurnIssuance) {
+    throw makeError('turn_issuance_disabled', 503);
+  }
+  const turnToken = await getTurnTokenRecord(req);
+  await assertPublicCapabilityAvailable('turn', turnToken.tenantId);
+  if (!TURN_SHARED_SECRET || !TURN_URIS.length) {
+    throw makeError('turn_credentials_not_configured', 503);
+  }
+  let deviceRecord = await registryStore.getRegisteredDevice({
+    tenantId: turnToken.tenantId,
+    userId: turnToken.userId,
+    deviceId: turnToken.deviceId,
+    protocolSigningAlgorithm: turnToken.protocolSigningAlgorithm,
+    protocolPublicKeyFingerprint: turnToken.protocolPublicKeyFingerprint
+  });
+  if (!deviceRecord && turnToken.deviceSynthetic) {
+    deviceRecord = syntheticDeviceRecord({
+      tenantId: turnToken.tenantId,
+      user: { id: turnToken.userId },
+      binding: {
+        deviceId: turnToken.deviceId,
+        protocolSigningAlgorithm: turnToken.protocolSigningAlgorithm,
+        protocolPublicKeyFingerprint: turnToken.protocolPublicKeyFingerprint
+      }
+    });
+  }
+  if (!deviceRecord || deviceRecord.status !== 'active') {
+    throw makeError('device_not_active', 403);
+  }
+  const session = await signalingState.getConnection(turnToken.sessionId);
+  if (!session || session.revokedAt) {
+    throw makeError('session_inactive', 403);
+  }
+  const ttl = Math.max(60, Math.min(600, Math.trunc(TURN_CRED_TTL_SECONDS)));
+  const expiresAtEpoch = Math.floor(now() / 1000) + ttl;
+  const username = `${expiresAtEpoch}:${deriveTurnOpaqueTag('tenant', turnToken.tenantId)}.${deriveTurnOpaqueTag('device', turnToken.deviceId)}.${deriveTurnOpaqueTag('session', turnToken.sessionId)}.${turnToken.jti}`;
+  const password = crypto.createHmac('sha1', TURN_SHARED_SECRET).update(username).digest('base64');
+  incrementSecurityCounter('turn_issued');
+  res.json({
+    username,
+    password,
+    ttl,
+    expiresAt: expiresAtEpoch,
+    uris: TURN_URIS,
+    mode: 'shared_secret_hmac'
+  });
+}));
+
+app.post('/api/devices/enroll/first', rlControl, asyncRoute(async (req, res) => {
+  const context = await loadAuthenticatedDeviceContext(req, { requireRegisteredDevice: false });
+  await assertPublicCapabilityAvailable('enroll_first', context.tenantId);
+  const inviteToken = String(req.body?.inviteToken || '').trim();
+  const deviceName = typeof req.body?.deviceName === 'string' ? req.body.deviceName.slice(0, 128) : '';
+  if (!inviteToken) {
+    throw makeError('missing_invite_token', 400);
+  }
+  const result = await registryStore.enrollFirstDevice({
+    p_invite_token_hash: sha256Hex(inviteToken),
+    p_tenant_id: context.tenantId,
+    p_target_user_id: context.user.id,
+    p_device_id: context.binding.deviceId,
+    p_protocol_signing_algorithm: context.binding.protocolSigningAlgorithm,
+    p_protocol_public_key_fingerprint: context.binding.protocolPublicKeyFingerprint,
+    p_device_name: deviceName
+  });
+  res.json({ enrolled: true, device: result });
+}));
+
+app.post('/api/devices/enroll/confirm', rlControl, asyncRoute(async (req, res) => {
+  const context = await loadAuthenticatedDeviceContext(req, { requireRegisteredDevice: true });
+  await assertPublicCapabilityAvailable('enroll_confirm', context.tenantId);
+  const pending = normalizeIdentityBinding({
+    deviceId: req.body?.pendingDeviceId,
+    protocolSigningAlgorithm: req.body?.pendingProtocolSigningAlgorithm,
+    protocolPublicKeyFingerprint: req.body?.pendingProtocolPublicKeyFingerprint
+  });
+  if (!pending) {
+    throw makeError('bad_pending_device_binding', 400);
+  }
+  const deviceName = typeof req.body?.deviceName === 'string' ? req.body.deviceName.slice(0, 128) : '';
+  const result = await registryStore.confirmDeviceEnrollment({
+    p_tenant_id: context.tenantId,
+    p_user_id: context.user.id,
+    p_approver_device_id: context.binding.deviceId,
+    p_approver_protocol_signing_algorithm: context.binding.protocolSigningAlgorithm,
+    p_approver_protocol_public_key_fingerprint: context.binding.protocolPublicKeyFingerprint,
+    p_pending_device_id: pending.deviceId,
+    p_pending_protocol_signing_algorithm: pending.protocolSigningAlgorithm,
+    p_pending_protocol_public_key_fingerprint: pending.protocolPublicKeyFingerprint,
+    p_device_name: deviceName
+  });
+  res.json({ confirmed: true, device: result });
+}));
+
+for (const path of ['/api/register', '/api/lookup/:code', '/api/answer/:code', '/api/ice/:sessionId']) {
+  app.all(path, (req, res) => res.status(410).json({ error: 'legacy_endpoint_removed' }));
+}
+
 const server = (() => {
   if (!USE_NODE_HTTPS) return http.createServer(app);
-
   const tlsOptions = {
     key: fs.readFileSync(TLS_KEY),
-    cert: fs.readFileSync(TLS_CERT),
+    cert: fs.readFileSync(TLS_CERT)
   };
   if (TLS_CA) tlsOptions.ca = fs.readFileSync(TLS_CA);
   return https.createServer(tlsOptions, app);
 })();
 
-// -------------------- WebSocket --------------------
 let wss = null;
-
-wss = new WebSocketServer({ server, path: '/ws' });
-
-async function getItemByCode(code) {
-  const c = safeUpperCode(code);
-  return signalingState.getConnection(c);
-}
-
-async function dropCode(code, reason) {
-  const key = safeUpperCode(code);
-  const bindings = await signalingState.listLegacyBindings(key);
-  for (const binding of bindings) {
-    if (binding.instanceId && binding.instanceId !== INSTANCE_ID) {
-      await signalingState.publishToInstance(binding.instanceId, {
-        kind: 'drop-code',
-        code: key,
-        reason
-      });
-    }
-  }
-  const local = legacyBindings.get(key);
-  if (local) {
-    for (const role of ['initiator', 'responder']) {
-      const ws = local[role];
-      if (!ws) continue;
-      try { ws.close(1000, reason); } catch {}
-    }
-    legacyBindings.delete(key);
-  }
-  await signalingState.deleteConnection(key);
-  console.log(`[Cleanup] code=${code} reason=${reason}`);
-}
-
-function wsSend(ws, obj) {
-  if (!ws || ws.readyState !== ws.OPEN) return false;
-  ws.send(JSON.stringify(obj));
-  return true;
-}
-
-function authWsBind(item, role, token) {
-  if (role === 'initiator') {
-    return authMatchesHash(token, item.initiatorTokenHash);
-  }
-  if (role === 'responder') {
-    return authMatchesHash(token, item.responderTokenHash);
-  }
-  return false;
-}
+wss = new WebSocketServer({
+  server,
+  path: '/ws',
+  maxPayload: WS_MAX_MSG_BYTES,
+  perMessageDeflate: false
+});
 
 wss.on('connection', (ws, req) => {
-  const clientId = uuidv4();
-  ws.isAlive = true;
-  wsMeta.set(ws, { code: null, role: null, clientId, sessionId: null, deviceId: null, rate: { t0: now(), c: 0 } });
+  void (async () => {
+    const requestURL = new URL(req.url, 'http://skybridge.local');
+    const sessionId = String(requestURL.searchParams.get('shard') || '').trim();
+    const sessionToken = String(requestURL.searchParams.get('st') || '').trim();
+    const clientVersion = normalizeVersion(requestURL.searchParams.get('cv') || '0.0.0');
+    const protocolVersion = normalizeVersion(requestURL.searchParams.get('pv') || '0');
+    if (!sessionId || !sessionToken) {
+      incrementSecurityCounter('ws_1008_missing_token');
+      ws.close(1008, 'missing_session_token');
+      return;
+    }
+    const tokenHash = sha256Hex(sessionToken);
+    const tokenPreview = await signalingState.getEphemeral('session_token', tokenHash);
+    if (!tokenPreview) {
+      incrementSecurityCounter('ws_1008_expired_token');
+      ws.close(1008, 'session_token_expired');
+      return;
+    }
+    const tenantPolicy = await registryStore.getTenantPolicy(tokenPreview.tenantId);
+    assertVersionGates(
+      clientVersion,
+      protocolVersion,
+      (!tenantPolicy && SIGNALING_ALLOW_BOOTSTRAP_TENANT_POLICY)
+        ? syntheticTenantPolicy(tokenPreview.tenantId)
+        : tenantPolicy
+    );
+    await assertPublicCapabilityAvailable('ws', tokenPreview.tenantId);
+    const clientId = uuidv4();
+    let bindError = null;
+    let reclaimTarget = null;
+    const boundToken = await signalingState.updateEphemeral('session_token', tokenHash, (record) => {
+      if (record.sessionId !== sessionId) {
+        bindError = 'session_scope_mismatch';
+        return false;
+      }
+      if (record.state === 'issued') {
+        record.state = 'bound';
+        record.boundAt = now();
+        record.boundInstanceId = INSTANCE_ID;
+        record.boundClientId = clientId;
+        record.handshakeClientVersion = clientVersion;
+        record.handshakeProtocolVersion = protocolVersion;
+        return;
+      }
+      if (record.state === 'bound') {
+        const withinWindow = now() - Number(record.boundAt || 0) <= SESSION_RECLAIM_WINDOW_MS;
+        const sameScope = record.sessionId === sessionId
+          && record.deviceId
+          && record.protocolPublicKeyFingerprint
+          && record.role;
+        if (withinWindow && sameScope) {
+          reclaimTarget = {
+            instanceId: record.boundInstanceId,
+            clientId: record.boundClientId
+          };
+          record.boundAt = now();
+          record.boundInstanceId = INSTANCE_ID;
+          record.boundClientId = clientId;
+          record.handshakeClientVersion = clientVersion;
+          record.handshakeProtocolVersion = protocolVersion;
+          return;
+        }
+        bindError = 'session_token_already_bound';
+        return false;
+      }
+      bindError = 'session_token_not_issuable';
+      return false;
+    });
+    if (!boundToken) {
+      incrementSecurityCounter('ws_1008_missing_state');
+      ws.close(1008, 'session_token_missing');
+      return;
+    }
+    if (bindError) {
+      incrementSecurityCounter('ws_1008_bind_rejected');
+      ws.close(1008, bindError);
+      return;
+    }
+    if (reclaimTarget?.clientId && reclaimTarget.instanceId) {
+      if (reclaimTarget.instanceId === INSTANCE_ID) {
+        await dropLocalClientById(reclaimTarget.clientId, 'reclaimed');
+      } else {
+        await signalingState.publishToInstance(reclaimTarget.instanceId, {
+          kind: 'drop-client',
+          clientId: reclaimTarget.clientId,
+          reason: 'reclaimed'
+        });
+      }
+    }
+    ws.isAlive = true;
+    wsMeta.set(ws, {
+      clientId,
+      sessionId,
+      deviceId: boundToken.deviceId,
+      role: boundToken.role,
+      protocolPublicKeyFingerprint: boundToken.protocolPublicKeyFingerprint,
+      tenantId: boundToken.tenantId,
+      userId: boundToken.userId,
+      tokenHash,
+      rate: { t0: now(), count: 0, bytes: 0 }
+    });
+    const room = getOrCreateRoom(sessionId);
+    room.clients.add(ws);
+    room.clientsByDeviceId.set(boundToken.deviceId, ws);
+    await signalingState.upsertRoomMember(sessionId, {
+      deviceId: boundToken.deviceId,
+      role: boundToken.role,
+      protocolPublicKeyFingerprint: boundToken.protocolPublicKeyFingerprint,
+      sessionId,
+      instanceId: INSTANCE_ID,
+      clientId,
+      updatedAt: now(),
+      expiresAt: now() + ROOM_MEMBERSHIP_TTL_MS
+    });
+    wsSendRaw(ws, { type: 'bound', sessionId, role: boundToken.role, clientId });
+  })().catch((error) => {
+    console.error('[WS] handshake failed:', error.message);
+    incrementSecurityCounter('ws_1008_handshake_failed');
+    try { ws.close(1008, 'handshake_failed'); } catch (_) {}
+  });
 
   ws.on('pong', () => { ws.isAlive = true; });
 
   ws.on('message', (raw) => {
     void (async () => {
-    // Basic WS message size cap (prevents memory spikes).
-    try {
-      const buf = Buffer.isBuffer(raw) ? raw : Buffer.from(raw);
-      if (buf.length > WS_MAX_MSG_BYTES) {
-        wsSend(ws, { type: 'error', error: 'msg_too_large' });
-        ws.close(1009, 'message_too_large');
+      const meta = wsMeta.get(ws);
+      if (!meta) {
+        incrementSecurityCounter('ws_1008_unbound_message');
+        ws.close(1008, 'not_bound');
         return;
       }
-    } catch (_) {
-      // If we cannot measure it, fail closed.
-      ws.close(1009, 'message_too_large');
-      return;
-    }
-
-    // Per-connection rate limiter (10s sliding-ish window).
-    const meta0 = wsMeta.get(ws) || { code: null, role: null, clientId };
-    const r = meta0.rate || { t0: now(), c: 0 };
-    const t = now();
-    if ((t - r.t0) > 10_000) {
-      r.t0 = t;
-      r.c = 0;
-    }
-    r.c++;
-    wsMeta.set(ws, { ...meta0, rate: r });
-    if (r.c > WS_MAX_MSGS_PER_10S) {
-      wsSend(ws, { type: 'error', error: 'ws_rate_limited' });
-      ws.close(1013, 'rate_limited');
-      return;
-    }
-
-    let msg;
-    try {
-      msg = JSON.parse(raw.toString());
-    } catch (e) {
-      return wsSend(ws, { type: 'error', error: 'bad_json' });
-    }
-
-    // New WebRTC envelope protocol (sessionId-based room routing).
-    // This is used by iOS/macOS `WebRTCSignalingEnvelope`.
-    if (isWebRTCEnvelope(msg)) {
-      try {
-        await handleWebRTCEnvelope(ws, msg);
-      } catch (e) {
-        wsSend(ws, { type: 'error', error: 'envelope_failed' });
+      const buffer = Buffer.isBuffer(raw) ? raw : Buffer.from(raw);
+      const rate = meta.rate || { t0: now(), count: 0, bytes: 0 };
+      if ((now() - rate.t0) > 10_000) {
+        rate.t0 = now();
+        rate.count = 0;
+        rate.bytes = 0;
       }
-      return;
-    }
+      rate.count += 1;
+      rate.bytes += buffer.length;
+      meta.rate = rate;
+      wsMeta.set(ws, meta);
+      if (rate.count > WS_MAX_MSGS_PER_10S) {
+        incrementSecurityCounter('ws_1013_rate_limited');
+        ws.close(1013, 'rate_limited');
+        return;
+      }
+      if (rate.bytes > WS_MAX_BYTES_PER_10S) {
+        incrementSecurityCounter('ws_1009_bytes_limited');
+        ws.close(1009, 'bytes_limited');
+        return;
+      }
 
-    const meta = wsMeta.get(ws) || { code: null, role: null, clientId };
-
-    switch (msg.type) {
-      case 'bind': {
-        // { type:'bind', code, role:'initiator'|'responder', token }
-        const code = safeUpperCode(msg.code);
-        const role = msg.role === 'responder' ? 'responder' : 'initiator';
-        const item = await getItemByCode(code);
-        if (!item) return wsSend(ws, { type: 'error', error: 'code_not_found' });
-
-        const ok = authWsBind(item, role, msg.token);
-        if (!ok && !ALLOW_INSECURE) {
-          ws.close(1008, 'unauthorized');
+      let message;
+      try {
+        message = JSON.parse(buffer.toString('utf8'));
+      } catch (_) {
+        incrementSecurityCounter('ws_bad_json');
+        wsSendRaw(ws, { type: 'error', error: 'bad_json' });
+        return;
+      }
+      if (!isWebRTCEnvelope(message)) {
+        wsSendRaw(ws, { type: 'error', error: 'bad_envelope' });
+        return;
+      }
+      const schemaError = validateEnvelopeSchema(message);
+      if (schemaError) {
+        wsSendRaw(ws, { type: 'error', error: schemaError, sessionId: meta.sessionId });
+        if (schemaError === 'bad_sdp' || schemaError === 'bad_candidate') {
+          incrementSecurityCounter('ws_1009_schema_limit');
+          ws.close(1009, schemaError);
+        }
+        return;
+      }
+      if (message.sessionId !== meta.sessionId || message.from !== meta.deviceId) {
+        incrementSecurityCounter('ws_1008_scope_violation');
+        ws.close(1008, 'scope_violation');
+        return;
+      }
+      if (message.type === 'iceCandidate') {
+        const usage = await signalingState.trackIceUsage(
+          meta.sessionId,
+          meta.deviceId,
+          iceCandidateHash(meta.deviceId, message.payload || {}),
+          payloadByteSize(message.payload),
+          {
+            maxPerSession: ICE_MAX_PER_SESSION,
+            maxBytesPerSession: ICE_MAX_BYTES_PER_SESSION,
+            maxBytesPerPeerPerSession: ICE_MAX_BYTES_PER_PEER_PER_SESSION
+          }
+        );
+        if (usage.killed) {
+          incrementSecurityCounter('ice_killed_session');
+          await killSession(meta.sessionId, usage.reason || 'ice_limit');
           return;
         }
-
-        setLocalLegacyBinding(code, role, ws);
-
-        const updatedMeta = { ...meta, code, role };
-        wsMeta.set(ws, updatedMeta);
-        await signalingState.upsertLegacyBinding(code, role, {
-          deviceId: role,
-          instanceId: INSTANCE_ID,
-          clientId,
-          updatedAt: now(),
-          expiresAt: now() + LEGACY_BINDING_TTL_MS
-        });
-
-        wsSend(ws, { type: 'bound', code, role, clientId });
-
-        // 如果 answer 已经先通过 REST 到了，也推一下
-        if (role === 'initiator' && item.answer) {
-          wsSend(ws, { type: 'answer', code, answer: item.answer, from: item.answerFrom });
+        if (usage.duplicate) {
+          incrementSecurityCounter('ice_duplicate_dropped');
+          return;
         }
-        console.log(`[WS] bind client=${clientId} role=${role} code=${code} ok=${ok}`);
-        break;
       }
-
-      case 'signal': {
-        // { type:'signal', data, targetRole:'initiator'|'responder' }
-        if (!meta.code || !meta.role) return wsSend(ws, { type: 'error', error: 'not_bound' });
-        const item = await getItemByCode(meta.code);
-        if (!item) return wsSend(ws, { type: 'error', error: 'code_not_found' });
-
-        const targetRole = msg.targetRole === 'initiator' ? 'initiator' : 'responder';
-        const target = getLocalLegacyBinding(meta.code, targetRole);
-        const forwarded = { type: 'signal', code: meta.code, data: msg.data, from: meta.role, fromClientId: clientId };
-        if (target) {
-          wsSend(target, forwarded);
-        } else {
-          const binding = await signalingState.getLegacyBinding(meta.code, targetRole);
-          if (binding?.instanceId && binding.instanceId !== INSTANCE_ID) {
-            await signalingState.publishToInstance(binding.instanceId, {
-              kind: 'legacy-forward',
-              code: meta.code,
-              targetRole,
-              message: forwarded
-            });
-          }
-        }
-        break;
+      const room = getOrCreateRoom(meta.sessionId);
+      if (!room.clients.has(ws)) {
+        room.clients.add(ws);
       }
-
-      case 'ice': {
-        // { type:'ice', candidate, targetRole }
-        if (!meta.code || !meta.role) return wsSend(ws, { type: 'error', error: 'not_bound' });
-        const item = await getItemByCode(meta.code);
-        if (!item) return wsSend(ws, { type: 'error', error: 'code_not_found' });
-
-        const targetRole = msg.targetRole === 'initiator' ? 'initiator' : 'responder';
-        const target = getLocalLegacyBinding(meta.code, targetRole);
-        const forwarded = { type: 'ice', code: meta.code, candidate: msg.candidate, from: meta.role };
-        if (target) {
-          wsSend(target, forwarded);
-        } else {
-          const binding = await signalingState.getLegacyBinding(meta.code, targetRole);
-          if (binding?.instanceId && binding.instanceId !== INSTANCE_ID) {
-            await signalingState.publishToInstance(binding.instanceId, {
-              kind: 'legacy-forward',
-              code: meta.code,
-              targetRole,
-              message: forwarded
-            });
-          }
-        }
-        break;
+      room.clientsByDeviceId.set(meta.deviceId, ws);
+      await signalingState.upsertRoomMember(meta.sessionId, {
+        deviceId: meta.deviceId,
+        role: meta.role,
+        protocolPublicKeyFingerprint: meta.protocolPublicKeyFingerprint,
+        sessionId: meta.sessionId,
+        instanceId: INSTANCE_ID,
+        clientId: meta.clientId,
+        updatedAt: now(),
+        expiresAt: now() + ROOM_MEMBERSHIP_TTL_MS
+      });
+      const outbound = sanitizeEnvelopeForPeer(message, meta.deviceId);
+      deliverEnvelopeLocally(ws, outbound);
+      await forwardEnvelopeToRemoteInstances(outbound);
+      if (message.type === 'leave') {
+        await removeFromRooms(ws);
       }
-
-      case 'answer': {
-        // WS 也允许发 answer（可选）
-        // { type:'answer', answer, deviceId }
-        if (!meta.code || !meta.role) return wsSend(ws, { type: 'error', error: 'not_bound' });
-        if (meta.role !== 'responder') return wsSend(ws, { type: 'error', error: 'bad_role' });
-
-        const item = await getItemByCode(meta.code);
-        if (!item) return wsSend(ws, { type: 'error', error: 'code_not_found' });
-        if (!isPlainObject(msg.answer)) return wsSend(ws, { type: 'error', error: 'bad_answer' });
-
-        const answerFrom = (typeof msg.deviceId === 'string' && msg.deviceId.length <= 128) ? msg.deviceId : 'responder';
-        await signalingState.storeAnswer(meta.code, msg.answer, answerFrom, answerFrom);
-
-        const forwarded = { type: 'answer', code: meta.code, answer: msg.answer, from: answerFrom };
-        const target = getLocalLegacyBinding(meta.code, 'initiator');
-        if (target) {
-          wsSend(target, forwarded);
-        } else {
-          const binding = await signalingState.getLegacyBinding(meta.code, 'initiator');
-          if (binding?.instanceId && binding.instanceId !== INSTANCE_ID) {
-            await signalingState.publishToInstance(binding.instanceId, {
-              kind: 'legacy-forward',
-              code: meta.code,
-              targetRole: 'initiator',
-              message: forwarded
-            });
-          }
-        }
-        wsSend(ws, { type: 'ok', what: 'answer_saved' });
-        break;
-      }
-
-      default:
-        wsSend(ws, { type: 'error', error: 'unknown_type' });
-    }
     })().catch((error) => {
-      console.error('[WS] message handling failed:', error);
-      try { wsSend(ws, { type: 'error', error: 'server_error' }); } catch {}
+      console.error('[WS] message failed:', error.message);
+      incrementSecurityCounter('ws_server_error');
+      try { wsSendRaw(ws, { type: 'error', error: 'server_error' }); } catch (_) {}
     });
   });
 
   ws.on('close', () => {
-    void (async () => {
-    const meta = wsMeta.get(ws);
-    // Cleanup room membership for the new envelope protocol.
-    await removeFromAllRooms(ws);
-    if (meta && meta.code) {
-      if (meta.role === 'initiator' || meta.role === 'responder') {
-        clearLocalLegacyBinding(meta.code, meta.role, ws);
-        await signalingState.removeLegacyBinding(meta.code, meta.role, meta.clientId || '');
-      }
-    }
-    })().catch((error) => {
-      console.error('[WS] close cleanup failed:', error);
+    void removeFromRooms(ws).catch((error) => {
+      console.error('[WS] close cleanup failed:', error.message);
     });
   });
 
   ws.on('error', () => {});
 });
 
-// WS heartbeat to kill dead connections
 const heartbeatTimer = setInterval(() => {
+  if (!wss) return;
   for (const ws of wss.clients) {
     if (ws.isAlive === false) {
-      try { ws.terminate(); } catch {}
+      try { ws.terminate(); } catch (_) {}
       continue;
     }
     ws.isAlive = false;
-    try { ws.ping(); } catch {}
+    try { ws.ping(); } catch (_) {}
   }
 }, 30_000);
 
-// -------------------- Sweeper --------------------
 const sweepTimer = setInterval(() => {
   void signalingState.sweepExpired().catch((error) => {
-    console.error('[sweeper] failed:', error);
+    console.error('[sweeper] failed:', error.message);
   });
 }, SWEEP_INTERVAL_MS);
 
+const protectionTimer = setInterval(() => {
+  void refreshRuntimeProtection();
+}, 5_000);
+
 let shuttingDown = false;
-async function shutdown() {
+async function shutdown({ exitProcess = false } = {}) {
   if (shuttingDown) return;
   shuttingDown = true;
   clearInterval(heartbeatTimer);
   clearInterval(sweepTimer);
+  clearInterval(protectionTimer);
   await signalingState.close().catch((error) => {
-    console.error('[shutdown] backend close failed:', error);
+    console.error('[shutdown] backend close failed:', error.message);
   });
-  server.close(() => process.exit(0));
+  await new Promise((resolve) => {
+    server.close(() => {
+      if (exitProcess) process.exit(0);
+      resolve();
+    });
+  });
 }
 
-process.on('SIGINT', () => {
-  void shutdown();
-});
-process.on('SIGTERM', () => {
-  void shutdown();
-});
-
-// -------------------- Start --------------------
-(async () => {
+async function startRuntime({ port = PORT, host = HOST } = {}) {
   await signalingState.init(handleBackendInstanceMessage);
-  server.listen(PORT, HOST, () => {
-    console.log('========================================');
-    console.log('SkyBridge Signaling Server');
-    console.log(`Mode: ${USE_NODE_HTTPS ? 'HTTPS' : 'HTTP'}  listening on ${HOST}:${PORT}`);
-    console.log(`Instance: ${INSTANCE_ID}  stateBackend=${SIGNALING_STATE_BACKEND}  stickyHintCookie=${ENABLE_STICKY_HINT_COOKIE ? STICKY_HINT_COOKIE_NAME : 'disabled'}  codePrefixes=${INSTANCE_CODE_PREFIXES || 'auto-any'}`);
-    if (SIGNALING_STATE_BACKEND === 'redis') {
-      console.log(`Redis: ${SIGNALING_REDIS_URL}  keyPrefix=${SIGNALING_REDIS_KEY_PREFIX}  channelPrefix=${SIGNALING_REDIS_CHANNEL_PREFIX}`);
-    }
-    console.log(`WS:   ${USE_NODE_HTTPS ? 'wss' : 'ws'}://<host>:${PORT}/ws`);
-    console.log(`TTL:  code=${Math.round(CODE_TTL_MS / 1000)}s  ice=${Math.round(ICE_TTL_MS / 1000)}s  room=${Math.round(ROOM_MEMBERSHIP_TTL_MS / 1000)}s`);
-    console.log(`Security: ALLOW_INSECURE=${ALLOW_INSECURE} WS_MAX_MSG_BYTES=${WS_MAX_MSG_BYTES} WS_MAX_MSGS_PER_10S=${WS_MAX_MSGS_PER_10S} WS_MAX_CLIENTS_PER_ROOM=${WS_MAX_CLIENTS_PER_ROOM}`);
-    console.log('========================================');
+  await refreshRuntimeProtection();
+  return await new Promise((resolve, reject) => {
+    const onError = (error) => {
+      server.off('error', onError);
+      reject(error);
+    };
+    server.once('error', onError);
+    server.listen(port, host, () => {
+      server.off('error', onError);
+      console.log('========================================');
+      console.log('SkyBridge Signaling Server');
+      console.log(`Mode: ${USE_NODE_HTTPS ? 'HTTPS' : 'HTTP'} listening on ${host}:${port}`);
+      console.log(`Instance: ${INSTANCE_ID} stateBackend=${SIGNALING_STATE_BACKEND}`);
+      if (SIGNALING_STATE_BACKEND === 'redis') {
+        console.log(`Redis: ${SIGNALING_REDIS_URL} keyPrefix=${SIGNALING_REDIS_KEY_PREFIX}`);
+      }
+      console.log(`WS: ${USE_NODE_HTTPS ? 'wss' : 'ws'}://<host>:${port}/ws?shard=<session_id>&st=<session_token>`);
+      console.log(`Security: maxPayload=${WS_MAX_MSG_BYTES} maxMsgs10s=${WS_MAX_MSGS_PER_10S} maxBytes10s=${WS_MAX_BYTES_PER_10S} perMessageDeflate=false`);
+      console.log('========================================');
+      resolve(server.address());
+    });
   });
-})().catch((error) => {
-  console.error('[startup] failed:', error);
-  process.exit(1);
-});
+}
+
+function createRuntime(options = {}) {
+  const {
+    signalingStateOverride,
+    registryStoreOverride,
+    trustProxy = TRUST_PROXY,
+    requireSharedStateForPublicCapabilities = REQUIRE_SHARED_STATE_FOR_PUBLIC_CAPABILITIES,
+    allowBootstrapDeviceAuth = SIGNALING_ALLOW_BOOTSTRAP_DEVICE_AUTH
+  } = options;
+  if (signalingStateOverride) {
+    signalingState = signalingStateOverride;
+  }
+  if (registryStoreOverride) {
+    registryStore = registryStoreOverride;
+  }
+  currentTrustProxy = trustProxy;
+  currentRequireSharedStateForPublicCapabilities = requireSharedStateForPublicCapabilities;
+  currentAllowBootstrapDeviceAuth = allowBootstrapDeviceAuth;
+  app.set('trust proxy', trustProxy ? 1 : false);
+  rooms.clear();
+  securityCounters.clear();
+  runtimeProtection.redisAllowlistOnly = false;
+  runtimeProtection.lastControlFlags = {
+    allowlistOnly: false,
+    disableChallengeAdmission: false,
+    disableTurnIssuance: false,
+    disableCodeFlows: false,
+    allowlistTenants: []
+  };
+  runtimeProtection.redisLatencySamples = [];
+
+  return {
+    app,
+    server,
+    start: () => startRuntime(options),
+    shutdown: () => shutdown({ exitProcess: false })
+  };
+}
+
+process.on('SIGINT', () => { void shutdown({ exitProcess: true }); });
+process.on('SIGTERM', () => { void shutdown({ exitProcess: true }); });
+
+if (require.main === module) {
+  startRuntime().catch((error) => {
+    console.error('[startup] failed:', error);
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  createRuntime
+};

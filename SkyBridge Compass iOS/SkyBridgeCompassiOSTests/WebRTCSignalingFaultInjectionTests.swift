@@ -107,6 +107,27 @@ final class WebRTCSignalingFaultInjectionTests: XCTestCase {
             XCTAssertTrue(cancelFlag.isCancelled)
         }.value
     }
+
+    func testWebSocketSignalingClientParsesServerFramesAndRedactsTokenizedURL() async {
+        await Task { @MainActor in
+            let raw = #"{"type":"bound","sessionId":"ROOM1234","role":"initiator","clientId":"client-1"}"#
+            let parsed = WebSocketSignalingClient.parseInboundText(raw)
+
+            switch parsed {
+            case .serverFrame(let frame):
+                XCTAssertEqual(frame.type, "bound")
+                XCTAssertEqual(frame.sessionId, "ROOM1234")
+                XCTAssertFalse(frame.isError)
+            default:
+                XCTFail("Expected server frame, got \(parsed)")
+            }
+
+            let url = URL(string: "wss://api.example.com/ws?shard=ROOM1234&st=secret-token&cv=1.0&pv=1")!
+            let redacted = WebSocketSignalingClient.redactedURLString(url)
+            XCTAssertFalse(redacted.contains("secret-token"))
+            XCTAssertTrue(redacted.contains("st=%3Credacted%3E") || redacted.contains("st=<redacted>"))
+        }.value
+    }
 }
 
 @available(iOS 17.0, *)

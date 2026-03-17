@@ -16,12 +16,20 @@ public final class SupabaseService: BaseManager {
     public struct Configuration: Sendable {
         public let url: URL
         public let anonKey: String
-        public let serviceRoleKey: String?
         
-        public init(url: URL, anonKey: String, serviceRoleKey: String? = nil) {
+        public init(url: URL, anonKey: String) {
             self.url = url
             self.anonKey = anonKey
-            self.serviceRoleKey = serviceRoleKey
+        }
+
+        @available(*, deprecated, message: "Supabase service role keys must remain server-side.")
+        public init(url: URL, anonKey: String, serviceRoleKey: String? = nil) {
+            self.init(url: url, anonKey: anonKey)
+        }
+
+        @available(*, deprecated, message: "Client-side Supabase configuration no longer exposes service role keys.")
+        public var serviceRoleKey: String? {
+            nil
         }
         
  /// 从环境变量或Keychain加载配置
@@ -31,7 +39,7 @@ public final class SupabaseService: BaseManager {
             do {
                 let keychainConfig = try KeychainManager.shared.retrieveSupabaseConfig()
                 guard let url = URL(string: keychainConfig.url) else { return nil }
-                return Configuration(url: url, anonKey: keychainConfig.anonKey, serviceRoleKey: keychainConfig.serviceRoleKey)
+                return Configuration(url: url, anonKey: keychainConfig.anonKey)
             } catch {
  // 如果Keychain中没有配置，尝试从环境变量获取
                 guard let urlString = ProcessInfo.processInfo.environment["SUPABASE_URL"],
@@ -40,8 +48,7 @@ public final class SupabaseService: BaseManager {
                     return nil
                 }
                 
-                let serviceRoleKey = ProcessInfo.processInfo.environment["SUPABASE_SERVICE_ROLE_KEY"]
-                return Configuration(url: url, anonKey: anonKey, serviceRoleKey: serviceRoleKey)
+                return Configuration(url: url, anonKey: anonKey)
             }
         }
     }
@@ -353,6 +360,7 @@ public final class SupabaseService: BaseManager {
                         accessToken: authResponse.accessToken,
                         refreshToken: authResponse.refreshToken,
                         userIdentifier: authResponse.user.id,
+                        nebulaId: authResponse.user.preferredNebulaId,
                         displayName: preferredDisplayName,
                         issuedAt: Date()
                     )
@@ -370,6 +378,7 @@ public final class SupabaseService: BaseManager {
                         accessToken: "pending_verification", // 临时令牌，表示等待验证
                         refreshToken: nil,
                         userIdentifier: signUpResponse.id,
+                        nebulaId: signUpResponse.preferredNebulaId,
                         displayName: signUpResponse.email ?? "新用户",
                         issuedAt: Date()
                     )
@@ -1020,6 +1029,7 @@ public final class SupabaseService: BaseManager {
                         accessToken: authResponse.accessToken,
                         refreshToken: authResponse.refreshToken,
                         userIdentifier: authResponse.user.id,
+                        nebulaId: authResponse.user.preferredNebulaId,
                         displayName: preferredDisplayName,
                         issuedAt: Date()
                     )
@@ -1095,6 +1105,7 @@ private struct SupabaseSignUpResponse: Codable {
     let createdAt: String
     let updatedAt: String
     let isAnonymous: Bool
+    let userMetadata: [String: AnyCodable]?
     
     enum CodingKeys: String, CodingKey {
         case id
@@ -1104,6 +1115,12 @@ private struct SupabaseSignUpResponse: Codable {
         case createdAt = "created_at"
         case updatedAt = "updated_at"
         case isAnonymous = "is_anonymous"
+        case userMetadata = "user_metadata"
+    }
+
+    fileprivate var preferredNebulaId: String? {
+        let raw = (userMetadata?["nebula_id"]?.value as? String) ?? (userMetadata?["nebulaId"]?.value as? String)
+        return NebulaIdentityContract.normalizedNebulaId(raw)
     }
 }
 
@@ -1133,6 +1150,11 @@ private struct SupabaseUser: Codable {
         // - display_name (SkyBridge primary)
         // - full_name / name (OIDC common)
         return read("display_name") ?? read("full_name") ?? read("name")
+    }
+
+    fileprivate var preferredNebulaId: String? {
+        let raw = (userMetadata?["nebula_id"]?.value as? String) ?? (userMetadata?["nebulaId"]?.value as? String)
+        return NebulaIdentityContract.normalizedNebulaId(raw)
     }
 }
 
@@ -1237,7 +1259,13 @@ extension SupabaseService {
         
         SkyBridgeLogger.ui.debugOnly("🔄 [SupabaseService] 开始刷新访问令牌")
         
-        let endpoint = config.url.appendingPathComponent("auth/v1/token")
+        guard var urlComponents = URLComponents(url: config.url.appendingPathComponent("auth/v1/token"), resolvingAgainstBaseURL: false) else {
+            throw SupabaseError.invalidResponse
+        }
+        urlComponents.queryItems = [URLQueryItem(name: "grant_type", value: "refresh_token")]
+        guard let endpoint = urlComponents.url else {
+            throw SupabaseError.invalidResponse
+        }
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -1245,7 +1273,6 @@ extension SupabaseService {
         request.setValue(config.anonKey, forHTTPHeaderField: "apikey")
         
         let payload = [
-            "grant_type": "refresh_token",
             "refresh_token": refreshToken
         ]
         
@@ -1272,6 +1299,7 @@ extension SupabaseService {
                     accessToken: authResponse.accessToken,
                     refreshToken: authResponse.refreshToken,
                     userIdentifier: authResponse.user.id,
+                    nebulaId: authResponse.user.preferredNebulaId,
                     displayName: preferredDisplayName,
                     issuedAt: Date()
                 )

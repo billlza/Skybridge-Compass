@@ -9,7 +9,6 @@ public struct APIKeyManagementView: View {
     @State private var weatherAPIKey = ""
     @State private var supabaseURL = ""
     @State private var supabaseAnonKey = ""
-    @State private var supabaseServiceKey = ""
     @State private var nebulaBaseURL = ""
     @State private var nebulaClientID = ""
     @State private var nebulaClientSecret = ""
@@ -42,7 +41,7 @@ public struct APIKeyManagementView: View {
                 }
                 
  // Supabase配置
-                Section("Supabase配置") {
+                Section {
                     APIKeyRow(
                         title: "URL",
                         value: $supabaseURL,
@@ -64,17 +63,10 @@ public struct APIKeyManagementView: View {
                             }
                         }
                     )
-                    
-                    APIKeyRow(
-                        title: "服务密钥",
-                        value: $supabaseServiceKey,
-                        placeholder: "输入服务密钥",
-                        onSave: { key in
-                            Task {
-                                await saveSupabaseConfig()
-                            }
-                        }
-                    )
+                } header: {
+                    Text("Supabase配置")
+                } footer: {
+                    Text("客户端仅保存 Supabase URL 和 anon key。service role key 属于服务端密钥，不再接入本地配置链路。")
                 }
                 
  // Nebula配置
@@ -204,11 +196,9 @@ public struct APIKeyManagementView: View {
                 let supabaseConfig = try keychain.retrieveSupabaseConfig()
                 supabaseURL = supabaseConfig.url.isEmpty ? "" : "••••••••"
                 supabaseAnonKey = supabaseConfig.anonKey.isEmpty ? "" : "••••••••"
-                supabaseServiceKey = supabaseConfig.serviceRoleKey?.isEmpty == false ? "••••••••" : ""
             } catch {
                 supabaseURL = ""
                 supabaseAnonKey = ""
-                supabaseServiceKey = ""
             }
             
             do {
@@ -261,19 +251,16 @@ public struct APIKeyManagementView: View {
  // 获取当前配置用于保留未修改的值
                 var currentURL = ""
                 var currentAnonKey = ""
-                var currentServiceKey: String? = nil
                 
                 if let currentConfig = try? keychain.retrieveSupabaseConfig() {
                     currentURL = currentConfig.url
                     currentAnonKey = currentConfig.anonKey
-                    currentServiceKey = currentConfig.serviceRoleKey
                 }
                 
                 let finalURL = supabaseURL == "••••••••" ? currentURL : supabaseURL
                 let finalAnonKey = supabaseAnonKey == "••••••••" ? currentAnonKey : supabaseAnonKey
-                let finalServiceKey = supabaseServiceKey == "••••••••" ? currentServiceKey : (supabaseServiceKey.isEmpty ? nil : supabaseServiceKey)
                 
-                try keychain.storeSupabaseConfig(url: finalURL, anonKey: finalAnonKey, serviceRoleKey: finalServiceKey)
+                try keychain.storeSupabaseConfig(url: finalURL, anonKey: finalAnonKey)
                 alertMessage = "Supabase配置保存成功"
                 logger.info("Supabase配置已保存到Keychain")
             } catch {
@@ -377,11 +364,11 @@ public struct APIKeyManagementView: View {
  // 迁移Supabase配置
         let supabaseURL = ProcessInfo.processInfo.environment["SUPABASE_URL"] ?? ""
         let supabaseAnonKey = ProcessInfo.processInfo.environment["SUPABASE_ANON_KEY"] ?? ""
-        let supabaseServiceKey = ProcessInfo.processInfo.environment["SUPABASE_SERVICE_ROLE_KEY"] ?? ""
+        let ignoredServiceRoleKey = ProcessInfo.processInfo.environment["SUPABASE_SERVICE_ROLE_KEY"]?.isEmpty == false
         
         if !supabaseURL.isEmpty && !supabaseAnonKey.isEmpty {
             do {
-                try keychain.storeSupabaseConfig(url: supabaseURL, anonKey: supabaseAnonKey, serviceRoleKey: supabaseServiceKey.isEmpty ? nil : supabaseServiceKey)
+                try keychain.storeSupabaseConfig(url: supabaseURL, anonKey: supabaseAnonKey)
                 migratedCount += 1
             } catch {
                 logger.error("迁移Supabase配置失败: \(error.localizedDescription)")
@@ -420,7 +407,9 @@ public struct APIKeyManagementView: View {
         }
         
         await MainActor.run {
-            alertMessage = "成功迁移 \(migratedCount) 个配置项到安全存储"
+            alertMessage = ignoredServiceRoleKey
+                ? "成功迁移 \(migratedCount) 个配置项到安全存储，已忽略客户端不应保存的 SUPABASE_SERVICE_ROLE_KEY"
+                : "成功迁移 \(migratedCount) 个配置项到安全存储"
             logger.info("从环境变量迁移了 \(migratedCount) 个配置项到Keychain")
             showingAlert = true
         }
@@ -473,7 +462,7 @@ public struct APIKeyManagementView: View {
             weatherAPIKey = ""
             supabaseURL = ""
             supabaseAnonKey = ""
-            supabaseServiceKey = ""
+            nebulaBaseURL = ""
             nebulaClientID = ""
             nebulaClientSecret = ""
             smsAccessKeyID = ""

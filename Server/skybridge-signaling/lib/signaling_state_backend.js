@@ -46,7 +46,14 @@ function connectionRecordToStorage(record) {
     responderProtocolPublicKeyFingerprint: record.responderProtocolPublicKeyFingerprint || null,
     signalingServerOrigin: record.signalingServerOrigin || null,
     answer: record.answer || null,
-    answerFrom: record.answerFrom || null
+    answerFrom: record.answerFrom || null,
+    tenantId: record.tenantId || null,
+    userId: record.userId || null,
+    initiatorSessionTokenHash: record.initiatorSessionTokenHash || null,
+    initiatorTurnAdmissionTokenHash: record.initiatorTurnAdmissionTokenHash || null,
+    responderSessionTokenHash: record.responderSessionTokenHash || null,
+    responderTurnAdmissionTokenHash: record.responderTurnAdmissionTokenHash || null,
+    revokedAt: record.revokedAt || null
   });
 }
 
@@ -72,7 +79,14 @@ function connectionRecordFromStorage(raw) {
     responderProtocolPublicKeyFingerprint: typeof parsed.responderProtocolPublicKeyFingerprint === 'string' ? parsed.responderProtocolPublicKeyFingerprint : null,
     signalingServerOrigin: typeof parsed.signalingServerOrigin === 'string' ? parsed.signalingServerOrigin : null,
     answer: parsed.answer && typeof parsed.answer === 'object' ? parsed.answer : null,
-    answerFrom: typeof parsed.answerFrom === 'string' ? parsed.answerFrom : null
+    answerFrom: typeof parsed.answerFrom === 'string' ? parsed.answerFrom : null,
+    tenantId: typeof parsed.tenantId === 'string' ? parsed.tenantId : null,
+    userId: typeof parsed.userId === 'string' ? parsed.userId : null,
+    initiatorSessionTokenHash: typeof parsed.initiatorSessionTokenHash === 'string' ? parsed.initiatorSessionTokenHash : null,
+    initiatorTurnAdmissionTokenHash: typeof parsed.initiatorTurnAdmissionTokenHash === 'string' ? parsed.initiatorTurnAdmissionTokenHash : null,
+    responderSessionTokenHash: typeof parsed.responderSessionTokenHash === 'string' ? parsed.responderSessionTokenHash : null,
+    responderTurnAdmissionTokenHash: typeof parsed.responderTurnAdmissionTokenHash === 'string' ? parsed.responderTurnAdmissionTokenHash : null,
+    revokedAt: toInteger(parsed.revokedAt, 0)
   };
 }
 
@@ -88,7 +102,30 @@ function normalizeActiveMember(member, fallbackDeviceId = null) {
     instanceId,
     clientId: typeof member.clientId === 'string' ? member.clientId : '',
     updatedAt: toInteger(member.updatedAt, Date.now()),
-    expiresAt: toInteger(member.expiresAt, 0)
+    expiresAt: toInteger(member.expiresAt, 0),
+    role: typeof member.role === 'string' ? member.role : null,
+    protocolPublicKeyFingerprint: typeof member.protocolPublicKeyFingerprint === 'string' ? member.protocolPublicKeyFingerprint : null,
+    sessionId: typeof member.sessionId === 'string' ? member.sessionId : null
+  };
+}
+
+function ephemeralRecordFromStorage(raw) {
+  const parsed = safeJsonParse(raw);
+  if (!parsed || typeof parsed !== 'object') return null;
+  return parsed;
+}
+
+function iceUsageFromStorage(raw) {
+  const parsed = safeJsonParse(raw);
+  if (!parsed || typeof parsed !== 'object') return null;
+  return {
+    hashes: Array.isArray(parsed.hashes) ? parsed.hashes.filter((item) => typeof item === 'string') : [],
+    perPeerBytes: parsed.perPeerBytes && typeof parsed.perPeerBytes === 'object' ? parsed.perPeerBytes : {},
+    totalBytes: toInteger(parsed.totalBytes, 0),
+    totalCount: toInteger(parsed.totalCount, 0),
+    expiresAt: toInteger(parsed.expiresAt, 0),
+    killed: Boolean(parsed.killed),
+    reason: typeof parsed.reason === 'string' ? parsed.reason : null
   };
 }
 
@@ -102,8 +139,11 @@ class MemorySignalingStateBackend {
     this.legacyBindingTtlMs = options.legacyBindingTtlMs;
     this.connectionCodes = new Map();
     this.iceCandidates = new Map();
+    this.iceUsage = new Map();
     this.roomMembers = new Map();
     this.legacyBindings = new Map();
+    this.ephemeralObjects = new Map();
+    this.windowCounters = new Map();
     this.localMessageHandler = null;
   }
 
@@ -137,56 +177,87 @@ class MemorySignalingStateBackend {
   async getConnection(code) {
     const item = this.connectionCodes.get(code);
     if (!item) return null;
-    if (Date.now() > item.expiresAt) {
+    if (Date.now() > item.expiresAt || item.revokedAt) {
       await this.deleteConnection(code);
       return null;
     }
     return deepClone(item);
   }
 
-  async bindResponder(code, binding) {
+  async updateConnection(code, mutator) {
     const item = await this.getConnection(code);
     if (!item) return null;
-    if (binding.qrBootstrapTokenHash) {
-      if (!item.qrBootstrapTokenHash || item.qrBootstrapTokenHash !== binding.qrBootstrapTokenHash) {
-        return { item, issued: false, error: 'bootstrap_token_invalid' };
+    const nextItem = deepClone(item);
+    const result = mutator(nextItem);
+    if (result === false) {
+      return item;
+    }
+    this.connectionCodes.set(code, nextItem);
+    return nextItem;
+  }
+
+  async bindResponder(code, binding) {
+    let issued = false;
+    let rejectedError = null;
+    const item = await this.updateConnection(code, (nextItem) => {
+      if (binding.qrBootstrapTokenHash) {
+        if (!nextItem.qrBootstrapTokenHash || nextItem.qrBootstrapTokenHash !== binding.qrBootstrapTokenHash) {
+          rejectedError = 'bootstrap_token_invalid';
+          return false;
+        }
+        if (nextItem.qrBootstrapConsumedAt) {
+          rejectedError = 'bootstrap_token_consumed';
+          return false;
+        }
       }
-      if (item.qrBootstrapConsumedAt) {
-        return { item, issued: false, error: 'bootstrap_token_consumed' };
+      const sameResponder = !nextItem.responderId || nextItem.responderId === binding.responderId;
+      const sameFingerprint = !nextItem.responderProtocolPublicKeyFingerprint
+        || nextItem.responderProtocolPublicKeyFingerprint === binding.responderProtocolPublicKeyFingerprint;
+      if (!sameResponder || !sameFingerprint) {
+        rejectedError = 'responder_binding_conflict';
+        return false;
       }
-    }
-    const sameResponder = !item.responderId || item.responderId === binding.responderId;
-    const sameFingerprint = !item.responderProtocolPublicKeyFingerprint
-      || item.responderProtocolPublicKeyFingerprint === binding.responderProtocolPublicKeyFingerprint;
-    if (!sameResponder || !sameFingerprint) {
-      return { item, issued: false, error: 'responder_binding_conflict' };
-    }
-    item.responderTokenHash = binding.responderTokenHash || item.responderTokenHash;
-    item.responderId = binding.responderId || item.responderId;
-    item.responderProtocolSigningAlgorithm = binding.responderProtocolSigningAlgorithm || item.responderProtocolSigningAlgorithm;
-    item.responderProtocolPublicKeyFingerprint = binding.responderProtocolPublicKeyFingerprint || item.responderProtocolPublicKeyFingerprint;
-    if (binding.qrBootstrapTokenHash) {
-      item.qrBootstrapConsumedAt = Date.now();
-    }
-    this.connectionCodes.set(code, deepClone(item));
-    return { item, issued: Boolean(binding.responderTokenHash), error: null };
+      if (binding.responderTokenHash) {
+        nextItem.responderTokenHash = binding.responderTokenHash;
+        issued = true;
+      }
+      if (binding.responderId) {
+        nextItem.responderId = binding.responderId;
+      }
+      if (binding.responderProtocolSigningAlgorithm) {
+        nextItem.responderProtocolSigningAlgorithm = binding.responderProtocolSigningAlgorithm;
+      }
+      if (binding.responderProtocolPublicKeyFingerprint) {
+        nextItem.responderProtocolPublicKeyFingerprint = binding.responderProtocolPublicKeyFingerprint;
+      }
+      if (binding.qrBootstrapTokenHash) {
+        nextItem.qrBootstrapConsumedAt = Date.now();
+      }
+      if (binding.responderSessionTokenHash) {
+        nextItem.responderSessionTokenHash = binding.responderSessionTokenHash;
+      }
+      if (binding.responderTurnAdmissionTokenHash) {
+        nextItem.responderTurnAdmissionTokenHash = binding.responderTurnAdmissionTokenHash;
+      }
+    });
+    if (!item) return null;
+    return { item, issued, error: rejectedError };
   }
 
   async storeAnswer(code, answer, answerFrom, responderId) {
-    const item = await this.getConnection(code);
-    if (!item) return null;
-    item.answer = deepClone(answer);
-    item.answerFrom = answerFrom;
-    if (responderId && !item.responderId) {
-      item.responderId = responderId;
-    }
-    this.connectionCodes.set(code, deepClone(item));
-    return item;
+    return this.updateConnection(code, (nextItem) => {
+      nextItem.answer = deepClone(answer);
+      nextItem.answerFrom = answerFrom;
+      if (responderId && !nextItem.responderId) {
+        nextItem.responderId = responderId;
+      }
+    });
   }
 
   async deleteConnection(code) {
     this.connectionCodes.delete(code);
     this.iceCandidates.delete(code);
+    this.iceUsage.delete(code);
     this.legacyBindings.delete(code);
   }
 
@@ -213,6 +284,73 @@ class MemorySignalingStateBackend {
     return filtered
       .filter((candidate) => !since || candidate.timestamp > since)
       .map((candidate) => deepClone(candidate));
+  }
+
+  async trackIceUsage(sessionId, peerId, candidateHash, byteSize, limits) {
+    const now = Date.now();
+    const state = this.iceUsage.get(sessionId) || {
+      hashes: new Set(),
+      perPeerBytes: new Map(),
+      totalBytes: 0,
+      totalCount: 0,
+      expiresAt: now + this.iceTtlMs,
+      killed: false,
+      reason: null
+    };
+    if (state.expiresAt <= now) {
+      state.hashes = new Set();
+      state.perPeerBytes = new Map();
+      state.totalBytes = 0;
+      state.totalCount = 0;
+      state.killed = false;
+      state.reason = null;
+    }
+    state.expiresAt = now + this.iceTtlMs;
+    if (state.killed) {
+      this.iceUsage.set(sessionId, state);
+      return { accepted: false, duplicate: false, killed: true, reason: state.reason };
+    }
+    if (state.hashes.has(candidateHash)) {
+      this.iceUsage.set(sessionId, state);
+      return {
+        accepted: false,
+        duplicate: true,
+        killed: false,
+        totalBytes: state.totalBytes,
+        totalCount: state.totalCount,
+        peerBytes: state.perPeerBytes.get(peerId) || 0
+      };
+    }
+    const nextTotalCount = state.totalCount + 1;
+    const nextTotalBytes = state.totalBytes + byteSize;
+    const nextPeerBytes = (state.perPeerBytes.get(peerId) || 0) + byteSize;
+    if (nextTotalCount > limits.maxPerSession) {
+      state.killed = true;
+      state.reason = 'ice_count_limit';
+    } else if (nextTotalBytes > limits.maxBytesPerSession) {
+      state.killed = true;
+      state.reason = 'ice_bytes_limit';
+    } else if (nextPeerBytes > limits.maxBytesPerPeerPerSession) {
+      state.killed = true;
+      state.reason = 'ice_peer_bytes_limit';
+    }
+    if (state.killed) {
+      this.iceUsage.set(sessionId, state);
+      return { accepted: false, duplicate: false, killed: true, reason: state.reason };
+    }
+    state.hashes.add(candidateHash);
+    state.perPeerBytes.set(peerId, nextPeerBytes);
+    state.totalBytes = nextTotalBytes;
+    state.totalCount = nextTotalCount;
+    this.iceUsage.set(sessionId, state);
+    return {
+      accepted: true,
+      duplicate: false,
+      killed: false,
+      totalBytes: state.totalBytes,
+      totalCount: state.totalCount,
+      peerBytes: nextPeerBytes
+    };
   }
 
   async upsertRoomMember(sessionId, member) {
@@ -307,6 +445,68 @@ class MemorySignalingStateBackend {
     if (bindings.size === 0) this.legacyBindings.delete(code);
   }
 
+  async createEphemeral(kind, id, record) {
+    const key = `${kind}:${id}`;
+    if (!record || typeof record !== 'object' || !record.expiresAt) return false;
+    if (this.ephemeralObjects.has(key)) return false;
+    this.ephemeralObjects.set(key, deepClone(record));
+    return true;
+  }
+
+  async getEphemeral(kind, id) {
+    const key = `${kind}:${id}`;
+    const record = this.ephemeralObjects.get(key);
+    if (!record) return null;
+    if (Date.now() > toInteger(record.expiresAt, 0)) {
+      this.ephemeralObjects.delete(key);
+      return null;
+    }
+    return deepClone(record);
+  }
+
+  async updateEphemeral(kind, id, mutator) {
+    const key = `${kind}:${id}`;
+    const current = await this.getEphemeral(kind, id);
+    if (!current) return null;
+    const nextRecord = deepClone(current);
+    const result = mutator(nextRecord);
+    if (result === false) {
+      return current;
+    }
+    this.ephemeralObjects.set(key, nextRecord);
+    return nextRecord;
+  }
+
+  async deleteEphemeral(kind, id) {
+    this.ephemeralObjects.delete(`${kind}:${id}`);
+  }
+
+  async incrementWindowCounter(key, windowMs, increment = 1) {
+    const now = Date.now();
+    const current = this.windowCounters.get(key);
+    if (!current || current.expiresAt <= now) {
+      const next = { count: increment, expiresAt: now + windowMs };
+      this.windowCounters.set(key, next);
+      return next;
+    }
+    current.count += increment;
+    return current;
+  }
+
+  async readControlFlags() {
+    return {
+      allowlistOnly: false,
+      disableChallengeAdmission: false,
+      disableTurnIssuance: false,
+      disableCodeFlows: false,
+      allowlistTenants: []
+    };
+  }
+
+  async measureLatency() {
+    return 0;
+  }
+
   async publishToInstance(instanceId, payload) {
     if (!instanceId || instanceId !== this.instanceId || typeof this.localMessageHandler !== 'function') {
       return;
@@ -321,9 +521,10 @@ class MemorySignalingStateBackend {
   async sweepExpired() {
     const now = Date.now();
     for (const [code, record] of this.connectionCodes.entries()) {
-      if (now > record.expiresAt) {
+      if (now > record.expiresAt || record.revokedAt) {
         this.connectionCodes.delete(code);
         this.iceCandidates.delete(code);
+        this.iceUsage.delete(code);
         this.legacyBindings.delete(code);
       }
     }
@@ -332,6 +533,24 @@ class MemorySignalingStateBackend {
       const filtered = list.filter((candidate) => (now - candidate.timestamp) <= this.iceTtlMs);
       if (filtered.length === 0) this.iceCandidates.delete(sessionId);
       else this.iceCandidates.set(sessionId, filtered);
+    }
+
+    for (const [sessionId, state] of this.iceUsage.entries()) {
+      if (state.expiresAt <= now) {
+        this.iceUsage.delete(sessionId);
+      }
+    }
+
+    for (const [key, record] of this.ephemeralObjects.entries()) {
+      if (now > toInteger(record.expiresAt, 0)) {
+        this.ephemeralObjects.delete(key);
+      }
+    }
+
+    for (const [key, counter] of this.windowCounters.entries()) {
+      if (counter.expiresAt <= now) {
+        this.windowCounters.delete(key);
+      }
     }
 
     for (const [sessionId] of this.roomMembers.entries()) {
@@ -359,7 +578,8 @@ class MemorySignalingStateBackend {
       connections: this.connectionCodes.size,
       iceSessions: this.iceCandidates.size,
       roomMembers: roomMemberCount,
-      legacyBindings: bindingCount
+      legacyBindings: bindingCount,
+      ephemerals: this.ephemeralObjects.size
     };
   }
 }
@@ -387,8 +607,13 @@ class RedisSignalingStateBackend {
   codeIndexKey() { return `${this.redisKeyPrefix}index:codes`; }
   iceKey(sessionId) { return `${this.redisKeyPrefix}ice:${sessionId}`; }
   iceIndexKey() { return `${this.redisKeyPrefix}index:ice`; }
+  iceUsageKey(sessionId) { return `${this.redisKeyPrefix}iceusage:${sessionId}`; }
   roomKey(sessionId) { return `${this.redisKeyPrefix}room:${sessionId}:members`; }
   legacyBindingKey(code) { return `${this.redisKeyPrefix}legacy:${code}:bindings`; }
+  ephemeralKey(kind, id) { return `${this.redisKeyPrefix}ephemeral:${kind}:${id}`; }
+  counterKey(key) { return `${this.redisKeyPrefix}counter:${key}`; }
+  controlKey(name) { return `${this.redisKeyPrefix}ops:${name}`; }
+  allowlistTenantsKey() { return `${this.redisKeyPrefix}ops:allowlist_tenants`; }
   instanceChannel(instanceId) { return `${this.redisChannelPrefix}instance:${instanceId}`; }
 
   createRedisClient() {
@@ -489,7 +714,7 @@ class RedisSignalingStateBackend {
       await this.deleteConnection(code);
       return null;
     }
-    if (Date.now() > item.expiresAt) {
+    if (Date.now() > item.expiresAt || item.revokedAt) {
       await this.deleteConnection(code);
       return null;
     }
@@ -508,7 +733,7 @@ class RedisSignalingStateBackend {
           return null;
         }
         const item = connectionRecordFromStorage(raw);
-        if (!item || Date.now() > item.expiresAt) {
+        if (!item || Date.now() > item.expiresAt || item.revokedAt) {
           const tx = isolated.multi();
           tx.del(key);
           tx.sRem(this.codeIndexKey(), code);
@@ -573,6 +798,12 @@ class RedisSignalingStateBackend {
       if (binding.qrBootstrapTokenHash) {
         nextItem.qrBootstrapConsumedAt = Date.now();
       }
+      if (binding.responderSessionTokenHash) {
+        nextItem.responderSessionTokenHash = binding.responderSessionTokenHash;
+      }
+      if (binding.responderTurnAdmissionTokenHash) {
+        nextItem.responderTurnAdmissionTokenHash = binding.responderTurnAdmissionTokenHash;
+      }
     });
     if (!item) return null;
     return { item, issued, error: rejectedError };
@@ -593,6 +824,7 @@ class RedisSignalingStateBackend {
       this.command.del(this.codeKey(code)),
       this.command.del(this.legacyBindingKey(code)),
       this.command.del(this.iceKey(code)),
+      this.command.del(this.iceUsageKey(code)),
       this.command.sRem(this.codeIndexKey(), code),
       this.command.sRem(this.iceIndexKey(), code)
     ]);
@@ -625,6 +857,88 @@ class RedisSignalingStateBackend {
       .map((raw) => safeJsonParse(raw))
       .filter(Boolean)
       .map(({ id, ...candidate }) => candidate);
+  }
+
+  async trackIceUsage(sessionId, peerId, candidateHash, byteSize, limits) {
+    const key = this.iceUsageKey(sessionId);
+    return this.command.executeIsolated(async (isolated) => {
+      for (let attempt = 0; attempt < 5; attempt++) {
+        await isolated.watch(key);
+        const current = iceUsageFromStorage(await isolated.get(key)) || {
+          hashes: [],
+          perPeerBytes: {},
+          totalBytes: 0,
+          totalCount: 0,
+          expiresAt: Date.now() + this.iceTtlMs,
+          killed: false,
+          reason: null
+        };
+        if (current.expiresAt <= Date.now()) {
+          current.hashes = [];
+          current.perPeerBytes = {};
+          current.totalBytes = 0;
+          current.totalCount = 0;
+          current.killed = false;
+          current.reason = null;
+        }
+        current.expiresAt = Date.now() + this.iceTtlMs;
+        if (current.killed) {
+          await isolated.unwatch();
+          return { accepted: false, duplicate: false, killed: true, reason: current.reason };
+        }
+        if (current.hashes.includes(candidateHash)) {
+          await isolated.unwatch();
+          return {
+            accepted: false,
+            duplicate: true,
+            killed: false,
+            totalBytes: current.totalBytes,
+            totalCount: current.totalCount,
+            peerBytes: toInteger(current.perPeerBytes[peerId], 0)
+          };
+        }
+        const nextTotalCount = current.totalCount + 1;
+        const nextTotalBytes = current.totalBytes + byteSize;
+        const nextPeerBytes = toInteger(current.perPeerBytes[peerId], 0) + byteSize;
+        if (nextTotalCount > limits.maxPerSession) {
+          current.killed = true;
+          current.reason = 'ice_count_limit';
+        } else if (nextTotalBytes > limits.maxBytesPerSession) {
+          current.killed = true;
+          current.reason = 'ice_bytes_limit';
+        } else if (nextPeerBytes > limits.maxBytesPerPeerPerSession) {
+          current.killed = true;
+          current.reason = 'ice_peer_bytes_limit';
+        }
+        if (current.killed) {
+          const execResult = await isolated.multi()
+            .set(key, JSON.stringify(current), { PX: this.iceTtlMs })
+            .exec();
+          if (execResult) {
+            return { accepted: false, duplicate: false, killed: true, reason: current.reason };
+          }
+          continue;
+        }
+        current.hashes.push(candidateHash);
+        current.perPeerBytes[peerId] = nextPeerBytes;
+        current.totalBytes = nextTotalBytes;
+        current.totalCount = nextTotalCount;
+        const execResult = await isolated.multi()
+          .set(key, JSON.stringify(current), { PX: this.iceTtlMs })
+          .exec();
+        if (execResult) {
+          return {
+            accepted: true,
+            duplicate: false,
+            killed: false,
+            totalBytes: current.totalBytes,
+            totalCount: current.totalCount,
+            peerBytes: nextPeerBytes
+          };
+        }
+      }
+      throw new Error(`redis optimistic ice usage update failed for session=${sessionId}`);
+    });
   }
 
   async upsertRoomMember(sessionId, member) {
@@ -733,13 +1047,112 @@ class RedisSignalingStateBackend {
     await this.command.hDel(key, role);
   }
 
+  async createEphemeral(kind, id, record) {
+    if (!record || typeof record !== 'object' || !record.expiresAt) return false;
+    const reserved = await this.command.set(this.ephemeralKey(kind, id), JSON.stringify(record), {
+      NX: true,
+      PX: Math.max(1, record.expiresAt - Date.now())
+    });
+    return reserved === 'OK';
+  }
+
+  async getEphemeral(kind, id) {
+    const raw = await this.command.get(this.ephemeralKey(kind, id));
+    if (!raw) return null;
+    const record = ephemeralRecordFromStorage(raw);
+    if (!record) {
+      await this.deleteEphemeral(kind, id);
+      return null;
+    }
+    if (Date.now() > toInteger(record.expiresAt, 0)) {
+      await this.deleteEphemeral(kind, id);
+      return null;
+    }
+    return record;
+  }
+
+  async updateEphemeral(kind, id, mutator) {
+    const key = this.ephemeralKey(kind, id);
+    return this.command.executeIsolated(async (isolated) => {
+      for (let attempt = 0; attempt < 5; attempt++) {
+        await isolated.watch(key);
+        const current = ephemeralRecordFromStorage(await isolated.get(key));
+        if (!current || Date.now() > toInteger(current.expiresAt, 0)) {
+          await isolated.multi().del(key).exec();
+          return null;
+        }
+        const nextRecord = deepClone(current);
+        const result = mutator(nextRecord);
+        if (result === false) {
+          await isolated.unwatch();
+          return current;
+        }
+        const execResult = await isolated.multi()
+          .set(key, JSON.stringify(nextRecord), {
+            XX: true,
+            PX: Math.max(1, nextRecord.expiresAt - Date.now())
+          })
+          .exec();
+        if (execResult) {
+          return nextRecord;
+        }
+      }
+      throw new Error(`redis optimistic ephemeral update failed for kind=${kind} id=${id}`);
+    });
+  }
+
+  async deleteEphemeral(kind, id) {
+    await this.command.del(this.ephemeralKey(kind, id));
+  }
+
+  async incrementWindowCounter(key, windowMs, increment = 1) {
+    const redisKey = this.counterKey(key);
+    const count = await this.command.incrBy(redisKey, increment);
+    if (count === increment) {
+      await this.command.pExpire(redisKey, windowMs);
+    }
+    const ttl = await this.command.pTTL(redisKey);
+    return {
+      count,
+      expiresAt: Date.now() + Math.max(ttl, 0)
+    };
+  }
+
+  async readControlFlags() {
+    const [
+      allowlistOnly,
+      disableChallengeAdmission,
+      disableTurnIssuance,
+      disableCodeFlows,
+      allowlistTenants
+    ] = await Promise.all([
+      this.command.get(this.controlKey('allowlist_only')),
+      this.command.get(this.controlKey('disable_challenge_admission')),
+      this.command.get(this.controlKey('disable_turn_issuance')),
+      this.command.get(this.controlKey('disable_code_flows')),
+      this.command.sMembers(this.allowlistTenantsKey())
+    ]);
+    return {
+      allowlistOnly: /^(1|true|yes)$/i.test(String(allowlistOnly || 'false')),
+      disableChallengeAdmission: /^(1|true|yes)$/i.test(String(disableChallengeAdmission || 'false')),
+      disableTurnIssuance: /^(1|true|yes)$/i.test(String(disableTurnIssuance || 'false')),
+      disableCodeFlows: /^(1|true|yes)$/i.test(String(disableCodeFlows || 'false')),
+      allowlistTenants: unique(allowlistTenants)
+    };
+  }
+
+  async measureLatency() {
+    const startedAt = Date.now();
+    await this.command.ping();
+    return Date.now() - startedAt;
+  }
+
   async publishToInstance(instanceId, payload) {
     if (!instanceId || instanceId === this.instanceId) return;
     await this.publisher.publish(this.instanceChannel(instanceId), JSON.stringify(payload));
   }
 
   async sweepExpired() {
-    // Redis key expiry is the primary cleanup. We only prune lightweight indexes here.
     const codeEntries = await this.command.sMembers(this.codeIndexKey());
     if (codeEntries.length) {
       const pipeline = this.command.multi();
@@ -788,7 +1201,8 @@ class RedisSignalingStateBackend {
       connections,
       iceSessions,
       roomMembers: null,
-      legacyBindings: null
+      legacyBindings: null,
+      ephemerals: null
     };
   }
 }

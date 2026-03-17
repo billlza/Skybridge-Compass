@@ -67,7 +67,9 @@ public final class TrustedDeviceStore: ObservableObject {
     }
 
     public func isTrusted(deviceId: String) -> Bool {
-        trustedDevices.contains(where: { $0.id == deviceId })
+        let candidates = Set(PeerIdentityAliasResolver.lookupCandidates(for: deviceId))
+        guard !candidates.isEmpty else { return false }
+        return trustedDevices.contains(where: { matches($0, candidates: candidates) })
     }
 
     public func currentPathTrustRecord(fingerprint: String) -> TrustedDevice? {
@@ -115,18 +117,29 @@ public final class TrustedDeviceStore: ObservableObject {
 
     public func trust(_ device: DiscoveredDevice) {
         let id = device.id
-        guard !id.isEmpty else { return }
-        if let idx = trustedDevices.firstIndex(where: { $0.id == id }) {
+        let candidates = Set(PeerIdentityAliasResolver.lookupCandidates(for: id))
+        guard !candidates.isEmpty else { return }
+
+        if let idx = trustedDevices.firstIndex(where: { matches($0, candidates: candidates) }) {
             trustedDevices[idx].name = device.name
             trustedDevices[idx].platform = device.platform
             trustedDevices[idx].ipAddress = device.ipAddress
+            trustedDevices[idx].knownDeviceIds = mergedKnownDeviceIds(
+                existing: trustedDevices[idx].knownDeviceIds,
+                adding: Array(candidates)
+            )
+            if let persistent = PeerIdentityAliasResolver.persistentDeviceId(from: id) {
+                trustedDevices[idx].currentDeviceId = persistent
+            }
         } else {
             trustedDevices.append(
                 TrustedDevice(
                     id: id,
                     name: device.name,
                     platform: device.platform,
-                    ipAddress: device.ipAddress
+                    ipAddress: device.ipAddress,
+                    currentDeviceId: PeerIdentityAliasResolver.persistentDeviceId(from: id),
+                    knownDeviceIds: Array(candidates).sorted()
                 )
             )
         }
@@ -274,6 +287,27 @@ public final class TrustedDeviceStore: ObservableObject {
 
     private func mergedKnownDeviceIds(existing: [String]?, adding newValues: [String]) -> [String] {
         Array(Set((existing ?? []) + newValues.filter { !$0.isEmpty })).sorted()
+    }
+
+    private func matches(_ device: TrustedDevice, candidates: Set<String>) -> Bool {
+        if candidates.contains(device.id.lowercased()) {
+            return true
+        }
+
+        if let current = device.currentDeviceId?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+           candidates.contains(current) {
+            return true
+        }
+
+        if let knownDeviceIds = device.knownDeviceIds {
+            for known in knownDeviceIds {
+                if candidates.contains(known.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()) {
+                    return true
+                }
+            }
+        }
+
+        return false
     }
 
     private func resolvedCurrentDeviceId(for device: TrustedDevice) -> String {

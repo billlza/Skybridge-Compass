@@ -72,6 +72,9 @@
 		959456034AC8CD9FAF2E5A08 /* ThemeConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 54AD8F4C687F9B90B67B4329 /* ThemeConfiguration.swift */; };
 		9B1311542C3BB9B1E34608F0 /* NebulaIDGenerator.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD6CE3E346837A1B1449284F /* NebulaIDGenerator.swift */; };
 		A30B6ADBE722CB3EDFFBF5A0 /* PolicyDecisionTestVectors.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D702D54FA811F70FC96D595 /* PolicyDecisionTestVectors.swift */; };
+		AA1F00C12F60000100499668 /* ConnectionCodeFormatTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1F00C32F60000100499668 /* ConnectionCodeFormatTests.swift */; };
+		AA1F00C22F60000100499668 /* ConnectLinkFormatTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1F00C42F60000100499668 /* ConnectLinkFormatTests.swift */; };
+		AA1F00C52F60010100499668 /* PQCRekeyElectionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1F00C62F60010100499668 /* PQCRekeyElectionTests.swift */; };
 		A5DF44B0F65FD8FBCAD30855 /* StatCardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74C91A71B2D7745DA114BC0D /* StatCardView.swift */; };
 		A90F76AC2F532AC400499668 /* RegressionHardeningTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A90F76AB2F532AC400499668 /* RegressionHardeningTests.swift */; };
 		A90F76AF2F532D7200499668 /* SignalingRetryController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A90F76AE2F532D7200499668 /* SignalingRetryController.swift */; };
@@ -214,6 +217,9 @@
 		A90F76AD2F532AF900499668 /* RiskAuditChecklist.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = RiskAuditChecklist.md; sourceTree = "<group>"; };
 		A90F76AE2F532D7200499668 /* SignalingRetryController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignalingRetryController.swift; sourceTree = "<group>"; };
 		A90F76B02F532DEF00499668 /* WebRTCSignalingFaultInjectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebRTCSignalingFaultInjectionTests.swift; sourceTree = "<group>"; };
+		AA1F00C32F60000100499668 /* ConnectionCodeFormatTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionCodeFormatTests.swift; sourceTree = "<group>"; };
+		AA1F00C42F60000100499668 /* ConnectLinkFormatTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectLinkFormatTests.swift; sourceTree = "<group>"; };
+		AA1F00C62F60010100499668 /* PQCRekeyElectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PQCRekeyElectionTests.swift; sourceTree = "<group>"; };
 		ABC561404FEB156CA37E8009 /* CapabilityResolutionParityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CapabilityResolutionParityTests.swift; sourceTree = "<group>"; };
 		AD79DE03EB5BE43A7F4DD6C7 /* HandshakeMessages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HandshakeMessages.swift; sourceTree = "<group>"; };
 		AF1C80121FB209395A52D1EA /* SkyBridgeServerConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkyBridgeServerConfig.swift; sourceTree = "<group>"; };
@@ -350,7 +356,10 @@
 			39BB4D8E9F48D029BFDD9F57 /* SkyBridgeCompassiOSTests */ = {
 				isa = PBXGroup;
 				children = (
-					ABC561404FEB156CA37E8009 /* CapabilityResolutionParityTests.swift */,
+				ABC561404FEB156CA37E8009 /* CapabilityResolutionParityTests.swift */,
+				AA1F00C32F60000100499668 /* ConnectionCodeFormatTests.swift */,
+				AA1F00C42F60000100499668 /* ConnectLinkFormatTests.swift */,
+				AA1F00C62F60010100499668 /* PQCRekeyElectionTests.swift */,
 				EA4C38A12FB6E4C100B0C002 /* CurrentPathTrustedDeviceStoreTests.swift */,
 				4160F9F87D13AA571CE03308 /* FallbackSemanticsParityTests.swift */,
 				D02F165A3577BDC88F31411B /* KEMTrustStoreTests.swift */,
@@ -850,6 +859,9 @@
 				buildActionMask = 2147483647;
 				files = (
 				A90F76B12F532DEF00499668 /* WebRTCSignalingFaultInjectionTests.swift in Sources */,
+				AA1F00C12F60000100499668 /* ConnectionCodeFormatTests.swift in Sources */,
+				AA1F00C22F60000100499668 /* ConnectLinkFormatTests.swift in Sources */,
+				AA1F00C52F60010100499668 /* PQCRekeyElectionTests.swift in Sources */,
 				DCEFA18F51EEAC5A498234D7 /* CapabilityResolutionParityTests.swift in Sources */,
 				EA4C38A12FB6E4C100B0C001 /* CurrentPathTrustedDeviceStoreTests.swift in Sources */,
 				B9B1776A08627F2AC1499D85 /* FallbackSemanticsParityTests.swift in Sources */,

@@ -320,5 +320,5 @@ extension NWTXTRecord {
 }
 
 // MARK: - 注意事项
-// TXTRecordHelper 已在 RealSignalService.swift 中定义
+// 旧的 RealSignalService / TXTRecordHelper 已下线
 // 新代码应直接使用 BonjourTXTParser

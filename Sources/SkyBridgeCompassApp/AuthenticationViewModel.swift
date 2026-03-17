@@ -64,12 +64,17 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
 
  // MARK: - 发布属性
 
-    @Published var currentSession: AuthSession?
+    @Published var currentSession: AuthSession? {
+        didSet {
+            handleCurrentSessionChange(from: oldValue, to: currentSession)
+        }
+    }
     @Published var isProcessing = false
     @Published var errorMessage: String?
     @Published var selectedMethod: LoginMethod = .apple
     @Published var isGuestMode = false
     @Published var supabaseNebulaId: String?
+    @Published private(set) var nebulaIdentitySyncPhase: NebulaIdentitySyncPhase = .idle
 
  // Apple登录状态
     @Published var appleAuthorizationState: ASAuthorizationAppleIDProvider.CredentialState = .notFound
@@ -117,17 +122,19 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
     private var phoneCodeTimer: Timer?
     private var nebulaBrowserSession: ASWebAuthenticationSession?
     private let nebulaPresentationContextProvider = NebulaBrowserPresentationContextProvider()
+    private var sessionGeneration = 0
+    private var activeNebulaIdentityLookupTask: Task<Void, Never>?
 
  /// 当前设备指纹（懒加载）
     private var deviceFingerprint: String?
 
     /// 用于 UI 展示的“星云ID”（优先使用 Supabase user_metadata.nebula_id）
     var displayedNebulaId: String {
-        if let value = supabaseNebulaId?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !value.isEmpty {
-            return value
-        }
-        return currentSession?.userIdentifier ?? "未知"
+        NebulaIdentityContract.displayedNebulaId(
+            resolvedNebulaId: supabaseNebulaId,
+            sessionNebulaId: currentSession?.nebulaId,
+            sessionUserIdentifier: currentSession?.userIdentifier
+        )
     }
 
  // MARK: - 初始化
@@ -141,6 +148,19 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] session in
                 self?.currentSession = session
+            }
+            .store(in: &cancellables)
+
+        SupabaseConfiguration.shared.$isConfigured
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] isConfigured in
+                guard let self else { return }
+                if isConfigured {
+                    self.scheduleNebulaIdentitySyncIfNeeded(reason: "supabase_config_ready")
+                } else {
+                    self.refreshNebulaIdentitySyncPhase()
+                }
             }
             .store(in: &cancellables)
 
@@ -163,6 +183,182 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
         let fingerprint = await SelfIdentityProvider.shared.generateRegistrationFingerprint()
         self.deviceFingerprint = fingerprint
         SkyBridgeLogger.ui.debugOnly("🔐 设备指纹已加载: \(fingerprint.prefix(16))...")
+    }
+
+    private func sessionSyncKey(for session: AuthSession?) -> String? {
+        guard let session else { return nil }
+        return "\(session.userIdentifier)|\(session.accessToken)"
+    }
+
+    private func handleCurrentSessionChange(from oldValue: AuthSession?, to newValue: AuthSession?) {
+        let oldKey = sessionSyncKey(for: oldValue)
+        let newKey = sessionSyncKey(for: newValue)
+
+        if oldKey != newKey {
+            sessionGeneration &+= 1
+            activeNebulaIdentityLookupTask?.cancel()
+        }
+
+        guard let newValue else {
+            supabaseNebulaId = nil
+            nebulaIdentitySyncPhase = .idle
+            return
+        }
+
+        supabaseNebulaId = NebulaIdentityContract.normalizedNebulaId(newValue.nebulaId)
+        refreshNebulaIdentitySyncPhase(session: newValue)
+        scheduleNebulaIdentitySyncIfNeeded(session: newValue, reason: "session_changed")
+    }
+
+    private func refreshNebulaIdentitySyncPhase(session: AuthSession? = nil) {
+        guard let session = session ?? currentSession else {
+            nebulaIdentitySyncPhase = .idle
+            return
+        }
+
+        nebulaIdentitySyncPhase = NebulaIdentityContract.recommendedPhase(
+            accessToken: session.accessToken,
+            isSupabaseSession: SupabaseService.shared.isSupabaseAccessToken(session.accessToken),
+            isSupabaseConfigured: SupabaseConfiguration.shared.isConfigured,
+            resolvedNebulaId: supabaseNebulaId,
+            sessionNebulaId: session.nebulaId
+        )
+    }
+
+    private func scheduleNebulaIdentitySyncIfNeeded(
+        session: AuthSession? = nil,
+        reason: String,
+        forceRemoteLoad: Bool = false
+    ) {
+        guard let session = session ?? currentSession else {
+            nebulaIdentitySyncPhase = .idle
+            return
+        }
+
+        let hasLocalNebulaId =
+            NebulaIdentityContract.normalizedNebulaId(supabaseNebulaId) != nil ||
+            NebulaIdentityContract.normalizedNebulaId(session.nebulaId) != nil
+
+        refreshNebulaIdentitySyncPhase(session: session)
+
+        guard session.accessToken != "pending_verification" else { return }
+        guard SupabaseService.shared.isSupabaseAccessToken(session.accessToken) else { return }
+        guard SupabaseConfiguration.shared.isConfigured else { return }
+        guard forceRemoteLoad || !hasLocalNebulaId else { return }
+
+        let expectedGeneration = sessionGeneration
+        let expectedSessionKey = sessionSyncKey(for: session) ?? ""
+        activeNebulaIdentityLookupTask?.cancel()
+        nebulaIdentitySyncPhase = .loading
+
+        activeNebulaIdentityLookupTask = Task { [weak self] in
+            guard let self else { return }
+
+            do {
+                let nebulaId = try await SupabaseService.shared.getUserNebulaId(
+                    userId: session.userIdentifier,
+                    accessToken: session.accessToken
+                )
+                await MainActor.run {
+                    self.finishNebulaIdentityLookup(
+                        nebulaId: nebulaId,
+                        expectedGeneration: expectedGeneration,
+                        expectedSessionKey: expectedSessionKey,
+                        reason: reason
+                    )
+                }
+            } catch is CancellationError {
+                await MainActor.run {
+                    if NebulaIdentityContract.shouldApplyAsyncResult(
+                        expectedGeneration: expectedGeneration,
+                        currentGeneration: self.sessionGeneration,
+                        expectedSessionKey: expectedSessionKey,
+                        currentSessionKey: self.sessionSyncKey(for: self.currentSession)
+                    ) {
+                        self.refreshNebulaIdentitySyncPhase()
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    self.failNebulaIdentityLookup(
+                        error,
+                        expectedGeneration: expectedGeneration,
+                        expectedSessionKey: expectedSessionKey
+                    )
+                }
+            }
+        }
+    }
+
+    private func finishNebulaIdentityLookup(
+        nebulaId: String?,
+        expectedGeneration: Int,
+        expectedSessionKey: String,
+        reason: String
+    ) {
+        guard NebulaIdentityContract.shouldApplyAsyncResult(
+            expectedGeneration: expectedGeneration,
+            currentGeneration: sessionGeneration,
+            expectedSessionKey: expectedSessionKey,
+            currentSessionKey: sessionSyncKey(for: currentSession)
+        ) else {
+            return
+        }
+
+        let normalizedNebulaId = NebulaIdentityContract.normalizedNebulaId(nebulaId)
+        if let normalizedNebulaId {
+            supabaseNebulaId = normalizedNebulaId
+            nebulaIdentitySyncPhase = .hydrated
+            persistNebulaIdentityIfNeeded(normalizedNebulaId, reason: reason)
+        } else {
+            refreshNebulaIdentitySyncPhase()
+        }
+        activeNebulaIdentityLookupTask = nil
+    }
+
+    private func failNebulaIdentityLookup(
+        _ error: Error,
+        expectedGeneration: Int,
+        expectedSessionKey: String
+    ) {
+        guard NebulaIdentityContract.shouldApplyAsyncResult(
+            expectedGeneration: expectedGeneration,
+            currentGeneration: sessionGeneration,
+            expectedSessionKey: expectedSessionKey,
+            currentSessionKey: sessionSyncKey(for: currentSession)
+        ) else {
+            return
+        }
+
+        if NebulaIdentityContract.normalizedNebulaId(supabaseNebulaId) != nil ||
+            NebulaIdentityContract.normalizedNebulaId(currentSession?.nebulaId) != nil {
+            nebulaIdentitySyncPhase = .hydrated
+        } else {
+            refreshNebulaIdentitySyncPhase()
+        }
+        activeNebulaIdentityLookupTask = nil
+        SkyBridgeLogger.ui.debugOnly("ℹ️ [AuthenticationViewModel] NebulaID 加载失败（忽略）: \(error.localizedDescription)")
+    }
+
+    private func persistNebulaIdentityIfNeeded(_ nebulaId: String, reason: String) {
+        guard let session = currentSession else { return }
+        guard NebulaIdentityContract.normalizedNebulaId(session.nebulaId) != nebulaId else { return }
+
+        let updatedSession = AuthSession(
+            accessToken: session.accessToken,
+            refreshToken: session.refreshToken,
+            userIdentifier: session.userIdentifier,
+            nebulaId: nebulaId,
+            displayName: session.displayName,
+            issuedAt: session.issuedAt
+        )
+
+        do {
+            try authService.updateSession(updatedSession)
+            SkyBridgeLogger.ui.debugOnly("✅ [AuthenticationViewModel] NebulaID 已回写持久化会话: \(reason)")
+        } catch {
+            SkyBridgeLogger.ui.error("⚠️ [AuthenticationViewModel] NebulaID 会话回写失败: \(error.localizedDescription, privacy: .private)")
+        }
     }
 
  /// 执行注册前安全检查
@@ -422,10 +618,8 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
                 code: mfaCode
             )
 
-            await loadUserAvatarAfterLogin(session: session)
-            await loadUserNebulaIdAfterLogin(session: session)
-
             currentSession = session
+            await loadUserAvatarAfterLogin(session: session)
             showMFAInput = false
             mfaToken = ""
             mfaCode = ""
@@ -1225,10 +1419,6 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
             SkyBridgeLogger.ui.debugOnly("   显示名称: \(session.displayName)")
             SkyBridgeLogger.ui.debugOnly("   访问令牌: \(String(session.accessToken.prefix(10)))...")
 
- // 登录成功后，尝试从Supabase加载用户头像
-            await loadUserAvatarAfterLogin(session: session)
-            await loadUserNebulaIdAfterLogin(session: session)
-
             await MainActor.run {
                 SkyBridgeLogger.ui.debugOnly("🔄 [AuthenticationViewModel] 更新UI状态")
 
@@ -1240,6 +1430,8 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
                 SkyBridgeLogger.ui.debugOnly("✅ [AuthenticationViewModel] UI状态更新完成")
                 SkyBridgeLogger.ui.debugOnly("   currentSession 用户: \(self.currentSession?.userIdentifier ?? "无")")
             }
+
+            await loadUserAvatarAfterLogin(session: session)
         } catch let error as AuthenticationService.AuthenticationError {
             if case .nebulaMFARequired(let token) = error {
                 await MainActor.run {
@@ -1308,33 +1500,6 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
         } catch {
  // 头像加载失败不影响登录流程，只记录日志
             SkyBridgeLogger.ui.error("⚠️ [AuthenticationViewModel] 头像加载失败: \(error.localizedDescription, privacy: .private)")
-        }
-    }
-
-    /// 登录成功后加载用户 NebulaID（跨端一致：Supabase user_metadata.nebula_id）
-    private func loadUserNebulaIdAfterLogin(session: AuthSession) async {
-        // 跳过待验证状态的会话
-        guard session.accessToken != "pending_verification" else { return }
-
-        // 非 Supabase 会话：不覆盖（保持原 userIdentifier 语义）
-        guard SupabaseService.shared.isSupabaseAccessToken(session.accessToken) else {
-            await MainActor.run {
-                self.supabaseNebulaId = nil
-            }
-            return
-        }
-
-        do {
-            let nebulaId = try await SupabaseService.shared.getUserNebulaId(
-                userId: session.userIdentifier,
-                accessToken: session.accessToken
-            )
-            await MainActor.run {
-                self.supabaseNebulaId = nebulaId
-            }
-        } catch {
-            // 不阻塞登录流程
-            SkyBridgeLogger.ui.debugOnly("ℹ️ [AuthenticationViewModel] NebulaID 加载失败（忽略）: \(error.localizedDescription)")
         }
     }
 
@@ -1437,9 +1602,8 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
                     if !result.requiresEmailVerification && !result.requiresAdminApproval {
  // 等待登录完成后再保存
                         let session = try await loginWithNebulaDirectCredentials()
-                        await loadUserAvatarAfterLogin(session: session)
-                        await loadUserNebulaIdAfterLogin(session: session)
                         currentSession = session
+                        await loadUserAvatarAfterLogin(session: session)
                         clearAllFields()
 
  // 登录成功后，尝试保存 nebulaid 到数据库

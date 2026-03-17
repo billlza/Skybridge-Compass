@@ -204,6 +204,11 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         raw.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    private static var shouldForceRelayOnlyForSmoke: Bool {
+        ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil &&
+        ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_FORCE_RELAY_ICE"] == "1"
+    }
+
 #if canImport(WebRTC)
     private func buildIceServers() -> [RTCIceServer] {
         var servers: [RTCIceServer] = []
@@ -258,7 +263,12 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         
         let config = RTCConfiguration()
         config.sdpSemantics = .unifiedPlan
-        config.continualGatheringPolicy = .gatherContinually
+        if Self.shouldForceRelayOnlyForSmoke {
+            config.iceTransportPolicy = .relay
+            config.continualGatheringPolicy = .gatherOnce
+        } else {
+            config.continualGatheringPolicy = .gatherContinually
+        }
         config.iceServers = buildIceServers()
         
         let constraints = RTCMediaConstraints(

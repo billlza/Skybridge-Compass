@@ -29,7 +29,7 @@ public struct EnhancedDeviceDiscoveryView: View {
 
  // 跨网络连接（使用共享实例，确保与文件传输/远程桌面等模块状态一致）
     @StateObject private var crossNetworkManager = CrossNetworkConnectionManager.shared
-    @StateObject private var p2pDiscoveryService = P2PDiscoveryService()
+    @StateObject private var p2pDiscoveryService = P2PDiscoveryService.shared
 
  // 🆕 真实iCloud设备发现(不再单独使用,已整合到统一管理器中)
  // @StateObject private var iCloudManager = iCloudDeviceDiscoveryManager()
@@ -1533,12 +1533,7 @@ public struct EnhancedDeviceDiscoveryView: View {
                             .background(Color(NSColor.textBackgroundColor))
                             .cornerRadius(12)
                             .onChange(of: connectionCodeInput) { _, newValue in
-                                connectionCodeInput = String(
-                                    newValue
-                                        .uppercased()
-                                        .filter { "ABCDEFGHJKLMNPQRSTUVWXYZ23456789".contains($0) }
-                                        .prefix(6)
-                                )
+                                connectionCodeInput = CrossNetworkConnectionManager.sanitizeConnectionCodeInput(newValue)
                             }
 
                         Button(action: {
@@ -1561,7 +1556,7 @@ public struct EnhancedDeviceDiscoveryView: View {
                             .padding(.vertical, 12)
                         }
                         .buttonStyle(.borderedProminent)
-                        .disabled(connectionCodeInput.count != 6)
+                        .disabled(!CrossNetworkConnectionManager.canSubmitConnectionCode(connectionCodeInput))
                         .frame(width: 240)
 
                         if let connectionCodeErrorMessage, !connectionCodeErrorMessage.isEmpty {
