@@ -21,6 +21,26 @@ struct WebRTCSignalingCurrentPathTests {
         }
     }
 
+    @Test("WebSocket 信令客户端会识别服务端 bound frame 并脱敏 URL")
+    func parseBoundFrameAndRedactURL() {
+        let raw = #"{"type":"bound","sessionId":"ROOM1234","role":"initiator","clientId":"client-1"}"#
+        let parsed = WebSocketSignalingClient.parseInboundText(raw)
+
+        switch parsed {
+        case .serverFrame(let frame):
+            #expect(frame.type == "bound")
+            #expect(frame.sessionId == "ROOM1234")
+            #expect(!frame.isError)
+        default:
+            Issue.record("Expected signaling bound frame, got \(parsed)")
+        }
+
+        let url = URL(string: "wss://api.example.com/ws?shard=ROOM1234&st=secret-token&cv=1.0&pv=1")!
+        let redacted = WebSocketSignalingClient.redactedURLString(url)
+        #expect(!redacted.contains("secret-token"))
+        #expect(redacted.contains("st=%3Credacted%3E") || redacted.contains("st=<redacted>"))
+    }
+
     @Test("SignalServerClient 的当前 WebRTC 端点与编解码逻辑保持稳定")
     func signalServerClientCurrentEndpointContracts() throws {
         #expect(SignalServerClient.registerCodePath == "/api/webrtc/register-code")
@@ -132,6 +152,11 @@ struct WebRTCSignalingCurrentPathTests {
         #expect(decoded.authToken == "secure-token")
         #expect(decoded.sessionId == "session-123")
         #expect(decoded.type == .offer)
+    }
+
+    @Test("Control-plane client API key remains non-empty by default")
+    func controlPlaneClientAPIKeyDefaultIsPresent() {
+        #expect(!SkyBridgeServerConfig.clientAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
     }
 }
 

@@ -53,8 +53,8 @@ final class DashboardViewModel: ObservableObject {
     var onNavigateToSettings: (() -> Void)?
 
  // 修改：避免重复初始化设备发现服务，使用单独的实例但检查是否已启动
-    private let discoveryService = DeviceDiscoveryService()
-    private let p2pDiscoveryService = P2PDiscoveryService()
+    private let discoveryService = DeviceDiscoveryService.shared
+    private let p2pDiscoveryService = P2PDiscoveryService.shared
     private let connectionManager = ConnectionManager()  // 添加连接管理器以支持USB设备扫描
     private let crossNetworkManager = CrossNetworkConnectionManager.shared
     private let usbcManager = USBCConnectionManager()    // 直接监听USB设备连接，计入在线设备
@@ -76,6 +76,8 @@ final class DashboardViewModel: ObservableObject {
     private var pendingUpdate: DispatchWorkItem? = nil
 
     private var cancellables = Set<AnyCancellable>()
+    private var presentationCancellables = Set<AnyCancellable>()
+    private var hasStartedServices = false
     private var isAuthenticated: Bool {
         tenantController.accessToken != nil
     }
@@ -95,6 +97,10 @@ final class DashboardViewModel: ObservableObject {
         ) { [weak self] _ in
             self?.openSettings()
         }
+    }
+
+    func bootstrapConnectionPresentationBindings() {
+        installConnectionPresentationBindingsIfNeeded()
     }
 
     deinit {
@@ -118,8 +124,10 @@ final class DashboardViewModel: ObservableObject {
 
  /// 根据当前认证状态启动各项后台服务。
     func start() async {
+        installConnectionPresentationBindingsIfNeeded()
+
  // 如果已经启动，只启动系统监控并返回
-        if !cancellables.isEmpty {
+        if hasStartedServices {
         #if DEBUG
         SkyBridgeLogger.ui.debugOnly("🔍 [DashboardViewModel] 服务已启动，仅启动系统监控")
         #endif
@@ -201,14 +209,14 @@ final class DashboardViewModel: ObservableObject {
 
         // 启动文件传输入站监听（iOS ↔ macOS 互传的最小闭环）
         do {
-            try fileTransferListener.start()
+            try await fileTransferListener.start()
         } catch {
             SkyBridgeLogger.ui.error("❌ 启动文件传输监听失败: \(error.localizedDescription, privacy: .public)")
         }
 
         // 启动 iPhone → Mac 远程桌面/控制服务（JPEG 流 + 输入注入）
         do {
-            try remoteControlServer.start()
+            try await remoteControlServer.start()
         } catch {
             SkyBridgeLogger.ui.error("❌ 启动远程控制服务失败: \(error.localizedDescription, privacy: .public)")
         }
@@ -323,7 +331,98 @@ final class DashboardViewModel: ObservableObject {
             .sink { [weak self] _ in self?.updateDashboardCounts() }
             .store(in: &cancellables)
 
-        // 监听连接状态（聚合：ConnectionManager + P2P（主动/被动） + 文件传输活动 + 统一在线设备连接态）
+        NotificationCenter.default.publisher(for: .skyBridgeIntentConnect)
+            .compactMap { $0.userInfo?[SkyBridgeIntentPayloadKey.deviceName] as? String }
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] target in
+                guard let self else { return }
+                Task { await self.handleSiriConnectRequest(targetName: target) }
+            }
+            .store(in: &cancellables)
+        sessionService.bootstrap()
+ // FileTransferManager 不需要prepare方法
+ // 集中网络监控，订阅共享发布者
+        NetworkFrameworkEnhancements.NetworkPathMonitor.shared.startMonitoring(queue: DispatchQueue(label: "skybridge.network.monitor"))
+        NetworkFrameworkEnhancements.NetworkPathMonitor.shared.$isOnline
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] online in
+                self?.isNetworkOnline = online
+                self?.localIPv4 = self?.currentIPv4Address()
+                self?.updateDashboardCounts()
+            }
+            .store(in: &cancellables)
+
+        hasStartedServices = true
+    }
+
+    private func synthesizedCrossNetworkSnapshot(
+        status: CrossNetworkConnectionManager.CrossNetworkConnectionStatus,
+        readiness: CrossNetworkConnectionManager.CrossNetworkReadiness,
+        activeSnapshot: ActiveSessionSnapshot?,
+        currentConnection: RemoteConnection?
+    ) -> ActiveSessionSnapshot? {
+        guard activeSnapshot == nil else { return nil }
+
+        switch readiness {
+        case .handshakeComplete(let sessionId, let negotiatedSuite):
+            return ActiveSessionSnapshot(
+                sessionId: sessionId,
+                source: .reused,
+                phase: .handshakeComplete,
+                deviceId: nil,
+                deviceName: currentConnection?.deviceName,
+                negotiatedSuite: negotiatedSuite
+            )
+        case .transportReady(let sessionId):
+            return ActiveSessionSnapshot(
+                sessionId: sessionId,
+                source: .reused,
+                phase: .transportReady,
+                deviceId: nil,
+                deviceName: currentConnection?.deviceName,
+                negotiatedSuite: nil
+            )
+        case .idle:
+            break
+        }
+
+        switch status {
+        case .connecting:
+            if let currentConnection {
+                return ActiveSessionSnapshot(
+                    sessionId: currentConnection.id,
+                    source: .reused,
+                    phase: .transportReady,
+                    deviceId: nil,
+                    deviceName: currentConnection.deviceName,
+                    negotiatedSuite: nil
+                )
+            }
+            return ActiveSessionSnapshot(
+                sessionId: "cross-network-pending",
+                source: .reused,
+                phase: .connecting,
+                deviceId: nil,
+                deviceName: nil,
+                negotiatedSuite: nil
+            )
+        case .connected:
+            return ActiveSessionSnapshot(
+                sessionId: currentConnection?.id ?? "cross-network-active",
+                source: .reused,
+                phase: .handshakeComplete,
+                deviceId: nil,
+                deviceName: currentConnection?.deviceName,
+                negotiatedSuite: nil
+            )
+        case .idle, .generating, .waiting, .failed:
+            return nil
+        }
+    }
+
+    private func installConnectionPresentationBindingsIfNeeded() {
+        guard presentationCancellables.isEmpty else { return }
+
         let base = Publishers.CombineLatest4(
             connectionManager.$connectionStatus,
             p2pDiscoveryService.$connectionStatus,
@@ -335,17 +434,27 @@ final class DashboardViewModel: ObservableObject {
             ConnectionPresenceService.shared.$activeConnections,
             ConnectionPresenceService.shared.$rekeyStatusByPeerId
         )
-        
+
         let unified = unifiedDeviceManager.$onlineDevices
-        
-        let crossNetwork = crossNetworkManager.$activeSessionSnapshot
+
+        let crossNetworkBase = Publishers.CombineLatest4(
+            crossNetworkManager.$connectionStatus,
+            crossNetworkManager.$readiness,
+            crossNetworkManager.$activeSessionSnapshot,
+            crossNetworkManager.$currentConnection
+        )
+        let crossNetwork = Publishers.CombineLatest(
+            crossNetworkBase,
+            crossNetworkManager.$signalingHealth
+        )
 
         Publishers.CombineLatest4(base, presence, unified, crossNetwork)
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] baseTuple, presenceTuple, unifiedDevices, crossSnapshot in
+            .sink { [weak self] baseTuple, presenceTuple, unifiedDevices, crossNetworkTuple in
                 guard let self else { return }
                 let (baseStatus, p2pStatus, inboundCount, isTransferring) = baseTuple
                 let (presenceConnections, rekeyStatusByPeerId) = presenceTuple
+                let ((crossStatus, crossReadiness, crossSnapshot, crossConnection), crossSignalingHealth) = crossNetworkTuple
 
                 let unifiedLinkedPeers = unifiedDevices
                     .filter { device in
@@ -353,8 +462,23 @@ final class DashboardViewModel: ObservableObject {
                     }
                     .sorted { ($0.lastConnectedAt ?? .distantPast) > ($1.lastConnectedAt ?? .distantPast) }
 
+                let activeCrossNetworkPresencePeerID: String? = {
+                    if let sessionId = crossSnapshot?.sessionId {
+                        return "cross-network:\(sessionId)"
+                    }
+                    if let sessionId = crossConnection?.id {
+                        return "cross-network:\(sessionId)"
+                    }
+                    return nil
+                }()
+
+                let filteredPresenceConnections = presenceConnections.filter { connection in
+                    guard let activeCrossNetworkPresencePeerID else { return true }
+                    return connection.id != activeCrossNetworkPresencePeerID
+                }
+
                 let latestPeerConnection: ConnectionPresentationPeer?
-                if let newest = presenceConnections.sorted(by: { $0.connectedAt > $1.connectedAt }).first {
+                if let newest = filteredPresenceConnections.sorted(by: { $0.connectedAt > $1.connectedAt }).first {
                     if let rekey = rekeyStatusByPeerId[newest.id] {
                         latestPeerConnection = ConnectionPresentationPeer(
                             displayName: newest.displayName,
@@ -394,6 +518,13 @@ final class DashboardViewModel: ObservableObject {
                     )
                 }
 
+                let crossNetworkFallback = self.synthesizedCrossNetworkSnapshot(
+                    status: crossStatus,
+                    readiness: crossReadiness,
+                    activeSnapshot: crossSnapshot,
+                    currentConnection: crossConnection
+                )
+
                 let presentation = ConnectionPresentationContract.evaluate(
                     ConnectionPresentationInput(
                         labels: ConnectionPresentationLabels(
@@ -408,10 +539,12 @@ final class DashboardViewModel: ObservableObject {
                         latestPeerConnection: latestPeerConnection,
                         latestConnectedDevice: latestConnectedDevice,
                         activeSessionSnapshot: crossSnapshot,
+                        crossNetworkFallback: crossNetworkFallback,
                         defaultPQCModeLabel: ConnectionCryptoPresentation.inferredModeLabelForCurrentPolicy(
                             compatibilityModeEnabled: SettingsManager.shared.enableCompatibilityMode
                         ),
-                        compatibilityModeEnabled: SettingsManager.shared.enableCompatibilityMode
+                        compatibilityModeEnabled: SettingsManager.shared.enableCompatibilityMode,
+                        signalingHealth: crossSignalingHealth
                     )
                 )
 
@@ -429,34 +562,13 @@ final class DashboardViewModel: ObservableObject {
                     self.connectionStatus = .disconnected
                 }
             }
-            .store(in: &cancellables)
-
-        NotificationCenter.default.publisher(for: .skyBridgeIntentConnect)
-            .compactMap { $0.userInfo?[SkyBridgeIntentPayloadKey.deviceName] as? String }
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] target in
-                guard let self else { return }
-                Task { await self.handleSiriConnectRequest(targetName: target) }
-            }
-            .store(in: &cancellables)
-
-        await discoveryService.start()
-        sessionService.bootstrap()
- // FileTransferManager 不需要prepare方法
- // 集中网络监控，订阅共享发布者
-        NetworkFrameworkEnhancements.NetworkPathMonitor.shared.startMonitoring(queue: DispatchQueue(label: "skybridge.network.monitor"))
-        NetworkFrameworkEnhancements.NetworkPathMonitor.shared.$isOnline
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] online in
-                self?.isNetworkOnline = online
-                self?.localIPv4 = self?.currentIPv4Address()
-                self?.updateDashboardCounts()
-            }
-            .store(in: &cancellables)
+            .store(in: &presentationCancellables)
     }
 
  /// 停止所有订阅并释放资源，通常在界面离开或退出登录时调用。
     func stop() {
+        hasStartedServices = false
+        presentationCancellables.removeAll()
         cancellables.removeAll()
         discoveryService.stop()
         p2pDiscoveryService.stopDiscovery()

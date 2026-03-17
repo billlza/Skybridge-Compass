@@ -231,4 +231,99 @@ final class NebulaIdentityAndConnectionPresentationTests: XCTestCase {
         )
         XCTAssertEqual(afterLateCleanup, newerSnapshot)
     }
+
+    func testCrossNetworkFallbackPresentationKeepsMacStatusResponsiveWhenSnapshotMissing() {
+        let labels = ConnectionPresentationLabels(
+            connectedText: "已连接",
+            disconnectedText: "未连接",
+            connectingText: "连接中",
+            reconnectingText: "重连中",
+            defaultGuardStatus: "守护中",
+            crossNetworkGuardStatus: "跨网已连接"
+        )
+
+        let fallbackConnected = ConnectionPresentationContract.evaluate(
+            ConnectionPresentationInput(
+                labels: labels,
+                fileTransferActive: false,
+                latestPeerConnection: nil,
+                latestConnectedDevice: nil,
+                activeSessionSnapshot: nil,
+                crossNetworkFallback: ActiveSessionSnapshot(
+                    sessionId: "session-fallback",
+                    source: .reused,
+                    phase: .transportReady,
+                    deviceId: nil,
+                    deviceName: "Mac mini",
+                    negotiatedSuite: "ML-KEM-768"
+                ),
+                defaultPQCModeLabel: "Apple PQC",
+                compatibilityModeEnabled: false
+            )
+        )
+
+        XCTAssertEqual(fallbackConnected.phase, .connected)
+        XCTAssertEqual(fallbackConnected.statusText, "Apple PQC已连接")
+        XCTAssertEqual(fallbackConnected.detailText, "Apple PQC · ML-KEM-768 · 跨网已连接")
+
+        let fallbackConnecting = ConnectionPresentationContract.evaluate(
+            ConnectionPresentationInput(
+                labels: labels,
+                fileTransferActive: false,
+                latestPeerConnection: nil,
+                latestConnectedDevice: nil,
+                activeSessionSnapshot: nil,
+                crossNetworkFallback: ActiveSessionSnapshot(
+                    sessionId: "session-connecting",
+                    source: .reused,
+                    phase: .connecting,
+                    deviceId: nil,
+                    deviceName: "Remote Device",
+                    negotiatedSuite: nil
+                ),
+                defaultPQCModeLabel: nil,
+                compatibilityModeEnabled: false
+            )
+        )
+
+        XCTAssertEqual(fallbackConnecting.phase, .connecting)
+        XCTAssertEqual(fallbackConnecting.statusText, "连接中")
+        XCTAssertEqual(fallbackConnecting.detailText, "Remote Device")
+    }
+
+    func testCrossNetworkSnapshotUsesDegradedDisplayStateWhenSignalingIsDegraded() {
+        let labels = ConnectionPresentationLabels(
+            connectedText: "已连接",
+            disconnectedText: "未连接",
+            connectingText: "连接中",
+            reconnectingText: "重连中",
+            defaultGuardStatus: "守护中",
+            crossNetworkGuardStatus: "跨网已连接"
+        )
+
+        let degradedPresentation = ConnectionPresentationContract.evaluate(
+            ConnectionPresentationInput(
+                labels: labels,
+                fileTransferActive: false,
+                latestPeerConnection: nil,
+                latestConnectedDevice: nil,
+                activeSessionSnapshot: ActiveSessionSnapshot(
+                    sessionId: "session-degraded",
+                    source: .qr,
+                    phase: .handshakeComplete,
+                    deviceId: "peer-1",
+                    deviceName: "Mac mini",
+                    negotiatedSuite: "ML-KEM-768"
+                ),
+                defaultPQCModeLabel: "Apple PQC",
+                compatibilityModeEnabled: false,
+                signalingHealth: .degradedFatal
+            )
+        )
+
+        XCTAssertEqual(degradedPresentation.phase, .connected)
+        XCTAssertEqual(degradedPresentation.displayState, .connectedDegradedSignaling)
+        XCTAssertEqual(degradedPresentation.statusText, "Apple PQC已连接")
+        XCTAssertTrue(degradedPresentation.detailText?.contains("信令降级") == true)
+    }
 }

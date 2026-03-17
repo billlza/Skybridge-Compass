@@ -9,10 +9,14 @@ import OSLog
 /// - 协议解析/落盘逻辑复用现有 `FileTransferManager.receiveFile(from:deviceId:deviceName:)`
 @MainActor
 public final class FileTransferListenerService: ObservableObject {
+    private final class StartState: @unchecked Sendable {
+        var finished = false
+    }
+
     private let log = Logger(subsystem: "com.skybridge.transfer", category: "Listener")
     
     private let manager: FileTransferManager
-    private let port: UInt16
+    private let preferredPort: UInt16
     
     private var listener: NWListener?
     private let queue = DispatchQueue(label: "com.skybridge.transfer.listener", qos: .userInitiated)
@@ -21,13 +25,14 @@ public final class FileTransferListenerService: ObservableObject {
     private let serviceType = "_skybridge-transfer._tcp"
     private let serviceDomain = "local."
     private var netService: NetService?
+    private(set) var activePort: UInt16?
     
     public init(manager: FileTransferManager, port: UInt16 = 8080) {
         self.manager = manager
-        self.port = port
+        self.preferredPort = port
     }
     
-    public func start() throws {
+    public func start() async throws {
         guard listener == nil else { return }
         
         let parameters = NWParameters.tcp
@@ -39,45 +44,24 @@ public final class FileTransferListenerService: ObservableObject {
             tcp.keepaliveInterval = 15
             tcp.keepaliveCount = 4
         }
-        
-        listener = try NWListener(using: parameters, on: NWEndpoint.Port.validated(port))
-        configureBonjour(on: listener)
-        
-        listener?.stateUpdateHandler = { [weak self] state in
-            guard let self else { return }
-            Task { @MainActor in
-                switch state {
-                case .ready:
-                    self.log.info("✅ FileTransfer listener ready on \(self.port)")
-                case .failed(let error):
-                    self.log.error("❌ FileTransfer listener failed: \(String(describing: error))")
-                case .cancelled:
-                    self.log.info("⏹️ FileTransfer listener cancelled")
-                default:
-                    break
-                }
-            }
-        }
-        
-        listener?.newConnectionHandler = { [weak self] connection in
-            Task { @MainActor in
-                self?.handleIncoming(connection)
-            }
-        }
-        
-        listener?.start(queue: queue)
+
+        let (boundListener, boundPort) = try await makeStartedListener(parameters: parameters, preferredPort: preferredPort)
+        listener = boundListener
+        activePort = boundPort
+        configureBonjour(on: boundListener, port: boundPort)
     }
     
     public func stop() {
         listener?.cancel()
         listener = nil
+        activePort = nil
         netService?.stop()
         netService = nil
     }
     
     /// Prefer advertising via `NWListener.service` (Network.framework) so iOS `NWBrowser` sees it reliably.
     /// We still keep a NetService fallback for older stacks / debugging.
-    private func configureBonjour(on listener: NWListener?) {
+    private func configureBonjour(on listener: NWListener?, port: UInt16) {
         guard let listener else { return }
         
         let serviceName = Host.current().localizedName ?? "Mac"
@@ -90,7 +74,7 @@ public final class FileTransferListenerService: ObservableObject {
         txt["transferPort"] = String(port)
         txt["port"] = String(port)
         // Mirror TXT for NetService fallback (Bonjour TXTRecord is [String: Data])
-        let txtData = makeNetServiceTXTData(serviceName: serviceName, deviceId: nil, pubKeyFP: nil)
+        let txtData = makeNetServiceTXTData(serviceName: serviceName, deviceId: nil, pubKeyFP: nil, port: port)
         
         // Try to include stable identity if available (best-effort, non-blocking).
         if #available(macOS 14.0, *) {
@@ -108,7 +92,8 @@ public final class FileTransferListenerService: ObservableObject {
                     var updatedData = self.makeNetServiceTXTData(
                         serviceName: serviceName,
                         deviceId: snap.deviceId.isEmpty ? nil : snap.deviceId,
-                        pubKeyFP: snap.pubKeyFP.isEmpty ? nil : snap.pubKeyFP
+                        pubKeyFP: snap.pubKeyFP.isEmpty ? nil : snap.pubKeyFP,
+                        port: port
                     )
                     // Ensure uniqueId aligns with deviceId when available.
                     if !snap.deviceId.isEmpty {
@@ -120,22 +105,22 @@ public final class FileTransferListenerService: ObservableObject {
         }
         
         listener.service = NWListener.Service(name: serviceName, type: serviceType, domain: serviceDomain, txtRecord: txt)
-        log.info("📡 NWListener.service advertised \(self.serviceType) port=\(self.port)")
+        log.info("📡 NWListener.service advertised \(self.serviceType) port=\(port)")
         
         // Fallback NetService (optional)
-        publishBonjourFallback(serviceName: serviceName, txtData: txtData)
+        publishBonjourFallback(serviceName: serviceName, txtData: txtData, port: port)
     }
     
-    private func publishBonjourFallback(serviceName: String, txtData: [String: Data]) {
+    private func publishBonjourFallback(serviceName: String, txtData: [String: Data], port: UInt16) {
         netService?.stop()
         netService = NetService(domain: serviceDomain, type: serviceType, name: serviceName, port: Int32(port))
 
         netService?.setTXTRecord(NetService.data(fromTXTRecord: txtData))
         netService?.publish()
-        log.info("📡 NetService fallback published \(self.serviceType) port=\(self.port)")
+        log.info("📡 NetService fallback published \(self.serviceType) port=\(port)")
     }
     
-    private func makeNetServiceTXTData(serviceName: String, deviceId: String?, pubKeyFP: String?) -> [String: Data] {
+    private func makeNetServiceTXTData(serviceName: String, deviceId: String?, pubKeyFP: String?, port: UInt16) -> [String: Data] {
         var d: [String: Data] = [
             "platform": Data("macos".utf8),
             "osVersion": Data(ProcessInfo.processInfo.operatingSystemVersionString.utf8),
@@ -153,6 +138,79 @@ public final class FileTransferListenerService: ObservableObject {
             d["pubKeyFP"] = Data(pubKeyFP.utf8)
         }
         return d
+    }
+
+    private func makeStartedListener(
+        parameters: NWParameters,
+        preferredPort: UInt16
+    ) async throws -> (NWListener, UInt16) {
+        do {
+            let listener = try NWListener(using: parameters, on: NWEndpoint.Port.validated(preferredPort))
+            let port = try await start(listener: listener)
+            return (listener, port)
+        } catch {
+            guard isAddressInUse(error) else { throw error }
+            log.warning("⚠️ FileTransfer preferred port \(preferredPort) busy, falling back to dynamic port")
+            let listener = try NWListener(using: parameters)
+            let port = try await start(listener: listener)
+            return (listener, port)
+        }
+    }
+
+    private func start(listener: NWListener) async throws -> UInt16 {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<UInt16, Error>) in
+            let startState = StartState()
+
+            listener.stateUpdateHandler = { [weak self] state in
+                guard let self else { return }
+                Task { @MainActor in
+                    switch state {
+                    case .ready:
+                        let boundPort = listener.port?.rawValue ?? 0
+                        self.activePort = boundPort
+                        self.log.info("✅ FileTransfer listener ready on \(boundPort)")
+                        if !startState.finished {
+                            startState.finished = true
+                            continuation.resume(returning: boundPort)
+                        }
+                    case .failed(let error):
+                        self.log.error("❌ FileTransfer listener failed: \(String(describing: error))")
+                        if !startState.finished {
+                            startState.finished = true
+                            continuation.resume(throwing: error)
+                        }
+                    case .cancelled:
+                        self.log.info("⏹️ FileTransfer listener cancelled")
+                        if !startState.finished {
+                            startState.finished = true
+                            continuation.resume(throwing: POSIXError(.ECANCELED))
+                        }
+                    default:
+                        break
+                    }
+                }
+            }
+
+            listener.newConnectionHandler = { [weak self] connection in
+                Task { @MainActor in
+                    self?.handleIncoming(connection)
+                }
+            }
+
+            listener.start(queue: queue)
+        }
+    }
+
+    private func isAddressInUse(_ error: Error) -> Bool {
+        if let posix = error as? POSIXError, posix.code == .EADDRINUSE {
+            return true
+        }
+        if let nwError = error as? NWError,
+           case .posix(let code) = nwError,
+           code == .EADDRINUSE {
+            return true
+        }
+        return (error as NSError).code == 48
     }
     
     private func handleIncoming(_ connection: NWConnection) {
@@ -177,4 +235,3 @@ public final class FileTransferListenerService: ObservableObject {
         }
     }
 }
-

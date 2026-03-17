@@ -282,6 +282,11 @@ public actor SignalServerClient {
         bearerTokenProvider: @escaping @Sendable () async throws -> String = { "" },
         tenantIDProvider: @escaping @Sendable () async -> String = { "" },
         clientVersionProvider: @escaping @Sendable () -> String = {
+            if let value = ProcessInfo.processInfo.environment["SKYBRIDGE_CLIENT_VERSION"]?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+               !value.isEmpty {
+                return value
+            }
             if let value = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String {
                 let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !trimmed.isEmpty { return trimmed }

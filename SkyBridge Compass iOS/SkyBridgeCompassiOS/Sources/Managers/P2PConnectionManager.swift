@@ -47,6 +47,8 @@ public class P2PConnectionManager: ObservableObject {
     private var reconnectSuppressedDeviceIds: Set<String> = []
     private var lastKnownDevices: [String: DiscoveredDevice] = [:]
     private var pairKeyByDeviceId: [String: Data] = [:]
+    private var peerAliasToCanonicalDeviceId: [String: String] = [:]
+    private var peerPresentationIdByRuntimePeerId: [String: String] = [:]
     
     /// Prevent pairing identity exchange ping-pong loops.
     private var lastPairingIdentityExchangeSentAt: [String: Date] = [:]
@@ -273,6 +275,7 @@ public class P2PConnectionManager: ObservableObject {
     /// - Important: Code is deterministically derived from the *handshake transcript hash* to bind user verification
     ///   to the negotiated suite + policy + key shares. Both peers compute the same value after a successful handshake.
     public func pairingVerificationCode(for deviceId: String) -> String? {
+        let deviceId = canonicalPeerLookupKey(deviceId)
         guard let keys = sessionKeys[deviceId] else { return nil }
 
         var material = Data("SkyBridge-Pairing-SAS|".utf8)
@@ -293,7 +296,9 @@ public class P2PConnectionManager: ObservableObject {
         to device: DiscoveredDevice,
         allowUntrustedClassicBootstrapOnMissingPeerKEM: Bool = false
     ) async throws {
-        let targetDevice = resolveLatestConnectableDevice(from: device)
+        let resolvedTargetDevice = resolveLatestConnectableDevice(from: device)
+        let canonicalTargetId = registerCanonicalPeerIdentity(candidate: resolvedTargetDevice, primaryPeerId: resolvedTargetDevice.id)
+        let targetDevice = canonicalizedDevice(resolvedTargetDevice, canonicalPeerId: canonicalTargetId)
         if targetDevice.id != device.id {
             SkyBridgeLogger.shared.info("ℹ️ P2P 连接目标已补全: \(device.id) -> \(targetDevice.id)")
         }
@@ -546,10 +551,17 @@ public class P2PConnectionManager: ObservableObject {
     
     /// 断开连接
     public func disconnect(from device: DiscoveredDevice) async {
-        let targetDevice = resolveLatestConnectableDevice(from: device)
+        let resolvedTargetDevice = resolveLatestConnectableDevice(from: device)
+        let targetDevice = canonicalizedDevice(
+            resolvedTargetDevice,
+            canonicalPeerId: registerCanonicalPeerIdentity(candidate: resolvedTargetDevice, primaryPeerId: resolvedTargetDevice.id)
+        )
+        let peerIds = connectionStatePeerIds(for: targetDevice.id)
         guard let connection = connections[targetDevice.id] else { return }
 
-        connectionStatusByDeviceId[targetDevice.id] = .disconnecting
+        for peerId in peerIds {
+            connectionStatusByDeviceId[peerId] = .disconnecting
+        }
         userInitiatedDisconnects.insert(targetDevice.id)
         heartbeatTasks[targetDevice.id]?.cancel()
         heartbeatTasks.removeValue(forKey: targetDevice.id)
@@ -567,9 +579,13 @@ public class P2PConnectionManager: ObservableObject {
         await releaseArbiterState(for: targetDevice.id)
         
         // 更新活动连接列表
-        activeConnections.removeAll { $0.device.id == targetDevice.id }
-        connectionStatusByDeviceId[targetDevice.id] = .disconnected
-        connectionErrorByDeviceId.removeValue(forKey: targetDevice.id)
+        activeConnections.removeAll {
+            $0.device.id == targetDevice.id || $0.device.id == presentationPeerId(for: targetDevice.id)
+        }
+        for peerId in peerIds {
+            connectionStatusByDeviceId[peerId] = .disconnected
+            connectionErrorByDeviceId.removeValue(forKey: peerId)
+        }
 
         // 更新灵动岛状态（iOS 17+）
         Task {
@@ -614,31 +630,45 @@ public class P2PConnectionManager: ObservableObject {
     /// 处理入站连接（作为响应方）
     private func handleIncomingConnection(_ connection: NWConnection, peerId: String) async {
         SkyBridgeLogger.shared.info("📞 处理入站连接: \(peerId)")
-        
+
+        let inboundDevice = makeActiveConnectionDevice(peerId: peerId, connection: connection)
+        let canonicalPeerId = registerCanonicalPeerIdentity(candidate: inboundDevice, primaryPeerId: peerId)
+        let canonicalDevice = canonicalizedDevice(inboundDevice, canonicalPeerId: canonicalPeerId)
+        lastKnownDevices[canonicalPeerId] = canonicalDevice
+        connectionStatusByDeviceId[canonicalPeerId] = .connecting
+        connectionErrorByDeviceId.removeValue(forKey: canonicalPeerId)
+
         // 保存连接
-        connections[peerId] = connection
-        
+        connections[canonicalPeerId] = connection
+
+        // Inbound connections must enter the same lifecycle funnel as outbound ones,
+        // otherwise ready/failed/cancelled transitions never reach UI and cleanup.
+        installConnectionObservers(connection, for: canonicalDevice)
+        await handleConnectionStateChange(.ready, for: canonicalDevice)
+
         // 设置传输层
-        await transport?.setConnection(connection, for: peerId)
-        
+        await transport?.setConnection(connection, for: canonicalPeerId)
+
         // 创建握手驱动器（响应方角色）
         do {
             let driver = try skyBridgeCore.createHandshakeDriver(
                 transport: transport!,
                 localSOAPeerId: localSOAPeerIdBytes(),
-                expectedRemoteSOAPeerId: soaPeerIdBytes(for: peerId)
+                expectedRemoteSOAPeerId: soaPeerIdBytes(for: canonicalPeerId)
             )
-            handshakeDrivers[peerId] = driver
+            handshakeDrivers[canonicalPeerId] = driver
             
             // 开始接收消息
-            startReceiving(from: connection, peerId: peerId)
+            startReceiving(from: connection, peerId: canonicalPeerId)
             
             currentHandshakeState = "等待握手消息..."
-            SkyBridgeLogger.shared.info("🔐 等待来自 \(peerId) 的握手消息")
-            
+            SkyBridgeLogger.shared.info("🔐 等待来自 \(canonicalPeerId) 的握手消息")
+
         } catch {
             SkyBridgeLogger.shared.error("❌ 创建握手驱动器失败: \(error.localizedDescription)")
             lastError = error.localizedDescription
+            connectionStatusByDeviceId[canonicalPeerId] = .failed
+            connectionErrorByDeviceId[canonicalPeerId] = error.localizedDescription
         }
     }
     
@@ -706,6 +736,7 @@ public class P2PConnectionManager: ObservableObject {
     }
 
     private func cleanupBrokenInboundConnection(_ connection: NWConnection, peerId: String, reason: String) {
+        let peerId = canonicalPeerLookupKey(peerId)
         connection.cancel()
 
         let isTrackedConnection = connections[peerId].map { $0 === connection } ?? false
@@ -731,6 +762,7 @@ public class P2PConnectionManager: ObservableObject {
     
     /// 处理收到的消息
     private func handleReceivedMessage(_ data: Data, from peerId: String) async {
+        let peerId = canonicalPeerLookupKey(peerId)
         lastActivityByDeviceId[peerId] = Date()
         // Phase C2: optional post-handshake traffic padding (SBP2).
         // This is safe to apply unconditionally because unwrap is a no-op unless magic matches.
@@ -851,6 +883,7 @@ public class P2PConnectionManager: ObservableObject {
                 connection: connections[peerId]
             )
             upsertActiveConnection(device: activeDevice, status: .connected)
+            syncPresentationState(for: peerId)
 
         case .failed(let reason):
             handshakeDrivers.removeValue(forKey: peerId)
@@ -960,8 +993,15 @@ public class P2PConnectionManager: ObservableObject {
             SkyBridgeLogger.shared.info("📋 已接收远端剪贴板：\(peerId)")
         case .pairingIdentityExchange(let payload):
             await handlePairingIdentityExchangeRequest(from: peerId, payload: payload)
-        case .heartbeat:
-            break
+        case .heartbeat(let payload):
+            _ = promotePeerPresentationIdentityIfNeeded(
+                runtimePeerId: peerId,
+                declaredDeviceId: payload.deviceId,
+                deviceName: payload.deviceName,
+                modelName: payload.modelName,
+                platform: payload.platform,
+                osVersion: payload.osVersion
+            )
         case .ping(let payload):
             await replyPong(to: peerId, pingId: payload.id)
         case .pong:
@@ -986,6 +1026,15 @@ public class P2PConnectionManager: ObservableObject {
     }
     
     private func handlePairingIdentityExchangeRequest(from peerId: String, payload: AppMessage.PairingIdentityExchangePayload) async {
+        let peerId = promotePeerPresentationIdentityIfNeeded(
+            runtimePeerId: peerId,
+            declaredDeviceId: payload.deviceId,
+            deviceName: payload.deviceName,
+            modelName: payload.modelName,
+            platform: payload.platform,
+            osVersion: payload.osVersion
+        )
+
         // Policy: auto-accept / auto-reject if a decision exists; otherwise raise a UI prompt.
         if let raw = pairingPolicyByPeerId[peerId],
            let policy = PairingTrustDecision(rawValue: raw) {
@@ -1039,9 +1088,12 @@ public class P2PConnectionManager: ObservableObject {
     
     private func scheduleBootstrapRekeyIfNeeded(peerId: String, suiteRaw: String) {
         guard bootstrapRekeyTasks[peerId] == nil else { return }
+        let peerIds = connectionStatePeerIds(for: peerId)
         
         // Surface a stable "pending approval/keys" state to prevent reconnect storms.
-        connectionErrorByDeviceId[peerId] = "等待对端批准配对/受信任申请以完成 PQC 切换（suite=\(suiteRaw)）"
+        for effectivePeerId in peerIds {
+            connectionErrorByDeviceId[effectivePeerId] = "等待对端批准配对/受信任申请以完成 PQC 切换（suite=\(suiteRaw)）"
+        }
         currentHandshakeState = "等待对端批准以完成 PQC 切换..."
         
         bootstrapRekeyTasks[peerId] = Task { @MainActor [weak self] in
@@ -1070,10 +1122,14 @@ public class P2PConnectionManager: ObservableObject {
             do {
                 SkyBridgeLogger.shared.info("🔁 已获得对端 KEM 公钥，开始 rekey 到 PQC… peer=\(peerId)")
                 try await self.rekeyToPreferPQC(deviceId: peerId, allowSOA: false)
-                self.connectionErrorByDeviceId.removeValue(forKey: peerId)
+                for effectivePeerId in self.connectionStatePeerIds(for: peerId) {
+                    self.connectionErrorByDeviceId.removeValue(forKey: effectivePeerId)
+                }
                 self.currentHandshakeState = "已切换到 PQC"
             } catch {
-                self.connectionErrorByDeviceId[peerId] = "PQC 切换失败：\(error.localizedDescription)"
+                for effectivePeerId in self.connectionStatePeerIds(for: peerId) {
+                    self.connectionErrorByDeviceId[effectivePeerId] = "PQC 切换失败：\(error.localizedDescription)"
+                }
                 SkyBridgeLogger.shared.error("❌ rekeyToPreferPQC failed: \(error.localizedDescription)")
             }
         }
@@ -1085,6 +1141,15 @@ public class P2PConnectionManager: ObservableObject {
         trustPeer: Bool,
         persistTrust: Bool
     ) async {
+        let peerId = promotePeerPresentationIdentityIfNeeded(
+            runtimePeerId: peerId,
+            declaredDeviceId: payload.deviceId,
+            deviceName: payload.deviceName,
+            modelName: payload.modelName,
+            platform: payload.platform,
+            osVersion: payload.osVersion
+        )
+
         // Store under both the "declared" deviceId and the current peerId key.
         // Reason: in discovery/bonjour flows the runtime peerId can be "bonjour:<name>@local." while the
         // pairing identity exchange uses a stable deviceId. If we only store one, PQC lookup may miss.
@@ -1119,6 +1184,7 @@ public class P2PConnectionManager: ObservableObject {
 
     /// 向对端发送本机 KEM identity 公钥，用于 bootstrap PQC suite 协商（首次可用 classic，收到后即可 rekey 到 PQC）。
     public func sendPairingIdentityExchange(to deviceId: String) async throws {
+        let deviceId = canonicalPeerLookupKey(deviceId)
         // Avoid mixing business traffic during in-band rekey.
         if rekeyInProgress.contains(deviceId) { return }
         guard let connection = connections[deviceId] else { throw P2PError.connectionFailed }
@@ -1157,6 +1223,7 @@ public class P2PConnectionManager: ObservableObject {
 
     /// 发送剪贴板内容到指定设备（走已建立的会话密钥加密通道）
     public func sendClipboard(to deviceId: String, data: Data, mimeType: String) async throws {
+        let deviceId = canonicalPeerLookupKey(deviceId)
         // Avoid mixing business traffic during in-band rekey.
         if rekeyInProgress.contains(deviceId) { return }
         guard let connection = connections[deviceId] else { throw P2PError.connectionFailed }
@@ -1179,53 +1246,74 @@ public class P2PConnectionManager: ObservableObject {
     }
     
     private func handleConnectionStateChange(_ state: NWConnection.State, for device: DiscoveredDevice) async {
+        let runtimePeerId = canonicalPeerLookupKey(device.id)
+        let effectiveDevice = canonicalizedDevice(device, canonicalPeerId: runtimePeerId)
+        let peerIds = connectionStatePeerIds(for: runtimePeerId)
+
         switch state {
         case .ready:
             // Transport ready != protocol handshake complete.
-            connectionStatusByDeviceId[device.id] = .connecting
-            connectionErrorByDeviceId.removeValue(forKey: device.id)
-            userInitiatedDisconnects.remove(device.id)
-            lastActivityByDeviceId[device.id] = Date()
+            for peerId in peerIds {
+                connectionStatusByDeviceId[peerId] = .connecting
+                connectionErrorByDeviceId.removeValue(forKey: peerId)
+            }
+            userInitiatedDisconnects.remove(runtimePeerId)
+            lastActivityByDeviceId[runtimePeerId] = Date()
+            syncPresentationState(for: runtimePeerId)
 
         case .waiting(let error):
-            connectionStatusByDeviceId[device.id] = .connecting
-            connectionErrorByDeviceId[device.id] = error.localizedDescription
-            SkyBridgeLogger.shared.warning("⏳ 连接等待网络: \(device.name) error=\(error.localizedDescription)")
+            for peerId in peerIds {
+                connectionStatusByDeviceId[peerId] = .connecting
+                connectionErrorByDeviceId[peerId] = error.localizedDescription
+            }
+            SkyBridgeLogger.shared.warning("⏳ 连接等待网络: \(effectiveDevice.name) error=\(error.localizedDescription)")
             
         case .failed(let error):
-            SkyBridgeLogger.shared.error("❌ 连接失败: \(device.name) error=\(error.localizedDescription)")
-            connectionStatusByDeviceId[device.id] = .failed
-            connectionErrorByDeviceId[device.id] = error.localizedDescription
-            userInitiatedDisconnects.remove(device.id)
-            connections.removeValue(forKey: device.id)
-            sessionKeys.removeValue(forKey: device.id)
-            handshakeDrivers.removeValue(forKey: device.id)
-            sharedSecrets.removeValue(forKey: device.id)
-            await transport?.removeConnection(for: device.id)
-            activeConnections.removeAll { $0.device.id == device.id }
-            heartbeatTasks[device.id]?.cancel()
-            heartbeatTasks.removeValue(forKey: device.id)
-            await releaseArbiterState(for: device.id)
-            scheduleReconnectIfNeeded(deviceId: device.id)
+            SkyBridgeLogger.shared.error("❌ 连接失败: \(effectiveDevice.name) error=\(error.localizedDescription)")
+            for peerId in peerIds {
+                connectionStatusByDeviceId[peerId] = .failed
+                connectionErrorByDeviceId[peerId] = error.localizedDescription
+            }
+            userInitiatedDisconnects.remove(runtimePeerId)
+            connections.removeValue(forKey: runtimePeerId)
+            sessionKeys.removeValue(forKey: runtimePeerId)
+            handshakeDrivers.removeValue(forKey: runtimePeerId)
+            sharedSecrets.removeValue(forKey: runtimePeerId)
+            await transport?.removeConnection(for: runtimePeerId)
+            activeConnections.removeAll {
+                $0.device.id == runtimePeerId || $0.device.id == presentationPeerId(for: runtimePeerId)
+            }
+            heartbeatTasks[runtimePeerId]?.cancel()
+            heartbeatTasks.removeValue(forKey: runtimePeerId)
+            await releaseArbiterState(for: runtimePeerId)
+            scheduleReconnectIfNeeded(deviceId: runtimePeerId)
             
         case .cancelled:
-            connections.removeValue(forKey: device.id)
-            sessionKeys.removeValue(forKey: device.id)
-            handshakeDrivers.removeValue(forKey: device.id)
-            sharedSecrets.removeValue(forKey: device.id)
-            await transport?.removeConnection(for: device.id)
-            activeConnections.removeAll { $0.device.id == device.id }
-            connectionStatusByDeviceId[device.id] = .disconnected
-            let wasUser = userInitiatedDisconnects.remove(device.id) != nil
-            if !wasUser, connectionErrorByDeviceId[device.id] == nil {
-                connectionErrorByDeviceId[device.id] = "连接已断开（系统未提供错误原因）"
+            connections.removeValue(forKey: runtimePeerId)
+            sessionKeys.removeValue(forKey: runtimePeerId)
+            handshakeDrivers.removeValue(forKey: runtimePeerId)
+            sharedSecrets.removeValue(forKey: runtimePeerId)
+            await transport?.removeConnection(for: runtimePeerId)
+            activeConnections.removeAll {
+                $0.device.id == runtimePeerId || $0.device.id == presentationPeerId(for: runtimePeerId)
             }
-            SkyBridgeLogger.shared.warning("⏹️ 连接已取消/断开: \(device.name) user=\(wasUser)")
-            heartbeatTasks[device.id]?.cancel()
-            heartbeatTasks.removeValue(forKey: device.id)
-            await releaseArbiterState(for: device.id)
+            for peerId in peerIds {
+                connectionStatusByDeviceId[peerId] = .disconnected
+            }
+            let wasUser = userInitiatedDisconnects.remove(runtimePeerId) != nil
+            if !wasUser, connectionErrorByDeviceId[runtimePeerId] == nil {
+                connectionErrorByDeviceId[runtimePeerId] = "连接已断开（系统未提供错误原因）"
+            }
+            if !wasUser, let presentationPeerId = peerIds.last, presentationPeerId != runtimePeerId,
+               connectionErrorByDeviceId[presentationPeerId] == nil {
+                connectionErrorByDeviceId[presentationPeerId] = "连接已断开（系统未提供错误原因）"
+            }
+            SkyBridgeLogger.shared.warning("⏹️ 连接已取消/断开: \(effectiveDevice.name) user=\(wasUser)")
+            heartbeatTasks[runtimePeerId]?.cancel()
+            heartbeatTasks.removeValue(forKey: runtimePeerId)
+            await releaseArbiterState(for: runtimePeerId)
             if !wasUser {
-                scheduleReconnectIfNeeded(deviceId: device.id)
+                scheduleReconnectIfNeeded(deviceId: runtimePeerId)
             }
             
         default:
@@ -1405,6 +1493,201 @@ public class P2PConnectionManager: ObservableObject {
             || resolvedServices.count > inputServices.count
 
         return isResolvedRicher ? resolved : device
+    }
+
+    private func canonicalPeerLookupKey(_ raw: String) -> String {
+        let normalized = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return peerAliasToCanonicalDeviceId[normalized] ?? raw
+    }
+
+    private func presentationPeerId(for runtimePeerId: String) -> String {
+        peerPresentationIdByRuntimePeerId[runtimePeerId] ?? runtimePeerId
+    }
+
+    private func connectionStatePeerIds(for runtimePeerId: String) -> [String] {
+        let presentationPeerId = presentationPeerId(for: runtimePeerId)
+        if presentationPeerId == runtimePeerId {
+            return [runtimePeerId]
+        }
+        return [runtimePeerId, presentationPeerId]
+    }
+
+    private func platform(from raw: String?) -> DevicePlatform {
+        guard let normalized = raw?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+              !normalized.isEmpty else {
+            return .unknown
+        }
+
+        switch normalized {
+        case "ios":
+            return .iOS
+        case "ipados":
+            return .iPadOS
+        case "macos", "mac":
+            return .macOS
+        case "android":
+            return .android
+        case "windows", "win":
+            return .windows
+        case "linux":
+            return .linux
+        default:
+            return .unknown
+        }
+    }
+
+    private func registerRuntimePeerAliases(runtimePeerId: String, aliases: [String]) {
+        for alias in aliases {
+            let normalized = alias.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard !normalized.isEmpty else { continue }
+            peerAliasToCanonicalDeviceId[normalized] = runtimePeerId
+        }
+    }
+
+    private func syncPresentationState(
+        for runtimePeerId: String,
+        preferredDevice: DiscoveredDevice? = nil
+    ) {
+        let presentationPeerId = presentationPeerId(for: runtimePeerId)
+        guard presentationPeerId != runtimePeerId else { return }
+
+        if let status = connectionStatusByDeviceId[runtimePeerId] {
+            connectionStatusByDeviceId[presentationPeerId] = status
+        }
+
+        if let error = connectionErrorByDeviceId[runtimePeerId] {
+            connectionErrorByDeviceId[presentationPeerId] = error
+        } else {
+            connectionErrorByDeviceId.removeValue(forKey: presentationPeerId)
+        }
+
+        if let suite = negotiatedSuiteByDeviceId[runtimePeerId] {
+            negotiatedSuiteByDeviceId[presentationPeerId] = suite
+        } else {
+            negotiatedSuiteByDeviceId.removeValue(forKey: presentationPeerId)
+        }
+
+        if let preferredDevice {
+            lastKnownDevices[presentationPeerId] = preferredDevice
+            upsertActiveConnection(
+                device: preferredDevice,
+                status: connectionStatusByDeviceId[runtimePeerId] ?? .connecting
+            )
+        }
+    }
+
+    @discardableResult
+    private func promotePeerPresentationIdentityIfNeeded(
+        runtimePeerId: String,
+        declaredDeviceId: String?,
+        deviceName: String? = nil,
+        modelName: String? = nil,
+        platform: String? = nil,
+        osVersion: String? = nil
+    ) -> String {
+        let runtimePeerId = canonicalPeerLookupKey(runtimePeerId)
+        registerRuntimePeerAliases(
+            runtimePeerId: runtimePeerId,
+            aliases: PeerIdentityAliasResolver.lookupCandidates(for: runtimePeerId)
+        )
+
+        let presentationPeerId =
+            PeerIdentityAliasResolver.persistentDeviceId(from: declaredDeviceId)
+            ?? presentationPeerId(for: runtimePeerId)
+
+        peerPresentationIdByRuntimePeerId[runtimePeerId] = presentationPeerId
+        registerRuntimePeerAliases(
+            runtimePeerId: runtimePeerId,
+            aliases: PeerIdentityAliasResolver.lookupCandidates(for: declaredDeviceId)
+        )
+
+        let baseDevice =
+            lastKnownDevices[presentationPeerId]
+            ?? lastKnownDevices[runtimePeerId]
+            ?? discoveryManager.discoveredDevices.first(where: { candidate in
+                let aliases = Set(PeerIdentityAliasResolver.aliasKeys(for: candidate))
+                let runtimeAliases = Set(PeerIdentityAliasResolver.lookupCandidates(for: runtimePeerId))
+                let declaredAliases = Set(PeerIdentityAliasResolver.lookupCandidates(for: declaredDeviceId))
+                return !aliases.isDisjoint(with: runtimeAliases)
+                    || !aliases.isDisjoint(with: declaredAliases)
+            })
+            ?? DiscoveredDevice(
+                id: presentationPeerId,
+                name: deviceName ?? runtimePeerId,
+                modelName: modelName ?? "Unknown",
+                platform: self.platform(from: platform),
+                osVersion: osVersion ?? "Unknown"
+            )
+
+        let mergedDevice = DiscoveredDevice(
+            id: presentationPeerId,
+            name: (deviceName?.isEmpty == false ? deviceName! : baseDevice.name),
+            bonjourServiceName: baseDevice.bonjourServiceName,
+            modelName: (modelName?.isEmpty == false ? modelName! : baseDevice.modelName),
+            platform: self.platform(from: platform) == .unknown ? baseDevice.platform : self.platform(from: platform),
+            osVersion: (osVersion?.isEmpty == false ? osVersion! : baseDevice.osVersion),
+            ipAddress: baseDevice.ipAddress,
+            bonjourServiceType: baseDevice.bonjourServiceType,
+            bonjourServiceDomain: baseDevice.bonjourServiceDomain,
+            services: baseDevice.services,
+            portMap: baseDevice.portMap,
+            signalStrength: baseDevice.signalStrength,
+            lastSeen: Date(),
+            isConnected: baseDevice.isConnected,
+            isTrusted: baseDevice.isTrusted || TrustedDeviceStore.shared.isTrusted(deviceId: presentationPeerId),
+            publicKey: baseDevice.publicKey,
+            advertisedCapabilities: baseDevice.advertisedCapabilities,
+            capabilities: baseDevice.capabilities
+        )
+
+        lastKnownDevices[runtimePeerId] = canonicalizedDevice(mergedDevice, canonicalPeerId: runtimePeerId)
+        lastKnownDevices[presentationPeerId] = mergedDevice
+        syncPresentationState(for: runtimePeerId, preferredDevice: mergedDevice)
+        return runtimePeerId
+    }
+
+    private func registerCanonicalPeerIdentity(candidate: DiscoveredDevice, primaryPeerId: String) -> String {
+        let canonical = candidate.id.trimmingCharacters(in: .whitespacesAndNewlines)
+        let canonicalId = canonical.isEmpty ? primaryPeerId : canonical
+
+        func registerAlias(_ raw: String?) {
+            guard let raw else { return }
+            let normalized = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard !normalized.isEmpty else { return }
+            peerAliasToCanonicalDeviceId[normalized] = canonicalId
+        }
+
+        registerAlias(primaryPeerId)
+        registerAlias(canonicalId)
+        for alias in PeerIdentityAliasResolver.aliasKeys(for: candidate) {
+            registerAlias(alias)
+        }
+        peerPresentationIdByRuntimePeerId[canonicalId] = peerPresentationIdByRuntimePeerId[canonicalId] ?? canonicalId
+        return canonicalId
+    }
+
+    private func canonicalizedDevice(_ device: DiscoveredDevice, canonicalPeerId: String) -> DiscoveredDevice {
+        guard device.id != canonicalPeerId else { return device }
+        return DiscoveredDevice(
+            id: canonicalPeerId,
+            name: device.name,
+            bonjourServiceName: device.bonjourServiceName,
+            modelName: device.modelName,
+            platform: device.platform,
+            osVersion: device.osVersion,
+            ipAddress: device.ipAddress,
+            bonjourServiceType: device.bonjourServiceType,
+            bonjourServiceDomain: device.bonjourServiceDomain,
+            services: device.services,
+            portMap: device.portMap,
+            signalStrength: device.signalStrength,
+            lastSeen: device.lastSeen,
+            isConnected: device.isConnected,
+            isTrusted: device.isTrusted,
+            publicKey: device.publicKey,
+            advertisedCapabilities: device.advertisedCapabilities,
+            capabilities: device.capabilities
+        )
     }
 
     private func parseBonjourPeerIdentifier(_ peerId: String) -> (name: String, domain: String)? {
@@ -1768,6 +2051,10 @@ public class P2PConnectionManager: ObservableObject {
     private func setSessionKeys(_ keys: SessionKeys, for deviceId: String, deviceNameHint: String? = nil) {
         sessionKeys[deviceId] = keys
         negotiatedSuiteByDeviceId[deviceId] = keys.negotiatedSuite
+        let presentationPeerId = presentationPeerId(for: deviceId)
+        if presentationPeerId != deviceId {
+            negotiatedSuiteByDeviceId[presentationPeerId] = keys.negotiatedSuite
+        }
 
         // Keep Live Activity in sync with the latest negotiated suite (e.g., after Classic -> PQC rekey).
         let name =
@@ -1961,6 +2248,7 @@ public class P2PConnectionManager: ObservableObject {
 
     /// 强制用 preferPQC=true 重新握手（用于完成 KEM 公钥交换后的“立刻切换到 PQC suite”）
     public func rekeyToPreferPQC(deviceId: String, allowSOA: Bool = true) async throws {
+        let deviceId = canonicalPeerLookupKey(deviceId)
         rekeyInProgress.insert(deviceId)
         defer { rekeyInProgress.remove(deviceId) }
         guard let connection = connections[deviceId] else { throw P2PError.connectionFailed }
@@ -2052,6 +2340,7 @@ public class P2PConnectionManager: ObservableObject {
     
     /// 使用会话密钥加密数据
     public func encryptForDevice(_ data: Data, deviceId: String) throws -> Data {
+        let deviceId = canonicalPeerLookupKey(deviceId)
         guard let keys = sessionKeys[deviceId] else {
             throw P2PError.noSessionKey
         }
@@ -2060,6 +2349,7 @@ public class P2PConnectionManager: ObservableObject {
     
     /// 使用会话密钥解密数据
     public func decryptFromDevice(_ data: Data, deviceId: String) throws -> Data {
+        let deviceId = canonicalPeerLookupKey(deviceId)
         guard let keys = sessionKeys[deviceId] else {
             throw P2PError.noSessionKey
         }
@@ -2068,7 +2358,7 @@ public class P2PConnectionManager: ObservableObject {
     
     /// 获取设备的协商套件
     public func getNegotiatedSuite(for deviceId: String) -> CryptoSuite? {
-        sessionKeys[deviceId]?.negotiatedSuite
+        sessionKeys[canonicalPeerLookupKey(deviceId)]?.negotiatedSuite
     }
     
     private func send(data: Data, over connection: NWConnection) async throws {
@@ -2127,6 +2417,50 @@ extension P2PConnectionManager {
     func installUITestPairingPrompt(request: PairingTrustRequest) {
         pendingPairingTrustRequest = request
         uiTestPairingRequestIDs.insert(request.id)
+    }
+
+    func installTestPeerRuntimeState(
+        runtimePeerId: String,
+        status: ConnectionStatus = .connected,
+        name: String = "Test Peer",
+        ipAddress: String? = nil
+    ) {
+        let device = DiscoveredDevice(
+            id: runtimePeerId,
+            name: name,
+            modelName: "Test Model",
+            platform: .macOS,
+            osVersion: "TestOS",
+            ipAddress: ipAddress
+        )
+        lastKnownDevices[runtimePeerId] = device
+        connectionStatusByDeviceId[runtimePeerId] = status
+        connectionErrorByDeviceId.removeValue(forKey: runtimePeerId)
+        registerRuntimePeerAliases(
+            runtimePeerId: runtimePeerId,
+            aliases: PeerIdentityAliasResolver.lookupCandidates(for: runtimePeerId)
+        )
+        peerPresentationIdByRuntimePeerId[runtimePeerId] = runtimePeerId
+        activeConnections = [Connection(device: device, status: status)]
+    }
+
+    @discardableResult
+    func testPromotePeerPresentationIdentity(
+        runtimePeerId: String,
+        declaredDeviceId: String,
+        deviceName: String? = nil,
+        modelName: String? = nil,
+        platform: String? = nil,
+        osVersion: String? = nil
+    ) -> String {
+        promotePeerPresentationIdentityIfNeeded(
+            runtimePeerId: runtimePeerId,
+            declaredDeviceId: declaredDeviceId,
+            deviceName: deviceName,
+            modelName: modelName,
+            platform: platform,
+            osVersion: osVersion
+        )
     }
 }
 

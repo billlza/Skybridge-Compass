@@ -18,6 +18,7 @@ import Combine
 /// 继承 BaseManager，统一管理器模式和生命周期管理
 @MainActor
 public class P2PDiscoveryService: BaseManager {
+    public static let shared = P2PDiscoveryService()
 
  // MARK: - 发布的属性（给 SwiftUI / 视图层用）
 
@@ -320,10 +321,17 @@ public class P2PDiscoveryService: BaseManager {
 
  // MARK: - 公共方法（扫描 / 连接）
 
- /// 开始扫描设备 - 2025 增强版：多服务类型扫描（全基于 Network.framework）
+    /// 开始扫描设备 - 2025 增强版：多服务类型扫描（全基于 Network.framework）
     public func startScanning() {
         guard isInitialized else {
-            Task { await self.handleError(.notInitialized) }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if await self.waitUntilInitialized() {
+                    self.startScanning()
+                } else {
+                    await self.handleError(.notInitialized)
+                }
+            }
             return
         }
         guard !isScanning else {
@@ -1760,11 +1768,14 @@ public class P2PDiscoveryService: BaseManager {
     nonisolated private func handleInboundControlChannel(_ connection: NWConnection) async {
         let logger = Logger(subsystem: "com.skybridge.Compass", category: "P2PInboundHandshake")
         var didMarkEstablished = false
+        var peerIdForPresence = Self.stableEndpointLabel(for: connection.endpoint)
         defer {
             if didMarkEstablished {
+                let disconnectedPeerId = peerIdForPresence
                 Task { @MainActor [weak self] in
                     guard let self else { return }
                     self.activeInboundSessions = max(0, self.activeInboundSessions - 1)
+                    ConnectionPresenceService.shared.markDisconnected(peerId: disconnectedPeerId)
                     if self.activeInboundSessions == 0, self.connections.isEmpty {
                         self.connectionStatus = .disconnected
                     }
@@ -1812,6 +1823,18 @@ public class P2PDiscoveryService: BaseManager {
             }
         }
 
+        func sendFramed(_ data: Data) async throws {
+            var framed = Data()
+            var length = UInt32(data.count).bigEndian
+            framed.append(Data(bytes: &length, count: 4))
+            framed.append(data)
+            try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
+                connection.send(content: framed, completion: .contentProcessed { err in
+                    if let err { c.resume(throwing: err) } else { c.resume() }
+                })
+            }
+        }
+
         func packetSenderId(_ packet: SecurePacket) -> String { String(packet.timestamp) }
 
         let transport = DirectHandshakeTransport(connection: connection)
@@ -1821,6 +1844,12 @@ public class P2PDiscoveryService: BaseManager {
         let localSOAPeerId = await Self.localSOAPeerIdBytes()
         var expectedRemoteSOAPeerId: Data?
         var inboundPairKey: Data?
+        // Protocol-grade gate:
+        // Only .established promotes keys to the active business-traffic channel.
+        // waitingFinished may derive candidate keys for verification UX, but must not
+        // unlock app-message processing or shared connected state.
+        var sessionKeys: SessionKeys?
+        var declaredDeviceIdForVerification: String?
         defer {
             if let pairKey = inboundPairKey {
                 Task {
@@ -1831,6 +1860,101 @@ public class P2PDiscoveryService: BaseManager {
         }
         let peer = PeerIdentifier(deviceId: resolvedPeerId)
         var driver: HandshakeDriver?
+        peerIdForPresence = peer.deviceId
+        let endpointDescriptionForPresence = Self.stableEndpointLabel(for: connection.endpoint)
+
+        func cryptoKind(for suite: CryptoSuite) -> String {
+            ConnectionCryptoPresentation.modeLabel(kind: nil, suite: suite.rawValue) ?? suite.rawValue
+        }
+
+        func displayNameFromPeerId(_ peerId: String) -> String {
+            if peerId.hasPrefix("bonjour:") {
+                let rest = peerId.dropFirst("bonjour:".count)
+                return rest.split(separator: "@", maxSplits: 1).first.map(String.init) ?? peerId
+            }
+            if peerId.hasPrefix("id:") {
+                return String(peerId.dropFirst("id:".count))
+            }
+            if peerId.hasPrefix("peer:") {
+                return String(peerId.dropFirst("peer:".count))
+            }
+            return peerId
+        }
+
+        func encryptAppPayload(_ plaintext: Data, with keys: SessionKeys) throws -> Data {
+            let key = SymmetricKey(data: keys.sendKey)
+            let box = try AES.GCM.seal(plaintext, using: key)
+            guard let combined = box.combined else {
+                throw P2PDiscoveryError.connectionCancelled
+            }
+            return combined
+        }
+
+        func decryptAppPayload(_ ciphertext: Data, with keys: SessionKeys) throws -> Data {
+            let key = SymmetricKey(data: keys.receiveKey)
+            let box = try AES.GCM.SealedBox(combined: ciphertext)
+            return try AES.GCM.open(box, using: key)
+        }
+
+        func isLikelyHandshakeControlPacket(_ data: Data) -> Bool {
+            Self.isLikelyHandshakeControlFrame(data)
+        }
+
+        func publishInboundPresence(keys: SessionKeys) async -> Bool {
+            let suite = keys.negotiatedSuite
+            let kind = cryptoKind(for: suite)
+            let peerId = peerIdForPresence
+
+            return await MainActor.run {
+                let resolved = Self.resolveInboundPresenceRoute(
+                    peerId: peerId,
+                    endpointLabel: endpointDescriptionForPresence,
+                    discoveredDevices: self.discoveredDevices,
+                    unifiedDevices: UnifiedOnlineDeviceManager.shared.onlineDevices
+                )
+
+                guard let displayAddress = resolved.displayAddress?
+                    .trimmingCharacters(in: .whitespacesAndNewlines),
+                    !displayAddress.isEmpty else {
+                    logger.error(
+                        "❌ inbound establish route missing: peer=\(peerId, privacy: .public) endpoint=\(endpointDescriptionForPresence, privacy: .public)"
+                    )
+                    return false
+                }
+
+                let routeDescriptor = ConnectionPresenceService.PresenceRouteDescriptor(
+                    peerId: peerId,
+                    deviceName: resolved.name,
+                    displayAddress: displayAddress,
+                    transferAddress: displayAddress,
+                    transferPort: resolved.transferPort,
+                    routeSource: .inbound,
+                    connectedAt: Date()
+                )
+
+                guard ConnectionPresenceService.shared.publishConnectedAtomically(
+                    peerId: peerId,
+                    displayName: resolved.name,
+                    address: displayAddress,
+                    cryptoKind: kind,
+                    suite: suite.rawValue,
+                    routeDescriptor: routeDescriptor
+                ) else {
+                    logger.error("❌ inbound establish contract incomplete: peer=\(peerId, privacy: .public)")
+                    return false
+                }
+
+                ConnectionPresenceService.shared.clearRekeying(peerId: peerId)
+                UnifiedOnlineDeviceManager.shared.markDeviceAsConnected(
+                    peerId: peerId,
+                    displayName: resolved.name,
+                    cryptoKind: kind,
+                    suite: suite.rawValue,
+                    guardStatus: "守护中"
+                )
+                return true
+            }
+        }
 
         logger.info("🤝 入站连接：启用 HandshakeDriver 兼容通道（iOS 互通） state=\(String(describing: connection.state), privacy: .public)")
 
@@ -1843,9 +1967,118 @@ public class P2PDiscoveryService: BaseManager {
                 guard totalLen > 0 && totalLen < 1_048_576 else { break }
 
                 let payload = try await framedReader.receiveExactly(Int(totalLen))
-                let unwrapped = TrafficPadding.unwrapIfNeeded(payload, label: "rx")
+                let frame = Self.normalizeInboundControlFrame(payload)
 
-                if let packet = try? JSONDecoder().decode(SecurePacket.self, from: unwrapped) {
+                if let currentDriver = driver,
+                   let messageA = try? HandshakeMessageA.decode(from: frame) {
+                    let driverState = await currentDriver.getCurrentState()
+                    if Self.shouldRestartInboundHandshakeForRekey(state: driverState, frame: frame) {
+                        let fromSuite = sessionKeys?.negotiatedSuite.rawValue ?? "?"
+                        let fromKind = sessionKeys.map { cryptoKind(for: $0.negotiatedSuite) } ?? "?"
+                        let toSuite = messageA.supportedSuites.first?.rawValue ?? "?"
+                        let toKind = messageA.supportedSuites.first.map { cryptoKind(for: $0) } ?? "?"
+                        let rekeyPeerId = peerIdForPresence
+
+                        Task { @MainActor in
+                            ConnectionPresenceService.shared.markRekeying(.init(
+                                peerId: rekeyPeerId,
+                                fromKind: fromKind,
+                                fromSuite: fromSuite,
+                                toKind: toKind,
+                                toSuite: toSuite
+                            ))
+                        }
+                        logger.info("🔁 入站 rekey：\(fromKind)·\(fromSuite) -> \(toKind)·\(toSuite) peer=\(peerIdForPresence, privacy: .public)")
+                        driver = nil
+                        sessionKeys = nil
+                    }
+                }
+
+                if let keys = sessionKeys, !isLikelyHandshakeControlPacket(frame) {
+                    do {
+                        let plaintext = try decryptAppPayload(frame, with: keys)
+                        if let msg = try? JSONDecoder().decode(AppMessage.self, from: plaintext) {
+                            switch msg {
+                            case .pairingIdentityExchange(let payload):
+                                declaredDeviceIdForVerification = payload.deviceId
+                                let displayName = payload.deviceName
+                                    ?? displayNameFromPeerId(peer.deviceId)
+
+                                await MainActor.run {
+                                    PairingTrustApprovalService.shared.updateVerificationCode(
+                                        declaredDeviceId: payload.deviceId,
+                                        sessionKeys: keys
+                                    )
+                                }
+
+                                let request = PairingTrustApprovalService.Request(
+                                    peerEndpoint: endpointDescriptionForPresence,
+                                    declaredDeviceId: payload.deviceId,
+                                    displayName: displayName,
+                                    model: payload.modelName,
+                                    platform: payload.platform,
+                                    osVersion: payload.osVersion,
+                                    kemKeyCount: payload.kemPublicKeys.count
+                                )
+
+                                let decision = await PairingTrustApprovalService.shared.decide(for: request)
+                                guard decision != PairingTrustApprovalService.Decision.reject else {
+                                    logger.info("🛑 Pairing/trust request rejected (no KEM reply): deviceId=\(payload.deviceId, privacy: .public)")
+                                    break
+                                }
+
+                                await PeerKEMBootstrapStore.shared.upsert(
+                                    deviceIds: [payload.deviceId, peer.deviceId],
+                                    kemPublicKeys: payload.kemPublicKeys
+                                )
+                                logger.info(
+                                    "🔑 已缓存对端 KEM 公钥（bootstrap）：declared=\(payload.deviceId, privacy: .public) peer=\(peer.deviceId, privacy: .public) keys=\(payload.kemPublicKeys.count, privacy: .public)"
+                                )
+
+                                let provider = CryptoProviderFactory.make(policy: .preferPQC)
+                                let km = DeviceIdentityKeyManager.shared
+                                let kemKeys: [KEMPublicKeyInfo]
+                                do {
+                                    kemKeys = try await km.pairingIdentityKEMPublicKeys(using: provider)
+                                } catch {
+                                    logger.warning("⚠️ 本机 KEM 公钥准备失败（bootstrap reply）：\(error.localizedDescription, privacy: .public)")
+                                    kemKeys = []
+                                }
+
+                                let localId = await SelfIdentityProvider.shared.snapshot().deviceId
+                                let reply = AppMessage.pairingIdentityExchange(.init(
+                                    deviceId: localId,
+                                    kemPublicKeys: kemKeys,
+                                    deviceName: Host.current().localizedName,
+                                    modelName: "Mac",
+                                    platform: "macOS",
+                                    osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
+                                    chip: nil
+                                ))
+                                let outPlain = try JSONEncoder().encode(reply)
+                                let outCipher = try encryptAppPayload(outPlain, with: keys)
+                                let outPadded = TrafficPadding.wrapIfEnabled(outCipher, label: "tx")
+                                try await sendFramed(outPadded)
+                                logger.info("🔑 已回传本机 KEM 公钥：count=\(kemKeys.count, privacy: .public) decision=\(decision.rawValue, privacy: .public)")
+
+                            case .ping(let payload):
+                                let reply = AppMessage.pong(.init(id: payload.id))
+                                let outPlain = try JSONEncoder().encode(reply)
+                                let outCipher = try encryptAppPayload(outPlain, with: keys)
+                                let outPadded = TrafficPadding.wrapIfEnabled(outCipher, label: "tx")
+                                try await sendFramed(outPadded)
+
+                            case .pong, .heartbeat, .clipboard:
+                                break
+                            }
+                        }
+                    } catch {
+                        logger.debug("ℹ️ 业务消息解密/解析失败（忽略）：\(error.localizedDescription, privacy: .public)")
+                    }
+                    continue
+                }
+
+                if let packet = try? JSONDecoder().decode(SecurePacket.self, from: frame) {
                     do {
                         let ok = try await EnhancedPostQuantumCrypto().verify(packet.data, signature: packet.signature, for: packetSenderId(packet))
                         guard ok else {
@@ -1871,7 +2104,7 @@ public class P2PDiscoveryService: BaseManager {
                 // 延迟初始化：必须先看到 MessageA 才知道对端 offeredSuites 分组，
                 // 从而选择本机可用的 (sigAAlgorithm / provider / offeredSuites) 组合。
                 if driver == nil {
-                    if let messageA = try? HandshakeMessageA.decode(from: unwrapped) {
+                    if let messageA = try? HandshakeMessageA.decode(from: frame) {
                         let soaBinding = InboundHandshakeAdapter.bindSOAState(
                             from: messageA,
                             localPeerId: localSOAPeerId
@@ -1982,13 +2215,13 @@ public class P2PDiscoveryService: BaseManager {
                             return
                         }
                     } else {
-                        logger.debug("ℹ️ 入站首帧不是 MessageA（忽略，等待下一帧） size=\(unwrapped.count, privacy: .public)")
+                        logger.debug("ℹ️ 入站首帧不是 MessageA（忽略，等待下一帧） size=\(frame.count, privacy: .public)")
                         continue
                     }
                 }
 
                 guard let activeDriver = driver else { continue }
-                await activeDriver.handleMessage(unwrapped, from: peer)
+                await activeDriver.handleMessage(frame, from: peer)
                 let st = await activeDriver.getCurrentState()
                 logger.debug("🤝 HandshakeDriver state: \(String(describing: st), privacy: .public)")
 
@@ -2000,13 +2233,43 @@ public class P2PDiscoveryService: BaseManager {
                     continue
                 }
 
-                if !didMarkEstablished, case .established = st {
-                    didMarkEstablished = true
-                    Task { @MainActor [weak self] in
-                        guard let self else { return }
-                        self.activeInboundSessions += 1
-                        self.connectionStatus = .connected
+                switch st {
+                case .waitingFinished(_, let keys, _):
+                    if let declaredDeviceIdForVerification {
+                        await MainActor.run {
+                            PairingTrustApprovalService.shared.updateVerificationCode(
+                                declaredDeviceId: declaredDeviceIdForVerification,
+                                sessionKeys: keys
+                            )
+                        }
                     }
+                case .established(let keys):
+                    sessionKeys = keys
+                    if let declaredDeviceIdForVerification {
+                        await MainActor.run {
+                            PairingTrustApprovalService.shared.updateVerificationCode(
+                                declaredDeviceId: declaredDeviceIdForVerification,
+                                sessionKeys: keys
+                            )
+                        }
+                    }
+                    let published = await publishInboundPresence(keys: keys)
+                    guard published else { break }
+
+                    if !didMarkEstablished {
+                        didMarkEstablished = true
+                        Task { @MainActor [weak self] in
+                            guard let self else { return }
+                            self.activeInboundSessions += 1
+                            self.connectionStatus = .connected
+                        }
+                    } else {
+                        Task { @MainActor [weak self] in
+                            self?.connectionStatus = .connected
+                        }
+                    }
+                default:
+                    break
                 }
             }
         } catch {
@@ -2024,6 +2287,242 @@ public class P2PDiscoveryService: BaseManager {
             .replacingOccurrences(of: "(", with: "")
             .replacingOccurrences(of: ")", with: "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    nonisolated private static func stableEndpointLabel(for endpoint: NWEndpoint) -> String {
+        switch endpoint {
+        case .service(let name, _, let domain, _):
+            let resolvedDomain = domain.isEmpty ? "local." : domain.lowercased()
+            return "bonjour:\(name)@\(resolvedDomain)"
+        case .hostPort(let host, _):
+            return "peer:\(normalizePeerHostToken(String(describing: host)))"
+        default:
+            return "peer:\(normalizePeerHostToken(endpoint.debugDescription))"
+        }
+    }
+
+    nonisolated static func normalizeInboundControlFrame(_ payload: Data) -> Data {
+        let trafficUnwrapped = TrafficPadding.unwrapIfNeeded(payload, label: "rx")
+        return HandshakePadding.unwrapIfNeeded(trafficUnwrapped, label: "rx")
+    }
+
+    nonisolated static func isLikelyHandshakeControlFrame(_ data: Data) -> Bool {
+        if (try? HandshakeFinished.decode(from: data)) != nil { return true }
+        if (try? HandshakeMessageA.decode(from: data)) != nil { return true }
+        if (try? HandshakeMessageB.decode(from: data)) != nil { return true }
+        return false
+    }
+
+    nonisolated static func shouldRestartInboundHandshakeForRekey(
+        state: HandshakeState,
+        frame: Data
+    ) -> Bool {
+        switch state {
+        case .waitingFinished, .established:
+            return (try? HandshakeMessageA.decode(from: frame)) != nil
+        default:
+            return false
+        }
+    }
+
+    nonisolated private static func normalizePeerHostToken(_ raw: String) -> String {
+        var token = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if token.hasPrefix("[") && token.hasSuffix("]") {
+            token = String(token.dropFirst().dropLast())
+        }
+        if let pct = token.firstIndex(of: "%") {
+            token = String(token[..<pct])
+        }
+        if token.contains(":"),
+           let dot = token.lastIndex(of: "."),
+           token[token.index(after: dot)...].allSatisfy({ $0.isNumber }) {
+            token = String(token[..<dot])
+        } else {
+            let parts = token.split(separator: ".")
+            if parts.count == 5,
+               parts.dropLast().allSatisfy({ Int($0) != nil }),
+               let port = Int(parts.last ?? ""), (0...65535).contains(port) {
+                token = parts.dropLast().map(String.init).joined(separator: ".")
+            }
+        }
+        return token.lowercased()
+    }
+
+    struct InboundPresenceResolution: Sendable, Equatable {
+        let name: String
+        let displayAddress: String?
+        let transferPort: Int
+    }
+
+    nonisolated static func resolveInboundPresenceRoute(
+        peerId: String,
+        endpointLabel: String,
+        discoveredDevices: [DiscoveredDevice],
+        unifiedDevices: [OnlineDevice]
+    ) -> InboundPresenceResolution {
+        func displayName(from identifier: String) -> String {
+            if identifier.hasPrefix("bonjour:") {
+                let rest = identifier.dropFirst("bonjour:".count)
+                return rest.split(separator: "@", maxSplits: 1).first.map(String.init) ?? identifier
+            }
+            if identifier.hasPrefix("id:") {
+                return String(identifier.dropFirst("id:".count))
+            }
+            if identifier.hasPrefix("peer:") {
+                return String(identifier.dropFirst("peer:".count))
+            }
+            if identifier.hasPrefix("host:") {
+                return String(identifier.dropFirst("host:".count))
+            }
+            return identifier
+        }
+
+        func parseBonjourName(from identifier: String) -> String? {
+            guard identifier.hasPrefix("bonjour:") else { return nil }
+            let rest = identifier.dropFirst("bonjour:".count)
+            return rest.split(separator: "@", maxSplits: 1).first.map(String.init)
+        }
+
+        func extractIP(from identifier: String) -> (ipv4: String?, ipv6: String?) {
+            let payload: String
+            if identifier.hasPrefix("peer:") {
+                payload = String(identifier.dropFirst("peer:".count))
+            } else if identifier.hasPrefix("host:") {
+                payload = String(identifier.dropFirst("host:".count))
+            } else {
+                return (nil, nil)
+            }
+
+            let normalized = normalizePeerHostToken(payload)
+            if normalized.contains(":") {
+                return (nil, normalized)
+            }
+            if normalized.contains(".") {
+                return (normalized, nil)
+            }
+            return (nil, nil)
+        }
+
+        func normalizedIdentifier(_ raw: String?) -> String? {
+            raw?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        }
+
+        func transferPort(from portMap: [String: Int]) -> Int {
+            let candidate = portMap["_skybridge-transfer._tcp"] ?? 8080
+            return (1...65535).contains(candidate) ? candidate : 8080
+        }
+
+        let normalizedPeerId = normalizedIdentifier(peerId)
+        let normalizedEndpointLabel = normalizedIdentifier(endpointLabel)
+        let declaredDeviceId = normalizedPeerId?.hasPrefix("id:") == true
+            ? String(normalizedPeerId!.dropFirst(3))
+            : nil
+        let endpointExtractedIP = extractIP(from: endpointLabel)
+        let peerExtractedIP = extractIP(from: peerId)
+        let bonjourName = parseBonjourName(from: endpointLabel) ?? parseBonjourName(from: peerId)
+        let fallbackAddress = endpointExtractedIP.ipv4
+            ?? endpointExtractedIP.ipv6
+            ?? peerExtractedIP.ipv4
+            ?? peerExtractedIP.ipv6
+        let fallbackName = bonjourName ?? displayName(from: peerId)
+
+        func discoveredScore(_ device: DiscoveredDevice) -> Int {
+            var score = 0
+            if let declaredDeviceId,
+               device.deviceId?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == declaredDeviceId {
+                score += 500
+            }
+            if let normalizedPeerId,
+               device.uniqueIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == normalizedPeerId {
+                score += 420
+            }
+            if let normalizedEndpointLabel,
+               device.uniqueIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == normalizedEndpointLabel {
+                score += 380
+            }
+            if let v4 = endpointExtractedIP.ipv4,
+               device.ipv4?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == v4 {
+                score += 320
+            }
+            if let v6 = endpointExtractedIP.ipv6,
+               device.ipv6?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == v6 {
+                score += 320
+            }
+            if let v4 = peerExtractedIP.ipv4,
+               device.ipv4?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == v4 {
+                score += 280
+            }
+            if let v6 = peerExtractedIP.ipv6,
+               device.ipv6?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == v6 {
+                score += 280
+            }
+            if let bonjourName,
+               device.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().contains(bonjourName.lowercased()) {
+                score += 180
+            }
+            if device.portMap["_skybridge-transfer._tcp"] != nil {
+                score += 40
+            }
+            return score
+        }
+
+        if let bestDiscovered = discoveredDevices.max(by: { discoveredScore($0) < discoveredScore($1) }),
+           discoveredScore(bestDiscovered) > 0 {
+            let address = bestDiscovered.ipv4 ?? bestDiscovered.ipv6 ?? fallbackAddress
+            return InboundPresenceResolution(
+                name: bestDiscovered.name,
+                displayAddress: address,
+                transferPort: transferPort(from: bestDiscovered.portMap)
+            )
+        }
+
+        func unifiedScore(_ device: OnlineDevice) -> Int {
+            var score = 0
+            if let declaredDeviceId,
+               device.uniqueIdentifier.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "id:\(declaredDeviceId)" {
+                score += 500
+            }
+            if let normalizedPeerId,
+               device.uniqueIdentifier.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == normalizedPeerId {
+                score += 420
+            }
+            if let normalizedEndpointLabel,
+               device.uniqueIdentifier.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == normalizedEndpointLabel {
+                score += 380
+            }
+            if let v4 = endpointExtractedIP.ipv4,
+               device.ipv4?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == v4 {
+                score += 320
+            }
+            if let v6 = endpointExtractedIP.ipv6,
+               device.ipv6?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == v6 {
+                score += 320
+            }
+            if let bonjourName,
+               device.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == bonjourName.lowercased() {
+                score += 180
+            }
+            if device.portMap["_skybridge-transfer._tcp"] != nil {
+                score += 40
+            }
+            return score
+        }
+
+        if let bestUnified = unifiedDevices.max(by: { unifiedScore($0) < unifiedScore($1) }),
+           unifiedScore(bestUnified) > 0 {
+            let address = bestUnified.ipv4 ?? bestUnified.ipv6 ?? fallbackAddress
+            return InboundPresenceResolution(
+                name: bestUnified.name,
+                displayAddress: address,
+                transferPort: transferPort(from: bestUnified.portMap)
+            )
+        }
+
+        return InboundPresenceResolution(
+            name: fallbackName.isEmpty ? "P2P Peer" : fallbackName,
+            displayAddress: fallbackAddress,
+            transferPort: 8080
+        )
     }
 
     private func localInterfaceCacheSnapshot(forceRefresh: Bool = false) -> LocalInterfaceCacheEntry {

@@ -3,6 +3,23 @@ import OSLog
 
 @available(iOS 17.0, *)
 public actor WebSocketSignalingClient {
+    public enum InboundMessage: Sendable, Equatable {
+        case envelope(WebRTCSignalingEnvelope)
+        case serverFrame(SignalingServerFrame)
+        case unknown
+    }
+
+    public struct SignalingServerFrame: Decodable, Sendable, Equatable {
+        public let type: String
+        public let error: String?
+        public let sessionId: String?
+        public let what: String?
+
+        public var isError: Bool {
+            type == "error" && !(error?.isEmpty ?? true)
+        }
+    }
+
     public enum SignalingError: LocalizedError {
         case notConnected
 
@@ -21,6 +38,7 @@ public actor WebSocketSignalingClient {
     private var receiveLoopTask: Task<Void, Never>?
     
     public var onEnvelope: (@Sendable (WebRTCSignalingEnvelope) -> Void)?
+    public var onServerFrame: (@Sendable (SignalingServerFrame) -> Void)?
     
     public init(url: URL) {
         self.url = url
@@ -30,13 +48,17 @@ public actor WebSocketSignalingClient {
     public func setOnEnvelope(_ handler: (@Sendable (WebRTCSignalingEnvelope) -> Void)?) {
         self.onEnvelope = handler
     }
+
+    public func setOnServerFrame(_ handler: (@Sendable (SignalingServerFrame) -> Void)?) {
+        self.onServerFrame = handler
+    }
     
     public func connect() {
         guard task == nil else { return }
         let t = session.webSocketTask(with: url)
         self.task = t
         t.resume()
-        logger.info("connecting signaling websocket… \(self.url.absoluteString, privacy: .public)")
+        logger.info("connecting signaling websocket… \(Self.redactedURLString(self.url), privacy: .public)")
         startReceiveLoop()
     }
     
@@ -90,12 +112,40 @@ public actor WebSocketSignalingClient {
     }
     
     private func handleText(_ text: String) {
-        guard let data = text.data(using: .utf8) else { return }
-        do {
-            let env = try JSONDecoder().decode(WebRTCSignalingEnvelope.self, from: data)
+        switch Self.parseInboundText(text) {
+        case .envelope(let env):
             onEnvelope?(env)
-        } catch {
+        case .serverFrame(let frame):
+            onServerFrame?(frame)
+            if frame.isError {
+                logger.error("❌ signaling server error: \(frame.error ?? "unknown", privacy: .public)")
+            } else {
+                logger.debug("ℹ️ signaling server frame: type=\(frame.type, privacy: .public)")
+            }
+        case .unknown:
             logger.debug("ignoring non-envelope message: \(text.prefix(200), privacy: .public)")
         }
+    }
+
+    public static func parseInboundText(_ text: String) -> InboundMessage {
+        guard let data = text.data(using: .utf8) else { return .unknown }
+        if let env = try? JSONDecoder().decode(WebRTCSignalingEnvelope.self, from: data) {
+            return .envelope(env)
+        }
+        if let frame = try? JSONDecoder().decode(SignalingServerFrame.self, from: data) {
+            return .serverFrame(frame)
+        }
+        return .unknown
+    }
+
+    public static func redactedURLString(_ url: URL) -> String {
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return url.host ?? "<redacted>"
+        }
+        components.queryItems = components.queryItems?.map { item in
+            guard item.name == "st" else { return item }
+            return URLQueryItem(name: item.name, value: "<redacted>")
+        }
+        return components.string ?? components.host ?? "<redacted>"
     }
 }

@@ -24,8 +24,8 @@ private final class LocalLanInteropHostCoordinator {
 
         try await fileTransferManager.start()
         try await discoveryManager.start()
-        try fileTransferListener.start()
-        try remoteControlServer.start()
+        try await fileTransferListener.start()
+        try await remoteControlServer.start()
 
         let settingsPath = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/com.SkyBridge.Compass/settings.json")

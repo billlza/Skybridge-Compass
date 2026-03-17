@@ -77,6 +77,10 @@ struct SkyBridgeCompassApp: App {
             }
             .task {
                 if renderConfig == nil {
+                    await MainActor.run {
+                        appModel.bootstrapConnectionPresentationBindings()
+                    }
+
                     if localWebRTCSmokeHarness.isEnabledForCurrentEnvironment {
                         localWebRTCSmokeHarness.startIfNeeded()
                         return

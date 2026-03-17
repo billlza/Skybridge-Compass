@@ -1054,13 +1054,7 @@ private struct QRCodeHubSheet: View {
                                     pendingPairing = data
                                 },
                                 onScanString: { string in
-                                    // 兼容 macOS 跨网二维码：skybridge://connect/<payload> 或 skybridge://connect?data=<payload>
-                                    let isCrossNetworkConnectLink: Bool = {
-                                        if string.hasPrefix("skybridge://connect/") { return true }
-                                        guard let url = URL(string: string) else { return false }
-                                        return url.scheme == "skybridge" && url.host == "connect"
-                                    }()
-                                    if isCrossNetworkConnectLink {
+                                    if CrossNetworkWebRTCManager.isConnectLinkString(string) {
                                         SkyBridgeLogger.shared.info("🌐 扫描到跨网连接二维码")
                                         onScanConnectLink(string)
                                         dismiss()
@@ -1102,7 +1096,7 @@ private struct QRCodeHubSheet: View {
                         }
 
                     case .myQR:
-                        MyPairingQRCodeView()
+                        MyConnectionQRCodeView()
                         
                     case .code:
                         VStack(spacing: 18) {
@@ -1117,14 +1111,14 @@ private struct QRCodeHubSheet: View {
                                     .font(.title2.weight(.semibold))
                                     .foregroundStyle(.primary)
                                 
-                                Text("请输入 macOS 显示的 6 位智能连接码")
+                                Text("请输入另一台设备显示的连接码")
                                     .font(.subheadline)
                                     .foregroundStyle(.secondary)
                                     .multilineTextAlignment(.center)
                             }
                             .padding(.horizontal, 20)
                             
-                            TextField("例如：AB12CD", text: $codeInput)
+                            TextField("例如：AB12CD34", text: $codeInput)
                                 .textInputAutocapitalization(.characters)
                                 .autocorrectionDisabled()
                                 .font(.system(size: 30, weight: .semibold, design: .rounded))
@@ -1139,12 +1133,7 @@ private struct QRCodeHubSheet: View {
                                 )
                                 .padding(.horizontal, 24)
                                 .onChange(of: codeInput) { _, newValue in
-                                    codeInput = String(
-                                        newValue
-                                            .uppercased()
-                                            .filter { "ABCDEFGHJKLMNPQRSTUVWXYZ23456789".contains($0) }
-                                            .prefix(6)
-                                    )
+                                    codeInput = CrossNetworkWebRTCManager.sanitizeConnectionCodeInput(newValue)
                                 }
                             
                             Button {
@@ -1162,7 +1151,7 @@ private struct QRCodeHubSheet: View {
                             }
                             .buttonStyle(.borderedProminent)
                             .tint(.cyan)
-                            .disabled(codeInput.count != 6)
+                            .disabled(!CrossNetworkWebRTCManager.canSubmitConnectionCode(codeInput))
                             .padding(.horizontal, 24)
 
                             Divider()
@@ -1180,7 +1169,7 @@ private struct QRCodeHubSheet: View {
                                     .foregroundStyle(.cyan)
                                     .padding(.vertical, 2)
 
-                                Text("在 macOS 端输入此 6 位连接码即可连接到本机")
+                                Text("在另一台设备端输入此连接码即可连接到本机")
                                     .font(.footnote)
                                     .foregroundStyle(.secondary)
                                     .multilineTextAlignment(.center)
@@ -1309,9 +1298,11 @@ private struct QRCodePairingConfirmCard: View {
 }
 
 @available(iOS 17.0, *)
-private struct MyPairingQRCodeView: View {
+private struct MyConnectionQRCodeView: View {
+    @StateObject private var crossNetworkManager = CrossNetworkWebRTCManager.instance
     @State private var qrImage: UIImage?
     @State private var errorText: String?
+    @State private var isGenerating = false
 
     var body: some View {
         VStack(spacing: 16) {
@@ -1325,6 +1316,8 @@ private struct MyPairingQRCodeView: View {
                     .frame(width: 260, height: 260)
                     .background(Color.white)
                     .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            } else if isGenerating {
+                ProgressView()
             } else if let errorText {
                 Text(errorText)
                     .foregroundStyle(.secondary)
@@ -1334,10 +1327,19 @@ private struct MyPairingQRCodeView: View {
                 ProgressView()
             }
 
-            Text("让 macOS / 其他设备扫描此二维码以配对连接")
+            Text("让 macOS / 其他设备扫描此二维码以跨网连接")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
+
+            if let connectLink = crossNetworkManager.currentConnectLink,
+               !connectLink.isEmpty {
+                Text("当前路径二维码已就绪，语义与 macOS 保持一致")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal)
+            }
 
             Button("刷新") {
                 Task { await generate() }
@@ -1347,41 +1349,38 @@ private struct MyPairingQRCodeView: View {
             Spacer()
         }
         .padding()
-        .task { await generate() }
+        .task { await generateIfNeeded() }
+        .onChange(of: crossNetworkManager.currentConnectLink) { _, newValue in
+            renderQRCode(from: newValue)
+        }
+    }
+
+    private func generateIfNeeded() async {
+        await generate()
     }
 
     private func generate() async {
+        isGenerating = true
         errorText = nil
         qrImage = nil
+        defer { isGenerating = false }
 
-        // 本机局域网 IP（best-effort）
-        guard let ip = LocalIP.bestEffortIPv4() else {
-            errorText = RuntimeLocalization.string("未能获取本机局域网 IP（请连接 Wi‑Fi 或热点）")
+        guard let connectLink = await crossNetworkManager.generateConnectLink() else {
+            errorText = crossNetworkManager.lastError ?? RuntimeLocalization.string("生成二维码失败")
             return
         }
 
-        // 端口：与 P2PConnectionManager / DeviceDiscovery 广播一致
-        let port: UInt16 = 9527
+        renderQRCode(from: connectLink)
+    }
 
-        // 设备 ID：使用 identifierForVendor（足够用于本地配对；卸载重装会变化）
-        let deviceId = UIDevice.current.identifierForVendor?.uuidString ?? UUID().uuidString
-
-        // 公钥（可选：失败不阻塞二维码生成）
-        var publicKeyB64: String?
-        if let key = try? await PQCCryptoManager.instance.getKEMPublicKey() {
-            publicKeyB64 = key.base64EncodedString()
+    private func renderQRCode(from connectLink: String?) {
+        guard let connectLink, !connectLink.isEmpty else {
+            qrImage = nil
+            return
         }
 
-        let data = QRCodeGenerator.shared.createPairingData(
-            deviceId: deviceId,
-            deviceName: UIDevice.current.name,
-            ipAddress: ip,
-            port: port,
-            publicKey: publicKeyB64
-        )
-
         let image = QRCodeGenerator.shared.generateQRCode(
-            from: data,
+            from: connectLink,
             size: CGSize(width: 420, height: 420),
             foregroundColor: .black,
             backgroundColor: .white
@@ -1394,44 +1393,6 @@ private struct MyPairingQRCodeView: View {
         }
     }
 }
-
-private enum LocalIP {
-    static func bestEffortIPv4() -> String? {
-        var address: String?
-        var ifaddr: UnsafeMutablePointer<ifaddrs>?
-        guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return nil }
-        defer { freeifaddrs(ifaddr) }
-
-        for ptr in sequence(first: first, next: { $0.pointee.ifa_next }) {
-            let record = ptr.pointee
-            guard let namePtr = record.ifa_name,
-                  let addressPtr = record.ifa_addr else { continue }
-            let interface = String(decoding: Data(bytes: namePtr, count: Int(strlen(namePtr))), as: UTF8.self)
-            let addrFamily = addressPtr.pointee.sa_family
-            guard addrFamily == UInt8(AF_INET) else { continue }
-
-            // 优先 Wi‑Fi (en0)，其次蜂窝/热点 (pdp_ip0)
-            if interface == "en0" || interface.hasPrefix("pdp_ip") {
-                var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-		                getnameinfo(
-		                    addressPtr,
-		                    socklen_t(addressPtr.pointee.sa_len),
-		                    &hostname,
-		                    socklen_t(hostname.count),
-		                    nil,
-	                    0,
-	                    NI_NUMERICHOST
-	                )
-	                hostname.withUnsafeBufferPointer { buffer in
-	                    guard let base = buffer.baseAddress else { return }
-	                    address = String(cString: base)
-	                }
-	                break
-	            }
-	        }
-	        return address
-	    }
-	}
 
 // MARK: - Weather Effects (iOS)
 

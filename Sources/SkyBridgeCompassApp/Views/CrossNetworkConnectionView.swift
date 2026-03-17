@@ -478,13 +478,8 @@ struct CrossNetworkConnectionView: View {
                             .background(Color(NSColor.textBackgroundColor))
                             .cornerRadius(12)
                             .onChange(of: inputCode) { _, newValue in
- // 限制输入长度和字符
-                                inputCode = String(
-                                    newValue
-                                        .uppercased()
-                                        .filter { "ABCDEFGHJKLMNPQRSTUVWXYZ23456789".contains($0) }
-                                        .prefix(6)
-                                )
+ // 统一连接码过滤规则，避免 UI 与服务端长度语义漂移
+                                inputCode = CrossNetworkConnectionManager.sanitizeConnectionCodeInput(newValue)
                             }
 
                         Button(action: {
@@ -501,7 +496,7 @@ struct CrossNetworkConnectionView: View {
                             .padding(.vertical, 12)
                         }
                         .buttonStyle(.borderedProminent)
-                        .disabled(inputCode.count != 6)
+                        .disabled(!CrossNetworkConnectionManager.canSubmitConnectionCode(inputCode))
                         .frame(width: 280)
 
                     }

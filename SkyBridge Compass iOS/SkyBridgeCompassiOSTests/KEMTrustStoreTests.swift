@@ -30,4 +30,34 @@ final class KEMTrustStoreTests: XCTestCase {
         let cleared = await readerStore.kemPublicKeys(for: deviceId)
         XCTAssertTrue(cleared.isEmpty)
     }
+
+    func testLookupSupportsDiscoveryAndDeclaredIdentityAliases() async throws {
+        let suiteName = "KEMTrustStoreAliasTests.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Unable to create isolated UserDefaults suite")
+            return
+        }
+        defaults.removePersistentDomain(forName: suiteName)
+
+        let storageKey = "kem_trust_store.alias.tests.v1"
+        let rawDeviceId = UUID().uuidString.lowercased()
+        let discoveryDeviceId = "id:\(rawDeviceId)"
+        let endpointAlias = "host:192.168.10.22"
+        let keyInfo = KEMPublicKeyInfo(
+            suiteWireId: CryptoSuite.mlkem768.wireId,
+            publicKey: Data(repeating: 0x5A, count: 32)
+        )
+
+        let store = KEMTrustStore(storageKey: storageKey, userDefaults: defaults)
+        await store.upsert(deviceId: rawDeviceId, kemPublicKeys: [keyInfo])
+        await store.upsert(deviceId: endpointAlias, kemPublicKeys: [keyInfo])
+
+        let fromDiscoveryId = await store.kemPublicKeys(for: discoveryDeviceId)
+        let fromRawId = await store.kemPublicKeys(for: rawDeviceId)
+        let fromEndpointAlias = await store.kemPublicKeys(for: endpointAlias)
+
+        XCTAssertEqual(fromDiscoveryId[.mlkem768], keyInfo.publicKey)
+        XCTAssertEqual(fromRawId[.mlkem768], keyInfo.publicKey)
+        XCTAssertEqual(fromEndpointAlias[.mlkem768], keyInfo.publicKey)
+    }
 }

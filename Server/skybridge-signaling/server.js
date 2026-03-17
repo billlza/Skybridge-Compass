@@ -12,6 +12,7 @@ const { v4: uuidv4 } = require('uuid');
 
 const { createSignalingStateBackend, unique } = require('./lib/signaling_state_backend');
 const { RegistryStore } = require('./lib/registry_store');
+const { buildIdempotencyFingerprint, clientIPForRequest } = require('./lib/request_security');
 
 const PORT = Number(process.env.PORT || 8443);
 const HOST = process.env.HOST || '0.0.0.0';
@@ -276,23 +277,6 @@ function makeIPHash(ip) {
   return crypto.createHmac('sha256', CLIENT_IP_HASH_SECRET).update(String(ip || '')).digest('hex');
 }
 
-function normalizeClientIP(raw) {
-  const value = String(raw || '').split(',')[0].trim().replace(/^\[|\]$/g, '');
-  if (!value) return '';
-  if (value.startsWith('::ffff:')) {
-    return value.slice(7);
-  }
-  return value;
-}
-
-function clientIPForRequest(req) {
-  const cfConnectingIP = normalizeClientIP(req.get('CF-Connecting-IP'));
-  if (cfConnectingIP) return cfConnectingIP;
-  const forwardedFor = normalizeClientIP(req.get('X-Forwarded-For'));
-  if (forwardedFor) return forwardedFor;
-  return normalizeClientIP(req.ip || req.connection.remoteAddress || '');
-}
-
 function challengeSignaturePayload(challenge) {
   return Buffer.from([
     'SkyBridge-Admission-Challenge',
@@ -376,7 +360,7 @@ function asyncRoute(handler) {
 function rateLimit({ windowMs, max, keyFn }) {
   const hits = new Map();
   return (req, res, next) => {
-    const key = keyFn ? keyFn(req) : (clientIPForRequest(req) || 'unknown');
+    const key = keyFn ? keyFn(req) : (clientIPForRequest(req, { trustProxy: currentTrustProxy }) || 'unknown');
     const t = now();
     let entry = hits.get(key);
     if (!entry || t > entry.resetAt) {
@@ -393,7 +377,7 @@ function rateLimit({ windowMs, max, keyFn }) {
   };
 }
 
-const signalingState = createSignalingStateBackend({
+let signalingState = createSignalingStateBackend({
   backendName: SIGNALING_STATE_BACKEND,
   instanceId: INSTANCE_ID,
   codeTtlMs: CODE_TTL_MS,
@@ -408,7 +392,10 @@ const signalingState = createSignalingStateBackend({
   log: console
 });
 
-const registryStore = new RegistryStore();
+let registryStore = new RegistryStore();
+let currentTrustProxy = TRUST_PROXY;
+let currentRequireSharedStateForPublicCapabilities = REQUIRE_SHARED_STATE_FOR_PUBLIC_CAPABILITIES;
+let currentAllowBootstrapDeviceAuth = SIGNALING_ALLOW_BOOTSTRAP_DEVICE_AUTH;
 const rooms = new Map();
 const wsMeta = new WeakMap();
 const securityCounters = new Map();
@@ -484,7 +471,7 @@ async function refreshRuntimeProtection() {
 
 async function assertPublicCapabilityAvailable(action, tenantId) {
   const health = await signalingState.getHealth();
-  if (REQUIRE_SHARED_STATE_FOR_PUBLIC_CAPABILITIES) {
+  if (currentRequireSharedStateForPublicCapabilities) {
     if (SIGNALING_STATE_BACKEND !== 'redis' || !health.ready || !health.redisConnected) {
       incrementSecurityCounter(`fail_closed_${action}`);
       throw makeError('shared_state_unavailable', 503);
@@ -603,7 +590,7 @@ async function loadAuthenticatedDeviceContext(req, { requireRegisteredDevice = t
       protocolSigningAlgorithm: binding.protocolSigningAlgorithm,
       protocolPublicKeyFingerprint: binding.protocolPublicKeyFingerprint
     });
-    if (!deviceRecord && SIGNALING_ALLOW_BOOTSTRAP_DEVICE_AUTH) {
+    if (!deviceRecord && currentAllowBootstrapDeviceAuth) {
       deviceRecord = syntheticDeviceRecord({
         tenantId,
         user,
@@ -629,7 +616,7 @@ async function loadAuthenticatedDeviceContext(req, { requireRegisteredDevice = t
     binding,
     clientVersion,
     protocolVersion,
-    ipHash: makeIPHash(clientIPForRequest(req) || 'unknown')
+    ipHash: makeIPHash(clientIPForRequest(req, { trustProxy: currentTrustProxy }) || 'unknown')
   };
 }
 
@@ -645,21 +632,28 @@ async function enforceChallengeQuotas(ctx) {
   if (ipCount.count > MAX_CHALLENGES_PER_IP_PER_10M) throw makeError('challenge_ip_rate_limited', 429);
 }
 
-async function createIdempotencyGuard(action, key) {
+async function createIdempotencyGuard(action, key, fingerprint) {
   if (!key) return null;
   const scopedKey = `${action}:${key}`;
   const existing = await signalingState.getEphemeral('idempotency', scopedKey);
+  if (existing?.fingerprint && existing.fingerprint !== fingerprint) {
+    throw makeError('idempotency_key_reused', 409);
+  }
   if (existing?.state === 'completed') {
     return { existing };
   }
   const created = await signalingState.createEphemeral('idempotency', scopedKey, {
     state: 'in_progress',
     action,
+    fingerprint,
     issuedAt: now(),
     expiresAt: now() + 10 * 60_000
   });
   if (!created) {
     const latest = await signalingState.getEphemeral('idempotency', scopedKey);
+    if (latest?.fingerprint && latest.fingerprint !== fingerprint) {
+      throw makeError('idempotency_key_reused', 409);
+    }
     if (latest?.state === 'completed') {
       return { existing: latest };
     }
@@ -700,6 +694,7 @@ function issueEphemeralTokenRecord({ kind, ttlMs, payload }) {
 }
 
 async function issueSessionArtifacts({ sessionId, role, context, expiresAt }) {
+  const deviceSynthetic = Boolean(context.deviceSynthetic || context.deviceRecord?.synthetic);
   const sessionToken = issueEphemeralTokenRecord({
     kind: 'session_token',
     ttlMs: Math.max(1, expiresAt - now()),
@@ -711,6 +706,7 @@ async function issueSessionArtifacts({ sessionId, role, context, expiresAt }) {
       deviceId: context.binding.deviceId,
       protocolSigningAlgorithm: context.binding.protocolSigningAlgorithm,
       protocolPublicKeyFingerprint: context.binding.protocolPublicKeyFingerprint,
+      deviceSynthetic,
       clientVersion: context.clientVersion,
       protocolVersion: context.protocolVersion,
       reclaimWindowMs: SESSION_RECLAIM_WINDOW_MS
@@ -727,6 +723,7 @@ async function issueSessionArtifacts({ sessionId, role, context, expiresAt }) {
       deviceId: context.binding.deviceId,
       protocolSigningAlgorithm: context.binding.protocolSigningAlgorithm,
       protocolPublicKeyFingerprint: context.binding.protocolPublicKeyFingerprint,
+      deviceSynthetic,
       clientVersion: context.clientVersion,
       protocolVersion: context.protocolVersion,
       jti: base64url(crypto.randomBytes(16))
@@ -1198,6 +1195,7 @@ app.post('/api/webrtc/admission', rlAdmission, asyncRoute(async (req, res) => {
       deviceId: context.binding.deviceId,
       protocolSigningAlgorithm: context.binding.protocolSigningAlgorithm,
       protocolPublicKeyFingerprint: context.binding.protocolPublicKeyFingerprint,
+      deviceSynthetic: Boolean(context.deviceRecord?.synthetic),
       clientVersion: context.clientVersion,
       protocolVersion: context.protocolVersion,
       challengeId
@@ -1229,6 +1227,7 @@ app.post('/api/webrtc/register-code', rlControl, asyncRoute(async (req, res) => 
       protocolSigningAlgorithm: admission.protocolSigningAlgorithm,
       protocolPublicKeyFingerprint: admission.protocolPublicKeyFingerprint
     },
+    deviceSynthetic: Boolean(admission.deviceSynthetic),
     clientVersion: admission.clientVersion,
     protocolVersion: admission.protocolVersion
   };
@@ -1285,6 +1284,7 @@ app.get('/api/webrtc/lookup/:code', rlLookup, asyncRoute(async (req, res) => {
     tenantId: admission.tenantId,
     user: { id: admission.userId },
     binding,
+    deviceSynthetic: Boolean(admission.deviceSynthetic),
     clientVersion: admission.clientVersion,
     protocolVersion: admission.protocolVersion
   };
@@ -1318,7 +1318,14 @@ app.get('/api/webrtc/lookup/:code', rlLookup, asyncRoute(async (req, res) => {
 
 app.post('/api/webrtc/register-session', rlControl, asyncRoute(async (req, res) => {
   const idempotencyKey = String(req.get('Idempotency-Key') || req.get('X-SkyBridge-Idempotency-Key') || '').trim();
-  const idempotency = await createIdempotencyGuard('register-session', idempotencyKey);
+  const registerSessionFingerprint = buildIdempotencyFingerprint({
+    action: 'register-session',
+    body: req.body || {},
+    admissionToken: getOpaqueHeader(req, 'X-SkyBridge-Admission'),
+    backendName: SIGNALING_STATE_BACKEND,
+    fallbackTtlMs: CODE_TTL_MS
+  });
+  const idempotency = await createIdempotencyGuard('register-session', idempotencyKey, registerSessionFingerprint);
   if (idempotency?.existing?.responseBody) {
     return res.json(idempotency.existing.responseBody);
   }
@@ -1339,6 +1346,7 @@ app.post('/api/webrtc/register-session', rlControl, asyncRoute(async (req, res) 
         protocolSigningAlgorithm: admission.protocolSigningAlgorithm,
         protocolPublicKeyFingerprint: admission.protocolPublicKeyFingerprint
       },
+      deviceSynthetic: Boolean(admission.deviceSynthetic),
       clientVersion: admission.clientVersion,
       protocolVersion: admission.protocolVersion
     };
@@ -1373,7 +1381,14 @@ app.post('/api/webrtc/register-session', rlControl, asyncRoute(async (req, res) 
 
 app.post('/api/webrtc/redeem-session', rlControl, asyncRoute(async (req, res) => {
   const idempotencyKey = String(req.get('Idempotency-Key') || req.get('X-SkyBridge-Idempotency-Key') || '').trim();
-  const idempotency = await createIdempotencyGuard('redeem-session', idempotencyKey);
+  const redeemSessionFingerprint = buildIdempotencyFingerprint({
+    action: 'redeem-session',
+    body: req.body || {},
+    admissionToken: getOpaqueHeader(req, 'X-SkyBridge-Admission'),
+    backendName: SIGNALING_STATE_BACKEND,
+    fallbackTtlMs: CODE_TTL_MS
+  });
+  const idempotency = await createIdempotencyGuard('redeem-session', idempotencyKey, redeemSessionFingerprint);
   if (idempotency?.existing?.responseBody) {
     return res.json(idempotency.existing.responseBody);
   }
@@ -1405,6 +1420,7 @@ app.post('/api/webrtc/redeem-session', rlControl, asyncRoute(async (req, res) =>
       tenantId: admission.tenantId,
       user: { id: admission.userId },
       binding,
+      deviceSynthetic: Boolean(admission.deviceSynthetic),
       clientVersion: admission.clientVersion,
       protocolVersion: admission.protocolVersion
     };
@@ -1448,13 +1464,24 @@ app.get('/api/turn/credentials', rlTurn, asyncRoute(async (req, res) => {
   if (!TURN_SHARED_SECRET || !TURN_URIS.length) {
     throw makeError('turn_credentials_not_configured', 503);
   }
-  const deviceRecord = await registryStore.getRegisteredDevice({
+  let deviceRecord = await registryStore.getRegisteredDevice({
     tenantId: turnToken.tenantId,
     userId: turnToken.userId,
     deviceId: turnToken.deviceId,
     protocolSigningAlgorithm: turnToken.protocolSigningAlgorithm,
     protocolPublicKeyFingerprint: turnToken.protocolPublicKeyFingerprint
   });
+  if (!deviceRecord && turnToken.deviceSynthetic) {
+    deviceRecord = syntheticDeviceRecord({
+      tenantId: turnToken.tenantId,
+      user: { id: turnToken.userId },
+      binding: {
+        deviceId: turnToken.deviceId,
+        protocolSigningAlgorithm: turnToken.protocolSigningAlgorithm,
+        protocolPublicKeyFingerprint: turnToken.protocolPublicKeyFingerprint
+      }
+    });
+  }
   if (!deviceRecord || deviceRecord.status !== 'active') {
     throw makeError('device_not_active', 403);
   }
@@ -1807,7 +1834,7 @@ const protectionTimer = setInterval(() => {
 }, 5_000);
 
 let shuttingDown = false;
-async function shutdown() {
+async function shutdown({ exitProcess = false } = {}) {
   if (shuttingDown) return;
   shuttingDown = true;
   clearInterval(heartbeatTimer);
@@ -1816,28 +1843,88 @@ async function shutdown() {
   await signalingState.close().catch((error) => {
     console.error('[shutdown] backend close failed:', error.message);
   });
-  server.close(() => process.exit(0));
+  await new Promise((resolve) => {
+    server.close(() => {
+      if (exitProcess) process.exit(0);
+      resolve();
+    });
+  });
 }
 
-process.on('SIGINT', () => { void shutdown(); });
-process.on('SIGTERM', () => { void shutdown(); });
-
-(async () => {
+async function startRuntime({ port = PORT, host = HOST } = {}) {
   await signalingState.init(handleBackendInstanceMessage);
   await refreshRuntimeProtection();
-  server.listen(PORT, HOST, () => {
-    console.log('========================================');
-    console.log('SkyBridge Signaling Server');
-    console.log(`Mode: ${USE_NODE_HTTPS ? 'HTTPS' : 'HTTP'} listening on ${HOST}:${PORT}`);
-    console.log(`Instance: ${INSTANCE_ID} stateBackend=${SIGNALING_STATE_BACKEND}`);
-    if (SIGNALING_STATE_BACKEND === 'redis') {
-      console.log(`Redis: ${SIGNALING_REDIS_URL} keyPrefix=${SIGNALING_REDIS_KEY_PREFIX}`);
-    }
-    console.log(`WS: ${USE_NODE_HTTPS ? 'wss' : 'ws'}://<host>:${PORT}/ws?shard=<session_id>&st=<session_token>`);
-    console.log(`Security: maxPayload=${WS_MAX_MSG_BYTES} maxMsgs10s=${WS_MAX_MSGS_PER_10S} maxBytes10s=${WS_MAX_BYTES_PER_10S} perMessageDeflate=false`);
-    console.log('========================================');
+  return await new Promise((resolve, reject) => {
+    const onError = (error) => {
+      server.off('error', onError);
+      reject(error);
+    };
+    server.once('error', onError);
+    server.listen(port, host, () => {
+      server.off('error', onError);
+      console.log('========================================');
+      console.log('SkyBridge Signaling Server');
+      console.log(`Mode: ${USE_NODE_HTTPS ? 'HTTPS' : 'HTTP'} listening on ${host}:${port}`);
+      console.log(`Instance: ${INSTANCE_ID} stateBackend=${SIGNALING_STATE_BACKEND}`);
+      if (SIGNALING_STATE_BACKEND === 'redis') {
+        console.log(`Redis: ${SIGNALING_REDIS_URL} keyPrefix=${SIGNALING_REDIS_KEY_PREFIX}`);
+      }
+      console.log(`WS: ${USE_NODE_HTTPS ? 'wss' : 'ws'}://<host>:${port}/ws?shard=<session_id>&st=<session_token>`);
+      console.log(`Security: maxPayload=${WS_MAX_MSG_BYTES} maxMsgs10s=${WS_MAX_MSGS_PER_10S} maxBytes10s=${WS_MAX_BYTES_PER_10S} perMessageDeflate=false`);
+      console.log('========================================');
+      resolve(server.address());
+    });
   });
-})().catch((error) => {
-  console.error('[startup] failed:', error);
-  process.exit(1);
-});
+}
+
+function createRuntime(options = {}) {
+  const {
+    signalingStateOverride,
+    registryStoreOverride,
+    trustProxy = TRUST_PROXY,
+    requireSharedStateForPublicCapabilities = REQUIRE_SHARED_STATE_FOR_PUBLIC_CAPABILITIES,
+    allowBootstrapDeviceAuth = SIGNALING_ALLOW_BOOTSTRAP_DEVICE_AUTH
+  } = options;
+  if (signalingStateOverride) {
+    signalingState = signalingStateOverride;
+  }
+  if (registryStoreOverride) {
+    registryStore = registryStoreOverride;
+  }
+  currentTrustProxy = trustProxy;
+  currentRequireSharedStateForPublicCapabilities = requireSharedStateForPublicCapabilities;
+  currentAllowBootstrapDeviceAuth = allowBootstrapDeviceAuth;
+  app.set('trust proxy', trustProxy ? 1 : false);
+  rooms.clear();
+  securityCounters.clear();
+  runtimeProtection.redisAllowlistOnly = false;
+  runtimeProtection.lastControlFlags = {
+    allowlistOnly: false,
+    disableChallengeAdmission: false,
+    disableTurnIssuance: false,
+    disableCodeFlows: false,
+    allowlistTenants: []
+  };
+  runtimeProtection.redisLatencySamples = [];
+
+  return {
+    app,
+    server,
+    start: () => startRuntime(options),
+    shutdown: () => shutdown({ exitProcess: false })
+  };
+}
+
+process.on('SIGINT', () => { void shutdown({ exitProcess: true }); });
+process.on('SIGTERM', () => { void shutdown({ exitProcess: true }); });
+
+if (require.main === module) {
+  startRuntime().catch((error) => {
+    console.error('[startup] failed:', error);
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  createRuntime
+};

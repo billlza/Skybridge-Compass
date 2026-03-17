@@ -54,6 +54,65 @@ final class RegressionHardeningTests: XCTestCase {
         XCTAssertEqual(queue.failedMessages.first?.id, liveFailed.id)
     }
 
+    @MainActor
+    func testTrustedDeviceStoreTreatsDiscoveryIdAsTrustedAlias() {
+        let store = TrustedDeviceStore.shared
+        let original = store.trustedDevices
+        store.clearAll()
+        defer {
+            store.clearAll()
+            store.mergeFromCloud(original)
+        }
+
+        let rawDeviceId = UUID().uuidString.lowercased()
+        let trustedDevice = DiscoveredDevice(
+            id: "id:\(rawDeviceId)",
+            name: "Trusted Mac",
+            modelName: "Mac",
+            platform: .macOS,
+            osVersion: "15.0",
+            ipAddress: "192.168.1.20"
+        )
+
+        store.trust(trustedDevice)
+
+        XCTAssertTrue(store.isTrusted(deviceId: rawDeviceId))
+        XCTAssertTrue(store.isTrusted(deviceId: "id:\(rawDeviceId)"))
+    }
+
+    @MainActor
+    func testP2PConnectionManagerPromotesPresentationIdentityWithoutBreakingRuntimeLookup() {
+        let manager = P2PConnectionManager.instance
+        let runtimePeerId = "host:192.168.1.42"
+        let declaredDeviceId = UUID().uuidString.lowercased()
+        let stablePeerId = "id:\(declaredDeviceId)"
+
+        manager.installTestPeerRuntimeState(
+            runtimePeerId: runtimePeerId,
+            status: .connected,
+            name: "Host Alias Peer",
+            ipAddress: "192.168.1.42"
+        )
+
+        let resolvedRuntimePeerId = manager.testPromotePeerPresentationIdentity(
+            runtimePeerId: runtimePeerId,
+            declaredDeviceId: declaredDeviceId,
+            deviceName: "Stable Mac",
+            modelName: "MacBook Pro",
+            platform: "macOS",
+            osVersion: "15.0"
+        )
+
+        XCTAssertEqual(resolvedRuntimePeerId, runtimePeerId)
+        XCTAssertEqual(manager.connectionStatusByDeviceId[stablePeerId], .connected)
+        XCTAssertTrue(manager.activeConnections.contains(where: { $0.device.id == stablePeerId }))
+        XCTAssertEqual(
+            manager.activeConnections.first(where: { $0.device.id == stablePeerId })?.device.name,
+            "Stable Mac"
+        )
+        XCTAssertNil(manager.connectionErrorByDeviceId[stablePeerId])
+    }
+
     func testProcessMessageBWithoutTranscriptHashAFailsWithExplicitReason() async {
         let context = makeInitiatorContext()
         let messageB = makeMinimalMessageB()
@@ -341,6 +400,47 @@ final class RegressionHardeningTests: XCTestCase {
                 at: until.addingTimeInterval(2)
             ),
             ["hevc", "h264", "jpeg"]
+        )
+    }
+
+    func testRemoteDesktopCodecGovernanceEscalatesRepeatedSyncFrameWaitsToH264Fallback() {
+        var governance = RemoteDesktopCodecGovernance()
+        let start = Date(timeIntervalSince1970: 1_700_000_200)
+
+        XCTAssertEqual(
+            governance.noteDecodeFailure(
+                format: "hevc",
+                reason: "waiting-for-sync-frame",
+                at: start
+            ),
+            .requestRefresh
+        )
+        XCTAssertEqual(
+            governance.noteDecodeFailure(
+                format: "hevc",
+                reason: "waiting-for-sync-frame",
+                at: start.addingTimeInterval(0.2)
+            ),
+            .requestRefresh
+        )
+
+        let event = governance.noteDecodeFailure(
+            format: "hevc",
+            reason: "waiting-for-sync-frame",
+            at: start.addingTimeInterval(0.4)
+        )
+
+        guard case .disableHEVC(let until) = event else {
+            return XCTFail("Expected repeated sync-frame waits to disable HEVC temporarily")
+        }
+
+        XCTAssertGreaterThan(until.timeIntervalSince(start), 10)
+        XCTAssertEqual(
+            governance.effectiveSupportedFormats(
+                from: ["hevc", "h264", "jpeg"],
+                at: start.addingTimeInterval(1)
+            ),
+            ["h264", "jpeg"]
         )
     }
 

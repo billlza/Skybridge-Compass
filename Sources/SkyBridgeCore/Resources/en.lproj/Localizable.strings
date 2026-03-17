@@ -29,7 +29,7 @@
 
 /* Smart Code */
 "connection.smartCode.title" = "Smart Connection Code";
-"connection.smartCode.fullDescription" = "Generate a 6-digit alphanumeric code for all scenarios. Supports P2P direct and smart relay.";
+"connection.smartCode.fullDescription" = "Generate a short-lived alphanumeric code for all scenarios. Supports P2P direct and smart relay.";
 "connection.smartCode.highlight" = "✨ Highlight: Short Code + Smart Routing + 10-min Validity";
 "connection.device.this" = "On This Device";
 "connection.smartCode.shareInstruction" = "Share this code to connect";
@@ -254,7 +254,7 @@
 
 /* Smart Code */
 "discovery.smartCode.title" = "Smart Connection Code";
-"discovery.smartCode.description" = "6-digit code, valid for 10 mins, for remote assistance";
+"discovery.smartCode.description" = "Short-lived code, valid for 10 mins, for remote assistance";
 "discovery.smartCode.onThisDevice" = "On This Device";
 "discovery.smartCode.shareInstruction" = "Share this code to connect";
 "discovery.smartCode.copy" = "Copy";
@@ -271,7 +271,7 @@
 "discovery.mode.subtitle.localScan" = "Same Network";
 "discovery.mode.subtitle.qrCode" = "Scan";
 "discovery.mode.subtitle.cloudLink" = "Zero Config";
-"discovery.mode.subtitle.connectionCode" = "6-Digit Code";
+"discovery.mode.subtitle.connectionCode" = "Short-Lived Code";
 
 /* Cloud Link Section */
 "discovery.icloud.status.syncing" = "Syncing...";
@@ -299,7 +299,7 @@
 "discovery.capability.messages" = "Messages";
 
 /* Smart Code Section (Additional) */
-"discovery.code.enterPrompt" = "Enter 6-digit code";
+"discovery.code.enterPrompt" = "Enter connection code";
 "discovery.code.connect" = "Connect";
 
 /* Settings - Network */

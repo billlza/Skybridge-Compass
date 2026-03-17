@@ -1526,8 +1526,18 @@ struct RemoteDesktopCodecGovernance: Sendable, Equatable {
         stableFallbackFrameCount = 0
 
         if normalizedReason.contains("waiting-for-sync-frame") {
-            hevcFailureStreak = max(hevcFailureStreak, 1)
-            return .requestRefresh
+            hevcFailureStreak += 1
+            guard hevcFailureStreak >= 3 else {
+                return .requestRefresh
+            }
+
+            hevcDisableCount += 1
+            let cooldown = hevcDisableCount == 1 ? 20.0 : 60.0
+            let disabledUntil = now.addingTimeInterval(cooldown)
+            hevcDisabledUntil = disabledUntil
+            hevcFailureStreak = 0
+            stableFallbackFrameCount = 0
+            return .disableHEVC(until: disabledUntil)
         }
 
         hevcFailureStreak += 1

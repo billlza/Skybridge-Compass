@@ -7,6 +7,21 @@ public enum ConnectionPresentationPhase: String, Sendable, Equatable {
     case reconnecting
 }
 
+public enum ConnectionDisplayState: String, Sendable, Equatable {
+    case disconnected
+    case connecting
+    case reconnecting
+    case connectedClassic
+    case connectedApplePQC
+    case connectedDegradedSignaling
+}
+
+public enum SignalingSessionHealth: String, Sendable, Equatable {
+    case healthy
+    case degradedRecoverable
+    case degradedFatal
+}
+
 public enum SessionDisconnectKind: String, Sendable, Equatable {
     case explicit
     case remoteLeave
@@ -113,8 +128,10 @@ public struct ConnectionPresentationInput: Sendable, Equatable {
     public let latestPeerConnection: ConnectionPresentationPeer?
     public let latestConnectedDevice: ConnectionPresentationPeer?
     public let activeSessionSnapshot: ActiveSessionSnapshot?
+    public let crossNetworkFallback: ActiveSessionSnapshot?
     public let defaultPQCModeLabel: String?
     public let compatibilityModeEnabled: Bool
+    public let signalingHealth: SignalingSessionHealth?
 
     public init(
         labels: ConnectionPresentationLabels = ConnectionPresentationLabels(),
@@ -122,33 +139,40 @@ public struct ConnectionPresentationInput: Sendable, Equatable {
         latestPeerConnection: ConnectionPresentationPeer?,
         latestConnectedDevice: ConnectionPresentationPeer?,
         activeSessionSnapshot: ActiveSessionSnapshot?,
+        crossNetworkFallback: ActiveSessionSnapshot? = nil,
         defaultPQCModeLabel: String? = nil,
-        compatibilityModeEnabled: Bool
+        compatibilityModeEnabled: Bool,
+        signalingHealth: SignalingSessionHealth? = nil
     ) {
         self.labels = labels
         self.fileTransferActive = fileTransferActive
         self.latestPeerConnection = latestPeerConnection
         self.latestConnectedDevice = latestConnectedDevice
         self.activeSessionSnapshot = activeSessionSnapshot
+        self.crossNetworkFallback = crossNetworkFallback
         self.defaultPQCModeLabel = defaultPQCModeLabel
         self.compatibilityModeEnabled = compatibilityModeEnabled
+        self.signalingHealth = signalingHealth
     }
 }
 
 public struct ConnectionPresentation: Sendable, Equatable {
     public let phase: ConnectionPresentationPhase
     public let isConnected: Bool
+    public let displayState: ConnectionDisplayState
     public let statusText: String
     public let detailText: String?
 
     public init(
         phase: ConnectionPresentationPhase,
         isConnected: Bool,
+        displayState: ConnectionDisplayState = .disconnected,
         statusText: String,
         detailText: String?
     ) {
         self.phase = phase
         self.isConnected = isConnected
+        self.displayState = displayState
         self.statusText = statusText
         self.detailText = detailText
     }
@@ -238,16 +262,12 @@ public enum ActiveSessionSnapshotContract {
 
 public enum ConnectionPresentationContract {
     public static func evaluate(_ input: ConnectionPresentationInput) -> ConnectionPresentation {
-        if let snapshot = input.activeSessionSnapshot, snapshot.phase == .reconnecting {
-            let detail = [input.labels.reconnectingText, snapshot.deviceName]
-                .compactMap { normalized($0) }
-                .joined(separator: " · ")
-            return ConnectionPresentation(
-                phase: .reconnecting,
-                isConnected: true,
-                statusText: input.labels.reconnectingText,
-                detailText: detail.isEmpty ? input.labels.reconnectingText : detail
-            )
+        if let reconnectingPresentation = reconnectingPresentation(for: input.activeSessionSnapshot, input: input) {
+            return reconnectingPresentation
+        }
+
+        if let reconnectingFallback = reconnectingPresentation(for: input.crossNetworkFallback, input: input) {
+            return reconnectingFallback
         }
 
         if let peer = input.latestPeerConnection {
@@ -260,23 +280,12 @@ public enum ConnectionPresentationContract {
             )
         }
 
-        if let snapshot = input.activeSessionSnapshot,
-           snapshot.phase == .transportReady || snapshot.phase == .handshakeComplete {
-            let detail = ConnectionCryptoPresentation.detailText(
-                kind: nil,
-                suite: snapshot.negotiatedSuite,
-                guardStatus: input.labels.crossNetworkGuardStatus
-            ) ?? normalized(snapshot.deviceName) ?? input.labels.crossNetworkGuardStatus
-            return ConnectionPresentation(
-                phase: .connected,
-                isConnected: true,
-                statusText: connectedStatusText(
-                    kind: nil,
-                    suite: snapshot.negotiatedSuite,
-                    input: input
-                ),
-                detailText: detail
-            )
+        if let snapshotPresentation = connectedSnapshotPresentation(for: input.activeSessionSnapshot, input: input) {
+            return snapshotPresentation
+        }
+
+        if let fallbackPresentation = connectedSnapshotPresentation(for: input.crossNetworkFallback, input: input) {
+            return fallbackPresentation
         }
 
         if let device = input.latestConnectedDevice {
@@ -298,13 +307,12 @@ public enum ConnectionPresentationContract {
             )
         }
 
-        if let snapshot = input.activeSessionSnapshot, snapshot.phase == .connecting {
-            return ConnectionPresentation(
-                phase: .connecting,
-                isConnected: false,
-                statusText: input.labels.connectingText,
-                detailText: normalized(snapshot.deviceName)
-            )
+        if let connectingPresentation = connectingPresentation(for: input.activeSessionSnapshot, input: input) {
+            return connectingPresentation
+        }
+
+        if let fallbackConnecting = connectingPresentation(for: input.crossNetworkFallback, input: input) {
+            return fallbackConnecting
         }
 
         return ConnectionPresentation(
@@ -312,6 +320,77 @@ public enum ConnectionPresentationContract {
             isConnected: false,
             statusText: input.labels.disconnectedText,
             detailText: nil
+        )
+    }
+
+    private static func reconnectingPresentation(
+        for snapshot: ActiveSessionSnapshot?,
+        input: ConnectionPresentationInput
+    ) -> ConnectionPresentation? {
+        guard let snapshot, snapshot.phase == .reconnecting else {
+            return nil
+        }
+
+        let detail = [input.labels.reconnectingText, snapshot.deviceName]
+            .compactMap { normalized($0) }
+            .joined(separator: " · ")
+        return ConnectionPresentation(
+            phase: .reconnecting,
+            isConnected: true,
+            displayState: .reconnecting,
+            statusText: input.labels.reconnectingText,
+            detailText: detail.isEmpty ? input.labels.reconnectingText : detail
+        )
+    }
+
+    private static func connectedSnapshotPresentation(
+        for snapshot: ActiveSessionSnapshot?,
+        input: ConnectionPresentationInput
+    ) -> ConnectionPresentation? {
+        guard let snapshot,
+              snapshot.phase == .transportReady || snapshot.phase == .handshakeComplete else {
+            return nil
+        }
+
+        let detail = ConnectionCryptoPresentation.detailText(
+            kind: nil,
+            suite: snapshot.negotiatedSuite,
+            guardStatus: input.labels.crossNetworkGuardStatus
+        ) ?? normalized(snapshot.deviceName) ?? input.labels.crossNetworkGuardStatus
+        let degraded = input.signalingHealth == .degradedRecoverable || input.signalingHealth == .degradedFatal
+        let effectiveDetail = degraded ? [detail, "信令降级"].joined(separator: " · ") : detail
+        return ConnectionPresentation(
+            phase: .connected,
+            isConnected: true,
+            displayState: connectedDisplayState(
+                kind: nil,
+                suite: snapshot.negotiatedSuite,
+                input: input,
+                signalingHealth: input.signalingHealth
+            ),
+            statusText: connectedStatusText(
+                kind: nil,
+                suite: snapshot.negotiatedSuite,
+                input: input
+            ),
+            detailText: effectiveDetail
+        )
+    }
+
+    private static func connectingPresentation(
+        for snapshot: ActiveSessionSnapshot?,
+        input: ConnectionPresentationInput
+    ) -> ConnectionPresentation? {
+        guard let snapshot, snapshot.phase == .connecting else {
+            return nil
+        }
+
+        return ConnectionPresentation(
+            phase: .connecting,
+            isConnected: false,
+            displayState: .connecting,
+            statusText: input.labels.connectingText,
+            detailText: normalized(snapshot.deviceName)
         )
     }
 
@@ -325,6 +404,12 @@ public enum ConnectionPresentationContract {
         ConnectionPresentation(
             phase: .connected,
             isConnected: true,
+            displayState: connectedDisplayState(
+                kind: kind,
+                suite: suite,
+                input: input,
+                signalingHealth: nil
+            ),
             statusText: connectedStatusText(kind: kind, suite: suite, input: input),
             detailText: ConnectionCryptoPresentation.detailText(
                 kind: kind,
@@ -362,6 +447,30 @@ public enum ConnectionPresentationContract {
             baseConnectedText: base,
             compatibilityModeEnabled: input.compatibilityModeEnabled
         )
+    }
+
+    private static func connectedDisplayState(
+        kind: String?,
+        suite: String?,
+        input: ConnectionPresentationInput,
+        signalingHealth: SignalingSessionHealth?
+    ) -> ConnectionDisplayState {
+        if signalingHealth == .degradedRecoverable || signalingHealth == .degradedFatal {
+            return .connectedDegradedSignaling
+        }
+
+        let lowerKind = kind?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        let lowerSuite = suite?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        let fallbackMode = input.defaultPQCModeLabel?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        let looksLikeApplePQC =
+            lowerKind.contains("apple pqc") ||
+            lowerSuite.contains("ml-kem") ||
+            lowerSuite.contains("mlkem") ||
+            lowerSuite.contains("ml-dsa") ||
+            lowerSuite.contains("mldsa") ||
+            fallbackMode == "apple pqc"
+
+        return looksLikeApplePQC ? .connectedApplePQC : .connectedClassic
     }
 
     private static func normalized(_ value: String?) -> String? {

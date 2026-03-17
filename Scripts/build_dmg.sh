@@ -32,6 +32,12 @@ STAGE_DIR="$DIST_DIR/dmg_stage"
 BG_SRC_PNG="$PROJECT_ROOT/Sources/SkyBridgeCompassApp/Resources/AppIcon.png"
 BG_NAME="background.png"
 BUILD_DESTINATION="${BUILD_DESTINATION:-$(skybridge_default_macos_destination)}"
+XCODE_WORKSPACE="$PROJECT_ROOT/.swiftpm/xcode/package.xcworkspace"
+USE_XCODE_WORKSPACE=false
+
+if [[ -d "$XCODE_WORKSPACE" ]]; then
+    USE_XCODE_WORKSPACE=true
+fi
 
 SIGNING_IDENTITY="${SIGNING_IDENTITY:-}"
 
@@ -148,12 +154,24 @@ if [[ "$SKIP_BUILD" == false ]]; then
     fi
 
     log_info "使用 Xcode Release 构建..."
-    skybridge_run_xcodebuild -workspace .swiftpm/xcode/package.xcworkspace \
-        -scheme SkyBridgeCompassApp \
-        -configuration Release \
-        -destination "$BUILD_DESTINATION" \
-        -derivedDataPath .build/xcode \
-        build
+    if [[ "$USE_XCODE_WORKSPACE" != true ]]; then
+        log_info "未找到 package.xcworkspace，直接从 Swift package 根目录构建"
+    fi
+    if [[ "$USE_XCODE_WORKSPACE" == true ]]; then
+        skybridge_run_xcodebuild -workspace "$XCODE_WORKSPACE" \
+            -scheme SkyBridgeCompassApp \
+            -configuration Release \
+            -destination "$BUILD_DESTINATION" \
+            -derivedDataPath .build/xcode \
+            build
+    else
+        skybridge_run_xcodebuild \
+            -scheme SkyBridgeCompassApp \
+            -configuration Release \
+            -destination "$BUILD_DESTINATION" \
+            -derivedDataPath .build/xcode \
+            build
+    fi
 
     log_success "Release 构建完成"
 else
@@ -208,18 +226,8 @@ if [[ "$SKIP_SIGN" == false ]]; then
     fi
 
     if [[ -n "$SIGNING_IDENTITY" ]]; then
-        if [[ "$USE_EXISTING_APP" == true ]]; then
-            log_step "步骤 3: 对现有 App 重新签名"
-            APP_PATH="$APP_BUNDLE" IDENTITY="$SIGNING_IDENTITY" "$PROJECT_ROOT/Scripts/sign_app.sh"
-        else
-            log_step "步骤 3: 签名检查"
-            if codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE" >/dev/null 2>&1; then
-                log_success "签名校验通过（使用 package_app.sh 产物）"
-            else
-                log_info "签名校验未通过，尝试补签名..."
-                APP_PATH="$APP_BUNDLE" IDENTITY="$SIGNING_IDENTITY" "$PROJECT_ROOT/Scripts/sign_app.sh"
-            fi
-        fi
+        log_step "步骤 3: 规范化重签名"
+        APP_PATH="$APP_BUNDLE" IDENTITY="$SIGNING_IDENTITY" "$PROJECT_ROOT/Scripts/sign_app.sh"
     else
         log_info "未检测到可用签名证书，保持当前签名状态（可能为 ad-hoc）"
     fi

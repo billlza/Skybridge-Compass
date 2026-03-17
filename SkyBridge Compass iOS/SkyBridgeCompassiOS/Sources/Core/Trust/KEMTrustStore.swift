@@ -25,26 +25,37 @@ public actor KEMTrustStore {
     }
 
     public func upsert(deviceId: String, kemPublicKeys: [KEMPublicKeyInfo]) {
-        guard !deviceId.isEmpty else { return }
-        var dict: [UInt16: Data] = cache[deviceId]?.keys ?? [:]
-        for k in kemPublicKeys {
-            dict[k.suiteWireId] = k.publicKey
+        let candidates = PeerIdentityAliasResolver.lookupCandidates(for: deviceId)
+        guard !candidates.isEmpty else { return }
+
+        for candidate in candidates {
+            var dict: [UInt16: Data] = cache[candidate]?.keys ?? [:]
+            for keyInfo in kemPublicKeys {
+                dict[keyInfo.suiteWireId] = keyInfo.publicKey
+            }
+            cache[candidate] = StoredPeer(keys: dict, updatedAt: Date())
         }
-        cache[deviceId] = StoredPeer(keys: dict, updatedAt: Date())
         save()
     }
 
     public func kemPublicKeys(for deviceId: String) -> [CryptoSuite: Data] {
-        guard let stored = cache[deviceId] else { return [:] }
         var result: [CryptoSuite: Data] = [:]
-        for (wireId, pk) in stored.keys {
-            result[CryptoSuite(wireId: wireId)] = pk
+        for candidate in PeerIdentityAliasResolver.lookupCandidates(for: deviceId) {
+            guard let stored = cache[candidate] else { continue }
+            for (wireId, pk) in stored.keys {
+                let suite = CryptoSuite(wireId: wireId)
+                if result[suite] == nil {
+                    result[suite] = pk
+                }
+            }
         }
         return result
     }
 
     public func clear(deviceId: String) {
-        cache.removeValue(forKey: deviceId)
+        for candidate in PeerIdentityAliasResolver.lookupCandidates(for: deviceId) {
+            cache.removeValue(forKey: candidate)
+        }
         save()
     }
 

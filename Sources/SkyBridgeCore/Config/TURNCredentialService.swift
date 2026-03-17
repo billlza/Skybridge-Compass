@@ -129,6 +129,15 @@ public actor TURNCredentialService {
         request.httpMethod = "GET"
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue(trimmedToken, forHTTPHeaderField: "X-SkyBridge-Turn-Admission")
+        let apiKey = SkyBridgeServerConfig.clientAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !apiKey.isEmpty {
+            request.setValue(apiKey, forHTTPHeaderField: "X-API-Key")
+        }
+        let deviceID = await DeviceIdentityKeyManager.shared.getDeviceId()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !deviceID.isEmpty {
+            request.setValue(deviceID, forHTTPHeaderField: "X-Device-Id")
+        }
         request.timeoutInterval = 10
 
         let (data, response): (Data, URLResponse)

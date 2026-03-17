@@ -37,7 +37,7 @@ public class P2PNetworkManager: ObservableObject, Sendable {
  // MARK: - 初始化
     
     private init() {
-        self.discoveryService = P2PDiscoveryService()
+        self.discoveryService = P2PDiscoveryService.shared
         startQualityMonitoring()
     }
     
