@@ -78,12 +78,12 @@ jobs:
             --version "${VERSION}"
           test -f /tmp/skybridge-npm-stage/package.json
           python - <<'PY'
-import json
-from pathlib import Path
-pkg = json.loads(Path("/tmp/skybridge-npm-stage/package.json").read_text())
-assert pkg["version"], "npm package version missing"
-print(pkg["version"])
-PY
+          import json
+          from pathlib import Path
+          pkg = json.loads(Path("/tmp/skybridge-npm-stage/package.json").read_text())
+          assert pkg["version"], "npm package version missing"
+          print(pkg["version"])
+          PY
 
       - name: Render Homebrew formula
         run: |

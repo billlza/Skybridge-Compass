@@ -134,21 +134,29 @@ jobs:
           path: release-assets/*
 
       - name: Publish npm wrapper
-        if: needs.metadata.outputs.publish_npm == 'true' && secrets.NPM_TOKEN != ''
+        if: needs.metadata.outputs.publish_npm == 'true'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
+          if [[ -z "${NODE_AUTH_TOKEN:-}" ]]; then
+            echo "NPM_TOKEN is not configured; skipping npm publish"
+            exit 0
+          fi
           cd /tmp/skybridge-cli-npm
           npm publish --access public
 
       - name: Publish Homebrew tap
-        if: needs.metadata.outputs.create_github_release == 'true' && secrets.HOMEBREW_TAP_GITHUB_TOKEN != '' && vars.HOMEBREW_TAP_REPOSITORY != ''
+        if: needs.metadata.outputs.create_github_release == 'true'
         env:
           HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
           HOMEBREW_TAP_REPOSITORY: ${{ vars.HOMEBREW_TAP_REPOSITORY }}
           HOMEBREW_TAP_FORMULA_PATH: ${{ vars.HOMEBREW_TAP_FORMULA_PATH }}
           HOMEBREW_TAP_BRANCH: ${{ vars.HOMEBREW_TAP_BRANCH }}
         run: |
+          if [[ -z "${HOMEBREW_TAP_GITHUB_TOKEN:-}" || -z "${HOMEBREW_TAP_REPOSITORY:-}" ]]; then
+            echo "Homebrew tap secret/variables are incomplete; skipping tap publish"
+            exit 0
+          fi
           bash rust/scripts/publish_homebrew_formula.sh \
             --tap-repo "${HOMEBREW_TAP_REPOSITORY}" \
             --formula-file release-assets/skybridge.rb \
