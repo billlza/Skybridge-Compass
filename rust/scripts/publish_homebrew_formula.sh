@@ -68,7 +68,9 @@ mkdir -p "${TMP_DIR}/tap/$(dirname "${FORMULA_PATH}")"
 cp "${FORMULA_FILE}" "${TMP_DIR}/tap/${FORMULA_PATH}"
 
 pushd "${TMP_DIR}/tap" >/dev/null
-if git diff --quiet -- "${FORMULA_PATH}"; then
+if git status --short -- "${FORMULA_PATH}" | grep -q .; then
+  :
+elif git diff --quiet -- "${FORMULA_PATH}"; then
   echo "Homebrew formula already up to date"
   popd >/dev/null
   exit 0
