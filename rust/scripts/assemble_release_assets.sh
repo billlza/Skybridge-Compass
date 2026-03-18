@@ -55,7 +55,6 @@ assets_dir = pathlib.Path(sys.argv[1])
 version = sys.argv[2]
 expected = [
     ("skybridge-aarch64-apple-darwin.tar.gz", "darwin", "arm64"),
-    ("skybridge-x86_64-apple-darwin.tar.gz", "darwin", "x64"),
     ("skybridge-aarch64-unknown-linux-gnu.tar.gz", "linux", "arm64"),
     ("skybridge-x86_64-unknown-linux-gnu.tar.gz", "linux", "x64"),
     ("skybridge-x86_64-pc-windows-msvc.zip", "windows", "x64"),
@@ -103,13 +102,11 @@ import sys
 manifest = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 by_name = {entry["name"]: entry["sha256"] for entry in manifest["assets"]}
 print(f'SKYBRIDGE_DARWIN_ARM64_SHA256={by_name["skybridge-aarch64-apple-darwin.tar.gz"]}')
-print(f'SKYBRIDGE_DARWIN_AMD64_SHA256={by_name["skybridge-x86_64-apple-darwin.tar.gz"]}')
 PY
 )"
 
 SKYBRIDGE_VERSION="${VERSION}" \
 SKYBRIDGE_DARWIN_ARM64_SHA256="${SKYBRIDGE_DARWIN_ARM64_SHA256}" \
-SKYBRIDGE_DARWIN_AMD64_SHA256="${SKYBRIDGE_DARWIN_AMD64_SHA256}" \
 "${ROOT_DIR}/scripts/render_homebrew_formula.sh" "${ASSETS_DIR}/skybridge.rb"
 
 echo "assembled release assets in ${ASSETS_DIR}"

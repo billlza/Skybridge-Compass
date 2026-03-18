@@ -7,11 +7,6 @@ const PLATFORM_MATRIX = {
       archiveExtension: "tar.gz",
       binaryName: "skybridge",
     },
-    x64: {
-      targetTriple: "x86_64-apple-darwin",
-      archiveExtension: "tar.gz",
-      binaryName: "skybridge",
-    },
   },
   linux: {
     arm64: {

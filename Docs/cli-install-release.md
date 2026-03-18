@@ -8,6 +8,7 @@ Package managers must download the exact same signed release artifacts instead o
 Supported install surfaces for v1:
 
 - macOS
+  - Apple Silicon only
   - signed official binary archive
   - Homebrew formula
   - npm wrapper
@@ -77,7 +78,6 @@ Every persisted file carries a schema version.
 Release assets should use one stable naming contract so Homebrew and npm can consume the same binaries:
 
 - `skybridge-aarch64-apple-darwin.tar.gz`
-- `skybridge-x86_64-apple-darwin.tar.gz`
 - `skybridge-aarch64-unknown-linux-gnu.tar.gz`
 - `skybridge-x86_64-unknown-linux-gnu.tar.gz`
 - `skybridge-x86_64-pc-windows-msvc.zip`

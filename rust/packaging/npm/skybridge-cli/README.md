@@ -5,6 +5,7 @@ Thin npm wrapper for the signed Rust `skybridge` binary.
 ## Install surfaces
 
 - macOS
+  - Apple Silicon only
   - supported through npm and Homebrew
 - Linux
   - supported through npm
@@ -25,7 +26,6 @@ Thin npm wrapper for the signed Rust `skybridge` binary.
 The package expects a GitHub-style release layout:
 
 - `skybridge-aarch64-apple-darwin.tar.gz`
-- `skybridge-x86_64-apple-darwin.tar.gz`
 - `skybridge-aarch64-unknown-linux-gnu.tar.gz`
 - `skybridge-x86_64-unknown-linux-gnu.tar.gz`
 - `skybridge-x86_64-pc-windows-msvc.zip`

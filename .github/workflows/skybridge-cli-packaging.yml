@@ -90,7 +90,6 @@ jobs:
           VERSION="$(python rust/scripts/workspace_version.py)"
           SKYBRIDGE_VERSION="${VERSION}" \
           SKYBRIDGE_DARWIN_ARM64_SHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
-          SKYBRIDGE_DARWIN_AMD64_SHA256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
           bash rust/scripts/render_homebrew_formula.sh /tmp/skybridge.rb
           test -f /tmp/skybridge.rb
 
