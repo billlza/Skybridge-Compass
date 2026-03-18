@@ -1,0 +1,164 @@
+name: skybridge-cli-release
+
+on:
+  push:
+    tags:
+      - "skybridge-cli-v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  metadata:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      release_tag: ${{ steps.meta.outputs.release_tag }}
+      create_github_release: ${{ steps.meta.outputs.create_github_release }}
+      publish_npm: ${{ steps.meta.outputs.publish_npm }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - id: meta
+        shell: bash
+        run: |
+          VERSION="$(python rust/scripts/workspace_version.py)"
+          RELEASE_TAG="skybridge-cli-v${VERSION}"
+
+          if [[ "${GITHUB_EVENT_NAME}" == "push" && "${GITHUB_REF_NAME}" == skybridge-cli-v* ]]; then
+            python rust/scripts/workspace_version.py --expect-tag "${GITHUB_REF_NAME}"
+            CREATE_GITHUB_RELEASE=true
+            PUBLISH_NPM=true
+            RELEASE_TAG="${GITHUB_REF_NAME}"
+          else
+            CREATE_GITHUB_RELEASE=false
+            PUBLISH_NPM=false
+          fi
+
+          {
+            echo "version=${VERSION}"
+            echo "release_tag=${RELEASE_TAG}"
+            echo "create_github_release=${CREATE_GITHUB_RELEASE}"
+            echo "publish_npm=${PUBLISH_NPM}"
+          } >> "${GITHUB_OUTPUT}"
+
+  build:
+    needs: metadata
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            target: aarch64-apple-darwin
+          - runner: macos-13
+            target: x86_64-apple-darwin
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Build release asset
+        shell: bash
+        env:
+          PYTHON_BIN: python
+        run: |
+          mkdir -p release-assets
+          bash rust/scripts/build_release_artifact.sh \
+            --target "${{ matrix.target }}" \
+            --out-dir release-assets
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: skybridge-cli-${{ matrix.target }}
+          path: release-assets/*
+
+  assemble:
+    needs:
+      - metadata
+      - build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Assemble release assets
+        env:
+          PYTHON_BIN: python
+        run: |
+          bash rust/scripts/assemble_release_assets.sh \
+            --assets-dir release-assets \
+            --version "${{ needs.metadata.outputs.version }}"
+
+      - name: Stage npm package
+        run: |
+          python rust/scripts/prepare_npm_package.py \
+            --source-dir rust/packaging/npm/skybridge-cli \
+            --output-dir /tmp/skybridge-cli-npm \
+            --version "${{ needs.metadata.outputs.version }}"
+          npm pack /tmp/skybridge-cli-npm --pack-destination release-assets
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: skybridge-cli-release-assets
+          path: release-assets/*
+
+      - name: Publish npm wrapper
+        if: needs.metadata.outputs.publish_npm == 'true' && secrets.NPM_TOKEN != ''
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          cd /tmp/skybridge-cli-npm
+          npm publish --access public
+
+      - name: Publish Homebrew tap
+        if: needs.metadata.outputs.create_github_release == 'true' && secrets.HOMEBREW_TAP_GITHUB_TOKEN != '' && vars.HOMEBREW_TAP_REPOSITORY != ''
+        env:
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+          HOMEBREW_TAP_REPOSITORY: ${{ vars.HOMEBREW_TAP_REPOSITORY }}
+          HOMEBREW_TAP_FORMULA_PATH: ${{ vars.HOMEBREW_TAP_FORMULA_PATH }}
+          HOMEBREW_TAP_BRANCH: ${{ vars.HOMEBREW_TAP_BRANCH }}
+        run: |
+          bash rust/scripts/publish_homebrew_formula.sh \
+            --tap-repo "${HOMEBREW_TAP_REPOSITORY}" \
+            --formula-file release-assets/skybridge.rb \
+            --formula-path "${HOMEBREW_TAP_FORMULA_PATH:-Formula/skybridge.rb}" \
+            --branch "${HOMEBREW_TAP_BRANCH:-main}"
+
+      - name: Create or update GitHub release
+        if: needs.metadata.outputs.create_github_release == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.metadata.outputs.release_tag }}
+          generate_release_notes: true
+          files: release-assets/*

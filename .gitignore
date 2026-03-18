@@ -46,6 +46,9 @@ build/
 dist/
 dist_xcode/
 Artifacts/
+rust/target/
+rust/release-assets/
+rust/.release-staging/
 build-liboqs-14.0/
 External/
 rebuild-oqs-openssl-final14-env/

@@ -1,0 +1,102 @@
+name: skybridge-cli-packaging
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/skybridge-cli-*"
+      - "rust/**"
+      - "Docs/cli-install-release.md"
+      - "Docs/signaling-lifecycle-contract.md"
+      - "Docs/failure-matrix-and-recovery.md"
+      - "README.md"
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - ".github/workflows/skybridge-cli-*"
+      - "rust/**"
+      - "Docs/cli-install-release.md"
+      - "Docs/signaling-lifecycle-contract.md"
+      - "Docs/failure-matrix-and-recovery.md"
+      - "README.md"
+
+permissions:
+  contents: read
+
+jobs:
+  packaging-check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Read workspace version
+        run: python rust/scripts/workspace_version.py
+
+      - name: Check formatting
+        run: cargo fmt --manifest-path rust/Cargo.toml --all --check
+
+      - name: Check session runtime tests
+        run: CARGO_TARGET_DIR=/tmp/skybridge-core-packaging cargo test --manifest-path rust/Cargo.toml -p skybridge-core session::tests
+
+      - name: Check CLI compilation
+        run: CARGO_TARGET_DIR=/tmp/skybridge-cli-packaging cargo check --manifest-path rust/Cargo.toml -p skybridge
+
+      - name: Validate npm wrapper scripts
+        run: |
+          node --check rust/packaging/npm/skybridge-cli/bin/skybridge.js
+          node --check rust/packaging/npm/skybridge-cli/lib/platform.js
+          node --check rust/packaging/npm/skybridge-cli/lib/install.js
+          SKYBRIDGE_NPM_SKIP_DOWNLOAD=1 node rust/packaging/npm/skybridge-cli/lib/install.js
+
+      - name: Build Linux release archive
+        env:
+          PYTHON_BIN: python
+        run: |
+          mkdir -p /tmp/skybridge-release-asset
+          bash rust/scripts/build_release_artifact.sh \
+            --target x86_64-unknown-linux-gnu \
+            --out-dir /tmp/skybridge-release-asset
+          test -f /tmp/skybridge-release-asset/skybridge-x86_64-unknown-linux-gnu.tar.gz
+
+      - name: Stage npm package
+        run: |
+          VERSION="$(python rust/scripts/workspace_version.py)"
+          python rust/scripts/prepare_npm_package.py \
+            --source-dir rust/packaging/npm/skybridge-cli \
+            --output-dir /tmp/skybridge-npm-stage \
+            --version "${VERSION}"
+          test -f /tmp/skybridge-npm-stage/package.json
+          python - <<'PY'
+import json
+from pathlib import Path
+pkg = json.loads(Path("/tmp/skybridge-npm-stage/package.json").read_text())
+assert pkg["version"], "npm package version missing"
+print(pkg["version"])
+PY
+
+      - name: Render Homebrew formula
+        run: |
+          VERSION="$(python rust/scripts/workspace_version.py)"
+          SKYBRIDGE_VERSION="${VERSION}" \
+          SKYBRIDGE_DARWIN_ARM64_SHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+          SKYBRIDGE_DARWIN_AMD64_SHA256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+          bash rust/scripts/render_homebrew_formula.sh /tmp/skybridge.rb
+          test -f /tmp/skybridge.rb
+
+      - name: Check release shell scripts
+        run: |
+          bash -n rust/scripts/build_release_artifact.sh
+          bash -n rust/scripts/assemble_release_assets.sh
+          bash -n rust/scripts/render_homebrew_formula.sh
+          bash -n rust/scripts/publish_homebrew_formula.sh

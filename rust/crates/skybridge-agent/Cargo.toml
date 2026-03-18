@@ -1,0 +1,24 @@
+[package]
+name = "skybridge-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+base64.workspace = true
+directories.workspace = true
+ed25519-dalek.workspace = true
+hostname.workspace = true
+rand_core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+skybridge-core = { path = "../skybridge-core" }
+time.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+tracing-appender.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true

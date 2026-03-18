@@ -137,6 +137,56 @@ bash Scripts/check_turn_tls_regression.sh https://api.nebula-technologies.net
 swift test
 ```
 
+## Rust CLI / Agent Workspace
+
+CLI/agent 的新 headless 工作区位于 `rust/`，用于承载正式的 operator surface，不再依赖 GUI 侧状态。
+
+常用命令：
+
+```bash
+cargo test --manifest-path rust/Cargo.toml
+cargo run --manifest-path rust/Cargo.toml -p skybridge -- version
+```
+
+当前已落地的可运行命令：
+
+- `skybridge login`
+- `skybridge logout`
+- `skybridge agent run`
+- `skybridge device status`
+- `skybridge device enroll --invite-token <token>`
+- `skybridge device approve <pending-device-id> --pending-fingerprint <fp>`
+- `skybridge code create`
+- `skybridge connect <code>`
+- `skybridge session ls`
+- `skybridge session inspect <id>`
+- `skybridge disconnect <id>`
+- `skybridge doctor`
+- `skybridge logs tail`
+- `skybridge metrics`
+- `skybridge version`
+
+首发边界与 contract 文档：
+
+- `Docs/cli-scope-v1.md`
+- `Docs/signaling-lifecycle-contract.md`
+- `Docs/inbound-route-contract.md`
+- `Docs/file-transfer-route-source.md`
+- `Docs/cli-install-release.md`
+- `Docs/failure-matrix-and-recovery.md`
+
+分发骨架：
+
+- `rust/packaging/homebrew/`
+- `rust/packaging/npm/skybridge-cli/`
+- `rust/scripts/render_homebrew_formula.sh`
+- `rust/scripts/build_release_artifact.sh`
+- `rust/scripts/assemble_release_assets.sh`
+- `rust/scripts/prepare_npm_package.py`
+- `rust/scripts/publish_homebrew_formula.sh`
+- `.github/workflows/skybridge-cli-packaging.yml`
+- `.github/workflows/skybridge-cli-release.yml`
+
 ## 论文与 PDF 源码位置
 
 - 主论文 LaTeX：`Docs/TDSC-2026-01-0318_IEEE_Paper_SkyBridge_Compass_patched.tex`

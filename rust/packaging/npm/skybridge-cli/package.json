@@ -1,0 +1,36 @@
+{
+  "name": "skybridge-cli",
+  "version": "1.0.0",
+  "description": "SkyBridge CLI npm wrapper for signed Rust release binaries",
+  "license": "MIT",
+  "homepage": "https://github.com/billlza/Skybridge-Compass",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/billlza/Skybridge-Compass.git",
+    "directory": "rust/packaging/npm/skybridge-cli"
+  },
+  "bin": {
+    "skybridge": "bin/skybridge.js"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "lib",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "cpu": [
+    "arm64",
+    "x64"
+  ],
+  "scripts": {
+    "postinstall": "node ./lib/install.js"
+  }
+}

@@ -1,0 +1,25 @@
+class Skybridge < Formula
+  desc "SkyBridge CLI headless operator surface"
+  homepage "https://github.com/billlza/Skybridge-Compass"
+  version "__VERSION__"
+
+  on_macos do
+    if Hardware::CPU.arm?
+      url "__BASE_URL__/skybridge-aarch64-apple-darwin.tar.gz"
+      sha256 "__DARWIN_ARM64_SHA256__"
+    else
+      url "__BASE_URL__/skybridge-x86_64-apple-darwin.tar.gz"
+      sha256 "__DARWIN_AMD64_SHA256__"
+    end
+  end
+
+  def install
+    bin.install "skybridge"
+  end
+
+  test do
+    output = shell_output("#{bin}/skybridge version")
+    assert_match version.to_s, output
+    assert_match "phase_5_signaling_plane", output
+  end
+end
