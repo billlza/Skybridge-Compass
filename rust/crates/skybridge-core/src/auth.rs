@@ -13,6 +13,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use url::Url;
 
+pub const DEFAULT_NEBULA_BASE_URL: &str = "https://nebula.skybridge.com";
+pub const DEFAULT_NEBULA_CLIENT_ID: &str = "skybridge_compass_pro";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthSession {
     pub access_token: String,
@@ -84,10 +87,10 @@ impl NebulaOAuthClient {
     pub fn from_env() -> Result<Self> {
         let base_url = std::env::var("NEBULA_BASE_URL")
             .or_else(|_| std::env::var("SKYBRIDGE_NEBULA_BASE_URL"))
-            .context("missing NEBULA_BASE_URL")?;
+            .unwrap_or_else(|_| DEFAULT_NEBULA_BASE_URL.to_owned());
         let client_id = std::env::var("NEBULA_CLIENT_ID")
             .or_else(|_| std::env::var("SKYBRIDGE_NEBULA_CLIENT_ID"))
-            .context("missing NEBULA_CLIENT_ID")?;
+            .unwrap_or_else(|_| DEFAULT_NEBULA_CLIENT_ID.to_owned());
         Self::new(base_url, client_id)
     }
 

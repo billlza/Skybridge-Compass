@@ -5,7 +5,7 @@ use std::time::Duration;
 use anyhow::{Result, anyhow, bail};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use skybridge_agent::{
@@ -71,6 +71,19 @@ struct LoginCommand {
     callback_url: Option<String>,
     #[arg(long)]
     authorization_code: Option<String>,
+    #[arg(long, value_enum, default_value_t = LoginMode::Auto)]
+    mode: LoginMode,
+    #[arg(long, default_value_t = 8789)]
+    listen_port: u16,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum LoginMode {
+    Auto,
+    Browser,
+    Paste,
 }
 
 #[derive(Debug, Args)]
@@ -313,10 +326,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
 async fn login(state_dir: Option<PathBuf>, args: LoginCommand) -> Result<()> {
     let paths = resolve_paths(state_dir)?;
     let oauth = NebulaOAuthClient::from_env()?;
-    let redirect_uri = args
-        .redirect_uri
-        .or_else(|| std::env::var("SKYBRIDGE_OAUTH_REDIRECT_URI").ok())
-        .unwrap_or_else(|| "skybridge://auth/nebula".to_owned());
+    let redirect_uri = resolve_cli_login_redirect_uri(&args);
     let authorization_request = oauth.make_authorization_request(
         &redirect_uri,
         &["openid", "profile", "email", "offline_access"],
@@ -339,17 +349,33 @@ async fn login(state_dir: Option<PathBuf>, args: LoginCommand) -> Result<()> {
     store_auth_session(&paths, &session).await?;
     let identity = ensure_device_identity(&paths).await?;
     let tenant_id = derive_tenant_identifier(&session.access_token).unwrap_or_default();
-    println!("Logged in as: {}", session.display_name);
-    println!("User ID: {}", session.user_identifier);
-    println!(
-        "Tenant ID: {}",
-        if tenant_id.is_empty() {
-            "<unresolved>"
-        } else {
-            &tenant_id
-        }
-    );
-    println!("Device ID: {}", identity.state.device.device_id);
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "logged_in": true,
+                "display_name": session.display_name,
+                "user_id": session.user_identifier,
+                "tenant_id": if tenant_id.is_empty() { None::<String> } else { Some(tenant_id.clone()) },
+                "device_id": identity.state.device.device_id,
+                "redirect_uri": redirect_uri,
+                "mode": describe_login_mode(args.mode, authorization_request.redirect_uri.as_str()),
+            }))?
+        );
+    } else {
+        println!("Logged in as: {}", session.display_name);
+        println!("User ID: {}", session.user_identifier);
+        println!(
+            "Tenant ID: {}",
+            if tenant_id.is_empty() {
+                "<unresolved>"
+            } else {
+                &tenant_id
+            }
+        );
+        println!("Device ID: {}", identity.state.device.device_id);
+        println!("Login Mode: {}", describe_login_mode(args.mode, authorization_request.redirect_uri.as_str()));
+    }
     Ok(())
 }
 
@@ -358,6 +384,38 @@ async fn logout(state_dir: Option<PathBuf>) -> Result<()> {
     clear_auth_session(&paths).await?;
     println!("Logged out");
     Ok(())
+}
+
+fn resolve_cli_login_redirect_uri(args: &LoginCommand) -> String {
+    if let Some(explicit) = args
+        .redirect_uri
+        .clone()
+        .or_else(|| std::env::var("SKYBRIDGE_OAUTH_REDIRECT_URI").ok())
+    {
+        return explicit;
+    }
+
+    match args.mode {
+        LoginMode::Auto if args.callback_url.is_none() && args.authorization_code.is_none() => {
+            format!("http://127.0.0.1:{}/auth/callback", args.listen_port)
+        }
+        LoginMode::Auto => "skybridge://auth/nebula".to_owned(),
+        LoginMode::Browser => format!("http://127.0.0.1:{}/auth/callback", args.listen_port),
+        LoginMode::Paste => "skybridge://auth/nebula".to_owned(),
+    }
+}
+
+fn describe_login_mode(mode: LoginMode, redirect_uri: &str) -> &'static str {
+    match mode {
+        LoginMode::Browser => "browser-loopback",
+        LoginMode::Paste => "manual-paste",
+        LoginMode::Auto if redirect_uri.starts_with("http://127.0.0.1:")
+            || redirect_uri.starts_with("http://localhost:") =>
+        {
+            "browser-loopback"
+        }
+        LoginMode::Auto => "manual-paste",
+    }
 }
 
 fn internal_verify_mldsa(args: VerifyMldsaArgs) -> Result<()> {
