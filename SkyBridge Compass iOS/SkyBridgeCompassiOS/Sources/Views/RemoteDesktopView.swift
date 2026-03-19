@@ -11,7 +11,6 @@ struct RemoteDesktopView: View {
     @EnvironmentObject private var connectionManager: P2PConnectionManager
     @StateObject private var remoteDesktopManager = RemoteDesktopManager.instance
     @StateObject private var crossNetworkManager = CrossNetworkWebRTCManager.instance
-    @StateObject private var settings = SettingsManager.instance
     
     @State private var selectedConnection: Connection?
     @State private var isFullScreen = false
@@ -43,20 +42,6 @@ struct RemoteDesktopView: View {
                 } else {
                     // 连接选择界面
                     connectionSelectionView
-                }
-
-                if !settings.enableExperimentalFeatures {
-                    VStack {
-                        BetaBannerView(
-                            title: RuntimeLocalization.string("远程桌面（实验功能）"),
-                            message: RuntimeLocalization.string("iOS 端目前作为查看/控制端使用。若与 macOS 端协议不一致，可能无法连接；建议先在设置中开启“实验功能”，并使用真机与同网段设备测试。")
-                        )
-                        .padding(.horizontal, 16)
-                        .padding(.top, 12)
-
-                        Spacer()
-                    }
-                    .transition(.opacity)
                 }
             }
             .accessibilityIdentifier("remote.root")

@@ -100,6 +100,19 @@ log_step() {
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 }
 
+scrub_bundle_custom_icon() {
+    local bundle_path="$1"
+    local bundle_icon_path
+    bundle_icon_path="$bundle_path/Icon"$'\r'
+
+    if [[ -e "$bundle_icon_path" ]]; then
+        rm -f "$bundle_icon_path" || true
+    fi
+
+    xattr -d com.apple.FinderInfo "$bundle_path" >/dev/null 2>&1 || true
+    xattr -d com.apple.FinderInfo "$bundle_icon_path" >/dev/null 2>&1 || true
+}
+
 extract_helper_version() {
     local bin_path="$1"
     if [[ -x "$bin_path" ]]; then
@@ -245,7 +258,8 @@ rm -rf "$STAGE_DIR"
 
 log_info "准备 DMG staging 目录..."
 mkdir -p "$STAGE_DIR"
-cp -R "$APP_BUNDLE" "$STAGE_DIR/"
+ditto "$APP_BUNDLE" "$STAGE_DIR/$APP_NAME.app"
+scrub_bundle_custom_icon "$STAGE_DIR/$APP_NAME.app"
 ln -sf /Applications "$STAGE_DIR/Applications"
 mkdir -p "$STAGE_DIR/.background"
 
@@ -313,6 +327,8 @@ tell application "Finder"
 end tell
 OSA
 
+scrub_bundle_custom_icon "$MOUNT_DIR/$APP_NAME.app"
+
 sync
 hdiutil detach "$MOUNT_DIR"
 
@@ -327,6 +343,10 @@ hdiutil convert "$TEMP_DMG" -format UDZO -imagekey zlib-level=9 -o "$DMG_PATH"
 rm -f "$TEMP_DMG"
 
 log_success "DMG 创建完成: $DMG_PATH"
+
+DESKTOP_DMG_PATH="$HOME/Desktop/${DMG_NAME}-${APP_VERSION}.dmg"
+cp -f "$DMG_PATH" "$DESKTOP_DMG_PATH"
+log_success "桌面 DMG 已覆盖更新: $DESKTOP_DMG_PATH"
 
 log_step "构建完成"
 

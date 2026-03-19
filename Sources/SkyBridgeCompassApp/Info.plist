@@ -151,6 +151,8 @@
     <!-- 应用图标文件 -->
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
+    <key>CFBundleIconName</key>
+    <string>AppIcon</string>
 
 </dict>
 </plist>

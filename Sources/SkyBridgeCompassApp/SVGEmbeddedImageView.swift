@@ -47,15 +47,76 @@ struct SVGEmbeddedImageView: View {
 struct CustomGlobeIconView: View {
     var cornerRadius: CGFloat = 12
     var body: some View {
-        let bundle = Bundle.module
-        let url = bundle.url(forResource: "custom-globe", withExtension: "svg")
-            ?? bundle.url(forResource: "custom-globe", withExtension: "svg", subdirectory: "Icons")
-            ?? bundle.url(forResource: "app-icon", withExtension: "svg")
-        let env = ProcessInfo.processInfo.environment
-        let explicitPath = env["SKYBRIDGE_ICON_SVG_PATH"]
-        let defaultPath = "/Users/bill/Desktop/SkyBridge Compass Pro release/1764932992803.svg"
-        let path = url?.path ?? explicitPath ?? defaultPath
-        SVGEmbeddedImageView(filePath: path, contentMode: .fill, safeInset: 0, clipCornerRadius: cornerRadius)
+        BrandAppIconView(
+            contentMode: .fill,
+            safeInset: 0,
+            clipCornerRadius: cornerRadius
+        )
+    }
+}
+
+struct BrandAppIconView: View {
+    let contentMode: ContentMode
+    let safeInset: CGFloat
+    let clipCornerRadius: CGFloat?
+
+    @State private var nsImage: NSImage?
+
+    init(
+        contentMode: ContentMode = .fit,
+        safeInset: CGFloat = 0,
+        clipCornerRadius: CGFloat? = nil
+    ) {
+        self.contentMode = contentMode
+        self.safeInset = safeInset
+        self.clipCornerRadius = clipCornerRadius
+    }
+
+    var body: some View {
+        ZStack {
+            if let image = nsImage {
+                Image(nsImage: image)
+                    .resizable()
+                    .interpolation(.high)
+                    .antialiased(true)
+                    .aspectRatio(contentMode: contentMode)
+                    .padding(safeInset)
+                    .applyCornerClip(clipCornerRadius)
+            } else {
+                Color.clear
+            }
+        }
+        .task {
+            if nsImage == nil {
+                nsImage = BrandIconAssetLoader.load()
+            }
+        }
+    }
+}
+
+@MainActor
+private enum BrandIconAssetLoader {
+    static func load() -> NSImage? {
+        for bundle in [Bundle.module, Bundle.main] {
+            if let image = bundle.image(forResource: NSImage.Name("BrandIcon")) {
+                return image
+            }
+
+            for candidate in [("AppIcon", "png"), ("AppIconDock", "png"), ("BrandIcon", "png")] {
+                if let url = bundle.url(forResource: candidate.0, withExtension: candidate.1),
+                   let image = NSImage(contentsOf: url) {
+                    return image
+                }
+            }
+        }
+
+        if let appIcon = NSApp.applicationIconImage.copy() as? NSImage,
+           appIcon.size.width > 0,
+           appIcon.size.height > 0 {
+            return appIcon
+        }
+
+        return nil
     }
 }
 

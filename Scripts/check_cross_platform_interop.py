@@ -20,6 +20,13 @@ def norm_hex(value: str) -> str:
     return f"0x{int(value, 16):04x}"
 
 
+def first_existing(*candidates: Path) -> Path:
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
+
 def read_text(path: Path) -> str:
     if not path.exists():
         raise FileNotFoundError(str(path))
@@ -138,11 +145,26 @@ def main() -> int:
     ubuntu_root = Path(args.ubuntu_root)
     website_root = Path(args.website_root)
 
-    ios_suite_file = ios_root / "Sources/SkyBridgeCore/P2P/CryptoProviderProtocol.swift"
-    ios_wire_file = ios_root / "Sources/SkyBridgeCore/P2P/HandshakeMessages.swift"
-    ios_fallback_file = ios_root / "Sources/SkyBridgeCore/P2P/TwoAttemptHandshakeManager.swift"
-    ios_sig_file = ios_root / "Sources/SkyBridgeCore/P2P/PreNegotiationSignatureSelector.swift"
-    ios_trust_file = ios_root / "Sources/SkyBridgeCore/P2P/MultiAlgorithmSignatureVerifier.swift"
+    ios_suite_file = first_existing(
+        ios_root / "Sources/SkyBridgeProtocolCore/P2P/CryptoSuite.swift",
+        ios_root / "Sources/SkyBridgeCore/P2P/CryptoProviderProtocol.swift",
+        ios_root / "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/CryptoProviderProtocol.swift",
+    )
+    ios_wire_file = first_existing(
+        ios_root / "Sources/SkyBridgeCore/P2P/HandshakeMessages.swift",
+        ios_root / "Sources/SkyBridgeProtocolCore/P2P/HandshakeMessages.swift",
+        ios_root / "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/Handshake/HandshakeMessages.swift",
+    )
+    ios_fallback_file = first_existing(
+        ios_root / "Sources/SkyBridgeCore/P2P/TwoAttemptHandshakeManager.swift",
+        ios_root / "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/Handshake/TwoAttemptHandshakeManager.swift",
+    )
+    ios_sig_file = first_existing(
+        ios_root / "Sources/SkyBridgeCore/P2P/PreNegotiationSignatureSelector.swift",
+    )
+    ios_trust_file = first_existing(
+        ios_root / "Sources/SkyBridgeCore/P2P/MultiAlgorithmSignatureVerifier.swift",
+    )
 
     android_suite_file = (
         android_root

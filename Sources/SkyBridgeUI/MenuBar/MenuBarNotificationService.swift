@@ -9,6 +9,7 @@
 import Foundation
 import UserNotifications
 import os.log
+import SkyBridgeCore
 
 /// 菜单栏通知服务 - 处理传输完成通知
 /// Requirements: 4.3, 4.4
@@ -24,6 +25,14 @@ public final class MenuBarNotificationService {
     
     private let logger = Logger(subsystem: "com.skybridge.ui", category: "MenuBarNotification")
     private let notificationCenter = UNUserNotificationCenter.current()
+
+    private func t(_ key: String) -> String {
+        LocalizationManager.shared.localizedString(key)
+    }
+
+    private func tf(_ key: String, _ args: CVarArg...) -> String {
+        String(format: t(key), locale: LocalizationManager.shared.locale, arguments: args)
+    }
     
  // MARK: - Initialization
     
@@ -43,13 +52,13 @@ public final class MenuBarNotificationService {
         let content = UNMutableNotificationContent()
         
         if success {
-            content.title = "传输完成"
-            content.body = "\(fileName) 已成功传输"
+            content.title = t("notifications.fileTransfer.completed")
+            content.body = tf("notifications.fileTransfer.completed.body", fileName)
             content.sound = .default
             content.categoryIdentifier = "TRANSFER_COMPLETE"
         } else {
-            content.title = "传输失败"
-            content.body = "\(fileName) 传输失败"
+            content.title = t("notifications.fileTransfer.failed")
+            content.body = tf("notifications.fileTransfer.failed.body", fileName)
             content.sound = UNNotificationSound.defaultCritical
             content.categoryIdentifier = "TRANSFER_FAILED"
         }
@@ -84,8 +93,8 @@ public final class MenuBarNotificationService {
  /// 发送设备发现通知
     public func sendDeviceDiscoveredNotification(deviceName: String) {
         let content = UNMutableNotificationContent()
-        content.title = "发现新设备"
-        content.body = "已发现设备: \(deviceName)"
+        content.title = t("notifications.deviceDiscovered.title")
+        content.body = tf("notifications.deviceDiscovered.body", deviceName)
         content.sound = .default
         content.categoryIdentifier = "DEVICE_DISCOVERED"
         
@@ -112,7 +121,7 @@ public final class MenuBarNotificationService {
             actions: [
                 UNNotificationAction(
                     identifier: "SHOW_FILE",
-                    title: "在 Finder 中显示",
+                    title: t("notifications.action.showInFinder"),
                     options: .foreground
                 )
             ],
@@ -126,7 +135,7 @@ public final class MenuBarNotificationService {
             actions: [
                 UNNotificationAction(
                     identifier: "RETRY",
-                    title: "重试",
+                    title: t("notifications.action.retry"),
                     options: .foreground
                 )
             ],
@@ -140,7 +149,7 @@ public final class MenuBarNotificationService {
             actions: [
                 UNNotificationAction(
                     identifier: "CONNECT",
-                    title: "连接",
+                    title: t("dashboard.action.connect"),
                     options: .foreground
                 )
             ],

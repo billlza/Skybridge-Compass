@@ -130,6 +130,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     private var peerConnection: RTCPeerConnection?
     private var dataChannel: RTCDataChannel?
     private var pendingRemoteICECandidates: [RTCIceCandidate] = []
+    private var seenRemoteICECandidateKeys: Set<String> = []
 #endif
     
     private var isClosed = false
@@ -138,6 +139,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     private var didNotifyReady = false
     private var hasRemoteDescription = false
     private var isSettingRemoteDescription = false
+    private var lastEmittedLocalSDP: String?
     private let inboundDataLock = NSLock()
     private let outboundFrameLock = NSLock()
     private let outboundFrameGate = WebRTCOutboundFrameGate()
@@ -164,9 +166,11 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         didNotifyReady = false
         hasRemoteDescription = false
         isSettingRemoteDescription = false
+        lastEmittedLocalSDP = nil
         onDisconnected = nil
 #if canImport(WebRTC)
         pendingRemoteICECandidates.removeAll(keepingCapacity: false)
+        seenRemoteICECandidateKeys.removeAll(keepingCapacity: false)
         dataChannel?.close()
         dataChannel = nil
         peerConnection?.close()
@@ -255,8 +259,10 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         didNotifyDisconnected = false
         didNotifyReady = false
         hasRemoteDescription = false
+        lastEmittedLocalSDP = nil
 #if canImport(WebRTC)
         pendingRemoteICECandidates.removeAll(keepingCapacity: false)
+        seenRemoteICECandidateKeys.removeAll(keepingCapacity: false)
         WebRTCSSL.retain()
         sslHeld = true
         let factory = WebRTCPeerConnectionFactoryProvider.factory()
@@ -353,18 +359,21 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     
     public func setRemoteOffer(_ sdp: String) {
 #if canImport(WebRTC)
+        let normalizedOffer = Self.normalizedRemoteSDP(sdp)
         if hasRemoteDescription || isSettingRemoteDescription {
+            absorbRemoteICECandidatesFromSDP(normalizedOffer.sdp)
             logger.debug("ℹ️ ignore duplicate remote offer. sessionId=\(self.sessionId, privacy: .public)")
             return
         }
         guard let pc = peerConnection else { return }
         if pc.remoteDescription != nil {
             hasRemoteDescription = true
+            absorbRemoteICECandidatesFromSDP(normalizedOffer.sdp)
             flushPendingRemoteICECandidates()
             logger.debug("ℹ️ remote offer already applied; ignore. sessionId=\(self.sessionId, privacy: .public)")
             return
         }
-        let desc = RTCSessionDescription(type: .offer, sdp: sdp)
+        let desc = RTCSessionDescription(type: .offer, sdp: normalizedOffer.sdp)
         isSettingRemoteDescription = true
         pc.setRemoteDescription(desc) { [weak self] error in
             guard let self else { return }
@@ -385,13 +394,15 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     public func setRemoteAnswer(_ sdp: String) {
 #if canImport(WebRTC)
         guard let pc = peerConnection else { return }
+        let normalizedAnswer = Self.normalizedRemoteSDP(sdp)
         if hasRemoteDescription || isSettingRemoteDescription || pc.remoteDescription != nil {
             hasRemoteDescription = true
+            absorbRemoteICECandidatesFromSDP(normalizedAnswer.sdp)
             flushPendingRemoteICECandidates()
             logger.debug("ℹ️ ignore duplicate remote answer. sessionId=\(self.sessionId, privacy: .public)")
             return
         }
-        let desc = RTCSessionDescription(type: .answer, sdp: sdp)
+        let desc = RTCSessionDescription(type: .answer, sdp: normalizedAnswer.sdp)
         isSettingRemoteDescription = true
         pc.setRemoteDescription(desc) { [weak self] error in
             guard let self else { return }
@@ -417,6 +428,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     public func addRemoteICECandidate(candidate: String, sdpMid: String?, sdpMLineIndex: Int32?) {
 #if canImport(WebRTC)
         let cand = RTCIceCandidate(sdp: candidate, sdpMLineIndex: sdpMLineIndex ?? 0, sdpMid: sdpMid)
+        guard trackRemoteICECandidateIfNeeded(cand) else { return }
         guard hasRemoteDescription else {
             pendingRemoteICECandidates.append(cand)
             logger.debug("⏳ queue remote ICE candidate until remote description is set. sessionId=\(self.sessionId, privacy: .public) pending=\(self.pendingRemoteICECandidates.count, privacy: .public)")
@@ -553,6 +565,18 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     }
     
 #if canImport(WebRTC)
+    private func trackRemoteICECandidateIfNeeded(_ candidate: RTCIceCandidate) -> Bool {
+        let normalizedSDP: String
+        if candidate.sdp.hasPrefix("a=") {
+            normalizedSDP = String(candidate.sdp.dropFirst(2))
+        } else {
+            normalizedSDP = candidate.sdp
+        }
+        let mid = candidate.sdpMid?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let key = "\(candidate.sdpMLineIndex)|\(mid)|\(normalizedSDP)"
+        return seenRemoteICECandidateKeys.insert(key).inserted
+    }
+
     private func addRemoteICECandidateInternal(_ candidate: RTCIceCandidate) {
         guard let pc = peerConnection else { return }
         pc.add(candidate) { [weak self] error in
@@ -575,6 +599,142 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         }
     }
 
+    private func absorbRemoteICECandidatesFromSDP(_ sdp: String) {
+        let extracted = Self.extractRemoteICECandidates(from: sdp)
+        guard !extracted.isEmpty else { return }
+
+        var absorbed = 0
+        for candidate in extracted where trackRemoteICECandidateIfNeeded(candidate) {
+            absorbed += 1
+            if hasRemoteDescription {
+                addRemoteICECandidateInternal(candidate)
+            } else {
+                pendingRemoteICECandidates.append(candidate)
+            }
+        }
+
+        guard absorbed > 0 else { return }
+        logger.info("🔄 absorbed ICE candidates from duplicate SDP. sessionId=\(self.sessionId, privacy: .public) count=\(absorbed, privacy: .public)")
+    }
+
+    private struct NormalizedRemoteSDP {
+        let sdp: String
+        let droppedSessionLevelCandidateLines: Int
+        let deduplicatedCandidateLines: Int
+    }
+
+    private static func normalizedRemoteSDP(_ sdp: String) -> NormalizedRemoteSDP {
+        let normalizedNewlines = sdp.replacingOccurrences(of: "\r\n", with: "\n")
+        let rawLines = normalizedNewlines
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+
+        var prefix: [String] = []
+        var sections: [[String]] = []
+        var currentSection: [String]? = nil
+        var droppedSessionLevelCandidateLines = 0
+        var deduplicatedCandidateLines = 0
+
+        for line in rawLines {
+            if line.hasPrefix("m=") {
+                if let currentSection {
+                    sections.append(currentSection)
+                }
+                currentSection = [line]
+                continue
+            }
+
+            if currentSection != nil {
+                currentSection?.append(line)
+                continue
+            }
+
+            if line.hasPrefix("a=candidate:") || line == "a=end-of-candidates" {
+                droppedSessionLevelCandidateLines += 1
+                continue
+            }
+            if !line.isEmpty {
+                prefix.append(line)
+            }
+        }
+
+        if let currentSection {
+            sections.append(currentSection)
+        }
+
+        var cleanedSections: [[String]] = []
+        cleanedSections.reserveCapacity(sections.count)
+        for section in sections {
+            var seenCandidateLines = Set<String>()
+            var cleanedSection: [String] = []
+            cleanedSection.reserveCapacity(section.count)
+
+            for line in section {
+                guard !line.isEmpty else { continue }
+                if line.hasPrefix("a=candidate:") {
+                    if !seenCandidateLines.insert(line).inserted {
+                        deduplicatedCandidateLines += 1
+                        continue
+                    }
+                }
+                if line == "a=end-of-candidates",
+                   cleanedSection.last == "a=end-of-candidates" {
+                    deduplicatedCandidateLines += 1
+                    continue
+                }
+                cleanedSection.append(line)
+            }
+            cleanedSections.append(cleanedSection)
+        }
+
+        var flattened = prefix
+        for section in cleanedSections {
+            flattened.append(contentsOf: section)
+        }
+
+        let rendered = flattened.joined(separator: "\r\n") + "\r\n"
+        return NormalizedRemoteSDP(
+            sdp: rendered,
+            droppedSessionLevelCandidateLines: droppedSessionLevelCandidateLines,
+            deduplicatedCandidateLines: deduplicatedCandidateLines
+        )
+    }
+
+    private static func extractRemoteICECandidates(from sdp: String) -> [RTCIceCandidate] {
+        let normalizedLines = sdp
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map(String.init)
+
+        var candidates: [RTCIceCandidate] = []
+        var currentMid: String?
+        var currentMLineIndex: Int32 = -1
+
+        for line in normalizedLines {
+            if line.hasPrefix("m=") {
+                currentMLineIndex += 1
+                currentMid = nil
+                continue
+            }
+            if line.hasPrefix("a=mid:") {
+                currentMid = String(line.dropFirst(6))
+                continue
+            }
+            if line.hasPrefix("a=candidate:"), currentMLineIndex >= 0 {
+                let candidateSDP = String(line.dropFirst(2))
+                candidates.append(
+                    RTCIceCandidate(
+                        sdp: candidateSDP,
+                        sdpMLineIndex: currentMLineIndex,
+                        sdpMid: currentMid
+                    )
+                )
+            }
+        }
+
+        return candidates
+    }
+
     private func createOffer() {
         guard let pc = peerConnection else { return }
         let constraints = RTCMediaConstraints(mandatoryConstraints: ["OfferToReceiveAudio": "false", "OfferToReceiveVideo": "false"], optionalConstraints: nil)
@@ -593,6 +753,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
                     self.logger.error("❌ setLocalDescription(offer) failed: \(err.localizedDescription, privacy: .public)")
                     return
                 }
+                self.lastEmittedLocalSDP = sdpString
                 self.onLocalOffer?(sdpString)
             }
         }
@@ -616,9 +777,26 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
                     self.logger.error("❌ setLocalDescription(answer) failed: \(err.localizedDescription, privacy: .public)")
                     return
                 }
+                self.lastEmittedLocalSDP = sdpString
                 self.onLocalAnswer?(sdpString)
             }
         }
+    }
+
+    private func emitCompletedLocalDescriptionIfNeeded() {
+#if canImport(WebRTC)
+        guard let localDescription = peerConnection?.localDescription else { return }
+        let sdp = localDescription.sdp
+        guard !sdp.isEmpty, sdp != lastEmittedLocalSDP else { return }
+        lastEmittedLocalSDP = sdp
+        logger.info("🔁 emitting gathered local description. sessionId=\(self.sessionId, privacy: .public) role=\(String(describing: self.role), privacy: .public)")
+        switch role {
+        case .offerer:
+            onLocalOffer?(sdp)
+        case .answerer:
+            onLocalAnswer?(sdp)
+        }
+#endif
     }
 
     private static func detectICETransportPath(from report: RTCStatisticsReport) -> ICETransportPath {
@@ -688,7 +866,12 @@ extension WebRTCSession: RTCPeerConnectionDelegate {
         }
     }
     
-    public func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceGatheringState) {}
+    public func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceGatheringState) {
+        logger.info("ICE gathering state: \(String(describing: newState), privacy: .public)")
+        if newState == .complete {
+            emitCompletedLocalDescriptionIfNeeded()
+        }
+    }
     public func peerConnection(_ peerConnection: RTCPeerConnection, didGenerate candidate: RTCIceCandidate) {
         onLocalICECandidate?(.init(candidate: candidate.sdp, sdpMid: candidate.sdpMid, sdpMLineIndex: candidate.sdpMLineIndex))
     }

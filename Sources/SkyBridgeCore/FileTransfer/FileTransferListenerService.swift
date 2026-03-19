@@ -25,7 +25,7 @@ public final class FileTransferListenerService: ObservableObject {
     private let serviceType = "_skybridge-transfer._tcp"
     private let serviceDomain = "local."
     private var netService: NetService?
-    private(set) var activePort: UInt16?
+    public private(set) var activePort: UInt16?
     
     public init(manager: FileTransferManager, port: UInt16 = 8080) {
         self.manager = manager

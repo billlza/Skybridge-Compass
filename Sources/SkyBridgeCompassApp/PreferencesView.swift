@@ -1391,19 +1391,12 @@ struct AboutPreferencesView: View {
     private var appInfoView: some View {
         VStack(alignment: .center, spacing: 20) {
  // 应用图标
-            ZStack {
-                Circle()
-                    .fill(LinearGradient(
-                        colors: [.blue, .cyan],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ))
-                    .frame(width: 120, height: 120)
-
-                Image(systemName: "globe.americas.fill")
-                    .font(.system(size: 60))
-                    .foregroundColor(.white)
-            }
+            BrandAppIconView(
+                contentMode: .fit,
+                safeInset: 0,
+                clipCornerRadius: 28
+            )
+            .frame(width: 120, height: 120)
             .shadow(color: .blue.opacity(0.3), radius: 20, y: 10)
 
  // 应用名称和版本

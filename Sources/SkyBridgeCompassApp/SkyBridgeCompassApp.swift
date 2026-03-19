@@ -222,9 +222,13 @@ struct SkyBridgeCompassApp: App {
             VStack(spacing: 32) {
  // 应用图标和标题
                 VStack(spacing: 16) {
-                    Image(systemName: "globe.americas.fill")
-                        .font(.system(size: 64, weight: .light))
-                        .foregroundColor(.blue)
+                    BrandAppIconView(
+                        contentMode: .fit,
+                        safeInset: 0,
+                        clipCornerRadius: 24
+                    )
+                    .frame(width: 72, height: 72)
+                    .shadow(color: .blue.opacity(0.28), radius: 18, x: 0, y: 10)
 
                     Text("SkyBridge Compass Pro")
                         .font(.largeTitle.weight(.medium))
@@ -540,14 +544,35 @@ struct SkyBridgeCompassApp: App {
  /// 应用应用图标（如果可用）
     @MainActor
     private static func applyAppIconIfAvailable() -> Bool {
- // 优先使用 .icns 文件（系统会自动应用圆角遮罩），PNG 作为回退
-        let moduleICNS = Bundle.module.url(forResource: "AppIcon", withExtension: "icns")
-        let mainICNS = Bundle.main.url(forResource: "AppIcon", withExtension: "icns")
-        let modulePNG = Bundle.module.url(forResource: "AppIcon", withExtension: "png")
-        let mainPNG = Bundle.main.url(forResource: "AppIcon", withExtension: "png")
-        let chosenURL = moduleICNS ?? mainICNS ?? modulePNG ?? mainPNG
+ // On macOS, the Finder/static app icon and the running Dock icon should come
+ // from the same bundle contract. Loading the raw .icns here causes the Dock
+ // to bypass LaunchServices' packaged icon rendering, which is exactly how
+ // static and runtime icons drift apart.
+        if Bundle.main.bundleURL.pathExtension == "app" {
+            let hasBundledIcon =
+                Bundle.main.url(forResource: "AppIconDock", withExtension: "icns") != nil ||
+                Bundle.main.url(forResource: "AppIconDock", withExtension: "png") != nil ||
+                Bundle.main.url(forResource: "AppIcon", withExtension: "icns") != nil ||
+                Bundle.main.url(forResource: "AppIcon", withExtension: "png") != nil
+            if hasBundledIcon {
+                SkyBridgeLogger.ui.debugOnly("✅ 使用 bundle 静态应用图标，避免运行态与未启动态图标分叉")
+                return true
+            }
+        }
+
+ // Fallback for non-bundled/debug launches where the process has no packaged
+ // app icon for LaunchServices to resolve.
+        func resolveIconURL(named baseName: String) -> URL? {
+            let moduleICNS = Bundle.module.url(forResource: baseName, withExtension: "icns")
+            let mainICNS = Bundle.main.url(forResource: baseName, withExtension: "icns")
+            let modulePNG = Bundle.module.url(forResource: baseName, withExtension: "png")
+            let mainPNG = Bundle.main.url(forResource: baseName, withExtension: "png")
+            return moduleICNS ?? mainICNS ?? modulePNG ?? mainPNG
+        }
+
+        let chosenURL = resolveIconURL(named: "AppIconDock") ?? resolveIconURL(named: "AppIcon")
         guard let url = chosenURL else {
-            SkyBridgeLogger.ui.debugOnly("⚠️ 未找到 AppIcon.png 或 AppIcon.icns（module/main 均为空）")
+            SkyBridgeLogger.ui.debugOnly("⚠️ 未找到 AppIconDock/AppIcon 图标资源（module/main 均为空）")
             return false
         }
         guard let icon = NSImage(contentsOf: url) else {

@@ -100,6 +100,7 @@ public enum RemoteControlError: Error, LocalizedError {
     case invalidMessageLength(Int)
     case permissionDenied
     case screenCaptureFailed
+    case handshakeInitializationFailed(String)
 
     public var errorDescription: String? {
         switch self {
@@ -113,6 +114,8 @@ public enum RemoteControlError: Error, LocalizedError {
             return "权限被拒绝"
         case .screenCaptureFailed:
             return "屏幕捕获失败"
+        case .handshakeInitializationFailed(let reason):
+            return "远控握手初始化失败: \(reason)"
         }
     }
 }
@@ -206,6 +209,11 @@ public final class RemoteControlManager: BaseManager {
     @Published public private(set) var bandwidthHistory: [Double] = []
     @Published public private(set) var fpsHistory: [Int] = []
     private let historyCapacity = 120
+
+    private func emitSmokeTrace(_ message: String) {
+        guard ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil else { return }
+        print("🧪 \(message)")
+    }
 
  // MARK: 内部组件
 
@@ -319,32 +327,9 @@ public final class RemoteControlManager: BaseManager {
         let peer = PeerConnection(id: deviceId, connection: connection)
         peers[deviceId] = peer
 
-        // Optional: enable P2P handshake over this TCP channel (best-effort).
         if #available(macOS 14.0, *) {
-            Task { [weak self, weak peer] in
-                guard let self, let peer else { return }
-                do {
-                    let identity = try await DeviceIdentityKeyManager.shared.getOrCreateProtocolSigningKey()
-                    let offeredSuites = ClassicCryptoProvider().supportedSuites
-                    let transport = RemoteControlHandshakeTransport(connection: peer.connection)
-                    let driver = try HandshakeDriver(
-                        transport: transport,
-                        cryptoProvider: ClassicCryptoProvider(),
-                        protocolSignatureProvider: ClassicSignatureProvider(),
-                        protocolSigningKeyHandle: identity.keyHandle,
-                        sigAAlgorithm: .ed25519,
-                        identityPublicKey: identity.publicKey,
-                        offeredSuites: offeredSuites,
-                        policy: .default,
-                        cryptoPolicy: .default
-                    )
-                    peer.handshakeDriver = driver
-                    peer.handshakePeer = PeerIdentifier(deviceId: deviceId, displayName: nil, address: nil)
-                    self.logger.info("🔐 RemoteControl P2P handshake enabled for \(deviceId, privacy: .public)")
-                } catch {
-                    self.logger.info("🔐 RemoteControl P2P handshake disabled (best-effort init failed): \(error.localizedDescription, privacy: .public)")
-                }
-            }
+            peer.handshakePeer = PeerIdentifier(deviceId: deviceId, displayName: nil, address: nil)
+            logger.info("🔐 RemoteControl P2P handshake armed for \(deviceId, privacy: .public); waiting for MessageA")
         }
 
         if !connectedDevices.contains(deviceId) {
@@ -353,8 +338,15 @@ public final class RemoteControlManager: BaseManager {
 
         isBeingControlled = true
 
- // 1) 先开始接收对端发来的输入事件 / 流配置
+        // 1) 先开始接收对端发来的输入事件 / 流配置
         startReceivingRemoteEvents(from: peer)
+        if #available(macOS 14.0, *), peer.handshakePeer != nil {
+            logger.info("🔐 RemoteControl waiting for secure channel: peer=\(peer.id, privacy: .public)")
+            guard await waitForSecureChannelIfNeeded(for: peer) else {
+                logger.warning("⚠️ RemoteControl secure channel was not established in time for \(peer.id, privacy: .public)")
+                return
+            }
+        }
         await waitForInitialStreamConfigurationIfAvailable(for: peer)
 
  // 2) 再启动首个推流，尽量避免在未拿到 viewer 能力前回退到 JPEG
@@ -1055,6 +1047,7 @@ public final class RemoteControlManager: BaseManager {
                         throw RemoteControlError.connectionClosed
                     }
                     buffer.append(chunk)
+                    self.emitSmokeTrace("mac remote chunk peer=\(peer.id) bytes=\(chunk.count) buffered=\(buffer.count)")
                     if buffer.count > self.maxFramedMessageBytes * 2 {
                         throw RemoteControlError.invalidMessageLength(buffer.count)
                     }
@@ -1063,7 +1056,7 @@ public final class RemoteControlManager: BaseManager {
                         from: &buffer,
                         maxMessageBytes: self.maxFramedMessageBytes
                     ) {
-
+                        self.emitSmokeTrace("mac remote framed peer=\(peer.id) bytes=\(messageData.count)")
                         try await self.handleInboundRemoteFrame(from: peer, frame: messageData)
                     }
                 } catch {
@@ -1075,6 +1068,14 @@ public final class RemoteControlManager: BaseManager {
     }
 
     private func handleInboundRemoteFrame(from peer: PeerConnection, frame: Data) async throws {
+        if #available(macOS 14.0, *) {
+            let secure = peer.sessionKeys != nil
+            let hasDriver = peer.handshakeDriver != nil
+            logger.info(
+                "🔐 RemoteControl frame: peer=\(peer.id, privacy: .public) bytes=\(frame.count, privacy: .public) secure=\(secure, privacy: .public) driver=\(hasDriver, privacy: .public)"
+            )
+            emitSmokeTrace("mac remote frame peer=\(peer.id) bytes=\(frame.count) secure=\(secure) driver=\(hasDriver)")
+        }
         // If handshake established, frames become AES-GCM ciphertext of RemoteMessage JSON.
         if #available(macOS 14.0, *), let keys = peer.sessionKeys {
             let plain = try decryptRemotePayload(frame, with: keys)
@@ -1084,20 +1085,162 @@ public final class RemoteControlManager: BaseManager {
 
         // Best-effort: try JSON first (legacy), otherwise treat as handshake bytes if enabled.
         if let _ = try? JSONDecoder().decode(RemoteMessage.self, from: frame) {
+            logger.info("🔐 RemoteControl frame classified as JSON before secure channel: peer=\(peer.id, privacy: .public)")
+            emitSmokeTrace("mac remote json-before-secure peer=\(peer.id)")
             try await handleControlMessagePayload(frame, from: peer)
             return
+        }
+
+        if #available(macOS 14.0, *), peer.handshakeDriver == nil {
+            if let messageA = try? HandshakeMessageA.decode(from: frame) {
+                let suiteSummary = messageA.supportedSuites.map(\.rawValue).joined(separator: ",")
+                logger.info("🔐 RemoteControl received MessageA: peer=\(peer.id, privacy: .public) suites=\(suiteSummary, privacy: .public)")
+                emitSmokeTrace("mac remote rx MessageA peer=\(peer.id) suites=\(suiteSummary)")
+                do {
+                    peer.handshakeDriver = try makeInboundHandshakeDriver(
+                        for: peer,
+                        messageA: messageA
+                    )
+                    logger.info("🔐 RemoteControl inbound handshake driver ready for \(peer.id, privacy: .public)")
+                } catch {
+                    logger.error("❌ RemoteControl inbound handshake init failed for \(peer.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                    throw error
+                }
+            } else {
+                logger.debug("ℹ️ RemoteControl inbound non-JSON frame before MessageA; ignoring size=\(frame.count, privacy: .public)")
+                return
+            }
         }
 
         if #available(macOS 14.0, *), let driver = peer.handshakeDriver, let hPeer = peer.handshakePeer {
             await driver.handleMessage(frame, from: hPeer)
             let st = await driver.getCurrentState()
+            logger.info("🔐 RemoteControl handshake state: peer=\(peer.id, privacy: .public) state=\(String(describing: st), privacy: .public)")
+            emitSmokeTrace("mac remote state peer=\(peer.id) state=\(String(describing: st))")
             if case .established(let keys) = st {
                 peer.sessionKeys = keys
                 peer.handshakeDriver = nil
                 self.logger.info("🔐 RemoteControl handshake established for \(peer.id, privacy: .public)")
+                emitSmokeTrace("mac remote established peer=\(peer.id) suite=\(keys.negotiatedSuite.rawValue)")
             }
             return
         }
+    }
+
+    private func waitForSecureChannelIfNeeded(
+        for peer: PeerConnection,
+        timeoutSeconds: TimeInterval = 30.0
+    ) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        while Date() < deadline {
+            if peer.sessionKeys != nil {
+                logger.info("🔐 RemoteControl secure channel ready: peer=\(peer.id, privacy: .public)")
+                emitSmokeTrace("mac remote secure-ready peer=\(peer.id)")
+                return true
+            }
+            if peers[peer.id] == nil {
+                return false
+            }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        emitSmokeTrace("mac remote secure-timeout peer=\(peer.id)")
+        return peer.sessionKeys != nil
+    }
+
+    @available(macOS 14.0, *)
+    private func makeInboundHandshakeDriver(
+        for peer: PeerConnection,
+        messageA: HandshakeMessageA
+    ) throws -> HandshakeDriver {
+        let peerHasPQCGroup = messageA.supportedSuites.contains { $0.isPQCGroup }
+        let peerHasClassicGroup = messageA.supportedSuites.contains { !$0.isPQCGroup }
+        let peerHasHybridGroup = messageA.supportedSuites.contains { $0.isHybrid }
+        let peerOnlyOffersHybrid = peerHasHybridGroup && messageA.supportedSuites.allSatisfy { $0.isHybrid }
+        let compatibilityModeEnabled = UserDefaults.standard.bool(forKey: "Settings.EnableCompatibilityMode")
+        let requestedPolicy = HandshakePolicy.recommendedDefault(compatibilityModeEnabled: compatibilityModeEnabled)
+        let capability = CryptoProviderFactory.detectCapability()
+        let remotePrefersLiboqs = messageA.capabilities.providerType == .liboqs
+
+        var effectivePolicy = requestedPolicy
+        var cryptoProvider: any CryptoProvider = CryptoProviderFactory.make(policy: .classicOnly)
+        var sigAAlgorithm: ProtocolSigningAlgorithm = .ed25519
+        var offeredSuites: [CryptoSuite] = cryptoProvider.supportedSuites.filter { !$0.isPQCGroup }
+
+        if peerHasPQCGroup {
+            if remotePrefersLiboqs, capability.hasLiboqs {
+                cryptoProvider = OQSPQCCryptoProvider()
+                logger.info("🧩 RemoteControl inbound preferring liboqs provider for peer \(peer.id, privacy: .public)")
+            } else {
+                let pqcSelection: CryptoProviderFactory.SelectionPolicy = requestedPolicy.requirePQC ? .requirePQC : .preferPQC
+                cryptoProvider = CryptoProviderFactory.make(policy: pqcSelection)
+            }
+            let localPQCSuites = DeviceIdentityKeyManager.pairingIdentityAdvertisedPQCSuites(using: cryptoProvider)
+
+            if localPQCSuites.isEmpty {
+                guard peerHasClassicGroup else {
+                    throw RemoteControlError.handshakeInitializationFailed(
+                        "peer offered PQC-only suites but local PQC provider is unavailable"
+                    )
+                }
+                cryptoProvider = CryptoProviderFactory.make(policy: .classicOnly)
+                sigAAlgorithm = .ed25519
+                offeredSuites = cryptoProvider.supportedSuites.filter { !$0.isPQCGroup }
+                effectivePolicy = HandshakePolicy(
+                    requirePQC: false,
+                    allowClassicFallback: false,
+                    minimumTier: .classic,
+                    requireSecureEnclavePoP: requestedPolicy.requireSecureEnclavePoP
+                )
+                logger.info("🧩 RemoteControl inbound fallback(classic): local PQC unavailable for \(peer.id, privacy: .public)")
+            } else {
+                sigAAlgorithm = .mlDSA65
+                offeredSuites = localPQCSuites
+            }
+        } else {
+            if requestedPolicy.requirePQC {
+                logger.info("🧩 RemoteControl inbound classic bootstrap allowed for \(peer.id, privacy: .public)")
+            }
+            cryptoProvider = CryptoProviderFactory.make(policy: .classicOnly)
+            sigAAlgorithm = .ed25519
+            offeredSuites = cryptoProvider.supportedSuites.filter { !$0.isPQCGroup }
+            effectivePolicy = HandshakePolicy(
+                requirePQC: false,
+                allowClassicFallback: false,
+                minimumTier: .classic,
+                requireSecureEnclavePoP: requestedPolicy.requireSecureEnclavePoP
+            )
+        }
+
+        let identityProvider = DeviceIdentityHandshakeProvider(
+            sigAAlgorithm: sigAAlgorithm,
+            includeSecureEnclavePoP: effectivePolicy.requireSecureEnclavePoP
+        )
+        let peerSuitesSummary = messageA.supportedSuites.map(\.rawValue).joined(separator: ",")
+        let localSuitesSummary = offeredSuites.map(\.rawValue).joined(separator: ",")
+        let providerName = String(describing: type(of: cryptoProvider))
+        let cryptoPolicy: CryptoPolicy = peerHasHybridGroup
+            ? CryptoPolicy(
+                minimumSecurityTier: peerOnlyOffersHybrid ? .hybridPreferred : .pqcPreferred,
+                allowExperimentalHybrid: true,
+                advertiseHybrid: true,
+                requireHybridIfAvailable: peerOnlyOffersHybrid
+            )
+            : .default
+        logger.info(
+            "🔐 RemoteControl driver selection: peer=\(peer.id, privacy: .public) peerSuites=\(peerSuitesSummary, privacy: .public) localSuites=\(localSuitesSummary, privacy: .public) provider=\(providerName, privacy: .public) sigA=\(sigAAlgorithm.rawValue, privacy: .public) requirePQC=\(effectivePolicy.requirePQC, privacy: .public)"
+        )
+        emitSmokeTrace("mac remote driver peer=\(peer.id) peerSuites=\(peerSuitesSummary) localSuites=\(localSuitesSummary) provider=\(providerName) sigA=\(sigAAlgorithm.rawValue) requirePQC=\(effectivePolicy.requirePQC)")
+        let transport = RemoteControlHandshakeTransport(connection: peer.connection)
+        return try HandshakeDriver(
+            transport: transport,
+            cryptoProvider: cryptoProvider,
+            protocolSignatureProvider: ProtocolSignatureProviderSelector.select(for: sigAAlgorithm),
+            identityProvider: identityProvider,
+            sigAAlgorithm: sigAAlgorithm,
+            offeredSuites: offeredSuites,
+            policy: effectivePolicy,
+            cryptoPolicy: cryptoPolicy
+        )
     }
 
     private func handleControlMessagePayload(_ messageData: Data, from peer: PeerConnection) async throws {

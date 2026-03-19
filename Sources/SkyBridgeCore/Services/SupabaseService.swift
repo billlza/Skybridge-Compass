@@ -132,8 +132,9 @@ public final class SupabaseService: BaseManager {
         self.urlSession = URLSession(configuration: config)
         
         super.init(category: "SupabaseService")
-        
-        self.configuration = Configuration.fromEnvironment()
+
+        let useInMemoryKeychain = ProcessInfo.processInfo.environment["SKYBRIDGE_KEYCHAIN_IN_MEMORY"] == "1"
+        self.configuration = useInMemoryKeychain ? nil : Configuration.fromEnvironment()
     }
     
  // MARK: - BaseManager重写

@@ -420,26 +420,13 @@ struct LiquidGlassButtonStyle: ButtonStyle {
 @available(macOS 14.0, *)
 struct AboutWindow: View {
     @Environment(\.dismiss) private var dismiss
-    
-    private var aboutIconPath: String {
-        if let bundled = Bundle.module.url(forResource: "about-main-icon", withExtension: "svg")
-            ?? Bundle.module.url(
-                forResource: "about-main-icon",
-                withExtension: "svg",
-                subdirectory: "Icons"
-            ) {
-            return bundled.path
-        }
-        return "/Users/bill/Desktop/1764932992803-2.svg"
-    }
-    
+
     var body: some View {
         VStack(spacing: 24) {
  // 应用图标和名称
             VStack(spacing: 12) {
-                SVGEmbeddedImageView(
-                    filePath: aboutIconPath,
-                    contentMode: .fill,
+                BrandAppIconView(
+                    contentMode: .fit,
                     safeInset: 0,
                     clipCornerRadius: 22
                 )

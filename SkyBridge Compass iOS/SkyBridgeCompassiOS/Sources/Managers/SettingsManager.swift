@@ -53,7 +53,8 @@ public class SettingsManager: ObservableObject {
         didSet { UserDefaults.standard.set(enableCloudKitSync, forKey: "enable_cloudkit_sync") }
     }
 
-    // 实验功能（发行版建议默认关闭/标注 Beta）
+    // 兼容保留字段：旧版本曾用它控制 Beta Banner。
+    // 正式版阶段不再用它门控文件传输/远程桌面核心功能。
     @Published public var enableExperimentalFeatures: Bool = false {
         didSet { UserDefaults.standard.set(enableExperimentalFeatures, forKey: "enable_experimental_features") }
     }

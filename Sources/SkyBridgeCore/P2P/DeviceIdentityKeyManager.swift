@@ -290,6 +290,35 @@ public actor DeviceIdentityKeyManager {
         SkyBridgeLogger.p2p.debug("Signed data with identity key: \(keyInfo.shortId)")
         return signature as Data
     }
+
+    /// Prewarm identity material used by local P2P / current-path pairing so the first real connection
+    /// does not block on first-touch keychain / key generation work.
+    public func prewarmConnectionIdentityMaterials() async {
+        do {
+            _ = try await getOrCreateIdentityKey()
+        } catch {
+            SkyBridgeLogger.p2p.warning(
+                "⚠️ Prewarm identity key failed: \(error.localizedDescription, privacy: .public)"
+            )
+        }
+
+        do {
+            _ = try await getOrCreateProtocolSigningKey()
+        } catch {
+            SkyBridgeLogger.p2p.warning(
+                "⚠️ Prewarm protocol signing key failed: \(error.localizedDescription, privacy: .public)"
+            )
+        }
+
+        let provider = CryptoProviderFactory.make(policy: .preferPQC)
+        do {
+            _ = try await pairingIdentityKEMPublicKeys(using: provider)
+        } catch {
+            SkyBridgeLogger.p2p.warning(
+                "⚠️ Prewarm pairing KEM identity keys failed: \(error.localizedDescription, privacy: .public)"
+            )
+        }
+    }
     
  /// 获取身份密钥句柄（Keychain/Secure Enclave）
     public func getSigningKeyHandle() async throws -> SigningKeyHandle {

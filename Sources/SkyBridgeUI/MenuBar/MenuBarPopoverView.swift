@@ -8,6 +8,7 @@
 
 import SwiftUI
 import SkyBridgeCore
+import AppKit
 
 /// 菜单栏弹出面板视图
 /// Requirements: 1.2
@@ -102,8 +103,23 @@ struct CompassIcon: View {
     let size: CGFloat
     
     var body: some View {
+        Group {
+            if let image = MenuBarBrandIconLoader.load() {
+                Image(nsImage: image)
+                    .resizable()
+                    .interpolation(.high)
+                    .antialiased(true)
+                    .aspectRatio(contentMode: .fit)
+                    .clipShape(RoundedRectangle(cornerRadius: size * 0.22, style: .continuous))
+            } else {
+                legacyCompassIcon
+            }
+        }
+        .frame(width: size, height: size)
+    }
+
+    private var legacyCompassIcon: some View {
         ZStack {
- // 外圈
             Circle()
                 .stroke(
                     LinearGradient(
@@ -113,13 +129,11 @@ struct CompassIcon: View {
                     ),
                     lineWidth: 2
                 )
-            
- // 内圈刻度
+
             Circle()
                 .stroke(Color.secondary.opacity(0.3), lineWidth: 0.5)
                 .padding(4)
-            
- // 指针 - 北（红色）
+
             CompassNeedle(isNorth: true)
                 .fill(
                     LinearGradient(
@@ -128,8 +142,7 @@ struct CompassIcon: View {
                         endPoint: .center
                     )
                 )
-            
- // 指针 - 南（白色/浅色）
+
             CompassNeedle(isNorth: false)
                 .fill(
                     LinearGradient(
@@ -138,13 +151,37 @@ struct CompassIcon: View {
                         endPoint: .center
                     )
                 )
-            
- // 中心点
+
             Circle()
                 .fill(Color.blue)
                 .frame(width: size * 0.15, height: size * 0.15)
         }
-        .frame(width: size, height: size)
+    }
+}
+
+@MainActor
+private enum MenuBarBrandIconLoader {
+    static func load() -> NSImage? {
+        if let appIcon = NSApp.applicationIconImage.copy() as? NSImage,
+           appIcon.size.width > 0,
+           appIcon.size.height > 0 {
+            return appIcon
+        }
+
+        for bundle in [Bundle.main] {
+            if let image = bundle.image(forResource: NSImage.Name("BrandIcon")) {
+                return image
+            }
+
+            for candidate in [("AppIcon", "png"), ("AppIconDock", "png"), ("BrandIcon", "png")] {
+                if let url = bundle.url(forResource: candidate.0, withExtension: candidate.1),
+                   let image = NSImage(contentsOf: url) {
+                    return image
+                }
+            }
+        }
+
+        return nil
     }
 }
 

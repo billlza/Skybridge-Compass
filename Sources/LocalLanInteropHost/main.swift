@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import SkyBridgeCore
 
 @MainActor
@@ -30,13 +31,18 @@ private final class LocalLanInteropHostCoordinator {
         let settingsPath = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/com.SkyBridge.Compass/settings.json")
 
-        print("LocalLanInteropHost ready.")
-        print("Discovery/control: _skybridge._tcp on 9527")
-        print("File transfer: 8080")
-        print("Remote desktop: 5901")
-        print("Inbound files: \(inboundDirectory.path)")
-        print("Settings reference: \(settingsPath.path)")
-        print("Keep this process running while Azure relay and Windows client are active.")
+        emit("LocalLanInteropHost ready.")
+        emit("Discovery/control: _skybridge._tcp on 9527")
+        emit("File transfer: \(fileTransferListener.activePort ?? 8080)")
+        emit("Remote desktop: \(remoteControlServer.activePort ?? 5901)")
+        emit("Inbound files: \(inboundDirectory.path)")
+        emit("Settings reference: \(settingsPath.path)")
+        emit("Keep this process running while Azure relay and Windows client are active.")
+    }
+
+    private func emit(_ line: String) {
+        let data = Data((line + "\n").utf8)
+        FileHandle.standardOutput.write(data)
     }
 }
 
@@ -54,6 +60,7 @@ private enum HostStartupError: LocalizedError {
 @main
 struct LocalLanInteropHostMain {
     static func main() async {
+        setenv("SKYBRIDGE_SMOKE_ROLE", "mac-host", 1)
         let coordinator = await MainActor.run { LocalLanInteropHostCoordinator() }
 
         do {

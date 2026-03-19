@@ -113,7 +113,10 @@ import Security
 
         configuration = Self.loadConfigurationFromEnvironment()
         isSupabaseMode = false
-        if let session = try? loadSessionFromKeychain() {
+        // Smoke/test harnesses can opt out of synchronous Security.framework keychain
+        // reads and inject a session explicitly after startup.
+        let useInMemoryKeychain = ProcessInfo.processInfo.environment["SKYBRIDGE_KEYCHAIN_IN_MEMORY"] == "1"
+        if !useInMemoryKeychain, let session = try? loadSessionFromKeychain() {
             sessionSubject.send(session)
         }
     }

@@ -5,6 +5,7 @@ const https = require('https');
 const fs = require('fs');
 const crypto = require('crypto');
 const os = require('os');
+const { spawnSync } = require('child_process');
 
 const express = require('express');
 const { WebSocketServer } = require('ws');
@@ -90,6 +91,10 @@ const ENV_ALLOWLIST_ONLY = /^(1|true|yes)$/i.test(process.env.KILL_SWITCH_ALLOWL
 const STRICT_DEVICE_ID_RE = /^[A-Za-z0-9._:-]{16,128}$/;
 const FINGERPRINT_RE = /^[0-9a-f]{64}$/;
 const ALLOWED_PROTOCOL_SIGNING_ALGORITHMS = new Set(['Ed25519', 'ML-DSA-65']);
+const MLDSA65_PUBLIC_KEY_BYTES = 1952;
+const MLDSA65_OID_DER = Buffer.from('608648016503040312', 'hex');
+const MLDSA_VERIFY_HELPER = String(process.env.SKYBRIDGE_MLDSA_VERIFY_HELPER || '').trim();
+const MLDSA_VERIFY_HELPER_TIMEOUT_MS = Number(process.env.SKYBRIDGE_MLDSA_VERIFY_HELPER_TIMEOUT_MS || 2000);
 
 const TLS_CERT = process.env.TLS_CERT || '';
 const TLS_KEY = process.env.TLS_KEY || '';
@@ -298,19 +303,126 @@ function ed25519RawPublicKeyToSpki(rawKey) {
   return Buffer.concat([prefix, rawKey]);
 }
 
-function verifyChallengeSignature(binding, signatureBase64, challenge) {
-  if (binding.protocolSigningAlgorithm !== 'Ed25519') {
+function encodeDerLength(length) {
+  if (!Number.isInteger(length) || length < 0) return null;
+  if (length < 0x80) return Buffer.from([length]);
+  if (length <= 0xff) return Buffer.from([0x81, length]);
+  if (length <= 0xffff) return Buffer.from([0x82, (length >> 8) & 0xff, length & 0xff]);
+  if (length <= 0xffffff) return Buffer.from([0x83, (length >> 16) & 0xff, (length >> 8) & 0xff, length & 0xff]);
+  return null;
+}
+
+function rawPublicKeyToSpki(rawKey, algorithmOidDer) {
+  if (!Buffer.isBuffer(rawKey) || !Buffer.isBuffer(algorithmOidDer) || !algorithmOidDer.length) {
+    return null;
+  }
+  const oidLength = encodeDerLength(algorithmOidDer.length);
+  if (!oidLength) return null;
+  const algorithmBody = Buffer.concat([
+    Buffer.from([0x06]),
+    oidLength,
+    algorithmOidDer
+  ]);
+  const algorithmIdentifierLength = encodeDerLength(algorithmBody.length);
+  if (!algorithmIdentifierLength) return null;
+  const algorithmIdentifier = Buffer.concat([
+    Buffer.from([0x30]),
+    algorithmIdentifierLength,
+    algorithmBody
+  ]);
+
+  const bitStringPayload = Buffer.concat([Buffer.from([0x00]), rawKey]);
+  const bitStringLength = encodeDerLength(bitStringPayload.length);
+  if (!bitStringLength) return null;
+  const subjectPublicKey = Buffer.concat([
+    Buffer.from([0x03]),
+    bitStringLength,
+    bitStringPayload
+  ]);
+
+  const spkiBody = Buffer.concat([algorithmIdentifier, subjectPublicKey]);
+  const spkiLength = encodeDerLength(spkiBody.length);
+  if (!spkiLength) return null;
+  return Buffer.concat([
+    Buffer.from([0x30]),
+    spkiLength,
+    spkiBody
+  ]);
+}
+
+function mldsa65RawPublicKeyToSpki(rawKey) {
+  if (!Buffer.isBuffer(rawKey) || rawKey.length !== MLDSA65_PUBLIC_KEY_BYTES) {
+    return null;
+  }
+  return rawPublicKeyToSpki(rawKey, MLDSA65_OID_DER);
+}
+
+function verifyMldsa65ChallengeSignature(rawPublicKey, signature, challenge) {
+  const spki = mldsa65RawPublicKeyToSpki(rawPublicKey);
+  if (!spki) return false;
+  try {
+    return crypto.verify(
+      null,
+      challengeSignaturePayload(challenge),
+      { key: spki, format: 'der', type: 'spki' },
+      signature
+    );
+  } catch (_) {
+    if (!MLDSA_VERIFY_HELPER) return false;
+  }
+
+  const helper = MLDSA_VERIFY_HELPER;
+  if (!helper) return false;
+  try {
+    const result = spawnSync(helper, [
+      'internal',
+      'verify-mldsa',
+      '--message-base64', challengeSignaturePayload(challenge).toString('base64'),
+      '--signature-base64', signature.toString('base64'),
+      '--public-key-base64', rawPublicKey.toString('base64')
+    ], {
+      encoding: 'utf8',
+      timeout: MLDSA_VERIFY_HELPER_TIMEOUT_MS,
+      maxBuffer: 64 * 1024
+    });
+    if (result.error) {
+      console.warn('[ML-DSA verify helper] execution failed:', result.error.message);
+      return false;
+    }
+    if (result.status !== 0) {
+      if (result.stderr) {
+        console.warn('[ML-DSA verify helper] rejected signature:', result.stderr.trim());
+      }
+      return false;
+    }
+    return true;
+  } catch (error) {
+    console.warn('[ML-DSA verify helper] unexpected failure:', error.message);
     return false;
   }
+}
+
+function verifyChallengeSignature(binding, signatureBase64, challenge) {
   const signature = Buffer.from(String(signatureBase64 || '').trim(), 'base64');
   if (!signature.length || !binding.protocolPublicKeyBytes) {
     return false;
   }
-  const spki = ed25519RawPublicKeyToSpki(binding.protocolPublicKeyBytes);
-  if (!spki) return false;
-  try {
-    return crypto.verify(null, challengeSignaturePayload(challenge), { key: spki, format: 'der', type: 'spki' }, signature);
-  } catch (_) {
+  if (binding.protocolSigningAlgorithm === 'Ed25519') {
+    const spki = ed25519RawPublicKeyToSpki(binding.protocolPublicKeyBytes);
+    if (!spki) return false;
+    try {
+      return crypto.verify(
+        null,
+        challengeSignaturePayload(challenge),
+        { key: spki, format: 'der', type: 'spki' },
+        signature
+      );
+    } catch (_) {
+      return false;
+    }
+  } else if (binding.protocolSigningAlgorithm === 'ML-DSA-65') {
+    return verifyMldsa65ChallengeSignature(binding.protocolPublicKeyBytes, signature, challenge);
+  } else {
     return false;
   }
 }

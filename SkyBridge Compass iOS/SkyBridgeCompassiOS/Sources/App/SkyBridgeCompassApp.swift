@@ -154,10 +154,6 @@ struct SkyBridgeCompassApp: App {
         SkyBridgeLogger.shared.info("🧪 Installing UI test fixtures: \(Array(arguments).sorted().joined(separator: ","))")
         var fixtureConnections: [Connection] = []
 
-        if arguments.contains("UITEST_SCENARIO_FILES") || arguments.contains("UITEST_SCENARIO_REMOTE") {
-            SettingsManager.instance.enableExperimentalFeatures = true
-        }
-
         if arguments.contains("UITEST_SCENARIO_FILES") {
             let fileConnection = makeUITestConnection(
                 id: "uitest-files-connection",
@@ -670,13 +666,16 @@ class BiometricAuthManager {
 @MainActor
 private final class LocalWebRTCSmokeHarness {
     static let shared = LocalWebRTCSmokeHarness()
+    private static let xwingSuiteWireID: UInt16 = 0x0001
+    private static let mlkem768SuiteWireID: UInt16 = 0x0101
+    private static let mlkem768FSSuiteWireID: UInt16 = 0x0102
 
     private var didStart = false
 
     private init() {}
 
     var isEnabled: Bool {
-        role == "ios-client"
+        role == "ios-client" || role == "ios-host"
     }
 
     private var role: String {
@@ -689,24 +688,53 @@ private final class LocalWebRTCSmokeHarness {
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
 
+    private var expectsPQCRekey: Bool {
+        ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_EXPECT_PQC_REKEY"] == "1"
+    }
+
+    private var expectsHandshakeOnly: Bool {
+        ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_EXPECT_HANDSHAKE_ONLY"] == "1"
+    }
+
+    private func environmentValue(_ name: String) -> String? {
+        guard let raw = ProcessInfo.processInfo.environment[name] else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
     func startIfNeeded() async {
         guard isEnabled, !didStart else { return }
         didStart = true
 
         let reporter = SmokeStatusReporter(statusURL: statusURL())
         reporter.reset()
-        reporter.append("boot role=ios-client")
-
-        guard !connectCode.isEmpty else {
-            reporter.append("failed stage=bootstrap error=missing_connect_code")
-            return
-        }
+        await exportLocalPQCIdentityIfNeeded(reporter: reporter)
+        await preseedPeerKEMTrustIfNeeded(reporter: reporter)
 
         let manager = CrossNetworkWebRTCManager.instance
         await manager.disconnect()
 
-        reporter.append("connect \(connectCode)")
-        await manager.connect(withCode: connectCode)
+        switch role {
+        case "ios-client":
+            reporter.append("boot role=ios-client")
+            guard !connectCode.isEmpty else {
+                reporter.append("failed stage=bootstrap error=missing_connect_code")
+                return
+            }
+            reporter.append("connect \(connectCode)")
+            await manager.connect(withCode: connectCode)
+        case "ios-host":
+            reporter.append("boot role=ios-host")
+            guard let code = await manager.generateConnectionCode(), !code.isEmpty else {
+                reporter.append("failed stage=bootstrap error=missing_generated_code")
+                return
+            }
+            writeGeneratedCode(code)
+            reporter.append("code \(code)")
+        default:
+            reporter.append("failed stage=bootstrap error=unsupported_role_\(role)")
+            return
+        }
 
         let timeoutSeconds = Double(ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_TIMEOUT_SECONDS"] ?? "") ?? 90
         let deadline = Date().addingTimeInterval(timeoutSeconds)
@@ -745,14 +773,43 @@ private final class LocalWebRTCSmokeHarness {
                 reporter.append(
                     "handshake session=\(sessionId) suite=\(Self.sanitize(negotiatedSuite))"
                 )
-                manager.startRemoteDesktopHeartbeat()
+                if role == "ios-client" {
+                    manager.startRemoteDesktopHeartbeat()
+                }
             }
 
-            if let screenData = manager.lastScreenData {
+            if role == "ios-client", let screenData = manager.lastScreenData {
                 reporter.append(
                     "success frame=\(screenData.width)x\(screenData.height) bytes=\(screenData.imageData.count)"
                 )
                 return
+            }
+
+            if role == "ios-client",
+               expectsHandshakeOnly,
+               case .handshakeComplete(let sessionId, let negotiatedSuite) = manager.readiness {
+                reporter.append(
+                    "success session=\(sessionId) suite=\(Self.sanitize(negotiatedSuite)) handshakeOnly=1"
+                )
+                return
+            }
+
+            if role == "ios-host",
+               case .handshakeComplete(let sessionId, let negotiatedSuite) = manager.readiness {
+                if expectsPQCRekey {
+                    if let rekeyDescription = manager.lastRekeyEvent,
+                       rekeyDescription.starts(with: "complete suite=") {
+                        reporter.append(
+                            "success session=\(sessionId) suite=\(Self.sanitize(negotiatedSuite)) rekey=\(Self.sanitize(rekeyDescription))"
+                        )
+                        return
+                    }
+                } else {
+                    reporter.append(
+                        "success session=\(sessionId) suite=\(Self.sanitize(negotiatedSuite))"
+                    )
+                    return
+                }
             }
 
             try? await Task.sleep(for: .milliseconds(250))
@@ -768,6 +825,135 @@ private final class LocalWebRTCSmokeHarness {
         return FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)
             .first?
             .appendingPathComponent(fileName)
+    }
+
+    private func codeURL() -> URL? {
+        let fileName = ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_CODE_BASENAME"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "skybridge-smoke-code.txt"
+        guard !fileName.isEmpty else { return nil }
+        return FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)
+            .first?
+            .appendingPathComponent(fileName)
+    }
+
+    private func writeGeneratedCode(_ code: String) {
+        guard let codeURL = codeURL() else { return }
+        try? FileManager.default.createDirectory(
+            at: codeURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try? code.appending("\n").write(to: codeURL, atomically: true, encoding: .utf8)
+    }
+
+    private func pqcReportURL() -> URL? {
+        guard let fileName = environmentValue("SKYBRIDGE_SMOKE_PQC_REPORT_BASENAME") else {
+            return nil
+        }
+        return FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)
+            .first?
+            .appendingPathComponent(fileName)
+    }
+
+    private func resolvedLocalDeviceID() -> String {
+        if let explicit = environmentValue("SKYBRIDGE_DEVICE_ID") {
+            return explicit
+        }
+        return KeychainManager.shared.getOrGenerateDeviceId()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func decodeBase64Key(
+        _ name: String,
+        reporter: SmokeStatusReporter
+    ) -> Data? {
+        guard let raw = environmentValue(name) else { return nil }
+        guard let data = Data(base64Encoded: raw, options: [.ignoreUnknownCharacters]), !data.isEmpty else {
+            reporter.append("failed stage=pqc-preseed error=invalid_base64_\(name)")
+            return nil
+        }
+        return data
+    }
+
+    private func preseedPeerKEMTrustIfNeeded(reporter: SmokeStatusReporter) async {
+        guard let peerDeviceID = environmentValue("SKYBRIDGE_PQC_PEER_DEVICE_ID") else {
+            return
+        }
+
+        var keysBySuite: [UInt16: KEMPublicKeyInfo] = [:]
+        if let xwing = decodeBase64Key("SKYBRIDGE_PQC_PEER_XWING_PUBLIC_KEY_BASE64", reporter: reporter) {
+            keysBySuite[Self.xwingSuiteWireID] = KEMPublicKeyInfo(
+                suiteWireId: Self.xwingSuiteWireID,
+                publicKey: xwing
+            )
+        }
+        if let mlkem768 = decodeBase64Key("SKYBRIDGE_PQC_PEER_MLKEM768_PUBLIC_KEY_BASE64", reporter: reporter) {
+            keysBySuite[Self.mlkem768SuiteWireID] = KEMPublicKeyInfo(
+                suiteWireId: Self.mlkem768SuiteWireID,
+                publicKey: mlkem768
+            )
+            if environmentValue("SKYBRIDGE_PQC_PEER_MLKEM768FS_PUBLIC_KEY_BASE64") == nil {
+                keysBySuite[Self.mlkem768FSSuiteWireID] = KEMPublicKeyInfo(
+                    suiteWireId: Self.mlkem768FSSuiteWireID,
+                    publicKey: mlkem768
+                )
+            }
+        }
+        if let mlkem768fs = decodeBase64Key("SKYBRIDGE_PQC_PEER_MLKEM768FS_PUBLIC_KEY_BASE64", reporter: reporter) {
+            keysBySuite[Self.mlkem768FSSuiteWireID] = KEMPublicKeyInfo(
+                suiteWireId: Self.mlkem768FSSuiteWireID,
+                publicKey: mlkem768fs
+            )
+        }
+
+        let keys = keysBySuite.keys.sorted().compactMap { keysBySuite[$0] }
+        guard !keys.isEmpty else {
+            reporter.append("pqc-preseed skipped device=\(Self.sanitize(peerDeviceID)) reason=missing_keys")
+            return
+        }
+
+        await KEMTrustStore.shared.upsert(deviceId: peerDeviceID, kemPublicKeys: keys)
+        let suites = keys.map { String(format: "0x%04x", $0.suiteWireId) }.joined(separator: ",")
+        reporter.append("pqc-preseed device=\(Self.sanitize(peerDeviceID)) suites=\(suites)")
+    }
+
+    private func exportLocalPQCIdentityIfNeeded(reporter: SmokeStatusReporter) async {
+        guard let reportURL = pqcReportURL() else { return }
+
+        struct LocalPQCReport: Encodable {
+            struct PublicKeyEntry: Encodable {
+                let suiteWireId: UInt16
+                let publicKeyBase64: String
+            }
+
+            let deviceId: String
+            let keys: [PublicKeyEntry]
+        }
+
+        do {
+            let keys = try await P2PKEMIdentityKeyStore.shared.getOrCreateBootstrapPublicKeys()
+            let report = LocalPQCReport(
+                deviceId: resolvedLocalDeviceID(),
+                keys: keys.map { key in
+                    LocalPQCReport.PublicKeyEntry(
+                        suiteWireId: key.suiteWireId,
+                        publicKeyBase64: key.publicKey.base64EncodedString()
+                    )
+                }
+            )
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let data = try encoder.encode(report)
+            try FileManager.default.createDirectory(
+                at: reportURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try data.write(to: reportURL, options: .atomic)
+            reporter.append(
+                "pqc-report device=\(Self.sanitize(report.deviceId)) keys=\(report.keys.count) file=\(reportURL.lastPathComponent)"
+            )
+        } catch {
+            reporter.append("failed stage=pqc-report error=\(Self.sanitize(error.localizedDescription))")
+        }
     }
 
     private static func sanitize(_ value: String) -> String {

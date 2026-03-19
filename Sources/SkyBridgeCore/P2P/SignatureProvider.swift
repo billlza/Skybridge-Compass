@@ -219,11 +219,16 @@ public struct PQCSignatureProvider: ProtocolSignatureProvider {
             #if HAS_APPLE_PQC_SDK
             if #available(macOS 26.0, iOS 26.0, *) {
                 do {
-                    return try await signWithApplePQC(data, key: key)
+                    let signature = try await signWithApplePQC(data, key: key)
+                    emitSmokeBackendLog("sign backend=apple bytes=\(signature.count)")
+                    return signature
                 } catch let appleError {
+                    emitSmokeBackendLog("sign apple_failed=\(appleError.localizedDescription)")
                     // Apple PQC 失败（常见：参数长度/格式不匹配），尝试 OQS 以保证互操作性
                     do {
-                        return try await signWithOQS(data, key: key)
+                        let signature = try await signWithOQS(data, key: key)
+                        emitSmokeBackendLog("sign backend=oqs bytes=\(signature.count)")
+                        return signature
                     } catch {
                         // 两者都失败：保留 Apple 的原始错误，更利于定位
                         throw appleError
@@ -247,13 +252,17 @@ public struct PQCSignatureProvider: ProtocolSignatureProvider {
             if #available(macOS 26.0, iOS 26.0, *) {
                 do {
                     let ok = try await verifyWithApplePQC(data, signature: signature, publicKey: publicKey)
+                    emitSmokeBackendLog("verify backend=apple ok=\(ok)")
                     if ok { return true }
                 } catch {
+                    emitSmokeBackendLog("verify apple_failed=\(error.localizedDescription)")
                     // ignore and fall back to OQS
                 }
             }
             #endif
-            return try await verifyWithOQS(data, signature: signature, publicKey: publicKey)
+            let ok = try await verifyWithOQS(data, signature: signature, publicKey: publicKey)
+            emitSmokeBackendLog("verify backend=oqs ok=\(ok)")
+            return ok
         }
     }
 
@@ -357,6 +366,11 @@ public struct PQCSignatureProvider: ProtocolSignatureProvider {
         }
 
         return try await OQSMLDSAHelper.verify(data: data, signature: signature, publicKey: publicKey)
+    }
+
+    private func emitSmokeBackendLog(_ message: String) {
+        guard ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil else { return }
+        print("🧪 mac MLDSA \(message)")
     }
 }
 

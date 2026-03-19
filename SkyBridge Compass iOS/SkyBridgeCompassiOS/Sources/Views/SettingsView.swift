@@ -217,10 +217,6 @@ struct SettingsView: View {
             Toggle(isOn: $settingsManager.enableRealTimeWeather) {
                 Label(localizationManager.localized("settings.realtime_weather_api"), systemImage: "cloud.sun")
             }
-
-            Toggle(isOn: $settingsManager.enableExperimentalFeatures) {
-                Label(t("settings.experimental"), systemImage: "testtube.2")
-            }
         }
     }
     

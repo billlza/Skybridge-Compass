@@ -254,13 +254,27 @@ test('turn credentials accept bootstrap-auth synthetic devices', async () => {
   }
 });
 
-function makeIdentityBinding(prefix) {
-  const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
-  const publicKeyDer = publicKey.export({ type: 'spki', format: 'der' });
-  const rawPublicKey = publicKeyDer.subarray(publicKeyDer.length - 32);
+function makeIdentityBinding(prefix, algorithm = 'Ed25519') {
+  let publicKey;
+  let privateKey;
+  let rawPublicKey;
+  let protocolSigningAlgorithm;
+
+  if (algorithm === 'ML-DSA-65') {
+    ({ publicKey, privateKey } = crypto.generateKeyPairSync('ml-dsa-65'));
+    const publicKeyDer = publicKey.export({ type: 'spki', format: 'der' });
+    rawPublicKey = publicKeyDer.subarray(publicKeyDer.length - 1952);
+    protocolSigningAlgorithm = 'ML-DSA-65';
+  } else {
+    ({ publicKey, privateKey } = crypto.generateKeyPairSync('ed25519'));
+    const publicKeyDer = publicKey.export({ type: 'spki', format: 'der' });
+    rawPublicKey = publicKeyDer.subarray(publicKeyDer.length - 32);
+    protocolSigningAlgorithm = 'Ed25519';
+  }
+
   return {
     deviceId: `${prefix}-${crypto.randomUUID()}`,
-    protocolSigningAlgorithm: 'Ed25519',
+    protocolSigningAlgorithm,
     protocolPublicKeyBytes: rawPublicKey,
     protocolPublicKeyFingerprint: crypto.createHash('sha256').update(rawPublicKey).digest('hex'),
     privateKey
@@ -316,6 +330,13 @@ async function issueAdmissionLease(binding) {
   assert.equal(admission.status, 200);
   return admission.json;
 }
+
+test('admission accepts ML-DSA-65 challenge signatures', async () => {
+  const pqcBinding = makeIdentityBinding('mldsa-admission', 'ML-DSA-65');
+  const admissionLease = await issueAdmissionLease(pqcBinding);
+  assert.equal(typeof admissionLease.admissionToken, 'string');
+  assert.ok(admissionLease.admissionToken.length > 0);
+});
 
 async function postJSON(path, { headers = {}, body, requiresAuth = false } = {}) {
   const requestHeaders = {

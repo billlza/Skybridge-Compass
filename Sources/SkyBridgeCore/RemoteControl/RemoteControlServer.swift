@@ -24,7 +24,7 @@ public final class RemoteControlServer: ObservableObject {
     private let serviceType = "_skybridge-remote._tcp"
     private let serviceDomain = "local."
     private var netService: NetService?
-    private(set) var activePort: UInt16?
+    public private(set) var activePort: UInt16?
     
     public init(manager: RemoteControlManager, port: UInt16 = 5901) {
         self.manager = manager
@@ -175,6 +175,37 @@ public final class RemoteControlServer: ObservableObject {
             deviceId = "\(host)"
         } else {
             deviceId = UUID().uuidString
+        }
+
+        if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
+            print("🧪 mac remote server incoming endpoint=\(String(describing: connection.endpoint)) deviceId=\(deviceId)")
+        }
+
+        connection.stateUpdateHandler = { [weak self] state in
+            guard let self else { return }
+            Task { @MainActor in
+                let rendered: String
+                switch state {
+                case .setup:
+                    rendered = "setup"
+                case .waiting(let error):
+                    rendered = "waiting \(error)"
+                case .preparing:
+                    rendered = "preparing"
+                case .ready:
+                    rendered = "ready"
+                case .failed(let error):
+                    rendered = "failed \(error)"
+                case .cancelled:
+                    rendered = "cancelled"
+                @unknown default:
+                    rendered = "unknown"
+                }
+                self.log.info("🔐 RemoteControlServer connection state: peer=\(deviceId, privacy: .public) state=\(rendered, privacy: .public)")
+                if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
+                    print("🧪 mac remote server state peer=\(deviceId) state=\(rendered)")
+                }
+            }
         }
         
         connection.start(queue: queue)

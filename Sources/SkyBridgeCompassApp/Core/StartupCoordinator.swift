@@ -152,6 +152,12 @@ public class StartupCoordinator: ObservableObject {
 // 初始化本机强身份（用于设备发现的本机判定）
         await SelfIdentityProvider.shared.loadOrCreate()
         logger.debug("🆔 本机强身份初始化完成")
+
+        // Prewarm identity / signing / pairing KEM material up front so the first real
+        // P2P attempt does not spend its handshake window on keychain prompts or key generation.
+        await DeviceIdentityKeyManager.shared.prewarmConnectionIdentityMaterials()
+        _ = TrustSyncService.shared
+        logger.debug("🔐 P2P 身份材料与信任缓存预热完成")
         
         logger.debug("🔒 安全服务初始化完成")
     }

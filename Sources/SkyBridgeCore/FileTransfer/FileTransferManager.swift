@@ -629,10 +629,15 @@ public class FileTransferManager: BaseManager {
             #if canImport(UserNotifications)
             if Self.canUseUserNotificationsSafely() {
                 let content = UNMutableNotificationContent()
-                content.title = "文件接收完成"
+                content.title = LocalizationManager.shared.localizedString("notifications.fileReceived.completed")
                 content.subtitle = effectiveDeviceName
                 // Use the actual resolved path to avoid confusion when a custom receive directory is set.
-                content.body = "\(metadata.fileName) 已保存到 \(receivePath.path)"
+                content.body = String(
+                    format: LocalizationManager.shared.localizedString("notifications.fileReceived.savedTo"),
+                    locale: LocalizationManager.shared.locale,
+                    metadata.fileName,
+                    receivePath.path
+                )
                 content.userInfo = [
                     "transferId": transfer.id,
                     "localPath": receivePath.path
@@ -1563,12 +1568,21 @@ public class FileTransferManager: BaseManager {
         #if canImport(UserNotifications)
         if direction == "incoming", Self.canUseUserNotificationsSafely() {
             let content = UNMutableNotificationContent()
-            content.title = "文件接收完成"
+            content.title = LocalizationManager.shared.localizedString("notifications.fileReceived.completed")
             content.subtitle = transfer.deviceName ?? transfer.deviceId
             if let localPath, !localPath.isEmpty {
-                content.body = "\(transfer.fileName) 已保存到 \(localPath)"
+                content.body = String(
+                    format: LocalizationManager.shared.localizedString("notifications.fileReceived.savedTo"),
+                    locale: LocalizationManager.shared.locale,
+                    transfer.fileName,
+                    localPath
+                )
             } else {
-                content.body = "\(transfer.fileName) 已接收完成"
+                content.body = String(
+                    format: LocalizationManager.shared.localizedString("notifications.fileReceived.completedBody"),
+                    locale: LocalizationManager.shared.locale,
+                    transfer.fileName
+                )
             }
             content.userInfo = userInfo
             let request = UNNotificationRequest(

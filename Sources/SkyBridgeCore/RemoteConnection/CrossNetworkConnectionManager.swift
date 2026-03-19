@@ -192,6 +192,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     private var webrtcRemoteVideoFormatsBySessionId: [String: Set<String>] = [:]
     private var webrtcRemoteStreamConfigurationBySessionId: [String: RemoteDesktopStreamConfiguration] = [:]
     private var webrtcPendingStreamRefreshSessionIds: Set<String> = []
+    private var webrtcBootstrapReplyFingerprintBySessionId: [String: String] = [:]
     private var webrtcSessionKeysBySessionId: [String: SessionKeys] = [:]
     private var activeWebRTCClipboardSessionId: String?
     private var activeWebRTCClipboardToken: UUID?
@@ -758,6 +759,12 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         }
     }
 
+    private func sanitizeStatus(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
+    }
+
     private func stopJoinHeartbeat(for sessionID: String) {
         webrtcJoinHeartbeatTasksBySessionId[sessionID]?.cancel()
         webrtcJoinHeartbeatTasksBySessionId.removeValue(forKey: sessionID)
@@ -847,6 +854,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         webrtcRemoteVideoFormatsBySessionId.removeValue(forKey: sessionID)
         webrtcRemoteStreamConfigurationBySessionId.removeValue(forKey: sessionID)
         webrtcPendingStreamRefreshSessionIds.remove(sessionID)
+        webrtcBootstrapReplyFingerprintBySessionId.removeValue(forKey: sessionID)
         stopWebRTCClipboardSyncIfNeeded(for: sessionID)
         stopWebRTCLivenessWatchdog(for: sessionID)
         markCrossNetworkPresenceDisconnected(sessionID: sessionID)
@@ -1015,6 +1023,8 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         webrtcRemoteLivenessWatchdogTasksBySessionId[sessionID] = Task { @MainActor [weak self] in
             guard let self else { return }
             let heartbeatTimeoutSeconds: TimeInterval = 8.0
+            let handshakeGraceTimeoutSeconds: TimeInterval = 30.0
+            let transportReadyAt = Date()
 
             defer {
                 self.webrtcRemoteLivenessWatchdogTasksBySessionId.removeValue(forKey: sessionID)
@@ -1022,6 +1032,30 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 
             while !Task.isCancelled {
                 guard self.webrtcSessionsBySessionId[sessionID] != nil else { break }
+                let hasSessionKeys = self.webrtcSessionKeysBySessionId[sessionID] != nil
+                let rekeyInProgress = self.webrtcRekeyInProgressSessionIds.contains(sessionID)
+
+                if !hasSessionKeys || rekeyInProgress {
+                    if Date().timeIntervalSince(transportReadyAt) <= handshakeGraceTimeoutSeconds {
+                        try? await Task.sleep(for: .seconds(1))
+                        continue
+                    }
+
+                    let reason = hasSessionKeys ? "rekey_timeout" : "app_handshake_timeout"
+                    let message = hasSessionKeys ? "WebRTC rekey timed out" : "WebRTC app handshake timed out"
+                    self.logger.warning(
+                        "⚠️ WebRTC 握手宽限期超时: session=\(sessionID, privacy: .public) reason=\(reason, privacy: .public)"
+                    )
+                    self.cleanupWebRTCSession(
+                        sessionID,
+                        reason: reason,
+                        disconnectKind: .transient
+                    )
+                    self.connectionStatus = .failed(message)
+                    self.readiness = .idle
+                    break
+                }
+
                 if let lastHeartbeatAt = self.webrtcRemoteDesktopHeartbeatAtBySessionId[sessionID],
                    Date().timeIntervalSince(lastHeartbeatAt) > heartbeatTimeoutSeconds {
                     let reason = "remote_heartbeat_timeout"
@@ -1152,9 +1186,10 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     private func resendCachedOfferIfNeeded(for sessionID: String, reason: String) async {
         guard let sdp = webrtcLatestOfferBySessionId[sessionID] else { return }
         let localDeviceId = webrtcSessionsBySessionId[sessionID]?.localDeviceId ?? deviceFingerprint
+        let enrichedSDP = sdpWithCachedLocalICECandidates(sessionID: sessionID, sdp: sdp)
         logger.info("🔁 重发本地 offer: session=\(sessionID, privacy: .public) reason=\(reason, privacy: .public)")
         await sendSignal(
-            .init(sessionId: sessionID, from: localDeviceId, type: .offer, payload: .init(sdp: sdp)),
+            .init(sessionId: sessionID, from: localDeviceId, type: .offer, payload: .init(sdp: enrichedSDP)),
             retries: 2
         )
     }
@@ -1162,11 +1197,109 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     private func resendCachedAnswerIfNeeded(for sessionID: String, reason: String) async {
         guard let sdp = webrtcLatestAnswerBySessionId[sessionID] else { return }
         let localDeviceId = webrtcSessionsBySessionId[sessionID]?.localDeviceId ?? deviceFingerprint
+        let enrichedSDP = sdpWithCachedLocalICECandidates(sessionID: sessionID, sdp: sdp)
         logger.info("🔁 重发本地 answer: session=\(sessionID, privacy: .public) reason=\(reason, privacy: .public)")
         await sendSignal(
-            .init(sessionId: sessionID, from: localDeviceId, type: .answer, payload: .init(sdp: sdp)),
+            .init(sessionId: sessionID, from: localDeviceId, type: .answer, payload: .init(sdp: enrichedSDP)),
             retries: 2
         )
+    }
+
+    private func sdpWithCachedLocalICECandidates(sessionID: String, sdp: String) -> String {
+        guard let candidates = webrtcLocalICECandidatesBySessionId[sessionID], !candidates.isEmpty else {
+            return sdp
+        }
+        return Self.injectLocalICECandidates(candidates, into: sdp)
+    }
+
+    private static func injectLocalICECandidates(
+        _ candidates: [WebRTCSignalingEnvelope.Payload],
+        into sdp: String
+    ) -> String {
+        let newline = sdp.contains("\r\n") ? "\r\n" : "\n"
+        let normalizedLines = sdp
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map(String.init)
+
+        var prefix: [String] = []
+        var sections: [[String]] = []
+        var currentSection: [String]? = nil
+
+        for line in normalizedLines {
+            if line.hasPrefix("m=") {
+                if let currentSection {
+                    sections.append(currentSection)
+                }
+                currentSection = [line]
+            } else if currentSection != nil {
+                currentSection?.append(line)
+            } else {
+                prefix.append(line)
+            }
+        }
+        if let currentSection {
+            sections.append(currentSection)
+        }
+        guard !sections.isEmpty else { return sdp }
+
+        for payload in candidates {
+            guard let candidateLine = normalizedCandidateSDPLine(from: payload) else { continue }
+            let targetIndex = targetMediaSectionIndex(for: payload, sections: sections) ?? 0
+            guard sections.indices.contains(targetIndex) else { continue }
+            insertSDPLine(candidateLine, into: &sections[targetIndex])
+        }
+
+        var flattened = prefix
+        for section in sections {
+            flattened.append(contentsOf: section)
+        }
+
+        var rendered = flattened.joined(separator: newline)
+        if sdp.hasSuffix("\r\n") || sdp.hasSuffix("\n") {
+            rendered.append(newline)
+        }
+        return rendered
+    }
+
+    private static func normalizedCandidateSDPLine(from payload: WebRTCSignalingEnvelope.Payload) -> String? {
+        guard let raw = payload.candidate?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else {
+            return nil
+        }
+        if raw.hasPrefix("a=") {
+            return raw
+        }
+        if raw.hasPrefix("candidate:") {
+            return "a=\(raw)"
+        }
+        return raw
+    }
+
+    private static func targetMediaSectionIndex(
+        for payload: WebRTCSignalingEnvelope.Payload,
+        sections: [[String]]
+    ) -> Int? {
+        if let index = payload.sdpMLineIndex, index >= 0, Int(index) < sections.count {
+            return Int(index)
+        }
+        if let mid = payload.sdpMid?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !mid.isEmpty,
+           let match = sections.firstIndex(where: { section in
+               section.contains(where: { $0 == "a=mid:\(mid)" })
+           }) {
+            return match
+        }
+        return sections.isEmpty ? nil : max(0, sections.count - 1)
+    }
+
+    private static func insertSDPLine(_ line: String, into section: inout [String]) {
+        guard !section.contains(line) else { return }
+        if let insertionIndex = section.firstIndex(of: "a=end-of-candidates") {
+            section.insert(line, at: insertionIndex)
+        } else {
+            section.append(line)
+        }
     }
 
     private func resendCachedLocalICECandidatesIfNeeded(for sessionID: String, reason: String) async {
@@ -1189,6 +1322,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             while remaining > 0, !Task.isCancelled, self.webrtcSessionsBySessionId[sessionID] != nil {
                 if case .connected = self.connectionStatus { break }
                 await self.resendCachedOfferIfNeeded(for: sessionID, reason: "periodic")
+                await self.resendCachedLocalICECandidatesIfNeeded(for: sessionID, reason: "periodic")
                 remaining -= 1
                 if remaining == 0 { break }
                 try? await Task.sleep(for: .milliseconds(1500))
@@ -1315,7 +1449,11 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 
     private func currentPathLocalBinding() async throws -> ProtocolIdentityBinding {
         let algorithm: ProtocolSigningAlgorithm = .ed25519
-        let deviceId = await DeviceIdentityKeyManager.shared.getDeviceId()
+        await SelfIdentityProvider.shared.loadOrCreate()
+        let selfIdentity = await SelfIdentityProvider.shared.snapshot()
+        let deviceId = selfIdentity.deviceId.isEmpty
+            ? await DeviceIdentityKeyManager.shared.getDeviceId()
+            : selfIdentity.deviceId
         let publicKey = try await DeviceIdentityKeyManager.shared.getProtocolSigningPublicKey(for: algorithm)
         return try ProtocolIdentityBinding(
             deviceId: deviceId,
@@ -2199,19 +2337,43 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     }
 
     private func authenticatedEnvelope(_ env: WebRTCSignalingEnvelope) -> WebRTCSignalingEnvelope? {
-        WebRTCSignalingEnvelope(
+        let authToken = env.authToken?.trimmingCharacters(in: .whitespacesAndNewlines)
+            ?? webrtcSignalingAuthTokenBySessionId[env.sessionId]?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let authToken, !authToken.isEmpty else {
+            logger.error("❌ missing signaling auth token for session=\(env.sessionId, privacy: .public) type=\(env.type.rawValue, privacy: .public)")
+            return nil
+        }
+        return WebRTCSignalingEnvelope(
             sessionId: env.sessionId,
             from: env.from,
             to: env.to,
             type: env.type,
             payload: env.payload,
-            authToken: nil,
+            authToken: authToken,
             sentAt: env.sentAt
         )
     }
 
     private func sendSignal(_ env: WebRTCSignalingEnvelope, retries: Int = 2) async {
-        guard let authorizedEnvelope = authenticatedEnvelope(env) else {
+        let directedEnvelope: WebRTCSignalingEnvelope = {
+            guard env.to == nil,
+                  let remoteId = webrtcRemoteIdBySessionId[env.sessionId]?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !remoteId.isEmpty,
+                  remoteId != env.from else {
+                return env
+            }
+            return WebRTCSignalingEnvelope(
+                sessionId: env.sessionId,
+                from: env.from,
+                to: remoteId,
+                type: env.type,
+                payload: env.payload,
+                authToken: env.authToken,
+                sentAt: env.sentAt
+            )
+        }()
+
+        guard let authorizedEnvelope = authenticatedEnvelope(directedEnvelope) else {
             connectionStatus = .failed("Missing signaling authorization")
             readiness = .idle
             return
@@ -2739,7 +2901,8 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             try await session.sendFramedPayloadAsync(
                 data,
                 maxChunkBytes: webRTCHandshakeMaxChunkBytes,
-                maxBufferedAmountBytes: 0
+                // Control-plane messages must not starve behind ongoing screen/file traffic.
+                maxBufferedAmountBytes: 256 * 1024
             )
         }
 
@@ -2859,6 +3022,19 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             return ordered
         }
 
+        func pairingExchangeFingerprint(_ payload: AppMessage.PairingIdentityExchangePayload) -> String {
+            var hasher = SHA256()
+            hasher.update(data: Data(payload.deviceId.utf8))
+            for key in payload.kemPublicKeys.sorted(by: { $0.suiteWireId < $1.suiteWireId }) {
+                hasher.update(data: Data("\(key.suiteWireId)".utf8))
+                hasher.update(data: key.publicKey)
+            }
+            for format in (payload.remoteVideoFormats ?? []).map({ $0.lowercased() }).sorted() {
+                hasher.update(data: Data(format.utf8))
+            }
+            return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+        }
+
         func maybeStartOutboundPQCRekeyIfNeeded(
             from pairingPayload: AppMessage.PairingIdentityExchangePayload,
             trigger: String
@@ -2899,21 +3075,12 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 return
             }
 
-            let cryptoProvider = CryptoProviderFactory.make(policy: .requirePQC)
-            let localPQCSuites = DeviceIdentityKeyManager
-                .pairingIdentityAdvertisedPQCSuites(using: cryptoProvider)
-                .filter(\.isPQCGroup)
-            guard !localPQCSuites.isEmpty else {
-                if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
-                    print("🧪 mac skip PQC rekey: no local PQC suites")
-                }
-                logger.info(
-                    "ℹ️ WebRTC skip PQC rekey: no local PQC suites available. session=\(sessionID, privacy: .public) trigger=\(trigger, privacy: .public)"
-                )
-                return
-            }
+            let prefersLiboqsForPeer =
+                (pairingPayload.platform ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                    .localizedCaseInsensitiveCompare("android") == .orderedSame
 
             func sharedPQCSuites(
+                localPQCSuites: [CryptoSuite],
                 with peerKEMPublicKeys: [UInt16: Data]
             ) -> [CryptoSuite] {
                 var seenWireIds = Set<UInt16>()
@@ -2936,30 +3103,86 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             ])
             guard !candidateIds.isEmpty else { return }
 
-            if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
-                let localSuitesSummary = localPQCSuites.map(\.rawValue).joined(separator: ",")
-                print("🧪 mac PQC candidates=\(candidateIds.joined(separator: ",")) localSuites=\(localSuitesSummary)")
+            var peerKEMByCandidateId: [String: [UInt16: Data]] = [:]
+            for candidateId in candidateIds {
+                peerKEMByCandidateId[candidateId] = await PeerKEMBootstrapStore.shared
+                    .mergedKEMPublicKeys(forCandidates: [candidateId])
             }
 
+            let peerHasXWing = peerKEMByCandidateId.values.contains { $0[CryptoSuite.xwingMLDSA.wireId] != nil }
+
+            let providerCandidates: [(provider: any CryptoProvider, label: String)] = {
+                var candidates: [(provider: any CryptoProvider, label: String)] = []
+                if capability.hasApplePQC, peerHasXWing {
+                    candidates.append((CryptoProviderFactory.make(policy: .requirePQC), "native-xwing"))
+                }
+                if prefersLiboqsForPeer, capability.hasLiboqs {
+                    candidates.append((OQSPQCCryptoProvider(), "liboqs"))
+                }
+                if capability.hasApplePQC && !peerHasXWing {
+                    candidates.append((CryptoProviderFactory.make(policy: .requirePQC), "native-pqc"))
+                }
+                if !prefersLiboqsForPeer, capability.hasLiboqs {
+                    candidates.append((OQSPQCCryptoProvider(), "liboqs-fallback"))
+                }
+
+                var seen = Set<String>()
+                return candidates.filter { candidate in
+                    let key = "\(candidate.label)|\(String(describing: type(of: candidate.provider)))"
+                    return seen.insert(key).inserted
+                }
+            }()
+
             var selectedPeerId: String?
+            var selectedProvider: (any CryptoProvider)?
+            var selectedProviderLabel = ""
+            var selectedCryptoPolicy: CryptoPolicy = .default
             var offeredSuites: [CryptoSuite] = []
 
-            for candidateId in candidateIds {
-                let peerKEMPublicKeys = await PeerKEMBootstrapStore.shared
-                    .mergedKEMPublicKeys(forCandidates: [candidateId])
-                let sharedSuites = sharedPQCSuites(with: peerKEMPublicKeys)
-                if !sharedSuites.isEmpty {
-                    selectedPeerId = candidateId
-                    offeredSuites = sharedSuites
-                    break
+            providerLoop: for candidate in providerCandidates {
+                let candidateLocalSuites = DeviceIdentityKeyManager
+                    .pairingIdentityAdvertisedPQCSuites(using: candidate.provider)
+                    .filter(\.isPQCGroup)
+                guard !candidateLocalSuites.isEmpty else { continue }
+
+                if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
+                    let localSuitesSummary = candidateLocalSuites.map(\.rawValue).joined(separator: ",")
+                    print(
+                        "🧪 mac PQC candidates=\(candidateIds.joined(separator: ",")) " +
+                        "provider=\(candidate.label) localSuites=\(localSuitesSummary)"
+                    )
+                }
+
+                for candidateId in candidateIds {
+                    let peerKEMPublicKeys = peerKEMByCandidateId[candidateId] ?? [:]
+                    let sharedSuites = sharedPQCSuites(
+                        localPQCSuites: candidateLocalSuites,
+                        with: peerKEMPublicKeys
+                    )
+                    if !sharedSuites.isEmpty {
+                        selectedPeerId = candidateId
+                        selectedProvider = candidate.provider
+                        selectedProviderLabel = candidate.label
+                        offeredSuites = sharedSuites
+                        selectedCryptoPolicy = sharedSuites.contains(where: { $0.isHybrid })
+                            ? CryptoPolicy(
+                                minimumSecurityTier: .hybridPreferred,
+                                allowExperimentalHybrid: true,
+                                advertiseHybrid: true,
+                                requireHybridIfAvailable: true
+                            )
+                            : .default
+                        break providerLoop
+                    }
                 }
             }
 
-            guard let selectedPeerId else {
+            guard let selectedPeerId, let cryptoProvider = selectedProvider else {
                 let mergedPeerKEMPublicKeys = await PeerKEMBootstrapStore.shared
                     .mergedKEMPublicKeys(forCandidates: candidateIds)
                 let missingCanonicalSuites = Array(Set(
-                    localPQCSuites
+                    providerCandidates
+                        .flatMap { DeviceIdentityKeyManager.pairingIdentityAdvertisedPQCSuites(using: $0.provider).filter(\.isPQCGroup) }
                         .map(\.canonicalKEMSuite)
                         .filter { mergedPeerKEMPublicKeys[$0.wireId] == nil }
                         .map(\.rawValue)
@@ -2985,7 +3208,8 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     identityProvider: identityProvider,
                     sigAAlgorithm: .mlDSA65,
                     offeredSuites: offeredSuites,
-                    policy: .strictPQC
+                    policy: .strictPQC,
+                    cryptoPolicy: selectedCryptoPolicy
                 )
 
                 handshakeState.previousSessionKeysBeforeRekey = establishedKeys
@@ -3000,7 +3224,10 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 
                 let offeredSummary = offeredSuites.map(\.rawValue).joined(separator: ",")
                 if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
-                    print("🧪 mac start PQC rekey peer=\(selectedPeerId) offered=\(offeredSummary)")
+                    print(
+                        "🧪 mac start PQC rekey peer=\(selectedPeerId) offered=\(offeredSummary) " +
+                        "provider=\(String(describing: type(of: cryptoProvider))) source=\(selectedProviderLabel)"
+                    )
                 }
                 self.lastRekeyEvent = "start peer=\(selectedPeerId) policy=requirePQC"
                 logger.info(
@@ -3731,45 +3958,54 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                         continue
                     }
                     var capturedFrame: ScreenDataWire?
+                    if let synthetic = syntheticScreenDataIfEnabled() {
+                        if !usingSyntheticFrames {
+                            usingSyntheticFrames = true
+                            self.logger.info("🧪 WebRTC smoke 使用合成屏幕帧: session=\(sessionID, privacy: .public)")
+                        }
+                        capturedFrame = synthetic
+                    }
 #if os(macOS)
-                    let damageTrackingEnabled = self.webrtcRemoteStreamConfigurationBySessionId[sessionID]?.damageTrackingEnabled ?? true
-                    if videoPolicy.usesHardwareEncoder,
-                       let image = CGDisplayCreateImage(CGMainDisplayID()) {
-                        if damageTrackingEnabled {
-                            if let report = damageTracker.analyze(image: image) {
-                                pendingDamageReport = report
+                    if capturedFrame == nil {
+                        let damageTrackingEnabled = self.webrtcRemoteStreamConfigurationBySessionId[sessionID]?.damageTrackingEnabled ?? true
+                        if videoPolicy.usesHardwareEncoder,
+                           let image = CGDisplayCreateImage(CGMainDisplayID()) {
+                            if damageTrackingEnabled {
+                                if let report = damageTracker.analyze(image: image) {
+                                    pendingDamageReport = report
+                                    directEncoder?.encode(
+                                        image: image,
+                                        timestamp: Date().timeIntervalSince1970
+                                    )
+                                }
+                            } else {
                                 directEncoder?.encode(
                                     image: image,
                                     timestamp: Date().timeIntervalSince1970
                                 )
                             }
-                        } else {
-                            directEncoder?.encode(
-                                image: image,
-                                timestamp: Date().timeIntervalSince1970
-                            )
                         }
-                    }
 
-                    let directEncodedFrame = videoPolicy.usesHardwareEncoder
-                        ? encodedFrameStore.takeLatest()
-                        : nil
-                    if let encodedFrame = directEncodedFrame {
-                        lastHardwareFrameAt = Date()
-                        capturedFrame = ScreenDataWire(
-                            width: encodedFrame.width,
-                            height: encodedFrame.height,
-                            imageData: encodedFrame.imageData,
-                            timestamp: encodedFrame.timestamp,
-                            format: encodedFrame.format
-                        )
-                    } else if videoPolicy.usesHardwareEncoder {
-                        if Date().timeIntervalSince(lastHardwareFrameAt) > 1.0 {
-                            self.appendSmokeStatus(
-                                "stream-hardware-wait session=\(sessionID) codec=\(Self.remoteFrameFormatName(frameType: videoPolicy.codec, payload: Data()))"
+                        let directEncodedFrame = videoPolicy.usesHardwareEncoder
+                            ? encodedFrameStore.takeLatest()
+                            : nil
+                        if let encodedFrame = directEncodedFrame {
+                            lastHardwareFrameAt = Date()
+                            capturedFrame = ScreenDataWire(
+                                width: encodedFrame.width,
+                                height: encodedFrame.height,
+                                imageData: encodedFrame.imageData,
+                                timestamp: encodedFrame.timestamp,
+                                format: encodedFrame.format
                             )
+                        } else if videoPolicy.usesHardwareEncoder {
+                            if Date().timeIntervalSince(lastHardwareFrameAt) > 1.0 {
+                                self.appendSmokeStatus(
+                                    "stream-hardware-wait session=\(sessionID) codec=\(Self.remoteFrameFormatName(frameType: videoPolicy.codec, payload: Data()))"
+                                )
+                            }
+                            continue
                         }
-                        continue
                     }
 #endif
                     if capturedFrame == nil,
@@ -3790,13 +4026,6 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                             timestamp: Date().timeIntervalSince1970,
                             format: "jpeg"
                         )
-                    } else if capturedFrame == nil,
-                              let synthetic = syntheticScreenDataIfEnabled() {
-                        if !usingSyntheticFrames {
-                            usingSyntheticFrames = true
-                            self.logger.info("🧪 WebRTC smoke 使用合成屏幕帧: session=\(sessionID, privacy: .public)")
-                        }
-                        capturedFrame = synthetic
                     }
                     guard let sd = capturedFrame else {
                         continue
@@ -3843,6 +4072,12 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                         )
                         bytesSent += padded.count + 4
                         framesSent += 1
+                        if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil,
+                           framesSent <= 3 {
+                            self.appendSmokeStatus(
+                                "screen-send session=\(sessionID) bytes=\(padded.count) format=\(formatLabel)"
+                            )
+                        }
                         let elapsed = Date().timeIntervalSince(logWindowStart)
                         if elapsed >= 5.0 {
                             let upMBps = Double(bytesSent) / elapsed / 1024.0 / 1024.0
@@ -3863,6 +4098,11 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                             logWindowStart = Date()
                         }
                     } catch {
+                        if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
+                            self.appendSmokeStatus(
+                                "screen-send-failed session=\(sessionID) error=\(error.localizedDescription)"
+                            )
+                        }
                         self.logger.error("❌ WebRTC 屏幕推流发送失败: \(error.localizedDescription, privacy: .public)")
                         break
                     }
@@ -3948,75 +4188,142 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                                     kemKeyCount: payload.kemPublicKeys.count
                                 )
                                 let decision = await PairingTrustApprovalService.shared.decide(for: request)
+                                self.appendSmokeStatus(
+                                    "app-pairing-decision session=\(sessionID) decision=\(decision.rawValue)"
+                                )
                                 if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
                                     print("🧪 mac pairing decision=\(decision.rawValue)")
                                 }
                                 guard decision != PairingTrustApprovalService.Decision.reject else { break }
+                                let sendPairingReply = sendFramed
+                                Task { @MainActor [weak self] in
+                                    guard let self else { return }
 
-                                        await PeerKEMBootstrapStore.shared.upsert(
-                                            deviceIds: [payload.deviceId, endpointDescription],
-                                            kemPublicKeys: payload.kemPublicKeys
-                                        )
-                                        logger.info(
-                                            "🔑 WebRTC bootstrap KEM cache updated: declared=\(payload.deviceId, privacy: .public) peer=\(endpointDescription, privacy: .public) keys=\(payload.kemPublicKeys.count, privacy: .public)"
-                                        )
+                                    await PeerKEMBootstrapStore.shared.upsert(
+                                        deviceIds: orderedUniqueCandidateIds([
+                                            payload.deviceId,
+                                            peerDeviceId,
+                                            endpointDescription
+                                        ]),
+                                        kemPublicKeys: payload.kemPublicKeys
+                                    )
+                                    logger.info(
+                                        "🔑 WebRTC bootstrap KEM cache updated: declared=\(payload.deviceId, privacy: .public) peer=\(endpointDescription, privacy: .public) keys=\(payload.kemPublicKeys.count, privacy: .public)"
+                                    )
 
-                                        let provider = CryptoProviderFactory.make(policy: .preferPQC)
-                                        let km = DeviceIdentityKeyManager.shared
-                                        let kemKeys: [KEMPublicKeyInfo]
-                                        do {
-                                            kemKeys = try await km.pairingIdentityKEMPublicKeys(using: provider)
-                                        } catch {
-                                            logger.warning("⚠️ WebRTC bootstrap reply KEM 公钥准备失败: \(error.localizedDescription, privacy: .public)")
-                                            kemKeys = []
+                                    let peerPlatform = (payload.platform ?? "")
+                                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                                    let provider: any CryptoProvider = {
+                                        if peerPlatform.localizedCaseInsensitiveCompare("ubuntu") == .orderedSame,
+                                           SystemCryptoEnvironment.system.checkLiboqsAvailable() {
+                                            return OQSPQCCryptoProvider()
                                         }
-                                        let localId = await SelfIdentityProvider.shared.snapshot().deviceId
-                                        let localPlatform: String = {
+                                        return CryptoProviderFactory.make(policy: .preferPQC)
+                                    }()
+                                    let km = DeviceIdentityKeyManager.shared
+                                    let kemKeys: [KEMPublicKeyInfo]
+                                    do {
+                                        kemKeys = try await km.pairingIdentityKEMPublicKeys(using: provider)
+                                    } catch {
+                                        logger.warning("⚠️ WebRTC bootstrap reply KEM 公钥准备失败: \(error.localizedDescription, privacy: .public)")
+                                        self.appendSmokeStatus(
+                                            "app-pairing-send-failed session=\(sessionID) stage=prepare_kem error=\(sanitizeStatus(error.localizedDescription))"
+                                        )
+                                        return
+                                    }
+
+                                    let selfIdentity = await SelfIdentityProvider.shared.snapshot()
+                                    let localId = selfIdentity.deviceId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                        ? await DeviceIdentityKeyManager.shared.getDeviceId()
+                                        : selfIdentity.deviceId
+                                    let localPlatform: String = {
 #if os(macOS)
-                                            return "macOS"
+                                        return "macOS"
 #elseif os(iOS)
-                                            return "iOS"
+                                        return "iOS"
 #else
-                                            return "unknown"
+                                        return "unknown"
 #endif
-                                        }()
-                                        let localOS = ProcessInfo.processInfo.operatingSystemVersionString
-                                        let localName: String? = {
+                                    }()
+                                    let localOS = ProcessInfo.processInfo.operatingSystemVersionString
+                                    let localName: String? = {
 #if os(macOS)
-                                            return Host.current().localizedName
+                                        return Host.current().localizedName
 #elseif os(iOS)
-                                            return UIDevice.current.name
+                                        return UIDevice.current.name
 #else
-                                            return nil
+                                        return nil
 #endif
-                                        }()
-                                        let localModel: String? = {
+                                    }()
+                                    let localModel: String? = {
 #if os(macOS)
-                                            return "Mac"
+                                        return "Mac"
 #elseif os(iOS)
-                                            return UIDevice.current.model
+                                        return UIDevice.current.model
 #else
-                                            return nil
+                                        return nil
 #endif
-                                        }()
-                                        let reply = AppMessage.pairingIdentityExchange(.init(
-                                            deviceId: localId,
-                                            kemPublicKeys: kemKeys,
-                                            deviceName: localName,
-                                            modelName: localModel,
-                                            platform: localPlatform,
-                                            osVersion: localOS,
-                                            chip: nil,
-                                            remoteVideoFormats: Self.supportedRemoteVideoFormats()
-                                        ))
-                                let outPlain = try JSONEncoder().encode(reply)
-                                let outCipher = try encryptAppPayload(outPlain, with: keys)
-                                let outPadded = TrafficPadding.wrapIfEnabled(outCipher, label: "tx/webrtc")
-                                try await sendFramed(outPadded)
-                                await maybeStartOutboundPQCRekeyIfNeeded(
-                                    from: payload,
-                                    trigger: "pairing_exchange"
-                                )
+                                    }()
+                                    let replyPayload = AppMessage.PairingIdentityExchangePayload(
+                                        deviceId: localId,
+                                        kemPublicKeys: kemKeys,
+                                        deviceName: localName,
+                                        modelName: localModel,
+                                        platform: localPlatform,
+                                        osVersion: localOS,
+                                        chip: nil,
+                                        remoteVideoFormats: Self.supportedRemoteVideoFormats()
+                                    )
+                                    let replyFingerprint = pairingExchangeFingerprint(replyPayload)
+                                    if self.webrtcBootstrapReplyFingerprintBySessionId[sessionID] == replyFingerprint {
+                                        await maybeStartOutboundPQCRekeyIfNeeded(
+                                            from: payload,
+                                            trigger: "pairing_exchange"
+                                        )
+                                        return
+                                    }
+                                    let reply = AppMessage.pairingIdentityExchange(replyPayload)
+                                    if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
+                                        print("🧪 mac pairing reply deviceId=\(localId) keys=\(kemKeys.count)")
+                                        print("🧪 mac pairing reply provider=\(String(describing: type(of: provider)))")
+                                        let digests = kemKeys
+                                            .sorted { $0.suiteWireId < $1.suiteWireId }
+                                            .map { key in
+                                                let digest = SHA256.hash(data: key.publicKey).prefix(8)
+                                                    .map { String(format: "%02x", $0) }
+                                                    .joined()
+                                                return String(format: "0x%04x:%@", key.suiteWireId, digest)
+                                            }
+                                            .joined(separator: ",")
+                                        print("🧪 mac pairing reply KEM digests=\(digests)")
+                                    }
+                                    self.appendSmokeStatus(
+                                        "app-pairing-send session=\(sessionID) deviceId=\(localId) keys=\(kemKeys.count)"
+                                    )
+                                    do {
+                                        let outPlain = try JSONEncoder().encode(reply)
+                                        let outCipher = try encryptAppPayload(outPlain, with: keys)
+                                        let outPadded = TrafficPadding.wrapIfEnabled(outCipher, label: "tx/webrtc")
+                                        try await sendPairingReply(outPadded)
+                                        self.webrtcBootstrapReplyFingerprintBySessionId[sessionID] = replyFingerprint
+                                        if let rawDelay = ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_DELAY_HOST_PQC_REKEY_SECONDS"],
+                                           let delaySeconds = Double(rawDelay.trimmingCharacters(in: .whitespacesAndNewlines)),
+                                           delaySeconds > 0 {
+                                            self.appendSmokeStatus(
+                                                "rekey-delay session=\(sessionID) seconds=\(delaySeconds)"
+                                            )
+                                            try? await Task.sleep(for: .milliseconds(Int(delaySeconds * 1000)))
+                                        }
+                                        await maybeStartOutboundPQCRekeyIfNeeded(
+                                            from: payload,
+                                            trigger: "pairing_exchange"
+                                        )
+                                    } catch {
+                                        self.appendSmokeStatus(
+                                            "app-pairing-send-failed session=\(sessionID) stage=send error=\(sanitizeStatus(error.localizedDescription))"
+                                        )
+                                    }
+                                }
                             case .heartbeat(let payload):
                                 let remoteFormatsSummary = (payload.remoteVideoFormats ?? []).joined(separator: ",")
                                 self.appendSmokeStatus(
@@ -4742,6 +5049,17 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                         if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
                             let suiteSummary = messageA.supportedSuites.map(\.rawValue).joined(separator: ",")
                             print("🧪 mac rx MessageA bytes=\(frame.count) suites=\(suiteSummary)")
+                            let preimageDigest = SHA256.hash(data: messageA.signaturePreimage)
+                                .map { String(format: "%02x", $0) }
+                                .joined()
+                                .prefix(16)
+                            let identitySummary = try? IdentityPublicKeys.decodeWithLegacyFallback(from: messageA.identityPublicKey)
+                            print(
+                                "🧪 mac rx MessageA sigAlg=\(identitySummary?.protocolAlgorithm.rawValue ?? "unknown") " +
+                                "pubBytes=\(identitySummary?.protocolPublicKey.count ?? messageA.identityPublicKey.count) " +
+                                "sigBytes=\(messageA.signature.count) " +
+                                "preimageSha256=\(preimageDigest)"
+                            )
                         }
                         if let establishedKeys = handshakeState.sessionKeys {
                             handshakeState.previousSessionKeysBeforeRekey = establishedKeys
@@ -4759,6 +5077,8 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                         }
 
                         let hasPQCGroup = messageA.supportedSuites.contains { $0.isPQCGroup }
+                        let hasHybridGroup = messageA.supportedSuites.contains { $0.isHybrid }
+                        let peerOnlyOffersHybrid = hasHybridGroup && messageA.supportedSuites.allSatisfy { $0.isHybrid }
                         let compatibilityModeEnabled = UserDefaults.standard.bool(forKey: "Settings.EnableCompatibilityMode")
                         let handshakePolicy: HandshakePolicy = {
                             if hasPQCGroup {
@@ -4772,14 +5092,29 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                             )
                         }()
                         let sigAAlgorithm: ProtocolSigningAlgorithm = hasPQCGroup ? .mlDSA65 : .ed25519
-                        let selection: CryptoProviderFactory.SelectionPolicy = {
-                            if hasPQCGroup { return (handshakePolicy.requirePQC ? .requirePQC : .preferPQC) }
-                            return .classicOnly
+                        let capability = CryptoProviderFactory.detectCapability()
+                        let remotePrefersLiboqs = messageA.capabilities.providerType == .liboqs
+                        let cryptoProvider: any CryptoProvider = {
+                            if hasPQCGroup, remotePrefersLiboqs, capability.hasLiboqs {
+                                return OQSPQCCryptoProvider()
+                            }
+                            let selection: CryptoProviderFactory.SelectionPolicy = {
+                                if hasPQCGroup { return (handshakePolicy.requirePQC ? .requirePQC : .preferPQC) }
+                                return .classicOnly
+                            }()
+                            return CryptoProviderFactory.make(policy: selection)
                         }()
-                        let cryptoProvider = CryptoProviderFactory.make(policy: selection)
                         let offeredSuites: [CryptoSuite] = hasPQCGroup
                         ? DeviceIdentityKeyManager.pairingIdentityAdvertisedPQCSuites(using: cryptoProvider)
                         : cryptoProvider.supportedSuites.filter { !$0.isPQCGroup }
+                        let cryptoPolicy: CryptoPolicy = hasHybridGroup
+                            ? CryptoPolicy(
+                                minimumSecurityTier: peerOnlyOffersHybrid ? .hybridPreferred : .pqcPreferred,
+                                allowExperimentalHybrid: true,
+                                advertiseHybrid: true,
+                                requireHybridIfAvailable: peerOnlyOffersHybrid
+                            )
+                            : .default
 
                         let identityProvider = DeviceIdentityHandshakeProvider(
                             sigAAlgorithm: sigAAlgorithm,
@@ -4794,10 +5129,11 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                             sigAAlgorithm: sigAAlgorithm,
                             offeredSuites: offeredSuites,
                             policy: handshakePolicy,
+                            cryptoPolicy: cryptoPolicy,
                             trustProvider: hasPQCGroup ? nil : currentPathTrustProvider
                         )
                         if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
-                            print("🧪 mac driver init sigA=\(sigAAlgorithm.rawValue) requirePQC=\(handshakePolicy.requirePQC)")
+                            print("🧪 mac driver init sigA=\(sigAAlgorithm.rawValue) requirePQC=\(handshakePolicy.requirePQC) provider=\(String(describing: type(of: cryptoProvider)))")
                         }
                         if handshakeState.previousSessionKeysBeforeRekey != nil, self.lastRekeyEvent == nil {
                             let suiteSummary = messageA.supportedSuites.map(\.rawValue).joined(separator: ",")
@@ -5537,6 +5873,21 @@ private struct CurrentPathHandshakeTrustProvider: HandshakeTrustProvider, Sendab
     let expectedRemoteAuthority: CurrentPathRemoteAuthority?
     let fallbackPeerIDs: [String]
 
+    private func candidateDeviceIds(for requestedDeviceId: String) -> [String] {
+        var seen = Set<String>()
+        var ordered: [String] = []
+        let rawValues: [String?] = [requestedDeviceId, expectedRemoteAuthority?.deviceId] + fallbackPeerIDs.map(Optional.some)
+        for raw in rawValues {
+            guard let raw else { continue }
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            if seen.insert(trimmed).inserted {
+                ordered.append(trimmed)
+            }
+        }
+        return ordered
+    }
+
     func trustedFingerprint(for deviceId: String) async -> String? {
         if let expectedRemoteAuthority,
            deviceId == expectedRemoteAuthority.deviceId || fallbackPeerIDs.contains(deviceId) {
@@ -5546,7 +5897,9 @@ private struct CurrentPathHandshakeTrustProvider: HandshakeTrustProvider, Sendab
     }
 
     func trustedKEMPublicKeys(for deviceId: String) async -> [CryptoSuite: Data] {
-        let merged = await PeerKEMBootstrapStore.shared.mergedKEMPublicKeys(forCandidates: [deviceId])
+        let merged = await PeerKEMBootstrapStore.shared.mergedKEMPublicKeys(
+            forCandidates: candidateDeviceIds(for: deviceId)
+        )
         return merged.reduce(into: [:]) { partialResult, item in
             partialResult[CryptoSuite(wireId: item.key)] = item.value
         }

@@ -94,6 +94,7 @@ let package = Package(
         .executable(name: "MacUIBaselineCapture", targets: ["MacUIBaselineCapture"]),
         .executable(name: "LocalLanInteropHost", targets: ["LocalLanInteropHost"]),
         .executable(name: "LocalWebRTCSmokeHost", targets: ["LocalWebRTCSmokeHost"]),
+        .executable(name: "CurrentPathProbe", targets: ["CurrentPathProbe"]),
         .executable(name: "BaselineBenchRunner", targets: ["BaselineBenchRunner"]),
         .executable(name: "HandshakeBenchRunner", targets: ["HandshakeBenchRunner"]),
         .executable(name: "MessageSizeBenchRunner", targets: ["MessageSizeBenchRunner"]),
@@ -163,6 +164,18 @@ let package = Package(
                 "SkyBridgeCore"
             ],
             path: "Sources/LocalLanInteropHost",
+            swiftSettings: [
+                .enableUpcomingFeature("StrictConcurrency")
+            ]
+        ),
+        .executableTarget(
+            name: "CurrentPathProbe",
+            dependencies: [
+                "SkyBridgeCore",
+                "SkyBridgeProtocolCore",
+                "SkyBridgeAppleTransport"
+            ],
+            path: "Sources/CurrentPathProbe",
             swiftSettings: [
                 .enableUpcomingFeature("StrictConcurrency")
             ]

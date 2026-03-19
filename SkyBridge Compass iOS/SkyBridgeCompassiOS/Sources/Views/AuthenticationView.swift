@@ -68,16 +68,7 @@ struct AuthenticationView: View {
     
     private var headerSection: some View {
         VStack(spacing: 16) {
-            // App 图标
-            Image(systemName: "globe.americas.fill")
-                .font(.system(size: 80))
-                .foregroundStyle(
-                    LinearGradient(
-                        colors: [.blue, .cyan, .purple],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
+            iOSBrandIcon(size: 92)
             
             Text("SkyBridge Compass")
                 .font(.system(size: 32, weight: .bold))
@@ -88,6 +79,17 @@ struct AuthenticationView: View {
                 .foregroundColor(.gray)
                 .multilineTextAlignment(.center)
         }
+    }
+
+    private func iOSBrandIcon(size: CGFloat) -> some View {
+        Image("BrandIcon")
+            .resizable()
+            .interpolation(.high)
+            .antialiased(true)
+            .aspectRatio(contentMode: .fit)
+            .frame(width: size, height: size)
+            .clipShape(RoundedRectangle(cornerRadius: size * 0.24, style: .continuous))
+            .shadow(color: .blue.opacity(0.28), radius: 18, x: 0, y: 10)
     }
     
     private var formSection: some View {

@@ -246,7 +246,16 @@ public final class Metal4EnhancedRenderer: @unchecked Sendable {
         let buffer: CVPixelBuffer
         do {
             let useZeroCopy = SettingsManager.shared.enableZeroCopyBGRA
-            buffer = try BGRAFrameBuilder.buildPixelBuffer(from: frame, mode: useZeroCopy ? .zeroCopy : .safeCopy)
+            if useZeroCopy {
+                do {
+                    buffer = try BGRAFrameBuilder.buildPixelBuffer(from: frame, mode: .zeroCopy)
+                } catch BGRAFrameBuilderError.zeroCopyNotImplemented {
+                    log.warning("Zero-copy BGRA path unavailable; falling back to safe copy")
+                    buffer = try BGRAFrameBuilder.buildPixelBuffer(from: frame, mode: .safeCopy)
+                }
+            } else {
+                buffer = try BGRAFrameBuilder.buildPixelBuffer(from: frame, mode: .safeCopy)
+            }
         } catch {
             log.error("Failed to build BGRA pixel buffer: \(String(describing: error))")
             return RenderMetrics(bandwidthMbps: bandwidth, latencyMilliseconds: delta * 1000)

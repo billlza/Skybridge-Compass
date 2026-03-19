@@ -6,7 +6,6 @@ import QuickLook
 struct FileTransferView: View {
     @EnvironmentObject private var connectionManager: P2PConnectionManager
     @StateObject private var fileTransferManager = FileTransferManager.instance
-    @StateObject private var settings = SettingsManager.instance
     @StateObject private var crossNetwork = CrossNetworkWebRTCManager.instance
     
     @State private var showFilePicker = false
@@ -22,13 +21,6 @@ struct FileTransferView: View {
         NavigationStack {
             ScrollView(showsIndicators: false) {
                 VStack(spacing: 16) {
-                    if !settings.enableExperimentalFeatures {
-                        BetaBannerView(
-                            title: RuntimeLocalization.string("文件传输（实验功能）"),
-                            message: RuntimeLocalization.string("当前实现支持分块/校验/可选压缩。发布前建议与 macOS 端做一次双向互通冒烟测试（同网段发现→连接→发送/接收）。")
-                        )
-                    }
-                    
                     quickSendSection
                     
                     if !fileTransferManager.activeTransfers.isEmpty {

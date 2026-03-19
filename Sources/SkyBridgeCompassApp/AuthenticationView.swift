@@ -118,7 +118,6 @@ struct AuthenticationView: View {
                         .shadow(color: primary.opacity(0.35), radius: 24, x: 0, y: 14)
                     
                     CustomGlobeIconView(cornerRadius: 12)
-                        .padding(6)
                         .frame(width: 40, height: 40)
                 }
                 .frame(width: 40, height: 40)

@@ -115,4 +115,85 @@ public enum AppMessage: Codable, Sendable, Equatable {
             self.id = id
         }
     }
+
+    private enum CodingKeys: String, CodingKey {
+        case clipboard
+        case pairingIdentityExchange
+        case heartbeat
+        case ping
+        case pong
+    }
+
+    private struct LegacyAssociatedValueBox<Value: Decodable>: Decodable {
+        let _0: Value
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+
+        if let payload = try container.decodeIfPresent(ClipboardPayload.self, forKey: .clipboard) {
+            self = .clipboard(payload)
+            return
+        }
+        if let payload = try container.decodeIfPresent(PairingIdentityExchangePayload.self, forKey: .pairingIdentityExchange) {
+            self = .pairingIdentityExchange(payload)
+            return
+        }
+        if let payload = try container.decodeIfPresent(HeartbeatPayload.self, forKey: .heartbeat) {
+            self = .heartbeat(payload)
+            return
+        }
+        if let payload = try container.decodeIfPresent(PingPayload.self, forKey: .ping) {
+            self = .ping(payload)
+            return
+        }
+        if let payload = try container.decodeIfPresent(PongPayload.self, forKey: .pong) {
+            self = .pong(payload)
+            return
+        }
+
+        if let payload = try container.decodeIfPresent(LegacyAssociatedValueBox<ClipboardPayload>.self, forKey: .clipboard)?._0 {
+            self = .clipboard(payload)
+            return
+        }
+        if let payload = try container.decodeIfPresent(LegacyAssociatedValueBox<PairingIdentityExchangePayload>.self, forKey: .pairingIdentityExchange)?._0 {
+            self = .pairingIdentityExchange(payload)
+            return
+        }
+        if let payload = try container.decodeIfPresent(LegacyAssociatedValueBox<HeartbeatPayload>.self, forKey: .heartbeat)?._0 {
+            self = .heartbeat(payload)
+            return
+        }
+        if let payload = try container.decodeIfPresent(LegacyAssociatedValueBox<PingPayload>.self, forKey: .ping)?._0 {
+            self = .ping(payload)
+            return
+        }
+        if let payload = try container.decodeIfPresent(LegacyAssociatedValueBox<PongPayload>.self, forKey: .pong)?._0 {
+            self = .pong(payload)
+            return
+        }
+
+        throw DecodingError.dataCorrupted(
+            .init(
+                codingPath: decoder.codingPath,
+                debugDescription: "Unsupported AppMessage payload"
+            )
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .clipboard(let payload):
+            try container.encode(payload, forKey: .clipboard)
+        case .pairingIdentityExchange(let payload):
+            try container.encode(payload, forKey: .pairingIdentityExchange)
+        case .heartbeat(let payload):
+            try container.encode(payload, forKey: .heartbeat)
+        case .ping(let payload):
+            try container.encode(payload, forKey: .ping)
+        case .pong(let payload):
+            try container.encode(payload, forKey: .pong)
+        }
+    }
 }

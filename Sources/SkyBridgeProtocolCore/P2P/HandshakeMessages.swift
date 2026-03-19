@@ -709,6 +709,12 @@ public struct HandshakeMessageA: Sendable {
         return data
     }
 
+    public static func rawSignaturePreimage(from wireData: Data) throws -> Data {
+        var data = Data(HandshakeSignatureDomain.protocolA.utf8)
+        data.append(try rawEncodedWithoutSignature(from: wireData))
+        return data
+    }
+
     public var secureEnclaveSignaturePreimage: Data {
         makeSecureEnclavePreimage(
             domain: HandshakeSignatureDomain.secureEnclaveA,
@@ -749,6 +755,95 @@ public struct HandshakeMessageA: Sendable {
             data.append(extensionsRaw)
         }
         return data
+    }
+
+    private static func rawEncodedWithoutSignature(from wireData: Data) throws -> Data {
+        let data = HandshakePadding.unwrapIfNeeded(wireData, label: "HandshakeMessageA.rawEncodedWithoutSignature")
+        guard data.count >= 5 else {
+            throw HandshakeError.failed(.invalidMessageFormat("MessageA too short"))
+        }
+
+        var offset = 0
+        let version = data[offset]
+        offset += 1
+        guard version == HandshakeConstants.protocolVersion else {
+            throw HandshakeError.failed(.versionMismatch(
+                local: HandshakeConstants.protocolVersion,
+                remote: version
+            ))
+        }
+
+        let supportedCount = try HandshakeEncoding.readUInt16LE(from: data, offset: &offset)
+        guard supportedCount > 0,
+              supportedCount <= HandshakeConstants.maxSupportedSuites else {
+            throw HandshakeError.failed(.invalidMessageFormat("Invalid supportedSuites count"))
+        }
+
+        var supportedSuites: [CryptoSuite] = []
+        supportedSuites.reserveCapacity(Int(supportedCount))
+        for _ in 0..<supportedCount {
+            let suiteId = try HandshakeEncoding.readUInt16LE(from: data, offset: &offset)
+            supportedSuites.append(CryptoSuite(wireId: suiteId))
+        }
+
+        let keyShareCount = try HandshakeEncoding.readUInt16LE(from: data, offset: &offset)
+        guard keyShareCount <= HandshakeConstants.maxKeyShareCount,
+              keyShareCount <= supportedCount else {
+            throw HandshakeError.failed(.invalidMessageFormat("Too many keyShares"))
+        }
+        for _ in 0..<keyShareCount {
+            _ = try HandshakeEncoding.readUInt16LE(from: data, offset: &offset)
+            let shareLen = try HandshakeEncoding.readUInt16LE(from: data, offset: &offset)
+            guard offset + Int(shareLen) <= data.count else {
+                throw HandshakeError.failed(.invalidMessageFormat("KeyShare truncated"))
+            }
+            offset += Int(shareLen)
+        }
+
+        guard offset + 32 <= data.count else {
+            throw HandshakeError.failed(.invalidMessageFormat("Missing nonce"))
+        }
+        offset += 32
+
+        let capLen = try HandshakeEncoding.readUInt16LE(from: data, offset: &offset)
+        guard offset + Int(capLen) <= data.count else {
+            throw HandshakeError.failed(.invalidMessageFormat("Capabilities truncated"))
+        }
+        offset += Int(capLen)
+
+        let policyLen = try HandshakeEncoding.readUInt16LE(from: data, offset: &offset)
+        guard offset + Int(policyLen) <= data.count else {
+            throw HandshakeError.failed(.invalidMessageFormat("Policy truncated"))
+        }
+        offset += Int(policyLen)
+
+        let idKeyLen = try HandshakeEncoding.readUInt16LE(from: data, offset: &offset)
+        guard offset + Int(idKeyLen) <= data.count else {
+            throw HandshakeError.failed(.invalidMessageFormat("Identity key truncated"))
+        }
+        offset += Int(idKeyLen)
+
+        if supportedSuites.contains(where: { $0.requiresV2EphemeralContribution }) {
+            let contributionLen = try HandshakeEncoding.readUInt16LE(from: data, offset: &offset)
+            guard offset + Int(contributionLen) <= data.count else {
+                throw HandshakeError.failed(.invalidMessageFormat("v2 initiator contribution truncated"))
+            }
+            offset += Int(contributionLen)
+        }
+
+        if offset + extensionContainerMagic.count + 2 <= data.count {
+            let maybeMagic = data[offset..<(offset + extensionContainerMagic.count)]
+            if Data(maybeMagic) == extensionContainerMagic {
+                offset += extensionContainerMagic.count
+                let extLen = try HandshakeEncoding.readUInt16LE(from: data, offset: &offset)
+                guard offset + Int(extLen) <= data.count else {
+                    throw HandshakeError.failed(.invalidMessageFormat("Extensions truncated"))
+                }
+                offset += Int(extLen)
+            }
+        }
+
+        return Data(data[..<offset])
     }
 
     private func decodeSOAExtension(from raw: Data) -> HandshakeSOAExtension? {

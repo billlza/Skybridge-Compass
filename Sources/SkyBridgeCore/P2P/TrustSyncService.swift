@@ -355,6 +355,10 @@ public final class TrustSyncService: ObservableObject {
         static let recordPrefix = "trust_record_"
         static let syncEnabled = "sync_enabled"
     }
+
+    private enum FallbackStorageConstants {
+        static let recordsKey = "com.skybridge.p2p.trust.fallback.records.v1"
+    }
     
  // MARK: - Published Properties
     
@@ -637,22 +641,42 @@ public final class TrustSyncService: ObservableObject {
     
  /// 加载本地记录
     private func loadLocalRecords() async {
+        var mergedCache: [String: TrustRecord] = [:]
+
+        func merge(_ record: TrustRecord) {
+            if let existing = mergedCache[record.deviceId] {
+                mergedCache[record.deviceId] = resolveConflict(local: existing, remote: record)
+            } else {
+                mergedCache[record.deviceId] = record
+            }
+        }
+
         do {
             let records = try loadAllFromKeychain()
-            for record in records {
-                localCache[record.deviceId] = record
-            }
-            await updateActiveTrustRecords()
+            for record in records { merge(record) }
             SkyBridgeLogger.p2p.debug("Loaded \(records.count) trust records from Keychain")
         } catch {
             // errSecParam(-50) 在部分系统/环境下会出现在 synchronizable 查询中；
             // 对于启动期加载而言，视作“暂无可用 trust records”更合理，避免刷错误日志。
             if let e = error as? TrustSyncError, case .keychainError(let status) = e, status == errSecParam {
                 SkyBridgeLogger.p2p.debug("Trust records load skipped (errSecParam=-50)")
-                return
+            } else if let e = error as? TrustSyncError,
+                      case .keychainError(let status) = e,
+                      isKeychainEntitlementUnavailable(status) {
+                SkyBridgeLogger.p2p.warning("⚠️ Trust records keychain unavailable (\(status)); falling back to local storage")
+            } else {
+                SkyBridgeLogger.p2p.error("Failed to load trust records: \(error.localizedDescription)")
             }
-            SkyBridgeLogger.p2p.error("Failed to load trust records: \(error.localizedDescription)")
         }
+
+        let fallbackRecords = loadFallbackRecords()
+        for record in fallbackRecords { merge(record) }
+        if !fallbackRecords.isEmpty {
+            SkyBridgeLogger.p2p.debug("Loaded \(fallbackRecords.count) trust records from fallback storage")
+        }
+
+        localCache = mergedCache
+        await updateActiveTrustRecords()
     }
     
  /// 更新活跃信任记录
@@ -831,8 +855,21 @@ public final class TrustSyncService: ObservableObject {
         ]
         SecItemDelete(deleteQuery as CFDictionary)
         
- // 添加新的
+// 添加新的
         let status = SecItemAdd(query as CFDictionary, nil)
+        if status == errSecSuccess {
+            removeFallbackRecord(deviceId: record.deviceId)
+            return
+        }
+
+        if isKeychainEntitlementUnavailable(status) {
+            upsertFallbackRecord(record)
+            SkyBridgeLogger.p2p.warning(
+                "⚠️ Trust record keychain unavailable (\(status)); persisted to fallback storage: \(record.deviceId, privacy: .public)"
+            )
+            return
+        }
+
         guard status == errSecSuccess else {
             throw TrustSyncError.keychainError(status)
         }
@@ -960,6 +997,46 @@ public final class TrustSyncService: ObservableObject {
             kSecAttrSynchronizable as String: kSecAttrSynchronizableAny
         ]
         SecItemDelete(query as CFDictionary)
+        removeFallbackRecord(deviceId: deviceId)
+    }
+
+    private func isKeychainEntitlementUnavailable(_ status: OSStatus) -> Bool {
+        status == errSecMissingEntitlement || status == -34018
+    }
+
+    private func loadFallbackRecords() -> [TrustRecord] {
+        guard let data = UserDefaults.standard.data(forKey: FallbackStorageConstants.recordsKey) else {
+            return []
+        }
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .millisecondsSince1970
+        return (try? decoder.decode([TrustRecord].self, from: data)) ?? []
+    }
+
+    private func storeFallbackRecords(_ records: [TrustRecord]) {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .millisecondsSince1970
+        guard let data = try? encoder.encode(records) else { return }
+        UserDefaults.standard.set(data, forKey: FallbackStorageConstants.recordsKey)
+    }
+
+    private func upsertFallbackRecord(_ record: TrustRecord) {
+        var records = loadFallbackRecords()
+        if let index = records.firstIndex(where: { $0.deviceId == record.deviceId }) {
+            records[index] = record
+        } else {
+            records.append(record)
+        }
+        storeFallbackRecords(records)
+    }
+
+    private func removeFallbackRecord(deviceId: String) {
+        var records = loadFallbackRecords()
+        let originalCount = records.count
+        records.removeAll { $0.deviceId == deviceId }
+        guard records.count != originalCount else { return }
+        storeFallbackRecords(records)
     }
     
  /// 验证记录签名

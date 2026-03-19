@@ -1,4 +1,5 @@
 import Foundation
+import Security
 import SkyBridgeCore
 
 @available(macOS 14.0, *)
@@ -9,6 +10,16 @@ struct LocalWebRTCSmokeHost {
         let reporter = SmokeStatusReporter(statusURL: statusURL())
         reporter.reset()
         reporter.append("boot role=mac-host")
+        do {
+            reporter.append("auth-start")
+            try await configureAuthContext(reporter: reporter)
+            reporter.append("auth-configured")
+            await SelfIdentityProvider.shared.loadOrCreate()
+            reporter.append("self-identity-ready")
+        } catch {
+            reporter.append("failed stage=auth error=\(sanitize(error.localizedDescription))")
+            exit(EXIT_FAILURE)
+        }
         exportAuthContextIfRequested()
 
         let manager = CrossNetworkConnectionManager.shared
@@ -159,6 +170,276 @@ struct LocalWebRTCSmokeHost {
         }
     }
 
+    private struct StoredSupabaseConfig {
+        let url: String
+        let anonKey: String
+    }
+
+    private static func configureAuthContext(reporter: SmokeStatusReporter) async throws {
+        reporter.append("auth-session-load-start")
+        let session = try await currentAuthSession(reporter: reporter)
+        reporter.append("auth-session-loaded")
+        if let config = loadSupabaseConfig(),
+           let url = URL(string: config.url) {
+            reporter.append("auth-supabase-enable-start")
+            await MainActor.run {
+                AuthenticationService.shared.enableSupabaseMode(
+                    supabaseConfig: SupabaseService.Configuration(url: url, anonKey: config.anonKey)
+                )
+            }
+            reporter.append("auth-supabase-enable-done")
+        }
+        reporter.append("auth-update-session-start")
+        try await MainActor.run {
+            try AuthenticationService.shared.updateSession(session)
+        }
+        reporter.append("auth-update-session-done")
+        reporter.append("auth-bind-tenant-start")
+        await TenantAccessController.shared.bindAuthentication(session: session)
+        reporter.append("auth-bind-tenant-done")
+    }
+
+    private static func currentAuthSession(reporter: SmokeStatusReporter) async throws -> AuthSession {
+        if let injected = injectedAuthSession() {
+            reporter.append("auth-session-env-present")
+            return injected
+        }
+
+        guard let stored = loadStoredAuthSession() else {
+            throw NSError(
+                domain: "LocalWebRTCSmokeHost",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "missing auth session in keychain"]
+            )
+        }
+        reporter.append("auth-session-keychain-present")
+        if let refreshToken = stored.refreshToken,
+           !refreshToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            reporter.append("auth-refresh-start")
+            do {
+                if let refreshed = try await refreshSupabaseSession(refreshToken: refreshToken, previous: stored) {
+                    reporter.append("auth-refresh-ok")
+                    return refreshed
+                }
+                reporter.append("auth-refresh-empty")
+            } catch {
+                reporter.append("auth-refresh-fallback error=\(sanitize(error.localizedDescription))")
+            }
+        }
+        reporter.append("auth-refresh-skip-using-stored")
+        return stored
+    }
+
+    private static func injectedAuthSession() -> AuthSession? {
+        let env = ProcessInfo.processInfo.environment
+        guard let accessToken = env["SKYBRIDGE_BEARER_TOKEN"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !accessToken.isEmpty else {
+            return nil
+        }
+
+        let refreshToken = env["SKYBRIDGE_REFRESH_TOKEN"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let userIdentifier = env["SKYBRIDGE_USER_ID"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            ?? deriveUserIdentifier(accessToken: accessToken)
+            ?? deriveTenantIdentifier(accessToken: accessToken)
+            ?? "smoke-user"
+        let displayName = env["SKYBRIDGE_DISPLAY_NAME"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            ?? "Smoke Host"
+        let nebulaId = env["SKYBRIDGE_NEBULA_ID"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        return AuthSession(
+            accessToken: accessToken,
+            refreshToken: refreshToken?.isEmpty == true ? nil : refreshToken,
+            userIdentifier: userIdentifier,
+            nebulaId: nebulaId?.isEmpty == true ? nil : nebulaId,
+            displayName: displayName,
+            issuedAt: Date()
+        )
+    }
+
+    private static func loadStoredAuthSession() -> AuthSession? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: "com.skybridge.compass.authsession",
+            kSecAttrAccount as String: "primary",
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        if status == errSecSuccess, let data = item as? Data {
+            return try? JSONDecoder().decode(AuthSession.self, from: data)
+        }
+
+        if let data = loadKeychainDataViaSecurityCLI(
+            service: "com.skybridge.compass.authsession",
+            account: "primary"
+        ) {
+            return try? JSONDecoder().decode(AuthSession.self, from: data)
+        }
+        return nil
+    }
+
+    private static func loadSupabaseConfig() -> StoredSupabaseConfig? {
+        let env = ProcessInfo.processInfo.environment
+        if let url = env["SKYBRIDGE_SMOKE_SUPABASE_URL"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           let anonKey = env["SKYBRIDGE_SMOKE_SUPABASE_ANON_KEY"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !url.isEmpty,
+           !anonKey.isEmpty {
+            return StoredSupabaseConfig(url: url, anonKey: anonKey)
+        }
+        guard let url = loadKeychainString(service: "SkyBridge.Supabase", account: "URL"),
+              let anonKey = loadKeychainString(service: "SkyBridge.Supabase", account: "AnonKey") else {
+            return nil
+        }
+        return StoredSupabaseConfig(url: url, anonKey: anonKey)
+    }
+
+    private static func loadKeychainString(service: String, account: String) -> String? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        if status == errSecSuccess,
+           let data = item as? Data,
+           let value = String(data: data, encoding: .utf8) {
+            return value
+        }
+
+        if let data = loadKeychainDataViaSecurityCLI(service: service, account: account),
+           let value = String(data: data, encoding: .utf8) {
+            return value
+        }
+        return nil
+    }
+
+    private static func loadKeychainDataViaSecurityCLI(service: String, account: String) -> Data? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        process.arguments = [
+            "find-generic-password",
+            "-s", service,
+            "-a", account,
+            "-w",
+        ]
+
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
+
+        do {
+            try process.run()
+        } catch {
+            return nil
+        }
+
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            return nil
+        }
+
+        let output = stdout.fileHandleForReading.readDataToEndOfFile()
+        return decodeSecurityCLIPasswordOutput(output)
+    }
+
+    private static func decodeSecurityCLIPasswordOutput(_ raw: Data) -> Data? {
+        let trimmed = raw.trimmingTrailingWhitespaceAndNewlines()
+        guard !trimmed.isEmpty else { return nil }
+
+        if let text = String(data: trimmed, encoding: .utf8),
+           isHexEncoded(text),
+           let decoded = decodeHex(text) {
+            return decoded
+        }
+        return trimmed
+    }
+
+    private static func isHexEncoded(_ text: String) -> Bool {
+        !text.isEmpty
+            && text.count.isMultiple(of: 2)
+            && text.unicodeScalars.allSatisfy { scalar in
+                CharacterSet(charactersIn: "0123456789abcdefABCDEF").contains(scalar)
+            }
+    }
+
+    private static func decodeHex(_ text: String) -> Data? {
+        var bytes = Data(capacity: text.count / 2)
+        var index = text.startIndex
+        while index < text.endIndex {
+            let next = text.index(index, offsetBy: 2)
+            guard let value = UInt8(text[index..<next], radix: 16) else {
+                return nil
+            }
+            bytes.append(value)
+            index = next
+        }
+        return bytes
+    }
+
+    private struct RefreshResponse: Decodable {
+        let accessToken: String
+        let refreshToken: String?
+
+        enum CodingKeys: String, CodingKey {
+            case accessToken = "access_token"
+            case refreshToken = "refresh_token"
+        }
+    }
+
+    private static func refreshSupabaseSession(
+        refreshToken: String,
+        previous: AuthSession
+    ) async throws -> AuthSession? {
+        guard let config = loadSupabaseConfig(),
+              var components = URLComponents(string: config.url + "/auth/v1/token") else {
+            return nil
+        }
+        components.queryItems = [URLQueryItem(name: "grant_type", value: "refresh_token")]
+        guard let endpoint = components.url else { return nil }
+
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 15
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(config.anonKey)", forHTTPHeaderField: "Authorization")
+        request.setValue(config.anonKey, forHTTPHeaderField: "apikey")
+        request.httpBody = try JSONSerialization.data(
+            withJSONObject: ["refresh_token": refreshToken]
+        )
+
+        let sessionConfig = URLSessionConfiguration.ephemeral
+        sessionConfig.waitsForConnectivity = false
+        sessionConfig.timeoutIntervalForRequest = 15
+        sessionConfig.timeoutIntervalForResource = 20
+        let session = URLSession(configuration: sessionConfig)
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            return nil
+        }
+
+        let decoded = try JSONDecoder().decode(RefreshResponse.self, from: data)
+        return AuthSession(
+            accessToken: decoded.accessToken,
+            refreshToken: decoded.refreshToken ?? previous.refreshToken,
+            userIdentifier: previous.userIdentifier,
+            nebulaId: previous.nebulaId,
+            displayName: previous.displayName,
+            issuedAt: Date()
+        )
+    }
+
     private static func deriveTenantIdentifier(accessToken: String) -> String? {
         guard !accessToken.isEmpty else { return nil }
         guard let payload = accessToken.split(separator: ".").dropFirst().first else {
@@ -196,6 +477,25 @@ struct LocalWebRTCSmokeHost {
             }
         }
         return nil
+    }
+
+    private static func deriveUserIdentifier(accessToken: String) -> String? {
+        guard !accessToken.isEmpty else { return nil }
+        guard let payload = accessToken.split(separator: ".").dropFirst().first else {
+            return nil
+        }
+        var base64 = payload.replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        let remainder = base64.count % 4
+        if remainder != 0 {
+            base64.append(String(repeating: "=", count: 4 - remainder))
+        }
+        guard let data = Data(base64Encoded: base64),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        return (object["sub"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static func writeText(_ text: String, to url: URL) throws {
@@ -244,5 +544,15 @@ private struct SmokeStatusReporter {
                 try? data.write(to: statusURL, options: .atomic)
             }
         }
+    }
+}
+
+private extension Data {
+    func trimmingTrailingWhitespaceAndNewlines() -> Data {
+        var slice = self[...]
+        while let last = slice.last, last == 0x0a || last == 0x0d || last == 0x20 || last == 0x09 {
+            slice = slice.dropLast()
+        }
+        return Data(slice)
     }
 }

@@ -39,6 +39,7 @@ public actor WebSocketSignalingClient {
     
     public var onEnvelope: (@Sendable (WebRTCSignalingEnvelope) -> Void)?
     public var onServerFrame: (@Sendable (SignalingServerFrame) -> Void)?
+    public var onTrace: (@Sendable (String) -> Void)?
     
     public init(url: URL) {
         self.url = url
@@ -52,6 +53,10 @@ public actor WebSocketSignalingClient {
     public func setOnServerFrame(_ handler: (@Sendable (SignalingServerFrame) -> Void)?) {
         self.onServerFrame = handler
     }
+
+    public func setOnTrace(_ handler: (@Sendable (String) -> Void)?) {
+        self.onTrace = handler
+    }
     
     public func connect() {
         guard task == nil else { return }
@@ -59,10 +64,12 @@ public actor WebSocketSignalingClient {
         self.task = t
         t.resume()
         logger.info("connecting signaling websocket… \(Self.redactedURLString(self.url), privacy: .public)")
+        onTrace?("connect url=\(Self.redactedURLString(self.url))")
         startReceiveLoop()
     }
     
     public func close() {
+        onTrace?("close")
         receiveLoopTask?.cancel()
         receiveLoopTask = nil
         task?.cancel(with: .goingAway, reason: nil)
@@ -75,6 +82,9 @@ public actor WebSocketSignalingClient {
         }
         let data = try JSONEncoder().encode(envelope)
         guard let text = String(data: data, encoding: .utf8) else { return }
+        onTrace?(
+            "send session=\(envelope.sessionId) type=\(envelope.type.rawValue) from=\(envelope.from) to=\(envelope.to ?? "-") auth=\(envelope.authToken == nil ? 0 : 1)"
+        )
         try await task.send(.string(text))
     }
     
@@ -88,6 +98,7 @@ public actor WebSocketSignalingClient {
     
     private func receiveLoop() async {
         defer { receiveLoopTask = nil }
+        onTrace?("receive-loop start")
         while !Task.isCancelled {
             guard let task else { return }
             do {
@@ -104,18 +115,26 @@ public actor WebSocketSignalingClient {
                 }
             } catch {
                 logger.error("signaling receive failed: \(error.localizedDescription, privacy: .public)")
+                onTrace?("receive-loop failed error=\(error.localizedDescription)")
                 task.cancel(with: .goingAway, reason: nil)
                 self.task = nil
                 return
             }
         }
+        onTrace?("receive-loop ended cancelled=\(Task.isCancelled ? 1 : 0)")
     }
     
     private func handleText(_ text: String) {
         switch Self.parseInboundText(text) {
         case .envelope(let env):
+            onTrace?(
+                "recv-envelope session=\(env.sessionId) type=\(env.type.rawValue) from=\(env.from) to=\(env.to ?? "-") auth=\(env.authToken == nil ? 0 : 1)"
+            )
             onEnvelope?(env)
         case .serverFrame(let frame):
+            onTrace?(
+                "recv-server-frame type=\(frame.type) session=\(frame.sessionId ?? "-") error=\(frame.error ?? "-")"
+            )
             onServerFrame?(frame)
             if frame.isError {
                 logger.error("❌ signaling server error: \(frame.error ?? "unknown", privacy: .public)")
@@ -123,6 +142,7 @@ public actor WebSocketSignalingClient {
                 logger.debug("ℹ️ signaling server frame: type=\(frame.type, privacy: .public)")
             }
         case .unknown:
+            onTrace?("recv-unknown bytes=\(text.utf8.count)")
             logger.debug("ignoring non-envelope message: \(text.prefix(200), privacy: .public)")
         }
     }

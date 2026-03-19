@@ -84,6 +84,68 @@ function select_identity() {
   fi
 }
 
+function compile_icon_composer_assets() {
+  local source_resources_dir="$1"
+  local app_resources_dir="$2"
+  local info_plist_path="$3"
+  local bundle_identifier
+  local icon_doc_dir="$source_resources_dir/AppIcon.icon"
+  local asset_catalog_dir="$source_resources_dir/Assets.xcassets"
+
+  if [[ ! -d "$icon_doc_dir" || ! -d "$asset_catalog_dir" ]]; then
+    log "未检测到 Icon Composer 图标资源，沿用静态 AppIcon 文件"
+    return 0
+  fi
+
+  if ! xcrun -f actool >/dev/null 2>&1; then
+    log "未找到 actool，跳过 Icon Composer 图标编译"
+    return 0
+  fi
+
+  bundle_identifier=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$info_plist_path" 2>/dev/null || echo "com.skybridge.compass.pro")
+  local tmp_dir
+  tmp_dir="$(mktemp -d)"
+
+  log "编译 Icon Composer 应用图标（AppIcon.icon）"
+  xcrun actool \
+    "$asset_catalog_dir" \
+    "$icon_doc_dir" \
+    --compile "$tmp_dir" \
+    --output-format human-readable-text \
+    --notices \
+    --warnings \
+    --output-partial-info-plist "$tmp_dir/assetcatalog_generated_info.plist" \
+    --app-icon AppIcon \
+    --enable-on-demand-resources NO \
+    --development-region en \
+    --target-device mac \
+    --minimum-deployment-target 14.0 \
+    --platform macosx \
+    --bundle-identifier "$bundle_identifier" \
+    >/dev/null
+
+  if [[ -f "$tmp_dir/Assets.car" ]]; then
+    cp "$tmp_dir/Assets.car" "$app_resources_dir/Assets.car"
+  fi
+  if [[ -f "$tmp_dir/AppIcon.icns" ]]; then
+    cp "$tmp_dir/AppIcon.icns" "$app_resources_dir/AppIcon.icns"
+  fi
+
+  if [[ -f "$tmp_dir/assetcatalog_generated_info.plist" ]]; then
+    local icon_file icon_name
+    icon_file=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$tmp_dir/assetcatalog_generated_info.plist" 2>/dev/null || true)
+    icon_name=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' "$tmp_dir/assetcatalog_generated_info.plist" 2>/dev/null || true)
+    if [[ -n "$icon_file" ]]; then
+      plutil -replace CFBundleIconFile -string "$icon_file" "$info_plist_path"
+    fi
+    if [[ -n "$icon_name" ]]; then
+      plutil -replace CFBundleIconName -string "$icon_name" "$info_plist_path"
+    fi
+  fi
+
+  rm -rf "$tmp_dir"
+}
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 source "${ROOT_DIR}/Scripts/apple_pqc_sdk_probe.sh"
@@ -232,11 +294,18 @@ if [[ -d "${SRC_RES_DIR}" ]]; then
   cp -R "${SRC_RES_DIR}/"* "${RES_DIR}/" 2>/dev/null || true
 fi
 
+compile_icon_composer_assets "${SRC_RES_DIR}" "${RES_DIR}" "${INFO_PLIST_DST}"
+
 # 使用 plutil 注入/修正必要的关键键值
 log "校验并修正 Info.plist 关键键值"
 plutil -replace CFBundleExecutable -string "${EXECUTABLE}" "${INFO_PLIST_DST}"
 plutil -replace CFBundlePackageType -string "APPL" "${INFO_PLIST_DST}"
 plutil -replace LSMinimumSystemVersion -string "14.0" "${INFO_PLIST_DST}"
+if [[ -z "${SKYBRIDGE_PACKAGE_BUILD_ID:-}" ]]; then
+  SKYBRIDGE_PACKAGE_BUILD_ID="$(date +%Y%m%d%H%M%S)"
+fi
+plutil -replace CFBundleVersion -string "${SKYBRIDGE_PACKAGE_BUILD_ID}" "${INFO_PLIST_DST}"
+log "设置打包 Build ID: ${SKYBRIDGE_PACKAGE_BUILD_ID}"
 
 # 移除可能不需要的主 storyboard 键（SwiftUI App 生命周期无需该键）
 if /usr/libexec/PlistBuddy -c 'Print :NSMainStoryboardFile' "${INFO_PLIST_DST}" >/dev/null 2>&1; then

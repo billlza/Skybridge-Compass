@@ -1045,7 +1045,14 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     private let signalingRetryController = SignalingRetryController()
     private var session: WebRTCSession?
     private var currentSessionId: String?
-    private let localDeviceId: String = KeychainManager.shared.getOrGenerateDeviceId()
+    private let localDeviceId: String = {
+        let envID = ProcessInfo.processInfo.environment["SKYBRIDGE_DEVICE_ID"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !envID.isEmpty {
+            return envID
+        }
+        return KeychainManager.shared.getOrGenerateDeviceId()
+    }()
     private var currentPathExpectedRemoteAuthorityBySessionId: [String: CurrentPathRemoteAuthorityCompat] = [:]
     private var currentPathSignalingOriginBySessionId: [String: String] = [:]
     private var handshakeDriver: HandshakeDriver?
@@ -1718,6 +1725,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         let normalizedShardKey = (effectiveShardKey?.isEmpty == false) ? effectiveShardKey : nil
 
         if let signaling, signalingShardKey != normalizedShardKey {
+            appendSmokeTrace("signaling reset shard=\(signalingShardKey ?? "-")->\(normalizedShardKey ?? "-")")
             await signaling.close()
             self.signaling = nil
             signalingShardKey = nil
@@ -1728,6 +1736,9 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             let newSignaling = WebSocketSignalingClient(url: wsURL)
             signaling = newSignaling
             signalingShardKey = normalizedShardKey
+            await newSignaling.setOnTrace { [weak self] line in
+                self?.appendSmokeTrace("ws \(line)")
+            }
             await newSignaling.setOnEnvelope { [weak self] env in
                 Task { @MainActor in
                     self?.handleEnvelope(env)
@@ -1738,19 +1749,21 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
                     self?.handleServerFrame(frame)
                 }
             }
+            appendSmokeTrace("signaling connect shard=\(normalizedShardKey ?? "-") url=\(WebSocketSignalingClient.redactedURLString(wsURL))")
             await newSignaling.connect()
             return
         }
 
+        appendSmokeTrace("signaling reuse shard=\(normalizedShardKey ?? "-")")
         await signaling?.connect()
     }
 
     private func authenticatedEnvelope(_ envelope: WebRTCSignalingEnvelope) -> WebRTCSignalingEnvelope? {
-        if envelope.authToken?.isEmpty == false {
+        if envelope.authToken?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
             return envelope
         }
         guard let token = webrtcSignalingAuthTokenBySessionId[envelope.sessionId],
-              !token.isEmpty else {
+              !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             lastError = "缺少 signaling auth token"
             state = .failed("Missing signaling authorization")
             readiness = .idle
@@ -1768,7 +1781,26 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     }
 
     private func sendEnvelope(_ envelope: WebRTCSignalingEnvelope, retries: Int = 2) async {
-        guard let authorizedEnvelope = authenticatedEnvelope(envelope) else { return }
+        let directedEnvelope: WebRTCSignalingEnvelope = {
+            guard envelope.to == nil,
+                  let remoteId = remoteDeviceId?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !remoteId.isEmpty,
+                  remoteId != envelope.from else {
+                return envelope
+            }
+            return WebRTCSignalingEnvelope(
+                sessionId: envelope.sessionId,
+                from: envelope.from,
+                to: remoteId,
+                type: envelope.type,
+                payload: envelope.payload,
+                authToken: envelope.authToken,
+                sentAt: envelope.sentAt
+            )
+        }()
+
+        guard let authorizedEnvelope = authenticatedEnvelope(directedEnvelope) else { return }
+        appendSmokeTrace("tx \(describeEnvelope(authorizedEnvelope)) retries=\(retries)")
         do {
             try await signalingRetryController.sendWithRetry(
                 retries: retries,
@@ -1784,18 +1816,26 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
                     try await signaling.send(authorizedEnvelope)
                 }
             )
+            appendSmokeTrace("tx-ok \(describeEnvelope(authorizedEnvelope))")
         } catch SignalingRetryControllerError.invalidWebSocketURL {
             lastError = "信令服务 URL 无效"
+            appendSmokeTrace("tx-fail \(describeEnvelope(authorizedEnvelope)) error=invalid_websocket_url")
         } catch SignalingRetryControllerError.attemptTimedOut {
             lastError = "信令发送失败: 请求超时"
+            appendSmokeTrace("tx-fail \(describeEnvelope(authorizedEnvelope)) error=attempt_timed_out")
         } catch is CancellationError {
+            appendSmokeTrace("tx-cancel \(describeEnvelope(authorizedEnvelope))")
             return
         } catch {
             lastError = "信令发送失败: \(error.localizedDescription)"
+            appendSmokeTrace("tx-fail \(describeEnvelope(authorizedEnvelope)) error=\(error.localizedDescription)")
         }
     }
 
     private func handleServerFrame(_ frame: WebSocketSignalingClient.SignalingServerFrame) {
+        appendSmokeTrace(
+            "server-frame type=\(frame.type) session=\(frame.sessionId ?? "-") error=\(frame.error ?? "-") what=\(frame.what ?? "-")"
+        )
         guard frame.isError else { return }
         let sessionId = frame.sessionId?.trimmingCharacters(in: .whitespacesAndNewlines)
         let reason = frame.error ?? "unknown_signaling_error"
@@ -1820,6 +1860,12 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             guard let self else { return }
             var remaining = max(0, attempts)
             while remaining > 0, !Task.isCancelled, self.currentSessionId == sessionId {
+                if case .transportReady(let activeSessionID) = self.readiness, activeSessionID == sessionId {
+                    break
+                }
+                if case .handshakeComplete(let activeSessionID, _) = self.readiness, activeSessionID == sessionId {
+                    break
+                }
                 await self.sendEnvelope(
                     WebRTCSignalingEnvelope(sessionId: sessionId, from: localId, type: .join, payload: nil),
                     retries: 2
@@ -1838,12 +1884,13 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
 
     private func resendCachedOfferIfNeeded(sessionId: String, localId: String, reason: String) async {
         guard let sdp = latestLocalOfferBySessionId[sessionId] else { return }
+        let enrichedSDP = sdpWithCachedLocalICECandidates(sessionId: sessionId, sdp: sdp)
         await sendEnvelope(
             WebRTCSignalingEnvelope(
                 sessionId: sessionId,
                 from: localId,
                 type: .offer,
-                payload: WebRTCSignalingEnvelope.Payload(sdp: sdp)
+                payload: WebRTCSignalingEnvelope.Payload(sdp: enrichedSDP)
             ),
             retries: 2
         )
@@ -1860,6 +1907,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             while remaining > 0, !Task.isCancelled, self.currentSessionId == sessionId {
                 if case .connected = self.state { break }
                 await self.resendCachedOfferIfNeeded(sessionId: sessionId, localId: localId, reason: "periodic")
+                await self.resendCachedLocalICECandidatesIfNeeded(sessionId: sessionId, localId: localId)
                 remaining -= 1
                 if remaining == 0 { break }
                 try? await Task.sleep(for: .milliseconds(1500))
@@ -1892,13 +1940,111 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
 
     private func resendCachedAnswerIfNeeded(sessionId: String, localId: String) async {
         guard let sdp = latestLocalAnswerBySessionId[sessionId] else { return }
+        let enrichedSDP = sdpWithCachedLocalICECandidates(sessionId: sessionId, sdp: sdp)
         let env = WebRTCSignalingEnvelope(
             sessionId: sessionId,
             from: localId,
             type: .answer,
-            payload: WebRTCSignalingEnvelope.Payload(sdp: sdp)
+            payload: WebRTCSignalingEnvelope.Payload(sdp: enrichedSDP)
         )
         await sendEnvelope(env, retries: 2)
+    }
+
+    private func sdpWithCachedLocalICECandidates(sessionId: String, sdp: String) -> String {
+        guard let candidates = localICECandidatesBySessionId[sessionId], !candidates.isEmpty else {
+            return sdp
+        }
+        return Self.injectLocalICECandidates(candidates, into: sdp)
+    }
+
+    private static func injectLocalICECandidates(
+        _ candidates: [WebRTCSignalingEnvelope.Payload],
+        into sdp: String
+    ) -> String {
+        let newline = sdp.contains("\r\n") ? "\r\n" : "\n"
+        let normalizedLines = sdp
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map(String.init)
+
+        var prefix: [String] = []
+        var sections: [[String]] = []
+        var currentSection: [String]? = nil
+
+        for line in normalizedLines {
+            if line.hasPrefix("m=") {
+                if let currentSection {
+                    sections.append(currentSection)
+                }
+                currentSection = [line]
+            } else if currentSection != nil {
+                currentSection?.append(line)
+            } else {
+                prefix.append(line)
+            }
+        }
+        if let currentSection {
+            sections.append(currentSection)
+        }
+        guard !sections.isEmpty else { return sdp }
+
+        for payload in candidates {
+            guard let candidateLine = normalizedCandidateSDPLine(from: payload) else { continue }
+            let targetIndex = targetMediaSectionIndex(for: payload, sections: sections) ?? 0
+            guard sections.indices.contains(targetIndex) else { continue }
+            insertSDPLine(candidateLine, into: &sections[targetIndex])
+        }
+
+        var flattened = prefix
+        for section in sections {
+            flattened.append(contentsOf: section)
+        }
+
+        var rendered = flattened.joined(separator: newline)
+        if sdp.hasSuffix("\r\n") || sdp.hasSuffix("\n") {
+            rendered.append(newline)
+        }
+        return rendered
+    }
+
+    private static func normalizedCandidateSDPLine(from payload: WebRTCSignalingEnvelope.Payload) -> String? {
+        guard let raw = payload.candidate?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else {
+            return nil
+        }
+        if raw.hasPrefix("a=") {
+            return raw
+        }
+        if raw.hasPrefix("candidate:") {
+            return "a=\(raw)"
+        }
+        return raw
+    }
+
+    private static func targetMediaSectionIndex(
+        for payload: WebRTCSignalingEnvelope.Payload,
+        sections: [[String]]
+    ) -> Int? {
+        if let index = payload.sdpMLineIndex, index >= 0, Int(index) < sections.count {
+            return Int(index)
+        }
+        if let mid = payload.sdpMid?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !mid.isEmpty,
+           let match = sections.firstIndex(where: { section in
+               section.contains(where: { $0 == "a=mid:\(mid)" })
+           }) {
+            return match
+        }
+        return sections.isEmpty ? nil : max(0, sections.count - 1)
+    }
+
+    private static func insertSDPLine(_ line: String, into section: inout [String]) {
+        guard !section.contains(line) else { return }
+        if let insertionIndex = section.firstIndex(of: "a=end-of-candidates") {
+            section.insert(line, at: insertionIndex)
+        } else {
+            section.append(line)
+        }
     }
 
     private func resendCachedLocalICECandidatesIfNeeded(sessionId: String, localId: String) async {
@@ -1927,6 +2073,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         remoteDesktopHeartbeatTask?.cancel()
         remoteDesktopHeartbeatTask = Task { @MainActor [weak self] in
             guard let self else { return }
+            self.appendSmokeTrace("heartbeat-loop start session=\(self.currentSessionId ?? "-")")
             while !Task.isCancelled {
                 guard let session = self.session,
                       let sessionId = self.currentSessionId,
@@ -1975,13 +2122,16 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
                 ))
 
                 do {
+                    self.appendSmokeTrace("heartbeat-send session=\(sessionId)")
                     try await self.sendAppMessageOverWebRTC(
                         heartbeat,
                         sessionId: sessionId,
                         session: session,
                         label: "tx/webrtc-heartbeat"
                     )
+                    self.appendSmokeTrace("heartbeat-send-ok session=\(sessionId)")
                 } catch {
+                    self.appendSmokeTrace("heartbeat-send-failed session=\(sessionId) error=\(error.localizedDescription)")
                     SkyBridgeLogger.shared.debug("ℹ️ WebRTC heartbeat send failed: \(error.localizedDescription)")
                     break
                 }
@@ -1993,6 +2143,13 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
                 }
             }
         }
+    }
+
+    private func shouldAutoStartRemoteDesktopHeartbeat() -> Bool {
+        if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] == "ios-client" {
+            return true
+        }
+        return currentRole == .answerer
     }
 
     public func stopRemoteDesktopHeartbeat() {
@@ -2475,6 +2632,9 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         remoteDeviceName = remoteName
         remoteDeviceId = remotePeerDeviceId
         currentRole = role
+        appendSmokeTrace(
+            "connect session=\(sessionId) role=\(role == .offerer ? "offerer" : "answerer") source=\(String(describing: source)) remoteId=\(remotePeerDeviceId ?? "-") remoteName=\(remoteName ?? "-")"
+        )
         prepareSessionSnapshotMetadata(
             sessionId: sessionId,
             source: source,
@@ -2522,9 +2682,15 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         let ice = await CrossNetworkServerConfig.dynamicICEConfig(
             turnAdmissionToken: webrtcTurnAdmissionTokenBySessionId[sessionId]
         )
+        appendSmokeTrace(
+            "ice session=\(sessionId) role=\(role == .offerer ? "offerer" : "answerer") stun=\(ice.stunURL.isEmpty ? 0 : 1) turnUrls=\(ice.turnURLs.count) turnCreds=\((ice.turnUsername.isEmpty || ice.turnPassword.isEmpty) ? 0 : 1)"
+        )
         
         let s = WebRTCSession(sessionId: sessionId, localDeviceId: localId, role: role, ice: ice)
         self.session = s
+        s.onTrace = { [weak self] line in
+            self?.appendSmokeTrace("webrtc \(line)")
+        }
 
         s.onLocalOffer = { [weak self] (sdp: String) in
             guard let self else { return }
@@ -2532,6 +2698,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
                 await MainActor.run {
                     self.latestLocalOfferBySessionId[sessionId] = sdp
                 }
+                self.appendSmokeTrace("local-offer session=\(sessionId) \(Self.describeSDPCandidates(sdp))")
                 let env = WebRTCSignalingEnvelope(
                     sessionId: sessionId,
                     from: localId,
@@ -2546,6 +2713,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             guard let self else { return }
             Task { @MainActor in
                 self.latestLocalAnswerBySessionId[sessionId] = sdp
+                self.appendSmokeTrace("local-answer session=\(sessionId) \(Self.describeSDPCandidates(sdp))")
                 let env = WebRTCSignalingEnvelope(
                     sessionId: sessionId,
                     from: localId,
@@ -2560,6 +2728,8 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             guard let self else { return }
             Task { @MainActor in
                 self.cacheLocalICECandidate(payload, for: sessionId)
+                let candidateKind = Self.describeCandidateKind(payload.candidate)
+                self.appendSmokeTrace("local-ice session=\(sessionId) kind=\(candidateKind) mid=\(payload.sdpMid ?? "-") index=\(payload.sdpMLineIndex ?? -1)")
                 let env = WebRTCSignalingEnvelope(
                     sessionId: sessionId,
                     from: localId,
@@ -2590,6 +2760,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             Task { @MainActor in
                 guard let self else { return }
                 guard self.currentSessionId == sessionId else { return }
+                self.appendSmokeTrace("transport-disconnected session=\(sessionId) reason=\(reason)")
                 let msg = "WebRTC 传输已断开: \(reason)"
                 self.lastError = msg
                 self.applyActiveSessionDisconnect(sessionId: sessionId, kind: .transient)
@@ -2606,6 +2777,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
                 guard self.currentSessionId == sessionId else { return }
                 self.stopJoinHeartbeat()
                 self.stopOfferResendLoop()
+                self.appendSmokeTrace("transport-ready session=\(sessionId) role=\(role == .offerer ? "offerer" : "answerer")")
                 self.readiness = .transportReady(sessionId: sessionId)
                 self.updatePreparedSessionSnapshot(
                     sessionId: sessionId,
@@ -2634,6 +2806,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         }
         
         try s.start()
+        appendSmokeTrace("session-started session=\(sessionId) role=\(role == .offerer ? "offerer" : "answerer")")
 
         // 3) Join room + heartbeat to mask websocket timing jitters.
         await sendEnvelope(WebRTCSignalingEnvelope(sessionId: sessionId, from: localId, type: .join, payload: nil), retries: 2)
@@ -2648,6 +2821,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         // Ignore self-echo
         let localId = localDeviceId
         if env.from == localId { return }
+        appendSmokeTrace("rx \(describeEnvelope(env))")
         
         // If we don't know the remote id yet (e.g., code mode), learn it from signaling.
         if remoteDeviceId == nil || remoteDeviceId?.hasPrefix("webrtc-") == true {
@@ -2662,8 +2836,8 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         
         switch env.type {
         case .offer:
-            stopJoinHeartbeat()
             if let sdp = env.payload?.sdp {
+                appendSmokeTrace("remote-offer session=\(env.sessionId) \(Self.describeSDPCandidates(sdp))")
                 session?.setRemoteOffer(sdp)
             }
             let localId = localDeviceId
@@ -2672,9 +2846,9 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
                 await self?.resendCachedLocalICECandidatesIfNeeded(sessionId: env.sessionId, localId: localId)
             }
         case .answer:
-            stopJoinHeartbeat()
             stopOfferResendLoop()
             if let sdp = env.payload?.sdp {
+                appendSmokeTrace("remote-answer session=\(env.sessionId) \(Self.describeSDPCandidates(sdp))")
                 session?.setRemoteAnswer(sdp)
             }
             let localId = localDeviceId
@@ -2683,9 +2857,13 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             }
         case .iceCandidate:
             if let p = env.payload, let c = p.candidate {
+                appendSmokeTrace(
+                    "remote-ice session=\(env.sessionId) kind=\(Self.describeCandidateKind(p.candidate)) mid=\(p.sdpMid ?? "-") index=\(p.sdpMLineIndex ?? -1)"
+                )
                 session?.addRemoteICECandidate(candidate: c, sdpMid: p.sdpMid, sdpMLineIndex: p.sdpMLineIndex)
             }
         case .join:
+            appendSmokeTrace("remote-join session=\(env.sessionId) from=\(env.from)")
             if currentRole == .offerer, let sid = currentSessionId, sid == env.sessionId {
                 let localId = localDeviceId
                 Task { @MainActor [weak self] in
@@ -2697,6 +2875,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         case .leave:
             stopJoinHeartbeat()
             stopOfferResendLoop()
+            appendSmokeTrace("remote-leave session=\(env.sessionId) from=\(env.from)")
             applyActiveSessionDisconnect(sessionId: env.sessionId, kind: .remoteLeave)
             Task { @MainActor [weak self] in
                 await self?.disconnect(clearSnapshot: false)
@@ -3513,6 +3692,9 @@ private extension CrossNetworkWebRTCManager {
                     deviceName: self.remoteDeviceName,
                     negotiatedSuite: keys.negotiatedSuite.rawValue
                 )
+                if self.shouldAutoStartRemoteDesktopHeartbeat() {
+                    self.startRemoteDesktopHeartbeat()
+                }
             }
             self.persistCurrentPathTrust(sessionId: sessionId)
             SkyBridgeLogger.shared.info(
@@ -3781,6 +3963,9 @@ private extension CrossNetworkWebRTCManager {
                     deviceName: remoteDeviceName,
                     negotiatedSuite: keys.negotiatedSuite.rawValue
                 )
+                if shouldAutoStartRemoteDesktopHeartbeat() {
+                    startRemoteDesktopHeartbeat()
+                }
             }
             persistCurrentPathTrust(sessionId: sessionId)
             SkyBridgeLogger.shared.info(
@@ -4087,6 +4272,9 @@ private extension CrossNetworkWebRTCManager {
                     deviceName: remoteDeviceName,
                     negotiatedSuite: rekeyed.negotiatedSuite.rawValue
                 )
+                if shouldAutoStartRemoteDesktopHeartbeat() {
+                    startRemoteDesktopHeartbeat()
+                }
             }
             persistCurrentPathTrust(sessionId: sessionId)
 
@@ -4312,5 +4500,61 @@ private extension CrossNetworkWebRTCManager {
             try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             try? data.write(to: url, options: .atomic)
         }
+    }
+
+    nonisolated private func describeEnvelope(_ envelope: WebRTCSignalingEnvelope) -> String {
+        Self.describeEnvelope(envelope)
+    }
+
+    nonisolated private static func describeEnvelope(_ envelope: WebRTCSignalingEnvelope) -> String {
+        let payloadSummary: String
+        switch envelope.type {
+        case .offer, .answer:
+            if let sdp = envelope.payload?.sdp {
+                payloadSummary = describeSDPCandidates(sdp)
+            } else {
+                payloadSummary = "sdp=0"
+            }
+        case .iceCandidate:
+            payloadSummary = "kind=\(describeCandidateKind(envelope.payload?.candidate))"
+        case .join, .leave:
+            payloadSummary = "payload=0"
+        }
+        return "session=\(envelope.sessionId) type=\(envelope.type.rawValue) from=\(envelope.from) to=\(envelope.to ?? "-") auth=\(envelope.authToken == nil ? 0 : 1) \(payloadSummary)"
+    }
+
+    nonisolated private static func describeCandidateKind(_ candidate: String?) -> String {
+        guard let candidate = candidate?.lowercased() else { return "unknown" }
+        if candidate.contains(" typ relay") { return "relay" }
+        if candidate.contains(" typ srflx") { return "srflx" }
+        if candidate.contains(" typ prflx") { return "prflx" }
+        if candidate.contains(" typ host") { return "host" }
+        return "unknown"
+    }
+
+    nonisolated private static func describeSDPCandidates(_ sdp: String) -> String {
+        var total = 0
+        var host = 0
+        var srflx = 0
+        var relay = 0
+        var prflx = 0
+
+        for rawLine in sdp.split(whereSeparator: \.isNewline) {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            guard line.hasPrefix("a=candidate:") else { continue }
+            total += 1
+            let lower = line.lowercased()
+            if lower.contains(" typ relay") {
+                relay += 1
+            } else if lower.contains(" typ srflx") {
+                srflx += 1
+            } else if lower.contains(" typ prflx") {
+                prflx += 1
+            } else if lower.contains(" typ host") {
+                host += 1
+            }
+        }
+
+        return "candidates total=\(total) host=\(host) srflx=\(srflx) relay=\(relay) prflx=\(prflx)"
     }
 }
