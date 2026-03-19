@@ -316,6 +316,10 @@ impl PqcInitiatorHandshake {
         }
     }
 
+    pub fn is_waiting_for_message_b(&self) -> bool {
+        matches!(self.state, PqcInitiatorState::WaitingForMessageB(_))
+    }
+
     pub fn build_heartbeat_frame(&self) -> Result<Vec<u8>> {
         let session_keys = self
             .established_session_keys()

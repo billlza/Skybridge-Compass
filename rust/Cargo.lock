@@ -2589,6 +2589,7 @@ dependencies = [
  "pqcrypto-mldsa",
  "pqcrypto-mlkem",
  "pqcrypto-traits",
+ "rand",
  "rand_core 0.6.4",
  "reqwest",
  "serde",

@@ -19,6 +19,7 @@ hpke.workspace = true
 pqcrypto-mldsa.workspace = true
 pqcrypto-mlkem.workspace = true
 pqcrypto-traits.workspace = true
+rand = { version = "0.9", default-features = false, features = ["os_rng", "std_rng"] }
 rand_core.workspace = true
 reqwest.workspace = true
 serde.workspace = true

@@ -8,11 +8,12 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use directories::ProjectDirs;
 use skybridge_core::{
-    AgentHealthSnapshot, AgentRuntimeStatus, CryptoSuite, EventLevel, InboundMessage,
-    LocalIdentityState, ManagedSessionControl, NativeWebRtcConfig, NativeWebRtcEvent,
-    NativeWebRtcSession, PqcInitiatorConfig, PqcResponderConfig, RuntimeSessionRole,
-    RuntimeSessionState, RuntimeSessionTransportEvent, SignalServerClient, SignalingConnection,
-    SignalingLifecyclePhase, SignalingRuntimeEvent, StructuredEvent, make_join_envelope,
+    AgentHealthSnapshot, AgentRuntimeStatus, ClassicResponderConfig, CryptoSuite, EventLevel,
+    InboundMessage, LocalIdentityState, ManagedSessionControl, NativeWebRtcConfig,
+    NativeWebRtcEvent, NativeWebRtcSession, PqcInitiatorConfig, PqcInitiatorTemplate,
+    PqcResponderConfig, RuntimeSessionRole, RuntimeSessionState, RuntimeSessionTransportEvent,
+    SignalServerClient, SignalingConnection, SignalingLifecyclePhase, SignalingRuntimeEvent,
+    StructuredEvent, make_join_envelope,
 };
 use time::OffsetDateTime;
 use tokio::fs;
@@ -74,6 +75,8 @@ pub fn resolve_paths(state_dir_override: Option<PathBuf>) -> Result<AgentPaths> 
         let dirs = ProjectDirs::from("com", "SkyBridge", "skybridge")
             .ok_or_else(|| anyhow!("failed to resolve platform state directory"))?;
         dirs.state_dir()
+            .or_else(|| Some(dirs.data_local_dir()))
+            .or_else(|| Some(dirs.data_dir()))
             .ok_or_else(|| anyhow!("platform state directory is unavailable"))?
             .to_path_buf()
     };
@@ -414,11 +417,8 @@ async fn build_pqc_responder_config(
     paths: &AgentPaths,
     identity: &DeviceIdentityMaterial,
     local_binding: &skybridge_core::ProtocolIdentityBinding,
-    role: RuntimeSessionRole,
+    _role: RuntimeSessionRole,
 ) -> Result<Option<PqcResponderConfig>> {
-    if role != RuntimeSessionRole::Responder {
-        return Ok(None);
-    }
     let bridge_identity = pqc_bridge_identity_enabled();
     if local_binding.protocol_signing_algorithm != skybridge_core::ProtocolSigningAlgorithm::MlDsa65
         && !bridge_identity
@@ -452,6 +452,82 @@ async fn build_pqc_responder_config(
         local_device_name: Some(identity.state.device.device_name.clone()),
         identity: pqc_identity,
         supported_suites: vec![CryptoSuite::XWING_MLDSA, CryptoSuite::MLKEM768_MLDSA65],
+    }))
+}
+
+async fn build_pqc_initiator_template(
+    paths: &AgentPaths,
+    identity: &DeviceIdentityMaterial,
+    local_binding: &skybridge_core::ProtocolIdentityBinding,
+) -> Result<Option<PqcInitiatorTemplate>> {
+    let bridge_identity = pqc_bridge_identity_enabled();
+    if local_binding.protocol_signing_algorithm != skybridge_core::ProtocolSigningAlgorithm::MlDsa65
+        && !bridge_identity
+    {
+        return Ok(None);
+    }
+
+    let (pqc_binding, signing_secret_key) = if local_binding.protocol_signing_algorithm
+        == skybridge_core::ProtocolSigningAlgorithm::MlDsa65
+    {
+        let signing_secret_key = identity
+            .signing_key
+            .mldsa65_secret_key_bytes()
+            .ok_or_else(|| anyhow!("missing ML-DSA-65 signing secret key"))?;
+        (local_binding.clone(), signing_secret_key)
+    } else {
+        let pqc_identity = ensure_rust_pqc_identity(paths).await?;
+        (
+            skybridge_core::ProtocolIdentityBinding::new(
+                local_binding.device_id.clone(),
+                pqc_identity.signing_algorithm,
+                pqc_identity.signing_public_key.clone(),
+                None,
+            )
+            .map_err(anyhow::Error::from)?,
+            pqc_identity.signing_secret_key,
+        )
+    };
+
+    let preferred_suite = std::env::var(ENV_PQC_PREFERRED_SUITE)
+        .ok()
+        .and_then(|value| CryptoSuite::from_name(&value));
+    let mut preferred_suites = Vec::new();
+    if let Some(preferred_suite) = preferred_suite {
+        preferred_suites.push(preferred_suite);
+    }
+    for candidate in [CryptoSuite::XWING_MLDSA, CryptoSuite::MLKEM768_MLDSA65] {
+        if !preferred_suites.contains(&candidate) {
+            preferred_suites.push(candidate);
+        }
+    }
+
+    Ok(Some(PqcInitiatorTemplate {
+        local_binding: pqc_binding,
+        signing_secret_key,
+        local_device_name: Some(identity.state.device.device_name.clone()),
+        preferred_suites,
+    }))
+}
+
+fn build_classic_responder_config(
+    identity: &DeviceIdentityMaterial,
+    local_binding: &skybridge_core::ProtocolIdentityBinding,
+    role: RuntimeSessionRole,
+) -> Result<Option<ClassicResponderConfig>> {
+    if role != RuntimeSessionRole::Responder
+        || local_binding.protocol_signing_algorithm != skybridge_core::ProtocolSigningAlgorithm::Ed25519
+    {
+        return Ok(None);
+    }
+    let signing_secret_key = identity
+        .signing_key
+        .ed25519_secret_key_bytes()
+        .ok_or_else(|| anyhow!("classic responder requires an Ed25519 protocol identity"))?;
+    Ok(Some(ClassicResponderConfig {
+        local_binding: local_binding.clone(),
+        signing_secret_key,
+        local_device_name: Some(identity.state.device.device_name.clone()),
     }))
 }
 
@@ -525,8 +601,11 @@ async fn run_managed_session(
     let pqc_initiator =
         build_pqc_initiator_config_from_env(&paths, &identity, &local_binding, control.role)
             .await?;
+    let pqc_initiator_template =
+        build_pqc_initiator_template(&paths, &identity, &local_binding).await?;
     let pqc_responder =
         build_pqc_responder_config(&paths, &identity, &local_binding, control.role).await?;
+    let classic_responder = build_classic_responder_config(&identity, &local_binding, control.role)?;
     let mut connection = SignalingConnection::connect(ws_url, &control.session_id).await?;
     let mut native_session = NativeWebRtcSession::new(NativeWebRtcConfig {
         session_id: control.session_id.clone(),
@@ -550,7 +629,9 @@ async fn run_managed_session(
             })
         })
         .transpose()?,
+        classic_responder,
         pqc_initiator,
+        pqc_initiator_template,
         pqc_responder,
     })
     .await?;
@@ -742,6 +823,7 @@ async fn apply_native_runtime_event(
             );
             store_session_registry(paths, &registry).await?;
         }
+        NativeWebRtcEvent::AppPayload { .. } => {}
         NativeWebRtcEvent::Keepalive { kind, ping_id } => {
             info!(
                 kind = "agent.session.keepalive_applied",
