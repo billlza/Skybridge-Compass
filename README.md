@@ -161,6 +161,9 @@ cargo run --manifest-path rust/Cargo.toml -p skybridge -- version
 - `skybridge session ls`
 - `skybridge session inspect <id>`
 - `skybridge disconnect <id>`
+- `skybridge file send <path> --to <code>`
+- `skybridge file receive`
+- `skybridge file history`
 - `skybridge doctor`
 - `skybridge logs tail`
 - `skybridge metrics`

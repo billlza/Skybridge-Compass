@@ -25,6 +25,7 @@ use skybridge_core::{
     SignalServerClient, SignalingConnection, SignalingLifecycleEvent, SignalingLifecyclePhase,
     SignalingRuntimeEvent, derive_tenant_identifier, make_join_envelope, make_runtime_id,
 };
+use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
@@ -302,14 +303,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
         Commands::File(file) => match file.command {
             FileSubcommand::Send(args) => file_send(cli.state_dir, args).await,
             FileSubcommand::Receive(args) => file_receive(cli.state_dir, args).await,
-            FileSubcommand::History(output) => placeholder_json_or_text(
-                output.json,
-                json!({
-                    "history": [],
-                    "message": "Phase 6 pending: file transfer history is not wired yet."
-                }),
-                "Phase 6 pending: file transfer history is not wired yet.",
-            ),
+            FileSubcommand::History(output) => file_history(cli.state_dir, output.json).await,
         },
         Commands::Doctor(output) => doctor(cli.state_dir, output.json).await,
         Commands::Logs(logs) => match logs.command {
@@ -478,12 +472,13 @@ async fn maybe_pqc_identity_report(
 fn pqc_bridge_identity_enabled() -> bool {
     std::env::var(ENV_PQC_BRIDGE_IDENTITY)
         .ok()
-        .is_some_and(|value| {
-            matches!(
+        .map(|value| {
+            !matches!(
                 value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes"
+                "0" | "false" | "no"
             )
         })
+        .unwrap_or(true)
 }
 
 async fn maybe_inline_pqc_responder_config(
@@ -670,6 +665,28 @@ struct SessionTransferState {
     pairing_sent: bool,
     rekey_attempted: bool,
     current_negotiated_suite: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum FileTransferDirection {
+    Send,
+    Receive,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FileTransferHistoryEntry {
+    recorded_at: String,
+    direction: FileTransferDirection,
+    session_id: String,
+    transfer_id: String,
+    file_name: String,
+    path: String,
+    bytes: i64,
+    suite: Option<String>,
+    peer_device_id: Option<String>,
+    peer_device_name: Option<String>,
 }
 
 mod base64_bytes {
@@ -1252,6 +1269,46 @@ fn output_dir_or_current_dir(value: Option<PathBuf>) -> Result<PathBuf> {
     }
 }
 
+fn file_transfer_history_path(paths: &skybridge_agent::AgentPaths) -> PathBuf {
+    paths.runtime_dir.join("file-transfers.json")
+}
+
+async fn load_file_transfer_history(
+    paths: &skybridge_agent::AgentPaths,
+) -> Result<Vec<FileTransferHistoryEntry>> {
+    let path = file_transfer_history_path(paths);
+    match tokio::fs::read_to_string(&path).await {
+        Ok(body) => Ok(serde_json::from_str(&body)?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+async fn append_file_transfer_history(
+    paths: &skybridge_agent::AgentPaths,
+    entry: FileTransferHistoryEntry,
+) -> Result<()> {
+    tokio::fs::create_dir_all(&paths.runtime_dir).await?;
+    let mut history = load_file_transfer_history(paths).await?;
+    history.push(entry);
+    if history.len() > 200 {
+        let drain_until = history.len() - 200;
+        history.drain(0..drain_until);
+    }
+    tokio::fs::write(
+        file_transfer_history_path(paths),
+        serde_json::to_vec_pretty(&history)?,
+    )
+    .await?;
+    Ok(())
+}
+
+fn now_rfc3339() -> String {
+    OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .unwrap_or_else(|_| OffsetDateTime::now_utc().unix_timestamp().to_string())
+}
+
 fn sanitize_filename(raw: &str) -> String {
     let mut value = raw.trim().replace('/', "_").replace('\\', "_");
     if value.is_empty() {
@@ -1391,10 +1448,9 @@ async fn file_receive(state_dir: Option<PathBuf>, args: FileReceiveArgs) -> Resu
     let tenant_id = require_tenant_id(&auth_session)?;
     let identity = ensure_device_identity(&paths).await?;
     let local_binding = signing_binding(&identity)?;
-    let pairing_bytes = build_pairing_identity_exchange_bytes(&paths, &identity, &local_binding).await?;
-    if pairing_bytes.is_none() {
-        bail!("file receive requires a local PQC identity; set SKYBRIDGE_PQC_BRIDGE_IDENTITY=1");
-    }
+    let pairing_bytes = build_pairing_identity_exchange_bytes(&paths, &identity, &local_binding)
+        .await?
+        .ok_or_else(|| anyhow!("failed to prepare local PQC identity for file receive"))?;
     let pqc_initiator_template =
         maybe_inline_pqc_initiator_template(&paths, &identity, &local_binding).await?;
     let pqc_responder =
@@ -1510,7 +1566,12 @@ async fn file_receive(state_dir: Option<PathBuf>, args: FileReceiveArgs) -> Resu
                             &mut native_session,
                         ).await? {
                             if let Some(pairing) = decode_pairing_identity_exchange(&payload)? {
-                                maybe_send_pairing_exchange(&native_session, &mut session_state, &pairing_bytes).await?;
+                                maybe_send_pairing_exchange(
+                                    &native_session,
+                                    &mut session_state,
+                                    &Some(pairing_bytes.clone()),
+                                )
+                                .await?;
                                 maybe_start_pqc_rekey(
                                     &native_session,
                                     &mut session_state,
@@ -1593,6 +1654,22 @@ async fn file_receive(state_dir: Option<PathBuf>, args: FileReceiveArgs) -> Resu
                                             state.transfer_id.clone(),
                                         )
                                     )?).await?;
+                                    append_file_transfer_history(
+                                        &paths,
+                                        FileTransferHistoryEntry {
+                                            recorded_at: now_rfc3339(),
+                                            direction: FileTransferDirection::Receive,
+                                            session_id: lease.session_id.clone(),
+                                            transfer_id: state.transfer_id.clone(),
+                                            file_name: state.file_name.clone(),
+                                            path: state.final_path.display().to_string(),
+                                            bytes: state.received_bytes,
+                                            suite: session_state.current_negotiated_suite.clone(),
+                                            peer_device_id: None,
+                                            peer_device_name: None,
+                                        },
+                                    )
+                                    .await?;
                                     if args.json {
                                         println!(
                                             "{}",
@@ -1650,7 +1727,12 @@ async fn file_receive(state_dir: Option<PathBuf>, args: FileReceiveArgs) -> Resu
                             &mut native_session,
                         ).await? {
                             if let Some(pairing) = decode_pairing_identity_exchange(&payload)? {
-                                maybe_send_pairing_exchange(&native_session, &mut session_state, &pairing_bytes).await?;
+                                maybe_send_pairing_exchange(
+                                    &native_session,
+                                    &mut session_state,
+                                    &Some(pairing_bytes.clone()),
+                                )
+                                .await?;
                                 maybe_start_pqc_rekey(
                                     &native_session,
                                     &mut session_state,
@@ -1732,6 +1814,22 @@ async fn file_receive(state_dir: Option<PathBuf>, args: FileReceiveArgs) -> Resu
                                             state.transfer_id.clone(),
                                         )
                                     )?).await?;
+                                    append_file_transfer_history(
+                                        &paths,
+                                        FileTransferHistoryEntry {
+                                            recorded_at: now_rfc3339(),
+                                            direction: FileTransferDirection::Receive,
+                                            session_id: lease.session_id.clone(),
+                                            transfer_id: state.transfer_id.clone(),
+                                            file_name: state.file_name.clone(),
+                                            path: state.final_path.display().to_string(),
+                                            bytes: state.received_bytes,
+                                            suite: session_state.current_negotiated_suite.clone(),
+                                            peer_device_id: None,
+                                            peer_device_name: None,
+                                        },
+                                    )
+                                    .await?;
                                     if args.json {
                                         println!(
                                             "{}",
@@ -1777,7 +1875,12 @@ async fn file_receive(state_dir: Option<PathBuf>, args: FileReceiveArgs) -> Resu
                 match event {
                     NativeWebRtcEvent::AppPayload { data } => {
                         if let Some(pairing) = decode_pairing_identity_exchange(&data)? {
-                            maybe_send_pairing_exchange(&native_session, &mut session_state, &pairing_bytes).await?;
+                            maybe_send_pairing_exchange(
+                                &native_session,
+                                &mut session_state,
+                                &Some(pairing_bytes.clone()),
+                            )
+                            .await?;
                             maybe_start_pqc_rekey(
                                 &native_session,
                                 &mut session_state,
@@ -1859,6 +1962,22 @@ async fn file_receive(state_dir: Option<PathBuf>, args: FileReceiveArgs) -> Resu
                                         state.transfer_id.clone(),
                                     )
                                 )?).await?;
+                                append_file_transfer_history(
+                                    &paths,
+                                    FileTransferHistoryEntry {
+                                        recorded_at: now_rfc3339(),
+                                        direction: FileTransferDirection::Receive,
+                                        session_id: lease.session_id.clone(),
+                                        transfer_id: state.transfer_id.clone(),
+                                        file_name: state.file_name.clone(),
+                                        path: state.final_path.display().to_string(),
+                                        bytes: state.received_bytes,
+                                        suite: session_state.current_negotiated_suite.clone(),
+                                        peer_device_id: None,
+                                        peer_device_name: None,
+                                    },
+                                )
+                                .await?;
                                 if args.json {
                                     println!(
                                         "{}",
@@ -1903,7 +2022,12 @@ async fn file_receive(state_dir: Option<PathBuf>, args: FileReceiveArgs) -> Resu
                             NativeWebRtcEvent::HandshakeComplete { negotiated_suite },
                         )
                         .await?;
-                        maybe_send_pairing_exchange(&native_session, &mut session_state, &pairing_bytes).await?;
+                        maybe_send_pairing_exchange(
+                            &native_session,
+                            &mut session_state,
+                            &Some(pairing_bytes.clone()),
+                        )
+                        .await?;
                     }
                     other => {
                         apply_inline_native_event(&paths, &connection, &lease.session_id, other).await?;
@@ -1921,10 +2045,9 @@ async fn file_send(state_dir: Option<PathBuf>, args: FileSendArgs) -> Result<()>
     let tenant_id = require_tenant_id(&auth_session)?;
     let identity = ensure_device_identity(&paths).await?;
     let local_binding = signing_binding(&identity)?;
-    let pairing_bytes = build_pairing_identity_exchange_bytes(&paths, &identity, &local_binding).await?;
-    if pairing_bytes.is_none() {
-        bail!("file send requires a local PQC identity; set SKYBRIDGE_PQC_BRIDGE_IDENTITY=1");
-    }
+    let pairing_bytes = build_pairing_identity_exchange_bytes(&paths, &identity, &local_binding)
+        .await?
+        .ok_or_else(|| anyhow!("failed to prepare local PQC identity for file send"))?;
     let pqc_initiator_template =
         maybe_inline_pqc_initiator_template(&paths, &identity, &local_binding).await?;
     let pqc_responder =
@@ -2031,7 +2154,12 @@ async fn file_send(state_dir: Option<PathBuf>, args: FileSendArgs) -> Result<()>
                             &mut native_session,
                         ).await? {
                             if let Some(pairing) = decode_pairing_identity_exchange(&payload)? {
-                                maybe_send_pairing_exchange(&native_session, &mut session_state, &pairing_bytes).await?;
+                                maybe_send_pairing_exchange(
+                                    &native_session,
+                                    &mut session_state,
+                                    &Some(pairing_bytes.clone()),
+                                )
+                                .await?;
                                 maybe_start_pqc_rekey(
                                     &native_session,
                                     &mut session_state,
@@ -2055,6 +2183,22 @@ async fn file_send(state_dir: Option<PathBuf>, args: FileSendArgs) -> Result<()>
                                     }
                                 }
                                 CrossNetworkFileTransferOp::CompleteAck if msg.transfer_id == transfer_id => {
+                                    append_file_transfer_history(
+                                        &paths,
+                                        FileTransferHistoryEntry {
+                                            recorded_at: now_rfc3339(),
+                                            direction: FileTransferDirection::Send,
+                                            session_id: lookup.session_id.clone(),
+                                            transfer_id: transfer_id.clone(),
+                                            file_name: file_name.clone(),
+                                            path: args.path.display().to_string(),
+                                            bytes: file_bytes.len() as i64,
+                                            suite: session_state.current_negotiated_suite.clone(),
+                                            peer_device_id: Some(lookup.initiator_device_id.clone()),
+                                            peer_device_name: lookup.initiator_device_name.clone(),
+                                        },
+                                    )
+                                    .await?;
                                     if args.json {
                                         println!(
                                             "{}",
@@ -2108,7 +2252,12 @@ async fn file_send(state_dir: Option<PathBuf>, args: FileSendArgs) -> Result<()>
                             &mut native_session,
                         ).await? {
                             if let Some(pairing) = decode_pairing_identity_exchange(&payload)? {
-                                maybe_send_pairing_exchange(&native_session, &mut session_state, &pairing_bytes).await?;
+                                maybe_send_pairing_exchange(
+                                    &native_session,
+                                    &mut session_state,
+                                    &Some(pairing_bytes.clone()),
+                                )
+                                .await?;
                                 maybe_start_pqc_rekey(
                                     &native_session,
                                     &mut session_state,
@@ -2127,7 +2276,12 @@ async fn file_send(state_dir: Option<PathBuf>, args: FileSendArgs) -> Result<()>
                 match event {
                     NativeWebRtcEvent::AppPayload { data } => {
                         if let Some(pairing) = decode_pairing_identity_exchange(&data)? {
-                            maybe_send_pairing_exchange(&native_session, &mut session_state, &pairing_bytes).await?;
+                            maybe_send_pairing_exchange(
+                                &native_session,
+                                &mut session_state,
+                                &Some(pairing_bytes.clone()),
+                            )
+                            .await?;
                             maybe_start_pqc_rekey(
                                 &native_session,
                                 &mut session_state,
@@ -2148,6 +2302,22 @@ async fn file_send(state_dir: Option<PathBuf>, args: FileSendArgs) -> Result<()>
                                     }
                                 }
                                 CrossNetworkFileTransferOp::CompleteAck if msg.transfer_id == transfer_id => {
+                                    append_file_transfer_history(
+                                        &paths,
+                                        FileTransferHistoryEntry {
+                                            recorded_at: now_rfc3339(),
+                                            direction: FileTransferDirection::Send,
+                                            session_id: lookup.session_id.clone(),
+                                            transfer_id: transfer_id.clone(),
+                                            file_name: file_name.clone(),
+                                            path: args.path.display().to_string(),
+                                            bytes: file_bytes.len() as i64,
+                                            suite: session_state.current_negotiated_suite.clone(),
+                                            peer_device_id: Some(lookup.initiator_device_id.clone()),
+                                            peer_device_name: lookup.initiator_device_name.clone(),
+                                        },
+                                    )
+                                    .await?;
                                     if args.json {
                                         println!(
                                             "{}",
@@ -2189,7 +2359,12 @@ async fn file_send(state_dir: Option<PathBuf>, args: FileSendArgs) -> Result<()>
                             NativeWebRtcEvent::HandshakeComplete { negotiated_suite },
                         )
                         .await?;
-                        maybe_send_pairing_exchange(&native_session, &mut session_state, &pairing_bytes).await?;
+                        maybe_send_pairing_exchange(
+                            &native_session,
+                            &mut session_state,
+                            &Some(pairing_bytes.clone()),
+                        )
+                        .await?;
                     }
                     other => {
                         apply_inline_native_event(&paths, &connection, &lookup.session_id, other).await?;
@@ -2250,6 +2425,49 @@ async fn file_send(state_dir: Option<PathBuf>, args: FileSendArgs) -> Result<()>
             complete_sent = true;
         }
     }
+}
+
+async fn file_history(state_dir: Option<PathBuf>, as_json: bool) -> Result<()> {
+    let paths = resolve_paths(state_dir)?;
+    let history = load_file_transfer_history(&paths).await?;
+
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "history": history,
+            }))?
+        );
+        return Ok(());
+    }
+
+    if history.is_empty() {
+        println!("No file transfer history yet.");
+        return Ok(());
+    }
+
+    for entry in history {
+        let direction = match entry.direction {
+            FileTransferDirection::Send => "send",
+            FileTransferDirection::Receive => "receive",
+        };
+        println!(
+            "{} {} {} bytes {} suite={} peer={} path={}",
+            entry.recorded_at,
+            direction,
+            entry.bytes,
+            entry.file_name,
+            entry.suite.as_deref().unwrap_or("unknown"),
+            entry
+                .peer_device_name
+                .as_deref()
+                .or(entry.peer_device_id.as_deref())
+                .unwrap_or("-"),
+            entry.path,
+        );
+    }
+
+    Ok(())
 }
 
 async fn session_ls(state_dir: Option<PathBuf>, as_json: bool) -> Result<()> {
@@ -2656,15 +2874,6 @@ async fn should_stop_inline_connect(
     Ok(false)
 }
 
-fn placeholder_json_or_text(as_json: bool, payload: serde_json::Value, text: &str) -> Result<()> {
-    if as_json {
-        println!("{}", serde_json::to_string_pretty(&payload)?);
-    } else {
-        println!("{text}");
-    }
-    Ok(())
-}
-
 fn describe_enrollment(status: EnrollmentStatus) -> &'static str {
     match status {
         EnrollmentStatus::Unenrolled => "unenrolled",
@@ -2759,4 +2968,59 @@ fn describe_keepalive_brief(keepalive: &RuntimeSessionKeepaliveStatus) -> String
         summary.push_str(&format!(" active={last_activity_at}"));
     }
     summary
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pqc_bridge_identity_defaults_to_enabled() {
+        // SAFETY: test-scoped env mutation.
+        unsafe { std::env::remove_var(ENV_PQC_BRIDGE_IDENTITY) };
+        assert!(pqc_bridge_identity_enabled());
+        // SAFETY: test-scoped env mutation.
+        unsafe { std::env::set_var(ENV_PQC_BRIDGE_IDENTITY, "0") };
+        assert!(!pqc_bridge_identity_enabled());
+    }
+
+    #[tokio::test]
+    async fn file_transfer_history_round_trip() {
+        let root = std::env::temp_dir().join(format!(
+            "skybridge-cli-history-test-{}",
+            OffsetDateTime::now_utc().unix_timestamp_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("create temp root");
+        let paths = skybridge_agent::AgentPaths {
+            root: root.clone(),
+            identity_dir: root.join("identity"),
+            runtime_dir: root.join("runtime"),
+            logs_dir: root.join("logs"),
+            identity_file: root.join("identity").join("device.json"),
+            session_controls_file: root.join("runtime").join("session-controls.json"),
+            health_file: root.join("runtime").join("health.json"),
+            log_file: root.join("logs").join("agent.log"),
+        };
+        let entry = FileTransferHistoryEntry {
+            recorded_at: "2026-03-20T00:00:00Z".to_owned(),
+            direction: FileTransferDirection::Send,
+            session_id: "session-1".to_owned(),
+            transfer_id: "transfer-1".to_owned(),
+            file_name: "demo.txt".to_owned(),
+            path: "/tmp/demo.txt".to_owned(),
+            bytes: 42,
+            suite: Some("X-Wing + AES-256-GCM + ML-DSA-65".to_owned()),
+            peer_device_id: Some("peer-1".to_owned()),
+            peer_device_name: Some("Peer".to_owned()),
+        };
+
+        append_file_transfer_history(&paths, entry.clone())
+            .await
+            .expect("append");
+        let history = load_file_transfer_history(&paths).await.expect("load");
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].transfer_id, entry.transfer_id);
+        assert_eq!(history[0].bytes, entry.bytes);
+        std::fs::remove_dir_all(root).expect("cleanup temp root");
+    }
 }

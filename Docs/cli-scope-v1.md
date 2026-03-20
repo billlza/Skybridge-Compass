@@ -102,18 +102,17 @@ As of this commit, the runnable subset is:
 - `skybridge session ls`
 - `skybridge session inspect <id>`
 - `skybridge disconnect <id>`
+- `skybridge file send <path> --to <code>`
+- `skybridge file receive`
+- `skybridge file history`
 - `skybridge doctor`
 - `skybridge logs tail`
 - `skybridge metrics`
 - `skybridge version`
 
-Still intentionally gated:
+Current `connect` establishes and validates the formal signaling/current-path control plane, then writes lifecycle state into the shared runtime session registry under `runtime/sessions.json`. `session ls` and `session inspect` now read that agent/runtime view instead of CLI-local ad hoc records.
 
-- `skybridge file send`
-- `skybridge file receive`
-- `skybridge file history`
-
-Current `connect` establishes and validates the formal signaling/current-path control plane, then writes lifecycle state into the shared runtime session registry under `runtime/sessions.json`. `session ls` and `session inspect` now read that agent/runtime view instead of CLI-local ad hoc records. Full data-plane/file-transfer work remains Phase 6.
+`file send` and `file receive` now perform signed identity exchange, in-band PQC rekey, and only then transfer file payloads. The CLI auto-provisions its local PQC bridge identity by default; set `SKYBRIDGE_PQC_BRIDGE_IDENTITY=0` only if you explicitly need to disable that bridge path. Completed transfers are recorded in `runtime/file-transfers.json` and exposed by `skybridge file history`.
 
 ## Iteration Template
 
