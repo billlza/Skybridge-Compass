@@ -3,11 +3,23 @@ class Skybridge < Formula
   homepage "https://github.com/billlza/Skybridge-Compass"
   version "__VERSION__"
 
-  depends_on arch: :arm64
+  on_macos do
+    on_arm do
+      url "__BASE_URL__/skybridge-aarch64-apple-darwin.tar.gz"
+      sha256 "__DARWIN_ARM64_SHA256__"
+    end
+  end
 
-  on_arm do
-    url "__BASE_URL__/skybridge-aarch64-apple-darwin.tar.gz"
-    sha256 "__DARWIN_ARM64_SHA256__"
+  on_linux do
+    on_arm do
+      url "__BASE_URL__/skybridge-aarch64-unknown-linux-gnu.tar.gz"
+      sha256 "__LINUX_ARM64_SHA256__"
+    end
+
+    on_intel do
+      url "__BASE_URL__/skybridge-x86_64-unknown-linux-gnu.tar.gz"
+      sha256 "__LINUX_X64_SHA256__"
+    end
   end
 
   def install
