@@ -19,6 +19,7 @@ use skybridge_agent::{
 };
 use skybridge_core::{
     AgentRuntimeStatus, AuthState, ClassicResponderConfig, CryptoSuite, CurrentPathOriginPolicy,
+    DEFAULT_NEBULA_BASE_URL,
     EnrollmentStatus, InboundMessage, ManagedSessionControl, NativeWebRtcConfig,
     NativeWebRtcEvent, NativeWebRtcSession, NebulaOAuthClient, PqcInitiatorTemplate,
     PqcResponderConfig, ProtocolIdentityBinding, ProtocolSigningAlgorithm,
@@ -352,6 +353,8 @@ async fn login(state_dir: Option<PathBuf>, args: LoginCommand) -> Result<()> {
         return Ok(());
     }
 
+    validate_nebula_oauth_preflight(&oauth).await?;
+
     let session = oauth
         .complete_authorization_interactively(
             &authorization_request,
@@ -417,6 +420,24 @@ fn resolve_cli_login_redirect_uri(args: &LoginCommand) -> String {
         LoginMode::Browser => format!("http://127.0.0.1:{}/auth/callback", args.listen_port),
         LoginMode::Paste => "skybridge://auth/nebula".to_owned(),
     }
+}
+
+async fn validate_nebula_oauth_preflight(oauth: &NebulaOAuthClient) -> Result<()> {
+    if let Err(error) = oauth.fetch_discovery_document().await {
+        let base_url = configured_nebula_base_url();
+        bail!(
+            "Nebula OAuth preflight failed for {base_url}/.well-known/openid-configuration: {error}\n\
+             The configured Nebula base URL is not serving a valid OAuth issuer right now.\n\
+             Fix the Nebula auth deployment or override NEBULA_BASE_URL / SKYBRIDGE_NEBULA_BASE_URL before running `skybridge login`."
+        );
+    }
+    Ok(())
+}
+
+fn configured_nebula_base_url() -> String {
+    std::env::var("NEBULA_BASE_URL")
+        .or_else(|_| std::env::var("SKYBRIDGE_NEBULA_BASE_URL"))
+        .unwrap_or_else(|_| DEFAULT_NEBULA_BASE_URL.to_owned())
 }
 
 fn describe_login_mode(mode: LoginMode, redirect_uri: &str) -> &'static str {
