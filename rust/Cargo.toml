@@ -9,7 +9,7 @@ resolver = "2"
 [workspace.package]
 edition = "2024"
 license = "MIT"
-version = "1.0.1"
+version = "1.0.2"
 rust-version = "1.94"
 
 [workspace.dependencies]
@@ -37,7 +37,7 @@ sha2 = "0.10.9"
 sha3 = "0.10.8"
 thiserror = "2.0.17"
 time = { version = "0.3.44", features = ["formatting", "macros", "parsing", "serde"] }
-tokio = { version = "1.48.0", features = ["fs", "io-util", "macros", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { version = "1.48.0", features = ["fs", "io-util", "macros", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-tungstenite = { version = "0.28.0", features = ["rustls-tls-native-roots"] }
 tokio-util = { version = "0.7.17", features = ["rt"] }
 tracing = "0.1.41"

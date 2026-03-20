@@ -158,6 +158,7 @@ cargo run --manifest-path rust/Cargo.toml -p skybridge -- version
 - `skybridge device approve <pending-device-id> --pending-fingerprint <fp>`
 - `skybridge code create`
 - `skybridge connect <code>`
+- `skybridge test`
 - `skybridge session ls`
 - `skybridge session inspect <id>`
 - `skybridge disconnect <id>`
@@ -168,6 +169,11 @@ cargo run --manifest-path rust/Cargo.toml -p skybridge -- version
 - `skybridge logs tail`
 - `skybridge metrics`
 - `skybridge version`
+
+`skybridge test` now performs a real end-to-end smoke path by provisioning a
+temporary peer state directory, issuing a real receive code, sending a real
+file over the signaling/WebRTC path, and requiring a PQC-negotiated suite by
+default.
 
 首发边界与 contract 文档：
 

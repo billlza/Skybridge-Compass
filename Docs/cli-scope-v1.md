@@ -78,6 +78,7 @@ The parser is intentionally shaped around the release surface:
 - `skybridge device approve <request-id>`
 - `skybridge code create`
 - `skybridge connect <code>`
+- `skybridge test`
 - `skybridge session ls`
 - `skybridge session inspect <id>`
 - `skybridge disconnect <id>`
@@ -99,6 +100,7 @@ As of this commit, the runnable subset is:
 - `skybridge device approve <pending-device-id> --pending-fingerprint <fp>`
 - `skybridge code create`
 - `skybridge connect <code>`
+- `skybridge test`
 - `skybridge session ls`
 - `skybridge session inspect <id>`
 - `skybridge disconnect <id>`
@@ -113,6 +115,8 @@ As of this commit, the runnable subset is:
 Current `connect` establishes and validates the formal signaling/current-path control plane, then writes lifecycle state into the shared runtime session registry under `runtime/sessions.json`. `session ls` and `session inspect` now read that agent/runtime view instead of CLI-local ad hoc records.
 
 `file send` and `file receive` now perform signed identity exchange, in-band PQC rekey, and only then transfer file payloads. The CLI auto-provisions its local PQC bridge identity by default; set `SKYBRIDGE_PQC_BRIDGE_IDENTITY=0` only if you explicitly need to disable that bridge path. Completed transfers are recorded in `runtime/file-transfers.json` and exposed by `skybridge file history`.
+
+`skybridge test` is the operator-facing smoke path. It provisions a temporary second peer state directory under the current machine, reuses the current auth session, runs a real receive-code flow, transfers a real payload, and fails unless the negotiated suite is PQC (unless `--allow-classic` is explicitly passed).
 
 ## Iteration Template
 

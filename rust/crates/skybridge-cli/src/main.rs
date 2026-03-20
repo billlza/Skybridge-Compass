@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
@@ -8,6 +9,7 @@ use base64::engine::general_purpose::STANDARD;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use skybridge_agent::{
     clear_auth_session, ensure_device_identity, ensure_rust_pqc_identity, load_auth_session,
     load_health_snapshot, load_session_registry, refresh_auth_session_if_needed,
@@ -27,7 +29,9 @@ use skybridge_core::{
 };
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
-use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader};
+use tokio::process::Command as TokioCommand;
+use tokio::sync::oneshot;
 
 const ENV_PQC_BRIDGE_IDENTITY: &str = "SKYBRIDGE_PQC_BRIDGE_IDENTITY";
 
@@ -49,6 +53,7 @@ enum Commands {
     Device(DeviceCommand),
     Code(CodeCommand),
     Connect(ConnectCommand),
+    Test(TestCommand),
     Session(SessionCommand),
     Disconnect(DisconnectCommand),
     File(FileCommand),
@@ -103,6 +108,20 @@ struct ConnectCommand {
     code: String,
     #[arg(long, default_value_t = 5)]
     hold_seconds: u64,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct TestCommand {
+    #[arg(long, default_value_t = 180)]
+    timeout_seconds: u64,
+    #[arg(long, default_value_t = 4096)]
+    payload_bytes: usize,
+    #[arg(long)]
+    keep_artifacts: bool,
+    #[arg(long)]
+    allow_classic: bool,
     #[arg(long)]
     json: bool,
 }
@@ -295,6 +314,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
             CodeSubcommand::Create(args) => code_create(cli.state_dir, args).await,
         },
         Commands::Connect(args) => connect_code(cli.state_dir, args).await,
+        Commands::Test(args) => smoke_test(cli.state_dir, args).await,
         Commands::Session(session) => match session.command {
             SessionSubcommand::Ls(output) => session_ls(cli.state_dir, output.json).await,
             SessionSubcommand::Inspect(args) => session_inspect(cli.state_dir, args).await,
@@ -687,6 +707,31 @@ struct FileTransferHistoryEntry {
     suite: Option<String>,
     peer_device_id: Option<String>,
     peer_device_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SmokeTestResult {
+    ok: bool,
+    session_id: String,
+    transfer_id: String,
+    code: String,
+    suite: Option<String>,
+    pqc: bool,
+    payload_bytes: usize,
+    payload_sha256: String,
+    received_sha256: String,
+    sender_device_id: String,
+    receiver_device_id: String,
+    receiver_output_path: String,
+    artifacts_dir: Option<String>,
+}
+
+#[derive(Debug)]
+struct ChildCommandResult {
+    status: std::process::ExitStatus,
+    stdout: String,
+    stderr: String,
 }
 
 mod base64_bytes {
@@ -2470,6 +2515,311 @@ async fn file_history(state_dir: Option<PathBuf>, as_json: bool) -> Result<()> {
     Ok(())
 }
 
+async fn smoke_test(state_dir: Option<PathBuf>, args: TestCommand) -> Result<()> {
+    if args.payload_bytes == 0 {
+        bail!("--payload-bytes must be greater than zero");
+    }
+    if args.timeout_seconds < 10 {
+        bail!("--timeout-seconds must be at least 10");
+    }
+
+    let sender_paths = resolve_paths(state_dir)?;
+    let auth_session = require_auth_session(&sender_paths).await?;
+    let sender_identity = ensure_device_identity(&sender_paths).await?;
+    let artifacts_root =
+        std::env::temp_dir().join(format!("skybridge-smoke-{}", unique_test_suffix()));
+    tokio::fs::create_dir_all(&artifacts_root).await?;
+    let peer_state_dir = artifacts_root.join("peer-state");
+    let peer_output_dir = artifacts_root.join("peer-output");
+    let payload_path = artifacts_root.join("smoke-payload.bin");
+    let artifacts_display = artifacts_root.display().to_string();
+
+    let outcome = async {
+        let peer_paths = resolve_paths(Some(peer_state_dir.clone()))?;
+        store_auth_session(&peer_paths, &auth_session).await?;
+        let receiver_identity = ensure_device_identity(&peer_paths).await?;
+        let payload = build_smoke_payload(
+            args.payload_bytes,
+            &sender_identity.state.device.device_id,
+            &receiver_identity.state.device.device_id,
+        );
+        let payload_sha256 = sha256_hex(&payload);
+        tokio::fs::create_dir_all(&peer_output_dir).await?;
+        tokio::fs::write(&payload_path, &payload).await?;
+
+        let cli_path = std::env::current_exe()
+            .map_err(|error| anyhow!("failed to resolve current executable: {error}"))?;
+        let mut receive_child = TokioCommand::new(&cli_path);
+        receive_child
+            .arg("--state-dir")
+            .arg(&peer_paths.root)
+            .arg("file")
+            .arg("receive")
+            .arg("--output-dir")
+            .arg(&peer_output_dir)
+            .arg("--timeout-seconds")
+            .arg(args.timeout_seconds.to_string())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut receive_child = receive_child.spawn()?;
+        let receive_stdout = receive_child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow!("failed to capture receiver stdout"))?;
+        let receive_stderr = receive_child
+            .stderr
+            .take()
+            .ok_or_else(|| anyhow!("failed to capture receiver stderr"))?;
+        let (code_tx, code_rx) = oneshot::channel();
+        let receive_stdout_task = tokio::spawn(read_lines_and_capture_code(receive_stdout, code_tx));
+        let receive_stderr_task = tokio::spawn(read_stream_to_string(receive_stderr));
+
+        let code = tokio::time::timeout(Duration::from_secs(30), code_rx)
+            .await
+            .map_err(|_| anyhow!("timed out waiting for receiver connection code"))?
+            .map_err(|_| anyhow!("receiver exited before emitting a connection code"))?;
+
+        let mut send_command = TokioCommand::new(&cli_path);
+        send_command
+            .arg("--state-dir")
+            .arg(&sender_paths.root)
+            .arg("file")
+            .arg("send")
+            .arg("--to")
+            .arg(&code)
+            .arg("--timeout-seconds")
+            .arg(args.timeout_seconds.to_string())
+            .arg("--json")
+            .arg(&payload_path);
+        let send_result = run_child_command(send_command).await?;
+
+        if !send_result.status.success() {
+            let _ = receive_child.kill().await;
+            let _ = receive_child.wait().await;
+            let receive_stdout = receive_stdout_task
+                .await
+                .map_err(|error| anyhow!("receiver stdout task join failed: {error}"))??;
+            let receive_stderr = receive_stderr_task
+                .await
+                .map_err(|error| anyhow!("receiver stderr task join failed: {error}"))??;
+            bail!(
+                "sender smoke command failed\nsender stdout:\n{}\n\nsender stderr:\n{}\n\nreceiver stdout:\n{}\n\nreceiver stderr:\n{}",
+                send_result.stdout.trim(),
+                send_result.stderr.trim(),
+                receive_stdout.trim(),
+                receive_stderr.trim()
+            );
+        }
+
+        let send_payload: serde_json::Value = serde_json::from_str(send_result.stdout.trim())
+            .map_err(|error| anyhow!("failed to parse sender JSON output: {error}"))?;
+        let suite = send_payload
+            .get("suite")
+            .and_then(|value| value.as_str())
+            .map(str::to_owned);
+        if !args.allow_classic && !current_suite_is_pqc(suite.as_deref()) {
+            let _ = receive_child.kill().await;
+            let _ = receive_child.wait().await;
+            bail!(
+                "smoke test connected, but negotiated suite was not post-quantum: {}",
+                suite.as_deref().unwrap_or("unknown")
+            );
+        }
+
+        let receive_status = tokio::time::timeout(
+            Duration::from_secs(args.timeout_seconds + 15),
+            receive_child.wait(),
+        )
+        .await
+        .map_err(|_| anyhow!("timed out waiting for receiver completion"))??;
+        let receive_stdout = receive_stdout_task
+            .await
+            .map_err(|error| anyhow!("receiver stdout task join failed: {error}"))??;
+        let receive_stderr = receive_stderr_task
+            .await
+            .map_err(|error| anyhow!("receiver stderr task join failed: {error}"))??;
+        if !receive_status.success() {
+            bail!(
+                "receiver smoke command failed\nreceiver stdout:\n{}\n\nreceiver stderr:\n{}",
+                receive_stdout.trim(),
+                receive_stderr.trim()
+            );
+        }
+
+        let expected_name = payload_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| anyhow!("failed to determine smoke payload file name"))?;
+        let received_path = peer_output_dir.join(expected_name);
+        if !tokio::fs::try_exists(&received_path).await? {
+            bail!(
+                "receiver completed but expected payload was not found at {}",
+                received_path.display()
+            );
+        }
+        let received_bytes = tokio::fs::read(&received_path).await?;
+        let received_sha256 = sha256_hex(&received_bytes);
+        if received_bytes != payload {
+            bail!(
+                "smoke test payload mismatch between sender and receiver at {}",
+                received_path.display()
+            );
+        }
+
+        Ok(SmokeTestResult {
+            ok: true,
+            session_id: send_payload
+                .get("session_id")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_owned(),
+            transfer_id: send_payload
+                .get("transfer_id")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_owned(),
+            code,
+            suite: suite.clone(),
+            pqc: current_suite_is_pqc(suite.as_deref()),
+            payload_bytes: payload.len(),
+            payload_sha256,
+            received_sha256,
+            sender_device_id: sender_identity.state.device.device_id.clone(),
+            receiver_device_id: receiver_identity.state.device.device_id.clone(),
+            receiver_output_path: received_path.display().to_string(),
+            artifacts_dir: if args.keep_artifacts {
+                Some(artifacts_display.clone())
+            } else {
+                None
+            },
+        })
+    }
+    .await;
+
+    match outcome {
+        Ok(result) => {
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else {
+                println!("Smoke Test: ok");
+                println!("Code: {}", result.code);
+                println!("Session ID: {}", result.session_id);
+                println!("Transfer ID: {}", result.transfer_id);
+                println!(
+                    "Suite: {}",
+                    result.suite.as_deref().unwrap_or("unknown")
+                );
+                println!("PQC: {}", if result.pqc { "yes" } else { "no" });
+                println!("Payload Bytes: {}", result.payload_bytes);
+                println!("Sender Device ID: {}", result.sender_device_id);
+                println!("Receiver Device ID: {}", result.receiver_device_id);
+                println!("Received Path: {}", result.receiver_output_path);
+                if let Some(artifacts_dir) = result.artifacts_dir.as_deref() {
+                    println!("Artifacts: {artifacts_dir}");
+                }
+            }
+            if !args.keep_artifacts {
+                let _ = tokio::fs::remove_dir_all(&artifacts_root).await;
+            }
+            Ok(())
+        }
+        Err(error) => {
+            Err(anyhow!(
+                "{error}\nSmoke test artifacts preserved at {}",
+                artifacts_root.display()
+            ))
+        }
+    }
+}
+
+fn build_smoke_payload(payload_bytes: usize, sender_device_id: &str, receiver_device_id: &str) -> Vec<u8> {
+    let mut payload = format!(
+        "skybridge-smoke\nsender={sender_device_id}\nreceiver={receiver_device_id}\nts={}\n",
+        OffsetDateTime::now_utc().format(&Rfc3339).unwrap_or_else(|_| "unknown".to_owned())
+    )
+    .into_bytes();
+    let mut fill = 0u8;
+    while payload.len() < payload_bytes {
+        payload.push(fill);
+        fill = fill.wrapping_add(1);
+    }
+    payload.truncate(payload_bytes);
+    payload
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut digest = Sha256::new();
+    digest.update(bytes);
+    format!("{:x}", digest.finalize())
+}
+
+async fn run_child_command(mut command: TokioCommand) -> Result<ChildCommandResult> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("failed to capture child stdout"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow!("failed to capture child stderr"))?;
+    let stdout_task = tokio::spawn(read_stream_to_string(stdout));
+    let stderr_task = tokio::spawn(read_stream_to_string(stderr));
+    let status = child.wait().await?;
+    Ok(ChildCommandResult {
+        status,
+        stdout: stdout_task
+            .await
+            .map_err(|error| anyhow!("stdout task join failed: {error}"))??,
+        stderr: stderr_task
+            .await
+            .map_err(|error| anyhow!("stderr task join failed: {error}"))??,
+    })
+}
+
+async fn read_lines_and_capture_code<R>(
+    reader: R,
+    code_tx: oneshot::Sender<String>,
+) -> Result<String>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut lines = BufReader::new(reader).lines();
+    let mut output = String::new();
+    let mut code_tx = Some(code_tx);
+    while let Some(line) = lines.next_line().await? {
+        if let Some(code) = parse_receive_code_line(&line) {
+            if let Some(tx) = code_tx.take() {
+                let _ = tx.send(code);
+            }
+        }
+        output.push_str(&line);
+        output.push('\n');
+    }
+    Ok(output)
+}
+
+async fn read_stream_to_string<R>(reader: R) -> Result<String>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut output = String::new();
+    BufReader::new(reader).read_to_string(&mut output).await?;
+    Ok(output)
+}
+
+fn parse_receive_code_line(line: &str) -> Option<String> {
+    line.strip_prefix("Receive Code: ")
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn unique_test_suffix() -> String {
+    format!("{}", OffsetDateTime::now_utc().unix_timestamp_nanos())
+}
+
 async fn session_ls(state_dir: Option<PathBuf>, as_json: bool) -> Result<()> {
     let paths = resolve_paths(state_dir)?;
     let registry = load_session_registry(&paths).await?;
@@ -3022,5 +3372,14 @@ mod tests {
         assert_eq!(history[0].transfer_id, entry.transfer_id);
         assert_eq!(history[0].bytes, entry.bytes);
         std::fs::remove_dir_all(root).expect("cleanup temp root");
+    }
+
+    #[test]
+    fn parse_receive_code_line_extracts_code() {
+        assert_eq!(
+            parse_receive_code_line("Receive Code: SKY-ABC-123").as_deref(),
+            Some("SKY-ABC-123")
+        );
+        assert!(parse_receive_code_line("Session ID: abc").is_none());
     }
 }
