@@ -470,7 +470,8 @@ mod tests {
     use super::*;
     use axum::{
         body::Body,
-        http::{Request, StatusCode},
+        http::{header, HeaderValue, Request, StatusCode},
+        routing::get,
     };
     use proptest::prelude::*;
     use tower::ServiceExt;
@@ -753,5 +754,55 @@ mod tests {
             .is_some());
         // PNA header from our middleware
         assert!(response.headers().get(PNA_HEADER_NAME).is_some());
+    }
+
+    #[tokio::test]
+    async fn test_auth_proxy_preserves_custom_scheme_redirect() {
+        let upstream = Router::new().route(
+            "/oauth/authorize",
+            get(|| async {
+                (
+                    StatusCode::FOUND,
+                    [(
+                        header::LOCATION,
+                        HeaderValue::from_static(
+                            "skybridge://auth/nebula?code=test-code&state=test-state",
+                        ),
+                    )],
+                )
+            }),
+        );
+
+        let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(upstream_listener, upstream).await.unwrap();
+        });
+
+        let mut state = state::AppState::new();
+        state.auth_proxy_upstream = format!("http://{}", upstream_addr);
+
+        let app = Router::new()
+            .route("/oauth/authorize", axum::routing::any(proxy_auth_request))
+            .with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/oauth/authorize?response_type=code")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FOUND);
+        assert_eq!(
+            response.headers().get(header::LOCATION).unwrap(),
+            "skybridge://auth/nebula?code=test-code&state=test-state"
+        );
     }
 }

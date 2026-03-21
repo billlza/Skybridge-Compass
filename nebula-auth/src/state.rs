@@ -8,7 +8,7 @@ use crate::supabase::SupabaseClient;
 use chrono::{Duration, Utc};
 use dashmap::DashMap;
 use dashmap::DashMap as DM;
-use reqwest::Client;
+use reqwest::{redirect::Policy, Client};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -82,6 +82,7 @@ impl AppState {
             .to_string();
         let auth_proxy_client = reqwest::Client::builder()
             .no_proxy()
+            .redirect(Policy::none())
             .user_agent("skybridge-nebula-auth-proxy/1.0")
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
