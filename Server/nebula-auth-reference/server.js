@@ -959,7 +959,7 @@ const server = http.createServer(async (req, res) => {
     return json(res, 200, { revoked: true });
   }
 
-  if (req.method === 'POST' && url.pathname === '/auth/login') {
+  if (req.method === 'POST' && (url.pathname === '/auth/login' || url.pathname === '/auth/nebula/login')) {
     let body;
     try {
       body = await parseBody(req);
@@ -975,11 +975,6 @@ const server = http.createServer(async (req, res) => {
     } catch (error) {
       return json(res, 401, { success: false, message: error.message || 'authentication_failed' });
     }
-  }
-
-  if (req.method === 'POST' && url.pathname === '/auth/nebula/login') {
-    req.url = '/auth/login';
-    return server.emit('request', req, res);
   }
 
   if (req.method === 'POST' && url.pathname === '/auth/refresh') {
@@ -1092,7 +1087,9 @@ const server = http.createServer(async (req, res) => {
     }
     const input = Object.keys(body.json).length ? body.json : body.form;
     try {
-      const authResult = await performSupabaseLogin(input.email || input.username, input.password);
+      const authResult = supabase
+        ? await performSupabaseLogin(input.email || input.username, input.password)
+        : { session: tokenPayload(demoUser, 'skybridge_compass_pro', 'profile email company'), user: demoUser };
       return json(res, 200, makeLegacyAuthResponse(authResult));
     } catch (error) {
       return json(res, 401, { success: false, message: error.message || 'email_login_failed' });
