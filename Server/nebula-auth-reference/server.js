@@ -4,7 +4,9 @@ const http = require('node:http');
 const crypto = require('node:crypto');
 
 const port = Number(process.env.PORT || 8788);
-const configuredIssuer = String(process.env.NEBULA_ISSUER || `http://127.0.0.1:${port}`).replace(/\/+$/, '');
+const bindHost = String(process.env.NEBULA_BIND_HOST || process.env.HOST || '0.0.0.0').trim() || '0.0.0.0';
+const defaultIssuer = process.env.RENDER ? 'https://auth.nebula-technologies.net' : `http://127.0.0.1:${port}`;
+const configuredIssuer = String(process.env.NEBULA_ISSUER || defaultIssuer).replace(/\/+$/, '');
 const accessTokenTtlSec = Number(process.env.NEBULA_ACCESS_TOKEN_TTL_SEC || 900);
 const refreshTokenTtlSec = Number(process.env.NEBULA_REFRESH_TOKEN_TTL_SEC || 60 * 60 * 24 * 30);
 const headlessAuthorizeEnabled = !/^(0|false|no)$/i.test(process.env.NEBULA_ALLOW_DEV_HEADLESS_AUTHORIZE || 'true');
@@ -1206,9 +1208,9 @@ const server = http.createServer(async (req, res) => {
   return json(res, 404, { error: 'not_found' });
 });
 
-server.listen(port, () => {
+server.listen(port, bindHost, () => {
   console.log(`[nebula-auth-reference] issuer=${configuredIssuer}`);
-  console.log(`[nebula-auth-reference] listening on http://127.0.0.1:${port}`);
+  console.log(`[nebula-auth-reference] listening on http://${bindHost}:${port}`);
   console.log(`[nebula-auth-reference] public clients=${Object.keys(publicClients).join(', ')}`);
   console.log(`[nebula-auth-reference] mode=${supabase ? 'supabase_gateway' : 'demo'}`);
 });
