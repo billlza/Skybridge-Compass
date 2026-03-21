@@ -722,6 +722,7 @@ const server = http.createServer(async (req, res) => {
       mode: supabase ? 'supabase_gateway' : 'demo',
       issuer: requestIssuer,
       configuredIssuer,
+      serviceRoleConfigured: Boolean(supabaseServiceRoleKey),
       headlessAuthorizeEnabled,
       clients: Object.keys(publicClients),
       supabaseConfigured: Boolean(supabase)
@@ -1224,4 +1225,5 @@ server.listen(port, bindHost, () => {
   console.log(`[nebula-auth-reference] listening on http://${bindHost}:${port}`);
   console.log(`[nebula-auth-reference] public clients=${Object.keys(publicClients).join(', ')}`);
   console.log(`[nebula-auth-reference] mode=${supabase ? 'supabase_gateway' : 'demo'}`);
+  console.log(`[nebula-auth-reference] serviceRoleConfigured=${Boolean(supabaseServiceRoleKey)}`);
 });
