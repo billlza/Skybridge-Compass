@@ -8,6 +8,7 @@ use crate::supabase::SupabaseClient;
 use chrono::{Duration, Utc};
 use dashmap::DashMap;
 use dashmap::DashMap as DM;
+use reqwest::Client;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -42,6 +43,9 @@ pub struct AppState {
     pub oauth_dev_headless_authorize_enabled: bool,
     pub oauth_browser_mfa_code: Option<String>,
     pub nebula_issuer: String,
+    pub auth_proxy_upstream: String,
+    pub auth_proxy_public_host: String,
+    pub auth_proxy_client: Client,
 }
 
 impl AppState {
@@ -67,6 +71,20 @@ impl AppState {
             .ok()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
+        let auth_proxy_upstream = std::env::var("NEBULA_AUTH_PROXY_UPSTREAM")
+            .unwrap_or_else(|_| "https://nebula-auth-jfnt.onrender.com".to_string())
+            .trim()
+            .trim_end_matches('/')
+            .to_string();
+        let auth_proxy_public_host = std::env::var("NEBULA_AUTH_PROXY_PUBLIC_HOST")
+            .unwrap_or_else(|_| "auth.nebula-technologies.net".to_string())
+            .trim()
+            .to_string();
+        let auth_proxy_client = reqwest::Client::builder()
+            .no_proxy()
+            .user_agent("skybridge-nebula-auth-proxy/1.0")
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
 
         let (tx, _rx) = broadcast::channel::<String>(64);
         Self {
@@ -92,6 +110,9 @@ impl AppState {
             oauth_dev_headless_authorize_enabled,
             oauth_browser_mfa_code,
             nebula_issuer,
+            auth_proxy_upstream,
+            auth_proxy_public_host,
+            auth_proxy_client,
         }
     }
 

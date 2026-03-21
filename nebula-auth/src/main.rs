@@ -7,17 +7,33 @@ mod state;
 mod supabase;
 
 use axum::{
-    http::{header, HeaderMap, HeaderName, HeaderValue, Method, Request},
+    body::{to_bytes, Body},
+    extract::State,
+    http::{header, HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode},
     middleware::{self, Next},
-    response::Response,
-    routing::{get, patch, post},
-    Router,
+    response::{IntoResponse, Response},
+    routing::{any, get, patch, post},
+    Json, Router,
 };
 use std::net::SocketAddr;
 use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
 use tracing::{error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+const PROXY_BODY_LIMIT_BYTES: usize = 4 * 1024 * 1024;
+const HOP_BY_HOP_HEADERS: &[&str] = &[
+    "connection",
+    "content-length",
+    "host",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+];
 
 /// PNA (Private Network Access) middleware
 /// Ensures all responses include Access-Control-Allow-Private-Network header
@@ -56,14 +72,21 @@ async fn main() {
     // CORS is added first, then PNA, so PNA middleware wraps CORS and adds headers to all responses
     let app = Router::new()
         .route("/health", get(health_check))
-        .route("/.well-known/openid-configuration", get(oauth::discovery))
-        .route(
-            "/oauth/authorize",
-            get(oauth::authorize).post(oauth::authorize_submit),
-        )
-        .route("/oauth/token", post(oauth::token))
-        .route("/oauth/userinfo", get(oauth::userinfo))
-        .route("/oauth/revoke", post(oauth::revoke))
+        .route("/.well-known/openid-configuration", any(proxy_auth_request))
+        .route("/oauth/authorize", any(proxy_auth_request))
+        .route("/oauth/token", any(proxy_auth_request))
+        .route("/oauth/userinfo", any(proxy_auth_request))
+        .route("/oauth/revoke", any(proxy_auth_request))
+        .route("/auth/login", any(proxy_auth_request))
+        .route("/auth/nebula/login", any(proxy_auth_request))
+        .route("/auth/refresh", any(proxy_auth_request))
+        .route("/auth/register", any(proxy_auth_request))
+        .route("/auth/phone/send-code", any(proxy_auth_request))
+        .route("/auth/phone/login", any(proxy_auth_request))
+        .route("/auth/email/login", any(proxy_auth_request))
+        .route("/auth/apple/exchange", any(proxy_auth_request))
+        .route("/auth/check-username", any(proxy_auth_request))
+        .route("/auth/email/reset-password", any(proxy_auth_request))
         .route("/dev/oauth/authorize", post(oauth::dev_authorize))
         .route("/api/webrtc/config", get(webrtc_config))
         .route("/api/webrtc/health", get(webrtc_health))
@@ -92,6 +115,11 @@ async fn main() {
         .layer(middleware::from_fn(pna_middleware))
         .with_state(state.clone());
 
+    info!(
+        "proxying oidc/auth traffic to {} using public host {}",
+        state.auth_proxy_upstream, state.auth_proxy_public_host
+    );
+
     // Run HTTP server
     let addr = bind_address();
     info!("nebula-auth listening on {}", addr);
@@ -117,7 +145,6 @@ async fn main() {
     }
     axum::serve(listener, app).await.unwrap();
 }
-use axum::{response::IntoResponse, Json};
 
 fn bind_address() -> SocketAddr {
     let host = std::env::var("SKYBRIDGE_BIND_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
@@ -197,6 +224,148 @@ fn cors_layer() -> CorsLayer {
             header::ACCEPT,
             HeaderName::from_static("x-api-key"),
         ])
+}
+
+async fn proxy_auth_request(
+    State(state): State<state::AppState>,
+    request: Request<Body>,
+) -> Response {
+    let upstream_url = upstream_url_for_request(&state, &request);
+    let forwarded_host = forwarded_host_for_request(&state, request.headers());
+    let forwarded_proto = forwarded_proto_for_request(request.headers());
+    let method = request.method().clone();
+    let request_headers = request.headers().clone();
+
+    let body = match to_bytes(request.into_body(), PROXY_BODY_LIMIT_BYTES).await {
+        Ok(body) => body,
+        Err(error) => {
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                Json(serde_json::json!({
+                    "error": "payload_too_large",
+                    "message": error.to_string(),
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let mut upstream_request = state
+        .auth_proxy_client
+        .request(method, &upstream_url)
+        .header("x-forwarded-host", forwarded_host.as_str())
+        .header("x-forwarded-proto", forwarded_proto.as_str());
+
+    for (name, value) in &request_headers {
+        if should_forward_request_header(name) {
+            upstream_request = upstream_request.header(name, value);
+        }
+    }
+
+    let upstream_response = match upstream_request.body(body).send().await {
+        Ok(response) => response,
+        Err(error) => {
+            warn!(
+                "auth proxy request failed for {} {} -> {}: {}",
+                request_headers
+                    .get(header::HOST)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or("<unknown-host>"),
+                upstream_url,
+                state.auth_proxy_upstream,
+                error
+            );
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({
+                    "error": "auth_proxy_unreachable",
+                    "message": error.to_string(),
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    proxy_response_to_axum(upstream_response).await
+}
+
+fn upstream_url_for_request(state: &state::AppState, request: &Request<Body>) -> String {
+    let path_and_query = request
+        .uri()
+        .path_and_query()
+        .map(|value| value.as_str())
+        .unwrap_or_else(|| request.uri().path());
+    format!("{}{}", state.auth_proxy_upstream, path_and_query)
+}
+
+fn forwarded_host_for_request(state: &state::AppState, headers: &HeaderMap) -> String {
+    first_header_value(headers, "x-forwarded-host")
+        .or_else(|| first_header_value(headers, header::HOST.as_str()))
+        .unwrap_or_else(|| state.auth_proxy_public_host.clone())
+}
+
+fn forwarded_proto_for_request(headers: &HeaderMap) -> String {
+    first_header_value(headers, "x-forwarded-proto").unwrap_or_else(|| "https".to_string())
+}
+
+fn first_header_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').next())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn should_forward_request_header(name: &HeaderName) -> bool {
+    !HOP_BY_HOP_HEADERS
+        .iter()
+        .any(|blocked| name.as_str().eq_ignore_ascii_case(blocked))
+}
+
+fn should_forward_response_header(name: &HeaderName) -> bool {
+    !HOP_BY_HOP_HEADERS
+        .iter()
+        .any(|blocked| name.as_str().eq_ignore_ascii_case(blocked))
+}
+
+async fn proxy_response_to_axum(upstream_response: reqwest::Response) -> Response {
+    let status = upstream_response.status();
+    let response_headers = upstream_response.headers().clone();
+    let body = match upstream_response.bytes().await {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({
+                    "error": "auth_proxy_response_error",
+                    "message": error.to_string(),
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    if !status.is_success() {
+        let preview_len = body.len().min(256);
+        let preview = String::from_utf8_lossy(&body[..preview_len]);
+        warn!(
+            "auth proxy upstream returned status={} preview={}",
+            status, preview
+        );
+    }
+
+    let mut response = Response::new(Body::from(body));
+    *response.status_mut() = status;
+
+    for (name, value) in &response_headers {
+        if should_forward_response_header(name) {
+            response.headers_mut().insert(name.clone(), value.clone());
+        }
+    }
+
+    response
 }
 
 async fn health_check() -> impl IntoResponse {
