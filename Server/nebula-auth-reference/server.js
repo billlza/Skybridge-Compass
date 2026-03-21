@@ -641,17 +641,40 @@ class SupabaseAuthClient {
     if (!this.serviceRoleKey) {
       return { available: true, message: 'service_role_not_configured' };
     }
-    const response = await this.request(
-      `/rest/v1/profiles?username=eq.${encodeURIComponent(String(username || '').trim())}&select=id&limit=1`,
-      {
+
+    const candidate = String(username || '').trim().toLowerCase();
+    if (!candidate) {
+      return { available: false, message: 'username_required' };
+    }
+
+    for (let page = 1; page <= 10; page += 1) {
+      const response = await this.request(`/auth/v1/admin/users?page=${page}&per_page=200`, {
         method: 'GET',
         useServiceRole: true
+      });
+      const users = Array.isArray(response?.users) ? response.users : [];
+      const matched = users.some((user) => {
+        const meta = user?.user_metadata || user?.raw_user_meta_data || {};
+        const usernameCandidates = [
+          meta.username,
+          meta.preferred_username,
+          meta.display_name
+        ]
+          .map((value) => String(value || '').trim().toLowerCase())
+          .filter(Boolean);
+        return usernameCandidates.includes(candidate);
+      });
+
+      if (matched) {
+        return { available: false, message: null };
       }
-    );
-    return {
-      available: !Array.isArray(response) || response.length === 0,
-      message: null
-    };
+
+      if (users.length < 200) {
+        break;
+      }
+    }
+
+    return { available: true, message: null };
   }
 }
 
