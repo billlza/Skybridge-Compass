@@ -68,7 +68,7 @@ services:
     healthCheckPath: /health
     envVars:
       - key: NEBULA_ISSUER
-        value: https://nebula.skybridge.com
+        value: https://auth.nebula-technologies.net
       - key: NEBULA_ALLOW_DEV_HEADLESS_AUTHORIZE
         value: "false"
       - key: NEBULA_PUBLIC_CLIENTS_JSON

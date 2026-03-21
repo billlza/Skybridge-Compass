@@ -50,7 +50,7 @@ To run against real Supabase:
 export SUPABASE_URL="https://YOUR_PROJECT.supabase.co"
 export SUPABASE_ANON_KEY="..."
 export SUPABASE_SERVICE_ROLE_KEY="..."   # optional, only for username checks
-export NEBULA_ISSUER="https://nebula.skybridge.com"
+export NEBULA_ISSUER="https://auth.nebula-technologies.net"
 node server.js
 ```
 
@@ -68,7 +68,7 @@ For real Supabase-backed smoke, export:
 ```bash
 export NEBULA_SMOKE_IDENTIFIER="you@example.com"
 export NEBULA_SMOKE_PASSWORD="your-password"
-bash ./smoke_pkce.sh https://nebula.skybridge.com
+bash ./smoke_pkce.sh https://auth.nebula-technologies.net
 ```
 
 ## Environment
@@ -103,7 +103,7 @@ Example `NEBULA_PUBLIC_CLIENTS_JSON`:
 ## Production notes
 
 - Disable `NEBULA_ALLOW_DEV_HEADLESS_AUTHORIZE`.
-- Bind a dedicated issuer hostname such as `nebula.skybridge.com`; do not point the issuer at the frontend site or signaling service.
+- Bind a dedicated issuer hostname such as `auth.nebula-technologies.net`; do not point the issuer at the frontend site or signaling service.
 - Keep `api.nebula-technologies.net` for signaling and TURN, and point the auth hostname at this service.
 - If phone OTP is enabled in Supabase, configure Supabase `send_sms` hooks to call the signaling service endpoint `/api/hooks/supabase/send-sms`, which already supports Alibaba Cloud personal SMS.
 - For transactional email, prefer configuring Supabase/Auth mail delivery with a provider such as Resend, SES, or MailerSend instead of sending from clients directly.

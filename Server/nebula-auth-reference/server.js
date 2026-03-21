@@ -4,13 +4,19 @@ const http = require('node:http');
 const crypto = require('node:crypto');
 
 const port = Number(process.env.PORT || 8788);
-const issuer = String(process.env.NEBULA_ISSUER || `http://127.0.0.1:${port}`).replace(/\/+$/, '');
+const configuredIssuer = String(process.env.NEBULA_ISSUER || `http://127.0.0.1:${port}`).replace(/\/+$/, '');
 const accessTokenTtlSec = Number(process.env.NEBULA_ACCESS_TOKEN_TTL_SEC || 900);
 const refreshTokenTtlSec = Number(process.env.NEBULA_REFRESH_TOKEN_TTL_SEC || 60 * 60 * 24 * 30);
 const headlessAuthorizeEnabled = !/^(0|false|no)$/i.test(process.env.NEBULA_ALLOW_DEV_HEADLESS_AUTHORIZE || 'true');
 const supabaseUrl = normalizeBaseURL(process.env.SUPABASE_URL);
 const supabaseAnonKey = String(process.env.SUPABASE_ANON_KEY || '').trim();
 const supabaseServiceRoleKey = String(process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
+const dynamicIssuerHostSuffixes = String(
+  process.env.NEBULA_DYNAMIC_ISSUER_HOST_SUFFIXES || 'nebula-technologies.net,skybridge.com,onrender.com'
+)
+  .split(',')
+  .map((value) => value.trim().toLowerCase())
+  .filter(Boolean);
 
 const defaultClients = {
   skybridge_compass_pro: {
@@ -56,6 +62,45 @@ let supabase = null;
 function normalizeBaseURL(raw) {
   const value = String(raw || '').trim().replace(/\/+$/, '');
   return value || '';
+}
+
+function firstHeaderValue(value) {
+  return String(value || '').split(',')[0].trim();
+}
+
+function requestHost(req) {
+  return firstHeaderValue(req.headers['x-forwarded-host'] || req.headers.host).replace(/\/+$/, '');
+}
+
+function requestProtocol(req) {
+  const forwarded = firstHeaderValue(req.headers['x-forwarded-proto']).toLowerCase();
+  if (forwarded === 'http' || forwarded === 'https') {
+    return forwarded;
+  }
+  if (req.socket && req.socket.encrypted) {
+    return 'https';
+  }
+  try {
+    return new URL(configuredIssuer).protocol.replace(/:$/, '');
+  } catch {
+    return 'http';
+  }
+}
+
+function hostAllowedForDynamicIssuer(host) {
+  const hostname = String(host || '').split(':')[0].trim().toLowerCase();
+  if (!hostname) return false;
+  return dynamicIssuerHostSuffixes.some(
+    (suffix) => hostname === suffix || hostname.endsWith(`.${suffix}`)
+  );
+}
+
+function issuerForRequest(req) {
+  const host = requestHost(req);
+  if (host && hostAllowedForDynamicIssuer(host)) {
+    return `${requestProtocol(req)}://${host}`;
+  }
+  return configuredIssuer;
 }
 
 function json(res, statusCode, payload, headers = {}) {
@@ -655,13 +700,15 @@ setInterval(purgeExpired, 30_000).unref();
 
 const server = http.createServer(async (req, res) => {
   purgeExpired();
-  const url = new URL(req.url, issuer);
+  const requestIssuer = issuerForRequest(req);
+  const url = new URL(req.url, requestIssuer);
 
   if (req.method === 'GET' && url.pathname === '/health') {
     return json(res, 200, {
       service: 'nebula-auth-reference',
       mode: supabase ? 'supabase_gateway' : 'demo',
-      issuer,
+      issuer: requestIssuer,
+      configuredIssuer,
       headlessAuthorizeEnabled,
       clients: Object.keys(publicClients),
       supabaseConfigured: Boolean(supabase)
@@ -670,11 +717,11 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === 'GET' && url.pathname === '/.well-known/openid-configuration') {
     return json(res, 200, {
-      issuer,
-      authorization_endpoint: `${issuer}/oauth/authorize`,
-      token_endpoint: `${issuer}/oauth/token`,
-      userinfo_endpoint: `${issuer}/oauth/userinfo`,
-      revocation_endpoint: `${issuer}/oauth/revoke`,
+      issuer: requestIssuer,
+      authorization_endpoint: `${requestIssuer}/oauth/authorize`,
+      token_endpoint: `${requestIssuer}/oauth/token`,
+      userinfo_endpoint: `${requestIssuer}/oauth/userinfo`,
+      revocation_endpoint: `${requestIssuer}/oauth/revoke`,
       response_types_supported: ['code'],
       grant_types_supported: ['authorization_code', 'refresh_token'],
       token_endpoint_auth_methods_supported: ['none'],
@@ -1160,7 +1207,7 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(port, () => {
-  console.log(`[nebula-auth-reference] issuer=${issuer}`);
+  console.log(`[nebula-auth-reference] issuer=${configuredIssuer}`);
   console.log(`[nebula-auth-reference] listening on http://127.0.0.1:${port}`);
   console.log(`[nebula-auth-reference] public clients=${Object.keys(publicClients).join(', ')}`);
   console.log(`[nebula-auth-reference] mode=${supabase ? 'supabase_gateway' : 'demo'}`);
