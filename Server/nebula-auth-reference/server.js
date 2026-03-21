@@ -647,6 +647,8 @@ class SupabaseAuthClient {
       return { available: false, message: 'username_required' };
     }
 
+    console.log(`[nebula-auth-reference] usernameCheck strategy=auth_admin candidate=${candidate}`);
+
     for (let page = 1; page <= 10; page += 1) {
       const response = await this.request(`/auth/v1/admin/users?page=${page}&per_page=200`, {
         method: 'GET',
@@ -1217,6 +1219,7 @@ const server = http.createServer(async (req, res) => {
       const result = await supabase.checkUsername(input.username);
       return json(res, 200, result);
     } catch (error) {
+      console.warn(`[nebula-auth-reference] usernameCheck failed: ${error.message || 'username_check_failed'}`);
       return json(res, 400, { available: false, message: error.message || 'username_check_failed' });
     }
   }
