@@ -4,8 +4,8 @@ set -euo pipefail
 BASE_URL="${1:-http://127.0.0.1:8788}"
 CLIENT_ID="${CLIENT_ID:-skybridge_compass_pro}"
 REDIRECT_URI="${REDIRECT_URI:-skybridge://auth/nebula}"
-USERNAME="${NEBULA_DEMO_USERNAME:-demo}"
-PASSWORD="${NEBULA_DEMO_PASSWORD:-demo-pass}"
+IDENTIFIER="${NEBULA_SMOKE_IDENTIFIER:-${NEBULA_DEMO_USERNAME:-demo}}"
+PASSWORD="${NEBULA_SMOKE_PASSWORD:-${NEBULA_DEMO_PASSWORD:-demo-pass}}"
 
 json_get() {
   python3 -c 'import json,sys; print(json.load(sys.stdin)[sys.argv[1]])' "$1"
@@ -31,9 +31,9 @@ echo "[smoke] base_url=$BASE_URL"
 curl -fsS "$BASE_URL/health" >/dev/null
 curl -fsS "$BASE_URL/.well-known/openid-configuration" >/dev/null
 
-REQUEST_BODY="$(python3 - <<'PY' "$CLIENT_ID" "$REDIRECT_URI" "$CHALLENGE" "$STATE" "$USERNAME" "$PASSWORD"
+REQUEST_BODY="$(python3 - <<'PY' "$CLIENT_ID" "$REDIRECT_URI" "$CHALLENGE" "$STATE" "$IDENTIFIER" "$PASSWORD"
 import json, sys
-client_id, redirect_uri, challenge, state, username, password = sys.argv[1:]
+client_id, redirect_uri, challenge, state, identifier, password = sys.argv[1:]
 print(json.dumps({
     "response_type": "code",
     "client_id": client_id,
@@ -42,7 +42,7 @@ print(json.dumps({
     "state": state,
     "code_challenge": challenge,
     "code_challenge_method": "S256",
-    "username": username,
+    "username": identifier,
     "password": password
 }))
 PY

@@ -1,0 +1,89 @@
+services:
+  - type: web
+    runtime: node
+    name: skybridge-api
+    region: oregon
+    plan: starter
+    rootDir: Server/skybridge-signaling
+    buildCommand: npm ci
+    startCommand: node server.js
+    healthCheckPath: /health
+    envVars:
+      - key: SIGNALING_STATE_BACKEND
+        value: redis
+      - key: SIGNALING_REDIS_URL
+        fromService:
+          type: keyvalue
+          name: skybridge-redis
+          property: connectionString
+      - key: SIGNALING_REDIS_KEY_PREFIX
+        value: "skybridge:signaling:"
+      - key: SIGNALING_REDIS_CHANNEL_PREFIX
+        value: "skybridge:signaling:channel:"
+      - key: SIGNALING_REDIS_CONNECT_TIMEOUT_MS
+        value: 5000
+      - key: SIGNALING_SERVER_ORIGIN
+        value: https://api.nebula-technologies.net
+      - key: CORS_ORIGIN
+        sync: false
+      - key: CLIENT_IP_HASH_SECRET
+        generateValue: true
+      - key: TURN_SHARED_SECRET
+        sync: false
+      - key: TURN_OPAQUE_TAG_SECRET
+        sync: false
+      - key: SKYBRIDGE_CLIENT_API_KEY
+        generateValue: true
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_SEND_SMS_HOOK_SECRET
+        sync: false
+      - key: ALIYUN_SMS_PROVIDER
+        value: pnvs
+      - key: ALIYUN_PNVS_REGION_ID
+        value: ap-southeast-1
+      - key: ALIYUN_PNVS_ENDPOINT
+        value: dypnsapi.aliyuncs.com
+      - key: ALIYUN_PNVS_SIGN_NAME
+        value: 速通互联验证码
+      - key: ALIYUN_PNVS_TEMPLATE_CODE
+        value: "100001"
+      - key: ALIBABA_CLOUD_ACCESS_KEY_ID
+        sync: false
+      - key: ALIBABA_CLOUD_ACCESS_KEY_SECRET
+        sync: false
+
+  - type: web
+    runtime: node
+    name: nebula-auth
+    region: oregon
+    plan: starter
+    rootDir: Server/nebula-auth-reference
+    buildCommand: npm install
+    startCommand: node server.js
+    healthCheckPath: /health
+    envVars:
+      - key: NEBULA_ISSUER
+        value: https://nebula.skybridge.com
+      - key: NEBULA_ALLOW_DEV_HEADLESS_AUTHORIZE
+        value: "false"
+      - key: NEBULA_PUBLIC_CLIENTS_JSON
+        value: >-
+          {"skybridge_compass_pro":{"redirectUris":["skybridge://auth/nebula","http://127.0.0.1/auth/callback","http://localhost/auth/callback"],"scopes":["openid","profile","email","offline_access"]},"skybridge_compass_ios":{"redirectUris":["skybridge://auth/nebula"],"scopes":["openid","profile","email","offline_access"]}}
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+
+  - type: keyvalue
+    name: skybridge-redis
+    region: oregon
+    plan: starter
+    maxmemoryPolicy: allkeys-lru
+    ipAllowList: []
