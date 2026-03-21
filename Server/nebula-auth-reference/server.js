@@ -6,7 +6,7 @@ const crypto = require('node:crypto');
 const port = Number(process.env.PORT || 8788);
 const bindHost = String(process.env.NEBULA_BIND_HOST || process.env.HOST || '0.0.0.0').trim() || '0.0.0.0';
 const defaultIssuer = process.env.RENDER ? 'https://auth.nebula-technologies.net' : `http://127.0.0.1:${port}`;
-const configuredIssuer = String(process.env.NEBULA_ISSUER || defaultIssuer).replace(/\/+$/, '');
+const configuredIssuer = normalizeIssuer(process.env.NEBULA_ISSUER || defaultIssuer);
 const accessTokenTtlSec = Number(process.env.NEBULA_ACCESS_TOKEN_TTL_SEC || 900);
 const refreshTokenTtlSec = Number(process.env.NEBULA_REFRESH_TOKEN_TTL_SEC || 60 * 60 * 24 * 30);
 const headlessAuthorizeEnabled = !/^(0|false|no)$/i.test(process.env.NEBULA_ALLOW_DEV_HEADLESS_AUTHORIZE || 'true');
@@ -64,6 +64,17 @@ let supabase = null;
 function normalizeBaseURL(raw) {
   const value = String(raw || '').trim().replace(/\/+$/, '');
   return value || '';
+}
+
+function normalizeIssuer(raw) {
+  const value = String(raw || '').trim().replace(/\/+$/, '');
+  if (!value) return '';
+
+  if (value === 'https://nebula.skybridge.com' || value === 'http://nebula.skybridge.com') {
+    return 'https://auth.nebula-technologies.net';
+  }
+
+  return value;
 }
 
 function firstHeaderValue(value) {
