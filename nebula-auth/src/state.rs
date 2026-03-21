@@ -8,11 +8,12 @@ use crate::supabase::SupabaseClient;
 use chrono::{Duration, Utc};
 use dashmap::DashMap;
 use dashmap::DashMap as DM;
-use reqwest::{redirect::Policy, Client};
+use reqwest::{redirect::Policy, Client, Url};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::Sender as BSender;
+use tracing::warn;
 
 /// Phone rate limit: max 10 codes per day
 const PHONE_LIMIT: u32 = 10;
@@ -71,11 +72,10 @@ impl AppState {
             .ok()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
-        let auth_proxy_upstream = std::env::var("NEBULA_AUTH_PROXY_UPSTREAM")
-            .unwrap_or_else(|_| "https://nebula-auth-jfnt.onrender.com".to_string())
-            .trim()
-            .trim_end_matches('/')
-            .to_string();
+        let auth_proxy_upstream = normalize_auth_proxy_upstream(
+            std::env::var("NEBULA_AUTH_PROXY_UPSTREAM").ok(),
+            "https://nebula-auth-jfnt.onrender.com",
+        );
         let auth_proxy_public_host = std::env::var("NEBULA_AUTH_PROXY_PUBLIC_HOST")
             .unwrap_or_else(|_| "auth.nebula-technologies.net".to_string())
             .trim()
@@ -317,6 +317,28 @@ impl AppState {
     }
 }
 
+fn normalize_auth_proxy_upstream(configured: Option<String>, fallback: &str) -> String {
+    let candidate = configured
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(fallback);
+
+    match Url::parse(candidate) {
+        Ok(url) if matches!(url.scheme(), "http" | "https") && url.host_str().is_some() => {
+            candidate.trim_end_matches('/').to_string()
+        }
+        _ => {
+            warn!(
+                "invalid NEBULA_AUTH_PROXY_UPSTREAM={:?}; falling back to {}",
+                configured.as_deref(),
+                fallback
+            );
+            fallback.trim_end_matches('/').to_string()
+        }
+    }
+}
+
 fn load_public_clients() -> HashMap<String, PublicClientRegistration> {
     match std::env::var("NEBULA_PUBLIC_CLIENTS_JSON") {
         Ok(raw) if !raw.trim().is_empty() => {
@@ -339,6 +361,31 @@ fn load_public_clients() -> HashMap<String, PublicClientRegistration> {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn auth_proxy_upstream_accepts_https_urls() {
+        let normalized = normalize_auth_proxy_upstream(
+            Some("https://auth.nebula-technologies.net/".to_string()),
+            "https://fallback.example.com",
+        );
+        assert_eq!(normalized, "https://auth.nebula-technologies.net");
+    }
+
+    #[test]
+    fn auth_proxy_upstream_rejects_custom_scheme_urls() {
+        let normalized = normalize_auth_proxy_upstream(
+            Some("skybridge://auth/nebula?code=abc".to_string()),
+            "https://fallback.example.com",
+        );
+        assert_eq!(normalized, "https://fallback.example.com");
+    }
+
+    #[test]
+    fn auth_proxy_upstream_rejects_empty_values() {
+        let normalized =
+            normalize_auth_proxy_upstream(Some("   ".to_string()), "https://fallback.example.com");
+        assert_eq!(normalized, "https://fallback.example.com");
+    }
 
     #[test]
     fn test_phone_rate_limit_allows_under_limit() {

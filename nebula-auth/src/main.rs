@@ -230,7 +230,20 @@ async fn proxy_auth_request(
     State(state): State<state::AppState>,
     request: Request<Body>,
 ) -> Response {
-    let upstream_url = upstream_url_for_request(&state, &request);
+    let upstream_url = match upstream_url_for_request(&state, &request) {
+        Ok(url) => url,
+        Err(message) => {
+            warn!("rejecting unsupported auth proxy target: {}", message);
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "auth_proxy_invalid_target",
+                    "message": message,
+                })),
+            )
+                .into_response();
+        }
+    };
     let forwarded_host = forwarded_host_for_request(&state, request.headers());
     let forwarded_proto = forwarded_proto_for_request(request.headers());
     let method = request.method().clone();
@@ -289,13 +302,41 @@ async fn proxy_auth_request(
     proxy_response_to_axum(upstream_response).await
 }
 
-fn upstream_url_for_request(state: &state::AppState, request: &Request<Body>) -> String {
-    let path_and_query = request
-        .uri()
+fn upstream_url_for_request(
+    state: &state::AppState,
+    request: &Request<Body>,
+) -> Result<String, String> {
+    let uri = request.uri();
+
+    if let Some(scheme) = uri.scheme_str() {
+        if !matches!(scheme, "http" | "https") {
+            return Err(format!(
+                "unsupported request target scheme: {} ({})",
+                scheme, uri
+            ));
+        }
+    }
+
+    let path_and_query = uri
         .path_and_query()
-        .map(|value| value.as_str())
-        .unwrap_or_else(|| request.uri().path());
-    format!("{}{}", state.auth_proxy_upstream, path_and_query)
+        .map(|value| value.as_str().to_string())
+        .or_else(|| {
+            let path = uri.path();
+            if path.is_empty() || path == "*" {
+                None
+            } else {
+                Some(path.to_string())
+            }
+        })
+        .unwrap_or_else(|| "/".to_string());
+
+    let normalized = if path_and_query.starts_with('/') {
+        path_and_query
+    } else {
+        format!("/{}", path_and_query)
+    };
+
+    Ok(format!("{}{}", state.auth_proxy_upstream, normalized))
 }
 
 fn forwarded_host_for_request(state: &state::AppState, headers: &HeaderMap) -> String {
@@ -804,5 +845,33 @@ mod tests {
             response.headers().get(header::LOCATION).unwrap(),
             "skybridge://auth/nebula?code=test-code&state=test-state"
         );
+    }
+
+    #[test]
+    fn test_upstream_url_for_request_accepts_relative_path_and_query() {
+        let state = state::AppState::new();
+        let request = Request::builder()
+            .uri("/oauth/authorize?state=abc")
+            .body(Body::empty())
+            .unwrap();
+
+        let upstream = upstream_url_for_request(&state, &request).unwrap();
+        assert_eq!(
+            upstream,
+            format!("{}/oauth/authorize?state=abc", state.auth_proxy_upstream)
+        );
+    }
+
+    #[test]
+    fn test_upstream_url_for_request_rejects_custom_scheme_target() {
+        let state = state::AppState::new();
+        let request = Request::builder()
+            .uri("skybridge://auth/nebula?code=test-code&state=browsercheck")
+            .body(Body::empty())
+            .unwrap();
+
+        let error = upstream_url_for_request(&state, &request).unwrap_err();
+        assert!(error.contains("unsupported request target scheme"));
+        assert!(error.contains("skybridge://auth/nebula"));
     }
 }
