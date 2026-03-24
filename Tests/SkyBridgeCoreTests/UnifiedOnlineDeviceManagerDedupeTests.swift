@@ -65,6 +65,36 @@ final class UnifiedOnlineDeviceManagerDedupeTests: XCTestCase {
         )
     }
 
+    @MainActor
+    func testResolvedTrustRecordMatchesOfflineAliasToCanonicalTrustedIdentity() {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let trustRecord = TrustRecord(
+            deviceId: "id:peer-iphone",
+            pubKeyFP: String(repeating: "a", count: 64),
+            publicKey: Data([0x01]),
+            kemPublicKeys: nil,
+            capabilities: [
+                "trusted",
+                "peerEndpoint=bonjour:ziang的iphone 16 pro@local."
+            ],
+            signature: Data(),
+            deviceName: "Ziang的iPhone 16 Pro",
+            currentDeviceId: "id:peer-iphone",
+            knownDeviceIds: ["peer:169.254.186.235"]
+        )
+        let shadowAlias = makeDevice(
+            name: "169.254.186.235",
+            uniqueIdentifier: "recent:peer:169.254.186.235",
+            ipv4: "169.254.186.235",
+            status: .offline,
+            lastConnectedAt: Date()
+        )
+
+        let matched = manager.resolvedTrustRecord(for: shadowAlias, among: [trustRecord])
+
+        XCTAssertEqual(matched?.deviceId, trustRecord.deviceId)
+    }
+
     private func makeDevice(
         name: String,
         uniqueIdentifier: String,

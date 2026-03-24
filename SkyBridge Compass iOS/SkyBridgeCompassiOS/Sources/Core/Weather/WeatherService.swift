@@ -148,6 +148,12 @@ public struct LocationInfo: Sendable {
 @available(iOS 17.0, *)
 @MainActor
 public final class WeatherService: ObservableObject {
+    private static let weatherCacheStore = CodablePersistenceStore<WeatherInfo>(
+        location: .protectedApplicationSupport(
+            path: "Weather/ios-last-known-weather.json",
+            legacyUserDefaultsKey: "com.skybridge.ios.weather"
+        )
+    )
     
     // MARK: - Singleton
     
@@ -161,7 +167,6 @@ public final class WeatherService: ObservableObject {
     
     // MARK: - Private Properties
     
-    private let cacheKey = "com.skybridge.ios.weather"
     private let cacheValidityDuration: TimeInterval = 3600 // 1小时缓存（比 macOS 更长）
     private let requestTimeout: TimeInterval = 5.0 // 单源快速超时，配合多源并行兜底
     private let requestUserAgent = "SkyBridgeCompass/1.0 (iOS Weather; support@skybridge.local)"
@@ -483,14 +488,11 @@ public final class WeatherService: ObservableObject {
     // MARK: - Cache
     
     private func cacheWeather(_ weather: WeatherInfo) {
-        if let encoded = try? JSONEncoder().encode(weather) {
-            UserDefaults.standard.set(encoded, forKey: cacheKey)
-        }
+        try? Self.weatherCacheStore.save(weather)
     }
     
     private func loadCachedWeather(allowStale: Bool = false) -> WeatherInfo? {
-        guard let data = UserDefaults.standard.data(forKey: cacheKey),
-              let weather = try? JSONDecoder().decode(WeatherInfo.self, from: data) else {
+        guard let weather = Self.weatherCacheStore.load() else {
             return nil
         }
         

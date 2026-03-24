@@ -8,9 +8,11 @@ const os = require('os');
 const { spawnSync } = require('child_process');
 
 const express = require('express');
+const { Webhook } = require('standardwebhooks');
 const { WebSocketServer } = require('ws');
-const { v4: uuidv4 } = require('uuid');
+const { randomUUID } = require('crypto');
 
+const { AliyunSMSClient } = require('./lib/aliyun_sms');
 const { createSignalingStateBackend, unique } = require('./lib/signaling_state_backend');
 const { RegistryStore } = require('./lib/registry_store');
 const { buildIdempotencyFingerprint, clientIPForRequest } = require('./lib/request_security');
@@ -73,6 +75,11 @@ const TURN_URIS = (process.env.TURN_URIS || process.env.TURN_URLS || 'turns:54.9
 
 const SIGNALING_SERVER_ORIGIN = String(process.env.SIGNALING_SERVER_ORIGIN || '').trim();
 const CLIENT_IP_HASH_SECRET = String(process.env.CLIENT_IP_HASH_SECRET || process.env.SIGNALING_IP_HASH_SECRET || 'skybridge-ip-hash').trim();
+const SUPABASE_SEND_SMS_HOOK_SECRET = String(
+  process.env.SUPABASE_SEND_SMS_HOOK_SECRET
+  || process.env.SEND_SMS_HOOK_SECRET
+  || ''
+).trim();
 const ALLOWLIST_TENANTS = new Set(
   String(process.env.ALLOWLIST_TENANTS || '')
     .split(',')
@@ -505,6 +512,7 @@ let signalingState = createSignalingStateBackend({
 });
 
 let registryStore = new RegistryStore();
+let smsClient = new AliyunSMSClient();
 let currentTrustProxy = TRUST_PROXY;
 let currentRequireSharedStateForPublicCapabilities = REQUIRE_SHARED_STATE_FOR_PUBLIC_CAPABILITIES;
 let currentAllowBootstrapDeviceAuth = SIGNALING_ALLOW_BOOTSTRAP_DEVICE_AUTH;
@@ -537,6 +545,29 @@ function makeError(code, statusCode = 400) {
   error.code = code;
   error.statusCode = statusCode;
   return error;
+}
+
+function normalizeSupabaseHookSecret(raw) {
+  const value = String(raw || '').trim();
+  if (!value) return '';
+  return value.replace(/^v1,whsec_/, '');
+}
+
+const supabaseSMSHookVerifier = (() => {
+  const normalized = normalizeSupabaseHookSecret(SUPABASE_SEND_SMS_HOOK_SECRET);
+  if (!normalized) return null;
+  return new Webhook(normalized);
+})();
+
+function hookHeaderMap(req) {
+  return Object.fromEntries(
+    Object.entries(req.headers || {}).map(([key, value]) => {
+      if (Array.isArray(value)) {
+        return [key, value.join(',')];
+      }
+      return [key, String(value || '')];
+    })
+  );
 }
 
 function appControlFlags() {
@@ -1158,7 +1189,12 @@ app.use((req, res, next) => {
   res.setHeader('X-SkyBridge-State-Backend', SIGNALING_STATE_BACKEND);
   next();
 });
-app.use(express.json({ limit: JSON_LIMIT }));
+app.use(express.json({
+  limit: JSON_LIMIT,
+  verify: (req, res, buf) => {
+    req.rawBody = buf.toString('utf8');
+  }
+}));
 
 app.use((req, res, next) => {
   const origin = req.headers.origin;
@@ -1189,6 +1225,7 @@ app.get('/', asyncRoute(async (req, res) => {
     time: new Date().toISOString(),
     instanceId: INSTANCE_ID,
     stateBackend: SIGNALING_STATE_BACKEND,
+    smsProvider: smsClient.provider,
     backendHealth,
     protection: {
       ...appControlFlags(),
@@ -1197,6 +1234,7 @@ app.get('/', asyncRoute(async (req, res) => {
     endpoints: [
       '/health',
       '/healthz',
+      '/api/hooks/supabase/send-sms',
       '/api/webrtc/admission/challenge',
       '/api/webrtc/admission',
       '/api/webrtc/register-code',
@@ -1217,6 +1255,7 @@ app.get('/health', asyncRoute(async (req, res) => {
     status: 'ok',
     instanceId: INSTANCE_ID,
     stateBackend: SIGNALING_STATE_BACKEND,
+    smsProvider: smsClient.provider,
     backendHealth,
     protection: {
       ...appControlFlags(),
@@ -1229,6 +1268,44 @@ app.get('/health', asyncRoute(async (req, res) => {
 
 app.get('/healthz', (req, res) => res.status(200).send('ok'));
 
+app.post('/api/hooks/supabase/send-sms', asyncRoute(async (req, res) => {
+  if (!supabaseSMSHookVerifier) {
+    throw makeError('supabase_send_sms_hook_not_configured', 503);
+  }
+  if (!smsClient.configured) {
+    throw makeError('aliyun_sms_not_configured', 503);
+  }
+
+  const payload = typeof req.rawBody === 'string' && req.rawBody.length > 0
+    ? req.rawBody
+    : JSON.stringify(req.body || {});
+
+  let hookPayload;
+  try {
+    hookPayload = supabaseSMSHookVerifier.verify(payload, hookHeaderMap(req));
+  } catch (error) {
+    incrementSecurityCounter('supabase_send_sms_hook_verify_failed');
+    console.error('[hook] Supabase send_sms verification failed:', error.message);
+    throw makeError('supabase_send_sms_hook_invalid', 401);
+  }
+
+  const otp = String(hookPayload?.sms?.otp || '').trim();
+  const phoneNumber = String(hookPayload?.user?.phone || '').trim();
+  if (!otp || !phoneNumber) {
+    throw makeError('bad_send_sms_payload', 400);
+  }
+
+  try {
+    const result = await smsClient.sendVerificationCode({ phoneNumber, otp });
+    console.log(`[hook] send_sms delivered phone=${phoneNumber.slice(-4)} requestId=${result.requestId || 'n/a'} bizId=${result.bizId || 'n/a'}`);
+    res.status(200).json({});
+  } catch (error) {
+    incrementSecurityCounter('supabase_send_sms_delivery_failed');
+    console.error('[hook] Aliyun SMS delivery failed:', error.message);
+    throw makeError('sms_delivery_failed', 502);
+  }
+}));
+
 app.post('/api/webrtc/admission/challenge', rlAdmission, asyncRoute(async (req, res) => {
   const context = await loadAuthenticatedDeviceContext(req, { requireRegisteredDevice: true });
   await assertPublicCapabilityAvailable('challenge', context.tenantId);
@@ -1236,7 +1313,7 @@ app.post('/api/webrtc/admission/challenge', rlAdmission, asyncRoute(async (req, 
     throw makeError('challenge_disabled', 503);
   }
   await enforceChallengeQuotas(context);
-  const challengeId = uuidv4();
+  const challengeId = randomUUID();
   const challenge = {
     challengeId,
     nonce: newOpaqueToken(32),
@@ -1712,7 +1789,7 @@ wss.on('connection', (ws, req) => {
         : tenantPolicy
     );
     await assertPublicCapabilityAvailable('ws', tokenPreview.tenantId);
-    const clientId = uuidv4();
+    const clientId = randomUUID();
     let bindError = null;
     let reclaimTarget = null;
     const boundToken = await signalingState.updateEphemeral('session_token', tokenHash, (record) => {
@@ -1865,17 +1942,27 @@ wss.on('connection', (ws, req) => {
         return;
       }
       if (message.type === 'iceCandidate') {
-        const usage = await signalingState.trackIceUsage(
-          meta.sessionId,
-          meta.deviceId,
-          iceCandidateHash(meta.deviceId, message.payload || {}),
-          payloadByteSize(message.payload),
-          {
-            maxPerSession: ICE_MAX_PER_SESSION,
-            maxBytesPerSession: ICE_MAX_BYTES_PER_SESSION,
-            maxBytesPerPeerPerSession: ICE_MAX_BYTES_PER_PEER_PER_SESSION
-          }
-        );
+        let usage;
+        try {
+          usage = await signalingState.trackIceUsage(
+            meta.sessionId,
+            meta.deviceId,
+            iceCandidateHash(meta.deviceId, message.payload || {}),
+            payloadByteSize(message.payload),
+            {
+              maxPerSession: ICE_MAX_PER_SESSION,
+              maxBytesPerSession: ICE_MAX_BYTES_PER_SESSION,
+              maxBytesPerPeerPerSession: ICE_MAX_BYTES_PER_PEER_PER_SESSION
+            }
+          );
+        } catch (error) {
+          console.warn('[WS] ICE usage tracking degraded:', {
+            sessionId: meta.sessionId,
+            deviceId: meta.deviceId,
+            reason: error?.message || String(error)
+          });
+          usage = { accepted: true, duplicate: false, killed: false, degraded: true };
+        }
         if (usage.killed) {
           incrementSecurityCounter('ice_killed_session');
           await killSession(meta.sessionId, usage.reason || 'ice_limit');
@@ -1908,7 +1995,14 @@ wss.on('connection', (ws, req) => {
         await removeFromRooms(ws);
       }
     })().catch((error) => {
-      console.error('[WS] message failed:', error.message);
+      const meta = wsMeta.get(ws);
+      console.error('[WS] message failed:', {
+        sessionId: meta?.sessionId || null,
+        deviceId: meta?.deviceId || null,
+        role: meta?.role || null,
+        message: error?.message || String(error),
+        stack: error?.stack || null
+      });
       incrementSecurityCounter('ws_server_error');
       try { wsSendRaw(ws, { type: 'error', error: 'server_error' }); } catch (_) {}
     });
@@ -1993,6 +2087,7 @@ function createRuntime(options = {}) {
   const {
     signalingStateOverride,
     registryStoreOverride,
+    smsClientOverride,
     trustProxy = TRUST_PROXY,
     requireSharedStateForPublicCapabilities = REQUIRE_SHARED_STATE_FOR_PUBLIC_CAPABILITIES,
     allowBootstrapDeviceAuth = SIGNALING_ALLOW_BOOTSTRAP_DEVICE_AUTH
@@ -2002,6 +2097,9 @@ function createRuntime(options = {}) {
   }
   if (registryStoreOverride) {
     registryStore = registryStoreOverride;
+  }
+  if (smsClientOverride) {
+    smsClient = smsClientOverride;
   }
   currentTrustProxy = trustProxy;
   currentRequireSharedStateForPublicCapabilities = requireSharedStateForPublicCapabilities;

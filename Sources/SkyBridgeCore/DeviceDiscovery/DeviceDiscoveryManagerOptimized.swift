@@ -1473,10 +1473,17 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                 let model = await SelfIdentityProvider.shared.getRegistrationDeviceInfo().hardwareModel
                 if !model.isEmpty { txt["modelName"] = model }
                 txt["capabilities"] = "file,file_transfer,rdview,rdcontrol,remote_control,remote_desktop,clipboard"
-                txt["transferPort"] = "8080"
-                txt["fileTransferPort"] = "8080"
-                txt["remotePort"] = "5901"
-                txt["remoteControlPort"] = "5901"
+                let endpoints = ServiceEndpointRegistry.shared.snapshot()
+                if let transferPort = endpoints.fileTransferPort, transferPort > 0 {
+                    let port = String(transferPort)
+                    txt["transferPort"] = port
+                    txt["fileTransferPort"] = port
+                }
+                if let remotePort = endpoints.remoteControlPort, remotePort > 0 {
+                    let port = String(remotePort)
+                    txt["remotePort"] = port
+                    txt["remoteControlPort"] = port
+                }
                 let port = try await ServiceAdvertiserCenter.shared.startAdvertising(
                     serviceName: self.getDeviceName(),
                     serviceType: serviceType,
@@ -1521,10 +1528,17 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             let model = await SelfIdentityProvider.shared.getRegistrationDeviceInfo().hardwareModel
             if !model.isEmpty { txt["modelName"] = model }
             txt["capabilities"] = "file,file_transfer,rdview,rdcontrol,remote_control,remote_desktop,clipboard"
-            txt["transferPort"] = "8080"
-            txt["fileTransferPort"] = "8080"
-            txt["remotePort"] = "5901"
-            txt["remoteControlPort"] = "5901"
+            let endpoints = ServiceEndpointRegistry.shared.snapshot()
+            if let transferPort = endpoints.fileTransferPort, transferPort > 0 {
+                let port = String(transferPort)
+                txt["transferPort"] = port
+                txt["fileTransferPort"] = port
+            }
+            if let remotePort = endpoints.remoteControlPort, remotePort > 0 {
+                let port = String(remotePort)
+                txt["remotePort"] = port
+                txt["remoteControlPort"] = port
+            }
             let port = try await ServiceAdvertiserCenter.shared.startAdvertising(
                 serviceName: Self.resolveDeviceName(),
                 serviceType: serviceType,
@@ -2044,6 +2058,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                                 let localPlatform = "macOS"
                                 let localOS = ProcessInfo.processInfo.operatingSystemVersionString
                                 let localModel = "Mac"
+                                let endpoints = ServiceEndpointRegistry.shared.snapshot()
                                 let reply = AppMessage.pairingIdentityExchange(.init(
                                     deviceId: localId,
                                     kemPublicKeys: kemKeys,
@@ -2051,7 +2066,10 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                                     modelName: localModel,
                                     platform: localPlatform,
                                     osVersion: localOS,
-                                    chip: nil
+                                    chip: nil,
+                                    capabilities: ["clipboard_sync", "file_transfer", "remote_desktop", "remote_control"],
+                                    fileTransferPort: endpoints.fileTransferPort,
+                                    remoteControlPort: endpoints.remoteControlPort
                                 ))
                                 let outPlain = try JSONEncoder().encode(reply)
                                 let outCipher = try encryptAppPayload(outPlain, with: keys)
@@ -2257,6 +2275,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                             let localName = Host.current().localizedName
                             let localPlatform = "macOS"
                             let localOS = ProcessInfo.processInfo.operatingSystemVersionString
+                            let endpoints = ServiceEndpointRegistry.shared.snapshot()
                             let msg = AppMessage.heartbeat(.init(
                                 sentAt: Date(),
                                 deviceId: localIdForHeartbeat,
@@ -2264,7 +2283,10 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                                 modelName: "Mac",
                                 platform: localPlatform,
                                 osVersion: localOS,
-                                chip: nil
+                                chip: nil,
+                                capabilities: ["clipboard_sync", "file_transfer", "remote_desktop", "remote_control"],
+                                fileTransferPort: endpoints.fileTransferPort,
+                                remoteControlPort: endpoints.remoteControlPort
                             ))
                             let plain = try JSONEncoder().encode(msg)
                             let cipher = try encryptAppPayload(plain, with: keysNow)

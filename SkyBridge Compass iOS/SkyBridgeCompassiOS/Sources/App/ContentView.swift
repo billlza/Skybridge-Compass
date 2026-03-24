@@ -7,6 +7,7 @@ struct ContentView: View {
     @EnvironmentObject private var authManager: AuthenticationManager
     @EnvironmentObject private var themeConfiguration: ThemeConfiguration
     @EnvironmentObject private var connectionManager: P2PConnectionManager
+    @StateObject private var crossNetworkManager = CrossNetworkWebRTCManager.instance
 
     private var contentTransitionAnimation: Animation? {
         ProcessInfo.processInfo.arguments.contains("UITEST_DISABLE_ANIMATIONS") ? nil : .easeInOut
@@ -38,6 +39,37 @@ struct ContentView: View {
                         await connectionManager.resolvePairingTrustRequest(req, decision: decision)
                     }
                 }
+            )
+        }
+        .alert(
+            RuntimeLocalization.string("idleConnection.prompt.title"),
+            isPresented: Binding(
+                get: { crossNetworkManager.idleConnectionPrompt != nil },
+                set: { presenting in
+                    if !presenting {
+                        crossNetworkManager.dismissIdleConnectionPrompt()
+                    }
+                }
+            )
+        ) {
+            Button(RuntimeLocalization.string("idleConnection.keep"), role: .cancel) {
+                crossNetworkManager.dismissIdleConnectionPrompt()
+            }
+            Button(RuntimeLocalization.string("idleConnection.disconnect"), role: .destructive) {
+                Task {
+                    await crossNetworkManager.disconnect()
+                    await MainActor.run {
+                        crossNetworkManager.dismissIdleConnectionPrompt()
+                    }
+                }
+            }
+        } message: {
+            Text(
+                String(
+                    format: RuntimeLocalization.string("idleConnection.prompt.message"),
+                    crossNetworkManager.idleConnectionPrompt?.deviceName
+                        ?? RuntimeLocalization.string("idleConnection.notification.defaultDevice")
+                )
             )
         }
     }

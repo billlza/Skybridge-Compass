@@ -46,9 +46,18 @@ public final class ConnectionApprovalService: ObservableObject {
     public var onApprovalRequired: ((ConnectionApprovalRequest) -> Void)?
     public var onApprovalResponse: ((ApprovalResponse) async throws -> Void)?
 
-    // 持久化 keys
-    private let policyKey = "com.skybridge.approval.policy"
-    private let trustedDevicesKey = "com.skybridge.approval.trustedDevices"
+    private static let policyStore = CodablePersistenceStore<ApprovalPolicy>(
+        location: .protectedApplicationSupport(
+            path: "ConnectionApproval/policy.json",
+            legacyUserDefaultsKey: "com.skybridge.approval.policy"
+        )
+    )
+    private static let trustedDevicesStore = CodablePersistenceStore<[ApprovalTrustedDevice]>(
+        location: .protectedApplicationSupport(
+            path: "ConnectionApproval/trusted-devices.json",
+            legacyUserDefaultsKey: "com.skybridge.approval.trustedDevices"
+        )
+    )
 
     // MARK: - Initialization
 
@@ -355,30 +364,18 @@ public final class ConnectionApprovalService: ObservableObject {
     // MARK: - Persistence
 
     private func savePolicy() {
-        if let data = try? JSONEncoder().encode(policy) {
-            UserDefaults.standard.set(data, forKey: policyKey)
-        }
+        try? Self.policyStore.save(policy)
     }
 
     private static func loadPolicy() -> ApprovalPolicy? {
-        guard let data = UserDefaults.standard.data(forKey: "com.skybridge.approval.policy"),
-              let policy = try? JSONDecoder().decode(ApprovalPolicy.self, from: data) else {
-            return nil
-        }
-        return policy
+        Self.policyStore.load()
     }
 
     private func saveTrustedDevices() {
-        if let data = try? JSONEncoder().encode(trustedDevices) {
-            UserDefaults.standard.set(data, forKey: trustedDevicesKey)
-        }
+        try? Self.trustedDevicesStore.save(trustedDevices)
     }
 
     private static func loadTrustedDevices() -> [ApprovalTrustedDevice] {
-        guard let data = UserDefaults.standard.data(forKey: "com.skybridge.approval.trustedDevices"),
-              let devices = try? JSONDecoder().decode([ApprovalTrustedDevice].self, from: data) else {
-            return []
-        }
-        return devices
+        Self.trustedDevicesStore.load() ?? []
     }
 }

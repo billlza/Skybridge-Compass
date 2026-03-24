@@ -78,7 +78,7 @@ public actor KeychainManager {
         service: String,
         account: String,
         data: Data,
-        accessibility: CFString = kSecAttrAccessibleAfterFirstUnlock
+        accessibility: CFString = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
     ) -> OSStatus {
         let context = makeNonInteractiveAuthContext()
         let query: [String: Any] = [
@@ -104,7 +104,12 @@ public actor KeychainManager {
 
  // MARK: - Keychain 基础操作（nonisolated - Keychain 本身线程安全）
 
-    public nonisolated func importKey(data: Data, service: String, account: String) -> Bool {
+    public nonisolated func importKey(
+        data: Data,
+        service: String,
+        account: String,
+        accessibility: CFString = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+    ) -> Bool {
         if Self.useInMemoryKeychain {
             let key = service + "|" + account
             Self.inMemoryLock.lock()
@@ -112,7 +117,12 @@ public actor KeychainManager {
             Self.inMemoryLock.unlock()
             return true
         }
-        let status = upsertGenericPassword(service: service, account: account, data: data)
+        let status = upsertGenericPassword(
+            service: service,
+            account: account,
+            data: data,
+            accessibility: accessibility
+        )
         if status != errSecSuccess { logger.error("Key 导入失败: \(status)") }
         return status == errSecSuccess
     }
@@ -154,7 +164,12 @@ public actor KeychainManager {
             Self.inMemoryLock.unlock()
             return true
         }
-        let status = upsertGenericPassword(service: "SkyBridge.SymmetricKey", account: account, data: data)
+        let status = upsertGenericPassword(
+            service: "SkyBridge.SymmetricKey",
+            account: account,
+            data: data,
+            accessibility: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        )
         if status != errSecSuccess { logger.error("对称密钥存储失败: \(status)") }
         return status == errSecSuccess
     }
@@ -208,7 +223,7 @@ public actor KeychainManager {
         let addQuery: [String: Any] = [
             kSecClass as String: kSecClassKey,
             kSecAttrApplicationTag as String: tag,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
             kSecValueRef as String: secKey
         ]
         SecItemDelete(addQuery as CFDictionary)
@@ -240,8 +255,18 @@ public actor KeychainManager {
         let pub = priv.publicKey
         let privData = priv.rawRepresentation
         let pubData = pub.rawRepresentation
-        let ok1 = storeKeyData(privData, service: "SkyBridge.P256Priv", account: tag)
-        let ok2 = storeKeyData(pubData, service: "SkyBridge.P256Pub", account: tag)
+        let ok1 = storeKeyData(
+            privData,
+            service: "SkyBridge.P256Priv",
+            account: tag,
+            accessibility: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        )
+        let ok2 = storeKeyData(
+            pubData,
+            service: "SkyBridge.P256Pub",
+            account: tag,
+            accessibility: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        )
         if !ok1 || !ok2 { logger.error("P256 密钥对存储失败") }
         return (priv, pub)
     }
@@ -262,7 +287,12 @@ public actor KeychainManager {
  // MARK: - 底层Keychain封装
 
  /// 底层 Keychain 写入（nonisolated - Keychain API 线程安全）
-    private nonisolated func storeKeyData(_ data: Data, service: String, account: String) -> Bool {
+    private nonisolated func storeKeyData(
+        _ data: Data,
+        service: String,
+        account: String,
+        accessibility: CFString = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+    ) -> Bool {
         if Self.useInMemoryKeychain {
             let key = service + "|" + account
             Self.inMemoryLock.lock()
@@ -272,7 +302,12 @@ public actor KeychainManager {
         }
  // 若已存在且内容一致，避免重复写入，减少冗余项
         if let existing = loadKeyData(service: service, account: account), existing == data { return true }
-        let status = upsertGenericPassword(service: service, account: account, data: data)
+        let status = upsertGenericPassword(
+            service: service,
+            account: account,
+            data: data,
+            accessibility: accessibility
+        )
         if status != errSecSuccess { logger.error("Keychain 写入失败: \(status)") }
         return status == errSecSuccess
     }
@@ -524,6 +559,33 @@ extension KeychainManager {
 
     private nonisolated func purgeLegacySupabaseServiceRoleKey() throws {
         try deleteAPIKey(service: "SkyBridge.Supabase", account: "ServiceRoleKey")
+    }
+
+    public nonisolated func storeAuthSession(_ session: AuthSession) throws {
+        let data = try JSONEncoder().encode(session)
+        let status = upsertGenericPassword(
+            service: "com.skybridge.compass.authsession",
+            account: "primary",
+            data: data,
+            accessibility: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        )
+        if status != errSecSuccess {
+            throw NSError(domain: "Keychain", code: Int(status))
+        }
+    }
+
+    public nonisolated func loadAuthSession() -> AuthSession? {
+        guard let data = loadKeyData(
+            service: "com.skybridge.compass.authsession",
+            account: "primary"
+        ) else {
+            return nil
+        }
+        return try? JSONDecoder().decode(AuthSession.self, from: data)
+    }
+
+    public nonisolated func deleteAuthSession() {
+        try? deleteAPIKey(service: "com.skybridge.compass.authsession", account: "primary")
     }
 }
 @available(macOS 14.0, *)

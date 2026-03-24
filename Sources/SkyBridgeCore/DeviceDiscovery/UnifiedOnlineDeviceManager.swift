@@ -151,6 +151,52 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         return deviceMap[identifier]
     }
 
+    /// Resolve the best live `OnlineDevice` representation for a trusted record.
+    /// This keeps trusted-device UI aligned with the same identity and alias policy
+    /// used by discovery and connection code instead of relying on brittle name-only matching.
+    public func resolvedOnlineDevice(for trustRecord: TrustRecord) -> OnlineDevice? {
+        let scoredMatches = onlineDevices
+            .filter { !$0.isLocalDevice }
+            .compactMap { device -> (score: Int, device: OnlineDevice)? in
+                let score = scoreTrustedRecordCandidate(device, trustRecord: trustRecord)
+                guard score > 0 else { return nil }
+                return (score, device)
+            }
+            .sorted { lhs, rhs in
+                if lhs.score != rhs.score { return lhs.score > rhs.score }
+                if lhs.device.connectionStatus.priority != rhs.device.connectionStatus.priority {
+                    return lhs.device.connectionStatus.priority > rhs.device.connectionStatus.priority
+                }
+                if lhs.device.lastSeen != rhs.device.lastSeen {
+                    return lhs.device.lastSeen > rhs.device.lastSeen
+                }
+                return lhs.device.name < rhs.device.name
+            }
+
+        return scoredMatches.first?.device
+    }
+
+    /// Resolve the best matching trust record for a given online device.
+    /// This is the inverse of `resolvedOnlineDevice(for:)` and is useful when UI sections
+    /// need to collapse multiple alias-shaped device rows back onto one trusted identity.
+    public func resolvedTrustRecord(
+        for onlineDevice: OnlineDevice,
+        among trustRecords: [TrustRecord]
+    ) -> TrustRecord? {
+        let scoredMatches = trustRecords
+            .compactMap { record -> (score: Int, record: TrustRecord)? in
+                let score = scoreTrustedRecordCandidate(onlineDevice, trustRecord: record)
+                guard score > 0 else { return nil }
+                return (score, record)
+            }
+            .sorted { lhs, rhs in
+                if lhs.score != rhs.score { return lhs.score > rhs.score }
+                return lhs.record.updatedAt > rhs.record.updatedAt
+            }
+
+        return scoredMatches.first?.record
+    }
+
     /// 解析在线设备对应的底层发现记录（用于连接时保留真实 Bonjour/IP 元数据）。
     public func resolvedDiscoveredDevice(for onlineDevice: OnlineDevice) -> DiscoveredDevice? {
         resolvedDiscoveredCandidates(for: onlineDevice, limit: 1).first
@@ -300,6 +346,48 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         storage.saveDevice(new)
         updateDevicesList()
         logger.info("✅ 设备标记为已连接(新增recent): \(displayName, privacy: .public)")
+    }
+
+    public func markDeviceAsDisconnected(
+        peerId: String,
+        displayName: String? = nil
+    ) {
+        let normalizedPeerId = Self.normalizedPeerIdentifier(peerId)
+        let normalizedRecentIdentifier = "recent:\(normalizedPeerId)"
+        let normalizedDisplayName = displayName.map(normalizeDeviceName) ?? ""
+
+        func disconnectStatus(for device: OnlineDevice) -> OnlineDeviceStatus {
+            Date().timeIntervalSince(device.lastSeen) < 60 ? .online : .offline
+        }
+
+        var updated = false
+
+        for index in onlineDevices.indices {
+            let device = onlineDevices[index]
+            let matchesRecent =
+                Self.normalizedRecentIdentifier(from: device.uniqueIdentifier) == normalizedRecentIdentifier
+            let matchesStableId =
+                Self.normalizedStableIdentifierPayload(from: device.uniqueIdentifier) == normalizedPeerId
+            let matchesIP = indexOfDeviceMatchingPeerIP(normalizedPeerId) == index
+            let matchesName =
+                !normalizedDisplayName.isEmpty &&
+                normalizeDeviceName(device.name) == normalizedDisplayName
+
+            guard matchesRecent || matchesStableId || matchesIP || matchesName else { continue }
+
+            var next = device
+            next.connectionStatus = disconnectStatus(for: device)
+            next.guardStatus = nil
+            onlineDevices[index] = next
+            deviceMap[next.uniqueIdentifier] = next
+            storage.saveDevice(next)
+            updated = true
+        }
+
+        if updated {
+            updateDevicesList()
+            logger.info("⏹️ 设备标记为已断开: \(displayName ?? peerId, privacy: .public)")
+        }
     }
 
  /// 标记设备为已授权(iCloud)
@@ -832,6 +920,68 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         return "recent:\(normalizedPeerIdentifier(peerId))"
     }
 
+    private func normalizedPeerAliases(for trustRecord: TrustRecord) -> Set<String> {
+        var aliases: Set<String> = []
+
+        for stableId in ([trustRecord.deviceId, trustRecord.currentDeviceId] + trustRecord.knownDeviceIds) {
+            if let normalized = Self.normalizeStableIdentifier(stableId) {
+                aliases.insert(Self.normalizedPeerIdentifier(normalized))
+            }
+        }
+
+        if let peerEndpoint = trustRecordCapabilityValue("peerEndpoint", for: trustRecord),
+           !peerEndpoint.isEmpty {
+            aliases.insert(Self.normalizedPeerIdentifier(peerEndpoint))
+        }
+
+        return aliases
+    }
+
+    private func normalizedNameTokens(for trustRecord: TrustRecord) -> Set<String> {
+        var tokens: Set<String> = []
+        let candidates = [
+            trustRecord.deviceName,
+            trustRecordCapabilityValue("peerEndpoint", for: trustRecord).flatMap(Self.bonjourName)
+        ]
+
+        for candidate in candidates {
+            guard let candidate else { continue }
+            let normalized = Self.normalizedDedupeName(candidate)
+            if !normalized.isEmpty {
+                tokens.insert(normalized)
+            }
+        }
+
+        return tokens
+    }
+
+    private func trustRecordCapabilityValue(_ key: String, for trustRecord: TrustRecord) -> String? {
+        trustRecord.capabilities
+            .compactMap { capability -> String? in
+                let parts = capability.split(separator: "=", maxSplits: 1).map(String.init)
+                guard parts.count == 2, parts[0] == key else { return nil }
+                let value = parts[1].trimmingCharacters(in: .whitespacesAndNewlines)
+                return value.isEmpty ? nil : value
+            }
+            .first
+    }
+
+    private nonisolated static func bonjourName(from peerEndpoint: String) -> String? {
+        guard peerEndpoint.hasPrefix("bonjour:") else { return nil }
+        let payload = peerEndpoint.dropFirst("bonjour:".count)
+        let parts = payload.split(separator: "@", maxSplits: 1).map(String.init)
+        guard let name = parts.first?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !name.isEmpty else {
+            return nil
+        }
+        return name
+    }
+
+    private func normalizedFingerprintPayload(from uniqueIdentifier: String) -> String? {
+        guard uniqueIdentifier.hasPrefix("fp:") else { return nil }
+        return normalizeFingerprint(String(uniqueIdentifier.dropFirst("fp:".count)))
+    }
+
     private nonisolated static func normalizedPeerIdentifier(_ peerId: String) -> String {
         let trimmed = peerId.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.hasPrefix("bonjour:") {
@@ -1291,6 +1441,52 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
             prefersUSB: onlineDevice.connectionTypes.contains(.usb),
             hasStrongIdentityAnchor: strongId != nil || pubKeyFP != nil || onlineDevice.ipv4 != nil || onlineDevice.ipv6 != nil
         )
+    }
+
+    private func scoreTrustedRecordCandidate(_ device: OnlineDevice, trustRecord: TrustRecord) -> Int {
+        var score = 0
+        let knownStableIDs = Set(
+            ([trustRecord.deviceId, trustRecord.currentDeviceId] + trustRecord.knownDeviceIds)
+                .compactMap(Self.normalizeStableIdentifier)
+        )
+        let knownFingerprints = Set(
+            [trustRecord.pubKeyFP, trustRecord.currentPathAuthorityFingerprint]
+                .compactMap { normalizeFingerprint($0) }
+        )
+        let trustedPeerAliases = normalizedPeerAliases(for: trustRecord)
+        let trustedNameTokens = normalizedNameTokens(for: trustRecord)
+
+        if let stableId = Self.normalizedStableIdentifierPayload(from: device.uniqueIdentifier),
+           knownStableIDs.contains(stableId) {
+            score += 320
+        }
+
+        if let fingerprint = normalizedFingerprintPayload(from: device.uniqueIdentifier),
+           knownFingerprints.contains(fingerprint) {
+            score += 260
+        }
+
+        if !trustedPeerAliases.isEmpty,
+           !Self.normalizedPeerAliases(for: device).isDisjoint(with: trustedPeerAliases) {
+            score += 180
+        }
+
+        let normalizedDeviceName = Self.normalizedDedupeName(device.name)
+        if !normalizedDeviceName.isEmpty, trustedNameTokens.contains(normalizedDeviceName) {
+            score += 90
+        }
+
+        if device.connectionStatus == .connected {
+            score += 20
+        } else if device.connectionStatus == .online {
+            score += 10
+        }
+
+        if device.isConnectable {
+            score += 5
+        }
+
+        return score
     }
 
     private func scoreCandidateDevice(

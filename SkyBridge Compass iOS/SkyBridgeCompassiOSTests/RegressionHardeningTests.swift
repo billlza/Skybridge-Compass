@@ -81,6 +81,186 @@ final class RegressionHardeningTests: XCTestCase {
     }
 
     @MainActor
+    func testTrustedDeviceStoreResolvesHostAliasBackToCanonicalTrustedID() {
+        let store = TrustedDeviceStore.shared
+        let original = store.trustedDevices
+        store.clearAll()
+        defer {
+            store.clearAll()
+            store.mergeFromCloud(original)
+        }
+
+        let rawDeviceId = UUID().uuidString.lowercased()
+        let trustedDevice = DiscoveredDevice(
+            id: "id:\(rawDeviceId)",
+            name: "Trusted iPhone",
+            modelName: "iPhone 16 Pro",
+            platform: .iOS,
+            osVersion: "26.3.1",
+            ipAddress: "fe80::81d:bb45:8c18:6d6a%en0"
+        )
+
+        store.trust(trustedDevice)
+
+        XCTAssertTrue(store.isTrusted(deviceId: "host:fe80::81d:bb45:8c18:6d6a%en0"))
+        XCTAssertEqual(
+            store.canonicalTrustedDeviceId(for: "host:fe80::81d:bb45:8c18:6d6a%en0"),
+            "id:\(rawDeviceId)"
+        )
+    }
+
+    func testConnectableAddressCanonicalizerPreservesLinkLocalScopeForConnectionTargets() {
+        XCTAssertEqual(
+            ConnectableAddressCanonicalizer.connectionTarget("host:fe80::468:f5a1:462b:29d3%bridge100"),
+            "fe80::468:f5a1:462b:29d3%bridge100"
+        )
+        XCTAssertEqual(
+            ConnectableAddressCanonicalizer.connectionTarget("[fe80::468:f5a1:462b:29d3%bridge100].5901"),
+            "fe80::468:f5a1:462b:29d3%bridge100"
+        )
+    }
+
+    func testConnectableAddressCanonicalizerStripsInterfaceScopeForLookupKeys() {
+        XCTAssertEqual(
+            ConnectableAddressCanonicalizer.lookupKey("host:fe80::468:f5a1:462b:29d3%bridge100"),
+            "fe80::468:f5a1:462b:29d3"
+        )
+    }
+
+    @MainActor
+    func testDeviceDiscoveryCleanupPreservesSilentDeviceWhenBrowserStillHasLiveEndpoint() {
+        let manager = DeviceDiscoveryManager.debugMakeIsolatedInstance()
+        let device = DiscoveredDevice(
+            id: "id:\(UUID().uuidString.lowercased())",
+            name: "Lza的MacBook Pro",
+            modelName: "MacBook Pro",
+            platform: .macOS,
+            osVersion: "15.0",
+            ipAddress: "fe80::18ac:9228:7844:60fe%en0"
+        )
+        let endpointKey = "Lza的MacBook\\032Pro._skybridge._tcp.local."
+
+        manager.debugSeedDiscoveryState(
+            devices: [device],
+            lastActivity: Date().addingTimeInterval(-180),
+            endpointToDeviceId: [endpointKey: device.id],
+            liveBrowseEndpointKeysByServiceType: [DiscoveryServiceType.skybridge: [endpointKey]]
+        )
+
+        manager.debugRunCleanupStaleDevices()
+
+        XCTAssertTrue(manager.debugCachedDeviceIds.contains(device.id))
+        XCTAssertEqual(manager.discoveredDevices.first?.id, device.id)
+    }
+
+    @MainActor
+    func testDeviceDiscoveryCleanupRemovesTrulyStaleDeviceWithoutLiveEndpoint() {
+        let manager = DeviceDiscoveryManager.debugMakeIsolatedInstance()
+        let device = DiscoveredDevice(
+            id: "id:\(UUID().uuidString.lowercased())",
+            name: "Old Mac",
+            modelName: "Mac mini",
+            platform: .macOS,
+            osVersion: "15.0",
+            ipAddress: "192.168.1.8"
+        )
+
+        manager.debugSeedDiscoveryState(
+            devices: [device],
+            lastActivity: Date().addingTimeInterval(-180),
+            endpointToDeviceId: [:],
+            liveBrowseEndpointKeysByServiceType: [:]
+        )
+
+        manager.debugRunCleanupStaleDevices()
+
+        XCTAssertFalse(manager.debugCachedDeviceIds.contains(device.id))
+        XCTAssertTrue(manager.discoveredDevices.isEmpty)
+    }
+
+    @MainActor
+    func testRemoteDesktopBootstrapGuardRejectsFailedLANSession() {
+        XCTAssertFalse(
+            RemoteDesktopManager.shouldContinueLANBootstrap(
+                activeTransportModeIsLAN: true,
+                isCurrentLANConnection: true,
+                state: .error("连接已断开")
+            )
+        )
+        XCTAssertFalse(
+            RemoteDesktopManager.shouldContinueLANBootstrap(
+                activeTransportModeIsLAN: false,
+                isCurrentLANConnection: true,
+                state: .connected
+            )
+        )
+        XCTAssertTrue(
+            RemoteDesktopManager.shouldContinueLANBootstrap(
+                activeTransportModeIsLAN: true,
+                isCurrentLANConnection: true,
+                state: .connected
+            )
+        )
+    }
+
+    @MainActor
+    func testTrustResolvedPeerPersistsDeclaredDeviceIdForFutureBootstrap() {
+        let store = TrustedDeviceStore.shared
+        let original = store.trustedDevices
+        store.clearAll()
+        defer {
+            store.clearAll()
+            store.mergeFromCloud(original)
+        }
+
+        let declaredDeviceId = "id:\(UUID().uuidString.lowercased())"
+        let runtimeAliasDevice = DiscoveredDevice(
+            id: "host:fe80::81d:bb45:8c18:6d6a%en0",
+            name: "Lza的MacBook Pro",
+            modelName: "MacBook Pro",
+            platform: .macOS,
+            osVersion: "15.0",
+            ipAddress: "fe80::81d:bb45:8c18:6d6a%en0"
+        )
+
+        store.trustResolvedPeer(runtimeAliasDevice, declaredDeviceId: declaredDeviceId)
+
+        XCTAssertTrue(store.isTrusted(deviceId: "host:fe80::81d:bb45:8c18:6d6a%en0"))
+        XCTAssertEqual(
+            store.canonicalTrustedDeviceId(for: runtimeAliasDevice),
+            declaredDeviceId
+        )
+    }
+
+    @MainActor
+    func testCodablePersistenceStoreMigratesLegacyDefaultsIntoProtectedStateFile() throws {
+        let suiteName = "RegressionHardeningTests.\(UUID().uuidString)"
+        let legacyKey = "legacy.persistence.payload"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Expected isolated UserDefaults suite")
+            return
+        }
+
+        let store = CodablePersistenceStore<[String]>(
+            location: .protectedApplicationSupport(
+                path: "Tests/\(UUID().uuidString).json",
+                legacyUserDefaultsKey: legacyKey
+            ),
+            rootDirectoryName: "SkyBridgeStateTests",
+            defaults: defaults
+        )
+        let expected = ["alpha", "beta", "gamma"]
+        defaults.set(try JSONEncoder().encode(expected), forKey: legacyKey)
+
+        XCTAssertEqual(store.load(), expected)
+        XCTAssertNil(defaults.data(forKey: legacyKey))
+        XCTAssertEqual(store.load(), expected)
+
+        try? store.remove()
+        defaults.removePersistentDomain(forName: suiteName)
+    }
+
+    @MainActor
     func testP2PConnectionManagerPromotesPresentationIdentityWithoutBreakingRuntimeLookup() {
         let manager = P2PConnectionManager.instance
         let runtimePeerId = "host:192.168.1.42"
@@ -111,6 +291,114 @@ final class RegressionHardeningTests: XCTestCase {
             "Stable Mac"
         )
         XCTAssertNil(manager.connectionErrorByDeviceId[stablePeerId])
+    }
+
+    @MainActor
+    func testP2PConnectionManagerTerminalCleanupRemovesPresentationArtifactsAndSuite() {
+        let manager = P2PConnectionManager.instance
+        let runtimePeerId = "host:192.168.1.52"
+        let declaredDeviceId = UUID().uuidString.lowercased()
+        let stablePeerId = "id:\(declaredDeviceId)"
+
+        manager.installTestPeerRuntimeState(
+            runtimePeerId: runtimePeerId,
+            status: .connected,
+            name: "Host Alias Peer",
+            ipAddress: "192.168.1.52"
+        )
+        _ = manager.testPromotePeerPresentationIdentity(
+            runtimePeerId: runtimePeerId,
+            declaredDeviceId: declaredDeviceId,
+            deviceName: "Stable Mac",
+            modelName: "MacBook Pro",
+            platform: "macOS",
+            osVersion: "15.0"
+        )
+        manager.testInstallNegotiatedSuite(.mlkem768, for: runtimePeerId)
+
+        XCTAssertTrue(manager.activeConnections.contains(where: { $0.device.id == stablePeerId }))
+        XCTAssertEqual(manager.negotiatedSuiteByDeviceId[stablePeerId], .mlkem768)
+
+        manager.testSimulateTerminalCleanup(runtimePeerId: runtimePeerId)
+
+        XCTAssertFalse(manager.activeConnections.contains { connection in
+            let deviceId = connection.device.id
+            return deviceId == runtimePeerId || deviceId == stablePeerId
+        })
+        XCTAssertNil(manager.negotiatedSuiteByDeviceId[runtimePeerId])
+        XCTAssertNil(manager.negotiatedSuiteByDeviceId[stablePeerId])
+        XCTAssertEqual(manager.connectionStatusByDeviceId[stablePeerId], .disconnected)
+    }
+
+    @MainActor
+    func testP2PConnectionManagerResolvesPresentationPeerIdBackToRuntimePeerId() {
+        let manager = P2PConnectionManager.instance
+        let runtimePeerId = "host:192.168.1.62"
+        let declaredDeviceId = UUID().uuidString.lowercased()
+        let stablePeerId = "id:\(declaredDeviceId)"
+
+        manager.installTestPeerRuntimeState(
+            runtimePeerId: runtimePeerId,
+            status: .connected,
+            name: "Host Alias Peer",
+            ipAddress: "192.168.1.62"
+        )
+        _ = manager.testPromotePeerPresentationIdentity(
+            runtimePeerId: runtimePeerId,
+            declaredDeviceId: declaredDeviceId,
+            deviceName: "Stable Mac",
+            modelName: "MacBook Pro",
+            platform: "macOS",
+            osVersion: "15.0"
+        )
+
+        XCTAssertEqual(manager.testResolveRuntimePeerId(forAnyPeerId: stablePeerId), runtimePeerId)
+    }
+
+    @MainActor
+    func testResolvedConnectionStatusPrefersLiveConnectionOverStaleAliasFailure() {
+        let manager = P2PConnectionManager.instance
+        let runtimePeerId = "host:192.168.1.72"
+        let declaredDeviceId = UUID().uuidString.lowercased()
+        let stablePeerId = "id:\(declaredDeviceId)"
+
+        manager.installTestPeerRuntimeState(
+            runtimePeerId: runtimePeerId,
+            status: .connected,
+            name: "Alias Peer",
+            ipAddress: "192.168.1.72"
+        )
+        _ = manager.testPromotePeerPresentationIdentity(
+            runtimePeerId: runtimePeerId,
+            declaredDeviceId: declaredDeviceId,
+            deviceName: "Stable Mac",
+            modelName: "MacBook Pro",
+            platform: "macOS",
+            osVersion: "15.0"
+        )
+        manager.testSimulateTerminalCleanup(
+            runtimePeerId: runtimePeerId,
+            terminalStatus: .failed,
+            error: "stale failure"
+        )
+        manager.installTestPeerRuntimeState(
+            runtimePeerId: runtimePeerId,
+            status: .connected,
+            name: "Alias Peer",
+            ipAddress: "192.168.1.72"
+        )
+
+        let device = DiscoveredDevice(
+            id: stablePeerId,
+            name: "Stable Mac",
+            modelName: "MacBook Pro",
+            platform: .macOS,
+            osVersion: "15.0",
+            ipAddress: "192.168.1.72"
+        )
+
+        XCTAssertEqual(manager.resolvedConnectionStatus(for: device), .connected)
+        XCTAssertNil(manager.resolvedConnectionError(for: device))
     }
 
     func testProcessMessageBWithoutTranscriptHashAFailsWithExplicitReason() async {
@@ -264,7 +552,7 @@ final class RegressionHardeningTests: XCTestCase {
         XCTAssertNotEqual(base, refreshed)
     }
 
-    func testRemoteDesktopAutomaticViewerPolicyPrefersHEVCAt60FPS() {
+    func testRemoteDesktopAutomaticViewerPolicyPrefersStableH264At60FPS() {
         XCTAssertEqual(RemoteDesktopViewerFrameRate.adaptive.targetFPS, 60)
         XCTAssertEqual(RemoteDesktopViewerResolution.uhd5k.dimensions?.width, 5120)
         XCTAssertEqual(RemoteDesktopViewerResolution.uhd5k.dimensions?.height, 2880)
@@ -273,7 +561,7 @@ final class RegressionHardeningTests: XCTestCase {
             RemoteDesktopViewerCodec.automatic.resolvedWireValue(
                 supportedFormats: ["hevc", "jpeg", "h264"]
             ),
-            "hevc"
+            "h264"
         )
         XCTAssertEqual(
             RemoteDesktopViewerCodec.automatic.resolvedWireValue(
@@ -532,6 +820,280 @@ final class RegressionHardeningTests: XCTestCase {
         XCTAssertEqual(resolved.ipAddress, "192.168.31.20")
     }
 
+    @MainActor
+    func testResolveBestTransferDeviceMatchesScopedHostSnapshotToReachableTransferCandidate() {
+        let target = DiscoveredDevice(
+            id: "host:fe80::468:f5a1:462b:29d3%bridge100",
+            name: "fe80::468:f5a1:462b:29d3%bridge100",
+            modelName: "Mac",
+            platform: .macOS,
+            osVersion: "26.3.1",
+            ipAddress: nil,
+            bonjourServiceType: nil,
+            bonjourServiceDomain: nil,
+            services: [],
+            portMap: [:],
+            signalStrength: -40,
+            lastSeen: Date(),
+            isConnected: true,
+            isTrusted: true,
+            publicKey: nil,
+            advertisedCapabilities: [],
+            capabilities: []
+        )
+
+        let richerTransferCandidate = DiscoveredDevice(
+            id: "id:peer-transfer",
+            name: "MacBook Pro",
+            bonjourServiceName: "MacBook Pro",
+            modelName: "Mac",
+            platform: .macOS,
+            osVersion: "26.3.1",
+            ipAddress: "fe80::468:f5a1:462b:29d3",
+            bonjourServiceType: DiscoveredDevice.fileTransferServiceType,
+            bonjourServiceDomain: "local.",
+            services: [DiscoveredDevice.fileTransferServiceType],
+            portMap: [DiscoveredDevice.fileTransferServiceType: 8080],
+            signalStrength: -38,
+            lastSeen: Date(),
+            isConnected: false,
+            isTrusted: true,
+            publicKey: nil,
+            advertisedCapabilities: ["file_transfer"],
+            capabilities: ["file_transfer"]
+        )
+
+        let resolved = FileTransferManager.resolveBestTransferDevice(
+            target: target,
+            discovered: [richerTransferCandidate]
+        )
+
+        XCTAssertEqual(resolved.id, richerTransferCandidate.id)
+        XCTAssertEqual(resolved.fileTransferPort, 8080)
+    }
+
+    @MainActor
+    func testResolveBestRemoteDesktopDevicePrefersReachableRemoteCandidateOverCapabilityOnlySnapshot() {
+        let target = DiscoveredDevice(
+            id: "id:peer-1",
+            name: "MacBook Pro",
+            bonjourServiceName: "MacBook Pro",
+            modelName: "Mac",
+            platform: .macOS,
+            osVersion: "26.3.1",
+            ipAddress: nil,
+            bonjourServiceType: "_skybridge._tcp",
+            bonjourServiceDomain: "local.",
+            services: ["_skybridge._tcp"],
+            portMap: [:],
+            signalStrength: -40,
+            lastSeen: Date(),
+            isConnected: true,
+            isTrusted: true,
+            publicKey: nil,
+            advertisedCapabilities: ["remote_desktop"],
+            capabilities: ["remote_desktop"]
+        )
+
+        let richerRemoteCandidate = DiscoveredDevice(
+            id: "bonjour:MacBook Pro@local.",
+            name: "MacBook Pro",
+            bonjourServiceName: "MacBook Pro",
+            modelName: "Mac",
+            platform: .macOS,
+            osVersion: "26.3.1",
+            ipAddress: "192.168.31.20",
+            bonjourServiceType: DiscoveredDevice.remoteControlServiceType,
+            bonjourServiceDomain: "local.",
+            services: [DiscoveredDevice.remoteControlServiceType],
+            portMap: [DiscoveredDevice.remoteControlServiceType: 5901],
+            signalStrength: -38,
+            lastSeen: Date(),
+            isConnected: false,
+            isTrusted: true,
+            publicKey: nil,
+            advertisedCapabilities: ["remote_desktop"],
+            capabilities: ["remote_desktop"]
+        )
+
+        let resolved = RemoteDesktopManager.resolveBestRemoteDesktopDevice(
+            target: target,
+            discovered: [richerRemoteCandidate]
+        )
+
+        XCTAssertEqual(resolved.id, richerRemoteCandidate.id)
+        XCTAssertEqual(resolved.remoteControlPort, 5901)
+        XCTAssertEqual(resolved.ipAddress, "192.168.31.20")
+    }
+
+    @MainActor
+    func testResolveBestRemoteDesktopDeviceMatchesScopedHostSnapshotToReachableRemoteCandidate() {
+        let target = DiscoveredDevice(
+            id: "host:fe80::468:f5a1:462b:29d3%bridge100",
+            name: "fe80::468:f5a1:462b:29d3%bridge100",
+            modelName: "Mac",
+            platform: .macOS,
+            osVersion: "26.3.1",
+            ipAddress: nil,
+            bonjourServiceType: nil,
+            bonjourServiceDomain: nil,
+            services: [],
+            portMap: [:],
+            signalStrength: -40,
+            lastSeen: Date(),
+            isConnected: true,
+            isTrusted: true,
+            publicKey: nil,
+            advertisedCapabilities: [],
+            capabilities: []
+        )
+
+        let richerRemoteCandidate = DiscoveredDevice(
+            id: "id:peer-remote",
+            name: "MacBook Pro",
+            bonjourServiceName: "MacBook Pro",
+            modelName: "Mac",
+            platform: .macOS,
+            osVersion: "26.3.1",
+            ipAddress: "fe80::468:f5a1:462b:29d3",
+            bonjourServiceType: DiscoveredDevice.remoteControlServiceType,
+            bonjourServiceDomain: "local.",
+            services: [DiscoveredDevice.remoteControlServiceType],
+            portMap: [DiscoveredDevice.remoteControlServiceType: 5901],
+            signalStrength: -38,
+            lastSeen: Date(),
+            isConnected: false,
+            isTrusted: true,
+            publicKey: nil,
+            advertisedCapabilities: ["remote_desktop"],
+            capabilities: ["remote_desktop"]
+        )
+
+        let resolved = RemoteDesktopManager.resolveBestRemoteDesktopDevice(
+            target: target,
+            discovered: [richerRemoteCandidate]
+        )
+
+        XCTAssertEqual(resolved.id, richerRemoteCandidate.id)
+        XCTAssertEqual(resolved.remoteControlPort, 5901)
+    }
+
+    @MainActor
+    func testLiveLANMacConnectionIsEligibleForRemoteDesktopWithoutExplicitRemoteServiceAdvertisement() {
+        let connectionManager = P2PConnectionManager.instance
+        connectionManager.installUITestActiveConnections([])
+        defer {
+            connectionManager.installUITestActiveConnections([])
+        }
+
+        let runtimePeerId = "host:fe80::b4:98c9:b9a:3bb3%en2"
+        connectionManager.installTestPeerRuntimeState(
+            runtimePeerId: runtimePeerId,
+            status: .connected,
+            name: "Lza的MacBook Pro",
+            ipAddress: "fe80::b4:98c9:b9a:3bb3%en2"
+        )
+
+        let device = DiscoveredDevice(
+            id: runtimePeerId,
+            name: "Lza的MacBook Pro",
+            modelName: "MacBook Pro",
+            platform: .macOS,
+            osVersion: "26.3.1",
+            ipAddress: nil,
+            bonjourServiceType: nil,
+            bonjourServiceDomain: nil,
+            services: [],
+            portMap: [:],
+            signalStrength: -42,
+            lastSeen: Date(),
+            isConnected: true,
+            isTrusted: true,
+            publicKey: nil,
+            advertisedCapabilities: [],
+            capabilities: []
+        )
+
+        XCTAssertTrue(RemoteDesktopManager.instance.canPresentRemoteDesktopOption(for: device))
+    }
+
+    @MainActor
+    func testCapabilityOnlyTransferDeviceDoesNotExposeExplicitLANTransferService() {
+        let device = DiscoveredDevice(
+            id: "id:peer-transfer",
+            name: "MacBook Pro",
+            bonjourServiceName: "MacBook Pro",
+            modelName: "Mac",
+            platform: .macOS,
+            osVersion: "26.3.1",
+            ipAddress: nil,
+            bonjourServiceType: "_skybridge._tcp",
+            bonjourServiceDomain: "local.",
+            services: ["_skybridge._tcp"],
+            portMap: [:],
+            signalStrength: -42,
+            lastSeen: Date(),
+            isConnected: true,
+            isTrusted: true,
+            publicKey: nil,
+            advertisedCapabilities: ["file_transfer"],
+            capabilities: ["file_transfer"]
+        )
+
+        XCTAssertFalse(FileTransferManager.hasExplicitLANTransferService(device))
+    }
+
+    @MainActor
+    func testCapabilityOnlyRemoteDesktopDeviceDoesNotExposeExplicitLANEndpoint() {
+        let device = DiscoveredDevice(
+            id: "id:peer-remote",
+            name: "MacBook Pro",
+            bonjourServiceName: "MacBook Pro",
+            modelName: "Mac",
+            platform: .macOS,
+            osVersion: "26.3.1",
+            ipAddress: nil,
+            bonjourServiceType: "_skybridge._tcp",
+            bonjourServiceDomain: "local.",
+            services: ["_skybridge._tcp"],
+            portMap: [:],
+            signalStrength: -42,
+            lastSeen: Date(),
+            isConnected: true,
+            isTrusted: true,
+            publicKey: nil,
+            advertisedCapabilities: ["remote_desktop"],
+            capabilities: ["remote_desktop"]
+        )
+
+        XCTAssertFalse(RemoteDesktopManager.hasExplicitLANRemoteDesktopEndpoint(device))
+    }
+
+    @MainActor
+    func testProtectedDiscoveryIdentifiersDoNotKeepDisconnectedRuntimePeerAlive() {
+        let manager = P2PConnectionManager.instance
+        manager.installUITestActiveConnections([])
+
+        let runtimePeerId = "host:fe80::468:f5a1:462b:29d3%bridge100"
+        manager.installTestPeerRuntimeState(
+            runtimePeerId: runtimePeerId,
+            status: .connected,
+            name: "MacBook Pro",
+            ipAddress: "fe80::468:f5a1:462b:29d3%bridge100"
+        )
+
+        XCTAssertFalse(manager.activeDiscoveryIdentifiers.isEmpty)
+        XCTAssertTrue(manager.protectedDiscoveryIdentifiers.contains("host:fe80::468:f5a1:462b:29d3"))
+
+        manager.testSimulateTerminalCleanup(runtimePeerId: runtimePeerId, terminalStatus: .disconnected)
+
+        XCTAssertTrue(manager.activeDiscoveryIdentifiers.isEmpty)
+        XCTAssertFalse(manager.protectedDiscoveryIdentifiers.contains(runtimePeerId.lowercased()))
+        XCTAssertFalse(manager.protectedDiscoveryIdentifiers.contains("host:fe80::468:f5a1:462b:29d3"))
+
+        manager.installUITestActiveConnections([])
+    }
+
     private func makeInitiatorContext() -> HandshakeContext {
         let signingKey = Curve25519.Signing.PrivateKey()
         return HandshakeContext(
@@ -676,5 +1238,137 @@ final class RegressionHardeningTests: XCTestCase {
         )
 
         XCTAssertEqual(afterLateCleanup, newerSnapshot)
+    }
+
+    func testRemoteDesktopDecodeQueuePolicyPreservesPredictiveVideoOrder() {
+        var pending: [ScreenData] = []
+        var waitingForSyncFrame = false
+        let first = ScreenData(
+            width: 1280,
+            height: 720,
+            imageData: Data([0x01]),
+            timestamp: 1,
+            format: "h264"
+        )
+        let second = ScreenData(
+            width: 1280,
+            height: 720,
+            imageData: Data([0x02]),
+            timestamp: 2,
+            format: "h264"
+        )
+
+        XCTAssertEqual(
+            RemoteDesktopDecodeQueuePolicy.enqueue(
+                first,
+                into: &pending,
+                waitingForSyncFrame: &waitingForSyncFrame
+            ),
+            .enqueued
+        )
+        XCTAssertEqual(
+            RemoteDesktopDecodeQueuePolicy.enqueue(
+                second,
+                into: &pending,
+                waitingForSyncFrame: &waitingForSyncFrame
+            ),
+            .enqueued
+        )
+
+        XCTAssertEqual(RemoteDesktopDecodeQueuePolicy.dequeueNext(from: &pending)?.imageData, first.imageData)
+        XCTAssertEqual(RemoteDesktopDecodeQueuePolicy.dequeueNext(from: &pending)?.imageData, second.imageData)
+    }
+
+    func testRemoteDesktopDecodeQueuePolicyStillImagesReplaceLatestFrame() {
+        var pending: [ScreenData] = []
+        var waitingForSyncFrame = false
+        let stale = ScreenData(
+            width: 1206,
+            height: 779,
+            imageData: Data([0x11]),
+            timestamp: 1,
+            format: "jpeg"
+        )
+        let latest = ScreenData(
+            width: 1206,
+            height: 779,
+            imageData: Data([0x22]),
+            timestamp: 2,
+            format: "jpeg"
+        )
+
+        _ = RemoteDesktopDecodeQueuePolicy.enqueue(
+            stale,
+            into: &pending,
+            waitingForSyncFrame: &waitingForSyncFrame
+        )
+        XCTAssertEqual(
+            RemoteDesktopDecodeQueuePolicy.enqueue(
+                latest,
+                into: &pending,
+                waitingForSyncFrame: &waitingForSyncFrame
+            ),
+            .replacedStillFrame
+        )
+
+        XCTAssertEqual(pending.count, 1)
+        XCTAssertEqual(pending.first?.imageData, latest.imageData)
+        XCTAssertFalse(waitingForSyncFrame)
+    }
+
+    func testRemoteDesktopDecodeQueuePolicyEntersWaitingForSyncWhenQueueIsFull() {
+        var pending = (0..<RemoteDesktopDecodeQueuePolicy.maxPredictiveVideoFrames).map { index in
+            ScreenData(
+                width: 1280,
+                height: 720,
+                imageData: Data([UInt8(index)]),
+                timestamp: TimeInterval(index),
+                format: "hevc"
+            )
+        }
+        var waitingForSyncFrame = false
+        let overflow = ScreenData(
+            width: 1280,
+            height: 720,
+            imageData: Data([0xFE]),
+            timestamp: 99,
+            format: "hevc"
+        )
+
+        XCTAssertEqual(
+            RemoteDesktopDecodeQueuePolicy.enqueue(
+                overflow,
+                into: &pending,
+                waitingForSyncFrame: &waitingForSyncFrame
+            ),
+            .enteredWaitingForSync
+        )
+        XCTAssertTrue(pending.isEmpty)
+        XCTAssertTrue(waitingForSyncFrame)
+    }
+
+    func testRemoteDesktopDecodeQueuePolicyRecoversWhenSyncFrameArrives() {
+        var pending: [ScreenData] = []
+        var waitingForSyncFrame = true
+        let syncFrame = ScreenData(
+            width: 1280,
+            height: 720,
+            imageData: Data([0x00, 0x00, 0x00, 0x01, 0x65, 0x88]),
+            timestamp: 3,
+            format: "h264",
+            isSyncFrame: false
+        )
+
+        XCTAssertEqual(
+            RemoteDesktopDecodeQueuePolicy.enqueue(
+                syncFrame,
+                into: &pending,
+                waitingForSyncFrame: &waitingForSyncFrame
+            ),
+            .recoveredWithIndependentFrame
+        )
+        XCTAssertEqual(pending.count, 1)
+        XCTAssertEqual(pending.first?.imageData, syncFrame.imageData)
+        XCTAssertFalse(waitingForSyncFrame)
     }
 }

@@ -26,7 +26,8 @@ struct CurrentPathProbe {
         case "status":
             try await printStatus()
         case "auth-export":
-            try await exportAuthSession()
+            let includeSecrets = arguments.contains("--include-secrets")
+            try await exportAuthSession(includeSecrets: includeSecrets)
         case "code-create":
             let ttl = parseIntFlag("--ttl", from: arguments) ?? 300
             try await createCode(validDuration: TimeInterval(ttl))
@@ -78,7 +79,7 @@ struct CurrentPathProbe {
         let usage = """
         Usage:
           swift run CurrentPathProbe status
-          swift run CurrentPathProbe auth-export
+          swift run CurrentPathProbe auth-export [--include-secrets]
           swift run CurrentPathProbe code-create [--ttl 300]
           swift run CurrentPathProbe bridge-connect <code> [--state-dir /path/to/state] [--timeout-seconds 45] [--hold-seconds 0]
           swift run CurrentPathProbe approve-device <pending-device-id> --pending-fingerprint <fp> [--pending-algorithm Ed25519] [--device-name "Ubuntu Node"]
@@ -100,16 +101,21 @@ struct CurrentPathProbe {
         try printJSONObject(payload)
     }
 
-    private static func exportAuthSession() async throws {
+    private static func exportAuthSession(includeSecrets: Bool) async throws {
         let session = try await currentAuthSession()
-        try printJSONObject([
-            "access_token": session.accessToken,
-            "refresh_token": session.refreshToken ?? NSNull(),
+        var payload: [String: Any] = [
             "user_identifier": session.userIdentifier,
             "nebula_id": session.nebulaId ?? NSNull(),
             "display_name": session.displayName,
-            "issued_at": rfc3339String(session.issuedAt)
-        ])
+            "issued_at": rfc3339String(session.issuedAt),
+            "has_access_token": !session.accessToken.isEmpty,
+            "has_refresh_token": !(session.refreshToken?.isEmpty ?? true)
+        ]
+        if includeSecrets {
+            payload["access_token"] = session.accessToken
+            payload["refresh_token"] = session.refreshToken ?? NSNull()
+        }
+        try printJSONObject(payload)
     }
 
     private static func createCode(validDuration: TimeInterval) async throws {
@@ -504,7 +510,8 @@ struct CurrentPathProbe {
             kSecAttrAccount as String: "primary"
         ]
         let attributes: [String: Any] = [
-            kSecValueData as String: data
+            kSecValueData as String: data,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         ]
         let status: OSStatus
         if SecItemCopyMatching(query as CFDictionary, nil) == errSecSuccess {
@@ -512,6 +519,7 @@ struct CurrentPathProbe {
         } else {
             var addQuery = query
             addQuery[kSecValueData as String] = data
+            addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
             status = SecItemAdd(addQuery as CFDictionary, nil)
         }
         guard status == errSecSuccess else {
@@ -1036,7 +1044,7 @@ struct CurrentPathProbe {
         root["schema_version"] = 1
         root["sessions"] = sessions
         let data = try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys])
-        try data.write(to: sessionsURL)
+        try writePrivateData(data, to: sessionsURL)
     }
 
     private static func normalizePhase(_ raw: String) -> String {
@@ -1057,6 +1065,18 @@ struct CurrentPathProbe {
             return raw.lowercased()
         }
     }
+}
+
+private func writePrivateData(_ data: Data, to url: URL) throws {
+    try FileManager.default.createDirectory(
+        at: url.deletingLastPathComponent(),
+        withIntermediateDirectories: true
+    )
+    try data.write(to: url, options: .atomic)
+    try FileManager.default.setAttributes(
+        [.posixPermissions: 0o600],
+        ofItemAtPath: url.path
+    )
 }
 
 private extension Data {

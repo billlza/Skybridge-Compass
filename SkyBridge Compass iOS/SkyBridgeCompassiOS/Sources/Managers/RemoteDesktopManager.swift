@@ -83,13 +83,303 @@ public struct ScreenData: Codable, Sendable {
     public let imageData: Data
     public let timestamp: TimeInterval
     public let format: String? // "jpeg" / "hevc" / "h264" / "bgra"
-    
-    public init(width: Int, height: Int, imageData: Data, timestamp: TimeInterval, format: String? = nil) {
+    public let isSyncFrame: Bool?
+
+    public init(
+        width: Int,
+        height: Int,
+        imageData: Data,
+        timestamp: TimeInterval,
+        format: String? = nil,
+        isSyncFrame: Bool? = nil
+    ) {
         self.width = width
         self.height = height
         self.imageData = imageData
         self.timestamp = timestamp
         self.format = format
+        self.isSyncFrame = isSyncFrame
+    }
+}
+
+enum RemoteDesktopScreenFrameWire {
+    private static let magic: UInt32 = 0x53425246 // "SBRF"
+    private static let version: UInt8 = 1
+    private static let headerSize = 28
+
+    private enum CodecTag: UInt8 {
+        case unknown = 0
+        case jpeg = 1
+        case h264 = 2
+        case hevc = 3
+        case bgra = 4
+
+        init(format: String?) {
+            switch (format ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+            case "jpeg", "jpg":
+                self = .jpeg
+            case "h264":
+                self = .h264
+            case "hevc":
+                self = .hevc
+            case "bgra":
+                self = .bgra
+            default:
+                self = .unknown
+            }
+        }
+
+        var format: String? {
+            switch self {
+            case .unknown:
+                return nil
+            case .jpeg:
+                return "jpeg"
+            case .h264:
+                return "h264"
+            case .hevc:
+                return "hevc"
+            case .bgra:
+                return "bgra"
+            }
+        }
+    }
+
+    static func decodeIfPresent(_ data: Data) -> ScreenData? {
+        guard data.count >= headerSize else { return nil }
+        guard readUInt32(from: data, offset: 0) == magic else { return nil }
+        guard data[4] == version else { return nil }
+        guard let codecTag = CodecTag(rawValue: data[5]) else { return nil }
+
+        let flags = readUInt16(from: data, offset: 6)
+        let width = Int(readUInt32(from: data, offset: 8))
+        let height = Int(readUInt32(from: data, offset: 12))
+        let timestampMicros = readUInt64(from: data, offset: 16)
+        let payloadLength = Int(readUInt32(from: data, offset: 24))
+        guard payloadLength >= 0, data.count == headerSize + payloadLength else { return nil }
+
+        return ScreenData(
+            width: width,
+            height: height,
+            imageData: data.subdata(in: headerSize..<data.count),
+            timestamp: TimeInterval(timestampMicros) / 1_000_000.0,
+            format: codecTag.format,
+            isSyncFrame: (flags & 0x0001) != 0
+        )
+    }
+
+    static func containsSyncFrame(
+        format: String?,
+        imageData: Data,
+        advertisedSyncFrame: Bool?
+    ) -> Bool {
+        if advertisedSyncFrame == true {
+            return true
+        }
+
+        switch CodecTag(format: format) {
+        case .jpeg, .bgra, .unknown:
+            return true
+        case .h264:
+            return parseNALUnits(from: imageData).contains { nalu in
+                guard let first = nalu.first else { return false }
+                return Int(first & 0x1F) == 5
+            }
+        case .hevc:
+            return parseNALUnits(from: imageData).contains { nalu in
+                guard let first = nalu.first else { return false }
+                let type = Int((first >> 1) & 0x3F)
+                return (16...21).contains(type)
+            }
+        }
+    }
+
+    private static func parseNALUnits(from data: Data) -> [Data] {
+        if data.count >= 4,
+           data.starts(with: [0x00, 0x00, 0x00, 0x01]) || data.starts(with: [0x00, 0x00, 0x01]) {
+            return parseAnnexBNALUnits(from: data)
+        }
+        return parseLengthPrefixedNALUnits(from: data)
+    }
+
+    private static func parseLengthPrefixedNALUnits(from data: Data) -> [Data] {
+        var nalus: [Data] = []
+        var offset = 0
+        while offset + 4 <= data.count {
+            let length = data.withUnsafeBytes { raw -> Int in
+                let value = raw.loadUnaligned(fromByteOffset: offset, as: UInt32.self)
+                return Int(UInt32(bigEndian: value))
+            }
+            offset += 4
+            guard length > 0, offset + length <= data.count else { break }
+            nalus.append(data.subdata(in: offset..<(offset + length)))
+            offset += length
+        }
+        return nalus
+    }
+
+    private static func parseAnnexBNALUnits(from data: Data) -> [Data] {
+        func startCodeLength(at index: Int) -> Int? {
+            guard index + 3 <= data.count else { return nil }
+            if index + 4 <= data.count,
+               data[index] == 0x00, data[index + 1] == 0x00, data[index + 2] == 0x00, data[index + 3] == 0x01 {
+                return 4
+            }
+            if data[index] == 0x00, data[index + 1] == 0x00, data[index + 2] == 0x01 {
+                return 3
+            }
+            return nil
+        }
+
+        var nalus: [Data] = []
+        var currentStart: Int?
+        var currentSkip = 0
+        var index = 0
+
+        while index < data.count {
+            if let skip = startCodeLength(at: index) {
+                if let start = currentStart {
+                    let naluStart = start + currentSkip
+                    if naluStart < index {
+                        nalus.append(data.subdata(in: naluStart..<index))
+                    }
+                }
+                currentStart = index
+                currentSkip = skip
+                index += skip
+            } else {
+                index += 1
+            }
+        }
+
+        if let start = currentStart {
+            let naluStart = start + currentSkip
+            if naluStart < data.count {
+                nalus.append(data.subdata(in: naluStart..<data.count))
+            }
+        }
+        return nalus
+    }
+
+    private static func readUInt16(from data: Data, offset: Int) -> UInt16 {
+        data.withUnsafeBytes { rawBuffer in
+            UInt16(
+                bigEndian: rawBuffer.loadUnaligned(
+                    fromByteOffset: offset,
+                    as: UInt16.self
+                )
+            )
+        }
+    }
+
+    private static func readUInt32(from data: Data, offset: Int) -> UInt32 {
+        data.withUnsafeBytes { rawBuffer in
+            UInt32(
+                bigEndian: rawBuffer.loadUnaligned(
+                    fromByteOffset: offset,
+                    as: UInt32.self
+                )
+            )
+        }
+    }
+
+    private static func readUInt64(from data: Data, offset: Int) -> UInt64 {
+        data.withUnsafeBytes { rawBuffer in
+            UInt64(
+                bigEndian: rawBuffer.loadUnaligned(
+                    fromByteOffset: offset,
+                    as: UInt64.self
+                )
+            )
+        }
+    }
+}
+
+extension ScreenData {
+    var normalizedFormat: String {
+        (format ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    var isCompressedPredictiveVideoFrame: Bool {
+        switch normalizedFormat {
+        case "h264", "hevc":
+            return true
+        default:
+            return false
+        }
+    }
+
+    var isIndependentlyDecodableFrame: Bool {
+        if isCompressedPredictiveVideoFrame {
+            return RemoteDesktopScreenFrameWire.containsSyncFrame(
+                format: format,
+                imageData: imageData,
+                advertisedSyncFrame: isSyncFrame
+            )
+        }
+        return true
+    }
+}
+
+enum RemoteDesktopDecodeQueuePolicy {
+    static let maxPredictiveVideoFrames = 12
+
+    enum EnqueueResult: Equatable {
+        case enqueued
+        case replacedStillFrame
+        case droppedIncomingPredictiveFrame
+        case enteredWaitingForSync
+        case recoveredWithIndependentFrame
+    }
+
+    static func isPredictiveVideoFormat(_ format: String?) -> Bool {
+        switch (format ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "h264", "hevc":
+            return true
+        default:
+            return false
+        }
+    }
+
+    @discardableResult
+    static func enqueue(
+        _ screenData: ScreenData,
+        into pendingFrames: inout [ScreenData],
+        waitingForSyncFrame: inout Bool,
+        maxPredictiveVideoFrames: Int = maxPredictiveVideoFrames
+    ) -> EnqueueResult {
+        guard isPredictiveVideoFormat(screenData.format) else {
+            pendingFrames.removeAll(keepingCapacity: true)
+            waitingForSyncFrame = false
+            pendingFrames.append(screenData)
+            return .replacedStillFrame
+        }
+
+        if screenData.isIndependentlyDecodableFrame {
+            let shouldReportRecovery = waitingForSyncFrame || !pendingFrames.isEmpty
+            pendingFrames.removeAll(keepingCapacity: true)
+            waitingForSyncFrame = false
+            pendingFrames.append(screenData)
+            return shouldReportRecovery ? .recoveredWithIndependentFrame : .enqueued
+        }
+
+        guard !waitingForSyncFrame else {
+            return .droppedIncomingPredictiveFrame
+        }
+
+        guard pendingFrames.count < maxPredictiveVideoFrames else {
+            pendingFrames.removeAll(keepingCapacity: true)
+            waitingForSyncFrame = true
+            return .enteredWaitingForSync
+        }
+
+        pendingFrames.append(screenData)
+        return .enqueued
+    }
+
+    static func dequeueNext(from pendingFrames: inout [ScreenData]) -> ScreenData? {
+        guard !pendingFrames.isEmpty else { return nil }
+        return pendingFrames.removeFirst()
     }
 }
 
@@ -222,9 +512,30 @@ final class DecodedPixelBufferFrame: @unchecked Sendable {
 }
 
 @available(iOS 17.0, *)
+final class DisplaySampleBufferFrame: @unchecked Sendable {
+    let sampleBuffer: CMSampleBuffer
+    let width: Int
+    let height: Int
+    let presentationTimeStamp: CMTime
+
+    init(
+        sampleBuffer: CMSampleBuffer,
+        width: Int,
+        height: Int,
+        presentationTimeStamp: CMTime
+    ) {
+        self.sampleBuffer = sampleBuffer
+        self.width = width
+        self.height = height
+        self.presentationTimeStamp = presentationTimeStamp
+    }
+}
+
+@available(iOS 17.0, *)
 enum DecodeOutput: Sendable {
     case image(DecodedImageFrame)
     case pixelBuffer(DecodedPixelBufferFrame)
+    case sampleBuffer(DisplaySampleBufferFrame)
 }
 
 @available(iOS 17.0, *)
@@ -232,20 +543,80 @@ enum DecodeOutput: Sendable {
 final class RemoteVideoFrameFeed: ObservableObject {
     @Published private(set) var frameVersion: UInt64 = 0
 
-    private(set) var currentFrame: DecodedPixelBufferFrame?
+    private(set) var pendingFrames: [DisplaySampleBufferFrame] = []
     private(set) var flushVersion: UInt64 = 0
+    private(set) var hasDisplayedFrame = false
+    private(set) var removeDisplayedImageOnFlush = true
 
     var hasFrame: Bool {
-        currentFrame != nil
+        hasDisplayedFrame || !pendingFrames.isEmpty
     }
 
-    func update(frame: DecodedPixelBufferFrame) {
-        currentFrame = frame
+    func enqueue(frame: DisplaySampleBufferFrame) {
+        pendingFrames.append(frame)
         frameVersion &+= 1
     }
 
-    func flush() {
-        currentFrame = nil
+    func markDisplayedFrame() {
+        guard !hasDisplayedFrame else { return }
+        hasDisplayedFrame = true
+        frameVersion &+= 1
+    }
+
+    func takePendingFrames() -> [DisplaySampleBufferFrame] {
+        let frames = pendingFrames
+        pendingFrames.removeAll(keepingCapacity: true)
+        return frames
+    }
+
+    func flush(removeDisplayedImage: Bool = true) {
+        pendingFrames.removeAll(keepingCapacity: true)
+        removeDisplayedImageOnFlush = removeDisplayedImage
+        if removeDisplayedImage {
+            hasDisplayedFrame = false
+        }
+        flushVersion &+= 1
+        frameVersion &+= 1
+    }
+}
+
+@available(iOS 17.0, *)
+@MainActor
+final class RemoteMetalVideoFrameFeed: ObservableObject {
+    @Published private(set) var frameVersion: UInt64 = 0
+
+    private(set) var latestFrame: DecodedPixelBufferFrame?
+    private(set) var flushVersion: UInt64 = 0
+    private(set) var hasDisplayedFrame = false
+    private(set) var removeDisplayedImageOnFlush = true
+
+    var hasFrame: Bool {
+        hasDisplayedFrame || latestFrame != nil
+    }
+
+    func enqueue(frame: DecodedPixelBufferFrame) {
+        latestFrame = frame
+        frameVersion &+= 1
+    }
+
+    func markDisplayedFrame() {
+        guard !hasDisplayedFrame else { return }
+        hasDisplayedFrame = true
+        frameVersion &+= 1
+    }
+
+    func takeLatestFrame() -> DecodedPixelBufferFrame? {
+        let frame = latestFrame
+        latestFrame = nil
+        return frame
+    }
+
+    func flush(removeDisplayedImage: Bool = true) {
+        latestFrame = nil
+        removeDisplayedImageOnFlush = removeDisplayedImage
+        if removeDisplayedImage {
+            hasDisplayedFrame = false
+        }
         flushVersion &+= 1
         frameVersion &+= 1
     }
@@ -260,40 +631,8 @@ actor VideoDecoder {
         case h264
         case hevc
     }
-
-    private final class DecodeResultBox: @unchecked Sendable {
-        private let lock = NSLock()
-        private var value: DecodeOutput?
-        private var callbackInvoked = false
-
-        func set(_ value: DecodeOutput?) {
-            lock.lock()
-            self.value = value
-            callbackInvoked = true
-            lock.unlock()
-        }
-
-        func markCallbackInvoked() {
-            lock.lock()
-            callbackInvoked = true
-            lock.unlock()
-        }
-
-        func get() -> DecodeOutput? {
-            lock.lock()
-            defer { lock.unlock() }
-            return value
-        }
-
-        func didInvokeCallback() -> Bool {
-            lock.lock()
-            defer { lock.unlock() }
-            return callbackInvoked
-        }
-    }
-
-    private var decompressionSession: VTDecompressionSession?
     private var formatDescription: CMVideoFormatDescription?
+    private var decompressionSession: VTDecompressionSession?
     private var activeCodec: Codec?
     private var h264SPS: Data?
     private var h264PPS: Data?
@@ -302,7 +641,7 @@ actor VideoDecoder {
     private var hevcPPS: Data?
     private var activeVideoDimensions: CGSize?
     private var waitingForSyncFrame = false
-    private var decodeFrameCounter: Int64 = 0
+    private var lastPresentationTimeStamp: CMTime?
     private var lastDecodeFailureLogTime: Date = .distantPast
     private var lastDecodeFailureReason: String?
     private let ciContext = CIContext(options: [
@@ -324,18 +663,20 @@ actor VideoDecoder {
         case "jpeg", "jpg":
             return decodeJPEG(payload)
         case "h264":
-            return try decodeVideoFrame(
+            return try await decodeVideoFrame(
                 payload,
                 codec: .h264,
                 width: screenData.width,
-                height: screenData.height
+                height: screenData.height,
+                isSyncFrame: screenData.isSyncFrame
             )
         case "hevc":
-            return try decodeVideoFrame(
+            return try await decodeVideoFrame(
                 payload,
                 codec: .hevc,
                 width: screenData.width,
-                height: screenData.height
+                height: screenData.height,
+                isSyncFrame: screenData.isSyncFrame
             )
         case "bgra":
             return decodeBGRA(payload, width: screenData.width, height: screenData.height)
@@ -363,14 +704,13 @@ actor VideoDecoder {
         guard data.count >= expectedMinBytes else { return nil }
 
         if let pixelBuffer = makeBGRAFramePixelBuffer(data: data, width: width, height: height) {
-            return .pixelBuffer(
-                DecodedPixelBufferFrame(
-                    pixelBuffer: pixelBuffer,
-                    width: width,
-                    height: height,
-                    presentationTimeStamp: nextDecodePresentationTimeStamp()
-                )
+            let pixelBufferFrame = DecodedPixelBufferFrame(
+                pixelBuffer: pixelBuffer,
+                width: width,
+                height: height,
+                presentationTimeStamp: nextDecodePresentationTimeStamp()
             )
+            return .pixelBuffer(pixelBufferFrame)
         }
 
         guard let provider = CGDataProvider(data: data as CFData) else { return nil }
@@ -424,7 +764,13 @@ actor VideoDecoder {
         clearVideoParameterSets()
     }
 
-    private func decodeVideoFrame(_ data: Data, codec: Codec, width: Int, height: Int) throws -> DecodeOutput? {
+    private func decodeVideoFrame(
+        _ data: Data,
+        codec: Codec,
+        width: Int,
+        height: Int,
+        isSyncFrame: Bool?
+    ) async throws -> DecodeOutput? {
         let dimensions = CGSize(width: width, height: height)
         let streamChanged = activeCodec != codec || activeVideoDimensions != dimensions
         if streamChanged {
@@ -441,7 +787,7 @@ actor VideoDecoder {
             resetDecoderState(keepLastFrame: true)
         }
 
-        let containsSyncFrame = containsSyncFrame(in: nalus, codec: codec)
+        let containsSyncFrame = (isSyncFrame == true) || containsSyncFrame(in: nalus, codec: codec)
         if waitingForSyncFrame, !containsSyncFrame {
             logDecodeFailureIfNeeded(
                 codec: codec,
@@ -466,11 +812,6 @@ actor VideoDecoder {
             return nil
         }
 
-        if decompressionSession == nil {
-            try createDecompressionSession(formatDescription: formatDescription)
-        }
-        guard let session = decompressionSession else { return nil }
-
         guard let sampleData = makeDecoderSampleData(from: data, codec: codec) else {
             return nil
         }
@@ -480,68 +821,27 @@ actor VideoDecoder {
             formatDescription: formatDescription,
             presentationTimeStamp: nextDecodePresentationTimeStamp()
         )
-
-        let box = DecodeResultBox()
-        let presentationTimeStamp = sampleBuffer.presentationTimeStamp
-        var decodeInfoFlags = VTDecodeInfoFlags()
-        let status = VTDecompressionSessionDecodeFrame(
-            session,
-            sampleBuffer: sampleBuffer,
-            flags: [._EnableAsynchronousDecompression, ._1xRealTimePlayback],
-            infoFlagsOut: &decodeInfoFlags
-        ) { status, _, imageBuffer, _, _ in
-            box.markCallbackInvoked()
-            guard status == noErr,
-                  let pixelBuffer = imageBuffer else {
-                return
-            }
-            box.set(
-                .pixelBuffer(
-                    DecodedPixelBufferFrame(
-                        pixelBuffer: pixelBuffer,
-                        width: width,
-                        height: height,
-                        presentationTimeStamp: presentationTimeStamp
-                    )
-                )
-            )
-        }
-
-        guard status == noErr else {
-            logDecodeFailureIfNeeded(
-                codec: codec,
-                dataSize: data.count,
-                reason: "VTDecompressionSessionDecodeFrame status=\(status)"
-            )
+        guard let pixelBufferFrame = try await decodeToPixelBufferFrame(
+            sampleBuffer,
+            codec: codec,
+            width: width,
+            height: height
+        ) else {
             return nil
         }
 
-        VTDecompressionSessionWaitForAsynchronousFrames(session)
-
-        let decodedFrame = box.get()
-        if decodedFrame != nil {
-            activeVideoDimensions = dimensions
-            waitingForSyncFrame = false
-        } else {
-            let callbackState = box.didInvokeCallback() ? "callback-no-image" : "callback-missed"
-            logDecodeFailureIfNeeded(
-                codec: codec,
-                dataSize: data.count,
-                reason: callbackState
-            )
-            if containsSyncFrame {
-                resetDecoderState(keepLastFrame: true)
-                waitingForSyncFrame = true
-            }
-        }
-        return decodedFrame
+        activeVideoDimensions = dimensions
+        waitingForSyncFrame = false
+        return .pixelBuffer(pixelBufferFrame)
     }
 
     private func resetDecoderState(keepLastFrame: Bool) {
-        if let session = decompressionSession {
-            VTDecompressionSessionInvalidate(session)
-            decompressionSession = nil
+        _ = keepLastFrame
+        if let decompressionSession {
+            VTDecompressionSessionWaitForAsynchronousFrames(decompressionSession)
+            VTDecompressionSessionInvalidate(decompressionSession)
         }
+        decompressionSession = nil
         formatDescription = nil
     }
 
@@ -697,28 +997,96 @@ actor VideoDecoder {
         }
     }
 
-    private func createDecompressionSession(formatDescription: CMVideoFormatDescription) throws {
-        var newSession: VTDecompressionSession?
-        let attributes: [CFString: Any] = [
+    private func ensureDecompressionSession(
+        codec: Codec,
+        formatDescription: CMVideoFormatDescription
+    ) throws {
+        if decompressionSession != nil,
+           let activeDescription = self.formatDescription,
+           CMFormatDescriptionEqual(activeDescription, otherFormatDescription: formatDescription) {
+            _ = codec
+            return
+        }
+
+        if let decompressionSession {
+            VTDecompressionSessionWaitForAsynchronousFrames(decompressionSession)
+            VTDecompressionSessionInvalidate(decompressionSession)
+            self.decompressionSession = nil
+        }
+
+        let decoderSpecification: CFDictionary = [
+            kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder: true,
+            kVTVideoDecoderSpecification_RequireHardwareAcceleratedVideoDecoder: false
+        ] as CFDictionary
+
+        let destinationAttributes: CFDictionary = [
             kCVPixelBufferPixelFormatTypeKey: Int(kCVPixelFormatType_32BGRA),
             kCVPixelBufferMetalCompatibilityKey: true,
             kCVPixelBufferIOSurfacePropertiesKey: [:]
-        ]
+        ] as CFDictionary
 
+        var session: VTDecompressionSession?
         let status = VTDecompressionSessionCreate(
             allocator: kCFAllocatorDefault,
             formatDescription: formatDescription,
-            decoderSpecification: nil,
-            imageBufferAttributes: attributes as CFDictionary,
+            decoderSpecification: decoderSpecification,
+            imageBufferAttributes: destinationAttributes,
             outputCallback: nil,
-            decompressionSessionOut: &newSession
+            decompressionSessionOut: &session
         )
-        guard status == noErr, let session = newSession else {
-            throw RemoteDesktopError.decodingFailed("VTDecompressionSessionCreate failed (status=\(status))")
+        guard status == noErr, let session else {
+            throw RemoteDesktopError.decodingFailed(
+                "Failed to create decompression session (status=\(status))"
+            )
+        }
+        decompressionSession = session
+    }
+
+    private func decodeToPixelBufferFrame(
+        _ sampleBuffer: CMSampleBuffer,
+        codec: Codec,
+        width: Int,
+        height: Int
+    ) async throws -> DecodedPixelBufferFrame? {
+        guard let formatDescription else {
+            return nil
+        }
+        try ensureDecompressionSession(codec: codec, formatDescription: formatDescription)
+        guard let decompressionSession else {
+            return nil
         }
 
-        _ = VTSessionSetProperty(session, key: kVTDecompressionPropertyKey_RealTime, value: kCFBooleanTrue)
-        decompressionSession = session
+        return try await withCheckedThrowingContinuation { continuation in
+            var decodeInfoFlags = VTDecodeInfoFlags()
+            let status = VTDecompressionSessionDecodeFrame(
+                decompressionSession,
+                sampleBuffer: sampleBuffer,
+                flags: [],
+                infoFlagsOut: &decodeInfoFlags
+            ) { status, _, imageBuffer, presentationTimeStamp, _ in
+                guard status == noErr, let imageBuffer else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                let pixelBuffer = imageBuffer as CVPixelBuffer
+                continuation.resume(
+                    returning: DecodedPixelBufferFrame(
+                        pixelBuffer: pixelBuffer,
+                        width: width,
+                        height: height,
+                        presentationTimeStamp: presentationTimeStamp
+                    )
+                )
+            }
+
+            if status != noErr {
+                continuation.resume(
+                    throwing: RemoteDesktopError.decodingFailed(
+                        "VideoToolbox decode failed (status=\(status))"
+                    )
+                )
+            }
+        }
     }
 
     private func makeSampleBuffer(
@@ -753,7 +1121,7 @@ actor VideoDecoder {
         var sampleBuffer: CMSampleBuffer?
         var sampleSize = naluData.count
         var timing = CMSampleTimingInfo(
-            duration: CMTime(value: 1, timescale: 120),
+            duration: .invalid,
             presentationTimeStamp: presentationTimeStamp,
             decodeTimeStamp: .invalid
         )
@@ -774,12 +1142,20 @@ actor VideoDecoder {
         guard sbStatus == noErr, let sampleBuffer else {
             throw RemoteDesktopError.decodingFailed("CMSampleBufferCreate failed (status=\(sbStatus))")
         }
+        setDisplayImmediatelyAttachment(on: sampleBuffer)
         return sampleBuffer
     }
 
     private func nextDecodePresentationTimeStamp() -> CMTime {
-        defer { decodeFrameCounter += 1 }
-        return CMTime(value: decodeFrameCounter, timescale: 120)
+        let now = CMClockGetTime(CMClockGetHostTimeClock())
+        if let lastPresentationTimeStamp,
+           now <= lastPresentationTimeStamp {
+            let advanced = CMTimeAdd(lastPresentationTimeStamp, CMTime(value: 1, timescale: 600))
+            self.lastPresentationTimeStamp = advanced
+            return advanced
+        }
+        lastPresentationTimeStamp = now
+        return now
     }
 
     private func makeStillImagePixelBufferFrame(from data: Data) -> DecodedPixelBufferFrame? {
@@ -810,6 +1186,74 @@ actor VideoDecoder {
             width: Int(extent.width),
             height: Int(extent.height),
             presentationTimeStamp: nextDecodePresentationTimeStamp()
+        )
+    }
+
+    func makeDisplaySampleBufferFrame(
+        from pixelBufferFrame: DecodedPixelBufferFrame,
+        format: String?
+    ) -> DisplaySampleBufferFrame? {
+        guard let sampleBuffer = makeImageBufferSampleBuffer(
+            pixelBuffer: pixelBufferFrame.pixelBuffer,
+            presentationTimeStamp: pixelBufferFrame.presentationTimeStamp
+        ) else {
+            return nil
+        }
+        _ = format
+        return DisplaySampleBufferFrame(
+            sampleBuffer: sampleBuffer,
+            width: pixelBufferFrame.width,
+            height: pixelBufferFrame.height,
+            presentationTimeStamp: pixelBufferFrame.presentationTimeStamp
+        )
+    }
+
+    private func makeImageBufferSampleBuffer(
+        pixelBuffer: CVPixelBuffer,
+        presentationTimeStamp: CMTime
+    ) -> CMSampleBuffer? {
+        var formatDescription: CMVideoFormatDescription?
+        let descriptionStatus = CMVideoFormatDescriptionCreateForImageBuffer(
+            allocator: kCFAllocatorDefault,
+            imageBuffer: pixelBuffer,
+            formatDescriptionOut: &formatDescription
+        )
+        guard descriptionStatus == noErr, let formatDescription else { return nil }
+
+        var timingInfo = CMSampleTimingInfo(
+            duration: .invalid,
+            presentationTimeStamp: presentationTimeStamp,
+            decodeTimeStamp: .invalid
+        )
+        var sampleBuffer: CMSampleBuffer?
+        let sampleStatus = CMSampleBufferCreateReadyWithImageBuffer(
+            allocator: kCFAllocatorDefault,
+            imageBuffer: pixelBuffer,
+            formatDescription: formatDescription,
+            sampleTiming: &timingInfo,
+            sampleBufferOut: &sampleBuffer
+        )
+        guard sampleStatus == noErr, let sampleBuffer else { return nil }
+        setDisplayImmediatelyAttachment(on: sampleBuffer)
+        return sampleBuffer
+    }
+
+    private func setDisplayImmediatelyAttachment(on sampleBuffer: CMSampleBuffer) {
+        guard let attachments = CMSampleBufferGetSampleAttachmentsArray(
+            sampleBuffer,
+            createIfNecessary: true
+        ) else {
+            return
+        }
+        guard CFArrayGetCount(attachments) > 0 else { return }
+        let dictionary = unsafeBitCast(
+            CFArrayGetValueAtIndex(attachments, 0),
+            to: CFMutableDictionary.self
+        )
+        CFDictionarySetValue(
+            dictionary,
+            Unmanaged.passUnretained(kCMSampleAttachmentKey_DisplayImmediately).toOpaque(),
+            Unmanaged.passUnretained(kCFBooleanTrue).toOpaque()
         )
     }
 
@@ -881,6 +1325,13 @@ actor VideoDecoder {
 
         for nalu in nalus {
             guard !nalu.isEmpty else { continue }
+            // Skip parameter set NALUs — they are already conveyed via
+            // CMVideoFormatDescription.  Including them in-band causes
+            // AVSampleBufferDisplayLayer to silently stop decoding after
+            // the first IDR frame (the "first-frame-only-freeze" symptom).
+            if isParameterSetNALU(nalu, codec: codec) {
+                continue
+            }
             if isRenderableNALU(nalu, codec: codec) {
                 hasRenderableNALU = true
             }
@@ -894,6 +1345,20 @@ actor VideoDecoder {
 
         guard hasRenderableNALU else { return nil }
         return output.isEmpty ? nil : output
+    }
+
+    private func isParameterSetNALU(_ nalu: Data, codec: Codec) -> Bool {
+        guard let first = nalu.first else { return false }
+        switch codec {
+        case .h264:
+            let type = Int(first & 0x1F)
+            // 7 = SPS, 8 = PPS
+            return type == 7 || type == 8
+        case .hevc:
+            let type = Int((first >> 1) & 0x3F)
+            // 32 = VPS, 33 = SPS, 34 = PPS
+            return (32...34).contains(type)
+        }
     }
 
     private func isRenderableNALU(_ nalu: Data, codec: Codec) -> Bool {
@@ -972,7 +1437,7 @@ actor VideoDecoder {
         activeCodec = nil
         activeVideoDimensions = nil
         waitingForSyncFrame = false
-        decodeFrameCounter = 0
+        lastPresentationTimeStamp = nil
         lastDecodeFailureReason = nil
         clearVideoParameterSets()
     }
@@ -1063,6 +1528,8 @@ struct RemoteDesktopStreamConfigurationPayload: Codable, Sendable, Equatable {
     let refreshStrategy: String?
     let jitterBufferFrames: Int?
     let lossRecoveryMode: String?
+    let screenFrameTransport: String?
+    let screenDataChannelEnabled: Bool?
     let streamRefreshToken: UInt64?
     let sentAt: TimeInterval
 
@@ -1085,6 +1552,8 @@ struct RemoteDesktopStreamConfigurationPayload: Codable, Sendable, Equatable {
         refreshStrategy: String? = nil,
         jitterBufferFrames: Int? = nil,
         lossRecoveryMode: String? = nil,
+        screenFrameTransport: String? = nil,
+        screenDataChannelEnabled: Bool? = nil,
         streamRefreshToken: UInt64? = nil,
         sentAt: TimeInterval = Date().timeIntervalSince1970
     ) {
@@ -1106,6 +1575,8 @@ struct RemoteDesktopStreamConfigurationPayload: Codable, Sendable, Equatable {
         self.refreshStrategy = refreshStrategy
         self.jitterBufferFrames = jitterBufferFrames
         self.lossRecoveryMode = lossRecoveryMode
+        self.screenFrameTransport = screenFrameTransport
+        self.screenDataChannelEnabled = screenDataChannelEnabled
         self.streamRefreshToken = streamRefreshToken
         self.sentAt = sentAt
     }
@@ -1129,6 +1600,8 @@ struct RemoteDesktopStreamConfigurationPayload: Codable, Sendable, Equatable {
             && lhs.refreshStrategy == rhs.refreshStrategy
             && lhs.jitterBufferFrames == rhs.jitterBufferFrames
             && lhs.lossRecoveryMode == rhs.lossRecoveryMode
+            && lhs.screenFrameTransport == rhs.screenFrameTransport
+            && lhs.screenDataChannelEnabled == rhs.screenDataChannelEnabled
             && lhs.streamRefreshToken == rhs.streamRefreshToken
     }
 }
@@ -1222,11 +1695,11 @@ public enum RemoteDesktopViewerCodec: String, CaseIterable, Codable, Sendable {
     func resolvedWireValue(supportedFormats: [String]) -> String? {
         switch self {
         case .automatic:
-            if supportedFormats.contains("hevc") {
-                return "hevc"
-            }
             if supportedFormats.contains("h264") {
                 return "h264"
+            }
+            if supportedFormats.contains("hevc") {
+                return "hevc"
             }
             if supportedFormats.contains("jpeg") {
                 return "jpeg"
@@ -1294,7 +1767,7 @@ public enum RemoteDesktopViewerPreset: String, CaseIterable, Codable, Sendable {
     public var detailText: String {
         switch self {
         case .automatic:
-            return "HEVC 优先，自适应 60 FPS，自动平衡清晰度与流畅度"
+            return "稳定优先 H.264，自适应 60 FPS，链路稳定后再探测更激进编码"
         case .clarity:
             return "4K 60 HEVC，优先保住细节与文字锐度"
         case .fluid:
@@ -1595,7 +2068,12 @@ struct RemoteDesktopCodecGovernance: Sendable, Equatable {
 public class RemoteDesktopManager: ObservableObject {
     public static let instance = RemoteDesktopManager()
     public static let crossNetworkDeviceCapability = "cross_network_remote"
-    private static let viewerSettingsStorageKey = "com.skybridge.remoteDesktop.viewerSettings.v1"
+    private static let viewerSettingsStore = CodablePersistenceStore<RemoteDesktopViewerSettings>(
+        location: .protectedApplicationSupport(
+            path: "RemoteDesktop/viewer-settings.json",
+            legacyUserDefaultsKey: "com.skybridge.remoteDesktop.viewerSettings.v1"
+        )
+    )
 
     private struct IncomingStreamSignature: Equatable {
         let format: String
@@ -1617,6 +2095,7 @@ public class RemoteDesktopManager: ObservableObject {
     /// 当前帧图像
     @Published public private(set) var currentFrame: CGImage?
     let videoFrameFeed = RemoteVideoFrameFeed()
+    let metalVideoFrameFeed = RemoteMetalVideoFrameFeed()
     
     /// 帧率
     @Published public private(set) var frameRate: Double = 0
@@ -1657,11 +2136,18 @@ public class RemoteDesktopManager: ObservableObject {
         case lan
         case crossNetwork
     }
+
+    private enum DecodedVideoRendererPreference {
+        case metal
+        case sampleBuffer
+        case cgImage
+    }
     
     private var networkConnection: NWConnection?
     private var activeTransportMode: ActiveTransportMode = .none
     private let decoder = VideoDecoder()
     private let queue = DispatchQueue(label: "com.skybridge.remotedesktop", qos: .userInteractive)
+    private let fallbackImageContext = CIContext(options: [.cacheIntermediates: false])
     
     private var heartbeatTimer: Timer?
     private var frameCount: Int = 0
@@ -1674,9 +2160,13 @@ public class RemoteDesktopManager: ObservableObject {
     private var hasReceivedFrameInCurrentStream: Bool = false
     
     private let maxMessageBytes: Int = 8_000_000
-    private let maxPendingFrames: Int = 1
-    private var isDecodingFrame: Bool = false
+    private let maxConcurrentVideoDecodes: Int = 3
+    private var inFlightDecodeCount: Int = 0
+    private var decodeGeneration: UInt64 = 0
     private var pendingFrames: [ScreenData] = []
+    private var decodeQueueWaitingForSyncFrame = false
+    private var lastDecodeQueueOverflowLogTime: Date = .distantPast
+    private let connectionManager = P2PConnectionManager.instance
     private let crossNetwork = CrossNetworkWebRTCManager.instance
     private var clipboardSessionId: UUID?
     private var clipboardListenerToken: UUID?
@@ -1686,9 +2176,52 @@ public class RemoteDesktopManager: ObservableObject {
     private var streamRefreshTokenCounter: UInt64 = 0
     private var lastRefreshRequestAt: Date?
     private var codecGovernance = RemoteDesktopCodecGovernance()
+    private var decodedVideoRendererPreference: DecodedVideoRendererPreference = .metal
+    private var streamEpoch: UInt64 = 0
+    private var lastFrameArrivalAt: Date?
+    private var lastDecodedFrameTime: Date?
+    private var lastAcceptedDecodedPresentationTimeStamp: CMTime?
+    private var lastVideoRendererEnqueueAt: Date?
+    private var lastDisplayedFrameTime: Date?
+    private var receivedFrameCountInCurrentStream: Int = 0
+    private var statsWindowStartTime: Date?
+    private var receivedFramesInStatsWindow: Int = 0
+    private var decodedFramesInStatsWindow: Int = 0
+    private var displayedFramesInStatsWindow: Int = 0
+    private var lastViewerInteractionAt: Date?
+    private var lastContinuityRecoveryAt: Date?
+    private var streamContinuityWatchdogTask: Task<Void, Never>?
+    private var firstFrameContinuityTask: Task<Void, Never>?
+    private var interactionContinuityTask: Task<Void, Never>?
     
     private init() {
         viewerSettings = Self.loadViewerSettings()
+    }
+
+    private func invalidateDecodePipelineState() {
+        decodeGeneration &+= 1
+        inFlightDecodeCount = 0
+        lastDecodedFrameTime = nil
+        lastAcceptedDecodedPresentationTimeStamp = nil
+    }
+
+    private func resetFrameTelemetry() {
+        frameCount = 0
+        lastFrameTime = nil
+        lastRenderedFrameTime = nil
+        frameRate = 0
+        lastFrameArrivalAt = nil
+        lastDecodedFrameTime = nil
+        lastVideoRendererEnqueueAt = nil
+        lastDisplayedFrameTime = nil
+        lastAcceptedDecodedPresentationTimeStamp = nil
+        receivedFrameCountInCurrentStream = 0
+        statsWindowStartTime = nil
+        receivedFramesInStatsWindow = 0
+        decodedFramesInStatsWindow = 0
+        displayedFramesInStatsWindow = 0
+        decodedVideoRendererPreference = .metal
+        invalidateDecodePipelineState()
     }
     
     // MARK: - Public Methods
@@ -1699,6 +2232,11 @@ public class RemoteDesktopManager: ObservableObject {
         let resolvedDevice = shouldUseCrossNetworkTransport(for: device)
             ? device
             : resolveLatestRemoteDesktopDevice(from: device)
+        if !shouldUseCrossNetworkTransport(for: resolvedDevice),
+           !(await canResolveLANRemoteDesktopEndpoint(for: resolvedDevice)) {
+            state = .error("设备未发现可用远程桌面端点")
+            throw RemoteDesktopError.notSupported("设备未发现可用远程桌面端点")
+        }
         if resolvedDevice.id != device.id {
             SkyBridgeLogger.shared.info("ℹ️ 远程桌面连接设备已解析: \(device.id) -> \(resolvedDevice.id)")
         }
@@ -1716,6 +2254,7 @@ public class RemoteDesktopManager: ObservableObject {
                 transportStatusText = currentTransportStatusText()
                 currentConnection = Connection(device: resolvedDevice, status: .connected)
                 state = .connected
+                hasReceivedFrameInCurrentStream = false
                 isStreaming = true
                 state = .streaming
                 crossNetwork.startRemoteDesktopHeartbeat()
@@ -1732,33 +2271,39 @@ public class RemoteDesktopManager: ObservableObject {
                 }
                 
                 SkyBridgeLogger.shared.info("✅ 远程桌面已切换到 WebRTC(DataChannel) 传输")
-                await pushViewerStreamConfiguration(force: true)
+                await pushViewerStreamConfiguration(force: true, refreshStream: true)
                 return
             }
 
             crossNetwork.stopRemoteDesktopHeartbeat()
+            // Tear down any prior LAN socket before we install a new one.
+            // Otherwise stale callbacks from the previous NWConnection can
+            // race in later and incorrectly tear down the fresh session.
+            networkConnection?.stateUpdateHandler = nil
+            networkConnection?.cancel()
+            networkConnection = nil
             // 建立连接：优先 Bonjour service（不依赖 IP/默认端口）
-            let endpoint = try makeRemoteDesktopEndpoint(for: resolvedDevice)
+            let endpoint = try await makeRemoteDesktopEndpoint(for: resolvedDevice)
 
             let connection = try await createConnection(to: endpoint)
             networkConnection = connection
             connection.stateUpdateHandler = { [weak self] connectionState in
-                guard let self else { return }
-                switch connectionState {
-                case .failed(let error):
-                    Task { @MainActor [weak self] in
-                        guard let self else { return }
-                        await self.handleTransportFailure(error.localizedDescription)
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    guard self.isCurrentLANConnection(connection) else {
+                        SkyBridgeLogger.shared.debug("ℹ️ 忽略过期 LAN 连接状态回调: \(String(describing: connectionState))")
+                        return
                     }
-                case .cancelled:
-                    Task { @MainActor [weak self] in
-                        guard let self else { return }
+                    switch connectionState {
+                    case .failed(let error):
+                        await self.handleTransportFailure(error.localizedDescription)
+                    case .cancelled:
                         await self.handleTransportFailure(
                             RemoteDesktopError.disconnected.errorDescription ?? "连接已断开"
                         )
+                    default:
+                        break
                     }
-                default:
-                    break
                 }
             }
             activeTransportMode = .lan
@@ -1770,12 +2315,15 @@ public class RemoteDesktopManager: ObservableObject {
             
             // 开始接收数据
             startReceiving()
+            try ensureLANBootstrapStillActive(for: connection)
 
             // 在进入 streaming 前先主动发送一次 viewer 能力，避免 Mac 端首个会话默认退回到 JPEG。
             await pushViewerStreamConfiguration(force: true)
+            try ensureLANBootstrapStillActive(for: connection)
 
             // 直接进入 streaming（macOS 端无需 connect/heartbeat 握手）
             try await startStreaming()
+            try ensureLANBootstrapStillActive(for: connection)
             
             SkyBridgeLogger.shared.info("✅ 远程桌面连接成功")
             
@@ -1791,6 +2339,9 @@ public class RemoteDesktopManager: ObservableObject {
     public func startStreaming() async throws {
         if state == .streaming {
             await pushViewerStreamConfiguration(force: true)
+            guard activeTransportMode != .lan || networkConnection != nil else {
+                throw RemoteDesktopError.disconnected
+            }
             return
         }
         guard state == .connected else {
@@ -1800,20 +2351,23 @@ public class RemoteDesktopManager: ObservableObject {
         SkyBridgeLogger.shared.info("📺 开始远程桌面流")
         
         isStreaming = true
+        crossNetwork.disarmIdleConnectionReminder(clearPrompt: true)
         state = .streaming
-        configureSessionClipboardSync()
-        frameCount = 0
-        lastFrameTime = Date()
-        lastRenderedFrameTime = nil
+        streamEpoch &+= 1
         consecutiveDecodeMisses = 0
-        frameRate = 0
         hasReceivedFrameInCurrentStream = false
+        configureSessionClipboardSync()
         lastDecoderResetTime = nil
         lastIncomingStreamSignature = nil
         lastRefreshRequestAt = nil
         codecGovernance = .init()
+        resetFrameTelemetry()
+        lastViewerInteractionAt = nil
+        lastContinuityRecoveryAt = nil
+        pendingFrames.removeAll(keepingCapacity: true)
+        decodeQueueWaitingForSyncFrame = false
         currentFrame = nil
-        videoFrameFeed.flush()
+        flushRenderedVideoFeeds()
         renderPipelineStatus = .waiting
         lastDamageRectCount = 0
         lastDamageUsesFullFrameFallback = false
@@ -1823,6 +2377,9 @@ public class RemoteDesktopManager: ObservableObject {
         currentCursorImage = nil
 #endif
         firstFrameWatchdogTask?.cancel()
+        firstFrameContinuityTask?.cancel()
+        interactionContinuityTask?.cancel()
+        streamContinuityWatchdogTask?.cancel()
         firstFrameWatchdogTask = Task { [weak self] in
             guard let self else { return }
             do {
@@ -1831,9 +2388,18 @@ public class RemoteDesktopManager: ObservableObject {
                 return
             }
             guard self.state == .streaming, !self.hasReceivedFrameInCurrentStream else { return }
-            SkyBridgeLogger.shared.warning("⚠️ 远程桌面已连接但 5 秒内未收到屏幕帧，请检查 Mac 端录屏权限与采集状态")
+            await self.requestStreamRefreshIfNeeded(minimumInterval: 0)
+            SkyBridgeLogger.shared.warning("⚠️ 远程桌面已连接但 5 秒内未收到屏幕帧，已主动请求流刷新；若仍无画面，请检查 Mac 端录屏权限与采集状态")
         }
-        await pushViewerStreamConfiguration(force: true)
+        startStreamContinuityWatchdog(for: streamEpoch)
+        await pushViewerStreamConfiguration(
+            force: true,
+            refreshStream: activeTransportMode == .crossNetwork
+        )
+        guard activeTransportMode != .lan || networkConnection != nil else {
+            isStreaming = false
+            throw RemoteDesktopError.disconnected
+        }
     }
 
     /// 便捷入口：从 Connection 启动远程桌面（UI 侧直接调用）
@@ -1841,6 +2407,7 @@ public class RemoteDesktopManager: ObservableObject {
         if ProcessInfo.processInfo.arguments.contains("UITEST_SCENARIO_REMOTE") {
             currentConnection = connection
             activeTransportMode = .none
+            hasReceivedFrameInCurrentStream = false
             isStreaming = true
             state = .streaming
             transportStatusText = "UITest Fixture"
@@ -1851,7 +2418,7 @@ public class RemoteDesktopManager: ObservableObject {
             lastDamageRectCount = 0
             lastDamageUsesFullFrameFallback = false
             currentFrame = nil
-            videoFrameFeed.flush()
+            flushRenderedVideoFeeds()
             configureSessionClipboardSync()
             return
         }
@@ -1860,15 +2427,42 @@ public class RemoteDesktopManager: ObservableObject {
             await pushViewerStreamConfiguration(force: true)
             return
         }
-        // 若当前不是该设备的连接，先建立网络连接
-        if currentConnection?.device.id != connection.device.id || state == .disconnected {
-            try await connect(to: connection.device)
-            // 仅在设备 id 一致时用 UI 传入的 Connection 覆盖展示信息；
-            // 若 connect 过程中已解析到更可靠的设备记录（如 bonjour:*），保留解析结果。
-            if currentConnection?.device.id == connection.device.id || currentConnection == nil {
-                currentConnection = connection
+        let matchesCurrentConnection = currentConnection.map { existing in
+            areEquivalentRemoteDesktopDevices(existing.device, connection.device)
+        } ?? false
+
+        if matchesCurrentConnection {
+            switch state {
+            case .streaming:
+                await pushViewerStreamConfiguration(force: true)
+                return
+            case .connecting:
+                SkyBridgeLogger.shared.info(
+                    "ℹ️ 远程桌面连接进行中，复用现有建连: \(currentConnection?.device.id ?? connection.device.id)"
+                )
+                return
+            case .connected:
+                try await startStreaming()
+                return
+            case .disconnected, .error:
+                break
             }
         }
+
+        // 若当前不是该设备的连接，或现有会话已失效，则建立新连接。
+        switch state {
+        case .disconnected, .error:
+            try await connect(to: connection.device)
+            return
+        case .connecting, .connected, .streaming:
+            break
+        }
+
+        if currentConnection == nil || matchesCurrentConnection == false {
+            try await connect(to: connection.device)
+            return
+        }
+
         try await startStreaming()
     }
     
@@ -1884,7 +2478,10 @@ public class RemoteDesktopManager: ObservableObject {
         lastRefreshRequestAt = nil
         codecGovernance = .init()
         currentFrame = nil
-        videoFrameFeed.flush()
+        flushRenderedVideoFeeds()
+        pendingFrames.removeAll(keepingCapacity: true)
+        decodeQueueWaitingForSyncFrame = false
+        resetFrameTelemetry()
         renderPipelineStatus = .waiting
         lastDamageRectCount = 0
         lastDamageUsesFullFrameFallback = false
@@ -1894,18 +2491,35 @@ public class RemoteDesktopManager: ObservableObject {
         currentCursorImage = nil
 #endif
         firstFrameWatchdogTask?.cancel()
+        firstFrameContinuityTask?.cancel()
+        interactionContinuityTask?.cancel()
+        streamContinuityWatchdogTask?.cancel()
         firstFrameWatchdogTask = nil
+        firstFrameContinuityTask = nil
+        interactionContinuityTask = nil
+        streamContinuityWatchdogTask = nil
         if state == .streaming {
             state = .connected
         }
     }
     
-    /// 断开连接
-    public func disconnect() async {
-        SkyBridgeLogger.shared.info("🔌 断开远程桌面连接")
+    /// 断开远程桌面流。
+    /// - Parameter tearDownTransport: 为 `true` 时连带关闭底层跨网会话；默认仅停止视频/控制流，保留连接。
+    public func disconnect(tearDownTransport: Bool = false) async {
+        SkyBridgeLogger.shared.info(
+            tearDownTransport ? "🔌 断开远程桌面连接" : "⏹️ 停止远程桌面流（保留连接）"
+        )
+        let wasCrossNetworkTransport = activeTransportMode == .crossNetwork
+        let shouldDisconnectCrossNetworkSession = tearDownTransport && activeTransportMode == .crossNetwork
         crossNetwork.stopRemoteDesktopHeartbeat()
         firstFrameWatchdogTask?.cancel()
+        firstFrameContinuityTask?.cancel()
+        interactionContinuityTask?.cancel()
+        streamContinuityWatchdogTask?.cancel()
         firstFrameWatchdogTask = nil
+        firstFrameContinuityTask = nil
+        interactionContinuityTask = nil
+        streamContinuityWatchdogTask = nil
         
         // 关闭连接
         networkConnection?.stateUpdateHandler = nil
@@ -1919,6 +2533,10 @@ public class RemoteDesktopManager: ObservableObject {
         codecGovernance = .init()
         isStreaming = false
         configureSessionClipboardSync()
+
+        if shouldDisconnectCrossNetworkSession {
+            await crossNetwork.disconnect(clearSnapshot: true)
+        }
         
         // 清理解码器
         await decoder.cleanup()
@@ -1926,7 +2544,7 @@ public class RemoteDesktopManager: ObservableObject {
         // 重置状态
         currentConnection = nil
         currentFrame = nil
-        videoFrameFeed.flush()
+        flushRenderedVideoFeeds()
         renderPipelineStatus = .waiting
         lastDamageRectCount = 0
         lastDamageUsesFullFrameFallback = false
@@ -1936,11 +2554,17 @@ public class RemoteDesktopManager: ObservableObject {
         currentCursorImage = nil
 #endif
         state = .disconnected
-        frameRate = 0
         latency = 0
         resolution = .zero
         pendingFrames.removeAll()
-        isDecodingFrame = false
+        decodeQueueWaitingForSyncFrame = false
+        resetFrameTelemetry()
+        lastViewerInteractionAt = nil
+        lastContinuityRecoveryAt = nil
+
+        if wasCrossNetworkTransport && !shouldDisconnectCrossNetworkSession {
+            crossNetwork.armIdleConnectionReminderIfNeeded()
+        }
     }
 
     private func currentTransportStatusText() -> String? {
@@ -1957,15 +2581,88 @@ public class RemoteDesktopManager: ObservableObject {
         }
     }
 
+    func updateCrossNetworkNativeVideoResolution(_ size: CGSize) {
+        guard activeTransportMode == .crossNetwork else { return }
+        guard size.width > 0, size.height > 0 else { return }
+        resolution = size
+    }
+
+    func canPresentRemoteDesktopOption(for device: DiscoveredDevice) -> Bool {
+        if isCrossNetworkDevice(device) {
+            return true
+        }
+
+        let resolved = resolveLatestRemoteDesktopDevice(from: device)
+        let liveLANSessionExists =
+            connectionManager.resolvedConnectionStatus(for: resolved) == .connected
+            || connectionManager.resolvedConnectionStatus(for: device) == .connected
+        let liveLANAddressAvailable =
+            connectionManager.activePeerHostAddress(for: resolved) != nil
+            || connectionManager.activePeerHostAddress(for: device) != nil
+
+        if liveLANSessionExists,
+           resolved.platform == .macOS || liveLANAddressAvailable {
+            return true
+        }
+
+        if hasReachableLANRemoteDesktopEndpoint(resolved)
+            || resolved.supportsRemoteControl
+            || preferredRemoteDesktopServiceName(for: resolved) != nil {
+            return true
+        }
+
+        return false
+    }
+
+    private func isCurrentLANConnection(_ connection: NWConnection) -> Bool {
+        guard let current = networkConnection else { return false }
+        return current === connection
+    }
+
+    public static func shouldContinueLANBootstrap(
+        activeTransportModeIsLAN: Bool,
+        isCurrentLANConnection: Bool,
+        state: RemoteDesktopState
+    ) -> Bool {
+        guard activeTransportModeIsLAN, isCurrentLANConnection else { return false }
+        if case .error = state {
+            return false
+        }
+        return true
+    }
+
+    private func ensureLANBootstrapStillActive(for connection: NWConnection) throws {
+        guard Self.shouldContinueLANBootstrap(
+            activeTransportModeIsLAN: activeTransportMode == .lan,
+            isCurrentLANConnection: isCurrentLANConnection(connection),
+            state: state
+        ) else {
+            throw RemoteDesktopError.disconnected
+        }
+    }
+
     private func handleTransportFailure(_ reason: String) async {
         let normalizedReason = reason.trimmingCharacters(in: .whitespacesAndNewlines)
         let errorMessage = normalizedReason.isEmpty
             ? (RemoteDesktopError.disconnected.errorDescription ?? "连接已断开")
             : normalizedReason
+        let failedTransport = transportStatusText ?? currentTransportStatusText() ?? "unknown"
+        let failedConnection = currentConnection?.device.id ?? "-"
+        let shouldDisconnectCrossNetworkSession = activeTransportMode == .crossNetwork
+
+        SkyBridgeLogger.shared.error(
+            "❌ 远程桌面传输失败: device=\(failedConnection) transport=\(failedTransport) reason=\(errorMessage)"
+        )
 
         crossNetwork.stopRemoteDesktopHeartbeat()
         firstFrameWatchdogTask?.cancel()
+        firstFrameContinuityTask?.cancel()
+        interactionContinuityTask?.cancel()
+        streamContinuityWatchdogTask?.cancel()
         firstFrameWatchdogTask = nil
+        firstFrameContinuityTask = nil
+        interactionContinuityTask = nil
+        streamContinuityWatchdogTask = nil
         networkConnection?.stateUpdateHandler = nil
         networkConnection?.cancel()
         networkConnection = nil
@@ -1977,9 +2674,12 @@ public class RemoteDesktopManager: ObservableObject {
         codecGovernance = .init()
         isStreaming = false
         configureSessionClipboardSync()
+        if shouldDisconnectCrossNetworkSession {
+            await crossNetwork.disconnect(clearSnapshot: true)
+        }
         await decoder.cleanup()
         currentFrame = nil
-        videoFrameFeed.flush()
+        flushRenderedVideoFeeds()
         renderPipelineStatus = .waiting
         lastDamageRectCount = 0
         lastDamageUsesFullFrameFallback = false
@@ -1988,17 +2688,20 @@ public class RemoteDesktopManager: ObservableObject {
 #if canImport(UIKit)
         currentCursorImage = nil
 #endif
+        currentConnection = nil
         frameCount = 0
         lastFrameTime = nil
         lastRenderedFrameTime = nil
         consecutiveDecodeMisses = 0
         lastDecoderResetTime = nil
         hasReceivedFrameInCurrentStream = false
-        frameRate = 0
+        lastViewerInteractionAt = nil
+        lastContinuityRecoveryAt = nil
         latency = 0
         resolution = .zero
         pendingFrames.removeAll()
-        isDecodingFrame = false
+        decodeQueueWaitingForSyncFrame = false
+        resetFrameTelemetry()
         state = .error(errorMessage)
     }
 
@@ -2061,7 +2764,9 @@ public class RemoteDesktopManager: ObservableObject {
 
     private func configureSessionClipboardSync() {
         let clipboard = ClipboardManager.shared
-        let shouldEnable = viewerSettings.clipboardSyncEnabled && isStreaming
+        let shouldEnable = viewerSettings.clipboardSyncEnabled
+            && isStreaming
+            && hasReceivedFrameInCurrentStream
 
         if shouldEnable {
             if clipboardSessionId == nil {
@@ -2150,6 +2855,8 @@ public class RemoteDesktopManager: ObservableObject {
             refreshStrategy: transportTuning.refreshStrategy,
             jitterBufferFrames: transportTuning.jitterBufferFrames,
             lossRecoveryMode: transportTuning.lossRecoveryMode,
+            screenFrameTransport: "sbrf-v1",
+            screenDataChannelEnabled: true,
             streamRefreshToken: refreshStream ? nextStreamRefreshToken() : nil
         )
     }
@@ -2163,13 +2870,11 @@ public class RemoteDesktopManager: ObservableObject {
     }
 
     private func persistViewerSettings() {
-        guard let data = try? JSONEncoder().encode(viewerSettings) else { return }
-        UserDefaults.standard.set(data, forKey: Self.viewerSettingsStorageKey)
+        try? Self.viewerSettingsStore.save(viewerSettings)
     }
 
     private static func loadViewerSettings() -> RemoteDesktopViewerSettings {
-        guard let data = UserDefaults.standard.data(forKey: viewerSettingsStorageKey),
-              let settings = try? JSONDecoder().decode(RemoteDesktopViewerSettings.self, from: data) else {
+        guard let settings = viewerSettingsStore.load() else {
             return RemoteDesktopViewerSettings()
         }
         var migrated = settings
@@ -2185,11 +2890,55 @@ public class RemoteDesktopManager: ObservableObject {
         switch pipeline {
         case .waiting:
             break
-        case .metalZeroCopy:
-            SkyBridgeLogger.shared.info("🎬 远控渲染管线已切换到 Metal 零拷贝显示")
+        case .metalRenderer:
+            SkyBridgeLogger.shared.info("🎬 远控渲染管线已切换到 Metal Renderer")
+        case .sampleBufferDisplayLayer:
+            SkyBridgeLogger.shared.info("🎬 远控渲染管线已切换到 AVSampleBufferDisplayLayer")
         case .stillImageFallback:
             SkyBridgeLogger.shared.info("🖼️ 远控渲染管线已切换到静态帧回退")
         }
+    }
+
+    private func flushRenderedVideoFeeds(removeDisplayedImage: Bool = true) {
+        videoFrameFeed.flush(removeDisplayedImage: removeDisplayedImage)
+        metalVideoFrameFeed.flush(removeDisplayedImage: removeDisplayedImage)
+    }
+
+    func handleVideoRendererDidFailToDecode(_ errorDescription: String?) async {
+        let reason = (errorDescription ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedReason = reason.isEmpty ? "video-renderer-decode-failed" : reason
+        let now = Date()
+        let format = lastIncomingStreamSignature?.format ?? ""
+        pendingFrames.removeAll(keepingCapacity: true)
+        decodeQueueWaitingForSyncFrame = RemoteDesktopDecodeQueuePolicy.isPredictiveVideoFormat(format)
+        await decoder.resetPreservingLastFrame()
+        let governanceEvent = codecGovernance.noteDecodeFailure(
+            format: format,
+            reason: normalizedReason,
+            at: now
+        )
+        _ = await handleCodecGovernanceEvent(governanceEvent, at: now)
+        await requestStreamRefreshIfNeeded(minimumInterval: 0.25)
+        SkyBridgeLogger.shared.warning("⚠️ AVSampleBufferDisplayLayer 解码失败: \(normalizedReason)")
+    }
+
+    func handleVideoRendererRequiresFlushToResumeDecoding() async {
+        flushRenderedVideoFeeds(removeDisplayedImage: false)
+        pendingFrames.removeAll(keepingCapacity: true)
+        decodeQueueWaitingForSyncFrame = RemoteDesktopDecodeQueuePolicy.isPredictiveVideoFormat(
+            lastIncomingStreamSignature?.format
+        )
+        await decoder.resetPreservingLastFrame()
+        let now = Date()
+        let format = lastIncomingStreamSignature?.format ?? ""
+        let governanceEvent = codecGovernance.noteDecodeFailure(
+            format: format,
+            reason: "renderer-requires-flush",
+            at: now
+        )
+        _ = await handleCodecGovernanceEvent(governanceEvent, at: now)
+        await requestStreamRefreshIfNeeded(minimumInterval: 0.25)
+        SkyBridgeLogger.shared.warning("⚠️ AVSampleBufferDisplayLayer 需要 flush 后才能继续解码，已请求关键帧刷新")
     }
     
     // MARK: - Input Events
@@ -2202,6 +2951,7 @@ public class RemoteDesktopManager: ObservableObject {
             let data = try JSONEncoder().encode(event)
             let message = RemoteMessage(type: .mouseEvent, payload: data)
             try await sendMessage(message)
+            noteViewerInteraction(kind: "mouse")
         } catch {
             SkyBridgeLogger.shared.error("❌ 发送鼠标事件失败: \(error.localizedDescription)")
         }
@@ -2215,6 +2965,7 @@ public class RemoteDesktopManager: ObservableObject {
             let data = try JSONEncoder().encode(event)
             let message = RemoteMessage(type: .keyboardEvent, payload: data)
             try await sendMessage(message)
+            noteViewerInteraction(kind: "keyboard")
         } catch {
             SkyBridgeLogger.shared.error("❌ 发送键盘事件失败: \(error.localizedDescription)")
         }
@@ -2240,13 +2991,11 @@ public class RemoteDesktopManager: ObservableObject {
 
     // MARK: - Private Methods - Device Resolution
 
-    private func makeRemoteDesktopEndpoint(for device: DiscoveredDevice) throws -> NWEndpoint {
+    private func makeRemoteDesktopEndpoint(for device: DiscoveredDevice) async throws -> NWEndpoint {
         let remoteServiceType = DiscoveredDevice.remoteControlServiceType
-        let parsedBonjour = parseBonjourIdentity(from: device.id)
-        let hasRemoteService = device.services.contains(remoteServiceType)
-            || device.bonjourServiceType == remoteServiceType
-        let bonjourName = device.bonjourServiceName ?? parsedBonjour?.name
-        let bonjourDomain = device.bonjourServiceDomain ?? parsedBonjour?.domain ?? "local."
+        let hasRemoteService = hasAdvertisedRemoteDesktopService(device)
+        let bonjourName = preferredRemoteDesktopServiceName(for: device)
+        let bonjourDomain = preferredRemoteDesktopServiceDomain(for: device)
 
         if hasRemoteService {
             return .service(
@@ -2257,21 +3006,37 @@ public class RemoteDesktopManager: ObservableObject {
             )
         }
 
-        if let ip = bestIPAddress(for: device) {
-            let port = device.remoteControlPort ?? RemoteDesktopConstants.defaultPort
-            return .hostPort(host: .init(ip), port: .init(integerLiteral: port))
-        }
-
-        if let bonjourName, !bonjourName.isEmpty {
+        if let inferredServiceName = bonjourName,
+           (device.supportsRemoteControl
+            || device.remoteControlPort != nil
+            || device.platform == .macOS
+            || connectionManager.activePeerHostAddress(for: device) != nil) {
             SkyBridgeLogger.shared.info(
-                "📡 远控未发现独立端口，尝试使用 Bonjour 名称回退连接: name=\(bonjourName) domain=\(bonjourDomain)"
+                "📡 远控使用推断的 Bonjour 服务名回退连接: name=\(inferredServiceName) domain=\(bonjourDomain)"
             )
             return .service(
-                name: bonjourName,
+                name: inferredServiceName,
                 type: remoteServiceType,
                 domain: bonjourDomain,
                 interface: nil
             )
+        }
+
+        if let ip = bestIPAddress(for: device),
+           hasReachableLANRemoteDesktopEndpoint(device) {
+            let port = device.remoteControlPort ?? RemoteDesktopConstants.defaultPort
+            return .hostPort(host: .init(ip), port: .init(integerLiteral: port))
+        }
+
+        if let resolvedIP = await resolveRemoteDesktopIPAddress(for: device) {
+            guard hasReachableLANRemoteDesktopEndpoint(device) else {
+                throw RemoteDesktopError.connectionFailed("设备未发现可用远程桌面端点")
+            }
+            let port = device.remoteControlPort ?? RemoteDesktopConstants.defaultPort
+            SkyBridgeLogger.shared.info(
+                "📡 远控已解析到主服务地址: name=\(device.name) ip=\(resolvedIP) port=\(port)"
+            )
+            return .hostPort(host: .init(resolvedIP), port: .init(integerLiteral: port))
         }
 
         throw RemoteDesktopError.connectionFailed("设备缺少可连接地址（Bonjour/IP）")
@@ -2282,54 +3047,22 @@ public class RemoteDesktopManager: ObservableObject {
             return device
         }
 
-        var best = device
-        let discovered = deduplicatedRemoteDesktopCandidates(DeviceDiscoveryManager.instance.discoveredDevices)
-
-        if let exact = discovered.first(where: { $0.id == device.id }) {
-            best = preferredRemoteDesktopDevice(best, exact)
+        var candidates = deduplicatedRemoteDesktopCandidates(
+            DeviceDiscoveryManager.instance.discoveredDevices
+                + P2PConnectionManager.instance.activeConnections.map(\.device)
+        )
+        let peerResolved = connectionManager.resolvedPeerDevice(for: device)
+        if !candidates.contains(where: { areEquivalentRemoteDesktopDevices($0, peerResolved) }) {
+            candidates.insert(peerResolved, at: 0)
+        }
+        if let canonical = DeviceDiscoveryManager.instance.canonicalDiscoveredDevice(for: device) {
+            candidates.insert(canonical, at: 0)
         }
 
-        if let currentIP = bestIPAddress(for: best),
-           let byIP = discovered.first(where: { bestIPAddress(for: $0) == currentIP }) {
-            best = preferredRemoteDesktopDevice(best, byIP)
-        }
-
-        if let bonjourName = best.bonjourServiceName?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !bonjourName.isEmpty,
-           let byBonjour = discovered.first(where: { $0.bonjourServiceName == bonjourName }) {
-            best = preferredRemoteDesktopDevice(best, byBonjour)
-        }
-
-        if let parsedBonjour = parseBonjourIdentity(from: best.id),
-           let byParsedBonjour = discovered.first(where: {
-               $0.bonjourServiceName == parsedBonjour.name
-                   && (($0.bonjourServiceDomain ?? "local.") == parsedBonjour.domain)
-           }) {
-            best = preferredRemoteDesktopDevice(best, byParsedBonjour)
-        }
-
-        let normalizedName = normalizeDeviceName(best.name)
-        if !normalizedName.isEmpty,
-           let byName = discovered.first(where: { normalizeDeviceName($0.name) == normalizedName }) {
-            best = preferredRemoteDesktopDevice(best, byName)
-        }
-
-        let targetAliases = Set(PeerIdentityAliasResolver.aliasKeys(for: device))
-        if !targetAliases.isEmpty {
-            for candidate in discovered {
-                let candidateAliases = Set(PeerIdentityAliasResolver.aliasKeys(for: candidate))
-                if !candidateAliases.isDisjoint(with: targetAliases) {
-                    best = preferredRemoteDesktopDevice(best, candidate)
-                }
-            }
-        }
+        var best = Self.resolveBestRemoteDesktopDevice(target: device, discovered: candidates)
 
         if shouldUseUniqueRemoteCandidateFallback(for: best) {
-            let remoteCandidates = discovered.filter {
-                $0.services.contains(DiscoveredDevice.remoteControlServiceType)
-                    || $0.bonjourServiceType == DiscoveredDevice.remoteControlServiceType
-                    || $0.supportsRemoteControl
-            }
+            let remoteCandidates = candidates.filter { hasReachableLANRemoteDesktopEndpoint($0) }
             if remoteCandidates.count == 1, let only = remoteCandidates.first {
                 best = preferredRemoteDesktopDevice(best, only)
             }
@@ -2339,16 +3072,108 @@ public class RemoteDesktopManager: ObservableObject {
     }
 
     private func deduplicatedRemoteDesktopCandidates(_ candidates: [DiscoveredDevice]) -> [DiscoveredDevice] {
-        var seen = Set<String>()
-        return candidates.filter { candidate in
-            let key = candidate.id.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            guard !key.isEmpty else { return false }
-            return seen.insert(key).inserted
+        var deduplicated: [DiscoveredDevice] = []
+
+        for candidate in candidates {
+            let candidateId = candidate.id.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !candidateId.isEmpty else { continue }
+
+            let candidateAliases = Set(PeerIdentityAliasResolver.aliasKeys(for: candidate))
+            if let index = deduplicated.firstIndex(where: { existing in
+                if existing.id == candidate.id {
+                    return true
+                }
+                let existingAliases = Set(PeerIdentityAliasResolver.aliasKeys(for: existing))
+                return !candidateAliases.isEmpty
+                    && !existingAliases.isEmpty
+                    && !candidateAliases.isDisjoint(with: existingAliases)
+            }) {
+                deduplicated[index] = preferredRemoteDesktopDevice(deduplicated[index], candidate)
+            } else {
+                deduplicated.append(candidate)
+            }
         }
+        return deduplicated
+    }
+
+    private func preferredRemoteDesktopServiceName(for device: DiscoveredDevice) -> String? {
+        for candidate in remoteDesktopIdentityCandidates(for: device) {
+            if let bonjourServiceName = candidate.bonjourServiceName,
+               isPlausibleRemoteServiceInstanceName(bonjourServiceName) {
+                return bonjourServiceName.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            if let parsed = parseBonjourIdentity(from: candidate.id),
+               isPlausibleRemoteServiceInstanceName(parsed.name) {
+                return parsed.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            if isPlausibleRemoteServiceInstanceName(candidate.name) {
+                return candidate.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+        return nil
+    }
+
+    private func preferredRemoteDesktopServiceDomain(for device: DiscoveredDevice) -> String {
+        for candidate in remoteDesktopIdentityCandidates(for: device) {
+            if let domain = candidate.bonjourServiceDomain?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !domain.isEmpty {
+                return domain
+            }
+            if let parsed = parseBonjourIdentity(from: candidate.id) {
+                return parsed.domain
+            }
+        }
+        return "local."
+    }
+
+    private func remoteDesktopIdentityCandidates(for device: DiscoveredDevice) -> [DiscoveredDevice] {
+        var candidates: [DiscoveredDevice] = []
+
+        func append(_ candidate: DiscoveredDevice?) {
+            guard let candidate else { return }
+            if candidates.contains(where: { areEquivalentRemoteDesktopDevices($0, candidate) }) {
+                return
+            }
+            candidates.append(candidate)
+        }
+
+        append(device)
+        append(connectionManager.resolvedPeerDevice(for: device))
+        append(DeviceDiscoveryManager.instance.canonicalDiscoveredDevice(for: device))
+        for active in connectionManager.activeConnections.map(\.device) where areEquivalentRemoteDesktopDevices(active, device) {
+            append(active)
+        }
+        return candidates
+    }
+
+    private func isPlausibleRemoteServiceInstanceName(_ raw: String?) -> Bool {
+        guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else {
+            return false
+        }
+        let lowercased = raw.lowercased()
+        if lowercased == "unknown device" || lowercased == "未知设备" {
+            return false
+        }
+        if let sanitized = sanitizeAddress(raw),
+           sanitized == lowercased || sanitized == raw {
+            return false
+        }
+        return true
     }
 
     private func preferredRemoteDesktopDevice(_ lhs: DiscoveredDevice, _ rhs: DiscoveredDevice) -> DiscoveredDevice {
         remoteDesktopDeviceScore(rhs) > remoteDesktopDeviceScore(lhs) ? rhs : lhs
+    }
+
+    private func areEquivalentRemoteDesktopDevices(_ lhs: DiscoveredDevice, _ rhs: DiscoveredDevice) -> Bool {
+        if lhs.id == rhs.id {
+            return true
+        }
+
+        let lhsAliases = Set(PeerIdentityAliasResolver.aliasKeys(for: lhs))
+        let rhsAliases = Set(PeerIdentityAliasResolver.aliasKeys(for: rhs))
+        return !lhsAliases.isEmpty && !rhsAliases.isEmpty && !lhsAliases.isDisjoint(with: rhsAliases)
     }
 
     private func remoteDesktopDeviceScore(_ device: DiscoveredDevice) -> Int {
@@ -2357,8 +3182,14 @@ public class RemoteDesktopManager: ObservableObject {
             || device.bonjourServiceType == DiscoveredDevice.remoteControlServiceType {
             score += 120
         }
+        if device.remoteControlPort != nil {
+            score += 100
+        }
         if bestIPAddress(for: device) != nil {
             score += 80
+        }
+        if device.supportsRemoteControl {
+            score += 40
         }
         if let serviceName = device.bonjourServiceName, !serviceName.isEmpty {
             score += 40
@@ -2377,9 +3208,11 @@ public class RemoteDesktopManager: ObservableObject {
             return false
         }
 
-        let hasRemoteService = device.services.contains(DiscoveredDevice.remoteControlServiceType)
-            || device.bonjourServiceType == DiscoveredDevice.remoteControlServiceType
-        if hasRemoteService {
+        if hasAdvertisedRemoteDesktopService(device) {
+            return false
+        }
+
+        guard device.supportsRemoteControl || device.remoteControlPort != nil else {
             return false
         }
 
@@ -2390,6 +3223,220 @@ public class RemoteDesktopManager: ObservableObject {
             return true
         }
         return normalizeDeviceName(device.name).contains(":")
+    }
+
+    private func hasAdvertisedRemoteDesktopService(_ device: DiscoveredDevice) -> Bool {
+        device.services.contains(DiscoveredDevice.remoteControlServiceType)
+            || device.bonjourServiceType == DiscoveredDevice.remoteControlServiceType
+    }
+
+    static func hasExplicitLANRemoteDesktopEndpoint(_ device: DiscoveredDevice) -> Bool {
+        device.remoteControlPort != nil
+            || device.services.contains(DiscoveredDevice.remoteControlServiceType)
+            || device.bonjourServiceType == DiscoveredDevice.remoteControlServiceType
+    }
+
+    private func hasReachableLANRemoteDesktopEndpoint(_ device: DiscoveredDevice) -> Bool {
+        Self.hasExplicitLANRemoteDesktopEndpoint(device)
+    }
+
+    private func canResolveLANRemoteDesktopEndpoint(for device: DiscoveredDevice) async -> Bool {
+        if hasReachableLANRemoteDesktopEndpoint(device) {
+            return true
+        }
+
+        if preferredRemoteDesktopServiceName(for: device) != nil {
+            return true
+        }
+
+        if device.supportsRemoteControl {
+            if bestIPAddress(for: device) != nil {
+                return true
+            }
+            if preferredRemoteDesktopServiceName(for: device) != nil {
+                return true
+            }
+            if await resolveRemoteDesktopIPAddress(for: device) != nil {
+                return true
+            }
+        }
+
+        return false
+    }
+
+    private func resolveRemoteDesktopIPAddress(for device: DiscoveredDevice) async -> String? {
+        var candidates: [DiscoveredDevice] = []
+
+        func append(_ candidate: DiscoveredDevice?) {
+            guard let candidate else { return }
+            if candidates.contains(where: { areEquivalentRemoteDesktopDevices($0, candidate) }) {
+                return
+            }
+            candidates.append(candidate)
+        }
+
+        append(device)
+        append(connectionManager.resolvedPeerDevice(for: device))
+        append(DeviceDiscoveryManager.instance.canonicalDiscoveredDevice(for: device))
+        append(Self.resolveBestRemoteDesktopDevice(
+            target: device,
+            discovered: deduplicatedRemoteDesktopCandidates(
+                DeviceDiscoveryManager.instance.discoveredDevices
+                    + P2PConnectionManager.instance.activeConnections.map(\.device)
+            )
+        ))
+
+        for candidate in candidates {
+            if let ip = bestIPAddress(for: candidate) {
+                return ip
+            }
+            if let activePeerIP = connectionManager.activePeerHostAddress(for: candidate),
+               let sanitized = sanitizeAddress(activePeerIP) {
+                return sanitized
+            }
+            if let resolved = await DeviceDiscoveryManager.instance.resolveEndpoint(candidate),
+               let sanitized = sanitizeAddress(resolved) {
+                return sanitized
+            }
+        }
+
+        return nil
+    }
+
+    public static func resolveBestRemoteDesktopDevice(
+        target: DiscoveredDevice,
+        discovered: [DiscoveredDevice]
+    ) -> DiscoveredDevice {
+        let targetScore = remoteDesktopResolutionScore(candidate: target, target: target)
+        let bestCandidate = discovered.max { lhs, rhs in
+            remoteDesktopResolutionScore(candidate: lhs, target: target)
+                < remoteDesktopResolutionScore(candidate: rhs, target: target)
+        }
+
+        guard let bestCandidate else { return target }
+        let bestScore = remoteDesktopResolutionScore(candidate: bestCandidate, target: target)
+        return bestScore > targetScore ? bestCandidate : target
+    }
+
+    private static func remoteDesktopResolutionScore(
+        candidate: DiscoveredDevice,
+        target: DiscoveredDevice
+    ) -> Int {
+        let targetIdentity = normalizedRemoteDesktopIdentity(target.id)
+        let candidateIdentity = normalizedRemoteDesktopIdentity(candidate.id)
+        let exactIdMatch = !targetIdentity.isEmpty && targetIdentity == candidateIdentity
+        let stableExactIdMatch = exactIdMatch && isStableRemoteDesktopIdentity(candidate.id)
+
+        let targetIP = bestRemoteDesktopIPAddress(for: target)
+        let candidateIP = bestRemoteDesktopIPAddress(for: candidate)
+        let ipMatch = targetIP != nil && targetIP == candidateIP
+
+        let targetBonjour = bonjourIdentityComponents(for: target)
+        let candidateBonjour = bonjourIdentityComponents(for: candidate)
+        let bonjourMatch = targetBonjour != nil && targetBonjour == candidateBonjour
+
+        let targetName = normalizedRemoteDesktopDeviceName(target.name)
+        let candidateName = normalizedRemoteDesktopDeviceName(candidate.name)
+        let nameMatch = !targetName.isEmpty && targetName == candidateName
+
+        let targetAliases = Set(PeerIdentityAliasResolver.aliasKeys(for: target))
+        let candidateAliases = Set(PeerIdentityAliasResolver.aliasKeys(for: candidate))
+        let aliasMatch = !targetAliases.isEmpty && !candidateAliases.isDisjoint(with: targetAliases)
+
+        guard exactIdMatch || ipMatch || bonjourMatch || nameMatch || aliasMatch else {
+            return 0
+        }
+
+        var score = 0
+        if stableExactIdMatch {
+            score += 300
+        } else if exactIdMatch {
+            score += 80
+        }
+        if ipMatch { score += 250 }
+        if bonjourMatch { score += 220 }
+        if nameMatch { score += 160 }
+        if aliasMatch { score += 260 }
+
+        if candidate.services.contains(DiscoveredDevice.remoteControlServiceType)
+            || candidate.bonjourServiceType == DiscoveredDevice.remoteControlServiceType {
+            score += 260
+        }
+        if candidate.remoteControlPort != nil { score += 180 }
+        if candidateIP != nil { score += 120 }
+        if candidate.supportsRemoteControl { score += 60 }
+        if !candidate.services.isEmpty { score += 40 }
+
+        return score
+    }
+
+    private static func isStableRemoteDesktopIdentity(_ raw: String?) -> Bool {
+        let normalized = normalizedRemoteDesktopIdentity(raw)
+        guard !normalized.isEmpty else {
+            return false
+        }
+        return !(normalized.hasPrefix("host:")
+            || normalized.hasPrefix("peer:")
+            || normalized.hasPrefix("bonjour:")
+            || normalized.hasPrefix("recent:"))
+    }
+
+    private static func normalizedRemoteDesktopIdentity(_ raw: String?) -> String {
+        raw?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() ?? ""
+    }
+
+    private static func normalizedRemoteDesktopDeviceName(_ raw: String) -> String {
+        raw
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: " ", with: "")
+    }
+
+    private static func bonjourIdentityComponents(for device: DiscoveredDevice) -> String? {
+        let name = device.bonjourServiceName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let domain = device.bonjourServiceDomain?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let name, !name.isEmpty {
+            let normalizedDomain = (domain?.isEmpty == false ? domain! : "local.")
+            return "\(name.lowercased())@\(normalizedDomain.lowercased())"
+        }
+
+        if let parsed = parseRemoteDesktopBonjourIdentity(from: device.id) {
+            return "\(parsed.name.lowercased())@\(parsed.domain.lowercased())"
+        }
+
+        return nil
+    }
+
+    private static func parseRemoteDesktopBonjourIdentity(
+        from identifier: String
+    ) -> (name: String, domain: String)? {
+        guard identifier.hasPrefix("bonjour:") else { return nil }
+        let payload = String(identifier.dropFirst("bonjour:".count))
+        let parts = payload.split(separator: "@", maxSplits: 1).map(String.init)
+        guard let name = parts.first, !name.isEmpty else { return nil }
+        let domain = parts.count > 1 ? parts[1] : "local."
+        return (name, domain)
+    }
+
+    private static func bestRemoteDesktopIPAddress(for device: DiscoveredDevice) -> String? {
+        sanitizeRemoteDesktopAddress(device.ipAddress)
+            ?? sanitizeRemoteDesktopAddress(addressFromRemoteDesktopIdentifier(device.id))
+    }
+
+    private static func addressFromRemoteDesktopIdentifier(_ identifier: String) -> String? {
+        if identifier.hasPrefix("host:") {
+            return String(identifier.dropFirst("host:".count))
+        }
+        if identifier.hasPrefix("peer:") {
+            return String(identifier.dropFirst("peer:".count))
+        }
+        return nil
+    }
+
+    private static func sanitizeRemoteDesktopAddress(_ raw: String?) -> String? {
+        ConnectableAddressCanonicalizer.lookupKey(raw)
     }
 
     private func shouldUseCrossNetworkTransport(for device: DiscoveredDevice) -> Bool {
@@ -2461,42 +3508,7 @@ public class RemoteDesktopManager: ObservableObject {
     }
 
     private func sanitizeAddress(_ raw: String?) -> String? {
-        guard var token = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !token.isEmpty else {
-            return nil
-        }
-
-        if token.hasPrefix("host:") {
-            token = String(token.dropFirst("host:".count))
-        } else if token.hasPrefix("peer:") {
-            token = String(token.dropFirst("peer:".count))
-        } else if token.hasPrefix("ip:") {
-            token = String(token.dropFirst("ip:".count))
-        }
-
-        if token.hasPrefix("[") && token.hasSuffix("]") {
-            token = String(token.dropFirst().dropLast())
-        }
-
-        if let zoneIndex = token.firstIndex(of: "%") {
-            token = String(token[..<zoneIndex])
-        }
-
-        if token.contains(":"),
-           let dot = token.lastIndex(of: "."),
-           token[token.index(after: dot)...].allSatisfy({ $0.isNumber }) {
-            token = String(token[..<dot])
-        } else {
-            let parts = token.split(separator: ".")
-            if parts.count == 5,
-               parts.dropLast().allSatisfy({ Int($0) != nil }),
-               let port = Int(parts.last ?? ""),
-               (0...65535).contains(port) {
-                token = parts.dropLast().map(String.init).joined(separator: ".")
-            }
-        }
-
-        let sanitized = token.trimmingCharacters(in: .whitespacesAndNewlines)
-        return sanitized.isEmpty ? nil : sanitized
+        ConnectableAddressCanonicalizer.connectionTarget(raw)
     }
     
     // MARK: - Private Methods - Connection
@@ -2598,124 +3610,120 @@ public class RemoteDesktopManager: ObservableObject {
     private func receiveNextMessage(from connection: NWConnection) {
         // 先接收长度（4字节）
         connection.receive(minimumIncompleteLength: 4, maximumLength: 4) { [weak self] data, _, isComplete, error in
-            guard let self = self else { return }
-            
-            if let error = error {
-                Task { @MainActor in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                guard self.isCurrentLANConnection(connection) else { return }
+
+                if let error = error {
                     await self.handleTransportFailure(error.localizedDescription)
+                    return
                 }
-                return
-            }
-            
-            guard let lengthData = data, lengthData.count == 4 else {
-                if isComplete {
-                    Task { @MainActor in
+
+                guard let lengthData = data, lengthData.count == 4 else {
+                    if isComplete {
                         await self.handleTransportFailure(
                             RemoteDesktopError.disconnected.errorDescription ?? "连接已断开"
                         )
+                        return
                     }
+                    self.receiveNextMessage(from: connection)
                     return
                 }
-                if !isComplete {
-                    Task { @MainActor in
-                        self.receiveNextMessage(from: connection)
-                    }
-                }
-                return
-            }
-            
-		            let length = Int(lengthData.withUnsafeBytes { raw -> UInt32 in
-		                raw.loadUnaligned(fromByteOffset: 0, as: UInt32.self).bigEndian
-		            })
-	            if length <= 0 || length > maxMessageBytes {
-                Task { @MainActor in
+
+                let length = Int(lengthData.withUnsafeBytes { raw -> UInt32 in
+                    raw.loadUnaligned(fromByteOffset: 0, as: UInt32.self).bigEndian
+                })
+                if length <= 0 || length > maxMessageBytes {
                     await self.handleTransportFailure("消息长度异常：\(length) bytes")
+                    return
                 }
-                return
+
+                self.receiveMessageBody(of: length, from: connection)
             }
-            
-            // 接收消息体
-            connection.receive(minimumIncompleteLength: length, maximumLength: length) { [weak self] messageData, _, _, error in
-                guard let self = self else { return }
-                
+        }
+    }
+
+    private func receiveMessageBody(of length: Int, from connection: NWConnection) {
+        connection.receive(minimumIncompleteLength: length, maximumLength: length) { [weak self] messageData, _, isComplete, error in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                guard self.isCurrentLANConnection(connection) else { return }
+
                 if let error = error {
-                    Task { @MainActor in
-                        await self.handleTransportFailure(error.localizedDescription)
+                    await self.handleTransportFailure(error.localizedDescription)
+                    return
+                }
+
+                guard let data = messageData else {
+                    if isComplete {
+                        await self.handleTransportFailure(
+                            RemoteDesktopError.disconnected.errorDescription ?? "连接已断开"
+                        )
+                    } else {
+                        self.receiveMessageBody(of: length, from: connection)
                     }
                     return
                 }
-                
-                if let data = messageData {
-                    Task.detached(priority: .userInitiated) { [weak self] in
-                        guard let self else { return }
-                        do {
-                            let message = try JSONDecoder().decode(RemoteMessage.self, from: data)
-                            switch message.type {
-                            case .screenData:
-                                let screenData = try JSONDecoder().decode(ScreenData.self, from: message.payload)
-                                await self.handleScreenData(screenData)
-                            case .clipboard:
-                                let payload = try JSONDecoder().decode(RemoteClipboardMessagePayload.self, from: message.payload)
-                                await MainActor.run {
-                                    self.handleInboundRemoteClipboard(
-                                        data: payload.data,
-                                        mimeType: payload.mimeType,
-                                        fromDeviceId: self.currentConnection?.device.id
-                                    )
-                                }
-                            case .damageReport:
-                                let report = try JSONDecoder().decode(RemoteDesktopDamageReportPayload.self, from: message.payload)
-                                await MainActor.run {
-                                    self.handleInboundDamageReport(report)
-                                }
-                            case .cursorUpdate:
-                                let payload = try JSONDecoder().decode(RemoteDesktopCursorPayload.self, from: message.payload)
-                                await MainActor.run {
-                                    self.handleInboundCursorUpdate(payload)
-                                }
-                            case .overlayUpdate:
-                                let payload = try JSONDecoder().decode(RemoteDesktopOverlayPayload.self, from: message.payload)
-                                await MainActor.run {
-                                    self.handleInboundOverlayUpdate(payload)
-                                }
-                            case .mouseEvent, .keyboardEvent, .streamConfiguration:
-                                break
-                            }
-                        } catch {
-                            SkyBridgeLogger.shared.error("❌ 解析消息失败: \(error.localizedDescription)")
+
+                do {
+                    if let screenData = RemoteDesktopScreenFrameWire.decodeIfPresent(data) {
+                        await self.handleScreenData(screenData)
+                    } else {
+                        let message = try JSONDecoder().decode(RemoteMessage.self, from: data)
+                        switch message.type {
+                        case .screenData:
+                            let screenData = try JSONDecoder().decode(ScreenData.self, from: message.payload)
+                            await self.handleScreenData(screenData)
+                        case .clipboard:
+                            let payload = try JSONDecoder().decode(RemoteClipboardMessagePayload.self, from: message.payload)
+                            self.handleInboundRemoteClipboard(
+                                data: payload.data,
+                                mimeType: payload.mimeType,
+                                fromDeviceId: self.currentConnection?.device.id
+                            )
+                        case .damageReport:
+                            let report = try JSONDecoder().decode(RemoteDesktopDamageReportPayload.self, from: message.payload)
+                            self.handleInboundDamageReport(report)
+                        case .cursorUpdate:
+                            let payload = try JSONDecoder().decode(RemoteDesktopCursorPayload.self, from: message.payload)
+                            self.handleInboundCursorUpdate(payload)
+                        case .overlayUpdate:
+                            let payload = try JSONDecoder().decode(RemoteDesktopOverlayPayload.self, from: message.payload)
+                            self.handleInboundOverlayUpdate(payload)
+                        case .mouseEvent, .keyboardEvent, .streamConfiguration:
+                            break
                         }
                     }
-                } else {
-                    Task { @MainActor in
-                        await self.handleTransportFailure(
-                            RemoteDesktopError.disconnected.errorDescription ?? "连接已断开"
-                        )
-                    }
-                    return
+                } catch {
+                    SkyBridgeLogger.shared.error("❌ 解析消息失败: \(error.localizedDescription)")
                 }
-                
-                // 继续接收下一条消息
-                Task { @MainActor in
-                    self.receiveNextMessage(from: connection)
-                }
+
+                self.receiveNextMessage(from: connection)
             }
         }
     }
     
     private func handleScreenData(_ screenData: ScreenData) async {
+        let now = Date()
+        noteReceivedFrame(at: now)
         if !hasReceivedFrameInCurrentStream {
             hasReceivedFrameInCurrentStream = true
+            configureSessionClipboardSync()
             SkyBridgeLogger.shared.info(
                 "✅ 收到首帧: \(screenData.width)x\(screenData.height), format=\(screenData.format ?? "unknown"), bytes=\(screenData.imageData.count)"
             )
+            scheduleFirstFrameContinuityCheck(for: streamEpoch, firstFrameAt: now)
+        } else {
+            firstFrameContinuityTask?.cancel()
+            firstFrameContinuityTask = nil
         }
         await handleIncomingStreamTopologyChangeIfNeeded(for: screenData)
         // 更新分辨率
         resolution = CGSize(width: screenData.width, height: screenData.height)
         
         // 计算延迟
-        let now = Date().timeIntervalSince1970
-        latency = (now - screenData.timestamp) * 1000 // 转换为毫秒
+        let currentTimestamp = Date().timeIntervalSince1970
+        latency = (currentTimestamp - screenData.timestamp) * 1000 // 转换为毫秒
         
         enqueueFrameForDecode(screenData)
     }
@@ -2736,12 +3744,15 @@ public class RemoteDesktopManager: ObservableObject {
         guard previousSignature != newSignature else { return }
         lastIncomingStreamSignature = newSignature
 
+        invalidateDecodePipelineState()
+        decodedVideoRendererPreference = .metal
         pendingFrames.removeAll(keepingCapacity: true)
+        decodeQueueWaitingForSyncFrame = RemoteDesktopDecodeQueuePolicy.isPredictiveVideoFormat(normalizedFormat)
         consecutiveDecodeMisses = 0
         frameRate = 0
         lastRenderedFrameTime = nil
         currentFrame = nil
-        videoFrameFeed.flush()
+        flushRenderedVideoFeeds()
         updateRenderPipeline(.waiting)
         lastDamageRectCount = 0
         lastDamageUsesFullFrameFallback = false
@@ -2764,13 +3775,32 @@ public class RemoteDesktopManager: ObservableObject {
     }
 
     private func enqueueFrameForDecode(_ screenData: ScreenData) {
-        if pendingFrames.isEmpty {
-            pendingFrames.append(screenData)
-        } else {
-            pendingFrames[pendingFrames.count - 1] = screenData
-            if pendingFrames.count > maxPendingFrames {
-                pendingFrames.removeFirst(pendingFrames.count - maxPendingFrames)
+        let enqueueResult = RemoteDesktopDecodeQueuePolicy.enqueue(
+            screenData,
+            into: &pendingFrames,
+            waitingForSyncFrame: &decodeQueueWaitingForSyncFrame
+        )
+        if enqueueResult == .enteredWaitingForSync {
+            let now = Date()
+            if now.timeIntervalSince(lastDecodeQueueOverflowLogTime) >= 1.0 {
+                lastDecodeQueueOverflowLogTime = now
+                SkyBridgeLogger.shared.warning(
+                    "⚠️ 视频解码队列拥塞，已清空预测帧并等待关键帧恢复"
+                )
             }
+            Task { [weak self] in
+                await self?.requestStreamRefreshIfNeeded(minimumInterval: 0.25)
+            }
+        } else if enqueueResult == .droppedIncomingPredictiveFrame {
+            let now = Date()
+            if now.timeIntervalSince(lastDecodeQueueOverflowLogTime) >= 1.0 {
+                lastDecodeQueueOverflowLogTime = now
+                SkyBridgeLogger.shared.warning(
+                    "⚠️ 视频解码队列正在等待关键帧，已暂时丢弃预测帧"
+                )
+            }
+        } else if enqueueResult == .recoveredWithIndependentFrame {
+            SkyBridgeLogger.shared.info("♻️ 视频解码队列已收到关键帧，恢复连续解码")
         }
         startDecodeLoopIfNeeded()
     }
@@ -2794,6 +3824,9 @@ public class RemoteDesktopManager: ObservableObject {
             await requestStreamRefreshIfNeeded()
             return false
         case .disableHEVC(let until):
+            invalidateDecodePipelineState()
+            pendingFrames.removeAll(keepingCapacity: true)
+            decodeQueueWaitingForSyncFrame = true
             await decoder.resetPreservingLastFrame()
             lastDecoderResetTime = now
             consecutiveDecodeMisses = 0
@@ -2810,53 +3843,343 @@ public class RemoteDesktopManager: ObservableObject {
         }
     }
 
-    private func startDecodeLoopIfNeeded() {
-        guard !isDecodingFrame else { return }
-        guard let next = pendingFrames.popLast() else { return }
-        isDecodingFrame = true
-
-        let decoder = self.decoder
-        let screenData = next
-
-        Task { [weak self] in
-            guard let self else { return }
-            let format = (screenData.format ?? "").lowercased()
-            let isStillImageFrame = self.decoder.isStillImageFormat(format)
-            let decoded: DecodeOutput?
-            let decodeFailureReason: String?
-            do {
-                decoded = try await decoder.decode(screenData: screenData)
-                decodeFailureReason = await decoder.consumeLastFailureReason()
-            } catch {
-                decoded = nil
-                decodeFailureReason = error.localizedDescription
+    private func noteFrameProgress(at now: Date) {
+        lastRenderedFrameTime = now
+        if let lastFrameTime {
+            frameCount += 1
+            let elapsed = now.timeIntervalSince(lastFrameTime)
+            if elapsed >= 1.0 {
+                frameRate = Double(frameCount) / elapsed
+                frameCount = 0
+                self.lastFrameTime = now
             }
-            if let decoded {
-                switch decoded {
-                case .image(let frame):
-                    self.videoFrameFeed.flush()
-                    self.currentFrame = frame.image
-                    self.updateRenderPipeline(.stillImageFallback)
-                case .pixelBuffer(let frame):
-                    self.currentFrame = nil
-                    self.videoFrameFeed.update(frame: frame)
-                    self.updateRenderPipeline(.metalZeroCopy)
+        } else {
+            frameCount = 1
+            lastFrameTime = now
+            frameRate = 0
+        }
+    }
+
+    private func noteReceivedFrame(at now: Date) {
+        lastFrameArrivalAt = now
+        receivedFrameCountInCurrentStream += 1
+        receivedFramesInStatsWindow += 1
+        logRemoteDesktopPipelineStatsIfNeeded(at: now)
+    }
+
+    private func noteDecodedFrame(at now: Date) {
+        lastDecodedFrameTime = now
+        decodedFramesInStatsWindow += 1
+        logRemoteDesktopPipelineStatsIfNeeded(at: now)
+    }
+
+    private func noteDisplayedFrame(at now: Date) {
+        lastVideoRendererEnqueueAt = now
+        lastDisplayedFrameTime = now
+        displayedFramesInStatsWindow += 1
+        logRemoteDesktopPipelineStatsIfNeeded(at: now)
+        noteFrameProgress(at: now)
+    }
+
+    private func logRemoteDesktopPipelineStatsIfNeeded(at now: Date) {
+        guard state == .streaming else { return }
+        guard let statsWindowStartTime else {
+            self.statsWindowStartTime = now
+            return
+        }
+        let elapsed = now.timeIntervalSince(statsWindowStartTime)
+        guard elapsed >= 1.0 else { return }
+        SkyBridgeLogger.shared.debug(
+            "📈 远控链路统计: recv=\(receivedFramesInStatsWindow) decode=\(decodedFramesInStatsWindow) display=\(displayedFramesInStatsWindow) pending=\(pendingFrames.count) inflight=\(inFlightDecodeCount) waitingSync=\(decodeQueueWaitingForSyncFrame) pipeline=\(renderPipelineStatus.rawValue)"
+        )
+        self.statsWindowStartTime = now
+        receivedFramesInStatsWindow = 0
+        decodedFramesInStatsWindow = 0
+        displayedFramesInStatsWindow = 0
+    }
+
+    private func shouldAcceptDecodedFrame(presentationTimeStamp: CMTime) -> Bool {
+        guard presentationTimeStamp.flags.contains(.valid) else { return true }
+        if let lastAcceptedDecodedPresentationTimeStamp,
+           lastAcceptedDecodedPresentationTimeStamp.flags.contains(.valid),
+           CMTimeCompare(presentationTimeStamp, lastAcceptedDecodedPresentationTimeStamp) <= 0 {
+            return false
+        }
+        lastAcceptedDecodedPresentationTimeStamp = presentationTimeStamp
+        return true
+    }
+
+    private func completeDecodeTask(for generation: UInt64) {
+        guard generation == decodeGeneration else { return }
+        inFlightDecodeCount = max(0, inFlightDecodeCount - 1)
+    }
+
+    private func maxConcurrentDecodeTasks(for screenData: ScreenData) -> Int {
+        RemoteDesktopDecodeQueuePolicy.isPredictiveVideoFormat(screenData.format)
+            ? maxConcurrentVideoDecodes
+            : 1
+    }
+
+    private func activateSampleBufferFallbackForDecodedVideo() {
+        guard decodedVideoRendererPreference != .sampleBuffer else { return }
+        decodedVideoRendererPreference = .sampleBuffer
+        metalVideoFrameFeed.flush(removeDisplayedImage: true)
+        updateRenderPipeline(.sampleBufferDisplayLayer)
+        SkyBridgeLogger.shared.warning("⚠️ Metal 渲染未消费新帧，已回退到 AVSampleBufferDisplayLayer")
+    }
+
+    private func activateCGImageFallbackForDecodedVideo() {
+        guard decodedVideoRendererPreference != .cgImage else { return }
+        decodedVideoRendererPreference = .cgImage
+        flushRenderedVideoFeeds(removeDisplayedImage: true)
+        updateRenderPipeline(.stillImageFallback)
+        SkyBridgeLogger.shared.warning("⚠️ 视频渲染层未消费新帧，已回退到逐帧 CGImage 渲染")
+    }
+
+    private func makeCGImage(from pixelBufferFrame: DecodedPixelBufferFrame) -> CGImage? {
+        let image = CIImage(cvPixelBuffer: pixelBufferFrame.pixelBuffer)
+        let rect = CGRect(x: 0, y: 0, width: pixelBufferFrame.width, height: pixelBufferFrame.height)
+        return fallbackImageContext.createCGImage(image, from: rect)
+    }
+
+    private func zeroMeasuredFrameRate(at now: Date) {
+        guard frameRate != 0 || frameCount != 0 else { return }
+        frameRate = 0
+        frameCount = 0
+        lastFrameTime = now
+    }
+
+    private func startStreamContinuityWatchdog(for epoch: UInt64) {
+        streamContinuityWatchdogTask?.cancel()
+        streamContinuityWatchdogTask = Task { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: .milliseconds(500))
+                } catch {
+                    return
                 }
+                guard self.streamEpoch == epoch else { return }
+                guard self.state == .streaming else { continue }
                 let now = Date()
-                self.lastRenderedFrameTime = now
-                self.consecutiveDecodeMisses = 0
-                let governanceEvent = self.codecGovernance.noteDecodeSuccess(format: format, at: now)
-                _ = await self.handleCodecGovernanceEvent(governanceEvent, at: now)
-                self.frameCount += 1
-                if let lastTime = self.lastFrameTime {
-                    let elapsed = now.timeIntervalSince(lastTime)
-                    if elapsed >= 1.0 {
-                        self.frameRate = Double(self.frameCount) / elapsed
-                        self.frameCount = 0
-                        self.lastFrameTime = now
-                    }
+                let lastProgressAt = self.lastDisplayedFrameTime ?? self.lastVideoRendererEnqueueAt ?? self.lastRenderedFrameTime ?? self.lastFrameArrivalAt
+                if let lastProgressAt,
+                   now.timeIntervalSince(lastProgressAt) >= 1.0 {
+                    self.zeroMeasuredFrameRate(at: now)
                 }
-            } else {
+                if let lastFrameArrivalAt = self.lastFrameArrivalAt,
+                   let lastDisplayedFrameTime = self.lastDisplayedFrameTime,
+                   lastFrameArrivalAt > lastDisplayedFrameTime,
+                   now.timeIntervalSince(lastDisplayedFrameTime) >= 1.0 {
+                    await self.handleStreamContinuityStall(reason: "frames-arriving-without-display")
+                    continue
+                }
+                if let lastFrameArrivalAt = self.lastFrameArrivalAt,
+                   let lastDecodedFrameTime = self.lastDecodedFrameTime,
+                   lastFrameArrivalAt > lastDecodedFrameTime,
+                   now.timeIntervalSince(lastDecodedFrameTime) >= 1.0 {
+                    await self.handleStreamContinuityStall(reason: "frames-arriving-without-decode")
+                }
+            }
+        }
+    }
+
+    private func scheduleFirstFrameContinuityCheck(for epoch: UInt64, firstFrameAt: Date) {
+        firstFrameContinuityTask?.cancel()
+        firstFrameContinuityTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await Task.sleep(for: .seconds(1.2))
+            } catch {
+                return
+            }
+            guard self.streamEpoch == epoch else { return }
+            guard self.state == .streaming else { return }
+            guard self.receivedFrameCountInCurrentStream <= 1 else { return }
+            guard self.lastFrameArrivalAt == firstFrameAt else { return }
+            await self.handleStreamContinuityStall(reason: "first-frame-only-freeze")
+        }
+    }
+
+    private func noteViewerInteraction(kind: String) {
+        let interactionAt = Date()
+        lastViewerInteractionAt = interactionAt
+        let epoch = streamEpoch
+        interactionContinuityTask?.cancel()
+        interactionContinuityTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await Task.sleep(for: .milliseconds(450))
+            } catch {
+                return
+            }
+            guard self.streamEpoch == epoch else { return }
+            guard self.state == .streaming else { return }
+            guard self.hasReceivedFrameInCurrentStream else { return }
+            guard let lastFrameArrivalAt = self.lastFrameArrivalAt,
+                  lastFrameArrivalAt <= interactionAt else { return }
+            await self.handleStreamContinuityStall(reason: "post-\(kind)-no-frame")
+        }
+    }
+
+    private func handleStreamContinuityStall(reason: String) async {
+        let now = Date()
+        if let lastContinuityRecoveryAt,
+           now.timeIntervalSince(lastContinuityRecoveryAt) < 0.75 {
+            return
+        }
+        if reason == "frames-arriving-without-display",
+           renderPipelineStatus == .metalRenderer {
+            lastContinuityRecoveryAt = now
+            zeroMeasuredFrameRate(at: now)
+            activateSampleBufferFallbackForDecodedVideo()
+            return
+        }
+        if reason == "frames-arriving-without-display",
+           renderPipelineStatus == .sampleBufferDisplayLayer {
+            lastContinuityRecoveryAt = now
+            zeroMeasuredFrameRate(at: now)
+            activateCGImageFallbackForDecodedVideo()
+            return
+        }
+        lastContinuityRecoveryAt = now
+        zeroMeasuredFrameRate(at: now)
+        if renderPipelineStatus == .sampleBufferDisplayLayer || renderPipelineStatus == .metalRenderer {
+            invalidateDecodePipelineState()
+            flushRenderedVideoFeeds(removeDisplayedImage: false)
+            pendingFrames.removeAll(keepingCapacity: true)
+            decodeQueueWaitingForSyncFrame = RemoteDesktopDecodeQueuePolicy.isPredictiveVideoFormat(
+                lastIncomingStreamSignature?.format
+            )
+            await decoder.resetPreservingLastFrame()
+            lastDecoderResetTime = now
+            consecutiveDecodeMisses = 0
+        }
+        let format = lastIncomingStreamSignature?.format ?? ""
+        let governanceEvent = codecGovernance.noteDecodeFailure(
+            format: format,
+            reason: reason,
+            at: now
+        )
+        _ = await handleCodecGovernanceEvent(governanceEvent, at: now)
+        await requestStreamRefreshIfNeeded(minimumInterval: 0.25)
+        SkyBridgeLogger.shared.warning("⚠️ 检测到远控视频连续性异常: \(reason)，已请求关键帧刷新")
+    }
+
+    func handleVideoRendererDidEnqueueFrame(
+        presentationTimeStamp _: CMTime,
+        remainingQueueDepth _: Int
+    ) async {
+        videoFrameFeed.markDisplayedFrame()
+        noteDisplayedFrame(at: Date())
+    }
+
+    func handleMetalRendererDidDisplayFrame(
+        presentationTimeStamp _: CMTime
+    ) async {
+        metalVideoFrameFeed.markDisplayedFrame()
+        noteDisplayedFrame(at: Date())
+    }
+
+    private func startDecodeLoopIfNeeded() {
+        while let next = pendingFrames.first {
+            let maxConcurrentDecodeTasks = maxConcurrentDecodeTasks(for: next)
+            guard inFlightDecodeCount < maxConcurrentDecodeTasks else { return }
+            guard let screenData = RemoteDesktopDecodeQueuePolicy.dequeueNext(from: &pendingFrames) else { return }
+            inFlightDecodeCount += 1
+
+            let decoder = self.decoder
+            let decodeGeneration = self.decodeGeneration
+
+            Task { [weak self] in
+                guard let self else { return }
+                let format = (screenData.format ?? "").lowercased()
+                let isStillImageFrame = self.decoder.isStillImageFormat(format)
+                let decoded: DecodeOutput?
+                let decodeFailureReason: String?
+                do {
+                    decoded = try await decoder.decode(screenData: screenData)
+                    decodeFailureReason = await decoder.consumeLastFailureReason()
+                } catch {
+                    decoded = nil
+                    decodeFailureReason = error.localizedDescription
+                }
+
+                defer {
+                    self.completeDecodeTask(for: decodeGeneration)
+                    self.startDecodeLoopIfNeeded()
+                }
+
+                guard decodeGeneration == self.decodeGeneration else { return }
+
+                if let decoded {
+                    let now = Date()
+                    switch decoded {
+                    case .image(let frame):
+                        self.flushRenderedVideoFeeds()
+                        self.currentFrame = frame.image
+                        self.updateRenderPipeline(.stillImageFallback)
+                        self.noteDecodedFrame(at: now)
+                        self.noteDisplayedFrame(at: now)
+                    case .pixelBuffer(let frame):
+                        guard self.shouldAcceptDecodedFrame(presentationTimeStamp: frame.presentationTimeStamp) else {
+                            return
+                        }
+                        self.currentFrame = nil
+                        switch self.decodedVideoRendererPreference {
+                        case .metal:
+                            self.videoFrameFeed.flush(removeDisplayedImage: false)
+                            self.metalVideoFrameFeed.enqueue(frame: frame)
+                            self.updateRenderPipeline(.metalRenderer)
+                        case .sampleBuffer:
+                            if let displayFrame = await decoder.makeDisplaySampleBufferFrame(
+                                from: frame,
+                                format: format
+                            ) {
+                                self.metalVideoFrameFeed.flush(removeDisplayedImage: true)
+                                self.videoFrameFeed.enqueue(frame: displayFrame)
+                                self.updateRenderPipeline(.sampleBufferDisplayLayer)
+                            } else {
+                                self.videoFrameFeed.flush(removeDisplayedImage: false)
+                                self.metalVideoFrameFeed.enqueue(frame: frame)
+                                self.updateRenderPipeline(.metalRenderer)
+                            }
+                        case .cgImage:
+                            if let image = self.makeCGImage(from: frame) {
+                                self.flushRenderedVideoFeeds(removeDisplayedImage: true)
+                                self.currentFrame = image
+                                self.updateRenderPipeline(.stillImageFallback)
+                                self.noteDisplayedFrame(at: now)
+                            } else if let displayFrame = await decoder.makeDisplaySampleBufferFrame(
+                                from: frame,
+                                format: format
+                            ) {
+                                self.metalVideoFrameFeed.flush(removeDisplayedImage: true)
+                                self.videoFrameFeed.enqueue(frame: displayFrame)
+                                self.updateRenderPipeline(.sampleBufferDisplayLayer)
+                            } else {
+                                self.videoFrameFeed.flush(removeDisplayedImage: false)
+                                self.metalVideoFrameFeed.enqueue(frame: frame)
+                                self.updateRenderPipeline(.metalRenderer)
+                            }
+                        }
+                        self.noteDecodedFrame(at: now)
+                    case .sampleBuffer(let frame):
+                        guard self.shouldAcceptDecodedFrame(presentationTimeStamp: frame.presentationTimeStamp) else {
+                            return
+                        }
+                        self.currentFrame = nil
+                        self.metalVideoFrameFeed.flush(removeDisplayedImage: true)
+                        self.videoFrameFeed.enqueue(frame: frame)
+                        self.updateRenderPipeline(.sampleBufferDisplayLayer)
+                        self.noteDecodedFrame(at: now)
+                    }
+                    self.consecutiveDecodeMisses = 0
+                    let governanceEvent = self.codecGovernance.noteDecodeSuccess(format: format, at: now)
+                    _ = await self.handleCodecGovernanceEvent(governanceEvent, at: now)
+                    return
+                }
+
                 self.consecutiveDecodeMisses += 1
                 let now = Date()
                 if let lastRenderedFrameTime,
@@ -2865,8 +4188,6 @@ public class RemoteDesktopManager: ObservableObject {
                 }
                 if isStillImageFrame {
                     self.consecutiveDecodeMisses = 0
-                    self.isDecodingFrame = false
-                    self.startDecodeLoopIfNeeded()
                     return
                 }
                 let governanceEvent = self.codecGovernance.noteDecodeFailure(
@@ -2876,12 +4197,13 @@ public class RemoteDesktopManager: ObservableObject {
                 )
                 let governanceHandled = await self.handleCodecGovernanceEvent(governanceEvent, at: now)
                 if governanceHandled {
-                    self.isDecodingFrame = false
-                    self.startDecodeLoopIfNeeded()
                     return
                 }
                 let canResetDecoder = self.lastDecoderResetTime.map { now.timeIntervalSince($0) >= 1.0 } ?? true
                 if self.consecutiveDecodeMisses >= 6, canResetDecoder {
+                    self.invalidateDecodePipelineState()
+                    self.pendingFrames.removeAll(keepingCapacity: true)
+                    self.decodeQueueWaitingForSyncFrame = RemoteDesktopDecodeQueuePolicy.isPredictiveVideoFormat(format)
                     await self.decoder.resetPreservingLastFrame()
                     self.lastDecoderResetTime = now
                     self.consecutiveDecodeMisses = 0
@@ -2889,8 +4211,6 @@ public class RemoteDesktopManager: ObservableObject {
                     SkyBridgeLogger.shared.warning("⚠️ 检测到远控视频解码停滞，已自动重置解码器")
                 }
             }
-            self.isDecodingFrame = false
-            self.startDecodeLoopIfNeeded()
         }
     }
 }
@@ -2925,13 +4245,15 @@ public enum StreamQuality: String, CaseIterable, Sendable {
 
 public enum RemoteDesktopRenderPipeline: String, Sendable {
     case waiting
-    case metalZeroCopy
+    case metalRenderer
+    case sampleBufferDisplayLayer
     case stillImageFallback
 
     public var displayName: String {
         switch self {
         case .waiting: return "等待首帧"
-        case .metalZeroCopy: return "Metal 零拷贝"
+        case .metalRenderer: return "Metal Renderer"
+        case .sampleBufferDisplayLayer: return "AVSampleBufferDisplayLayer"
         case .stillImageFallback: return "静态帧回退"
         }
     }

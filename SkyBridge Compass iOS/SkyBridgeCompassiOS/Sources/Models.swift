@@ -191,6 +191,74 @@ public extension DiscoveredDevice {
     var remoteControlPort: UInt16? { port(for: Self.remoteControlServiceType) }
 }
 
+public enum ConnectableAddressCanonicalizer {
+    public static func connectionTarget(_ raw: String?) -> String? {
+        canonicalize(raw, preserveInterfaceScope: true)
+    }
+
+    public static func lookupKey(_ raw: String?) -> String? {
+        canonicalize(raw, preserveInterfaceScope: false)
+    }
+
+    private static func canonicalize(
+        _ raw: String?,
+        preserveInterfaceScope: Bool
+    ) -> String? {
+        guard var token = raw?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+              !token.isEmpty else {
+            return nil
+        }
+
+        if token.hasPrefix("host:") {
+            token = String(token.dropFirst("host:".count))
+        } else if token.hasPrefix("peer:") {
+            token = String(token.dropFirst("peer:".count))
+        } else if token.hasPrefix("ip:") {
+            token = String(token.dropFirst("ip:".count))
+        }
+
+        if token.hasPrefix("["),
+           let closingBracket = token.lastIndex(of: "]"),
+           closingBracket > token.startIndex {
+            let suffixStart = token.index(after: closingBracket)
+            let suffix = token[suffixStart...]
+            let suffixIsPort = suffix.first == "."
+                && suffix.dropFirst().allSatisfy({ $0.isNumber })
+            if suffix.isEmpty || suffixIsPort {
+                token = String(token[token.index(after: token.startIndex)..<closingBracket])
+            }
+        }
+
+        if !preserveInterfaceScope,
+           let percentIndex = token.firstIndex(of: "%") {
+            token = String(token[..<percentIndex])
+        }
+
+        if !token.contains(":"),
+           let colonIndex = token.lastIndex(of: ":"),
+           token[token.index(after: colonIndex)...].allSatisfy({ $0.isNumber }) {
+            token = String(token[..<colonIndex])
+        }
+
+        if token.contains(":"),
+           let dot = token.lastIndex(of: "."),
+           token[token.index(after: dot)...].allSatisfy({ $0.isNumber }) {
+            token = String(token[..<dot])
+        } else {
+            let parts = token.split(separator: ".")
+            if parts.count == 5,
+               parts.dropLast().allSatisfy({ Int($0) != nil }),
+               let port = Int(parts.last ?? ""),
+               (0...65535).contains(port) {
+                token = parts.dropLast().map(String.init).joined(separator: ".")
+            }
+        }
+
+        let normalized = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalized.isEmpty ? nil : normalized
+    }
+}
+
 /// P2P 连接
 public struct Connection: Identifiable, Sendable {
     public let id: String

@@ -191,7 +191,7 @@ struct DeviceDiscoveryView: View {
             ForEach(filteredDevices) { device in
                 DeviceRowView(
                     device: device,
-                    connectionStatus: connectionManager.connectionStatusByDeviceId[device.id]
+                    connectionStatus: connectionManager.resolvedConnectionStatus(for: device)
                 ) {
                     selectedDevice = device
                 }

@@ -315,6 +315,7 @@ struct ConnectionRowView: View {
                     .font(.title3)
                     .foregroundColor(.red.opacity(0.8))
             }
+            .buttonStyle(.plain)
         }
         .padding(.vertical, 8)
         .padding(.horizontal, 12)
@@ -357,6 +358,8 @@ struct DeviceDetailSheet: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var connectionManager: P2PConnectionManager
     @ObservedObject private var trustedStore: TrustedDeviceStore = .shared
+    @StateObject private var crossNetworkManager = CrossNetworkWebRTCManager.instance
+    @StateObject private var remoteDesktopManager = RemoteDesktopManager.instance
     @State private var isConnecting = false
     @State private var connectError: String?
     @State private var showPQCVerification: Bool = false
@@ -365,21 +368,21 @@ struct DeviceDetailSheet: View {
         NavigationStack {
             List {
                 // 设备信息
-                Section("设备信息") {
-                    LabeledContent("名称", value: device.name)
-                    LabeledContent("平台", value: device.platform.displayName)
-                    LabeledContent("系统版本", value: device.osVersion)
-                    LabeledContent("连接状态", value: connectionStatus?.displayName ?? RuntimeLocalization.string("未连接"))
+                Section(RuntimeLocalization.string("设备信息")) {
+                    LabeledContent(RuntimeLocalization.string("名称"), value: device.name)
+                    LabeledContent(RuntimeLocalization.string("平台"), value: device.platform.displayName)
+                    LabeledContent(RuntimeLocalization.string("系统版本"), value: device.osVersion)
+                    LabeledContent(RuntimeLocalization.string("连接状态"), value: effectiveConnectionStatus?.displayName ?? RuntimeLocalization.string("未连接"))
                     if let ip = device.ipAddress {
-                        LabeledContent("IP 地址", value: ip)
+                        LabeledContent(RuntimeLocalization.string("IP 地址"), value: ip)
                     }
-                    if let err = connectionManager.connectionErrorByDeviceId[device.id], !err.isEmpty {
-                        LabeledContent("断开原因", value: err)
+                    if let err = connectionManager.resolvedConnectionError(for: device), !err.isEmpty {
+                        LabeledContent(RuntimeLocalization.string("断开原因"), value: err)
                     }
                 }
                 
                 // 功能
-                Section("支持功能") {
+                Section(RuntimeLocalization.string("支持功能")) {
                     ForEach(device.capabilities, id: \.self) { capability in
                         HStack {
                             Image(systemName: capabilityIcon(capability))
@@ -395,7 +398,7 @@ struct DeviceDetailSheet: View {
                         HStack(spacing: 10) {
                             Image(systemName: trustSymbolName)
                                 .foregroundStyle(.green)
-                            Text("已受信任（PQC 引导）")
+                            Text(RuntimeLocalization.string("已受信任（PQC 引导）"))
                                 .foregroundStyle(.secondary)
                         }
                     } else {
@@ -404,17 +407,17 @@ struct DeviceDetailSheet: View {
                         } label: {
                             HStack {
                                 Image(systemName: "lock.shield")
-                                Text("PQC 身份验证（输入验证码）")
+                                Text(RuntimeLocalization.string("PQC 身份验证（输入验证码）"))
                             }
                         }
                     }
-                    if connectionStatus == .connected {
+                    if effectiveConnectionStatus == .connected || isCrossNetworkConnectedDevice {
                         Button(role: .destructive) {
                             disconnect()
                         } label: {
                             HStack {
                                 Image(systemName: disconnectSymbolName)
-                                Text("断开连接")
+                                Text(RuntimeLocalization.string("断开连接"))
                             }
                         }
                     } else {
@@ -431,7 +434,7 @@ struct DeviceDetailSheet: View {
                                 Text(isConnecting ? RuntimeLocalization.string("连接中...") : RuntimeLocalization.string("连接设备"))
                             }
                         }
-                        .disabled(isConnecting || connectionStatus == .connecting)
+                        .disabled(isConnecting || effectiveConnectionStatus == .connecting)
                     }
                 }
             }
@@ -439,13 +442,13 @@ struct DeviceDetailSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("关闭") {
+                    Button(RuntimeLocalization.string("关闭")) {
                         dismiss()
                     }
                 }
             }
             .alert(
-                "连接失败",
+                RuntimeLocalization.string("连接失败"),
                 isPresented: Binding(
                     get: { connectError != nil },
                     set: { presenting in
@@ -453,7 +456,7 @@ struct DeviceDetailSheet: View {
                     }
                 )
             ) {
-                Button("好的") { connectError = nil }
+                Button(RuntimeLocalization.string("好的")) { connectError = nil }
             } message: {
                 Text(connectError ?? "")
             }
@@ -482,9 +485,45 @@ struct DeviceDetailSheet: View {
         return "checkmark"
     }
 
-    private var connectionStatus: ConnectionStatus? {
-        connectionManager.connectionStatusByDeviceId[device.id]
-            ?? (connectionManager.activeConnections.contains(where: { $0.device.id == device.id }) ? .connected : nil)
+    private var effectiveConnectionStatus: ConnectionStatus? {
+        if let p2pStatus = connectionManager.resolvedConnectionStatus(for: device) {
+            return p2pStatus
+        }
+        guard let snapshot = activeCrossNetworkSnapshot else { return nil }
+        switch snapshot.phase {
+        case .transportReady, .handshakeComplete:
+            return .connected
+        case .reconnecting:
+            return .connecting
+        case .connecting, .disconnecting:
+            return .disconnecting
+        }
+    }
+
+    private var activeCrossNetworkSnapshot: ActiveSessionSnapshot? {
+        guard let snapshot = crossNetworkManager.activeSessionSnapshot else { return nil }
+        switch snapshot.phase {
+        case .transportReady, .handshakeComplete, .reconnecting:
+            return snapshot
+        case .connecting, .disconnecting:
+            return nil
+        }
+    }
+
+    private var isCrossNetworkConnectedDevice: Bool {
+        guard let snapshot = activeCrossNetworkSnapshot else { return false }
+        let snapshotId = normalizedIdentifier(snapshot.deviceId ?? crossNetworkManager.remoteDeviceId)
+        if snapshotId == normalizedIdentifier(device.id) {
+            return true
+        }
+        return normalizedName(snapshot.deviceName ?? crossNetworkManager.remoteDeviceName)
+            == normalizedName(device.name)
+    }
+
+    private var isCrossNetworkRemoteDesktopActiveForDevice: Bool {
+        guard let current = remoteDesktopManager.currentConnection?.device else { return false }
+        return normalizedIdentifier(current.id) == normalizedIdentifier(device.id)
+            || normalizedName(current.name) == normalizedName(device.name)
     }
 
     private func connect() {
@@ -506,9 +545,41 @@ struct DeviceDetailSheet: View {
 
     private func disconnect() {
         Task { @MainActor in
-            await P2PConnectionManager.instance.disconnect(from: device)
-            dismiss()
+            var didDisconnect = false
+            if isCrossNetworkConnectedDevice {
+                if isCrossNetworkRemoteDesktopActiveForDevice {
+                    await remoteDesktopManager.disconnect(tearDownTransport: true)
+                } else {
+                    await crossNetworkManager.disconnect()
+                }
+                didDisconnect = true
+            }
+            if connectionManager.resolvedConnectionStatus(for: device) != nil {
+                didDisconnect = await P2PConnectionManager.instance.disconnect(from: device) || didDisconnect
+            }
+
+            let stillConnected = isCrossNetworkConnectedDevice
+                || connectionManager.resolvedConnectionStatus(for: device) == .connected
+                || connectionManager.resolvedConnectionStatus(for: device) == .connecting
+                || connectionManager.resolvedConnectionStatus(for: device) == .disconnecting
+
+            if !stillConnected {
+                dismiss()
+            } else {
+                connectError = RuntimeLocalization.string("disconnect.failed")
+            }
         }
+    }
+
+    private func normalizedIdentifier(_ raw: String?) -> String {
+        raw?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+    }
+
+    private func normalizedName(_ raw: String?) -> String {
+        raw?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: " ", with: "") ?? ""
     }
     
     private func capabilityIcon(_ capability: String) -> String {

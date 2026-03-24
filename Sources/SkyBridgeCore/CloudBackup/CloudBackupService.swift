@@ -26,6 +26,12 @@ public final class CloudBackupService: ObservableObject {
     // MARK: - Singleton
 
     public static let shared = CloudBackupService()
+    private static let configurationStore = CodablePersistenceStore<CloudBackupConfiguration>(
+        location: .protectedApplicationSupport(
+            path: "CloudBackup/configuration.json",
+            legacyUserDefaultsKey: "com.skybridge.backup.config"
+        )
+    )
 
     // MARK: - Published Properties
 
@@ -55,8 +61,6 @@ public final class CloudBackupService: ObservableObject {
     private let recordType = "BackupSnapshot"
     private var encryptionKey: SymmetricKey?
 
-    // 持久化 keys
-    private let configKey = "com.skybridge.backup.config"
     private let lastBackupKey = "com.skybridge.backup.lastTime"
 
     // 数据提供者回调
@@ -403,17 +407,11 @@ public final class CloudBackupService: ObservableObject {
     // MARK: - Persistence
 
     private func saveConfiguration() {
-        if let data = try? JSONEncoder().encode(configuration) {
-            UserDefaults.standard.set(data, forKey: configKey)
-        }
+        try? Self.configurationStore.save(configuration)
     }
 
     private static func loadConfiguration() -> CloudBackupConfiguration? {
-        guard let data = UserDefaults.standard.data(forKey: "com.skybridge.backup.config"),
-              let config = try? JSONDecoder().decode(CloudBackupConfiguration.self, from: data) else {
-            return nil
-        }
-        return config
+        Self.configurationStore.load()
     }
 }
 

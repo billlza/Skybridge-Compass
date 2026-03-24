@@ -153,6 +153,8 @@ public actor WebSocketSignalingClient {
     private let sessionId: String
     private var nextSequenceGeneration: Int
     private let connectionTimeout: Duration = .seconds(5)
+    private static let websocketRequestTimeoutSeconds: TimeInterval = 120
+    private static let websocketResourceTimeoutSeconds: TimeInterval = 60 * 60 * 24
     private let selectionPolicy: BackendSelectionPolicy
     private let nativeFallbackEnabled: Bool
 
@@ -359,9 +361,15 @@ public actor WebSocketSignalingClient {
                 return
             } catch {
                 lastError = error
-                logger.error(
-                    "❌ signaling connect attempt failed: session=\(self.sessionId, privacy: .public) generation=\(sequenceGeneration, privacy: .public) backend=\(attempt.label, privacy: .public) err=\(error.localizedDescription, privacy: .public)"
-                )
+                if error is CancellationError {
+                    logger.debug(
+                        "ℹ️ signaling connect attempt cancelled: session=\(self.sessionId, privacy: .public) generation=\(sequenceGeneration, privacy: .public) backend=\(attempt.label, privacy: .public)"
+                    )
+                } else {
+                    logger.error(
+                        "❌ signaling connect attempt failed: session=\(self.sessionId, privacy: .public) generation=\(sequenceGeneration, privacy: .public) backend=\(attempt.label, privacy: .public) err=\(error.localizedDescription, privacy: .public)"
+                    )
+                }
                 await cleanupTransport(for: attempt.backend)
                 if currentHandle == handleId {
                     currentHandle = nil
@@ -394,8 +402,14 @@ public actor WebSocketSignalingClient {
     ) async throws {
         let config = URLSessionConfiguration.ephemeral
         config.waitsForConnectivity = true
-        config.timeoutIntervalForRequest = max(1.0, Self.durationSeconds(timeout))
-        config.timeoutIntervalForResource = max(1.0, Self.durationSeconds(timeout))
+        config.timeoutIntervalForRequest = max(
+            Self.websocketRequestTimeoutSeconds,
+            Self.durationSeconds(timeout)
+        )
+        config.timeoutIntervalForResource = max(
+            Self.websocketResourceTimeoutSeconds,
+            Self.durationSeconds(timeout)
+        )
         config.allowsConstrainedNetworkAccess = true
         config.allowsExpensiveNetworkAccess = true
         if proxyBypass {

@@ -146,11 +146,57 @@ function compile_icon_composer_assets() {
   rm -rf "$tmp_dir"
 }
 
+function assert_release_product_is_fresh() {
+  local build_artifact="$1"
+  local stale_source=""
+
+  if [[ ! -e "${build_artifact}" ]]; then
+    return 0
+  fi
+
+  if [[ "${ROOT_DIR}/Package.swift" -nt "${build_artifact}" ]]; then
+    stale_source="${ROOT_DIR}/Package.swift"
+  else
+    stale_source="$(find "${ROOT_DIR}/Sources" -type f -newer "${build_artifact}" -print -quit 2>/dev/null || true)"
+  fi
+
+  if [[ -n "${stale_source}" && "${ALLOW_STALE_BUILD:-0}" != "1" ]]; then
+    echo "错误：检测到 Release 产物早于源码：${stale_source}" >&2
+    echo "请先重新构建，或显式设置 ALLOW_STALE_BUILD=1 后再跳过构建。" >&2
+    exit 1
+  fi
+}
+
+function product_mtime() {
+  local artifact="$1"
+  if [[ -e "${artifact}" ]]; then
+    stat -f "%m" "${artifact}" 2>/dev/null || echo 0
+  else
+    echo 0
+  fi
+}
+
+function select_release_build_dir() {
+  local xcode_product="${XCODE_BUILD_DIR}/${EXECUTABLE}"
+  local swiftpm_product="${SWIFTPM_RELEASE_BUILD_DIR}/${EXECUTABLE}"
+
+  if [[ -e "${swiftpm_product}" ]]; then
+    if [[ ! -e "${xcode_product}" || "$(product_mtime "${swiftpm_product}")" -ge "$(product_mtime "${xcode_product}")" ]]; then
+      echo "${SWIFTPM_RELEASE_BUILD_DIR}"
+      return
+    fi
+  fi
+
+  echo "${XCODE_BUILD_DIR}"
+}
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 source "${ROOT_DIR}/Scripts/apple_pqc_sdk_probe.sh"
 source "${ROOT_DIR}/Scripts/xcodebuild_helpers.sh"
-BUILD_DIR="${ROOT_DIR}/.build/xcode/Build/Products/Release"
+XCODE_BUILD_DIR="${ROOT_DIR}/.build/xcode/Build/Products/Release"
+SWIFTPM_RELEASE_BUILD_DIR="${ROOT_DIR}/.build/arm64-apple-macosx/release"
+BUILD_DIR="${XCODE_BUILD_DIR}"
 APP_NAME="SkyBridge Compass Pro.app"
 APP_DIR="${ROOT_DIR}/dist/${APP_NAME}"
 CONTENTS_DIR="${APP_DIR}/Contents"
@@ -180,6 +226,7 @@ fi
 
 # 中文注释：可执行文件与资源 bundle 名称（来自 Xcode 构建输出）
 EXECUTABLE="SkyBridgeCompassApp"
+BUILD_DIR="$(select_release_build_dir)"
 
 if [[ "${SKIP_BUILD}" != "1" ]]; then
   log "执行 Release 构建，确保打包包含最新代码"
@@ -219,6 +266,7 @@ if [[ "${SKIP_BUILD}" != "1" ]]; then
   fi
 else
   log "按 SKIP_BUILD=1 跳过构建，直接复用已有产物"
+  assert_release_product_is_fresh "${BUILD_DIR}/${EXECUTABLE}"
 fi
 
 # 校验构建产物是否存在
@@ -431,6 +479,9 @@ if codesign --verify --deep --strict --verbose=2 "${APP_DIR}" >/dev/null 2>&1; t
 else
   log "签名验证未通过（开发阶段可忽略）"
 fi
+
+# 标记 App Bundle 为最新打包产物，便于后续 DMG 流程做 freshness 校验。
+touch "${APP_DIR}"
 
 log "完成打包：${APP_DIR}"
 log "可直接双击运行或使用：open '${APP_DIR}'"

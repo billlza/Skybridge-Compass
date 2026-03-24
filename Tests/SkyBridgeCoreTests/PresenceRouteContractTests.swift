@@ -57,6 +57,36 @@ final class PresenceRouteContractTests: XCTestCase {
         XCTAssertTrue(ConnectionPresenceService.shared.activeConnections.contains(where: { $0.id == peerId }))
     }
 
+    func testPresenceCanonicalizesAliasUpdatesAndDisconnectsAcrossPeerIdentifiers() {
+        let stablePeerId = "id:\(UUID().uuidString.lowercased())"
+        let rawPeerId = String(stablePeerId.dropFirst(3))
+        defer { ConnectionPresenceService.shared.markDisconnected(peerId: stablePeerId) }
+
+        ConnectionPresenceService.shared.markConnected(
+            peerId: stablePeerId,
+            displayName: "Mac mini",
+            address: "10.0.0.9",
+            cryptoKind: "Apple PQC",
+            suite: "ML-KEM-768"
+        )
+
+        ConnectionPresenceService.shared.markConnected(
+            peerId: rawPeerId,
+            displayName: "Mac mini",
+            address: "10.0.0.9",
+            cryptoKind: "Apple PQC",
+            suite: "ML-KEM-768"
+        )
+
+        XCTAssertEqual(ConnectionPresenceService.shared.activeConnections.count, 1)
+        XCTAssertEqual(ConnectionPresenceService.shared.activeConnections.first?.id, stablePeerId)
+
+        ConnectionPresenceService.shared.markDisconnected(peerId: rawPeerId)
+
+        XCTAssertTrue(ConnectionPresenceService.shared.activeConnections.isEmpty)
+        XCTAssertTrue(ConnectionPresenceService.shared.routeDescriptorsByPeerId.isEmpty)
+    }
+
     func testResolveInboundPresenceRouteUsesStableDeviceIdPlusEndpointAddress() {
         let deviceId = UUID().uuidString.lowercased()
         let discovered = DiscoveredDevice(

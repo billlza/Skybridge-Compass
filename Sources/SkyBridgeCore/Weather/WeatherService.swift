@@ -82,6 +82,12 @@ public enum WeatherCondition: String, Codable, Sendable {
 /// SkyBridge天气服务 - 集成多个API并智能降级
 @MainActor
 public final class SkyBridgeWeatherService: ObservableObject {
+    private static let weatherCacheStore = CodablePersistenceStore<WeatherInfo>(
+        location: .protectedApplicationSupport(
+            path: "Weather/last-known-weather.json",
+            legacyUserDefaultsKey: "com.skybridge.lastKnownWeather"
+        )
+    )
  // MARK: - Published Properties
     
     @Published public private(set) var currentWeather: WeatherInfo?
@@ -91,7 +97,6 @@ public final class SkyBridgeWeatherService: ObservableObject {
  // MARK: - Private Properties
     
     private let logger = Logger(subsystem: "com.skybridge.weather", category: "Service")
-    private let cacheKey = "com.skybridge.lastKnownWeather"
     private let cacheValidityDuration: TimeInterval = 1800 // 30分钟缓存
     private let wttrFailureCooldownSeconds: TimeInterval = 1800 // wttr.in 失败后冷却 30 分钟，避免反复超时刷屏
     private let wttrCooldownUntilKey = "com.skybridge.weather.wttrCooldownUntil"
@@ -494,14 +499,11 @@ public final class SkyBridgeWeatherService: ObservableObject {
  // MARK: - Cache Management
     
     private func cacheWeather(_ weather: WeatherInfo) {
-        if let encoded = try? JSONEncoder().encode(weather) {
-            UserDefaults.standard.set(encoded, forKey: cacheKey)
-        }
+        try? Self.weatherCacheStore.save(weather)
     }
     
     private func loadCachedWeather() -> WeatherInfo? {
-        guard let data = UserDefaults.standard.data(forKey: cacheKey),
-              let weather = try? JSONDecoder().decode(WeatherInfo.self, from: data) else {
+        guard let weather = Self.weatherCacheStore.load() else {
             return nil
         }
         

@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import SkyBridgeCore
 
-@Suite("KeychainManager Supabase Config Tests")
+@Suite("KeychainManager Supabase Config Tests", .serialized)
 struct KeychainManagerSupabaseConfigTests {
     @Test("Supabase client config strips legacy service-role storage on write")
     func testStoreSupabaseConfigPurgesLegacyServiceRoleKey() throws {

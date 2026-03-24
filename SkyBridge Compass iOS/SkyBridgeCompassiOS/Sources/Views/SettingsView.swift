@@ -959,6 +959,8 @@ struct SupabaseSettingsView: View {
                         Task { await authManager.refreshProfile() }
                     }
                 }
+            } footer: {
+                Text("手机号验证码登录依赖 Supabase Auth 的 send_sms hook。生产环境请将 hook 指向 SkyBridge 服务端，再由服务端安全地调用 Aliyun SMS。")
             }
         }
         .scrollContentBackground(.hidden)

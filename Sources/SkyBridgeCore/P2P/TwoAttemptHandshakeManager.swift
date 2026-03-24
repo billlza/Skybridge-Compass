@@ -297,15 +297,32 @@ public struct TwoAttemptHandshakeManager: Sendable {
             } catch let error as HandshakeError {
 // 检查是否允许 fallback
                 if case .failed(let reason) = error {
-                    if enablePQCBridgeRetry,
-                       let bridged = try await attemptPQCBridgeRetry(
-                            deviceId: deviceId,
-                            reason: reason,
-                            policy: policy,
-                            cryptoProvider: cryptoProvider,
-                            executor: executor
-                       ) {
-                        return bridged
+                    if enablePQCBridgeRetry {
+                        do {
+                            if let bridged = try await attemptPQCBridgeRetry(
+                                deviceId: deviceId,
+                                reason: reason,
+                                policy: policy,
+                                cryptoProvider: cryptoProvider,
+                                executor: executor
+                            ) {
+                                return bridged
+                            }
+                        } catch {
+                            // Bridge retry is best-effort. If the policy still allows
+                            // Classic fallback, continue into the normal downgrade path.
+                            SecurityEventEmitter.emitDetached(SecurityEvent(
+                                type: .handshakeFailed,
+                                severity: .warning,
+                                message: "PQC bridge retry failed; evaluating classic fallback",
+                                context: [
+                                    "deviceId": deviceId,
+                                    "reason": String(describing: reason),
+                                    "bridgeRetryError": error.localizedDescription,
+                                    "policyAllowClassicFallback": policy.allowClassicFallback ? "1" : "0"
+                                ]
+                            ))
+                        }
                     }
                 }
                 if case .failed(let reason) = error,

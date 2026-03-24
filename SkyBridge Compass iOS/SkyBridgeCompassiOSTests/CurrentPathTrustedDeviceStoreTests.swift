@@ -29,7 +29,7 @@ final class CurrentPathTrustedDeviceStoreTests: XCTestCase {
         XCTAssertEqual(conflict, .identityConflict)
     }
 
-    func testCurrentPathBindingRejectsDeviceIdMigration() {
+    func testCurrentPathBindingAllowsSameAuthorityDeviceIdMigration() {
         TrustedDeviceStore.shared.upsertCurrentPathAuthority(
             deviceId: "device-alpha-1234",
             name: "Alpha",
@@ -42,7 +42,7 @@ final class CurrentPathTrustedDeviceStoreTests: XCTestCase {
             protocolPublicKeyFingerprint: String(repeating: "a", count: 64)
         )
 
-        XCTAssertEqual(conflict, .deviceIdMigrationRequired)
+        XCTAssertNil(conflict)
     }
 
     func testCurrentPathTrustLookupUsesFingerprintAuthority() {
@@ -59,5 +59,29 @@ final class CurrentPathTrustedDeviceStoreTests: XCTestCase {
 
         XCTAssertEqual(trusted?.currentDeviceId, "device-alpha-1234")
         XCTAssertEqual(trusted?.protocolPublicKeyFingerprint, String(repeating: "c", count: 64))
+    }
+
+    func testCanonicalTrustedDeviceIdFallsBackToUniqueTrustedNameForDiscoveryDevice() {
+        TrustedDeviceStore.shared.upsertCurrentPathAuthority(
+            deviceId: "device-mac-stable",
+            name: "Lza的MacBook Pro",
+            platform: .macOS,
+            protocolSigningAlgorithm: "Ed25519",
+            protocolPublicKeyFingerprint: String(repeating: "d", count: 64)
+        )
+
+        let discoveryDevice = DiscoveredDevice(
+            id: "host:fe80::81d:bb45:8c18:6d6a%en0",
+            name: "Lza的MacBook Pro",
+            modelName: "MacBook Pro",
+            platform: .macOS,
+            osVersion: "15.0",
+            ipAddress: "fe80::81d:bb45:8c18:6d6a%en0"
+        )
+
+        XCTAssertEqual(
+            TrustedDeviceStore.shared.canonicalTrustedDeviceId(for: discoveryDevice),
+            "device-mac-stable"
+        )
     }
 }

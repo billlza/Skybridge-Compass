@@ -39,13 +39,257 @@ private struct RemoteMessage: Codable, Sendable {
 
 /// 屏幕数据（近距镜像主载体）
 /// imageData 通常为压缩后的视频帧（H.264 / HEVC），或者退化为静态图像字节
-private struct ScreenData: Codable, Sendable {
+struct ScreenData: Codable, Sendable {
     let width: Int
     let height: Int
     let imageData: Data
     let timestamp: TimeInterval
  /// "hevc" / "h264" / 其他（静态图像）
     let format: String?
+ /// 压缩视频帧是否为关键帧；对 JPEG/BGRA 等独立帧固定视为 true。
+    let isSyncFrame: Bool?
+}
+
+private actor RemoteControlOutboundFramePump {
+    struct HealthSnapshot: Sendable {
+        let lastSentFrameAt: Date
+        let waitingForSyncFrame: Bool
+        let waitingForSyncSince: Date?
+    }
+
+    private enum FrameTransport: Sendable {
+        case legacyJSON
+        case binaryWire
+    }
+
+    private let peerId: String
+    private let connection: NWConnection
+    private let maxFramedMessageBytes: Int
+
+    private var frameTransport: FrameTransport = .legacyJSON
+    private var damageTrackingEnabled = true
+    private var sessionKeys: SessionKeys?
+    private var frameQueue = RemoteScreenFrameSendQueue()
+    private var latestDamageReport: RemoteDesktopDamageReport?
+    private var sending = false
+    private var closed = false
+    private var onNeedsSyncRefresh: (@Sendable () -> Void)?
+    private var lastSentFrameAt: Date = .distantPast
+    private var waitingForSyncSince: Date?
+    private var lastSyncRefreshRequestAt: Date = .distantPast
+    private var syncRecoveryTask: Task<Void, Never>?
+
+    init(peerId: String, connection: NWConnection, maxFramedMessageBytes: Int) {
+        self.peerId = peerId
+        self.connection = connection
+        self.maxFramedMessageBytes = maxFramedMessageBytes
+    }
+
+    func updateTransportState(
+        requestedStreamConfiguration: RemoteDesktopStreamConfiguration?,
+        sessionKeys: SessionKeys?
+    ) {
+        frameTransport = requestedStreamConfiguration?.screenFrameTransport == "sbrf-v1"
+            ? .binaryWire
+            : .legacyJSON
+        damageTrackingEnabled = requestedStreamConfiguration?.damageTrackingEnabled ?? true
+        self.sessionKeys = sessionKeys
+    }
+
+    func submitDamageReport(_ report: RemoteDesktopDamageReport) async {
+        guard !closed else { return }
+        latestDamageReport = report
+        await drainIfNeeded()
+    }
+
+    func submitFrame(_ frame: ScreenData) async {
+        guard !closed else { return }
+        let enqueueResult = frameQueue.enqueue(frame)
+        if enqueueResult == .droppedPredictiveFrameNeedsSyncRefresh {
+            requestSyncRefreshIfNeeded(reason: "send-queue-overflow", minimumInterval: 0)
+        }
+        updateSyncRecoveryState()
+        await drainIfNeeded()
+    }
+
+    func setSyncRefreshHandler(_ handler: (@Sendable () -> Void)?) {
+        onNeedsSyncRefresh = handler
+    }
+
+    func close() {
+        closed = true
+        frameQueue.clear()
+        latestDamageReport = nil
+        onNeedsSyncRefresh = nil
+        waitingForSyncSince = nil
+        syncRecoveryTask?.cancel()
+        syncRecoveryTask = nil
+    }
+
+    func healthSnapshot() -> HealthSnapshot {
+        HealthSnapshot(
+            lastSentFrameAt: lastSentFrameAt,
+            waitingForSyncFrame: frameQueue.waitingForSyncFrame,
+            waitingForSyncSince: waitingForSyncSince
+        )
+    }
+
+    private func drainIfNeeded() async {
+        guard !sending else { return }
+        sending = true
+        defer { sending = false }
+
+        while !closed, let nextFrame = frameQueue.dequeue() {
+
+            do {
+                if damageTrackingEnabled,
+                   let report = latestDamageReport {
+                    latestDamageReport = nil
+                    try await sendControlPayload(report, type: .damageReport)
+                }
+
+                let payload = try makeScreenPayload(for: nextFrame)
+                guard payload.count <= maxFramedMessageBytes else {
+                    Logger(subsystem: "com.skybridge.compass", category: "RemoteControl")
+                        .warning(
+                            """
+                            ⚠️ 已丢弃超限远控屏幕帧: peer=\(self.peerId, privacy: .public) \
+                            bytes=\(payload.count, privacy: .public) \
+                            max=\(self.maxFramedMessageBytes, privacy: .public) \
+                            format=\(nextFrame.format ?? "unknown", privacy: .public) \
+                            resolution=\(nextFrame.width, privacy: .public)x\(nextFrame.height, privacy: .public)
+                            """
+                        )
+                    continue
+                }
+
+                try await sendRemoteFrame(payload)
+                lastSentFrameAt = Date()
+                updateSyncRecoveryState()
+            } catch {
+                Logger(subsystem: "com.skybridge.compass", category: "RemoteControl")
+                    .error(
+                        "❌ 发送屏幕数据失败: peer=\(self.peerId, privacy: .public) error=\(error.localizedDescription, privacy: .public)"
+                    )
+                break
+            }
+        }
+    }
+
+    private func updateSyncRecoveryState() {
+        if frameQueue.waitingForSyncFrame {
+            if waitingForSyncSince == nil {
+                waitingForSyncSince = Date()
+            }
+            ensureSyncRecoveryTaskRunning()
+        } else {
+            waitingForSyncSince = nil
+            syncRecoveryTask?.cancel()
+            syncRecoveryTask = nil
+        }
+    }
+
+    private func ensureSyncRecoveryTaskRunning() {
+        guard syncRecoveryTask == nil else { return }
+        syncRecoveryTask = Task { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: .milliseconds(400))
+                } catch {
+                    return
+                }
+                await self.driveSyncRecoveryTick()
+            }
+        }
+    }
+
+    private func driveSyncRecoveryTick() {
+        guard !closed else {
+            syncRecoveryTask = nil
+            return
+        }
+        guard frameQueue.waitingForSyncFrame else {
+            syncRecoveryTask?.cancel()
+            syncRecoveryTask = nil
+            waitingForSyncSince = nil
+            return
+        }
+        requestSyncRefreshIfNeeded(reason: "waiting-for-sync-frame", minimumInterval: 0.4)
+    }
+
+    private func requestSyncRefreshIfNeeded(reason: String, minimumInterval: TimeInterval) {
+        let now = Date()
+        guard now.timeIntervalSince(lastSyncRefreshRequestAt) >= minimumInterval else { return }
+        lastSyncRefreshRequestAt = now
+        Logger(subsystem: "com.skybridge.compass", category: "RemoteControl")
+            .warning("⚠️ 发送队列等待关键帧，已请求刷新: peer=\(self.peerId, privacy: .public) reason=\(reason, privacy: .public)")
+        onNeedsSyncRefresh?()
+    }
+
+    private func makeScreenPayload(for frame: ScreenData) throws -> Data {
+        switch frameTransport {
+        case .binaryWire:
+            return RemoteDesktopScreenFrameWire.encode(
+                width: frame.width,
+                height: frame.height,
+                imageData: frame.imageData,
+                timestamp: frame.timestamp,
+                format: frame.format,
+                isSyncFrame: frame.isSyncFrame
+            )
+        case .legacyJSON:
+            let encodedScreen = try JSONEncoder().encode(frame)
+            let message = RemoteMessage(type: .screenData, payload: encodedScreen)
+            return try JSONEncoder().encode(message)
+        }
+    }
+
+    func sendControlPayload<T: Encodable & Sendable>(
+        _ payload: T,
+        type: RemoteMessage.MessageType
+    ) async throws {
+        let encodedPayload = try JSONEncoder().encode(payload)
+        let message = RemoteMessage(type: type, payload: encodedPayload)
+        let framedMessage = try JSONEncoder().encode(message)
+        guard framedMessage.count <= maxFramedMessageBytes else {
+            throw RemoteControlError.invalidMessageLength(framedMessage.count)
+        }
+        try await sendRemoteFrame(framedMessage)
+    }
+
+    private func sendRemoteFrame(_ plaintext: Data) async throws {
+        let outboundData: Data
+        if #available(macOS 14.0, *), let sessionKeys {
+            outboundData = try Self.encryptRemotePayload(plaintext, with: sessionKeys)
+        } else {
+            outboundData = plaintext
+        }
+        try await Self.sendFramed(outboundData, over: connection)
+    }
+
+    @available(macOS 14.0, *)
+    private static func encryptRemotePayload(_ plaintext: Data, with keys: SessionKeys) throws -> Data {
+        let key = SymmetricKey(data: keys.sendKey)
+        let sealed = try AES.GCM.seal(plaintext, using: key)
+        return sealed.combined ?? Data()
+    }
+
+    private static func sendFramed(_ data: Data, over connection: NWConnection) async throws {
+        var length = UInt32(data.count).bigEndian
+        var frame = Data(bytes: &length, count: 4)
+        frame.append(data)
+
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            connection.send(content: frame, completion: .contentProcessed { error in
+                if let error {
+                    cont.resume(throwing: error)
+                } else {
+                    cont.resume()
+                }
+            })
+        }
+    }
 }
 
 /// 鼠标事件类型
@@ -128,6 +372,7 @@ private final class PeerConnection {
     var remoteVideoFormats: Set<String>
     var requestedStreamConfiguration: RemoteDesktopStreamConfiguration?
     let clipboardSessionId: UUID
+    let outboundFramePump: RemoteControlOutboundFramePump
  /// 专用收包队列，避免和 UI/MainActor 混在一起
     let queue: DispatchQueue
 
@@ -145,6 +390,11 @@ private final class PeerConnection {
         self.connection = connection
         self.remoteVideoFormats = Set(remoteVideoFormats.map { $0.lowercased() })
         self.clipboardSessionId = UUID()
+        self.outboundFramePump = RemoteControlOutboundFramePump(
+            peerId: id,
+            connection: connection,
+            maxFramedMessageBytes: 8_000_000
+        )
         self.queue = DispatchQueue(
             label: "com.skybridge.remote.\(id)",
             qos: .userInitiated
@@ -196,6 +446,13 @@ public final class RemoteControlManager: BaseManager {
     @Published public private(set) var isBeingControlled: Bool = false
     @Published public private(set) var connectedDevices: [String] = []
     @Published public private(set) var screenSharingActive: Bool = false
+    @Published public private(set) var currentRenderingMode: RenderingMode = .stable
+    public var preferredRenderingMode: RenderingMode = .stable {
+        didSet {
+            guard preferredRenderingMode != oldValue else { return }
+            applyPreferredRenderingModeToActiveViewingSession()
+        }
+    }
 
  /// 近距镜像纹理（供 SwiftUI / AppKit 直接渲染）
     public let textureFeed = RemoteTextureFeed()
@@ -218,14 +475,30 @@ public final class RemoteControlManager: BaseManager {
  // MARK: 内部组件
 
     private let renderer = RemoteFrameRenderer()
+    /// 三层渲染模式控制器
+    public let renderingModeController = RenderingModeController()
+    /// 稳定渲染器（Phase 1 正式产品化）
+    private lazy var stableRenderer: StableRenderer = {
+        StableRenderer(healthMonitor: renderingModeController.healthMonitor)
+    }()
+    /// 高性能渲染器（Phase 2 显示驱动拉帧）
+    private lazy var fluidRenderer: FluidRenderer = {
+        FluidRenderer(healthMonitor: renderingModeController.healthMonitor)
+    }()
+    /// 高保真渲染器（Phase 3 HDR/色彩管线）
+    private lazy var referenceRenderer: ReferenceRenderer = {
+        let r = ReferenceRenderer(healthMonitor: renderingModeController.healthMonitor)
+        r.onDegradationNeeded = { [weak self] reason in
+            self?.renderingModeController.triggerAutoDegradation(reason: reason)
+        }
+        return r
+    }()
     private var captureStreamer: ScreenCaptureKitStreamer?
     private var screenCaptureWatchdogTask: Task<Void, Never>?
     private var screenCaptureRestartInProgress = false
+    private var screenCaptureStartupRetryCountByPeerId: [String: Int] = [:]
     private var peers: [String: PeerConnection] = [:]
     private let maxFramedMessageBytes = 8_000_000
-    private var latestOutboundScreenFrameByPeerId: [String: ScreenData] = [:]
-    private var latestOutboundDamageReportByPeerId: [String: RemoteDesktopDamageReport] = [:]
-    private var outboundScreenSenderBusy: Set<String> = []
     private var interactionTelemetryTasksByPeerId: [String: Task<Void, Never>] = [:]
     private var activeClipboardPeerId: String?
 
@@ -246,10 +519,116 @@ public final class RemoteControlManager: BaseManager {
                 self.textureFeed.update(texture: texture, backing: backing)
             }
         }
+
+        // 稳定渲染器输出同样绑定到纹理流
+        stableRenderer.frameHandler = { [weak self] texture, backing in
+            guard let self else { return }
+            Task { @MainActor in
+                self.publishRenderedTexture(texture, backing: backing, from: .stable)
+            }
+        }
+
+        // 高性能渲染器输出绑定到纹理流
+        fluidRenderer.frameHandler = { [weak self] texture, backing in
+            guard let self else { return }
+            Task { @MainActor in
+                self.publishRenderedTexture(texture, backing: backing, from: .fluid)
+            }
+        }
+
+        // 高保真渲染器输出绑定到纹理流
+        referenceRenderer.frameHandler = { [weak self] texture, backing in
+            guard let self else { return }
+            Task { @MainActor in
+                self.publishRenderedTexture(texture, backing: backing, from: .reference)
+            }
+        }
+
+        renderingModeController.onModeChanged = { [weak self] _, to, _ in
+            guard let self else { return }
+            Task { @MainActor in
+                self.currentRenderingMode = to
+                self.synchronizeRendererResources(for: to)
+            }
+        }
     }
 
     public override func performInitialization() async {
         logger.info("🖥️ RemoteControlManager performInitialization 完成")
+    }
+
+    private func resolvedPreferredRenderingMode() -> RenderingMode {
+        switch preferredRenderingMode {
+        case .stable:
+            return .stable
+        case .fluid:
+            return MTLCreateSystemDefaultDevice() == nil ? .stable : .fluid
+        case .reference:
+            let report = HardwareCapabilityProbe.probe(requireExternalPower: true)
+            if report.isReferenceCapable {
+                return .reference
+            }
+            return MTLCreateSystemDefaultDevice() == nil ? .stable : .fluid
+        }
+    }
+
+    private func prepareViewingRenderPipelineForNewStream() {
+        stableRenderer.teardown()
+        fluidRenderer.teardown()
+        referenceRenderer.teardown()
+        textureFeed.update(texture: nil)
+        renderingModeController.resetForNewStream()
+        let requestedMode = resolvedPreferredRenderingMode()
+        currentRenderingMode = renderingModeController.requestMode(requestedMode)
+    }
+
+    private func tearDownViewingRenderPipeline() {
+        stableRenderer.teardown()
+        fluidRenderer.teardown()
+        referenceRenderer.teardown()
+        textureFeed.update(texture: nil)
+        renderingModeController.resetForNewStream()
+        currentRenderingMode = .stable
+    }
+
+    private func applyPreferredRenderingModeToActiveViewingSession() {
+        guard isControlling, !connectedDevices.isEmpty else { return }
+        currentRenderingMode = renderingModeController.requestMode(resolvedPreferredRenderingMode())
+    }
+
+    private func publishRenderedTexture(
+        _ texture: MTLTexture,
+        backing: AnyObject?,
+        from mode: RenderingMode
+    ) {
+        guard renderingModeController.currentMode == mode else { return }
+        textureFeed.update(texture: texture, backing: backing)
+        if renderingModeController.isProbationActive {
+            renderingModeController.reportProbationFrameSuccess()
+        }
+    }
+
+    private func synchronizeRendererResources(for activeMode: RenderingMode) {
+        switch activeMode {
+        case .stable:
+            fluidRenderer.teardown()
+            referenceRenderer.teardown()
+        case .fluid:
+            stableRenderer.teardown()
+            referenceRenderer.teardown()
+        case .reference:
+            stableRenderer.teardown()
+            fluidRenderer.teardown()
+        }
+    }
+
+    private func evaluateHighPerformanceRenderHealth(afterPullFor mode: RenderingMode, rendered: Bool) {
+        guard renderingModeController.currentMode == mode else { return }
+        guard !rendered else { return }
+        guard renderingModeController.isProbationActive else { return }
+        if renderingModeController.healthMonitor.isFrozen {
+            renderingModeController.reportProbationFrameFailure()
+        }
     }
 
  // MARK: - 公共控制接口
@@ -289,10 +668,8 @@ public final class RemoteControlManager: BaseManager {
             connection: connection,
             remoteVideoFormats: remoteVideoFormats
         )
-        peers[deviceId] = peer
-        latestOutboundScreenFrameByPeerId.removeValue(forKey: deviceId)
-        latestOutboundDamageReportByPeerId.removeValue(forKey: deviceId)
-        outboundScreenSenderBusy.remove(deviceId)
+        replacePeerSessionIfNeeded(with: peer, resetCapturePipeline: false)
+        prepareViewingRenderPipelineForNewStream()
 
         if !connectedDevices.contains(deviceId) {
             connectedDevices.append(deviceId)
@@ -311,12 +688,13 @@ public final class RemoteControlManager: BaseManager {
         peer.connection.cancel()
         peers.removeValue(forKey: deviceId)
         connectedDevices.removeAll { $0 == deviceId }
-        latestOutboundScreenFrameByPeerId.removeValue(forKey: deviceId)
-        latestOutboundDamageReportByPeerId.removeValue(forKey: deviceId)
-        outboundScreenSenderBusy.remove(deviceId)
+        Task {
+            await peer.outboundFramePump.close()
+        }
 
         if connectedDevices.isEmpty {
             isControlling = false
+            tearDownViewingRenderPipeline()
         }
     }
 
@@ -325,7 +703,7 @@ public final class RemoteControlManager: BaseManager {
         logger.info("🖥️ 允许远程控制来自设备: \(deviceId, privacy: .public)")
 
         let peer = PeerConnection(id: deviceId, connection: connection)
-        peers[deviceId] = peer
+        replacePeerSessionIfNeeded(with: peer, resetCapturePipeline: true)
 
         if #available(macOS 14.0, *) {
             peer.handshakePeer = PeerIdentifier(deviceId: deviceId, displayName: nil, address: nil)
@@ -368,10 +746,11 @@ public final class RemoteControlManager: BaseManager {
         peer.connection.cancel()
         peers.removeValue(forKey: deviceId)
         connectedDevices.removeAll { $0 == deviceId }
-        latestOutboundScreenFrameByPeerId.removeValue(forKey: deviceId)
-        latestOutboundDamageReportByPeerId.removeValue(forKey: deviceId)
-        outboundScreenSenderBusy.remove(deviceId)
+        Task {
+            await peer.outboundFramePump.close()
+        }
         stopInteractionTelemetry(for: deviceId)
+        screenCaptureStartupRetryCountByPeerId.removeValue(forKey: deviceId)
 
         if connectedDevices.isEmpty {
             isBeingControlled = false
@@ -386,16 +765,58 @@ public final class RemoteControlManager: BaseManager {
         }
     }
 
+    private func isCurrentPeer(_ peer: PeerConnection) -> Bool {
+        guard let current = peers[peer.id] else { return false }
+        return current === peer
+    }
+
+    private func replacePeerSessionIfNeeded(
+        with peer: PeerConnection,
+        resetCapturePipeline: Bool
+    ) {
+        let previousPeer = peers[peer.id]
+        peers[peer.id] = peer
+
+        guard let previousPeer, previousPeer !== peer else { return }
+
+        logger.warning(
+            "🔁 RemoteControl superseding existing session for \(peer.id, privacy: .public)"
+        )
+
+        if activeClipboardPeerId == previousPeer.id {
+            let clipboard = ClipboardRedirectionManager.shared
+            clipboard.onLocalClipboardChanged = nil
+            clipboard.disable()
+            activeClipboardPeerId = nil
+        }
+
+        stopInteractionTelemetry(for: previousPeer.id)
+        Task {
+            await previousPeer.outboundFramePump.close()
+        }
+
+        if resetCapturePipeline {
+            screenCaptureWatchdogTask?.cancel()
+            screenCaptureWatchdogTask = nil
+            screenCaptureRestartInProgress = false
+            captureStreamer?.stop()
+            captureStreamer = nil
+            screenSharingActive = false
+            screenCaptureStartupRetryCountByPeerId.removeValue(forKey: previousPeer.id)
+        } else {
+            tearDownViewingRenderPipeline()
+        }
+
+        previousPeer.connection.cancel()
+    }
+
  // MARK: - 输入事件发送（控制端 -> 被控制端）
 
     public func sendMouseEvent(_ event: RemoteMouseEvent, to deviceId: String) async throws {
         guard let peer = peers[deviceId] else {
             throw RemoteControlError.deviceNotConnected
         }
-        let eventData = try JSONEncoder().encode(event)
-        let message = RemoteMessage(type: .mouseEvent, payload: eventData)
-        let payload = try JSONEncoder().encode(message)
-        try await sendRemoteFrame(payload, to: peer)
+        try await peer.outboundFramePump.sendControlPayload(event, type: .mouseEvent)
         logger.debug("🖱️ 发送鼠标事件 \(event.type.rawValue, privacy: .public) -> \(deviceId, privacy: .public)")
     }
 
@@ -403,10 +824,7 @@ public final class RemoteControlManager: BaseManager {
         guard let peer = peers[deviceId] else {
             throw RemoteControlError.deviceNotConnected
         }
-        let eventData = try JSONEncoder().encode(event)
-        let message = RemoteMessage(type: .keyboardEvent, payload: eventData)
-        let payload = try JSONEncoder().encode(message)
-        try await sendRemoteFrame(payload, to: peer)
+        try await peer.outboundFramePump.sendControlPayload(event, type: .keyboardEvent)
         logger.debug("⌨️ 发送键盘事件 keyCode=\(event.keyCode) -> \(deviceId, privacy: .public)")
     }
 
@@ -414,6 +832,10 @@ public final class RemoteControlManager: BaseManager {
 
  /// 启动本机屏幕捕获 + 硬件编码 + 推流
     private func startScreenSharing(to peer: PeerConnection) async {
+        guard isCurrentPeer(peer) else {
+            logger.info("ℹ️ 忽略过期远控会话的推流启动: \(peer.id, privacy: .public)")
+            return
+        }
         logger.info("📺 开始屏幕共享（ScreenCaptureKit + 硬件编码） -> \(peer.id, privacy: .public)")
 
         if !(await ensureScreenCapturePermission()) {
@@ -422,12 +844,14 @@ public final class RemoteControlManager: BaseManager {
             )
         }
 
+        screenCaptureWatchdogTask?.cancel()
+        screenCaptureWatchdogTask = nil
+        captureStreamer?.stop()
+        captureStreamer = nil
         screenSharingActive = true
 
         let streamer = ScreenCaptureKitStreamer()
         captureStreamer = streamer
-        screenCaptureWatchdogTask?.cancel()
-        screenCaptureWatchdogTask = nil
         streamer.onCaptureIssue = { [weak self] reason in
             guard let self else { return }
             Task { @MainActor [weak self] in
@@ -436,9 +860,8 @@ public final class RemoteControlManager: BaseManager {
             }
         }
 
-        streamer.onEncodedFrame = { [weak self] data, width, height, frameType in
-            guard let self else { return }
-            // 在主线程捕获必要的值
+        let outboundFramePump = peer.outboundFramePump
+        streamer.onEncodedFrame = { data, width, height, frameType, isSyncFrame in
             let fmt: String
             switch frameType {
             case .hevc: fmt = "hevc"
@@ -451,23 +874,28 @@ public final class RemoteControlManager: BaseManager {
                     fmt = "bgra"
                 }
             }
-            Task { [weak self] in
-                guard let self else { return }
+            peer.queue.async {
                 let frame = ScreenData(
                     width: width,
                     height: height,
                     imageData: data,
                     timestamp: Date().timeIntervalSince1970,
-                    format: fmt
+                    format: fmt,
+                    isSyncFrame: isSyncFrame
                 )
-                await self.enqueueOutboundScreenFrame(frame, to: peer)
+                Task {
+                    await outboundFramePump.submitFrame(frame)
+                }
             }
         }
-        streamer.onDamageReport = { [weak self] report in
-            guard let self else { return }
-            Task { [weak self] in
-                guard let self else { return }
-                await self.noteOutboundDamageReport(report, to: peer)
+        await outboundFramePump.setSyncRefreshHandler { [weak streamer] in
+            Task { @MainActor [weak streamer] in
+                streamer?.requestKeyFrameRefresh(reason: "outbound-frame-drop")
+            }
+        }
+        streamer.onDamageReport = { report in
+            Task.detached(priority: .utility) {
+                await outboundFramePump.submitDamageReport(report)
             }
         }
 
@@ -488,6 +916,7 @@ public final class RemoteControlManager: BaseManager {
         )
 
         do {
+            await syncOutboundFramePump(for: peer)
             try await streamer.start(
                 preferredCodec: policy.codec,
                 preferredSize: policy.preferredSize,
@@ -496,6 +925,14 @@ public final class RemoteControlManager: BaseManager {
                 captureCursorInVideo: !(peer.requestedStreamConfiguration?.separateCursorChannelEnabled ?? false),
                 bitstreamFormat: .annexB
             )
+            guard captureStreamer === streamer else {
+                logger.info(
+                    "ℹ️ 已忽略被新流策略替换的屏幕采集启动完成: peer=\(peer.id, privacy: .public)"
+                )
+                streamer.stop()
+                return
+            }
+            screenCaptureStartupRetryCountByPeerId[peer.id] = 0
             configureClipboardSync(for: peer)
             startInteractionTelemetryIfNeeded(for: peer)
             screenCaptureWatchdogTask = Task { [weak self, weak streamer] in
@@ -507,27 +944,120 @@ public final class RemoteControlManager: BaseManager {
                           self.isBeingControlled else { break }
 
                     let health = streamer.healthSnapshot()
+                    let framePumpHealth = await outboundFramePump.healthSnapshot()
                     let now = Date()
                     let sampleAge = now.timeIntervalSince(health.lastSampleBufferAt)
+                    let meaningfulSampleAge = now.timeIntervalSince(health.lastMeaningfulSampleAt)
                     let encodedAge = now.timeIntervalSince(health.lastEncodedFrameAt)
+                    let sentAge = now.timeIntervalSince(framePumpHealth.lastSentFrameAt)
                     let hasSampleFlow = health.lastSampleBufferAt != .distantPast
+                    let hasMeaningfulSampleFlow = health.lastMeaningfulSampleAt != .distantPast
 
-                    if hasSampleFlow && sampleAge < 1.5 && encodedAge > 2.0 {
+                    if hasMeaningfulSampleFlow && meaningfulSampleAge < 1.5 && encodedAge > 2.0 {
                         self.logger.warning(
-                            "⚠️ 检测到录屏编码停滞：peer=\(peer.id, privacy: .public) sampleAge=\(sampleAge, privacy: .public) encodedAge=\(encodedAge, privacy: .public)"
+                            """
+                            ⚠️ 检测到录屏编码停滞：peer=\(peer.id, privacy: .public) \
+                            sampleAge=\(sampleAge, privacy: .public) \
+                            meaningfulSampleAge=\(meaningfulSampleAge, privacy: .public) \
+                            encodedAge=\(encodedAge, privacy: .public)
+                            """
                         )
                         await self.restartScreenSharingIfNeeded(for: peer.id, reason: "encoded-stall")
                         break
+                    } else if hasMeaningfulSampleFlow,
+                              encodedAge < 1.0,
+                              sentAge > 2.0 {
+                        self.logger.warning(
+                            """
+                            ⚠️ 检测到录屏发送停滞：peer=\(peer.id, privacy: .public) \
+                            encodedAge=\(encodedAge, privacy: .public) \
+                            sentAge=\(sentAge, privacy: .public) \
+                            waitingForSync=\(framePumpHealth.waitingForSyncFrame, privacy: .public)
+                            """
+                        )
+                        streamer.requestKeyFrameRefresh(reason: "frame-send-stall")
+                        await self.restartScreenSharingIfNeeded(for: peer.id, reason: "frame-send-stall")
+                        break
+                    } else if hasSampleFlow,
+                              !hasMeaningfulSampleFlow,
+                              encodedAge > 2.0 {
+                        self.logger.debug(
+                            """
+                            ℹ️ 录屏流处于 idle 状态，暂不将未编码判定为故障：peer=\(peer.id, privacy: .public) \
+                            sampleAge=\(sampleAge, privacy: .public) \
+                            encodedAge=\(encodedAge, privacy: .public)
+                            """
+                        )
                     }
                 }
             }
         } catch {
+            guard captureStreamer === streamer else {
+                logger.info(
+                    "ℹ️ 已忽略被新流策略替换的屏幕采集启动错误: peer=\(peer.id, privacy: .public) error=\(error.localizedDescription, privacy: .public)"
+                )
+                return
+            }
             logger.error(
                 "❌ 启动 ScreenCaptureKitStreamer 失败: \(error.localizedDescription, privacy: .public). 请确认已在“系统设置 > 隐私与安全 > 录屏与系统录音”中为当前运行的 App 条目授权，必要时完全退出后重开。"
             )
-            screenSharingActive = false
-            stopRemoteControl(from: peer.id)
+            guard isCurrentPeer(peer) else { return }
+            if !scheduleScreenSharingStartupRetry(
+                for: peer,
+                error: error,
+                replacing: streamer
+            ) {
+                screenSharingActive = false
+            }
         }
+    }
+
+    private func scheduleScreenSharingStartupRetry(
+        for peer: PeerConnection,
+        error: Error,
+        replacing streamer: ScreenCaptureKitStreamer
+    ) -> Bool {
+        let nextAttempt = (screenCaptureStartupRetryCountByPeerId[peer.id] ?? 0) + 1
+        screenCaptureStartupRetryCountByPeerId[peer.id] = nextAttempt
+
+        let nsError = error as NSError
+        logger.error(
+            """
+            ❌ 屏幕采集启动失败: peer=\(peer.id, privacy: .public) \
+            attempt=\(nextAttempt, privacy: .public) \
+            domain=\(nsError.domain, privacy: .public) \
+            code=\(nsError.code, privacy: .public)
+            """
+        )
+
+        screenCaptureWatchdogTask?.cancel()
+        screenCaptureWatchdogTask = nil
+        streamer.stop()
+        if captureStreamer === streamer {
+            captureStreamer = nil
+        }
+        screenSharingActive = false
+
+        guard nextAttempt <= 2 else {
+            logger.error(
+                "❌ 屏幕采集启动已连续失败，保留远控会话等待人工重试: peer=\(peer.id, privacy: .public)"
+            )
+            return false
+        }
+
+        let delay: Duration = nextAttempt == 1 ? .milliseconds(250) : .seconds(1)
+        logger.warning(
+            "⚠️ 屏幕采集启动失败，保留远控会话并准备自动重试: peer=\(peer.id, privacy: .public) delay=\(String(describing: delay), privacy: .public)"
+        )
+
+        Task { @MainActor [weak self, weak peer] in
+            guard let self, let peer else { return }
+            try? await Task.sleep(for: delay)
+            guard self.isCurrentPeer(peer), self.isBeingControlled else { return }
+            guard self.captureStreamer == nil else { return }
+            await self.startScreenSharing(to: peer)
+        }
+        return true
     }
 
     private func restartScreenSharingIfNeeded(for deviceId: String, reason: String) async {
@@ -550,6 +1080,7 @@ public final class RemoteControlManager: BaseManager {
     }
 
     private func startInteractionTelemetryIfNeeded(for peer: PeerConnection) {
+        guard isCurrentPeer(peer) else { return }
         guard interactionTelemetryTasksByPeerId[peer.id] == nil else { return }
 
         interactionTelemetryTasksByPeerId[peer.id] = Task { @MainActor [weak self] in
@@ -567,7 +1098,7 @@ public final class RemoteControlManager: BaseManager {
             }
 
             while !Task.isCancelled {
-                guard self.peers[peer.id] != nil, self.isBeingControlled else { break }
+                guard self.isCurrentPeer(peer), self.isBeingControlled else { break }
 
                 let wantsCursorChannel = peer.requestedStreamConfiguration?.separateCursorChannelEnabled ?? false
                 let wantsOverlayChannel = peer.requestedStreamConfiguration?.interactionOverlayChannelEnabled ?? false
@@ -667,12 +1198,17 @@ public final class RemoteControlManager: BaseManager {
         for peer: PeerConnection,
         timeout: Duration = .milliseconds(900)
     ) async {
+        guard isCurrentPeer(peer) else { return }
         guard peer.requestedStreamConfiguration == nil else { return }
 
         let deadline = ContinuousClock.now + timeout
-        while peer.requestedStreamConfiguration == nil, ContinuousClock.now < deadline {
+        while isCurrentPeer(peer),
+              peer.requestedStreamConfiguration == nil,
+              ContinuousClock.now < deadline {
             try? await Task.sleep(for: .milliseconds(50))
         }
+
+        guard isCurrentPeer(peer) else { return }
 
         if let config = peer.requestedStreamConfiguration {
             logger.info(
@@ -688,76 +1224,40 @@ public final class RemoteControlManager: BaseManager {
     }
 
     private func ensureScreenCapturePermission() async -> Bool {
-        if CGPreflightScreenCaptureAccess() {
-            return true
+        let authorized = await ScreenCaptureAuthorizationProbe.shared.requestAuthorizationIfNeeded {
+            ScreenCapturePermissionSettingsOpener.open()
         }
-
-        // Best effort: prompt once if the app has not been granted Screen Recording yet.
-        let requested = await MainActor.run { CGRequestScreenCaptureAccess() }
-        if requested {
-            return true
+        if !authorized {
+            logger.warning("⚠️ 屏幕录制权限预检失败：系统仍未确认授权")
         }
+        return authorized
+    }
 
-        do {
-            _ = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-            return true
-        } catch {
-            logger.warning("⚠️ SCShareableContent.excludingDesktopWindows 预检失败: \(error.localizedDescription, privacy: .public)")
-            return false
+    private func syncOutboundFramePump(for peer: PeerConnection) async {
+        guard isCurrentPeer(peer) else { return }
+        if #available(macOS 14.0, *) {
+            await peer.outboundFramePump.updateTransportState(
+                requestedStreamConfiguration: peer.requestedStreamConfiguration,
+                sessionKeys: peer.sessionKeys
+            )
+        } else {
+            await peer.outboundFramePump.updateTransportState(
+                requestedStreamConfiguration: peer.requestedStreamConfiguration,
+                sessionKeys: nil
+            )
         }
     }
 
-    private func enqueueOutboundScreenFrame(_ frame: ScreenData, to peer: PeerConnection) async {
-        latestOutboundScreenFrameByPeerId[peer.id] = frame
-        guard !outboundScreenSenderBusy.contains(peer.id) else { return }
-        outboundScreenSenderBusy.insert(peer.id)
-
-        while true {
-            guard let next = latestOutboundScreenFrameByPeerId.removeValue(forKey: peer.id) else { break }
-            guard peers[peer.id] != nil else {
-                latestOutboundScreenFrameByPeerId.removeValue(forKey: peer.id)
-                latestOutboundDamageReportByPeerId.removeValue(forKey: peer.id)
-                break
-            }
-
-            do {
-                if let damageReport = latestOutboundDamageReportByPeerId.removeValue(forKey: peer.id),
-                   peer.requestedStreamConfiguration?.damageTrackingEnabled ?? true {
-                    try await sendRemoteControlPayload(
-                        damageReport,
-                        type: .damageReport,
-                        to: peer
-                    )
-                }
-                let encodedScreen = try JSONEncoder().encode(next)
-                let message = RemoteMessage(type: .screenData, payload: encodedScreen)
-                let payload = try JSONEncoder().encode(message)
-                try await sendRemoteFrame(payload, to: peer)
-            } catch {
-                logger.error("❌ 发送屏幕数据失败: \(error.localizedDescription, privacy: .public)")
-                break
-            }
-        }
-
-        outboundScreenSenderBusy.remove(peer.id)
+    private func usesBinaryScreenFrameTransport(for peer: PeerConnection) -> Bool {
+        peer.requestedStreamConfiguration?.screenFrameTransport == "sbrf-v1"
     }
 
-    private func noteOutboundDamageReport(
-        _ report: RemoteDesktopDamageReport,
-        to peer: PeerConnection
-    ) async {
-        latestOutboundDamageReportByPeerId[peer.id] = report
-    }
-
-    private func sendRemoteControlPayload<T: Encodable>(
+    private func sendRemoteControlPayload<T: Encodable & Sendable>(
         _ payload: T,
         type: RemoteMessage.MessageType,
         to peer: PeerConnection
     ) async throws {
-        let encodedPayload = try JSONEncoder().encode(payload)
-        let message = RemoteMessage(type: type, payload: encodedPayload)
-        let framedMessage = try JSONEncoder().encode(message)
-        try await sendRemoteFrame(framedMessage, to: peer)
+        try await peer.outboundFramePump.sendControlPayload(payload, type: type)
     }
 
     private func preferredCaptureSize(for resolution: ResolutionSetting) -> CGSize {
@@ -876,6 +1376,7 @@ public final class RemoteControlManager: BaseManager {
     }
 
     private func configureClipboardSync(for peer: PeerConnection) {
+        guard isCurrentPeer(peer) else { return }
         let shouldEnable = peer.requestedStreamConfiguration?.clipboardSyncEnabled
             ?? RemoteDesktopSettingsManager.shared.settings.interactionSettings.enableClipboardSync
 
@@ -902,11 +1403,10 @@ public final class RemoteControlManager: BaseManager {
     private func sendClipboardPayload(data: Data, mimeType: String, to deviceId: String) async {
         guard let peer = peers[deviceId] else { return }
         do {
-            let payload = RemoteClipboardPayload(mimeType: mimeType, data: data)
-            let encoded = try JSONEncoder().encode(payload)
-            let message = RemoteMessage(type: .clipboard, payload: encoded)
-            let plaintext = try JSONEncoder().encode(message)
-            try await sendRemoteFrame(plaintext, to: peer)
+            try await peer.outboundFramePump.sendControlPayload(
+                RemoteClipboardPayload(mimeType: mimeType, data: data),
+                type: .clipboard
+            )
         } catch {
             logger.error("❌ 会话剪贴板发送失败: \(error.localizedDescription, privacy: .public)")
         }
@@ -947,6 +1447,8 @@ public final class RemoteControlManager: BaseManager {
                         throw RemoteControlError.invalidMessageLength(buffer.count)
                     }
 
+                    guard self.isCurrentPeer(peer) else { break }
+
                     while let messageData = try self.nextFramedMessage(
                         from: &buffer,
                         maxMessageBytes: self.maxFramedMessageBytes
@@ -958,10 +1460,11 @@ public final class RemoteControlManager: BaseManager {
                         } else {
                             plain = messageData
                         }
+                        guard self.isCurrentPeer(peer) else { break }
                         try await self.handleScreenMessagePayload(plain)
                     }
                 } catch {
-                    await self.handleConnectionClosed(peerId: peer.id, error: error)
+                    await self.handleConnectionClosed(peer: peer, error: error)
                     break
                 }
             }
@@ -970,13 +1473,34 @@ public final class RemoteControlManager: BaseManager {
 
  /// 处理收到的 .screenData 消息
     private func handleScreenMessagePayload(_ messageData: Data) async throws {
-        let message = try JSONDecoder().decode(RemoteMessage.self, from: messageData)
-        guard message.type == .screenData else {
-            logger.debug("📺 收到非 screenData 消息，丢弃: \(message.type.rawValue, privacy: .public)")
+        if let screenData = RemoteDesktopScreenFrameWire.decodeIfPresent(messageData) {
+            try await handleInboundScreenData(
+                ScreenData(
+                    width: screenData.width,
+                    height: screenData.height,
+                    imageData: screenData.imageData,
+                    timestamp: screenData.timestamp,
+                    format: screenData.format,
+                    isSyncFrame: screenData.isSyncFrame
+                )
+            )
             return
         }
 
-        let screenData = try JSONDecoder().decode(ScreenData.self, from: message.payload)
+        let message = try JSONDecoder().decode(RemoteMessage.self, from: messageData)
+        switch message.type {
+        case .screenData:
+            let screenData = try JSONDecoder().decode(ScreenData.self, from: message.payload)
+            try await handleInboundScreenData(screenData)
+        case .damageReport:
+            let report = try JSONDecoder().decode(RemoteDesktopDamageReport.self, from: message.payload)
+            stableRenderer.setDamageReport(report)
+        default:
+            logger.debug("📺 收到非 screenData 消息，丢弃: \(message.type.rawValue, privacy: .public)")
+        }
+    }
+
+    private func handleInboundScreenData(_ screenData: ScreenData) async throws {
         logger.debug("📺 接收到屏幕数据: \(screenData.width)x\(screenData.height)")
 
         guard !screenData.imageData.isEmpty else { return }
@@ -989,19 +1513,52 @@ public final class RemoteControlManager: BaseManager {
             default: frameType = .bgra
             }
 
-            let metrics = renderer.processFrame(
-                data: screenData.imageData,
-                width: screenData.width,
-                height: screenData.height,
-                stride: 0,
-                type: frameType
-            )
+            let metrics: RenderMetrics
+            switch renderingModeController.currentMode {
+            case .stable:
+                metrics = stableRenderer.processFrame(
+                    data: screenData.imageData,
+                    width: screenData.width,
+                    height: screenData.height,
+                    stride: 0,
+                    type: frameType
+                )
+            case .fluid:
+                metrics = fluidRenderer.processFrame(
+                    data: screenData.imageData,
+                    width: screenData.width,
+                    height: screenData.height,
+                    stride: 0,
+                    type: frameType
+                )
+                // Fluid 模式下也触发拉帧，保证 texture 输出到 textureFeed
+                let fluidRendered = fluidRenderer.pullAndRender()
+                evaluateHighPerformanceRenderHealth(afterPullFor: .fluid, rendered: fluidRendered)
+            case .reference:
+                metrics = referenceRenderer.processFrame(
+                    data: screenData.imageData,
+                    width: screenData.width,
+                    height: screenData.height,
+                    stride: 0,
+                    type: frameType
+                )
+                let refRendered = referenceRenderer.pullAndRender()
+                evaluateHighPerformanceRenderHealth(afterPullFor: .reference, rendered: refRendered)
+            }
             await MainActor.run {
                 self.updateMetrics(metrics)
             }
         } else {
- // 兜底：当成静态图像用 ImageIO 解码
-            await handleStaticImageFallback(screenData)
+ // 兜底：静态图像通过 StableRenderer 处理
+            switch renderingModeController.currentMode {
+            case .stable:
+                let metrics = stableRenderer.processStaticImage(data: screenData.imageData)
+                await MainActor.run {
+                    self.updateMetrics(metrics)
+                }
+            case .fluid, .reference:
+                await handleStaticImageFallback(screenData)
+            }
         }
     }
 
@@ -1052,6 +1609,8 @@ public final class RemoteControlManager: BaseManager {
                         throw RemoteControlError.invalidMessageLength(buffer.count)
                     }
 
+                    guard self.isCurrentPeer(peer) else { break }
+
                     while let messageData = try self.nextFramedMessage(
                         from: &buffer,
                         maxMessageBytes: self.maxFramedMessageBytes
@@ -1060,7 +1619,7 @@ public final class RemoteControlManager: BaseManager {
                         try await self.handleInboundRemoteFrame(from: peer, frame: messageData)
                     }
                 } catch {
-                    await self.handleConnectionClosed(peerId: peer.id, error: error)
+                    await self.handleConnectionClosed(peer: peer, error: error)
                     break
                 }
             }
@@ -1068,6 +1627,7 @@ public final class RemoteControlManager: BaseManager {
     }
 
     private func handleInboundRemoteFrame(from peer: PeerConnection, frame: Data) async throws {
+        guard isCurrentPeer(peer) else { return }
         if #available(macOS 14.0, *) {
             let secure = peer.sessionKeys != nil
             let hasDriver = peer.handshakeDriver != nil
@@ -1079,7 +1639,11 @@ public final class RemoteControlManager: BaseManager {
         // If handshake established, frames become AES-GCM ciphertext of RemoteMessage JSON.
         if #available(macOS 14.0, *), let keys = peer.sessionKeys {
             let plain = try decryptRemotePayload(frame, with: keys)
-            try await handleControlMessagePayload(plain, from: peer)
+            do {
+                try await handleControlMessagePayload(plain, from: peer)
+            } catch let error as DecodingError {
+                logDroppedMalformedControlPayload(error, from: peer, secure: true, bytes: plain.count)
+            }
             return
         }
 
@@ -1087,7 +1651,11 @@ public final class RemoteControlManager: BaseManager {
         if let _ = try? JSONDecoder().decode(RemoteMessage.self, from: frame) {
             logger.info("🔐 RemoteControl frame classified as JSON before secure channel: peer=\(peer.id, privacy: .public)")
             emitSmokeTrace("mac remote json-before-secure peer=\(peer.id)")
-            try await handleControlMessagePayload(frame, from: peer)
+            do {
+                try await handleControlMessagePayload(frame, from: peer)
+            } catch let error as DecodingError {
+                logDroppedMalformedControlPayload(error, from: peer, secure: false, bytes: frame.count)
+            }
             return
         }
 
@@ -1120,11 +1688,28 @@ public final class RemoteControlManager: BaseManager {
             if case .established(let keys) = st {
                 peer.sessionKeys = keys
                 peer.handshakeDriver = nil
+                await syncOutboundFramePump(for: peer)
                 self.logger.info("🔐 RemoteControl handshake established for \(peer.id, privacy: .public)")
                 emitSmokeTrace("mac remote established peer=\(peer.id) suite=\(keys.negotiatedSuite.rawValue)")
             }
             return
         }
+    }
+
+    private func logDroppedMalformedControlPayload(
+        _ error: DecodingError,
+        from peer: PeerConnection,
+        secure: Bool,
+        bytes: Int
+    ) {
+        logger.warning(
+            """
+            ⚠️ 已丢弃无法解析的远控消息: peer=\(peer.id, privacy: .public) \
+            secure=\(secure, privacy: .public) \
+            bytes=\(bytes, privacy: .public) \
+            error=\(String(reflecting: error), privacy: .public)
+            """
+        )
     }
 
     private func waitForSecureChannelIfNeeded(
@@ -1133,9 +1718,20 @@ public final class RemoteControlManager: BaseManager {
     ) async -> Bool {
         let deadline = Date().addingTimeInterval(timeoutSeconds)
         while Date() < deadline {
+            if !isCurrentPeer(peer) {
+                logger.info("ℹ️ RemoteControl secure-channel wait aborted for stale peer \(peer.id, privacy: .public)")
+                return false
+            }
             if peer.sessionKeys != nil {
                 logger.info("🔐 RemoteControl secure channel ready: peer=\(peer.id, privacy: .public)")
                 emitSmokeTrace("mac remote secure-ready peer=\(peer.id)")
+                return true
+            }
+            if peer.requestedStreamConfiguration != nil {
+                logger.notice(
+                    "🔓 RemoteControl compatibility mode: proceeding with legacy plaintext control channel for \(peer.id, privacy: .public)"
+                )
+                emitSmokeTrace("mac remote legacy-ready peer=\(peer.id)")
                 return true
             }
             if peers[peer.id] == nil {
@@ -1244,6 +1840,7 @@ public final class RemoteControlManager: BaseManager {
     }
 
     private func handleControlMessagePayload(_ messageData: Data, from peer: PeerConnection) async throws {
+        guard isCurrentPeer(peer) else { return }
         let message = try JSONDecoder().decode(RemoteMessage.self, from: messageData)
 
         switch message.type {
@@ -1259,6 +1856,9 @@ public final class RemoteControlManager: BaseManager {
         case .clipboard:
             let shouldAcceptClipboard = peer.requestedStreamConfiguration?.clipboardSyncEnabled
                 ?? RemoteDesktopSettingsManager.shared.settings.interactionSettings.enableClipboardSync
+            logger.debug(
+                "📋 收到远控剪贴板消息: peer=\(peer.id, privacy: .public) enabled=\(shouldAcceptClipboard, privacy: .public) bytes=\(message.payload.count, privacy: .public)"
+            )
             guard shouldAcceptClipboard else { break }
             let payload = try JSONDecoder().decode(RemoteClipboardPayload.self, from: message.payload)
             let clipboard = ClipboardRedirectionManager.shared
@@ -1269,6 +1869,10 @@ public final class RemoteControlManager: BaseManager {
             let previousConfig = peer.requestedStreamConfiguration
             peer.requestedStreamConfiguration = config
             peer.remoteVideoFormats = effectiveRemoteVideoFormats(for: peer)
+            await syncOutboundFramePump(for: peer)
+            logger.info(
+                "🎛️ 应用 viewer 流配置: peer=\(peer.id, privacy: .public) first=\(previousConfig == nil, privacy: .public) screenSharingActive=\(self.screenSharingActive, privacy: .public) transport=\(config.screenFrameTransport ?? "legacy", privacy: .public)"
+            )
             logger.info(
                 """
                 🎛️ 收到远控流策略: preset=\(config.qualityPreset ?? "unknown", privacy: .public) \
@@ -1474,33 +2078,63 @@ public final class RemoteControlManager: BaseManager {
  /// 读取一块原始数据，交由上层做粘包处理
     private func receiveChunk(from connection: NWConnection) async throws -> Data {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Data, Error>) in
-            connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { data, _, isComplete, error in
-                if let error {
-                    cont.resume(throwing: error)
-                } else if let data {
-                    cont.resume(returning: data)
-                } else {
- // data == nil 且无 error，一般视为连接关闭
-                    cont.resume(returning: Data())
+            @Sendable func receiveNextChunk() {
+                connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { data, _, isComplete, error in
+                    if let error {
+                        cont.resume(throwing: error)
+                    } else if let data, data.isEmpty == false {
+                        cont.resume(returning: data)
+                    } else if isComplete {
+ // 仅在 Network 明确报告 EOF 时才视为连接关闭，避免把建立期的空回调误判为断链。
+                        cont.resume(returning: Data())
+                    } else {
+                        self.logger.debug("ℹ️ RemoteControl receive returned no payload before completion; awaiting next chunk")
+                        receiveNextChunk()
+                    }
                 }
             }
+
+            receiveNextChunk()
         }
     }
 
  /// 统一处理连接关闭 / 错误
-    private func handleConnectionClosed(peerId: String, error: Error) async {
-        logger.error("🔌 连接 \(peerId, privacy: .public) 关闭或出错: \(error.localizedDescription, privacy: .public)")
+    private func handleConnectionClosed(peer: PeerConnection, error: Error) async {
+        guard isCurrentPeer(peer) else {
+            logger.info("ℹ️ 忽略过期远控会话的关闭回调: \(peer.id, privacy: .public)")
+            return
+        }
 
-        peers[peerId]?.connection.cancel()
-        peers.removeValue(forKey: peerId)
-        connectedDevices.removeAll { $0 == peerId }
-        latestOutboundScreenFrameByPeerId.removeValue(forKey: peerId)
-        outboundScreenSenderBusy.remove(peerId)
+        logger.error(
+            "🔌 连接 \(peer.id, privacy: .public) 关闭或出错: \(error.localizedDescription, privacy: .public) screenSharingActive=\(self.screenSharingActive, privacy: .public) hasCaptureStreamer=\(self.captureStreamer != nil, privacy: .public)"
+        )
+
+        peer.connection.cancel()
+        peers.removeValue(forKey: peer.id)
+        connectedDevices.removeAll { $0 == peer.id }
+        await peer.outboundFramePump.close()
+        stopInteractionTelemetry(for: peer.id)
+        screenCaptureStartupRetryCountByPeerId.removeValue(forKey: peer.id)
+
+        if activeClipboardPeerId == peer.id {
+            let clipboard = ClipboardRedirectionManager.shared
+            clipboard.onLocalClipboardChanged = nil
+            clipboard.disable()
+            activeClipboardPeerId = nil
+        }
 
         if connectedDevices.isEmpty {
             isControlling = false
             isBeingControlled = false
             screenSharingActive = false
+            tearDownViewingRenderPipeline()
+            screenCaptureWatchdogTask?.cancel()
+            screenCaptureWatchdogTask = nil
+            screenCaptureRestartInProgress = false
+            captureStreamer?.stop()
+            captureStreamer = nil
+            interactionTelemetryTasksByPeerId.values.forEach { $0.cancel() }
+            interactionTelemetryTasksByPeerId.removeAll()
         }
     }
 
@@ -1513,7 +2147,7 @@ public final class RemoteControlManager: BaseManager {
         let bytesPerRow = width * bytesPerPixel
         let bitsPerComponent = 8
 
-        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let colorSpace = ColorPipelineConfiguration.sdr.makeSourceColorSpace() ?? CGColorSpaceCreateDeviceRGB()
         let bitmapInfo = CGImageAlphaInfo.premultipliedFirst.rawValue |
         CGBitmapInfo.byteOrder32Little.rawValue
 

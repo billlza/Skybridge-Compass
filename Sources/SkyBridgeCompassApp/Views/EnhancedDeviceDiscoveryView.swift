@@ -125,6 +125,51 @@ public struct EnhancedDeviceDiscoveryView: View {
             if let record = selectedTrustedRecord {
                 TrustedDeviceDetailView(
                     record: record,
+                    status: trustedRecordStatus(record),
+                    onDisconnect: { idsToDisconnect, declaredDeviceId in
+                        Task { @MainActor in
+                            var didDisconnect = false
+                            let disconnectCandidateIds = Array(
+                                Set(
+                                    idsToDisconnect
+                                        + record.knownDeviceIds
+                                        + [record.deviceId, record.currentDeviceId, declaredDeviceId]
+                                            .compactMap { $0 }
+                                )
+                            )
+                            let normalizedIds = Set(
+                                disconnectCandidateIds
+                                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+                            )
+                            let normalizedRecordName = (record.deviceName ?? "")
+                                .trimmingCharacters(in: .whitespacesAndNewlines)
+                                .lowercased()
+
+                            if let snapshot = crossNetworkManager.activeSessionSnapshot {
+                                let snapshotId = (snapshot.deviceId ?? "")
+                                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                                    .lowercased()
+                                let snapshotName = (snapshot.deviceName ?? crossNetworkManager.currentConnection?.deviceName ?? "")
+                                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                                    .lowercased()
+
+                                if (!snapshotId.isEmpty && normalizedIds.contains(snapshotId))
+                                    || (!normalizedRecordName.isEmpty && snapshotName == normalizedRecordName) {
+                                    await crossNetworkManager.disconnect()
+                                    didDisconnect = true
+                                }
+                            }
+
+                            for id in disconnectCandidateIds {
+                                didDisconnect = p2pDiscoveryService.disconnectFromDevice(id) || didDisconnect
+                            }
+
+                            if didDisconnect {
+                                selectedTrustedRecord = nil
+                                showTrustedRecordSheet = false
+                            }
+                        }
+                    },
                     onRemoveTrust: { idsToRevoke, declaredDeviceId in
                         Task { @MainActor in
                             // Clear policy first so future requests prompt again.
@@ -380,9 +425,7 @@ public struct EnhancedDeviceDiscoveryView: View {
             }
 
             // 最近连接（不等同于“信任/已配对”，但应立即可见）
-            let recentlyConnected = unifiedDeviceManager.onlineDevices
-                .filter { !$0.isLocalDevice && $0.lastConnectedAt != nil && $0.connectionStatus != .connected }
-                .sorted { ($0.lastConnectedAt ?? .distantPast) > ($1.lastConnectedAt ?? .distantPast) }
+            let recentlyConnected = groupedRecentlyConnectedDevices
             if !recentlyConnected.isEmpty {
                 VStack(alignment: .leading, spacing: 12) {
                     Text("最近连接")
@@ -491,42 +534,54 @@ public struct EnhancedDeviceDiscoveryView: View {
     }
 
     private func trustedRecordStatus(_ record: TrustRecord) -> OnlineDeviceStatus {
-        // Two-step mapping (fast + 100% accurate when strong id is present):
-        // 1) Strong: match by stable deviceId (preferred). This becomes 100% accurate once discovery advertises deviceId.
-        // 2) Weak fallback: match by peerEndpoint/name to avoid showing "offline" when strong id isn't available yet.
-        let caps = trustedRecordCaps(record)
-
-        let strongIdKey = "id:\(record.deviceId)"
-        if let dev = unifiedDeviceManager.onlineDevices.first(where: { $0.uniqueIdentifier == strongIdKey }) {
-            return dev.connectionStatus
-        }
-
-        var candidateNames: [String] = []
-        if let peer = caps["peerEndpoint"], !peer.isEmpty {
-            if let n = extractBonjourName(from: peer) {
-                candidateNames.append(n)
-            }
-        }
-        if let dn = record.deviceName, !dn.isEmpty {
-            candidateNames.append(dn)
-        }
-
-        for name in candidateNames {
-            if let dev = unifiedDeviceManager.onlineDevices.first(where: { $0.name == name }) {
-                return dev.connectionStatus
-            }
-        }
-        return .offline
+        let resolvedStatus = unifiedDeviceManager.resolvedOnlineDevice(for: record)?.connectionStatus ?? .offline
+        return isCrossNetworkSessionActive(for: record) ? .connected : resolvedStatus
     }
 
-    private func extractBonjourName(from peerEndpoint: String) -> String? {
-        // Format: "bonjour:<name>@<domain>"
-        guard peerEndpoint.hasPrefix("bonjour:") else { return nil }
-        let rest = peerEndpoint.dropFirst("bonjour:".count)
-        // Split at "@"
-        let parts = rest.split(separator: "@", maxSplits: 1).map(String.init)
-        guard let name = parts.first, !name.isEmpty else { return nil }
-        return name
+    private func isCrossNetworkSessionActive(for record: TrustRecord) -> Bool {
+        guard let snapshot = crossNetworkManager.activeSessionSnapshot else { return false }
+        switch snapshot.phase {
+        case .transportReady, .handshakeComplete, .reconnecting:
+            break
+        case .connecting, .disconnecting:
+            return false
+        }
+
+        let caps = trustedRecordCaps(record)
+        let recordIds = Set(
+            [
+                record.deviceId,
+                record.currentDeviceId,
+                caps["declaredDeviceId"],
+                caps["peerEndpoint"]
+            ]
+            + record.knownDeviceIds
+            .compactMap(normalizedDiscoveryToken)
+        )
+
+        let snapshotIds = Set(
+            [
+                snapshot.deviceId
+            ]
+            .compactMap(normalizedDiscoveryToken)
+        )
+
+        if !recordIds.isDisjoint(with: snapshotIds) {
+            return true
+        }
+
+        let recordName = normalizedDiscoveryToken(record.deviceName)
+        let snapshotName = normalizedDiscoveryToken(
+            snapshot.deviceName ?? crossNetworkManager.currentConnection?.deviceName
+        )
+        guard let recordName, let snapshotName else { return false }
+        return recordName == snapshotName
+    }
+
+    private func normalizedDiscoveryToken(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        let token = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return token.isEmpty ? nil : token
     }
 
     private var onlineNonLocalDevices: [OnlineDevice] {
@@ -553,6 +608,92 @@ public struct EnhancedDeviceDiscoveryView: View {
             $0.name.localizedCaseInsensitiveContains(searchText) ||
             $0.ipv4?.contains(searchText) == true ||
             $0.ipv6?.contains(searchText) == true
+        }
+    }
+
+    private var groupedRecentlyConnectedDevices: [OnlineDevice] {
+        let candidates = unifiedDeviceManager.onlineDevices
+            .filter { !$0.isLocalDevice && $0.lastConnectedAt != nil && $0.connectionStatus != .connected }
+        guard !candidates.isEmpty else { return [] }
+
+        let trustRecords = trustedRecordsForUI
+        var grouped: [String: OnlineDevice] = [:]
+
+        for device in candidates {
+            let groupingKey: String
+            if let trustRecord = unifiedDeviceManager.resolvedTrustRecord(for: device, among: trustRecords) {
+                groupingKey = "trusted:\(trustRecord.deviceId)"
+            } else {
+                groupingKey = "device:\(device.id.uuidString)"
+            }
+
+            if let existing = grouped[groupingKey] {
+                grouped[groupingKey] = preferredRecentDisplayDevice(existing, device)
+            } else {
+                grouped[groupingKey] = device
+            }
+        }
+
+        return grouped.values.sorted { lhs, rhs in
+            if statusPriority(lhs.connectionStatus) != statusPriority(rhs.connectionStatus) {
+                return statusPriority(lhs.connectionStatus) > statusPriority(rhs.connectionStatus)
+            }
+            let lhsConnected = lhs.lastConnectedAt ?? .distantPast
+            let rhsConnected = rhs.lastConnectedAt ?? .distantPast
+            if lhsConnected != rhsConnected {
+                return lhsConnected > rhsConnected
+            }
+            if lhs.lastSeen != rhs.lastSeen {
+                return lhs.lastSeen > rhs.lastSeen
+            }
+            return lhs.name < rhs.name
+        }
+    }
+
+    private func preferredRecentDisplayDevice(_ lhs: OnlineDevice, _ rhs: OnlineDevice) -> OnlineDevice {
+        if statusPriority(lhs.connectionStatus) != statusPriority(rhs.connectionStatus) {
+            return statusPriority(lhs.connectionStatus) > statusPriority(rhs.connectionStatus) ? lhs : rhs
+        }
+
+        if lhs.isConnectable != rhs.isConnectable {
+            return lhs.isConnectable ? lhs : rhs
+        }
+
+        let lhsLooksLikeIP = isIPAddressLikeLabel(lhs.name)
+        let rhsLooksLikeIP = isIPAddressLikeLabel(rhs.name)
+        if lhsLooksLikeIP != rhsLooksLikeIP {
+            return lhsLooksLikeIP ? rhs : lhs
+        }
+
+        let lhsConnected = lhs.lastConnectedAt ?? .distantPast
+        let rhsConnected = rhs.lastConnectedAt ?? .distantPast
+        if lhsConnected != rhsConnected {
+            return lhsConnected > rhsConnected ? lhs : rhs
+        }
+
+        if lhs.lastSeen != rhs.lastSeen {
+            return lhs.lastSeen > rhs.lastSeen ? lhs : rhs
+        }
+
+        return lhs.name.count >= rhs.name.count ? lhs : rhs
+    }
+
+    private func isIPAddressLikeLabel(_ value: String) -> Bool {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        if trimmed.contains(":") { return true }
+        let parts = trimmed.split(separator: ".")
+        return parts.count == 4 && parts.allSatisfy { Int($0) != nil }
+    }
+
+    private func statusPriority(_ status: OnlineDeviceStatus) -> Int {
+        switch status {
+        case .connected:
+            return 3
+        case .online:
+            return 2
+        case .offline:
+            return 1
         }
     }
 
@@ -1440,6 +1581,28 @@ public struct EnhancedDeviceDiscoveryView: View {
 
                     if let code = crossNetworkManager.connectionCode {
                         VStack(spacing: 12) {
+                            Picker(
+                                LocalizationManager.shared.localizedString("connection.codeMode.title"),
+                                selection: $crossNetworkManager.connectionCodeLeaseMode
+                            ) {
+                                Text(LocalizationManager.shared.localizedString("connection.codeMode.short"))
+                                    .tag(CrossNetworkConnectionManager.ConnectionCodeLeaseMode.shortLived)
+                                Text(LocalizationManager.shared.localizedString("connection.codeMode.day"))
+                                    .tag(CrossNetworkConnectionManager.ConnectionCodeLeaseMode.dayStable)
+                            }
+                            .pickerStyle(.segmented)
+                            .frame(width: 240)
+
+                            Text(
+                                crossNetworkManager.connectionCodeLeaseMode == .dayStable
+                                    ? LocalizationManager.shared.localizedString("connection.codeMode.dayHint")
+                                    : LocalizationManager.shared.localizedString("connection.codeMode.shortHint")
+                            )
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.center)
+                            .frame(width: 240)
+
                             Text(code)
                                 .font(.system(size: 42, weight: .bold, design: .rounded))
                                 .tracking(6)
@@ -1511,6 +1674,28 @@ public struct EnhancedDeviceDiscoveryView: View {
                             .cornerRadius(12)
                         }
                         .buttonStyle(.plain)
+
+                        Picker(
+                            LocalizationManager.shared.localizedString("connection.codeMode.title"),
+                            selection: $crossNetworkManager.connectionCodeLeaseMode
+                        ) {
+                            Text(LocalizationManager.shared.localizedString("connection.codeMode.short"))
+                                .tag(CrossNetworkConnectionManager.ConnectionCodeLeaseMode.shortLived)
+                            Text(LocalizationManager.shared.localizedString("connection.codeMode.day"))
+                                .tag(CrossNetworkConnectionManager.ConnectionCodeLeaseMode.dayStable)
+                        }
+                        .pickerStyle(.segmented)
+                        .frame(width: 240)
+
+                        Text(
+                            crossNetworkManager.connectionCodeLeaseMode == .dayStable
+                                ? LocalizationManager.shared.localizedString("connection.codeMode.dayHint")
+                                : LocalizationManager.shared.localizedString("connection.codeMode.shortHint")
+                        )
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                        .frame(width: 240)
                     }
                 }
 

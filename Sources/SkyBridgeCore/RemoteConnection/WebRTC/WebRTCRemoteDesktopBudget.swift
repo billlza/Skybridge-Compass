@@ -66,17 +66,40 @@ enum WebRTCRemoteDesktopBudgetSelector {
                 fpsCap = 15
             }
             bufferCap = 384_000
-            baseReason = "relay"
+            baseReason = "relay-conservative"
         case .unknown:
-            if longEdge >= 5120 {
-                fpsCap = 12
-            } else if longEdge >= 3840 {
-                fpsCap = 18
-            } else {
-                fpsCap = 24
+            switch codec {
+            case .bgra:
+                if longEdge >= 5120 {
+                    fpsCap = 12
+                } else if longEdge >= 3840 {
+                    fpsCap = 18
+                } else {
+                    fpsCap = 24
+                }
+                bufferCap = 768_000
+                baseReason = "unknown-path-jpeg"
+            case .h264:
+                if longEdge >= 5120 {
+                    fpsCap = 16
+                } else if longEdge >= 3840 {
+                    fpsCap = 24
+                } else {
+                    fpsCap = lowLatencyMode ? 30 : 24
+                }
+                bufferCap = 1_024_000
+                baseReason = "unknown-path-h264"
+            case .hevc:
+                if longEdge >= 5120 {
+                    fpsCap = 18
+                } else if longEdge >= 3840 {
+                    fpsCap = 24
+                } else {
+                    fpsCap = lowLatencyMode ? 30 : 24
+                }
+                bufferCap = 1_152_000
+                baseReason = "unknown-path-hevc"
             }
-            bufferCap = 768_000
-            baseReason = "unknown-path"
         }
 
         switch thermalState {
@@ -134,6 +157,9 @@ enum WebRTCRemoteDesktopBudgetSelector {
             if !enableAppleSiliconOptimization {
                 fpsCap = min(fpsCap, codec == .hevc ? 60 : fpsCap)
             }
+        } else if !enableHardwareAcceleration {
+            fpsCap = min(fpsCap, codec == .bgra ? fpsCap : 20)
+            bufferCap = min(bufferCap, codec == .bgra ? bufferCap : 512_000)
         }
 
         return WebRTCRemoteDesktopStreamBudget(

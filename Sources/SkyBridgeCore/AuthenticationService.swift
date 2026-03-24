@@ -1,6 +1,5 @@
 import Foundation
 import Combine
-import Security
 
 /// 负责处理所有 SkyBridge 账户登录、注册与会话持久化逻辑的核心服务。
 @MainActor public final class AuthenticationService: BaseManager {
@@ -98,9 +97,6 @@ import Security
 
     private let sessionSubject = CurrentValueSubject<AuthSession?, Never>(nil)
     private let urlSession: URLSession
-    private let keychainService = "com.skybridge.compass.authsession"
-    private let keychainAccount = "primary"
-
     private var configuration: Configuration?
     private var isSupabaseMode: Bool = false
 
@@ -205,7 +201,7 @@ import Security
     public func sendPhoneVerificationCode(to phoneNumber: String) async throws -> String {
  // 检查是否使用Supabase模式
         if isSupabaseMode {
-            try await SupabaseService.shared.sendPhoneOTP(phone: phoneNumber)
+            try await SupabaseService.shared.sendPhoneOTP(phone: Self.normalizedPhoneForSupabase(phoneNumber))
             return "验证码已通过Supabase发送"
         }
 
@@ -213,7 +209,7 @@ import Security
             throw AuthenticationError.configurationMissing
         }
 
-        var request = URLRequest(url: endpoint.appendingPathComponent("send-code"))
+        var request = URLRequest(url: Self.phoneSendCodeEndpoint(from: endpoint))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
@@ -237,7 +233,10 @@ import Security
     public func loginPhone(number: String, code: String) async throws -> AuthSession {
  // 检查是否使用Supabase模式
         if isSupabaseMode {
-            let session = try await SupabaseService.shared.signInWithPhone(phone: number, token: code)
+            let session = try await SupabaseService.shared.signInWithPhone(
+                phone: Self.normalizedPhoneForSupabase(number),
+                token: code
+            )
             try store(session: session)
             sessionSubject.send(session)
             return session
@@ -282,12 +281,7 @@ import Security
     public func signOut() {
  // 在主 actor 上清理状态并删除钥匙串项
         self.sessionSubject.send(nil)
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: self.keychainService,
-            kSecAttrAccount as String: self.keychainAccount
-        ]
-        SecItemDelete(query as CFDictionary)
+        KeychainManager.shared.deleteAuthSession()
     }
 
     /// 持久化并广播新的会话（例如刷新访问令牌后）。
@@ -350,45 +344,15 @@ import Security
     }
 
     private func store(session: AuthSession) throws {
-        let data = try JSONEncoder().encode(session)
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: keychainService,
-            kSecAttrAccount as String: keychainAccount
-        ]
-        let attributes: [String: Any] = [
-            kSecValueData as String: data
-        ]
-        let status: OSStatus
-        if SecItemCopyMatching(query as CFDictionary, nil) == errSecSuccess {
-            status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
-        } else {
-            var addQuery = query
-            addQuery[kSecValueData as String] = data
-            status = SecItemAdd(addQuery as CFDictionary, nil)
-        }
-        guard status == errSecSuccess else {
-            throw AuthenticationError.storage(status)
+        do {
+            try KeychainManager.shared.storeAuthSession(session)
+        } catch let error as NSError {
+            throw AuthenticationError.storage(OSStatus(error.code))
         }
     }
 
     private func loadSessionFromKeychain() throws -> AuthSession? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: keychainService,
-            kSecAttrAccount as String: keychainAccount,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
-        ]
-        var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
-        guard status == errSecSuccess else {
-            return nil
-        }
-        guard let data = item as? Data else {
-            return nil
-        }
-        return try JSONDecoder().decode(AuthSession.self, from: data)
+        KeychainManager.shared.loadAuthSession()
     }
 
     private static func loadConfigurationFromEnvironment() -> Configuration? {
@@ -440,6 +404,28 @@ import Security
         }
         guard let data = Data(base64Encoded: base64) else { return nil }
         return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    }
+
+    private static func phoneSendCodeEndpoint(from phoneLoginEndpoint: URL) -> URL {
+        let lastComponent = phoneLoginEndpoint.lastPathComponent.lowercased()
+        if lastComponent == "login" {
+            return phoneLoginEndpoint.deletingLastPathComponent().appendingPathComponent("send-code")
+        }
+        return phoneLoginEndpoint.appendingPathComponent("send-code")
+    }
+
+    private static func normalizedPhoneForSupabase(_ rawPhone: String) -> String {
+        let sanitized = rawPhone.filter { $0.isNumber || $0 == "+" }
+        if sanitized.hasPrefix("+") {
+            return sanitized
+        }
+        if sanitized.hasPrefix("86"), sanitized.count == 13 {
+            return "+\(sanitized)"
+        }
+        if sanitized.count == 11, sanitized.hasPrefix("1") {
+            return "+86\(sanitized)"
+        }
+        return sanitized
     }
 }
 

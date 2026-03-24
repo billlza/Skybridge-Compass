@@ -28,7 +28,7 @@ struct TrustedDeviceCard: View {
                 
                 Spacer()
 
-                Text(status.rawValue)
+                Text(statusText)
                     .font(.caption2)
                     .foregroundColor(statusColor)
                     .padding(.horizontal, 8)
@@ -67,16 +67,83 @@ struct TrustedDeviceCard: View {
             return .secondary
         }
     }
+
+    private var statusText: String {
+        switch status {
+        case .connected:
+            return localizedText(
+                chinese: "已连接",
+                english: "Connected",
+                japanese: "接続済み"
+            )
+        case .online:
+            return localizedText(
+                chinese: "在线",
+                english: "Online",
+                japanese: "オンライン"
+            )
+        case .offline:
+            return localizedText(
+                chinese: "离线",
+                english: "Offline",
+                japanese: "オフライン"
+            )
+        }
+    }
+
+    private func localizedText(chinese: String, english: String, japanese: String) -> String {
+        switch currentLanguageCode {
+        case "en":
+            return english
+        case "ja":
+            return japanese
+        default:
+            return chinese
+        }
+    }
+
+    private var currentLanguageCode: String {
+        switch LocalizationManager.shared.currentLanguage {
+        case .en:
+            return "en"
+        case .ja:
+            return "ja"
+        case .zhHans:
+            return "zh"
+        case .system:
+            let identifier = LocalizationManager.shared.locale.identifier.lowercased()
+            if identifier.hasPrefix("ja") {
+                return "ja"
+            }
+            if identifier.hasPrefix("en") {
+                return "en"
+            }
+            return "zh"
+        }
+    }
 }
 
 @available(macOS 14.0, *)
 struct TrustedDeviceDetailView: View {
+    @Environment(\.dismiss) private var dismiss
     let record: TrustRecord
+    let status: OnlineDeviceStatus
+    let onDisconnect: ((_ idsToDisconnect: [String], _ declaredDeviceId: String?) -> Void)?
     let onRemoveTrust: (_ idsToRevoke: [String], _ declaredDeviceId: String?) -> Void
     
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
+                Button {
+                    dismiss()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.title3)
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .keyboardShortcut(.cancelAction)
+
                 Image(systemName: "checkmark.shield.fill")
                     .font(.title2)
                     .foregroundStyle(.green)
@@ -84,7 +151,7 @@ struct TrustedDeviceDetailView: View {
                     Text(record.deviceName ?? "受信任设备")
                         .font(.title3)
                         .fontWeight(.semibold)
-                    Text("已配对/已信任")
+                    Text(ui(chinese: "已配对/已信任", english: "Paired / Trusted", japanese: "ペア済み / 信頼済み"))
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -94,15 +161,18 @@ struct TrustedDeviceDetailView: View {
             Divider()
             
             VStack(alignment: .leading, spacing: 10) {
-                infoRow("设备 ID", value: record.deviceId)
-                infoRow("公钥指纹", value: record.pubKeyFP.isEmpty ? "（未绑定/引导模式）" : record.pubKeyFP)
+                infoRow(ui(chinese: "设备 ID", english: "Device ID", japanese: "デバイス ID"), value: record.deviceId)
+                infoRow(
+                    ui(chinese: "公钥指纹", english: "Public Key Fingerprint", japanese: "公開鍵フィンガープリント"),
+                    value: record.pubKeyFP.isEmpty ? ui(chinese: "（未绑定/引导模式）", english: "(Bootstrap / Unbound)", japanese: "（未バインド / ブートストラップ）") : record.pubKeyFP
+                )
                 
                 let c = capsDict
-                if let v = c["platform"], !v.isEmpty { infoRow("平台", value: v) }
-                if let v = c["osVersion"], !v.isEmpty { infoRow("系统版本", value: v) }
-                if let v = c["modelName"], !v.isEmpty { infoRow("型号", value: v) }
-                if let v = c["chip"], !v.isEmpty { infoRow("芯片", value: v) }
-                infoRow("更新时间", value: record.updatedAt.formatted(date: .numeric, time: .standard))
+                if let v = c["platform"], !v.isEmpty { infoRow(ui(chinese: "平台", english: "Platform", japanese: "プラットフォーム"), value: v) }
+                if let v = c["osVersion"], !v.isEmpty { infoRow(ui(chinese: "系统版本", english: "OS Version", japanese: "OS バージョン"), value: v) }
+                if let v = c["modelName"], !v.isEmpty { infoRow(ui(chinese: "型号", english: "Model", japanese: "モデル"), value: v) }
+                if let v = c["chip"], !v.isEmpty { infoRow(ui(chinese: "芯片", english: "Chip", japanese: "チップ"), value: v) }
+                infoRow(ui(chinese: "更新时间", english: "Updated At", japanese: "更新日時"), value: record.updatedAt.formatted(date: .numeric, time: .standard))
             }
             .padding(12)
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
@@ -114,11 +184,23 @@ struct TrustedDeviceDetailView: View {
             Spacer()
             
             HStack {
+                Button(LocalizationManager.shared.localizedString("action.close")) {
+                    dismiss()
+                }
+                .keyboardShortcut(.cancelAction)
+
                 Spacer()
+                if status == .connected, let onDisconnect {
+                    Button(role: .destructive) {
+                        onDisconnect(idsToRevoke, declaredDeviceId)
+                    } label: {
+                        Label(LocalizationManager.shared.localizedString("action.disconnect"), systemImage: "xmark.circle")
+                    }
+                }
                 Button(role: .destructive) {
                     onRemoveTrust(idsToRevoke, declaredDeviceId)
                 } label: {
-                    Label("移除信任", systemImage: "trash")
+                    Label(ui(chinese: "移除信任", english: "Remove Trust", japanese: "信頼を解除"), systemImage: "trash")
                 }
                 .keyboardShortcut(.delete)
             }
@@ -174,6 +256,24 @@ struct TrustedDeviceDetailView: View {
         }
         return Array(ids)
     }
+
+    private func ui(chinese: String, english: String, japanese: String) -> String {
+        switch LocalizationManager.shared.currentLanguage {
+        case .en:
+            return english
+        case .ja:
+            return japanese
+        case .zhHans:
+            return chinese
+        case .system:
+            let identifier = LocalizationManager.shared.locale.identifier.lowercased()
+            if identifier.hasPrefix("ja") {
+                return japanese
+            }
+            if identifier.hasPrefix("en") {
+                return english
+            }
+            return chinese
+        }
+    }
 }
-
-

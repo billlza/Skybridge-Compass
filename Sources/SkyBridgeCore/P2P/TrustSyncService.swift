@@ -502,9 +502,10 @@ public final class TrustSyncService: ObservableObject {
         }) {
             switch byFingerprint.lifecycleState {
             case .active:
-                if byFingerprint.currentDeviceId != deviceId {
-                    return .deviceIdMigrationRequired
-                }
+                // The authoritative signing key remains the stronger trust anchor.
+                // A deviceId rotation under the same key should heal metadata after
+                // the session succeeds instead of being treated as a hard conflict.
+                break
             case .reverificationRequired, .quarantined:
                 return .quarantinedIdentity
             case .revoked:

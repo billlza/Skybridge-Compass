@@ -135,6 +135,28 @@ select_identity() {
     fi
 }
 
+assert_existing_app_bundle_is_fresh() {
+    local app_bundle_path="$1"
+    local freshness_reference="$app_bundle_path"
+    local stale_source=""
+
+    if [[ ! -e "$freshness_reference" ]]; then
+        return 0
+    fi
+
+    if [[ "$PROJECT_ROOT/Package.swift" -nt "$freshness_reference" ]]; then
+        stale_source="$PROJECT_ROOT/Package.swift"
+    else
+        stale_source="$(find "$PROJECT_ROOT/Sources" -type f -newer "$freshness_reference" -print -quit 2>/dev/null || true)"
+    fi
+
+    if [[ -n "$stale_source" && "${ALLOW_STALE_BUILD:-0}" != "1" ]]; then
+        log_error "检测到现有 App Bundle 早于源码：$stale_source"
+        log_error "请先重新构建，或显式设置 ALLOW_STALE_BUILD=1 后再复用现有 App。"
+        exit 1
+    fi
+}
+
 cleanup() {
     log_info "清理临时文件..."
     hdiutil detach "/Volumes/$VOLUME_NAME" >/dev/null 2>&1 || true
@@ -196,6 +218,7 @@ mkdir -p "$DIST_DIR"
 
 if [[ "$USE_EXISTING_APP" == true ]]; then
     if [[ -d "$APP_BUNDLE" && -f "$APP_BUNDLE/Contents/Info.plist" && -d "$APP_BUNDLE/Contents/MacOS" ]]; then
+        assert_existing_app_bundle_is_fresh "$APP_BUNDLE"
         log_info "复用已存在 App Bundle: $APP_BUNDLE"
     else
         log_error "指定了 --use-existing-app，但未找到可用 App Bundle: $APP_BUNDLE"

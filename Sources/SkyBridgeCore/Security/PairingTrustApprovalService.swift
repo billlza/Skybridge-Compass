@@ -67,8 +67,13 @@ public final class PairingTrustApprovalService: ObservableObject {
     /// Last time the verification fields were updated (best-effort).
     @Published public private(set) var pendingVerificationUpdatedAt: Date?
     
+    private static let policyStore = CodablePersistenceStore<[String: String]>(
+        location: .protectedApplicationSupport(
+            path: "PairingTrust/policy.json",
+            legacyUserDefaultsKey: "com.skybridge.pairingTrust.policy.v1"
+        )
+    )
     private let logger = Logger(subsystem: "com.skybridge.compass", category: "PairingTrustApproval")
-    private let policyKey = "com.skybridge.pairingTrust.policy.v1"
     
     /// deviceId -> decisionRawValue (persists "alwaysAllow" and "reject"; allowOnce is not persisted)
     private var policyByDeviceId: [String: String] = [:]
@@ -76,18 +81,16 @@ public final class PairingTrustApprovalService: ObservableObject {
     private var continuationByRequestId: [UUID: CheckedContinuation<Decision, Never>] = [:]
     
     private init() {
-        policyByDeviceId = Self.loadPolicy(key: policyKey)
+        policyByDeviceId = Self.loadPolicy()
         logger.info("🔐 PairingTrustApprovalService initialized")
     }
     
-    private static func loadPolicy(key: String) -> [String: String] {
-        guard let data = UserDefaults.standard.data(forKey: key) else { return [:] }
-        return (try? JSONDecoder().decode([String: String].self, from: data)) ?? [:]
+    private static func loadPolicy() -> [String: String] {
+        Self.policyStore.load() ?? [:]
     }
     
     private func savePolicy() {
-        let data = (try? JSONEncoder().encode(policyByDeviceId)) ?? Data()
-        UserDefaults.standard.set(data, forKey: policyKey)
+        try? Self.policyStore.save(policyByDeviceId)
     }
     
     /// Clear persisted policy for a device (used when user removes trust).

@@ -1135,49 +1135,55 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
     }
 
     private func trustLookupCandidates(primary: String, persistent: String?) -> [String] {
-        var ordered: [String] = []
-        var seen: Set<String> = []
+        PeerTrustLookup.lookupCandidates(primary: primary, persistent: persistent)
+    }
 
-        func append(_ value: String?) {
-            guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else { return }
-            guard !seen.contains(value) else { return }
-            seen.insert(value)
-            ordered.append(value)
+    private func normalizeHostAlias(_ identifier: String) -> String? {
+        if identifier.hasPrefix("host:") {
+            return normalizeHostAliasFromIPAddress(String(identifier.dropFirst("host:".count)))
+        }
+        if identifier.hasPrefix("peer:") {
+            return normalizeHostAliasFromIPAddress(String(identifier.dropFirst("peer:".count)))
+        }
+        return nil
+    }
+
+    private func normalizeHostAliasFromIPAddress(_ raw: String?) -> String? {
+        guard var token = raw?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+              !token.isEmpty else {
+            return nil
         }
 
-        func appendDerived(from identifier: String) {
-            append(identifier)
+        if token.hasPrefix("host:") {
+            token = String(token.dropFirst("host:".count))
+        } else if token.hasPrefix("peer:") {
+            token = String(token.dropFirst("peer:".count))
+        }
 
-            if identifier.hasPrefix("recent:") {
-                let inner = String(identifier.dropFirst("recent:".count))
-                append(inner)
-                appendDerived(from: inner)
-            }
+        if token.hasPrefix("[") && token.hasSuffix("]") && token.count >= 2 {
+            token = String(token.dropFirst().dropLast())
+        }
+        if let percent = token.firstIndex(of: "%") {
+            token = String(token[..<percent])
+        }
 
-            if identifier.hasPrefix("id:") {
-                append(String(identifier.dropFirst("id:".count)))
-            }
-
-            if identifier.hasPrefix("mac:bonjour:") {
-                append(String(identifier.dropFirst("mac:".count)))
-            }
-
-            if identifier.hasPrefix("fp:") {
-                append(String(identifier.dropFirst("fp:".count)))
-            }
-
-            if identifier.hasPrefix("name:") {
-                append(String(identifier.dropFirst("name:".count)))
-            }
-
-            if let normalizedBonjour = normalizeBonjourIdentifier(identifier) {
-                append(normalizedBonjour)
+        if token.contains(":"),
+           let dot = token.lastIndex(of: "."),
+           token[token.index(after: dot)...].allSatisfy({ $0.isNumber }) {
+            token = String(token[..<dot])
+        } else {
+            let parts = token.split(separator: ".")
+            if parts.count == 5,
+               parts.dropLast().allSatisfy({ Int($0) != nil }),
+               let port = Int(parts.last ?? ""),
+               (0...65535).contains(port) {
+                token = parts.dropLast().map(String.init).joined(separator: ".")
             }
         }
 
-        append(persistent)
-        appendDerived(from: primary)
-        return ordered
+        let normalized = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return nil }
+        return "host:\(normalized)"
     }
 
     private func normalizeBonjourIdentifier(_ identifier: String) -> String? {
@@ -1237,21 +1243,15 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty })
         guard !normalizedCandidates.isEmpty else { return [] }
+        let normalizedCandidatesLower = Set(normalizedCandidates.map { $0.lowercased() })
 
         var matchedByDeviceId: [String: TrustRecord] = [:]
         for record in TrustSyncService.shared.activeTrustRecords where !record.isTombstone {
-            if normalizedCandidates.contains(record.deviceId) {
-                matchedByDeviceId[record.deviceId] = record
-                continue
-            }
-
-            let peerEndpoint = capabilityValue(prefix: "peerEndpoint=", in: record.capabilities)
-            let declared = capabilityValue(prefix: "declaredDeviceId=", in: record.capabilities)
-            if let peerEndpoint, normalizedCandidates.contains(peerEndpoint) {
-                matchedByDeviceId[record.deviceId] = record
-                continue
-            }
-            if let declared, normalizedCandidates.contains(declared) {
+            if PeerTrustLookup.recordMatches(
+                record,
+                candidates: normalizedCandidates,
+                candidateLowercased: normalizedCandidatesLower
+            ) {
                 matchedByDeviceId[record.deviceId] = record
             }
         }
@@ -1450,7 +1450,10 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             modelName: localModel,
             platform: localPlatform,
             osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
-            chip: nil
+            chip: nil,
+            capabilities: ["clipboard_sync", "file_transfer", "remote_desktop", "remote_control"],
+            fileTransferPort: ServiceEndpointRegistry.shared.snapshot().fileTransferPort,
+            remoteControlPort: ServiceEndpointRegistry.shared.snapshot().remoteControlPort
         ))
         try await sendEncryptedAppMessage(message)
         lastPairingIdentityExchangeSentAtLock.withLock { $0 = now }
@@ -1967,6 +1970,8 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             await handlePairingIdentityExchange(payload)
         case .heartbeat:
             break
+        case .peerDisconnecting:
+            disconnect()
         case .ping(let payload):
             guard !rekeyInProgressLock.withLock({ $0 }) else { return }
             // RTT probe: reply as fast as possible.
@@ -2050,6 +2055,17 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         }
     }
 
+    private func mergedKnownDeviceIds(
+        existing: [String]?,
+        incoming: [String]
+    ) -> [String]? {
+        let merged = Set((existing ?? []) + incoming)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !merged.isEmpty else { return nil }
+        return Array(merged).sorted()
+    }
+
     @available(macOS 14.0, iOS 17.0, *)
     private func persistPeerKEMTrustRecords(from payload: AppMessage.PairingIdentityExchangePayload) async throws {
         guard let declaredDeviceId = normalizedNonEmptyString(payload.deviceId) else { return }
@@ -2103,7 +2119,9 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
                     deviceId: deviceId,
                     displayName: displayName,
                     incomingKEMKeys: payload.kemPublicKeys,
-                    capabilities: caps
+                    capabilities: caps,
+                    currentDeviceId: declaredDeviceId,
+                    knownDeviceIds: bootstrapIds
                 )
                 savedIds.append(deviceId)
             } catch {
@@ -2167,7 +2185,9 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         deviceId: String,
         displayName: String,
         incomingKEMKeys: [KEMPublicKeyInfo],
-        capabilities: [String]
+        capabilities: [String],
+        currentDeviceId: String?,
+        knownDeviceIds: [String]
     ) async throws {
         let trust = TrustSyncService.shared
         let existing = trust.getTrustRecord(deviceId: deviceId)
@@ -2175,6 +2195,10 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         let mergedKEM = mergedKEMPublicKeys(existing: existing?.kemPublicKeys, incoming: incomingKEMKeys)
         let resolvedDisplayName = normalizedNonEmptyString(displayName)
             ?? existing?.deviceName
+        let mergedKnownDeviceIds = mergedKnownDeviceIds(
+            existing: existing?.knownDeviceIdsMetadata,
+            incoming: knownDeviceIds
+        )
 
         let record = TrustRecord(
             deviceId: deviceId,
@@ -2182,6 +2206,8 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             publicKey: existing?.publicKey ?? Data(),
             secureEnclavePublicKey: existing?.secureEnclavePublicKey,
             protocolPublicKey: existing?.protocolPublicKey,
+            protocolSigningAlgorithm: existing?.protocolSigningAlgorithm,
+            protocolPublicKeyFingerprint: existing?.protocolPublicKeyFingerprint,
             legacyP256PublicKey: existing?.legacyP256PublicKey,
             signatureAlgorithm: existing?.signatureAlgorithm,
             kemPublicKeys: mergedKEM,
@@ -2189,7 +2215,10 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             attestationData: existing?.attestationData,
             capabilities: mergedCapabilities,
             signature: Data(),
-            deviceName: resolvedDisplayName
+            deviceName: resolvedDisplayName,
+            currentDeviceId: currentDeviceId ?? existing?.currentDeviceIdMetadata,
+            knownDeviceIds: mergedKnownDeviceIds,
+            lifecycleState: existing?.lifecycleStateMetadata
         )
         _ = try await trust.addTrustRecord(record)
     }

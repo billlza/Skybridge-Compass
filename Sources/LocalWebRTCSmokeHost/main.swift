@@ -499,8 +499,8 @@ struct LocalWebRTCSmokeHost {
     }
 
     private static func writeText(_ text: String, to url: URL) throws {
-        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try text.appending("\n").write(to: url, atomically: true, encoding: .utf8)
+        guard let data = text.appending("\n").data(using: .utf8) else { return }
+        try writePrivateData(data, to: url)
     }
 
     private static func sanitize(_ value: String) -> String {
@@ -526,8 +526,7 @@ private struct SmokeStatusReporter {
 
     func reset() {
         guard let statusURL else { return }
-        try? FileManager.default.createDirectory(at: statusURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try? "".write(to: statusURL, atomically: true, encoding: .utf8)
+        try? writePrivateData(Data(), to: statusURL)
     }
 
     func append(_ line: String) {
@@ -540,11 +539,22 @@ private struct SmokeStatusReporter {
                 _ = try? handle.seekToEnd()
                 try? handle.write(contentsOf: data)
             } else {
-                try? FileManager.default.createDirectory(at: statusURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-                try? data.write(to: statusURL, options: .atomic)
+                try? writePrivateData(data, to: statusURL)
             }
         }
     }
+}
+
+private func writePrivateData(_ data: Data, to url: URL) throws {
+    try FileManager.default.createDirectory(
+        at: url.deletingLastPathComponent(),
+        withIntermediateDirectories: true
+    )
+    try data.write(to: url, options: .atomic)
+    try FileManager.default.setAttributes(
+        [.posixPermissions: 0o600],
+        ofItemAtPath: url.path
+    )
 }
 
 private extension Data {

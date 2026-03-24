@@ -91,9 +91,14 @@ public class OfflineMessageQueue: ObservableObject {
     
     // MARK: - Private Properties
     
+    private static let storage = CodablePersistenceStore<StoredMessages>(
+        location: .protectedApplicationSupport(
+            path: "Messaging/offline-message-queue.json",
+            legacyUserDefaultsKey: "offline_message_queue"
+        )
+    )
     private let maxRetryCount = 3
     private let retryInterval: TimeInterval = 60 // 60秒后重试
-    private let storageKey = "offline_message_queue"
     private var retryTimer: Timer?
     
     // MARK: - Initialization
@@ -265,15 +270,11 @@ public class OfflineMessageQueue: ObservableObject {
     
     private func saveToStorage() {
         let data = StoredMessages(pending: pendingMessages, failed: failedMessages)
-        
-        if let encoded = try? JSONEncoder().encode(data) {
-            UserDefaults.standard.set(encoded, forKey: storageKey)
-        }
+        try? Self.storage.save(data)
     }
     
     private func loadFromStorage() {
-        guard let data = UserDefaults.standard.data(forKey: storageKey),
-              let stored = try? JSONDecoder().decode(StoredMessages.self, from: data) else {
+        guard let stored = Self.storage.load() else {
             return
         }
         
@@ -290,4 +291,3 @@ public class OfflineMessageQueue: ObservableObject {
         let failed: [OfflineMessage]
     }
 }
-

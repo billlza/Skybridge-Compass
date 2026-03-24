@@ -47,18 +47,28 @@ public final class RemoteControlServer: ObservableObject {
         let (boundListener, boundPort) = try await makeStartedListener(parameters: parameters, preferredPort: preferredPort)
         listener = boundListener
         activePort = boundPort
-        publishBonjour(port: boundPort)
+        ServiceEndpointRegistry.shared.setRemoteControlPort(boundPort)
+        if #available(macOS 14.0, *) {
+            let identitySnapshot = await SelfIdentityProvider.shared.snapshot()
+            publishBonjour(port: boundPort, identitySnapshot: identitySnapshot)
+        } else {
+            publishBonjour(port: boundPort, identitySnapshot: nil)
+        }
     }
     
     public func stop() {
         listener?.cancel()
         listener = nil
         activePort = nil
+        ServiceEndpointRegistry.shared.setRemoteControlPort(nil)
         netService?.stop()
         netService = nil
     }
     
-    private func publishBonjour(port: UInt16) {
+    private func publishBonjour(
+        port: UInt16,
+        identitySnapshot: SelfIdentitySnapshot?
+    ) {
         netService?.stop()
 
         let serviceName = Host.current().localizedName ?? "Mac"
@@ -74,25 +84,25 @@ public final class RemoteControlServer: ObservableObject {
             "remotePort": "\(port)".data(using: .utf8) ?? Data(),
             "port": "\(port)".data(using: .utf8) ?? Data()
         ]
-        // placeholder（启动后异步更新为强身份）；必须唯一，避免 iOS 端“合并错设备”
-        txt["deviceId"] = serviceName.data(using: .utf8) ?? Data()
-        txt["uniqueId"] = serviceName.data(using: .utf8) ?? Data()
+        if let identitySnapshot {
+            if !identitySnapshot.deviceId.isEmpty {
+                txt["deviceId"] = identitySnapshot.deviceId.data(using: .utf8) ?? Data()
+                txt["uniqueId"] = identitySnapshot.deviceId.data(using: .utf8) ?? Data()
+            } else {
+                txt["deviceId"] = serviceName.data(using: .utf8) ?? Data()
+                txt["uniqueId"] = serviceName.data(using: .utf8) ?? Data()
+            }
+
+            if !identitySnapshot.pubKeyFP.isEmpty {
+                txt["pubKeyFP"] = identitySnapshot.pubKeyFP.data(using: .utf8) ?? Data()
+            }
+        } else {
+            txt["deviceId"] = serviceName.data(using: .utf8) ?? Data()
+            txt["uniqueId"] = serviceName.data(using: .utf8) ?? Data()
+        }
 
         netService?.setTXTRecord(NetService.data(fromTXTRecord: txt))
         netService?.publish()
-
-        // 异步补齐 deviceId/pubKeyFP（不阻塞 start）
-        Task { [weak self] in
-            guard let self else { return }
-            if #available(macOS 14.0, *) {
-                let snap = await SelfIdentityProvider.shared.snapshot()
-                var updated = txt
-                if !snap.deviceId.isEmpty { updated["deviceId"] = snap.deviceId.data(using: .utf8) ?? Data() }
-                if !snap.pubKeyFP.isEmpty { updated["pubKeyFP"] = snap.pubKeyFP.data(using: .utf8) ?? Data() }
-                updated["uniqueId"] = (snap.deviceId.isEmpty ? serviceName : snap.deviceId).data(using: .utf8) ?? Data()
-                self.netService?.setTXTRecord(NetService.data(fromTXTRecord: updated))
-            }
-        }
         log.info("📡 Bonjour published \(self.serviceType) port=\(port)")
     }
 
@@ -124,6 +134,7 @@ public final class RemoteControlServer: ObservableObject {
                     case .ready:
                         let boundPort = listener.port?.rawValue ?? 0
                         self.activePort = boundPort
+                        ServiceEndpointRegistry.shared.setRemoteControlPort(boundPort)
                         self.log.info("✅ RemoteControlServer ready on \(boundPort)")
                         if !startState.finished {
                             startState.finished = true
@@ -170,12 +181,17 @@ public final class RemoteControlServer: ObservableObject {
     }
     
     private func handleIncoming(_ connection: NWConnection) {
+        final class IncomingConnectionLifecycle: @unchecked Sendable {
+            var didHandOffToManager = false
+        }
+
         let deviceId: String
         if case let .hostPort(host, _) = connection.endpoint {
-            deviceId = "\(host)"
+            deviceId = "host:\(host)"
         } else {
             deviceId = UUID().uuidString
         }
+        let lifecycle = IncomingConnectionLifecycle()
 
         if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
             print("🧪 mac remote server incoming endpoint=\(String(describing: connection.endpoint)) deviceId=\(deviceId)")
@@ -205,13 +221,14 @@ public final class RemoteControlServer: ObservableObject {
                 if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
                     print("🧪 mac remote server state peer=\(deviceId) state=\(rendered)")
                 }
+
+                guard case .ready = state, lifecycle.didHandOffToManager == false else { return }
+                lifecycle.didHandOffToManager = true
+                self.log.info("🔐 RemoteControlServer handing ready connection to manager: peer=\(deviceId, privacy: .public)")
+                await self.manager.allowRemoteControl(from: deviceId, connection: connection)
             }
         }
         
         connection.start(queue: queue)
-        
-        Task { @MainActor in
-            await self.manager.allowRemoteControl(from: deviceId, connection: connection)
-        }
     }
 }

@@ -526,7 +526,7 @@ public final class UltraStreamSender {
         startHandshakeBurst()
         
  // 绑定编码回调 -> UltraStream 发送
-        captureStreamer.onEncodedFrame = { [weak self] data, w, h, type in
+        captureStreamer.onEncodedFrame = { [weak self] data, w, h, type, _ in
             guard let self else { return }
  // 在主线程捕获值，然后在后台队列处理
             let frameType = type

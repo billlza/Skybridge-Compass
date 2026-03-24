@@ -28,14 +28,7 @@ enum WebRTCRemoteDesktopVideoPolicySelector {
         thermalState: ProcessInfo.ThermalState,
         isAppleSilicon: Bool
     ) -> WebRTCRemoteDesktopVideoPolicy {
-        guard transportPath == .direct else {
-            return jpegFallback(
-                request: request,
-                reason: transportPath == .relay ? "relay-jpeg-conservative" : "unknown-path-jpeg-safe"
-            )
-        }
-
-        let directPolicy = RemoteControlStreamPolicySelector.select(
+        let basePolicy = RemoteControlStreamPolicySelector.select(
             request: .init(
                 preferredSize: request.preferredSize,
                 preferredCodec: request.preferredCodec,
@@ -50,20 +43,62 @@ enum WebRTCRemoteDesktopVideoPolicySelector {
             isAppleSilicon: isAppleSilicon
         )
 
-        guard directPolicy.codec != .bgra else {
+        guard transportPath == .direct else {
+            return WebRTCRemoteDesktopVideoPolicy(
+                codec: .bgra,
+                targetFrameRate: max(4, min(request.requestedFrameRate, transportPath == .relay ? 15 : 24)),
+                keyFrameInterval: max(10, min(request.keyFrameInterval, max(30, request.requestedFrameRate * 2))),
+                preferredSize: conservativePreferredSize(
+                    for: request.preferredSize,
+                    transportPath: transportPath
+                ),
+                usesHardwareEncoder: false,
+                reason: transportPath == .relay ? "relay-jpeg-conservative" : "unknown-path-jpeg-safe"
+            )
+        }
+
+        guard basePolicy.codec != .bgra else {
             return jpegFallback(
                 request: request,
-                reason: "direct-\(directPolicy.reason)"
+                reason: "direct-\(basePolicy.reason)"
             )
         }
 
         return WebRTCRemoteDesktopVideoPolicy(
-            codec: directPolicy.codec,
-            targetFrameRate: directPolicy.targetFrameRate,
-            keyFrameInterval: directPolicy.keyFrameInterval,
-            preferredSize: directPolicy.preferredSize,
+            codec: basePolicy.codec,
+            targetFrameRate: basePolicy.targetFrameRate,
+            keyFrameInterval: basePolicy.keyFrameInterval,
+            preferredSize: basePolicy.preferredSize,
             usesHardwareEncoder: true,
-            reason: "direct-\(directPolicy.reason)"
+            reason: "direct-\(basePolicy.reason)"
+        )
+    }
+
+    private static func conservativePreferredSize(
+        for preferredSize: CGSize,
+        transportPath: WebRTCSession.ICETransportPath
+    ) -> CGSize {
+        guard preferredSize.width > 0, preferredSize.height > 0 else {
+            return preferredSize
+        }
+
+        let longEdgeLimit: CGFloat
+        switch transportPath {
+        case .relay:
+            longEdgeLimit = 1920
+        case .unknown:
+            longEdgeLimit = 2560
+        case .direct:
+            return preferredSize
+        }
+
+        let longEdge = max(preferredSize.width, preferredSize.height)
+        guard longEdge > longEdgeLimit else { return preferredSize }
+
+        let scale = longEdgeLimit / longEdge
+        return CGSize(
+            width: max(960, floor(preferredSize.width * scale)),
+            height: max(540, floor(preferredSize.height * scale))
         )
     }
 

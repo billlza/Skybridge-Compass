@@ -17,6 +17,12 @@ import OSLog
 /// 增强支持高分辨率视频传输和Apple Silicon优化
 @MainActor
 public class FileTransferEngine: ObservableObject {
+    private static let transferHistoryStore = CodablePersistenceStore<[FileTransferRecord]>(
+        location: .protectedApplicationSupport(
+            path: "FileTransfer/engine-history.json",
+            legacyUserDefaultsKey: "FileTransferHistory"
+        )
+    )
     
  // MARK: - 发布属性
     
@@ -1737,18 +1743,13 @@ public class FileTransferEngine: ObservableObject {
     
  /// 加载传输历史记录
     private func loadTransferHistory() {
- // 从UserDefaults或其他持久化存储加载历史记录
-        if let data = UserDefaults.standard.data(forKey: "FileTransferHistory"),
-           let history = try? JSONDecoder().decode([FileTransferRecord].self, from: data) {
-            transferHistory = history
-        }
+ // 从统一受保护状态存储加载历史记录
+        transferHistory = Self.transferHistoryStore.load() ?? []
     }
     
  /// 保存传输历史记录
     private func saveTransferHistory() {
-        if let data = try? JSONEncoder().encode(transferHistory) {
-            UserDefaults.standard.set(data, forKey: "FileTransferHistory")
-        }
+        try? Self.transferHistoryStore.save(transferHistory)
     }
     
  /// 计算文件校验和
@@ -2263,6 +2264,22 @@ public class DeviceConnectionManager: ObservableObject {
     @Published public var devices: [String: DeviceInfo] = [:]
     private let persistenceKey = "SkyBridge.DeviceConnections"
     private let logger = Logger(subsystem: "com.skybridge.filetransfer", category: "DeviceManager")
+    private static let devicesStore = CodablePersistenceStore<TransferDeviceCacheEnvelope<[String: DeviceInfo]>>(
+        location: .protectedApplicationSupport(
+            path: "FileTransfer/device-connections.json",
+            legacyUserDefaultsKey: "SkyBridge.DeviceConnections"
+        ),
+        encoder: {
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            return encoder
+        }(),
+        decoder: {
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            return decoder
+        }()
+    )
  // 为传输设备缓存增加 schemaVersion 顶层信封，统一版本管理与迁移。
  // 当前版本采用 V2：使用 JSON 包装结构 { schemaVersion, payload }。
     private let transferCacheSchemaVersion = 2
@@ -2320,12 +2337,9 @@ public class DeviceConnectionManager: ObservableObject {
  /// 保存设备列表 - 利用macOS 26.x的改进文件系统性能
     private func saveDevices() {
         do {
-            let encoder = JSONEncoder()
-            encoder.dateEncodingStrategy = .iso8601
  // V2 写入使用顶层信封，包含 schemaVersion。
             let env = TransferDeviceCacheEnvelope(schemaVersion: transferCacheSchemaVersion, payload: self.devices)
-            let data = try encoder.encode(env)
-            UserDefaults.standard.set(data, forKey: persistenceKey)
+            try Self.devicesStore.save(env)
             logger.debug("💾 设备列表已保存: \(self.devices.count) 个设备")
         } catch {
             logger.error("❌ 保存设备列表失败: \(error.localizedDescription)")
@@ -2334,6 +2348,20 @@ public class DeviceConnectionManager: ObservableObject {
     
  /// 加载设备列表 - 利用macOS 26.x的改进文件系统性能
     private func loadDevices() {
+        if let env = Self.devicesStore.load() {
+            if env.schemaVersion == transferCacheSchemaVersion {
+                self.devices = env.payload
+                logger.info("✅ 设备列表已加载(V2): \(self.devices.count) 个设备")
+                return
+            } else {
+                logger.warning("传输设备缓存版本不匹配(schemaVersion=\(env.schemaVersion))，将清空缓存重建")
+                try? Self.devicesStore.remove()
+                UserDefaults.standard.removeObject(forKey: persistenceKey)
+                self.devices = [:]
+                return
+            }
+        }
+
         guard let data = UserDefaults.standard.data(forKey: persistenceKey) else {
             logger.debug("📂 未找到保存的设备列表")
             return
@@ -2345,10 +2373,13 @@ public class DeviceConnectionManager: ObservableObject {
         if let env = try? decoder.decode(TransferDeviceCacheEnvelope<[String: DeviceInfo]>.self, from: data) {
             if env.schemaVersion == transferCacheSchemaVersion {
                 self.devices = env.payload
+                try? Self.devicesStore.save(env)
+                UserDefaults.standard.removeObject(forKey: persistenceKey)
                 logger.info("✅ 设备列表已加载(V2): \(self.devices.count) 个设备")
                 return
             } else {
                 logger.warning("传输设备缓存版本不匹配(schemaVersion=\(env.schemaVersion))，将清空缓存重建")
+                try? Self.devicesStore.remove()
                 UserDefaults.standard.removeObject(forKey: persistenceKey)
                 self.devices = [:]
                 return
@@ -2359,18 +2390,17 @@ public class DeviceConnectionManager: ObservableObject {
         if let legacy = try? decoder.decode([String: DeviceInfo].self, from: data) {
             self.devices = legacy
             logger.info("📂 检测到旧版传输设备缓存(V1)，执行一次性迁移: \(legacy.count) 个设备")
-            let encoder = JSONEncoder()
-            encoder.dateEncodingStrategy = .iso8601
             let env = TransferDeviceCacheEnvelope(schemaVersion: transferCacheSchemaVersion, payload: legacy)
-            if let encoded = try? encoder.encode(env) {
-                UserDefaults.standard.set(encoded, forKey: persistenceKey)
-                logger.debug("🔄 传输设备缓存已升级至 V2")
+            if (try? Self.devicesStore.save(env)) != nil {
+                UserDefaults.standard.removeObject(forKey: persistenceKey)
+                logger.debug("🔄 传输设备缓存已升级至统一受保护存储")
             }
             return
         }
         
- // 两种格式均解析失败，视为损坏缓存，直接清理。
+// 两种格式均解析失败，视为损坏缓存，直接清理。
         logger.warning("传输设备缓存读取失败/版本不匹配，清理重建: \(String(data: data, encoding: .utf8) ?? "<binary>")")
+        try? Self.devicesStore.remove()
         UserDefaults.standard.removeObject(forKey: persistenceKey)
         self.devices = [:]
     }
@@ -2378,6 +2408,7 @@ public class DeviceConnectionManager: ObservableObject {
  /// 清除所有设备
     public func clearAll() {
         devices.removeAll()
+        try? Self.devicesStore.remove()
         UserDefaults.standard.removeObject(forKey: persistenceKey)
         logger.info("🗑️ 所有设备已清除")
     }

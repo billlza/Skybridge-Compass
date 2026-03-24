@@ -715,7 +715,7 @@ private struct QuantumStarLayer: View {
                     ForEach(viewModel.discoveredDevices.prefix(3)) { device in
                         DeviceRowView(
                             device: device,
-                            connectionStatus: connectionManager.connectionStatusByDeviceId[device.id]
+                            connectionStatus: connectionManager.resolvedConnectionStatus(for: device)
                         ) {
                             showingDeviceDetail = device
                         }
@@ -750,11 +750,7 @@ private struct QuantumStarLayer: View {
                 ForEach(displayedActiveConnections) { connection in
                     ConnectionRowView(connection: connection) {
                         Task {
-                            if connection.id.hasPrefix("webrtc-") {
-                                await crossNetworkManager.disconnect()
-                            } else {
-                                await viewModel.disconnect(from: connection.device)
-                            }
+                            await disconnect(connection)
                         }
                     }
                 }
@@ -805,6 +801,50 @@ private struct QuantumStarLayer: View {
             status: snapshot.phase == .reconnecting ? .connecting : .connected,
             encryptionType: .pqc
         )
+    }
+
+    private func disconnect(_ connection: Connection) async {
+        if isCrossNetworkConnection(connection) {
+            let activeRemoteDevice = remoteDesktopManager.currentConnection?.device
+            let shouldTearDownRemoteDesktop =
+                normalizedIdentifier(activeRemoteDevice?.id) == normalizedIdentifier(connection.device.id)
+                || normalizedName(activeRemoteDevice?.name) == normalizedName(connection.device.name)
+            if shouldTearDownRemoteDesktop {
+                await remoteDesktopManager.disconnect(tearDownTransport: true)
+            }
+            await crossNetworkManager.disconnect()
+            return
+        }
+
+        await viewModel.disconnect(from: connection.device)
+    }
+
+    private func isCrossNetworkConnection(_ connection: Connection) -> Bool {
+        if connection.id.hasPrefix("webrtc-") {
+            return true
+        }
+
+        guard let snapshot = crossNetworkManager.activeSessionSnapshot else { return false }
+        let snapshotDeviceId = normalizedIdentifier(
+            snapshot.deviceId ?? crossNetworkManager.remoteDeviceId
+        )
+        if snapshotDeviceId == normalizedIdentifier(connection.device.id) {
+            return true
+        }
+
+        return normalizedName(snapshot.deviceName ?? crossNetworkManager.remoteDeviceName)
+            == normalizedName(connection.device.name)
+    }
+
+    private func normalizedIdentifier(_ raw: String?) -> String {
+        raw?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+    }
+
+    private func normalizedName(_ raw: String?) -> String {
+        raw?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: " ", with: "") ?? ""
     }
     
     // MARK: - Devices Tab
@@ -1162,6 +1202,28 @@ private struct QRCodeHubSheet: View {
                                 Text("我的连接码")
                                     .font(.headline)
                                     .foregroundStyle(.primary)
+
+                                Picker(
+                                    RuntimeLocalization.string("connection.codeMode.title"),
+                                    selection: $crossNetworkManager.connectionCodeLeaseMode
+                                ) {
+                                    Text(RuntimeLocalization.string("connection.codeMode.short"))
+                                        .tag(CrossNetworkWebRTCManager.ConnectionCodeLeaseMode.shortLived)
+                                    Text(RuntimeLocalization.string("connection.codeMode.day"))
+                                        .tag(CrossNetworkWebRTCManager.ConnectionCodeLeaseMode.dayStable)
+                                }
+                                .pickerStyle(.segmented)
+                                .padding(.horizontal, 24)
+
+                                Text(
+                                    crossNetworkManager.connectionCodeLeaseMode == .dayStable
+                                        ? RuntimeLocalization.string("connection.codeMode.dayHint")
+                                        : RuntimeLocalization.string("connection.codeMode.shortHint")
+                                )
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.center)
+                                .padding(.horizontal, 24)
 
                                 Text(generatedCode.isEmpty ? (crossNetworkManager.localConnectionCode ?? RuntimeLocalization.string("未生成")) : generatedCode)
                                     .font(.system(size: 34, weight: .bold, design: .rounded))

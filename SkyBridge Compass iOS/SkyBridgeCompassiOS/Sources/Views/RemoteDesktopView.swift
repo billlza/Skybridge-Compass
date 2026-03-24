@@ -1,6 +1,10 @@
 import SwiftUI
-import Metal
+@preconcurrency import AVFoundation
 import MetalKit
+import CoreImage
+#if canImport(WebRTC)
+@preconcurrency import WebRTC
+#endif
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -37,7 +41,11 @@ struct RemoteDesktopView: View {
                     // 远程桌面流
                     RemoteDesktopStreamView(
                         connection: connection,
-                        isFullScreen: $isFullScreen
+                        isFullScreen: $isFullScreen,
+                        onDisconnect: {
+                            showUITestRemoteStream = false
+                            selectedConnection = nil
+                        }
                     )
                 } else {
                     // 连接选择界面
@@ -67,8 +75,20 @@ struct RemoteDesktopView: View {
             attemptAutoConnectCrossNetworkSession()
             attemptAutoConnectUITestFixture()
         }
+        .onDisappear {
+            Task {
+                await remoteDesktopManager.disconnect()
+                await MainActor.run {
+                    selectedConnection = nil
+                }
+            }
+        }
         .onChange(of: crossNetworkManager.state) { _, _ in
             attemptAutoConnectCrossNetworkSession()
+        }
+        .onChange(of: remoteDesktopManager.currentConnection?.device.id) { _, _ in
+            guard let activeConnection = remoteDesktopManager.currentConnection else { return }
+            selectedConnection = activeConnection
         }
         .onChange(of: connectionManager.activeConnections.count) { _, _ in
             attemptAutoConnectUITestFixture()
@@ -87,7 +107,7 @@ struct RemoteDesktopView: View {
                 .font(.title2.bold())
                 .foregroundColor(.white)
             
-            if connectionManager.activeConnections.isEmpty && crossNetworkConnection == nil {
+            if lanRemoteConnections.isEmpty && crossNetworkConnection == nil {
                 Text(
                     "\(RuntimeLocalization.string("当前没有活动连接"))\n\(RuntimeLocalization.string("请先在发现页面连接设备"))"
                 )
@@ -108,7 +128,7 @@ struct RemoteDesktopView: View {
                             .accessibilityIdentifier("remote.connection.\(crossNetworkConnection.device.id)")
                             .accessibilityElement(children: .combine)
                         }
-                        ForEach(connectionManager.activeConnections) { connection in
+                        ForEach(lanRemoteConnections) { connection in
                             Button {
                                 connectToDevice(connection)
                             } label: {
@@ -167,6 +187,12 @@ struct RemoteDesktopView: View {
         )
     }
 
+    private var lanRemoteConnections: [Connection] {
+        connectionManager.activeConnections.filter {
+            isRemoteDesktopEligible($0.device)
+        }
+    }
+
     private func connectToDevice(_ connection: Connection) {
         selectedConnection = connection
         if shouldAutoConnectUITestFixture {
@@ -175,6 +201,11 @@ struct RemoteDesktopView: View {
         Task {
             do {
                 try await remoteDesktopManager.startStreaming(from: connection)
+                await MainActor.run {
+                    if let activeConnection = remoteDesktopManager.currentConnection {
+                        selectedConnection = activeConnection
+                    }
+                }
             } catch {
                 await MainActor.run {
                     if selectedConnection?.id == connection.id,
@@ -211,6 +242,10 @@ struct RemoteDesktopView: View {
         didAutoConnectUITestFixture = true
         connectToDevice(firstConnection)
     }
+
+    private func isRemoteDesktopEligible(_ device: DiscoveredDevice) -> Bool {
+        remoteDesktopManager.canPresentRemoteDesktopOption(for: device)
+    }
 }
 
 // MARK: - Remote Desktop Stream View
@@ -220,8 +255,11 @@ struct RemoteDesktopView: View {
 struct RemoteDesktopStreamView: View {
     let connection: Connection
     @Binding var isFullScreen: Bool
+    let onDisconnect: () -> Void
     
+    @StateObject private var p2pConnectionManager = P2PConnectionManager.instance
     @StateObject private var remoteDesktopManager = RemoteDesktopManager.instance
+    @StateObject private var crossNetworkManager = CrossNetworkWebRTCManager.instance
     @State private var scale: CGFloat = 1.0
     @State private var offset: CGSize = .zero
     @State private var lastOffset: CGSize = .zero
@@ -268,11 +306,7 @@ struct RemoteDesktopStreamView: View {
         .statusBarHidden(isFullScreen)
         .persistentSystemOverlays(isFullScreen ? .hidden : .visible)
         .onAppear {
-            startStream()
             resetControlsTimer()
-        }
-        .onDisappear {
-            stopStream()
         }
         .onChange(of: touchMode) { _, _ in
             dragMouseDownSent = false
@@ -285,17 +319,60 @@ struct RemoteDesktopStreamView: View {
     }
     
     private func remoteScreenView(geometry: GeometryProxy) -> some View {
-        RemoteDesktopCompositedSurface(
-            feed: remoteDesktopManager.videoFrameFeed,
-            fallbackFrame: remoteDesktopManager.currentFrame,
-            resolution: remoteDesktopManager.resolution,
-            cursorPayload: remoteDesktopManager.currentCursorPayload,
-            cursorImage: remoteDesktopManager.currentCursorImage,
-            overlayPayload: remoteDesktopManager.currentOverlayPayload
-        )
+        Group {
+#if canImport(WebRTC)
+            if shouldUseNativeCrossNetworkVideo,
+               let remoteTrack = crossNetworkManager.remoteVideoTrack {
+                RemoteDesktopNativeVideoSurface(
+                    track: remoteTrack,
+                    resolution: remoteDesktopManager.resolution,
+                    cursorPayload: remoteDesktopManager.currentCursorPayload,
+                    cursorImage: remoteDesktopManager.currentCursorImage,
+                    overlayPayload: remoteDesktopManager.currentOverlayPayload
+                )
+            } else {
+                RemoteDesktopCompositedSurface(
+                    feed: remoteDesktopManager.videoFrameFeed,
+                    metalFeed: remoteDesktopManager.metalVideoFrameFeed,
+                    fallbackFrame: remoteDesktopManager.currentFrame,
+                    pipeline: remoteDesktopManager.renderPipelineStatus,
+                    resolution: remoteDesktopManager.resolution,
+                    cursorPayload: remoteDesktopManager.currentCursorPayload,
+                    cursorImage: remoteDesktopManager.currentCursorImage,
+                    overlayPayload: remoteDesktopManager.currentOverlayPayload
+                )
+            }
+#else
+            RemoteDesktopCompositedSurface(
+                feed: remoteDesktopManager.videoFrameFeed,
+                metalFeed: remoteDesktopManager.metalVideoFrameFeed,
+                fallbackFrame: remoteDesktopManager.currentFrame,
+                pipeline: remoteDesktopManager.renderPipelineStatus,
+                resolution: remoteDesktopManager.resolution,
+                cursorPayload: remoteDesktopManager.currentCursorPayload,
+                cursorImage: remoteDesktopManager.currentCursorImage,
+                overlayPayload: remoteDesktopManager.currentOverlayPayload
+            )
+#endif
+        }
         .scaleEffect(scale)
         .offset(offset)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var isUsingNativeCrossNetworkVideo: Bool {
+        connection.device.capabilities.contains(RemoteDesktopManager.crossNetworkDeviceCapability)
+            || connection.device.advertisedCapabilities.contains(RemoteDesktopManager.crossNetworkDeviceCapability)
+    }
+
+    private var shouldUseNativeCrossNetworkVideo: Bool {
+#if canImport(WebRTC)
+        return isUsingNativeCrossNetworkVideo
+            && crossNetworkManager.remoteVideoTrack != nil
+            && crossNetworkManager.remoteVideoTrackHasRenderedFrame
+#else
+        return false
+#endif
     }
     
     private func touchControlOverlay(geometry: GeometryProxy) -> some View {
@@ -460,23 +537,16 @@ struct RemoteDesktopStreamView: View {
     }
     
     private func disconnect() {
-        stopStream()
-        // 返回到连接选择界面
-    }
-    
-    private func startStream() {
         Task {
-            do {
-                try await remoteDesktopManager.startStreaming(from: connection)
-            } catch {
-                SkyBridgeLogger.shared.error("❌ 远程桌面启动失败: \(error.localizedDescription)")
+            if isUsingNativeCrossNetworkVideo {
+                await remoteDesktopManager.disconnect()
+            } else {
+                await remoteDesktopManager.disconnect(tearDownTransport: false)
+                await p2pConnectionManager.disconnect(from: connection.device)
             }
-        }
-    }
-    
-    private func stopStream() {
-        Task {
-            await remoteDesktopManager.disconnect()
+            await MainActor.run {
+                onDisconnect()
+            }
         }
     }
     
@@ -692,7 +762,9 @@ private struct RemoteDesktopStreamSettingsSheet: View {
 @available(iOS 17.0, *)
 private struct RemoteDesktopCompositedSurface: View {
     @ObservedObject var feed: RemoteVideoFrameFeed
+    @ObservedObject var metalFeed: RemoteMetalVideoFrameFeed
     let fallbackFrame: CGImage?
+    let pipeline: RemoteDesktopRenderPipeline
     let resolution: CGSize
     let cursorPayload: RemoteDesktopCursorPayload?
     let cursorImage: UIImage?
@@ -708,12 +780,19 @@ private struct RemoteDesktopCompositedSurface: View {
                 contentSize: referenceSize,
                 containerSize: geometry.size
             )
-            let hasRenderableContent = feed.hasFrame || fallbackFrame != nil
+            let hasRenderableContent =
+                pipeline == .metalRenderer
+                || pipeline == .sampleBufferDisplayLayer
+                || metalFeed.hasFrame
+                || feed.hasFrame
+                || fallbackFrame != nil
 
             ZStack {
                 RemoteDesktopRenderedSurface(
                     feed: feed,
-                    fallbackFrame: fallbackFrame
+                    metalFeed: metalFeed,
+                    fallbackFrame: fallbackFrame,
+                    pipeline: pipeline
                 )
                 .frame(width: canvasSize.width, height: canvasSize.height)
 
@@ -730,24 +809,158 @@ private struct RemoteDesktopCompositedSurface: View {
     }
 }
 
+#if canImport(WebRTC)
+@available(iOS 17.0, *)
+private struct RemoteDesktopNativeVideoSurface: View {
+    let track: RTCVideoTrack
+    let resolution: CGSize
+    let cursorPayload: RemoteDesktopCursorPayload?
+    let cursorImage: UIImage?
+    let overlayPayload: RemoteDesktopOverlayPayload?
+
+    var body: some View {
+        GeometryReader { geometry in
+            let referenceSize = remoteReferenceCanvasSize(
+                preferredResolution: resolution,
+                fallbackFrame: nil
+            )
+            let canvasSize = remoteAspectFitSize(
+                contentSize: referenceSize,
+                containerSize: geometry.size
+            )
+
+            ZStack {
+                RemoteDesktopRTCVideoView(track: track)
+                    .frame(width: canvasSize.width, height: canvasSize.height)
+
+                RemoteDesktopInteractionOverlayView(
+                    resolution: referenceSize,
+                    cursorPayload: cursorPayload,
+                    cursorImage: cursorImage,
+                    overlayPayload: overlayPayload
+                )
+                .frame(width: canvasSize.width, height: canvasSize.height)
+            }
+            .frame(width: geometry.size.width, height: geometry.size.height, alignment: .center)
+        }
+    }
+}
+
+@available(iOS 17.0, *)
+private struct RemoteDesktopRTCVideoView: UIViewRepresentable {
+    let track: RTCVideoTrack
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeUIView(context: Context) -> RTCMTLVideoView {
+        let view = RTCMTLVideoView(frame: .zero)
+        view.videoContentMode = .scaleAspectFit
+        view.delegate = context.coordinator
+        context.coordinator.bind(track: track, to: view)
+        return view
+    }
+
+    func updateUIView(_ uiView: RTCMTLVideoView, context: Context) {
+        uiView.delegate = context.coordinator
+        context.coordinator.bind(track: track, to: uiView)
+    }
+
+    static func dismantleUIView(_ uiView: RTCMTLVideoView, coordinator: Coordinator) {
+        coordinator.unbind()
+        uiView.delegate = nil
+    }
+
+    final class Coordinator: NSObject, RTCVideoViewDelegate {
+        private weak var boundTrack: RTCVideoTrack?
+        private weak var boundView: RTCMTLVideoView?
+
+        func bind(track: RTCVideoTrack, to view: RTCMTLVideoView) {
+            if boundTrack === track, boundView === view {
+                return
+            }
+            unbind()
+            boundTrack = track
+            boundView = view
+            track.add(view)
+        }
+
+        func unbind() {
+            if let boundTrack, let boundView {
+                boundTrack.remove(boundView)
+            }
+            boundTrack = nil
+            boundView = nil
+        }
+
+        func videoView(_ videoView: any RTCVideoRenderer, didChangeVideoSize size: CGSize) {
+            Task { @MainActor in
+                RemoteDesktopManager.instance.updateCrossNetworkNativeVideoResolution(size)
+            }
+        }
+    }
+}
+#endif
+
 @available(iOS 17.0, *)
 private struct RemoteDesktopRenderedSurface: View {
     @ObservedObject var feed: RemoteVideoFrameFeed
+    @ObservedObject var metalFeed: RemoteMetalVideoFrameFeed
     let fallbackFrame: CGImage?
+    let pipeline: RemoteDesktopRenderPipeline
 
     var body: some View {
         Group {
-            if feed.hasFrame {
-                RemoteDesktopMetalVideoView(feed: feed)
-            } else if let fallbackFrame {
-                Image(decorative: fallbackFrame, scale: 1.0, orientation: .up)
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-            } else {
-                ProgressView(RuntimeLocalization.string("正在连接..."))
-                    .tint(.white)
+            switch pipeline {
+            case .metalRenderer:
+                RemoteDesktopMetalVideoView(feed: metalFeed)
+            case .sampleBufferDisplayLayer:
+                RemoteDesktopSampleBufferVideoView(feed: feed)
+            case .stillImageFallback:
+                if let fallbackFrame {
+                    Image(decorative: fallbackFrame, scale: 1.0, orientation: .up)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                } else if metalFeed.hasFrame {
+                    RemoteDesktopMetalVideoView(feed: metalFeed)
+                } else if feed.hasFrame {
+                    RemoteDesktopSampleBufferVideoView(feed: feed)
+                } else {
+                    loadingView
+                }
+            case .waiting:
+                if metalFeed.hasFrame {
+                    RemoteDesktopMetalVideoView(feed: metalFeed)
+                } else if feed.hasFrame {
+                    RemoteDesktopSampleBufferVideoView(feed: feed)
+                } else if let fallbackFrame {
+                    Image(decorative: fallbackFrame, scale: 1.0, orientation: .up)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                } else {
+                    loadingView
+                }
             }
         }
+    }
+
+    @ViewBuilder
+    private var fallbackContent: some View {
+        if let fallbackFrame {
+            Image(decorative: fallbackFrame, scale: 1.0, orientation: .up)
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+        } else if feed.hasFrame {
+            RemoteDesktopSampleBufferVideoView(feed: feed)
+        } else {
+            loadingView
+        }
+    }
+
+    private var loadingView: some View {
+        ProgressView(RuntimeLocalization.string("正在连接..."))
+            .tint(.white)
     }
 }
 
@@ -881,239 +1094,456 @@ private func remoteAspectFitSize(contentSize: CGSize, containerSize: CGSize) -> 
 
 @available(iOS 17.0, *)
 private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
-    @ObservedObject var feed: RemoteVideoFrameFeed
+    let feed: RemoteMetalVideoFrameFeed
+    private let remoteDesktopManager = RemoteDesktopManager.instance
 
     func makeCoordinator() -> Coordinator {
-        Coordinator()
+        Coordinator(
+            onFrameDisplayed: { [remoteDesktopManager] presentationTimeStamp in
+                Task { @MainActor in
+                    await remoteDesktopManager.handleMetalRendererDidDisplayFrame(
+                        presentationTimeStamp: presentationTimeStamp
+                    )
+                }
+            }
+        )
     }
 
-    func makeUIView(context: Context) -> MTKView {
-        let view = MTKView(frame: .zero, device: context.coordinator.device)
+    @MainActor
+    func makeUIView(context: Context) -> MetalVideoContainerView {
+        let view = MetalVideoContainerView()
         context.coordinator.attach(to: view)
         view.isUserInteractionEnabled = false
         return view
     }
 
-    func updateUIView(_ uiView: MTKView, context: Context) {
+    @MainActor
+    func updateUIView(_ uiView: MetalVideoContainerView, context: Context) {
         context.coordinator.attach(to: uiView)
 
         if context.coordinator.lastFlushVersion != feed.flushVersion {
             context.coordinator.lastFlushVersion = feed.flushVersion
-            context.coordinator.flush(view: uiView)
+            context.coordinator.flush(
+                view: uiView,
+                removeDisplayedImage: feed.removeDisplayedImageOnFlush
+            )
         }
 
         guard context.coordinator.lastFrameVersion != feed.frameVersion else { return }
         context.coordinator.lastFrameVersion = feed.frameVersion
 
-        guard let frame = feed.currentFrame else {
-            context.coordinator.flush(view: uiView)
-            return
+        if let frame = feed.takeLatestFrame() {
+            context.coordinator.display(
+                frame: frame,
+                version: context.coordinator.lastFrameVersion,
+                in: uiView
+            )
         }
-        context.coordinator.display(frame: frame, view: uiView)
     }
 
-    final class Coordinator: NSObject, MTKViewDelegate {
-        let device: MTLDevice?
-        private let commandQueue: MTLCommandQueue?
-        private var textureCache: CVMetalTextureCache?
-        private var pipelineState: MTLRenderPipelineState?
-        private var vertexBuffer: MTLBuffer?
-        private weak var attachedView: MTKView?
-        private var currentTextureRef: CVMetalTexture?
-        private var currentTexture: MTLTexture?
+    @MainActor
+    final class Coordinator {
+        private let onFrameDisplayed: @Sendable (CMTime) -> Void
+        private weak var attachedView: MetalVideoContainerView?
+        let renderer = MetalVideoRenderer()
         var lastFrameVersion: UInt64 = 0
         var lastFlushVersion: UInt64 = 0
 
-        override init() {
-            let device = MTLCreateSystemDefaultDevice()
-            self.device = device
-            self.commandQueue = device?.makeCommandQueue()
-            super.init()
-
-            guard let device else { return }
-            var textureCache: CVMetalTextureCache?
-            CVMetalTextureCacheCreate(kCFAllocatorDefault, nil, device, nil, &textureCache)
-            self.textureCache = textureCache
-
-            let library = try? device.makeLibrary(source: Self.shaderSource, options: nil)
-            let descriptor = MTLRenderPipelineDescriptor()
-            descriptor.vertexFunction = library?.makeFunction(name: "passthroughVertex")
-            descriptor.fragmentFunction = library?.makeFunction(name: "blitFragment")
-            descriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
-            pipelineState = try? device.makeRenderPipelineState(descriptor: descriptor)
-
-            struct Vertex {
-                var position: SIMD2<Float>
-                var uv: SIMD2<Float>
-            }
-
-            let quad: [Vertex] = [
-                .init(position: [-1, -1], uv: [0, 1]),
-                .init(position: [ 1, -1], uv: [1, 1]),
-                .init(position: [-1,  1], uv: [0, 0]),
-                .init(position: [-1,  1], uv: [0, 0]),
-                .init(position: [ 1, -1], uv: [1, 1]),
-                .init(position: [ 1,  1], uv: [1, 0])
-            ]
-            vertexBuffer = device.makeBuffer(
-                bytes: quad,
-                length: MemoryLayout<Vertex>.stride * quad.count,
-                options: .storageModeShared
-            )
+        init(onFrameDisplayed: @escaping @Sendable (CMTime) -> Void) {
+            self.onFrameDisplayed = onFrameDisplayed
+            renderer.onFrameDisplayed = onFrameDisplayed
         }
 
-        func attach(to view: MTKView) {
+        func attach(to view: MetalVideoContainerView) {
             guard attachedView !== view else { return }
             attachedView = view
-            view.device = device
-            view.delegate = self
-            view.colorPixelFormat = .bgra8Unorm
-            view.clearColor = MTLClearColorMake(0, 0, 0, 1)
-            view.isPaused = true
-            view.enableSetNeedsDisplay = true
-            view.framebufferOnly = true
-            view.contentMode = .scaleAspectFit
-            view.layer.isOpaque = true
-            view.backgroundColor = .black
+            view.configureIfNeeded(renderer: renderer)
         }
 
-        func display(frame: DecodedPixelBufferFrame, view: MTKView) {
+        func display(frame: DecodedPixelBufferFrame, version: UInt64, in view: MetalVideoContainerView) {
             attach(to: view)
-            guard let textureCache else { return }
+            renderer.display(frame: frame, version: version, in: view.metalView)
+        }
 
-            var textureRef: CVMetalTexture?
-            let width = CVPixelBufferGetWidth(frame.pixelBuffer)
-            let height = CVPixelBufferGetHeight(frame.pixelBuffer)
-            let status = CVMetalTextureCacheCreateTextureFromImage(
-                kCFAllocatorDefault,
-                textureCache,
-                frame.pixelBuffer,
-                nil,
-                .bgra8Unorm,
-                width,
-                height,
-                0,
-                &textureRef
+        func flush(view: MetalVideoContainerView, removeDisplayedImage: Bool) {
+            attach(to: view)
+            renderer.flush(removeDisplayedImage: removeDisplayedImage, in: view.metalView)
+        }
+    }
+
+    final class MetalVideoContainerView: UIView {
+        let metalView = MTKView(frame: .zero)
+        private var didConfigure = false
+
+        override init(frame: CGRect) {
+            super.init(frame: frame)
+            addSubview(metalView)
+            metalView.translatesAutoresizingMaskIntoConstraints = false
+            NSLayoutConstraint.activate([
+                metalView.leadingAnchor.constraint(equalTo: leadingAnchor),
+                metalView.trailingAnchor.constraint(equalTo: trailingAnchor),
+                metalView.topAnchor.constraint(equalTo: topAnchor),
+                metalView.bottomAnchor.constraint(equalTo: bottomAnchor)
+            ])
+        }
+
+        required init?(coder: NSCoder) {
+            fatalError("init(coder:) has not been implemented")
+        }
+
+        func configureIfNeeded(renderer: MetalVideoRenderer) {
+            guard !didConfigure else { return }
+            didConfigure = true
+            backgroundColor = .black
+            metalView.device = renderer.device
+            metalView.delegate = renderer
+            metalView.framebufferOnly = false
+            metalView.enableSetNeedsDisplay = true
+            metalView.isPaused = true
+            metalView.preferredFramesPerSecond = 60
+            metalView.isOpaque = true
+            metalView.backgroundColor = .black
+            metalView.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+        }
+    }
+
+    final class MetalVideoRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
+        let device = MTLCreateSystemDefaultDevice()
+        private let commandQueue: MTLCommandQueue?
+        private let ciContext: CIContext?
+        private var currentFrame: DecodedPixelBufferFrame?
+        private var currentFrameVersion: UInt64 = 0
+        private var lastDisplayedFrameVersion: UInt64 = 0
+        private var needsClear = true
+        private let inFlightSemaphore = DispatchSemaphore(value: 2)
+        var onFrameDisplayed: (@Sendable (CMTime) -> Void)?
+
+        override init() {
+            if let device = device {
+                commandQueue = device.makeCommandQueue()
+                ciContext = CIContext(
+                    mtlDevice: device,
+                    options: [.cacheIntermediates: false]
+                )
+            } else {
+                commandQueue = nil
+                ciContext = nil
+            }
+            super.init()
+        }
+
+        @MainActor
+        func display(frame: DecodedPixelBufferFrame, version: UInt64, in view: MTKView) {
+            currentFrame = frame
+            currentFrameVersion = version
+            needsClear = false
+            let drawableScale = view.window?.screen.scale ?? UIScreen.main.scale
+            view.contentScaleFactor = drawableScale
+            view.drawableSize = CGSize(
+                width: max(view.bounds.width * drawableScale, 1),
+                height: max(view.bounds.height * drawableScale, 1)
             )
-
-            guard status == kCVReturnSuccess,
-                  let textureRef,
-                  let texture = CVMetalTextureGetTexture(textureRef) else {
-                return
-            }
-
-            currentTextureRef = textureRef
-            currentTexture = texture
-            view.setNeedsDisplay()
+            view.draw()
         }
 
-        func flush(view: MTKView) {
-            attach(to: view)
-            currentTexture = nil
-            currentTextureRef = nil
-            if let textureCache {
-                CVMetalTextureCacheFlush(textureCache, 0)
+        @MainActor
+        func flush(removeDisplayedImage: Bool, in view: MTKView) {
+            if removeDisplayedImage {
+                currentFrame = nil
+                currentFrameVersion = 0
+                lastDisplayedFrameVersion = 0
+                needsClear = true
+                view.draw()
             }
-            view.setNeedsDisplay()
         }
 
         func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
 
         func draw(in view: MTKView) {
-            guard let commandQueue,
-                  let pipelineState,
-                  let drawable = view.currentDrawable else {
+            guard view.drawableSize.width > 0, view.drawableSize.height > 0 else {
+                return
+            }
+            let frame = currentFrame
+            let frameVersion = currentFrameVersion
+            guard needsClear || frame != nil else {
+                return
+            }
+            guard inFlightSemaphore.wait(timeout: .now()) == .success else {
+                view.setNeedsDisplay()
+                return
+            }
+            guard let drawable = view.currentDrawable,
+                  let commandQueue,
+                  let commandBuffer = commandQueue.makeCommandBuffer() else {
+                inFlightSemaphore.signal()
+                view.setNeedsDisplay()
                 return
             }
 
-            let descriptor = MTLRenderPassDescriptor()
-            descriptor.colorAttachments[0].texture = drawable.texture
-            descriptor.colorAttachments[0].loadAction = .clear
-            descriptor.colorAttachments[0].storeAction = .store
-            descriptor.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1)
-
-            guard let commandBuffer = commandQueue.makeCommandBuffer(),
-                  let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor) else {
+            guard let frame, let ciContext else {
+                guard needsClear else {
+                    inFlightSemaphore.signal()
+                    return
+                }
+                if let passDescriptor = view.currentRenderPassDescriptor,
+                   let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: passDescriptor) {
+                    encoder.endEncoding()
+                }
+                commandBuffer.addCompletedHandler { [inFlightSemaphore] _ in
+                    inFlightSemaphore.signal()
+                }
+                commandBuffer.present(drawable)
+                commandBuffer.commit()
+                needsClear = false
                 return
             }
 
-            encoder.setRenderPipelineState(pipelineState)
-            if let vertexBuffer {
-                encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
+            guard frameVersion != 0, frameVersion != lastDisplayedFrameVersion else {
+                inFlightSemaphore.signal()
+                return
             }
 
-            if let texture = currentTexture {
-                encoder.setViewport(Self.aspectFitViewport(texture: texture, drawableSize: view.drawableSize))
-                encoder.setFragmentTexture(texture, index: 0)
-                encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
-            }
+            let image = CIImage(cvPixelBuffer: frame.pixelBuffer)
+            let drawableBounds = CGRect(
+                x: 0,
+                y: 0,
+                width: view.drawableSize.width,
+                height: view.drawableSize.height
+            )
+            let scaleX = drawableBounds.width / max(image.extent.width, 1)
+            let scaleY = drawableBounds.height / max(image.extent.height, 1)
+            let renderedImage = image.transformed(
+                by: CGAffineTransform(scaleX: scaleX, y: scaleY)
+            )
 
-            encoder.endEncoding()
+            ciContext.render(
+                renderedImage,
+                to: drawable.texture,
+                commandBuffer: commandBuffer,
+                bounds: drawableBounds,
+                colorSpace: CGColorSpaceCreateDeviceRGB()
+            )
+
+            let presentationTimeStamp = frame.presentationTimeStamp
+            commandBuffer.addCompletedHandler { [weak self, onFrameDisplayed, inFlightSemaphore] _ in
+                inFlightSemaphore.signal()
+                self?.lastDisplayedFrameVersion = frameVersion
+                onFrameDisplayed?(presentationTimeStamp)
+            }
             commandBuffer.present(drawable)
             commandBuffer.commit()
         }
+    }
+}
 
-        private static func aspectFitViewport(texture: MTLTexture, drawableSize: CGSize) -> MTLViewport {
-            let drawableWidth = max(drawableSize.width, 1)
-            let drawableHeight = max(drawableSize.height, 1)
-            let textureAspect = Double(texture.width) / Double(max(texture.height, 1))
-            let drawableAspect = Double(drawableWidth) / Double(drawableHeight)
+@available(iOS 17.0, *)
+private struct RemoteDesktopSampleBufferVideoView: UIViewRepresentable {
+    let feed: RemoteVideoFrameFeed
+    private let remoteDesktopManager = RemoteDesktopManager.instance
 
-            if drawableAspect > textureAspect {
-                let width = Double(drawableHeight) * textureAspect
-                return MTLViewport(
-                    originX: (Double(drawableWidth) - width) / 2.0,
-                    originY: 0,
-                    width: width,
-                    height: Double(drawableHeight),
-                    znear: 0,
-                    zfar: 1
-                )
-            } else {
-                let height = Double(drawableWidth) / textureAspect
-                return MTLViewport(
-                    originX: 0,
-                    originY: (Double(drawableHeight) - height) / 2.0,
-                    width: Double(drawableWidth),
-                    height: height,
-                    znear: 0,
-                    zfar: 1
-                )
+    func makeCoordinator() -> Coordinator {
+        Coordinator(
+            onDecodeFailure: { [remoteDesktopManager] description in
+                Task { @MainActor in
+                    await remoteDesktopManager.handleVideoRendererDidFailToDecode(description)
+                }
+            },
+            onRequiresFlush: { [remoteDesktopManager] in
+                Task { @MainActor in
+                    await remoteDesktopManager.handleVideoRendererRequiresFlushToResumeDecoding()
+                }
+            },
+            onFrameEnqueued: { [remoteDesktopManager] presentationTimeStamp, remainingQueueDepth in
+                Task { @MainActor in
+                    await remoteDesktopManager.handleVideoRendererDidEnqueueFrame(
+                        presentationTimeStamp: presentationTimeStamp,
+                        remainingQueueDepth: remainingQueueDepth
+                    )
+                }
+            }
+        )
+    }
+
+    @MainActor
+    func makeUIView(context: Context) -> SampleBufferDisplayView {
+        let view = SampleBufferDisplayView()
+        context.coordinator.attach(to: view)
+        view.isUserInteractionEnabled = false
+        return view
+    }
+
+    @MainActor
+    func updateUIView(_ uiView: SampleBufferDisplayView, context: Context) {
+        context.coordinator.attach(to: uiView)
+
+        if context.coordinator.lastFlushVersion != feed.flushVersion {
+            context.coordinator.lastFlushVersion = feed.flushVersion
+            context.coordinator.flush(
+                view: uiView,
+                removeDisplayedImage: feed.removeDisplayedImageOnFlush
+            )
+        }
+
+        guard context.coordinator.lastFrameVersion != feed.frameVersion else { return }
+        context.coordinator.lastFrameVersion = feed.frameVersion
+
+        context.coordinator.enqueuePendingFrames(from: feed, view: uiView)
+    }
+
+    final class Coordinator: @unchecked Sendable {
+        private let rendererQueue = DispatchQueue(
+            label: "com.skybridge.remote.samplebuffer.renderer",
+            qos: .userInteractive
+        )
+        private let onDecodeFailure: @Sendable (String?) -> Void
+        private let onRequiresFlush: @Sendable () -> Void
+        private let onFrameEnqueued: @Sendable (CMTime, Int) -> Void
+        private weak var attachedView: SampleBufferDisplayView?
+        private weak var attachedRenderer: AVSampleBufferVideoRenderer?
+        private var notificationTokens: [NSObjectProtocol] = []
+        var lastFrameVersion: UInt64 = 0
+        var lastFlushVersion: UInt64 = 0
+
+        init(
+            onDecodeFailure: @escaping @Sendable (String?) -> Void,
+            onRequiresFlush: @escaping @Sendable () -> Void,
+            onFrameEnqueued: @escaping @Sendable (CMTime, Int) -> Void
+        ) {
+            self.onDecodeFailure = onDecodeFailure
+            self.onRequiresFlush = onRequiresFlush
+            self.onFrameEnqueued = onFrameEnqueued
+        }
+
+        @MainActor
+        func attach(to view: SampleBufferDisplayView) {
+            guard attachedView !== view else { return }
+            detachObservers()
+            attachedView = view
+            view.configureIfNeeded()
+            let renderer = view.sampleBufferDisplayLayer.sampleBufferRenderer
+            attachedRenderer = renderer
+            installObservers(for: renderer)
+            if #available(iOS 17.4, *) {
+                renderer.presentationTimeExpectation = .none
             }
         }
 
-        private static let shaderSource = """
-        #include <metal_stdlib>
-        using namespace metal;
-
-        struct VertexIn {
-            float2 position [[attribute(0)]];
-            float2 uv [[attribute(1)]];
-        };
-
-        struct VertexOut {
-            float4 position [[position]];
-            float2 uv;
-        };
-
-        vertex VertexOut passthroughVertex(
-            uint vertexID [[vertex_id]],
-            const device VertexIn *vertices [[buffer(0)]]
-        ) {
-            VertexOut out;
-            out.position = float4(vertices[vertexID].position, 0.0, 1.0);
-            out.uv = vertices[vertexID].uv;
-            return out;
+        @MainActor
+        func enqueuePendingFrames(from feed: RemoteVideoFrameFeed, view: SampleBufferDisplayView) {
+            attach(to: view)
+            let frames = feed.takePendingFrames()
+            guard !frames.isEmpty else { return }
+            // For displayImmediately mode without a controlTimebase, use
+            // direct push: enqueue each frame immediately rather than
+            // relying on the pull-based requestMediaDataWhenReady model.
+            // Without a running timebase the renderer may never report
+            // isReadyForMoreMediaData=true, causing a permanent stall
+            // after the first frame.
+            rendererQueue.async { [weak self] in
+                guard let self,
+                      let renderer = self.attachedRenderer else { return }
+                if renderer.requiresFlushToResumeDecoding {
+                    renderer.flush(removingDisplayedImage: false, completionHandler: nil)
+                    self.onRequiresFlush()
+                    return
+                }
+                for (index, frame) in frames.enumerated() {
+                    renderer.enqueue(frame.sampleBuffer)
+                    let remaining = frames.count - index - 1
+                    self.onFrameEnqueued(frame.presentationTimeStamp, remaining)
+                }
+            }
         }
 
-        fragment float4 blitFragment(
-            VertexOut in [[stage_in]],
-            texture2d<float> textureIn [[texture(0)]]
-        ) {
-            constexpr sampler textureSampler(address::clamp_to_edge, filter::linear);
-            return textureIn.sample(textureSampler, in.uv);
+        @MainActor
+        func flush(view: SampleBufferDisplayView, removeDisplayedImage: Bool) {
+            attach(to: view)
+            rendererQueue.async { [weak self] in
+                guard let self,
+                      let renderer = self.attachedRenderer else { return }
+                renderer.stopRequestingMediaData()
+                renderer.flush(removingDisplayedImage: removeDisplayedImage, completionHandler: nil)
+                if #available(iOS 17.4, *) {
+                    renderer.presentationTimeExpectation = .none
+                }
+            }
         }
-        """
+
+        private func installObservers(for renderer: AVSampleBufferVideoRenderer) {
+            let center = NotificationCenter.default
+            notificationTokens.append(
+                center.addObserver(
+                    forName: AVSampleBufferVideoRenderer.didFailToDecodeNotification,
+                    object: renderer,
+                    queue: nil
+                ) { [weak self] notification in
+                    guard let self else { return }
+                    let error = notification.userInfo?[AVSampleBufferVideoRenderer.didFailToDecodeNotificationErrorKey]
+                        as? NSError
+                    self.onDecodeFailure(error?.localizedDescription)
+                }
+            )
+            notificationTokens.append(
+                center.addObserver(
+                    forName: AVSampleBufferVideoRenderer.requiresFlushToResumeDecodingDidChangeNotification,
+                    object: renderer,
+                    queue: nil
+                ) { [weak self] _ in
+                    guard let self, renderer.requiresFlushToResumeDecoding else { return }
+                    self.onRequiresFlush()
+                }
+            )
+        }
+
+        private func detachObservers() {
+            let center = NotificationCenter.default
+            notificationTokens.forEach(center.removeObserver)
+            notificationTokens.removeAll()
+        }
+
+        deinit {
+            detachObservers()
+        }
+    }
+
+    final class SampleBufferDisplayView: UIView {
+        override class var layerClass: AnyClass {
+            AVSampleBufferDisplayLayer.self
+        }
+
+        fileprivate var sampleBufferDisplayLayer: AVSampleBufferDisplayLayer {
+            layer as! AVSampleBufferDisplayLayer
+        }
+
+        private var didConfigureLayer = false
+        private var controlTimebase: CMTimebase?
+
+        @MainActor
+        func configureIfNeeded() {
+            guard !didConfigureLayer else { return }
+            didConfigureLayer = true
+            backgroundColor = .black
+            layer.isOpaque = true
+            contentMode = .scaleAspectFit
+
+            sampleBufferDisplayLayer.videoGravity = .resizeAspect
+            sampleBufferDisplayLayer.preventsDisplaySleepDuringVideoPlayback = false
+            // Do NOT set a controlTimebase.  All sample buffers carry the
+            // kCMSampleAttachmentKey_DisplayImmediately attachment, which
+            // tells the layer to render each frame instantly.  A running
+            // controlTimebase conflicts with displayImmediately and can
+            // cause the layer to schedule frames "in the future", leading
+            // to a first-frame-only-freeze where the IDR is shown but all
+            // subsequent P-frames are never displayed.
+            sampleBufferDisplayLayer.controlTimebase = nil
+            controlTimebase = nil
+        }
+
+        func flush(removeDisplayedImage: Bool) {
+            let renderer = sampleBufferDisplayLayer.sampleBufferRenderer
+            renderer.stopRequestingMediaData()
+            renderer.flush(removingDisplayedImage: removeDisplayedImage, completionHandler: nil)
+        }
     }
 }
 

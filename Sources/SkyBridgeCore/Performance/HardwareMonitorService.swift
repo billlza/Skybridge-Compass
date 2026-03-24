@@ -26,6 +26,12 @@ public final class HardwareMonitorService: ObservableObject {
     // MARK: - Singleton
 
     public static let shared = HardwareMonitorService()
+    private static let configurationStore = CodablePersistenceStore<HardwareMonitorConfiguration>(
+        location: .protectedApplicationSupport(
+            path: "HardwareMonitor/configuration.json",
+            legacyUserDefaultsKey: "com.skybridge.hardware.config"
+        )
+    )
 
     // MARK: - Published Properties
 
@@ -386,16 +392,10 @@ public final class HardwareMonitorService: ObservableObject {
     // MARK: - Persistence
 
     private func saveConfiguration() {
-        if let data = try? JSONEncoder().encode(configuration) {
-            UserDefaults.standard.set(data, forKey: "com.skybridge.hardware.config")
-        }
+        try? Self.configurationStore.save(configuration)
     }
 
     private static func loadConfiguration() -> HardwareMonitorConfiguration? {
-        guard let data = UserDefaults.standard.data(forKey: "com.skybridge.hardware.config"),
-              let config = try? JSONDecoder().decode(HardwareMonitorConfiguration.self, from: data) else {
-            return nil
-        }
-        return config
+        Self.configurationStore.load()
     }
 }

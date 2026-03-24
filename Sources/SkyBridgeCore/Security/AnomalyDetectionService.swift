@@ -219,6 +219,25 @@ public final class AnomalyDetectionService: ObservableObject {
 
     public static let shared = AnomalyDetectionService()
 
+    private static let configurationStore = CodablePersistenceStore<AnomalyDetectionConfiguration>(
+        location: .protectedApplicationSupport(
+            path: "AnomalyDetection/configuration.json",
+            legacyUserDefaultsKey: "com.skybridge.anomaly.config"
+        )
+    )
+    private static let baselineStore = CodablePersistenceStore<BehaviorBaseline>(
+        location: .protectedApplicationSupport(
+            path: "AnomalyDetection/baseline.json",
+            legacyUserDefaultsKey: "com.skybridge.anomaly.baseline"
+        )
+    )
+    private static let historyStore = CodablePersistenceStore<[DetectedAnomaly]>(
+        location: .protectedApplicationSupport(
+            path: "AnomalyDetection/history.json",
+            legacyUserDefaultsKey: "com.skybridge.anomaly.history"
+        )
+    )
+
     // MARK: - Published Properties
 
     /// 检测配置
@@ -505,44 +524,26 @@ public final class AnomalyDetectionService: ObservableObject {
     // MARK: - Persistence
 
     private func saveConfiguration() {
-        if let data = try? JSONEncoder().encode(configuration) {
-            UserDefaults.standard.set(data, forKey: "com.skybridge.anomaly.config")
-        }
+        try? Self.configurationStore.save(configuration)
     }
 
     private static func loadConfiguration() -> AnomalyDetectionConfiguration? {
-        guard let data = UserDefaults.standard.data(forKey: "com.skybridge.anomaly.config"),
-              let config = try? JSONDecoder().decode(AnomalyDetectionConfiguration.self, from: data) else {
-            return nil
-        }
-        return config
+        Self.configurationStore.load()
     }
 
     private func saveBaseline() {
-        if let data = try? JSONEncoder().encode(baseline) {
-            UserDefaults.standard.set(data, forKey: "com.skybridge.anomaly.baseline")
-        }
+        try? Self.baselineStore.save(baseline)
     }
 
     private static func loadBaseline() -> BehaviorBaseline? {
-        guard let data = UserDefaults.standard.data(forKey: "com.skybridge.anomaly.baseline"),
-              let baseline = try? JSONDecoder().decode(BehaviorBaseline.self, from: data) else {
-            return nil
-        }
-        return baseline
+        Self.baselineStore.load()
     }
 
     private func saveHistory() {
-        if let data = try? JSONEncoder().encode(anomalyHistory) {
-            UserDefaults.standard.set(data, forKey: "com.skybridge.anomaly.history")
-        }
+        try? Self.historyStore.save(anomalyHistory)
     }
 
     private static func loadHistory() -> [DetectedAnomaly] {
-        guard let data = UserDefaults.standard.data(forKey: "com.skybridge.anomaly.history"),
-              let history = try? JSONDecoder().decode([DetectedAnomaly].self, from: data) else {
-            return []
-        }
-        return history
+        Self.historyStore.load() ?? []
     }
 }

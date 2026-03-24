@@ -11,6 +11,7 @@ import SkyBridgeUI
 struct SkyBridgeCompassApp: App {
     @StateObject private var appModel = DashboardViewModel()
     @StateObject private var authModel = AuthenticationViewModel()
+    @StateObject private var localPeerServices = LocalPeerServiceCoordinator.shared
     @StateObject private var themeConfiguration = ThemeConfiguration.shared
     @StateObject private var supabaseConfiguration = SupabaseConfiguration.shared
     @StateObject private var vncLaunchContext = VNCLaunchContext.shared
@@ -46,6 +47,7 @@ struct SkyBridgeCompassApp: App {
                     RootContainerView()
                         .environmentObject(appModel)
                         .environmentObject(authModel)
+                        .environmentObject(localPeerServices)
                         .environmentObject(themeConfiguration)
                         .environmentObject(supabaseConfiguration)
                         .environmentObject(weatherDataService)
@@ -77,6 +79,8 @@ struct SkyBridgeCompassApp: App {
             }
             .task {
                 if renderConfig == nil {
+                    await localPeerServices.startIfNeeded()
+
                     await MainActor.run {
                         appModel.bootstrapConnectionPresentationBindings()
                     }
@@ -594,6 +598,7 @@ struct SkyBridgeCompassApp: App {
 private struct RootContainerView: View {
     @EnvironmentObject private var dashboardModel: DashboardViewModel
     @EnvironmentObject private var authModel: AuthenticationViewModel
+    @EnvironmentObject private var localPeerServices: LocalPeerServiceCoordinator
     @Environment(\.iconMissingHint) private var iconMissingHint
     @StateObject private var pairingTrustApproval = PairingTrustApprovalService.shared
 
@@ -625,10 +630,9 @@ private struct RootContainerView: View {
                     }
             }
         }
-        .onChange(of: authModel.currentSession) { _, newSession in
-            SkyBridgeLogger.ui.debugOnly("🔄 [RootContainerView] currentSession 发生变化")
-            SkyBridgeLogger.ui.debugOnly("   新会话: \(newSession?.userIdentifier ?? "无")")
-            Task { await dashboardModel.updateAuthentication(session: newSession) }
+        .task(id: authModel.currentSession) {
+            await localPeerServices.startIfNeeded()
+            await dashboardModel.updateAuthentication(session: authModel.currentSession)
         }
         .animation(.easeInOut(duration: 0.25), value: authModel.currentSession != nil)
         .overlay(alignment: .topTrailing) {

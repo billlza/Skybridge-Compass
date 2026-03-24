@@ -102,6 +102,19 @@ public class AuthenticationManager: ObservableObject {
         SkyBridgeLogger.shared.info("✅ 登录成功: \(email)")
     }
 
+    /// 发送手机号验证码。Supabase 负责验证码校验与会话签发，短信投递由 send_sms hook 转发到阿里云。
+    public func sendPhoneVerificationCode(phoneNumber: String) async throws {
+        try await SupabaseService.shared.sendPhoneOTP(phone: phoneNumber)
+        SkyBridgeLogger.shared.info("📱 手机验证码已发出: ****\(phoneNumber.suffix(4))")
+    }
+
+    /// 使用手机号 + 短信验证码登录；若手机号首次使用，Supabase 会按项目策略自动创建账号。
+    public func signInWithPhone(phoneNumber: String, code: String) async throws {
+        let session = try await SupabaseService.shared.signInWithPhone(phone: phoneNumber, token: code)
+        applySession(session, emailFallback: phoneNumber)
+        SkyBridgeLogger.shared.info("✅ 手机登录成功: ****\(phoneNumber.suffix(4))")
+    }
+
     /// Nebula 安全浏览器登录（OAuth 2.1 + PKCE）
     public func signInWithNebulaBrowser() async throws {
         let (tokenResponse, userInfo) = try await NebulaPublicClientOAuth.shared.authenticateUsingSystemBrowser()

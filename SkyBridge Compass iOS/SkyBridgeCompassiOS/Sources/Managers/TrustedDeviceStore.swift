@@ -60,7 +60,12 @@ public final class TrustedDeviceStore: ObservableObject {
 
     @Published public private(set) var trustedDevices: [TrustedDevice] = []
 
-    private let storageKey = "trusted_devices.v1"
+    private static let trustedDevicesStore = CodablePersistenceStore<[TrustedDevice]>(
+        location: .protectedApplicationSupport(
+            path: "Trust/trusted-devices.json",
+            legacyUserDefaultsKey: "trusted_devices.v1"
+        )
+    )
 
     private init() {
         load()
@@ -70,6 +75,38 @@ public final class TrustedDeviceStore: ObservableObject {
         let candidates = Set(PeerIdentityAliasResolver.lookupCandidates(for: deviceId))
         guard !candidates.isEmpty else { return false }
         return trustedDevices.contains(where: { matches($0, candidates: candidates) })
+    }
+
+    public func canonicalTrustedDeviceId(for deviceId: String) -> String? {
+        let candidates = Set(PeerIdentityAliasResolver.lookupCandidates(for: deviceId))
+        guard !candidates.isEmpty else { return nil }
+        guard let matched = trustedDevices.first(where: { matches($0, candidates: candidates) }) else {
+            return nil
+        }
+        return resolvedCurrentDeviceId(for: matched)
+    }
+
+    public func canonicalTrustedDeviceId(for device: DiscoveredDevice) -> String? {
+        var candidates = Set(PeerIdentityAliasResolver.lookupCandidates(for: device.id))
+        candidates.formUnion(PeerIdentityAliasResolver.aliasKeys(for: device))
+        if let ipAddress = device.ipAddress {
+            candidates.formUnion(PeerIdentityAliasResolver.lookupCandidates(for: ipAddress))
+        }
+
+        if let matched = trustedDevices.first(where: { matches($0, candidates: candidates) }) {
+            return resolvedCurrentDeviceId(for: matched)
+        }
+
+        let normalizedDeviceName = normalizedNameToken(device.name)
+        guard !normalizedDeviceName.isEmpty else { return nil }
+
+        let sameNameMatches = trustedDevices.filter { trusted in
+            normalizedNameToken(trusted.name) == normalizedDeviceName
+                && (trusted.platform == .unknown || device.platform == .unknown || trusted.platform == device.platform)
+        }
+
+        guard sameNameMatches.count == 1 else { return nil }
+        return resolvedCurrentDeviceId(for: sameNameMatches[0])
     }
 
     public func currentPathTrustRecord(fingerprint: String) -> TrustedDevice? {
@@ -89,9 +126,10 @@ public final class TrustedDeviceStore: ObservableObject {
         if let byFingerprint = trustedDevices.first(where: { $0.protocolPublicKeyFingerprint == normalized }) {
             switch byFingerprint.currentPathLifecycleState ?? .active {
             case .active:
-                if resolvedCurrentDeviceId(for: byFingerprint) != deviceId {
-                    return .deviceIdMigrationRequired
-                }
+                // The authoritative signing key is the stronger identity anchor.
+                // If the same key now advertises a new deviceId, allow the session
+                // to proceed and heal the stored deviceId/aliases after success.
+                break
             case .reverificationRequired, .quarantined:
                 return .quarantinedIdentity
             case .revoked:
@@ -117,7 +155,8 @@ public final class TrustedDeviceStore: ObservableObject {
 
     public func trust(_ device: DiscoveredDevice) {
         let id = device.id
-        let candidates = Set(PeerIdentityAliasResolver.lookupCandidates(for: id))
+        var candidates = Set(PeerIdentityAliasResolver.lookupCandidates(for: id))
+        candidates.formUnion(PeerIdentityAliasResolver.aliasKeys(for: device))
         guard !candidates.isEmpty else { return }
 
         if let idx = trustedDevices.firstIndex(where: { matches($0, candidates: candidates) }) {
@@ -139,6 +178,48 @@ public final class TrustedDeviceStore: ObservableObject {
                     platform: device.platform,
                     ipAddress: device.ipAddress,
                     currentDeviceId: PeerIdentityAliasResolver.persistentDeviceId(from: id),
+                    knownDeviceIds: Array(candidates).sorted()
+                )
+            )
+        }
+        save()
+    }
+
+    public func trustResolvedPeer(
+        _ device: DiscoveredDevice,
+        declaredDeviceId: String
+    ) {
+        let normalizedDeclaredDeviceId = declaredDeviceId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedDeclaredDeviceId.isEmpty else {
+            trust(device)
+            return
+        }
+
+        var candidates = Set(PeerIdentityAliasResolver.lookupCandidates(for: device.id))
+        candidates.formUnion(PeerIdentityAliasResolver.aliasKeys(for: device))
+        candidates.formUnion(PeerIdentityAliasResolver.lookupCandidates(for: normalizedDeclaredDeviceId))
+        if let ipAddress = device.ipAddress {
+            candidates.formUnion(PeerIdentityAliasResolver.lookupCandidates(for: ipAddress))
+        }
+        guard !candidates.isEmpty else { return }
+
+        if let idx = trustedDevices.firstIndex(where: { matches($0, candidates: candidates) }) {
+            trustedDevices[idx].name = device.name
+            trustedDevices[idx].platform = device.platform
+            trustedDevices[idx].ipAddress = device.ipAddress
+            trustedDevices[idx].currentDeviceId = normalizedDeclaredDeviceId
+            trustedDevices[idx].knownDeviceIds = mergedKnownDeviceIds(
+                existing: trustedDevices[idx].knownDeviceIds,
+                adding: Array(candidates)
+            )
+        } else {
+            trustedDevices.append(
+                TrustedDevice(
+                    id: device.id,
+                    name: device.name,
+                    platform: device.platform,
+                    ipAddress: device.ipAddress,
+                    currentDeviceId: normalizedDeclaredDeviceId,
                     knownDeviceIds: Array(candidates).sorted()
                 )
             )
@@ -265,13 +346,11 @@ public final class TrustedDeviceStore: ObservableObject {
     }
 
     private func load() {
-        guard let data = UserDefaults.standard.data(forKey: storageKey) else { return }
-        trustedDevices = (try? JSONDecoder().decode([TrustedDevice].self, from: data)) ?? []
+        trustedDevices = Self.trustedDevicesStore.load() ?? []
     }
 
     private func save() {
-        let data = (try? JSONEncoder().encode(trustedDevices)) ?? Data()
-        UserDefaults.standard.set(data, forKey: storageKey)
+        try? Self.trustedDevicesStore.save(trustedDevices)
     }
 
     private func normalizedFingerprint(_ raw: String?) -> String? {
@@ -279,6 +358,16 @@ public final class TrustedDeviceStore: ObservableObject {
         let value = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard value.count == 64, value.allSatisfy(\.isHexDigit) else { return nil }
         return value
+    }
+
+    private func normalizedNameToken(_ raw: String?) -> String {
+        guard let raw else { return "" }
+        return raw
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: " ", with: "")
+            .replacingOccurrences(of: "-", with: "")
+            .replacingOccurrences(of: "_", with: "")
     }
 
     private func mergedKnownDeviceIds(existing: [String]?, adding newValue: String) -> [String] {
@@ -291,6 +380,11 @@ public final class TrustedDeviceStore: ObservableObject {
 
     private func matches(_ device: TrustedDevice, candidates: Set<String>) -> Bool {
         if candidates.contains(device.id.lowercased()) {
+            return true
+        }
+
+        if let hostAlias = PeerIdentityAliasResolver.hostAlias(fromIPAddress: device.ipAddress),
+           candidates.contains(hostAlias) {
             return true
         }
 

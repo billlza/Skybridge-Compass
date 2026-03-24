@@ -3,9 +3,36 @@ import SwiftUI
 /// 认证视图 - 登录、注册和游客模式
 @available(iOS 17.0, *)
 struct AuthenticationView: View {
+    private enum AuthMethod: String, CaseIterable, Identifiable {
+        case email
+        case phone
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .email: return "邮箱"
+            case .phone: return "手机号"
+            }
+        }
+
+        var icon: String {
+            switch self {
+            case .email: return "envelope.fill"
+            case .phone: return "phone.fill"
+            }
+        }
+    }
+
     @EnvironmentObject private var authManager: AuthenticationManager
+    @State private var selectedMethod: AuthMethod = .email
     @State private var email = ""
     @State private var password = ""
+    @State private var phoneNumber = ""
+    @State private var phoneCode = ""
+    @State private var isPhoneCodeSent = false
+    @State private var phoneCodeCountdown = 0
+    @State private var phoneCountdownTask: Task<Void, Never>?
     @State private var isRegistering = false
     @State private var showError = false
     @State private var errorMessage = ""
@@ -26,6 +53,8 @@ struct AuthenticationView: View {
                 VStack(spacing: 28) {
                     // Logo 和标题
                     headerSection
+
+                    authMethodPicker
                     
                     // 登录/注册表单
                     formSection
@@ -63,6 +92,9 @@ struct AuthenticationView: View {
             }
         }
         .onAppear(perform: refreshSupabaseConfigurationStatus)
+        .onDisappear {
+            phoneCountdownTask?.cancel()
+        }
         .preferredColorScheme(.dark)
     }
     
@@ -81,6 +113,37 @@ struct AuthenticationView: View {
         }
     }
 
+    private var authMethodPicker: some View {
+        HStack(spacing: 12) {
+            ForEach(AuthMethod.allCases) { method in
+                Button {
+                    if selectedMethod != method {
+                        if method == .email {
+                            resetPhoneFlow(clearPhoneNumber: false)
+                        }
+                        selectedMethod = method
+                    }
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: method.icon)
+                        Text(method.title)
+                            .font(.subheadline.weight(.semibold))
+                    }
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 44)
+                    .background(selectedMethod == method ? Color.white.opacity(0.18) : Color.white.opacity(0.08))
+                    .foregroundColor(.white)
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .stroke(selectedMethod == method ? .white.opacity(0.4) : .white.opacity(0.14), lineWidth: 1)
+                    )
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
     private func iOSBrandIcon(size: CGFloat) -> some View {
         Image("BrandIcon")
             .resizable()
@@ -94,43 +157,56 @@ struct AuthenticationView: View {
     
     private var formSection: some View {
         VStack(spacing: 16) {
-            // 邮箱输入
-            HStack {
-                Image(systemName: "envelope.fill")
+            if selectedMethod == .email {
+                inputRow(systemImage: "envelope.fill") {
+                    TextField("邮箱", text: $email)
+                        .textContentType(.emailAddress)
+                        .keyboardType(.emailAddress)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .foregroundColor(.white)
+                }
+
+                inputRow(systemImage: "lock.fill") {
+                    SecureField("密码", text: $password)
+                        .textContentType(isRegistering ? .newPassword : .password)
+                        .foregroundColor(.white)
+                }
+            } else {
+                inputRow(systemImage: "phone.fill") {
+                    TextField("手机号（中国大陆）", text: $phoneNumber)
+                        .keyboardType(.numberPad)
+                        .textContentType(.telephoneNumber)
+                        .foregroundColor(.white)
+                }
+
+                if isPhoneCodeSent {
+                    inputRow(systemImage: "number.square.fill") {
+                        TextField("短信验证码", text: $phoneCode)
+                            .keyboardType(.numberPad)
+                            .textContentType(.oneTimeCode)
+                            .foregroundColor(.white)
+                    }
+                }
+
+                Text("短信由 Aliyun 发送，验证码校验与会话签发由 Supabase Auth 负责。未注册手机号会按项目配置自动创建账号。")
+                    .font(.footnote)
                     .foregroundColor(.gray)
-                    .frame(width: 20)
-                
-                TextField("邮箱", text: $email)
-                    .textContentType(.emailAddress)
-                    .keyboardType(.emailAddress)
-                    .autocapitalization(.none)
-                    .foregroundColor(.white)
+                    .multilineTextAlignment(.center)
+
+                if !isSupabaseConfigured {
+                    Text("请先配置可用的 Supabase 项目，并在 Auth 中启用 send_sms hook。")
+                        .font(.footnote)
+                        .foregroundColor(.orange)
+                        .multilineTextAlignment(.center)
+                }
+
+                if phoneCodeCountdown > 0 {
+                    Text("验证码已发送，\(phoneCodeCountdown) 秒后可重新发送")
+                        .font(.footnote)
+                        .foregroundColor(.gray)
+                }
             }
-            .padding()
-            .background(.ultraThinMaterial)
-            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .stroke(LinearGradient(colors: [.white.opacity(0.3), .clear], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1)
-            )
-            
-            // 密码输入
-            HStack {
-                Image(systemName: "lock.fill")
-                    .foregroundColor(.gray)
-                    .frame(width: 20)
-                
-                SecureField("密码", text: $password)
-                    .textContentType(isRegistering ? .newPassword : .password)
-                    .foregroundColor(.white)
-            }
-            .padding()
-            .background(.ultraThinMaterial)
-            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .stroke(LinearGradient(colors: [.white.opacity(0.3), .clear], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1)
-            )
         }
     }
     
@@ -178,13 +254,12 @@ struct AuthenticationView: View {
                     .multilineTextAlignment(.center)
             }
 
-            // 主操作按钮（登录/注册）
             Button(action: performAction) {
                 if isLoading {
                     ProgressView()
                         .tint(.white)
                 } else {
-                    Text(isRegistering ? "注册" : "登录")
+                    Text(primaryActionTitle)
                         .font(.headline)
                         .fontWeight(.bold)
                 }
@@ -204,13 +279,44 @@ struct AuthenticationView: View {
             .disabled(isLoading || !isFormValid)
             .opacity(isFormValid ? 1.0 : 0.6)
             
-            // 切换登录/注册
-            Button(action: { isRegistering.toggle() }) {
-                Text(isRegistering ? "已有账号？登录" : "没有账号？注册")
-                    .font(.subheadline)
-                    .foregroundColor(.blue)
+            if selectedMethod == .email {
+                Button(action: { isRegistering.toggle() }) {
+                    Text(isRegistering ? "已有账号？登录" : "没有账号？注册")
+                        .font(.subheadline)
+                        .foregroundColor(.blue)
+                }
+            } else if isPhoneCodeSent && phoneCodeCountdown == 0 {
+                Button("重新发送验证码") {
+                    performAction()
+                }
+                .font(.subheadline)
+                .foregroundColor(.blue)
             }
         }
+    }
+
+    private func inputRow<Content: View>(systemImage: String, @ViewBuilder content: () -> Content) -> some View {
+        HStack {
+            Image(systemName: systemImage)
+                .foregroundColor(.gray)
+                .frame(width: 20)
+
+            content()
+        }
+        .padding()
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(
+                    LinearGradient(
+                        colors: [.white.opacity(0.3), .clear],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ),
+                    lineWidth: 1
+                )
+        )
     }
     
     private var divider: some View {
@@ -286,7 +392,24 @@ struct AuthenticationView: View {
     }
     
     private var isFormValid: Bool {
-        !email.isEmpty && !password.isEmpty && password.count >= 6
+        switch selectedMethod {
+        case .email:
+            return !email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                && !password.isEmpty
+                && password.count >= 6
+        case .phone:
+            guard isSupabaseConfigured, isValidPhoneNumber(phoneNumber) else { return false }
+            return isPhoneCodeSent ? !phoneCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty : true
+        }
+    }
+
+    private var primaryActionTitle: String {
+        switch selectedMethod {
+        case .email:
+            return isRegistering ? "注册" : "登录"
+        case .phone:
+            return isPhoneCodeSent ? "验证并继续" : "发送验证码"
+        }
     }
     
     // MARK: - Actions
@@ -296,10 +419,14 @@ struct AuthenticationView: View {
         
         Task {
             do {
-                if isRegistering {
-                    try await authManager.register(email: email, password: password)
+                if selectedMethod == .phone {
+                    try await performPhoneAction()
                 } else {
-                    try await authManager.signIn(email: email, password: password)
+                    if isRegistering {
+                        try await authManager.register(email: email, password: password)
+                    } else {
+                        try await authManager.signIn(email: email, password: password)
+                    }
                 }
             } catch {
                 errorMessage = error.localizedDescription
@@ -328,6 +455,28 @@ struct AuthenticationView: View {
             isNebulaLoading = false
         }
     }
+
+    private func performPhoneAction() async throws {
+        let normalizedPhone = sanitizePhoneNumber(phoneNumber)
+        if !isPhoneCodeSent {
+            try await authManager.sendPhoneVerificationCode(phoneNumber: normalizedPhone)
+            await MainActor.run {
+                phoneNumber = normalizedPhone
+                isPhoneCodeSent = true
+                phoneCode = ""
+                startPhoneCountdown()
+            }
+            return
+        }
+
+        try await authManager.signInWithPhone(
+            phoneNumber: normalizedPhone,
+            code: phoneCode.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+        await MainActor.run {
+            resetPhoneFlow(clearPhoneNumber: false)
+        }
+    }
     
     private func loginAsGuest() {
         Task {
@@ -344,6 +493,47 @@ struct AuthenticationView: View {
             for: nil
         )
 #endif
+    }
+
+    private func sanitizePhoneNumber(_ rawPhone: String) -> String {
+        rawPhone.filter { $0.isNumber || $0 == "+" }
+    }
+
+    private func isValidPhoneNumber(_ rawPhone: String) -> Bool {
+        let sanitized = sanitizePhoneNumber(rawPhone)
+        if sanitized.hasPrefix("+") {
+            return sanitized.range(of: #"^\+[1-9]\d{7,14}$"#, options: .regularExpression) != nil
+        }
+        return sanitized.range(of: #"^1[3-9]\d{9}$"#, options: .regularExpression) != nil
+    }
+
+    private func startPhoneCountdown() {
+        phoneCountdownTask?.cancel()
+        phoneCodeCountdown = 60
+        phoneCountdownTask = Task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                await MainActor.run {
+                    guard phoneCodeCountdown > 0 else {
+                        phoneCountdownTask?.cancel()
+                        phoneCountdownTask = nil
+                        return
+                    }
+                    phoneCodeCountdown -= 1
+                }
+            }
+        }
+    }
+
+    private func resetPhoneFlow(clearPhoneNumber: Bool) {
+        phoneCountdownTask?.cancel()
+        phoneCountdownTask = nil
+        phoneCode = ""
+        phoneCodeCountdown = 0
+        isPhoneCodeSent = false
+        if clearPhoneNumber {
+            phoneNumber = ""
+        }
     }
 }
 

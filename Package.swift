@@ -108,10 +108,10 @@ let package = Package(
         .library(name: "SkyBridgeWidgetShared", targets: ["SkyBridgeWidgetShared"])
     ],
     dependencies: [
-        .package(url: "https://github.com/apple/swift-collections", from: "1.4.0"),
+        .package(url: "https://github.com/apple/swift-collections", from: "1.4.1"),
         .package(url: "https://github.com/apple/swift-nio-ssh", from: "0.12.0"),
         // ASN.1/DER 解析库：用于 PEM/PKCS#8 私钥解析（Ed25519）
-        .package(url: "https://github.com/apple/swift-asn1", from: "1.5.1"),
+        .package(url: "https://github.com/apple/swift-asn1", from: "1.6.0"),
         // WebRTC (ICE / DataChannel) - 跨网连接基础设施（走 STUN/TURN）
         .package(url: "https://github.com/stasel/WebRTC", from: "141.0.0")
     ],
@@ -232,6 +232,8 @@ let package = Package(
             resources: [
                 .process("Resources"),
                 .process("RemoteDesktop/RemoteDesktopShaders.metal"),
+                .process("RemoteDesktop/Shaders/RemoteDesktopPassthrough.metal"),
+                .process("RemoteDesktop/Shaders/RemoteDesktopHDR.metal"),
                 .process("Rendering/Metal4Shaders.metal"),
                 .process("Rendering/AuroraShaders.metal"),
                 .process("Shaders/WeatherParticleShaders.metal"),

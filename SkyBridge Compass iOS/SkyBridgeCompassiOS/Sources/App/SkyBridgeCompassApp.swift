@@ -419,7 +419,7 @@ struct SkyBridgeCompassApp: App {
                 guard !Task.isCancelled else { return }
                 guard scenePhase == .background else { return }
 
-                let hasActiveP2P = !connectionManager.activeConnections.isEmpty
+                let hasActiveP2P = connectionManager.shouldPreserveReachabilityInBackground
                 let isTransferring = FileTransferManager.instance.isTransferring
                 let hasCrossNetwork: Bool = {
                     if case .connected = CrossNetworkWebRTCManager.instance.state { return true }
@@ -484,6 +484,23 @@ struct SkyBridgeCompassApp: App {
             UNNotificationCategory(
                 identifier: "FILE_TRANSFER",
                 actions: [],
+                intentIdentifiers: [],
+                options: []
+            ),
+            UNNotificationCategory(
+                identifier: "IDLE_CONNECTION",
+                actions: [
+                    UNNotificationAction(
+                        identifier: "KEEP_CONNECTION",
+                        title: localizationManager.localized("idleConnection.keep"),
+                        options: []
+                    ),
+                    UNNotificationAction(
+                        identifier: "DISCONNECT_CONNECTION",
+                        title: localizationManager.localized("idleConnection.disconnect"),
+                        options: .destructive
+                    )
+                ],
                 intentIdentifiers: [],
                 options: []
             )
@@ -581,6 +598,12 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate, @u
             if let deviceID {
                 await P2PConnectionManager.instance.rejectConnection(from: deviceID)
             }
+
+        case "KEEP_CONNECTION":
+            await CrossNetworkWebRTCManager.instance.disarmIdleConnectionReminder(clearPrompt: true)
+
+        case "DISCONNECT_CONNECTION":
+            await CrossNetworkWebRTCManager.instance.disconnect()
             
         default:
             break
@@ -838,11 +861,8 @@ private final class LocalWebRTCSmokeHarness {
 
     private func writeGeneratedCode(_ code: String) {
         guard let codeURL = codeURL() else { return }
-        try? FileManager.default.createDirectory(
-            at: codeURL.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-        try? code.appending("\n").write(to: codeURL, atomically: true, encoding: .utf8)
+        guard let data = code.appending("\n").data(using: .utf8) else { return }
+        try? writeProtectedData(data, to: codeURL)
     }
 
     private func pqcReportURL() -> URL? {
@@ -943,11 +963,7 @@ private final class LocalWebRTCSmokeHarness {
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             let data = try encoder.encode(report)
-            try FileManager.default.createDirectory(
-                at: reportURL.deletingLastPathComponent(),
-                withIntermediateDirectories: true
-            )
-            try data.write(to: reportURL, options: .atomic)
+            try writeProtectedData(data, to: reportURL)
             reporter.append(
                 "pqc-report device=\(Self.sanitize(report.deviceId)) keys=\(report.keys.count) file=\(reportURL.lastPathComponent)"
             )
@@ -967,8 +983,7 @@ private struct SmokeStatusReporter {
 
     func reset() {
         guard let statusURL else { return }
-        try? FileManager.default.createDirectory(at: statusURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try? "".write(to: statusURL, atomically: true, encoding: .utf8)
+        try? writeProtectedData(Data(), to: statusURL)
     }
 
     func append(_ line: String) {
@@ -981,8 +996,20 @@ private struct SmokeStatusReporter {
             _ = try? handle.seekToEnd()
             try? handle.write(contentsOf: data)
         } else {
-            try? FileManager.default.createDirectory(at: statusURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try? data.write(to: statusURL, options: .atomic)
+            try? writeProtectedData(data, to: statusURL)
         }
     }
+}
+
+@available(iOS 17.0, *)
+private func writeProtectedData(_ data: Data, to url: URL) throws {
+    try FileManager.default.createDirectory(
+        at: url.deletingLastPathComponent(),
+        withIntermediateDirectories: true
+    )
+    try data.write(to: url, options: .atomic)
+    try FileManager.default.setAttributes(
+        [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+        ofItemAtPath: url.path
+    )
 }

@@ -93,9 +93,19 @@ public final class TenantAccessController: Sendable {
         activeTenantSubject.value
     }
 
+    private static let tenantsStore = CodablePersistenceStore<[TenantDescriptor]>(
+        location: .protectedApplicationSupport(
+            path: "TenantAccess/tenants.json",
+            legacyUserDefaultsKey: "com.skybridge.compass.tenants"
+        )
+    )
+    private static let activeTenantStore = CodablePersistenceStore<String>(
+        location: .protectedApplicationSupport(
+            path: "TenantAccess/active-tenant-id.json",
+            legacyUserDefaultsKey: "com.skybridge.compass.tenants.active"
+        )
+    )
     private let log = Logger(subsystem: "com.skybridge.compass", category: "Tenant")
-    private let storageKey = "com.skybridge.compass.tenants"
-    private let activeStorageKey = "com.skybridge.compass.tenants.active"
     private let keychainService = "com.skybridge.compass.tenants"
     private let tenantsSubject = CurrentValueSubject<[TenantDescriptor], Never>([])
     private let activeTenantSubject = CurrentValueSubject<TenantDescriptor?, Never>(nil)
@@ -229,18 +239,13 @@ public final class TenantAccessController: Sendable {
     }
 
     private func loadFromDisk() {
-        let defaults = UserDefaults.standard
-        if let data = defaults.data(forKey: storageKey) {
-            do {
-                let tenants = try JSONDecoder().decode([TenantDescriptor].self, from: data)
-                tenantsSubject.send(tenants)
-            } catch {
-                log.error("Failed to decode tenants from disk: \(error.localizedDescription)")
-                tenantsSubject.send([])
-            }
+        if let tenants = Self.tenantsStore.load() {
+            tenantsSubject.send(tenants)
+        } else {
+            tenantsSubject.send([])
         }
 
-        if let activeIdentifier = defaults.string(forKey: activeStorageKey),
+        if let activeIdentifier = Self.activeTenantStore.load(),
            let uuid = UUID(uuidString: activeIdentifier),
            let tenant = tenantsSubject.value.first(where: { $0.id == uuid }) {
             activeTenantSubject.send(tenant)
@@ -249,15 +254,18 @@ public final class TenantAccessController: Sendable {
 
     private func persistTenants(_ tenants: [TenantDescriptor]) {
         do {
-            let data = try JSONEncoder().encode(tenants)
-            UserDefaults.standard.set(data, forKey: storageKey)
+            try Self.tenantsStore.save(tenants)
         } catch {
             log.error("Unable to persist tenants: \(error.localizedDescription)")
         }
     }
 
     private func persistActiveTenant(id: UUID) {
-        UserDefaults.standard.set(id.uuidString, forKey: activeStorageKey)
+        do {
+            try Self.activeTenantStore.save(id.uuidString)
+        } catch {
+            log.error("Unable to persist active tenant: \(error.localizedDescription)")
+        }
     }
 
     private func storePasswordAsync(_ password: String, for tenant: TenantDescriptor) async throws {

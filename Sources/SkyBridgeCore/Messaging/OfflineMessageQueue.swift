@@ -52,9 +52,18 @@ public final class OfflineMessageQueue: ObservableObject {
     // 发送回调
     public var sendHandler: ((_ message: QueuedMessage) async throws -> Void)?
 
-    // 持久化
-    private let persistenceKey = "com.skybridge.offline.queue"
-    private let configKey = "com.skybridge.offline.config"
+    private static let queueStore = CodablePersistenceStore<[QueuedMessage]>(
+        location: .protectedApplicationSupport(
+            path: "OfflineQueue/queue.json",
+            legacyUserDefaultsKey: "com.skybridge.offline.queue"
+        )
+    )
+    private static let configurationStore = CodablePersistenceStore<OfflineQueueConfiguration>(
+        location: .protectedApplicationSupport(
+            path: "OfflineQueue/configuration.json",
+            legacyUserDefaultsKey: "com.skybridge.offline.config"
+        )
+    )
 
     // MARK: - Initialization
 
@@ -313,8 +322,7 @@ public final class OfflineMessageQueue: ObservableObject {
         let messages = await queueActor.getAllMessages()
 
         do {
-            let data = try JSONEncoder().encode(messages)
-            UserDefaults.standard.set(data, forKey: persistenceKey)
+            try Self.queueStore.save(messages)
         } catch {
             logger.error("📬 持久化队列失败: \(error.localizedDescription)")
         }
@@ -323,8 +331,7 @@ public final class OfflineMessageQueue: ObservableObject {
     /// 加载持久化的队列
     private func loadPersistedQueue() async {
         guard configuration.enablePersistence,
-              let data = UserDefaults.standard.data(forKey: persistenceKey),
-              let messages = try? JSONDecoder().decode([QueuedMessage].self, from: data) else {
+              let messages = Self.queueStore.load() else {
             return
         }
 
@@ -341,17 +348,11 @@ public final class OfflineMessageQueue: ObservableObject {
     }
 
     private func saveConfiguration() {
-        if let data = try? JSONEncoder().encode(configuration) {
-            UserDefaults.standard.set(data, forKey: configKey)
-        }
+        try? Self.configurationStore.save(configuration)
     }
 
     private static func loadConfiguration() -> OfflineQueueConfiguration? {
-        guard let data = UserDefaults.standard.data(forKey: "com.skybridge.offline.config"),
-              let config = try? JSONDecoder().decode(OfflineQueueConfiguration.self, from: data) else {
-            return nil
-        }
-        return config
+        Self.configurationStore.load()
     }
 }
 

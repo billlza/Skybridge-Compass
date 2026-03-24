@@ -1,6 +1,7 @@
 import Foundation
 import OSLog
 import SkyBridgeProtocolCore
+import CoreVideo
 
 #if canImport(WebRTC)
 @preconcurrency import WebRTC
@@ -60,8 +61,33 @@ private enum WebRTCPeerConnectionFactoryProvider {
 
 #if canImport(WebRTC)
 private actor WebRTCOutboundFrameGate {
+    private var isLocked = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
     func run<T>(_ operation: @Sendable () async throws -> T) async rethrows -> T {
-        try await operation()
+        await acquire()
+        defer { release() }
+        return try await operation()
+    }
+
+    private func acquire() async {
+        if !isLocked {
+            isLocked = true
+            return
+        }
+
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+    }
+
+    private func release() {
+        if waiters.isEmpty {
+            isLocked = false
+            return
+        }
+        let next = waiters.removeFirst()
+        next.resume()
     }
 }
 #endif
@@ -109,6 +135,8 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     
     private let logger = Logger(subsystem: "com.skybridge.webrtc", category: "WebRTCSession")
     private static let publicFallbackSTUNURL = "stun:stun.l.google.com:19302"
+    private static let controlChannelLabel = "skybridge"
+    private static let screenChannelLabel = "skybridge-screen"
     
     public let sessionId: String
     public let localDeviceId: String
@@ -123,12 +151,22 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             flushPendingInboundDataIfNeeded()
         }
     }
+    public var onScreenData: (@Sendable (Data) -> Void)? {
+        didSet {
+            flushPendingInboundScreenDataIfNeeded()
+        }
+    }
     public var onReady: (@Sendable () -> Void)?
     public var onDisconnected: (@Sendable (String) -> Void)?
     
 #if canImport(WebRTC)
     private var peerConnection: RTCPeerConnection?
     private var dataChannel: RTCDataChannel?
+    private var screenDataChannel: RTCDataChannel?
+    private var localVideoSource: RTCVideoSource?
+    private var localVideoTrack: RTCVideoTrack?
+    private var localVideoTransceiver: RTCRtpTransceiver?
+    private var localVideoCapturer: RTCVideoCapturer?
     private var pendingRemoteICECandidates: [RTCIceCandidate] = []
     private var seenRemoteICECandidateKeys: Set<String> = []
 #endif
@@ -141,9 +179,18 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     private var isSettingRemoteDescription = false
     private var lastEmittedLocalSDP: String?
     private let inboundDataLock = NSLock()
+    private let inboundScreenDataLock = NSLock()
     private let outboundFrameLock = NSLock()
+    private let outboundScreenFrameLock = NSLock()
     private let outboundFrameGate = WebRTCOutboundFrameGate()
+    private let outboundScreenFrameGate = WebRTCOutboundFrameGate()
     private var pendingInboundDataBuffers: [Data] = []
+    private var pendingInboundScreenDataBuffers: [Data] = []
+    // Native screen video track is still experimental in our current viewer stack.
+    // Keep it opt-in so the default transport stays aligned with the negotiated
+    // SBRF/DataChannel contract until native-track negotiation is explicit.
+    private let prefersNativeOutgoingScreenTrack =
+        ProcessInfo.processInfo.environment["SKYBRIDGE_ENABLE_WEBRTC_NATIVE_SCREEN_TRACK"] == "1"
     
     public init(sessionId: String, localDeviceId: String, role: Role, ice: ICEConfig) {
         self.sessionId = sessionId
@@ -173,6 +220,12 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         seenRemoteICECandidateKeys.removeAll(keepingCapacity: false)
         dataChannel?.close()
         dataChannel = nil
+        screenDataChannel?.close()
+        screenDataChannel = nil
+        localVideoTrack = nil
+        localVideoSource = nil
+        localVideoTransceiver = nil
+        localVideoCapturer = nil
         peerConnection?.close()
         peerConnection = nil
         if sslHeld {
@@ -186,7 +239,11 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         inboundDataLock.lock()
         pendingInboundDataBuffers.removeAll(keepingCapacity: false)
         inboundDataLock.unlock()
+        inboundScreenDataLock.lock()
+        pendingInboundScreenDataBuffers.removeAll(keepingCapacity: false)
+        inboundScreenDataLock.unlock()
         onData = nil
+        onScreenData = nil
         onReady = nil
         logger.info("⏹️ WebRTCSession closed sessionId=\(self.sessionId, privacy: .public)")
     }
@@ -289,12 +346,15 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             throw WebRTCError.peerConnectionCreationFailed
         }
         self.peerConnection = pc
+        if prefersNativeOutgoingScreenTrack {
+            configureOutgoingScreenVideoIfNeeded(factory: factory, peerConnection: pc)
+        }
         
         if role == .offerer {
             let dcConfig = RTCDataChannelConfiguration()
             dcConfig.isOrdered = true
             dcConfig.isNegotiated = false
-            let dc = pc.dataChannel(forLabel: "skybridge", configuration: dcConfig)
+            let dc = pc.dataChannel(forLabel: Self.controlChannelLabel, configuration: dcConfig)
             dc?.delegate = self
             self.dataChannel = dc
         }
@@ -336,6 +396,21 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         buffered.forEach(handler)
     }
 
+    private func flushPendingInboundScreenDataIfNeeded() {
+        let handler: (@Sendable (Data) -> Void)?
+        var buffered: [Data] = []
+        inboundScreenDataLock.lock()
+        handler = onScreenData
+        if handler != nil, !pendingInboundScreenDataBuffers.isEmpty {
+            buffered = pendingInboundScreenDataBuffers
+            pendingInboundScreenDataBuffers.removeAll(keepingCapacity: false)
+        }
+        inboundScreenDataLock.unlock()
+
+        guard let handler else { return }
+        buffered.forEach(handler)
+    }
+
     private func deliverInboundData(_ data: Data) {
         let handler: (@Sendable (Data) -> Void)?
         var buffered: [Data] = []
@@ -355,6 +430,43 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         guard let handler else { return }
         buffered.forEach(handler)
         handler(data)
+    }
+
+    private func deliverInboundScreenData(_ data: Data) {
+        let handler: (@Sendable (Data) -> Void)?
+        var buffered: [Data] = []
+        inboundScreenDataLock.lock()
+        if let activeHandler = onScreenData {
+            handler = activeHandler
+            if !pendingInboundScreenDataBuffers.isEmpty {
+                buffered = pendingInboundScreenDataBuffers
+                pendingInboundScreenDataBuffers.removeAll(keepingCapacity: false)
+            }
+        } else {
+            pendingInboundScreenDataBuffers.append(data)
+            handler = nil
+        }
+        inboundScreenDataLock.unlock()
+
+        guard let handler else { return }
+        buffered.forEach(handler)
+        handler(data)
+    }
+
+    private func isScreenChannel(_ dataChannel: RTCDataChannel) -> Bool {
+#if canImport(WebRTC)
+        dataChannel.label == Self.screenChannelLabel
+#else
+        false
+#endif
+    }
+
+    private func isControlChannel(_ dataChannel: RTCDataChannel) -> Bool {
+#if canImport(WebRTC)
+        dataChannel.label == Self.controlChannelLabel || dataChannel.label.isEmpty
+#else
+        false
+#endif
     }
     
     public func setRemoteOffer(_ sdp: String) {
@@ -438,34 +550,101 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
 #endif
     }
     
-    public func send(_ data: Data) throws {
+    public func ensureScreenDataChannel() throws {
         guard !isClosed else { throw WebRTCError.alreadyClosed }
 #if canImport(WebRTC)
-        guard let dc = dataChannel else { throw WebRTCError.dataChannelNotReady }
-        guard dc.readyState == .open else { throw WebRTCError.dataChannelNotOpen }
-        let buffer = RTCDataBuffer(data: data, isBinary: true)
-        guard dc.sendData(buffer) else { throw WebRTCError.dataChannelSendFailed }
+        guard let pc = peerConnection else { throw WebRTCError.peerConnectionCreationFailed }
+        if let screenDataChannel {
+            screenDataChannel.delegate = self
+            return
+        }
+        let configuration = RTCDataChannelConfiguration()
+        configuration.isOrdered = true
+        configuration.isNegotiated = false
+        configuration.`protocol` = "screen-frame-v1"
+        let channel = pc.dataChannel(forLabel: Self.screenChannelLabel, configuration: configuration)
+        guard let channel else {
+            throw WebRTCError.dataChannelNotReady
+        }
+        channel.delegate = self
+        screenDataChannel = channel
+#else
+        throw WebRTCError.webRTCNotAvailable
+#endif
+    }
+
+    public func send(_ data: Data) throws {
+        try send(data, preferScreenChannel: false, fallbackToControlChannel: false)
+    }
+
+    public func sendScreen(_ data: Data) throws {
+        try send(data, preferScreenChannel: true, fallbackToControlChannel: true)
+    }
+
+    private func send(
+        _ data: Data,
+        preferScreenChannel: Bool,
+        fallbackToControlChannel: Bool
+    ) throws {
+        guard !isClosed else { throw WebRTCError.alreadyClosed }
+#if canImport(WebRTC)
+        let channel = try resolvedDataChannel(
+            preferScreenChannel: preferScreenChannel,
+            fallbackToControlChannel: fallbackToControlChannel
+        )
+        try send(data, over: channel)
 #else
         throw WebRTCError.webRTCNotAvailable
 #endif
     }
 
     public func sendFramedPayload(_ payload: Data, maxChunkBytes: Int = 8 * 1024) throws {
+        try sendFramedPayload(
+            payload,
+            maxChunkBytes: maxChunkBytes,
+            preferScreenChannel: false,
+            fallbackToControlChannel: false,
+            lock: outboundFrameLock
+        )
+    }
+
+    public func sendScreenFramedPayload(_ payload: Data, maxChunkBytes: Int = 8 * 1024) throws {
+        let useDedicatedScreenChannel = hasOpenScreenDataChannel()
+        try sendFramedPayload(
+            payload,
+            maxChunkBytes: maxChunkBytes,
+            preferScreenChannel: useDedicatedScreenChannel,
+            fallbackToControlChannel: true,
+            lock: useDedicatedScreenChannel ? outboundScreenFrameLock : outboundFrameLock
+        )
+    }
+
+    private func sendFramedPayload(
+        _ payload: Data,
+        maxChunkBytes: Int,
+        preferScreenChannel: Bool,
+        fallbackToControlChannel: Bool,
+        lock: NSLock
+    ) throws {
         precondition(maxChunkBytes > 0, "maxChunkBytes must be greater than zero")
 
-        outboundFrameLock.lock()
-        defer { outboundFrameLock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
 
         var framed = Data()
         var length = UInt32(payload.count).bigEndian
         framed.append(Data(bytes: &length, count: 4))
         framed.append(payload)
+        let channel = try resolvedDataChannel(
+            preferScreenChannel: preferScreenChannel,
+            fallbackToControlChannel: fallbackToControlChannel
+        )
 
         var offset = 0
         while offset < framed.count {
             let end = min(offset + maxChunkBytes, framed.count)
             let chunk = Data(framed[offset..<end])
-            try send(chunk)
+            try send(chunk, over: channel)
             offset = end
         }
     }
@@ -477,40 +656,157 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         pollInterval: Duration = .milliseconds(10),
         drainTimeout: Duration = .seconds(5)
     ) async throws {
+        try await sendFramedPayloadAsync(
+            payload,
+            maxChunkBytes: maxChunkBytes,
+            maxBufferedAmountBytes: maxBufferedAmountBytes,
+            pollInterval: pollInterval,
+            drainTimeout: drainTimeout,
+            preferScreenChannel: false,
+            fallbackToControlChannel: false,
+            gate: outboundFrameGate
+        )
+    }
+
+    public func sendScreenFramedPayloadAsync(
+        _ payload: Data,
+        maxChunkBytes: Int = 8 * 1024,
+        maxBufferedAmountBytes: UInt64 = 16 * 1024,
+        pollInterval: Duration = .milliseconds(10),
+        drainTimeout: Duration = .seconds(5)
+    ) async throws {
+        let useDedicatedScreenChannel = hasOpenScreenDataChannel()
+        try await sendFramedPayloadAsync(
+            payload,
+            maxChunkBytes: maxChunkBytes,
+            maxBufferedAmountBytes: maxBufferedAmountBytes,
+            pollInterval: pollInterval,
+            drainTimeout: drainTimeout,
+            preferScreenChannel: useDedicatedScreenChannel,
+            fallbackToControlChannel: true,
+            gate: useDedicatedScreenChannel ? outboundScreenFrameGate : outboundFrameGate
+        )
+    }
+
+    private func sendFramedPayloadAsync(
+        _ payload: Data,
+        maxChunkBytes: Int,
+        maxBufferedAmountBytes: UInt64,
+        pollInterval: Duration,
+        drainTimeout: Duration,
+        preferScreenChannel: Bool,
+        fallbackToControlChannel: Bool,
+        gate: WebRTCOutboundFrameGate
+    ) async throws {
         precondition(maxChunkBytes > 0, "maxChunkBytes must be greater than zero")
 
-        try await outboundFrameGate.run {
+        try await gate.run {
             var framed = Data()
             var length = UInt32(payload.count).bigEndian
             framed.append(Data(bytes: &length, count: 4))
             framed.append(payload)
+            let channel = try resolvedDataChannel(
+                preferScreenChannel: preferScreenChannel,
+                fallbackToControlChannel: fallbackToControlChannel
+            )
 
             var offset = 0
             while offset < framed.count {
                 try await waitForBufferedAmountBelow(
                     maxBufferedAmountBytes,
                     pollInterval: pollInterval,
-                    timeout: drainTimeout
+                    timeout: drainTimeout,
+                    channel: channel
                 )
                 let end = min(offset + maxChunkBytes, framed.count)
                 let chunk = Data(framed[offset..<end])
-                try send(chunk)
+                try send(chunk, over: channel)
                 offset = end
             }
 
             try await waitForBufferedAmountBelow(
                 maxBufferedAmountBytes,
                 pollInterval: pollInterval,
-                timeout: drainTimeout
+                timeout: drainTimeout,
+                channel: channel
             )
         }
     }
 
     public func dataChannelBufferedAmountBytes() -> UInt64 {
+        dataChannelBufferedAmountBytes(preferScreenChannel: false, fallbackToControlChannel: false)
+    }
+
+    public func screenDataChannelBufferedAmountBytes() -> UInt64 {
+        dataChannelBufferedAmountBytes(preferScreenChannel: true, fallbackToControlChannel: true)
+    }
+
+    public var supportsNativeScreenVideoTrack: Bool {
 #if canImport(WebRTC)
-        return dataChannel?.bufferedAmount ?? 0
+        prefersNativeOutgoingScreenTrack && localVideoTrack != nil
+#else
+        false
+#endif
+    }
+
+    public func prepareOutgoingScreenVideo(width: Int, height: Int, fps: Int) {
+#if canImport(WebRTC)
+        guard let localVideoSource else { return }
+        localVideoSource.adaptOutputFormat(
+            toWidth: Int32(max(1, width)),
+            height: Int32(max(1, height)),
+            fps: Int32(max(1, fps))
+        )
+#endif
+    }
+
+    public func pushVideoFrame(pixelBuffer: CVPixelBuffer, timeStampNs: Int64) {
+#if canImport(WebRTC)
+        guard let localVideoSource,
+              let localVideoCapturer else { return }
+        let buffer = RTCCVPixelBuffer(pixelBuffer: pixelBuffer)
+        let frame = RTCVideoFrame(
+            buffer: buffer,
+            rotation: ._0,
+            timeStampNs: timeStampNs
+        )
+        localVideoSource.capturer(localVideoCapturer, didCapture: frame)
+#endif
+    }
+
+    private func dataChannelBufferedAmountBytes(
+        preferScreenChannel: Bool,
+        fallbackToControlChannel: Bool
+    ) -> UInt64 {
+#if canImport(WebRTC)
+        if preferScreenChannel,
+           let screenDataChannel,
+           screenDataChannel.readyState == .open {
+            return screenDataChannel.bufferedAmount
+        }
+        if fallbackToControlChannel || !preferScreenChannel {
+            return dataChannel?.bufferedAmount ?? 0
+        }
+        return screenDataChannel?.bufferedAmount ?? 0
 #else
         return 0
+#endif
+    }
+
+    private func dataChannelBufferedAmountBytes(for channel: RTCDataChannel) -> UInt64 {
+#if canImport(WebRTC)
+        channel.bufferedAmount
+#else
+        0
+#endif
+    }
+
+    private func hasOpenScreenDataChannel() -> Bool {
+#if canImport(WebRTC)
+        guard let screenDataChannel else { return false }
+        return screenDataChannel.readyState == .open
+#else
+        return false
 #endif
     }
 
@@ -552,16 +848,75 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     private func waitForBufferedAmountBelow(
         _ threshold: UInt64,
         pollInterval: Duration,
-        timeout: Duration
+        timeout: Duration,
+        channel: RTCDataChannel
     ) async throws {
         let clock = ContinuousClock()
         let deadline = clock.now + timeout
-        while dataChannelBufferedAmountBytes() > threshold {
+        while dataChannelBufferedAmountBytes(for: channel) > threshold {
             if clock.now >= deadline {
                 throw WebRTCError.dataChannelSendFailed
             }
             try await Task.sleep(for: pollInterval)
         }
+    }
+
+    private func resolvedDataChannel(
+        preferScreenChannel: Bool,
+        fallbackToControlChannel: Bool
+    ) throws -> RTCDataChannel {
+#if canImport(WebRTC)
+        let channel: RTCDataChannel?
+        if preferScreenChannel,
+           let screenDataChannel,
+           screenDataChannel.readyState == .open {
+            channel = screenDataChannel
+        } else if fallbackToControlChannel || !preferScreenChannel {
+            channel = dataChannel
+        } else {
+            channel = screenDataChannel
+        }
+        guard let channel else { throw WebRTCError.dataChannelNotReady }
+        guard channel.readyState == .open else { throw WebRTCError.dataChannelNotOpen }
+        return channel
+#else
+        throw WebRTCError.webRTCNotAvailable
+#endif
+    }
+
+    private func send(_ data: Data, over channel: RTCDataChannel) throws {
+#if canImport(WebRTC)
+        guard channel.readyState == .open else { throw WebRTCError.dataChannelNotOpen }
+        let buffer = RTCDataBuffer(data: data, isBinary: true)
+        guard channel.sendData(buffer) else { throw WebRTCError.dataChannelSendFailed }
+#else
+        throw WebRTCError.webRTCNotAvailable
+#endif
+    }
+
+    private func configureOutgoingScreenVideoIfNeeded(
+        factory: RTCPeerConnectionFactory,
+        peerConnection: RTCPeerConnection
+    ) {
+        guard localVideoTrack == nil else { return }
+
+        let videoSource = factory.videoSource(forScreenCast: true)
+        let videoTrack = factory.videoTrack(with: videoSource, trackId: "screen-\(sessionId)")
+        let videoCapturer = RTCVideoCapturer(delegate: videoSource)
+        let transceiverInit = RTCRtpTransceiverInit()
+        transceiverInit.direction = .sendOnly
+        transceiverInit.streamIds = ["screen-\(sessionId)"]
+
+        guard let transceiver = peerConnection.addTransceiver(with: videoTrack, init: transceiverInit) else {
+            logger.warning("⚠️ failed to create native screen video transceiver. sessionId=\(self.sessionId, privacy: .public)")
+            return
+        }
+
+        localVideoSource = videoSource
+        localVideoTrack = videoTrack
+        localVideoCapturer = videoCapturer
+        localVideoTransceiver = transceiver
+        videoSource.adaptOutputFormat(toWidth: 1280, height: 720, fps: 60)
     }
     
 #if canImport(WebRTC)
@@ -877,25 +1232,39 @@ extension WebRTCSession: RTCPeerConnectionDelegate {
     }
     public func peerConnection(_ peerConnection: RTCPeerConnection, didRemove candidates: [RTCIceCandidate]) {}
     public func peerConnection(_ peerConnection: RTCPeerConnection, didOpen dataChannel: RTCDataChannel) {
-        logger.info("✅ DataChannel opened by remote")
-        self.dataChannel = dataChannel
+        logger.info("✅ DataChannel opened by remote label=\(dataChannel.label, privacy: .public)")
+        if isScreenChannel(dataChannel) {
+            self.screenDataChannel = dataChannel
+        } else {
+            self.dataChannel = dataChannel
+        }
         dataChannel.delegate = self
-        notifyReadyIfNeeded()
+        if isControlChannel(dataChannel) {
+            notifyReadyIfNeeded()
+        }
     }
 }
 
 extension WebRTCSession: RTCDataChannelDelegate {
     public func dataChannelDidChangeState(_ dataChannel: RTCDataChannel) {
-        logger.info("DataChannel state: \(String(describing: dataChannel.readyState), privacy: .public)")
-        if dataChannel.readyState == .open {
+        logger.info("DataChannel state: \(String(describing: dataChannel.readyState), privacy: .public) label=\(dataChannel.label, privacy: .public)")
+        if dataChannel.readyState == .open, isControlChannel(dataChannel) {
             notifyReadyIfNeeded()
-        } else if dataChannel.readyState == .closed {
+        } else if dataChannel.readyState == .closed, isControlChannel(dataChannel) {
             notifyDisconnectedIfNeeded(reason: "data_channel_closed")
+        } else if dataChannel.readyState == .closed, isScreenChannel(dataChannel) {
+            if screenDataChannel === dataChannel {
+                screenDataChannel = nil
+            }
         }
     }
     
     public func dataChannel(_ dataChannel: RTCDataChannel, didReceiveMessageWith buffer: RTCDataBuffer) {
-        deliverInboundData(buffer.data)
+        if isScreenChannel(dataChannel) {
+            deliverInboundScreenData(buffer.data)
+        } else {
+            deliverInboundData(buffer.data)
+        }
     }
 }
 #endif

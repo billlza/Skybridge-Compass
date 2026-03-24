@@ -487,17 +487,12 @@ public class P2PSecurityManager: ObservableObject, Sendable {
     
  /// 加载信任设备
     private func loadTrustedDevices() {
-        if let data = UserDefaults.standard.data(forKey: "TrustedDevices"),
-           let devices = try? JSONDecoder().decode(Set<String>.self, from: data) {
-            self.trustedDevices = devices
-        }
+        self.trustedDevices = Set(TrustedDevicePersistence.loadDeviceIDs())
     }
     
  /// 保存信任设备
     private func saveTrustedDevices() {
-        if let data = try? JSONEncoder().encode(trustedDevices) {
-            UserDefaults.standard.set(data, forKey: "TrustedDevices")
-        }
+        TrustedDevicePersistence.saveDeviceIDs(trustedDevices)
     }
     
  /// 证书有效性检查

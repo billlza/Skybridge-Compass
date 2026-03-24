@@ -119,6 +119,77 @@ public final class ConnectionPresenceService: ObservableObject {
     private let logger = Logger(subsystem: "com.skybridge.core", category: "ConnectionPresence")
     
     private init() {}
+
+    private func aliasSet(for peerId: String) -> Set<String> {
+        Set(
+            PeerTrustLookup.lookupCandidates(for: peerId)
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+                .filter { !$0.isEmpty }
+        )
+    }
+
+    private func stableDevicePeerId(ifPossible peerId: String) -> String? {
+        guard let trimmed = PeerTrustLookup.trimmedIdentifier(peerId) else { return nil }
+        let normalized = trimmed.lowercased()
+        if normalized.hasPrefix("id:") {
+            let raw = String(normalized.dropFirst(3))
+            return UUID(uuidString: raw) == nil ? nil : normalized
+        }
+        guard UUID(uuidString: normalized) != nil else { return nil }
+        return "id:\(normalized)"
+    }
+
+    private func canonicalPresencePeerId(for peerId: String) -> String {
+        let aliases = aliasSet(for: peerId)
+
+        let existingPeerIds = Set(activeConnections.map(\.id))
+            .union(routeDescriptorsByPeerId.keys)
+            .union(rekeyStatusByPeerId.keys)
+
+        let matchingPeerIds = existingPeerIds.filter { candidate in
+            !aliasSet(for: candidate).isDisjoint(with: aliases)
+        }
+
+        if let stableMatch = matchingPeerIds.first(where: { candidate in
+            candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+                .hasPrefix("id:")
+        }) {
+            return stableMatch
+        }
+
+        if let persistentPeerId = stableDevicePeerId(ifPossible: peerId) {
+            return persistentPeerId
+        }
+
+        if let existingMatch = matchingPeerIds.first {
+            return existingMatch
+        }
+
+        return peerId
+    }
+
+    private func purgePresenceArtifacts(
+        matching peerId: String,
+        keeping keptPeerId: String? = nil
+    ) {
+        let aliases = aliasSet(for: peerId)
+
+        activeConnections.removeAll { connection in
+            let matches = !aliasSet(for: connection.id).isDisjoint(with: aliases)
+            return matches && connection.id != keptPeerId
+        }
+
+        routeDescriptorsByPeerId = routeDescriptorsByPeerId.filter { key, _ in
+            let matches = !aliasSet(for: key).isDisjoint(with: aliases)
+            return !matches || key == keptPeerId
+        }
+
+        rekeyStatusByPeerId = rekeyStatusByPeerId.filter { key, _ in
+            let matches = !aliasSet(for: key).isDisjoint(with: aliases)
+            return !matches || key == keptPeerId
+        }
+    }
     
     public func markConnected(
         peerId: String,
@@ -140,8 +211,11 @@ public final class ConnectionPresenceService: ObservableObject {
             return
         }
 
+        let canonicalPeerId = canonicalPresencePeerId(for: peerId)
+        purgePresenceArtifacts(matching: peerId, keeping: canonicalPeerId)
+
         let conn = ActiveConnection(
-            id: peerId,
+            id: canonicalPeerId,
             displayName: displayName,
             address: address,
             cryptoKind: cryptoKind,
@@ -150,26 +224,34 @@ public final class ConnectionPresenceService: ObservableObject {
         )
         
         // Upsert (avoid duplicates on reconnect/rekey)
-        if let idx = activeConnections.firstIndex(where: { $0.id == peerId }) {
+        if let idx = activeConnections.firstIndex(where: { $0.id == canonicalPeerId }) {
             activeConnections[idx] = conn
         } else {
             activeConnections.append(conn)
         }
 
         if let compatibilityRoute = makeCompatibilityRouteDescriptor(
-            peerId: peerId,
-            displayName: displayName,
-            address: address,
-            connectedAt: conn.connectedAt
-        ),
-           routeDescriptorsByPeerId[peerId]?.routeSource == nil ||
-           routeDescriptorsByPeerId[peerId]?.routeSource == .compatibility {
-            routeDescriptorsByPeerId[peerId] = compatibilityRoute
+                peerId: peerId,
+                displayName: displayName,
+                address: address,
+                connectedAt: conn.connectedAt
+            ),
+           routeDescriptorsByPeerId[canonicalPeerId]?.routeSource == nil ||
+           routeDescriptorsByPeerId[canonicalPeerId]?.routeSource == .compatibility {
+            routeDescriptorsByPeerId[canonicalPeerId] = PresenceRouteDescriptor(
+                peerId: canonicalPeerId,
+                deviceName: compatibilityRoute.deviceName,
+                displayAddress: compatibilityRoute.displayAddress,
+                transferAddress: compatibilityRoute.transferAddress,
+                transferPort: compatibilityRoute.transferPort,
+                routeSource: compatibilityRoute.routeSource,
+                connectedAt: compatibilityRoute.connectedAt
+            )
         }
         
-        logger.info("✅ presence connected: peer=\(peerId, privacy: .public) addr=\(address ?? "nil", privacy: .public) kind=\(cryptoKind, privacy: .public) suite=\(suite, privacy: .public)")
+        logger.info("✅ presence connected: peer=\(canonicalPeerId, privacy: .public) addr=\(address ?? "nil", privacy: .public) kind=\(cryptoKind, privacy: .public) suite=\(suite, privacy: .public)")
         // If we were in a "rekeying" state for this peer, clear it on successful connection update.
-        rekeyStatusByPeerId.removeValue(forKey: peerId)
+        rekeyStatusByPeerId.removeValue(forKey: canonicalPeerId)
     }
 
     @discardableResult
@@ -186,30 +268,42 @@ public final class ConnectionPresenceService: ObservableObject {
             return false
         }
 
-        let conn = ActiveConnection(
-            id: peerId,
-            displayName: displayName,
-            address: address ?? routeDescriptor.displayAddress,
-            cryptoKind: cryptoKind,
-            suite: suite,
+        let canonicalPeerId = canonicalPresencePeerId(for: peerId)
+        purgePresenceArtifacts(matching: peerId, keeping: canonicalPeerId)
+        let canonicalRouteDescriptor = PresenceRouteDescriptor(
+            peerId: canonicalPeerId,
+            deviceName: routeDescriptor.deviceName,
+            displayAddress: routeDescriptor.displayAddress,
+            transferAddress: routeDescriptor.transferAddress,
+            transferPort: routeDescriptor.transferPort,
+            routeSource: routeDescriptor.routeSource,
             connectedAt: routeDescriptor.connectedAt
         )
 
-        routeDescriptorsByPeerId[peerId] = routeDescriptor
+        let conn = ActiveConnection(
+            id: canonicalPeerId,
+            displayName: displayName,
+            address: address ?? canonicalRouteDescriptor.displayAddress,
+            cryptoKind: cryptoKind,
+            suite: suite,
+            connectedAt: canonicalRouteDescriptor.connectedAt
+        )
 
-        if let idx = activeConnections.firstIndex(where: { $0.id == peerId }) {
+        routeDescriptorsByPeerId[canonicalPeerId] = canonicalRouteDescriptor
+
+        if let idx = activeConnections.firstIndex(where: { $0.id == canonicalPeerId }) {
             activeConnections[idx] = conn
         } else {
             activeConnections.append(conn)
         }
 
-        rekeyStatusByPeerId.removeValue(forKey: peerId)
+        rekeyStatusByPeerId.removeValue(forKey: canonicalPeerId)
         logger.info(
             """
-            ✅ presence connected+route: peer=\(peerId, privacy: .public) \
-            display=\(routeDescriptor.displayAddress, privacy: .public) \
-            transfer=\(routeDescriptor.transferAddress, privacy: .public):\(routeDescriptor.transferPort, privacy: .public) \
-            source=\(routeDescriptor.routeSource.rawValue, privacy: .public)
+            ✅ presence connected+route: peer=\(canonicalPeerId, privacy: .public) \
+            display=\(canonicalRouteDescriptor.displayAddress, privacy: .public) \
+            transfer=\(canonicalRouteDescriptor.transferAddress, privacy: .public):\(canonicalRouteDescriptor.transferPort, privacy: .public) \
+            source=\(canonicalRouteDescriptor.routeSource.rawValue, privacy: .public)
             """
         )
         return true
@@ -225,9 +319,7 @@ public final class ConnectionPresenceService: ObservableObject {
     }
     
     public func markDisconnected(peerId: String) {
-        activeConnections.removeAll { $0.id == peerId }
-        rekeyStatusByPeerId.removeValue(forKey: peerId)
-        routeDescriptorsByPeerId.removeValue(forKey: peerId)
+        purgePresenceArtifacts(matching: peerId)
         logger.info("⏹️ presence disconnected: peer=\(peerId, privacy: .public)")
     }
 
@@ -251,7 +343,7 @@ public final class ConnectionPresenceService: ObservableObject {
             deviceName: displayName,
             displayAddress: trimmedAddress,
             transferAddress: trimmedAddress,
-            transferPort: 8080,
+            transferPort: Int(ServiceEndpointRegistry.shared.snapshot().fileTransferPort ?? 8080),
             routeSource: .compatibility,
             connectedAt: connectedAt
         )

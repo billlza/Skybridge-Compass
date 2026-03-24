@@ -50,6 +50,7 @@
 		4D0F9A282A0B4F4AA96C1A01 /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = 4D0F9A292A0B4F4AA96C1A01 /* Localizable.strings */; };
 		5C11C0249C43AED260C81E89 /* AuthenticationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B68E3A442804F03C62887E08 /* AuthenticationView.swift */; };
 		5F2704328C4CFAE111CE91B9 /* ClipboardManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 831AD13F1950B5F99A30CD7A /* ClipboardManager.swift */; };
+		F1A2B3C4D5E6F7012345678A /* CodablePersistenceStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1A2B3C4D5E6F70123456789 /* CodablePersistenceStore.swift */; };
 		5FC455D2316C3C8EA7B12D57 /* HandshakePadding.swift in Sources */ = {isa = PBXBuildFile; fileRef = 053FDF90F358AEE09BA7D06C /* HandshakePadding.swift */; };
 		621F7A0A1EEFC4728F1A3DDE /* AppIntents.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 840F0A7CE3B95CE644FCB56E /* AppIntents.framework */; };
 		6B2BE9727DB870A7EAEC8A0C /* HandshakeMessages.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD79DE03EB5BE43A7F4DD6C7 /* HandshakeMessages.swift */; };
@@ -197,6 +198,7 @@
 		7DB4CCFA78A457A620FEAF9F /* DeviceDiscoveryManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceDiscoveryManager.swift; sourceTree = "<group>"; };
 		828E67B857C238E15711B76B /* PolicyDecisionSnapshot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PolicyDecisionSnapshot.swift; sourceTree = "<group>"; };
 		831AD13F1950B5F99A30CD7A /* ClipboardManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipboardManager.swift; sourceTree = "<group>"; };
+		F1A2B3C4D5E6F70123456789 /* CodablePersistenceStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodablePersistenceStore.swift; sourceTree = "<group>"; };
 		840F0A7CE3B95CE644FCB56E /* AppIntents.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AppIntents.framework; path = System/Library/Frameworks/AppIntents.framework; sourceTree = SDKROOT; };
 		8583EB3BEA85C4C8D8FC97C2 /* ActivityKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = ActivityKit.framework; path = System/Library/Frameworks/ActivityKit.framework; sourceTree = SDKROOT; };
 		85C26B001A92135612CB4326 /* LiveActivityManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveActivityManager.swift; sourceTree = "<group>"; };
@@ -624,6 +626,7 @@
 			children = (
 				DF504A11EB980FBB3004D271 /* AuthenticationManager.swift */,
 				831AD13F1950B5F99A30CD7A /* ClipboardManager.swift */,
+				F1A2B3C4D5E6F70123456789 /* CodablePersistenceStore.swift */,
 				9BE5FEA7CC6B032C4D623243 /* CloudKitSyncManager.swift */,
 				6AF4DA70A289A8E7E1F8127F /* CrossNetworkWebRTCManager.swift */,
 				7DB4CCFA78A457A620FEAF9F /* DeviceDiscoveryManager.swift */,
@@ -895,6 +898,7 @@
 				A90F76AF2F532D7200499668 /* SignalingRetryController.swift in Sources */,
 				174D5857250DDFB578699097 /* ClassicProvider.swift in Sources */,
 				5F2704328C4CFAE111CE91B9 /* ClipboardManager.swift in Sources */,
+				F1A2B3C4D5E6F7012345678A /* CodablePersistenceStore.swift in Sources */,
 				80E7233868CBFCAA2004173E /* CloudKitSyncManager.swift in Sources */,
 				EAFF93330E52DC06EDC2EAAC /* ContentView.swift in Sources */,
 				D45C5A6CF3E34BECD4805E05 /* CoreTypes.swift in Sources */,
@@ -1026,7 +1030,7 @@
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited)";
 				"SWIFT_ACTIVE_COMPILATION_CONDITIONS[sdk=iphoneos26*]" = "$(inherited) HAS_APPLE_PQC_SDK";
 				"SWIFT_ACTIVE_COMPILATION_CONDITIONS[sdk=iphonesimulator26*]" = "$(inherited) HAS_APPLE_PQC_SDK";
-				SWIFT_STRICT_CONCURRENCY = targeted;
+				SWIFT_STRICT_CONCURRENCY = complete;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/SkyBridgeCompass-iOS.app/SkyBridgeCompass-iOS";
 			};
@@ -1059,7 +1063,7 @@
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited)";
 				"SWIFT_ACTIVE_COMPILATION_CONDITIONS[sdk=iphoneos26*]" = "$(inherited) HAS_APPLE_PQC_SDK";
 				"SWIFT_ACTIVE_COMPILATION_CONDITIONS[sdk=iphonesimulator26*]" = "$(inherited) HAS_APPLE_PQC_SDK";
-				SWIFT_STRICT_CONCURRENCY = targeted;
+				SWIFT_STRICT_CONCURRENCY = complete;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/SkyBridgeCompass-iOS.app/SkyBridgeCompass-iOS";
 				};
@@ -1076,8 +1080,8 @@
 					PRODUCT_NAME = "$(TARGET_NAME)";
 					SDKROOT = iphoneos;
 					SWIFT_OPTIMIZATION_LEVEL = "-Onone";
-					SWIFT_STRICT_CONCURRENCY = targeted;
-					SWIFT_VERSION = 5.0;
+					SWIFT_STRICT_CONCURRENCY = complete;
+					SWIFT_VERSION = 6.0;
 					TARGETED_DEVICE_FAMILY = "1,2";
 					TEST_TARGET_NAME = "SkyBridgeCompass-iOS";
 				};
@@ -1094,8 +1098,8 @@
 					PRODUCT_NAME = "$(TARGET_NAME)";
 					SDKROOT = iphoneos;
 					SWIFT_COMPILATION_MODE = wholemodule;
-					SWIFT_STRICT_CONCURRENCY = targeted;
-					SWIFT_VERSION = 5.0;
+					SWIFT_STRICT_CONCURRENCY = complete;
+					SWIFT_VERSION = 6.0;
 					TARGETED_DEVICE_FAMILY = "1,2";
 					TEST_TARGET_NAME = "SkyBridgeCompass-iOS";
 				};
@@ -1113,7 +1117,7 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.skybridge.compass.ios.widgets;
 				SDKROOT = iphoneos;
-				SWIFT_STRICT_CONCURRENCY = targeted;
+				SWIFT_STRICT_CONCURRENCY = complete;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Debug;
@@ -1170,7 +1174,7 @@
 				SDKROOT = iphoneos;
 				SWIFT_COMPILATION_MODE = wholemodule;
 				SWIFT_OPTIMIZATION_LEVEL = "-O";
-				SWIFT_VERSION = 5.0;
+				SWIFT_VERSION = 6.0;
 			};
 			name = Release;
 		};
@@ -1186,7 +1190,7 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.skybridge.compass.ios.widgets;
 				SDKROOT = iphoneos;
-				SWIFT_STRICT_CONCURRENCY = targeted;
+				SWIFT_STRICT_CONCURRENCY = complete;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Release;
@@ -1217,7 +1221,7 @@
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited)";
 				"SWIFT_ACTIVE_COMPILATION_CONDITIONS[sdk=iphoneos26*]" = "$(inherited) HAS_APPLE_PQC_SDK";
 				"SWIFT_ACTIVE_COMPILATION_CONDITIONS[sdk=iphonesimulator26*]" = "$(inherited) HAS_APPLE_PQC_SDK";
-				SWIFT_STRICT_CONCURRENCY = targeted;
+				SWIFT_STRICT_CONCURRENCY = complete;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Debug;
@@ -1248,7 +1252,7 @@
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited)";
 				"SWIFT_ACTIVE_COMPILATION_CONDITIONS[sdk=iphoneos26*]" = "$(inherited) HAS_APPLE_PQC_SDK";
 				"SWIFT_ACTIVE_COMPILATION_CONDITIONS[sdk=iphonesimulator26*]" = "$(inherited) HAS_APPLE_PQC_SDK";
-				SWIFT_STRICT_CONCURRENCY = targeted;
+				SWIFT_STRICT_CONCURRENCY = complete;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Release;
@@ -1312,7 +1316,7 @@
 				SDKROOT = iphoneos;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
-				SWIFT_VERSION = 5.0;
+				SWIFT_VERSION = 6.0;
 			};
 			name = Debug;
 		};

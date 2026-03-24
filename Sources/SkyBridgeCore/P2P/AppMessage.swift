@@ -7,6 +7,7 @@ public enum AppMessage: Codable, Sendable, Equatable {
     case clipboard(ClipboardPayload)
     case pairingIdentityExchange(PairingIdentityExchangePayload)
     case heartbeat(HeartbeatPayload)
+    case peerDisconnecting(PeerDisconnectingPayload)
     /// Lightweight RTT probe (request).
     case ping(PingPayload)
     /// Lightweight RTT probe (response).
@@ -41,6 +42,9 @@ public enum AppMessage: Codable, Sendable, Equatable {
         public let osVersion: String?
         public let chip: String?
         public let remoteVideoFormats: [String]?
+        public let capabilities: [String]?
+        public let fileTransferPort: UInt16?
+        public let remoteControlPort: UInt16?
         public let sentAt: Date
 
         public init(
@@ -52,6 +56,9 @@ public enum AppMessage: Codable, Sendable, Equatable {
             osVersion: String? = nil,
             chip: String? = nil,
             remoteVideoFormats: [String]? = nil,
+            capabilities: [String]? = nil,
+            fileTransferPort: UInt16? = nil,
+            remoteControlPort: UInt16? = nil,
             sentAt: Date = Date()
         ) {
             self.deviceId = deviceId
@@ -62,6 +69,9 @@ public enum AppMessage: Codable, Sendable, Equatable {
             self.osVersion = osVersion
             self.chip = chip
             self.remoteVideoFormats = remoteVideoFormats
+            self.capabilities = capabilities
+            self.fileTransferPort = fileTransferPort
+            self.remoteControlPort = remoteControlPort
             self.sentAt = sentAt
         }
     }
@@ -76,6 +86,9 @@ public enum AppMessage: Codable, Sendable, Equatable {
         public let osVersion: String?
         public let chip: String?
         public let remoteVideoFormats: [String]?
+        public let capabilities: [String]?
+        public let fileTransferPort: UInt16?
+        public let remoteControlPort: UInt16?
 
         public init(
             sentAt: Date = Date(),
@@ -85,7 +98,10 @@ public enum AppMessage: Codable, Sendable, Equatable {
             platform: String? = nil,
             osVersion: String? = nil,
             chip: String? = nil,
-            remoteVideoFormats: [String]? = nil
+            remoteVideoFormats: [String]? = nil,
+            capabilities: [String]? = nil,
+            fileTransferPort: UInt16? = nil,
+            remoteControlPort: UInt16? = nil
         ) {
             self.sentAt = sentAt
             self.deviceId = deviceId
@@ -95,6 +111,25 @@ public enum AppMessage: Codable, Sendable, Equatable {
             self.osVersion = osVersion
             self.chip = chip
             self.remoteVideoFormats = remoteVideoFormats
+            self.capabilities = capabilities
+            self.fileTransferPort = fileTransferPort
+            self.remoteControlPort = remoteControlPort
+        }
+    }
+
+    public struct PeerDisconnectingPayload: Codable, Sendable, Equatable {
+        public let deviceId: String?
+        public let deviceName: String?
+        public let sentAt: Date
+
+        public init(
+            deviceId: String? = nil,
+            deviceName: String? = nil,
+            sentAt: Date = Date()
+        ) {
+            self.deviceId = deviceId
+            self.deviceName = deviceName
+            self.sentAt = sentAt
         }
     }
 
@@ -120,6 +155,7 @@ public enum AppMessage: Codable, Sendable, Equatable {
         case clipboard
         case pairingIdentityExchange
         case heartbeat
+        case peerDisconnecting
         case ping
         case pong
     }
@@ -131,44 +167,52 @@ public enum AppMessage: Codable, Sendable, Equatable {
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
 
-        if let payload = try container.decodeIfPresent(ClipboardPayload.self, forKey: .clipboard) {
+        if let payload = try? container.decode(ClipboardPayload.self, forKey: .clipboard) {
             self = .clipboard(payload)
             return
         }
-        if let payload = try container.decodeIfPresent(PairingIdentityExchangePayload.self, forKey: .pairingIdentityExchange) {
+        if let payload = try? container.decode(PairingIdentityExchangePayload.self, forKey: .pairingIdentityExchange) {
             self = .pairingIdentityExchange(payload)
             return
         }
-        if let payload = try container.decodeIfPresent(HeartbeatPayload.self, forKey: .heartbeat) {
+        if let payload = try? container.decode(HeartbeatPayload.self, forKey: .heartbeat) {
             self = .heartbeat(payload)
             return
         }
-        if let payload = try container.decodeIfPresent(PingPayload.self, forKey: .ping) {
+        if let payload = try? container.decode(PeerDisconnectingPayload.self, forKey: .peerDisconnecting) {
+            self = .peerDisconnecting(payload)
+            return
+        }
+        if let payload = try? container.decode(PingPayload.self, forKey: .ping) {
             self = .ping(payload)
             return
         }
-        if let payload = try container.decodeIfPresent(PongPayload.self, forKey: .pong) {
+        if let payload = try? container.decode(PongPayload.self, forKey: .pong) {
             self = .pong(payload)
             return
         }
 
-        if let payload = try container.decodeIfPresent(LegacyAssociatedValueBox<ClipboardPayload>.self, forKey: .clipboard)?._0 {
+        if let payload = (try? container.decode(LegacyAssociatedValueBox<ClipboardPayload>.self, forKey: .clipboard))?._0 {
             self = .clipboard(payload)
             return
         }
-        if let payload = try container.decodeIfPresent(LegacyAssociatedValueBox<PairingIdentityExchangePayload>.self, forKey: .pairingIdentityExchange)?._0 {
+        if let payload = (try? container.decode(LegacyAssociatedValueBox<PairingIdentityExchangePayload>.self, forKey: .pairingIdentityExchange))?._0 {
             self = .pairingIdentityExchange(payload)
             return
         }
-        if let payload = try container.decodeIfPresent(LegacyAssociatedValueBox<HeartbeatPayload>.self, forKey: .heartbeat)?._0 {
+        if let payload = (try? container.decode(LegacyAssociatedValueBox<HeartbeatPayload>.self, forKey: .heartbeat))?._0 {
             self = .heartbeat(payload)
             return
         }
-        if let payload = try container.decodeIfPresent(LegacyAssociatedValueBox<PingPayload>.self, forKey: .ping)?._0 {
+        if let payload = (try? container.decode(LegacyAssociatedValueBox<PeerDisconnectingPayload>.self, forKey: .peerDisconnecting))?._0 {
+            self = .peerDisconnecting(payload)
+            return
+        }
+        if let payload = (try? container.decode(LegacyAssociatedValueBox<PingPayload>.self, forKey: .ping))?._0 {
             self = .ping(payload)
             return
         }
-        if let payload = try container.decodeIfPresent(LegacyAssociatedValueBox<PongPayload>.self, forKey: .pong)?._0 {
+        if let payload = (try? container.decode(LegacyAssociatedValueBox<PongPayload>.self, forKey: .pong))?._0 {
             self = .pong(payload)
             return
         }
@@ -190,6 +234,8 @@ public enum AppMessage: Codable, Sendable, Equatable {
             try container.encode(payload, forKey: .pairingIdentityExchange)
         case .heartbeat(let payload):
             try container.encode(payload, forKey: .heartbeat)
+        case .peerDisconnecting(let payload):
+            try container.encode(payload, forKey: .peerDisconnecting)
         case .ping(let payload):
             try container.encode(payload, forKey: .ping)
         case .pong(let payload):

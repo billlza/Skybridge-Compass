@@ -1,7 +1,7 @@
 'use strict';
 
 const crypto = require('crypto');
-const { createClient } = require('redis');
+const { createClient, createClientPool } = require('redis');
 
 function deepClone(value) {
   if (value == null) return value;
@@ -600,6 +600,7 @@ class RedisSignalingStateBackend {
     this.command = null;
     this.publisher = null;
     this.subscriber = null;
+    this.isolatedPool = null;
     this.localMessageHandler = null;
   }
 
@@ -626,6 +627,16 @@ class RedisSignalingStateBackend {
     });
   }
 
+  createRedisPool() {
+    return createClientPool({
+      url: this.redisUrl,
+      socket: {
+        connectTimeout: this.redisConnectTimeoutMs,
+        reconnectStrategy: (retries) => Math.min(1000 * Math.max(1, retries), 5_000)
+      }
+    });
+  }
+
   async init(onInstanceMessage) {
     if (!this.redisUrl) {
       throw new Error('SIGNALING_STATE_BACKEND=redis 但未配置 SIGNALING_REDIS_URL / REDIS_URL');
@@ -634,6 +645,7 @@ class RedisSignalingStateBackend {
     this.command = this.createRedisClient();
     this.publisher = this.createRedisClient();
     this.subscriber = this.createRedisClient();
+    this.isolatedPool = this.createRedisPool();
 
     const logError = (label) => (error) => {
       this.log.error(`[redis] ${label} error: ${error.message}`);
@@ -641,11 +653,13 @@ class RedisSignalingStateBackend {
     this.command.on('error', logError('command'));
     this.publisher.on('error', logError('publisher'));
     this.subscriber.on('error', logError('subscriber'));
+    this.isolatedPool.on('error', logError('isolated-pool'));
 
     await Promise.all([
       this.command.connect(),
       this.publisher.connect(),
-      this.subscriber.connect()
+      this.subscriber.connect(),
+      this.isolatedPool.connect()
     ]);
 
     await this.subscriber.subscribe(this.instanceChannel(this.instanceId), async (message) => {
@@ -662,9 +676,11 @@ class RedisSignalingStateBackend {
 
   async close() {
     const clients = [this.subscriber, this.publisher, this.command].filter(Boolean);
+    const isolatedPool = this.isolatedPool;
     this.subscriber = null;
     this.publisher = null;
     this.command = null;
+    this.isolatedPool = null;
     await Promise.all(clients.map(async (client) => {
       try {
         if (client.isOpen) {
@@ -674,6 +690,20 @@ class RedisSignalingStateBackend {
         try { client.disconnect(); } catch {}
       }
     }));
+    if (isolatedPool) {
+      try {
+        await isolatedPool.close();
+      } catch (_) {
+        try { isolatedPool.destroy(); } catch {}
+      }
+    }
+  }
+
+  async executeIsolated(fn) {
+    if (!this.isolatedPool) {
+      throw new Error('redis isolated pool not initialized');
+    }
+    return this.isolatedPool.execute(fn);
   }
 
   async createConnectionCode(generateCode, attempts, record) {
@@ -723,7 +753,7 @@ class RedisSignalingStateBackend {
 
   async updateConnection(code, mutator) {
     const key = this.codeKey(code);
-    return this.command.executeIsolated(async (isolated) => {
+    return this.executeIsolated(async (isolated) => {
       for (let attempt = 0; attempt < 5; attempt++) {
         await isolated.watch(key);
         const raw = await isolated.get(key);
@@ -861,7 +891,7 @@ class RedisSignalingStateBackend {
 
   async trackIceUsage(sessionId, peerId, candidateHash, byteSize, limits) {
     const key = this.iceUsageKey(sessionId);
-    return this.command.executeIsolated(async (isolated) => {
+    return this.executeIsolated(async (isolated) => {
       for (let attempt = 0; attempt < 5; attempt++) {
         await isolated.watch(key);
         const current = iceUsageFromStorage(await isolated.get(key)) || {
@@ -1073,7 +1103,7 @@ class RedisSignalingStateBackend {
 
   async updateEphemeral(kind, id, mutator) {
     const key = this.ephemeralKey(kind, id);
-    return this.command.executeIsolated(async (isolated) => {
+    return this.executeIsolated(async (isolated) => {
       for (let attempt = 0; attempt < 5; attempt++) {
         await isolated.watch(key);
         const current = ephemeralRecordFromStorage(await isolated.get(key));

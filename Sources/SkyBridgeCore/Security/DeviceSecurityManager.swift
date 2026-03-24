@@ -32,7 +32,6 @@ public class DeviceSecurityManager: BaseManager {
     private let keychain = DeviceKeychainManager()
  /// 设备信任记录表（包含信任日期）
     private var trustedDeviceRecords: [String: TrustedDeviceRecord] = [:]
-    private let trustRecordsKey = "SkyBridge.TrustedDeviceRecords"
     
  // MARK: - 初始化
     private init() {
@@ -153,52 +152,30 @@ public class DeviceSecurityManager: BaseManager {
  // MARK: - 私有方法
     
     private func loadTrustedDevices() {
- // 从UserDefaults加载受信任设备列表
-        self.trustedDevices = UserDefaults.standard.stringArray(forKey: "TrustedDevices") ?? []
- // 加载信任记录
-        loadTrustRecords()
+        let persisted = TrustedDevicePersistence.loadDetailedState()
+        self.trustedDevices = persisted.deviceIDs
+        self.trustedDeviceRecords = persisted.records
         logger.info("已加载 \(self.trustedDevices.count) 个受信任设备")
     }
     
     private func saveTrustedDevices() {
-        UserDefaults.standard.set(trustedDevices, forKey: "TrustedDevices")
+        TrustedDevicePersistence.saveDetailedState(
+            deviceIDs: trustedDevices,
+            records: trustedDeviceRecords
+        )
         logger.info("受信任设备列表已保存")
     }
     
     private func loadTrustRecords() {
-        guard let data = UserDefaults.standard.data(forKey: trustRecordsKey) else {
- // 兼容旧数据：为已存在的受信任设备创建记录（使用当前时间作为信任日期）
-            for deviceId in trustedDevices where trustedDeviceRecords[deviceId] == nil {
-                trustedDeviceRecords[deviceId] = TrustedDeviceRecord(deviceId: deviceId)
-            }
-            return
-        }
-        
-        do {
-            let decoder = JSONDecoder()
-            decoder.dateDecodingStrategy = .iso8601
-            let records = try decoder.decode([TrustedDeviceRecord].self, from: data)
-            trustedDeviceRecords = Dictionary(uniqueKeysWithValues: records.map { ($0.deviceId, $0) })
-            
- // 确保所有受信任设备都有记录
-            for deviceId in trustedDevices where trustedDeviceRecords[deviceId] == nil {
-                trustedDeviceRecords[deviceId] = TrustedDeviceRecord(deviceId: deviceId)
-            }
-        } catch {
-            logger.error("加载信任记录失败: \(error.localizedDescription)")
-        }
+        let persisted = TrustedDevicePersistence.loadDetailedState()
+        trustedDeviceRecords = persisted.records
     }
     
     private func saveTrustRecords() {
-        do {
-            let encoder = JSONEncoder()
-            encoder.dateEncodingStrategy = .iso8601
-            let records = Array(trustedDeviceRecords.values)
-            let data = try encoder.encode(records)
-            UserDefaults.standard.set(data, forKey: trustRecordsKey)
-        } catch {
-            logger.error("保存信任记录失败: \(error.localizedDescription)")
-        }
+        TrustedDevicePersistence.saveDetailedState(
+            deviceIDs: trustedDevices,
+            records: trustedDeviceRecords
+        )
     }
 }
 

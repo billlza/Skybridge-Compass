@@ -60,9 +60,7 @@ final class DashboardViewModel: ObservableObject {
     private let usbcManager = USBCConnectionManager()    // 直接监听USB设备连接，计入在线设备
     private let sessionService = RemoteDesktopManager.shared
     private let fileTransferService = FileTransferManager.shared
-    private lazy var fileTransferListener = FileTransferListenerService(manager: fileTransferService)
-    private let remoteControlManager = RemoteControlManager()
-    private lazy var remoteControlServer = RemoteControlServer(manager: remoteControlManager)
+    private let localPeerServices = LocalPeerServiceCoordinator.shared
     let systemMetricsService = SystemMetricsService()
     private let tenantController = TenantAccessController.shared
 
@@ -145,6 +143,8 @@ final class DashboardViewModel: ObservableObject {
 // 启动系统指标监控
         systemMetricsService.startMonitoring()
 
+        await localPeerServices.startIfNeeded()
+
         if shouldAutoScan {
             // 检查设备发现服务是否已启动，避免重复初始化
             if !discoveryService.isScanning {
@@ -205,20 +205,6 @@ final class DashboardViewModel: ObservableObject {
             p2pDiscoveryService.stopDiscovery()
             unifiedDeviceManager.stopDiscovery()
             discoveryStatus = LocalizationManager.shared.localizedString("settings.general.autoScan") + "：OFF"
-        }
-
-        // 启动文件传输入站监听（iOS ↔ macOS 互传的最小闭环）
-        do {
-            try await fileTransferListener.start()
-        } catch {
-            SkyBridgeLogger.ui.error("❌ 启动文件传输监听失败: \(error.localizedDescription, privacy: .public)")
-        }
-
-        // 启动 iPhone → Mac 远程桌面/控制服务（JPEG 流 + 输入注入）
-        do {
-            try await remoteControlServer.start()
-        } catch {
-            SkyBridgeLogger.ui.error("❌ 启动远程控制服务失败: \(error.localizedDescription, privacy: .public)")
         }
 
  // 初始化性能协调器
@@ -452,7 +438,7 @@ final class DashboardViewModel: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] baseTuple, presenceTuple, unifiedDevices, crossNetworkTuple in
                 guard let self else { return }
-                let (baseStatus, p2pStatus, inboundCount, isTransferring) = baseTuple
+                let (_, _, _, isTransferring) = baseTuple
                 let (presenceConnections, rekeyStatusByPeerId) = presenceTuple
                 let ((crossStatus, crossReadiness, crossSnapshot, crossConnection), crossSignalingHealth) = crossNetworkTuple
 
@@ -496,14 +482,6 @@ final class DashboardViewModel: ObservableObject {
                             connectedAt: newest.connectedAt
                         )
                     }
-                } else if baseStatus == .connected || p2pStatus == .connected || inboundCount > 0 {
-                    latestPeerConnection = ConnectionPresentationPeer(
-                        displayName: "P2P",
-                        cryptoKind: nil,
-                        suite: nil,
-                        guardStatus: "守护中",
-                        connectedAt: Date()
-                    )
                 } else {
                     latestPeerConnection = nil
                 }

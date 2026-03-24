@@ -211,8 +211,10 @@ public class StartupCoordinator: ObservableObject {
 
         // 修复：避免在启动阶段创建“临时”发现管理器实例。
         // 临时实例释放后会留下无效 listener handler，导致 iOS 连接后握手超时。
-        // 这里统一收敛到单例 P2PNetworkManager，并强制重绑 _skybridge._tcp 监听器。
-        await ServiceAdvertiserCenter.shared.stopAdvertising("_skybridge._tcp")
+        // 这里统一收敛到单例 P2PNetworkManager。
+        // 注意：不要直接 stopAdvertising("_skybridge._tcp")，否则会把
+        // P2PDiscoveryService 的内部 `isAdvertising` 状态和中央监听器状态打散，
+        // 进而造成 Bonjour 仍可见但实际 listener 已失效、iOS 连接即 RST。
 
         // 启动 P2P 网络管理器（使用单例）
         do {

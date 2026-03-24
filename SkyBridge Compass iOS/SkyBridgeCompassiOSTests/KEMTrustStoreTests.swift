@@ -5,11 +5,11 @@ import XCTest
 final class KEMTrustStoreTests: XCTestCase {
     func testPersistAndRestoreKEMTrustStore() async throws {
         let suiteName = "KEMTrustStoreTests.\(UUID().uuidString)"
-        guard let defaults = UserDefaults(suiteName: suiteName) else {
+        guard let cleanupDefaults = UserDefaults(suiteName: suiteName) else {
             XCTFail("Unable to create isolated UserDefaults suite")
             return
         }
-        defaults.removePersistentDomain(forName: suiteName)
+        cleanupDefaults.removePersistentDomain(forName: suiteName)
 
         let storageKey = "kem_trust_store.tests.v1"
         let deviceId = "peer-\(UUID().uuidString)"
@@ -18,10 +18,18 @@ final class KEMTrustStoreTests: XCTestCase {
             publicKey: Data(repeating: 0xA5, count: 32)
         )
 
-        let writerStore = KEMTrustStore(storageKey: storageKey, userDefaults: defaults)
+        guard let writerDefaults = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Unable to create writer UserDefaults suite")
+            return
+        }
+        let writerStore = KEMTrustStore(storageKey: storageKey, userDefaults: writerDefaults)
         await writerStore.upsert(deviceId: deviceId, kemPublicKeys: [keyInfo])
 
-        let readerStore = KEMTrustStore(storageKey: storageKey, userDefaults: defaults)
+        guard let readerDefaults = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Unable to create reader UserDefaults suite")
+            return
+        }
+        let readerStore = KEMTrustStore(storageKey: storageKey, userDefaults: readerDefaults)
         let restored = await readerStore.kemPublicKeys(for: deviceId)
 
         XCTAssertEqual(restored[.mlkem768], keyInfo.publicKey)

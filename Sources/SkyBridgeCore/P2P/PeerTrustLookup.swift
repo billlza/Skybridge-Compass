@@ -1,0 +1,237 @@
+import Foundation
+
+@available(macOS 14.0, iOS 17.0, *)
+enum PeerTrustLookup {
+    static func trimmedIdentifier(_ raw: String?) -> String? {
+        guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else {
+            return nil
+        }
+        return raw
+    }
+
+    static func normalizedIdentifier(_ raw: String?) -> String? {
+        trimmedIdentifier(raw)?.lowercased()
+    }
+
+    static func persistentDeviceId(from raw: String?) -> String? {
+        guard let trimmed = trimmedIdentifier(raw) else { return nil }
+        let normalized = trimmed.lowercased()
+        if normalized.hasPrefix("id:") {
+            return trimmed
+        }
+        if normalized.hasPrefix("host:")
+            || normalized.hasPrefix("peer:")
+            || normalized.hasPrefix("bonjour:")
+            || normalized.hasPrefix("recent:")
+            || trimmed.contains("@") {
+            return nil
+        }
+        return "id:\(trimmed)"
+    }
+
+    static func lookupCandidates(for identifier: String?) -> [String] {
+        var ordered: [String] = []
+        var seen: Set<String> = []
+
+        func append(_ raw: String?) {
+            guard let trimmed = trimmedIdentifier(raw) else { return }
+            if seen.insert(trimmed).inserted {
+                ordered.append(trimmed)
+            }
+
+            let lowercased = trimmed.lowercased()
+            if lowercased != trimmed, seen.insert(lowercased).inserted {
+                ordered.append(lowercased)
+            }
+        }
+
+        func appendDerived(_ raw: String?) {
+            guard let trimmed = trimmedIdentifier(raw) else { return }
+            append(trimmed)
+
+            let normalized = trimmed.lowercased()
+            if normalized.hasPrefix("recent:") {
+                let offset = trimmed.index(trimmed.startIndex, offsetBy: "recent:".count)
+                appendDerived(String(trimmed[offset...]))
+            }
+
+            if normalized.hasPrefix("id:") {
+                let offset = trimmed.index(trimmed.startIndex, offsetBy: 3)
+                append(String(trimmed[offset...]))
+            } else if let persistent = persistentDeviceId(from: trimmed) {
+                append(persistent)
+            }
+
+            if let alias = hostAlias(from: trimmed) {
+                append(alias)
+            }
+
+            if let alias = hostAlias(fromIPAddress: trimmed) {
+                append(alias)
+            }
+
+            if let alias = bonjourAlias(from: trimmed) {
+                append(alias)
+            }
+        }
+
+        appendDerived(identifier)
+        return ordered
+    }
+
+    static func lookupCandidates(primary: String?, persistent: String?) -> [String] {
+        var ordered: [String] = []
+        var seen: Set<String> = []
+
+        func appendCandidates(from raw: String?) {
+            for candidate in lookupCandidates(for: raw) where seen.insert(candidate).inserted {
+                ordered.append(candidate)
+            }
+        }
+
+        appendCandidates(from: persistent)
+        appendCandidates(from: primary)
+        return ordered
+    }
+
+    static func capabilityValue(prefix: String, in capabilities: [String]) -> String? {
+        for capability in capabilities {
+            guard capability.hasPrefix(prefix) else { continue }
+            let value = String(capability.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !value.isEmpty {
+                return value
+            }
+        }
+        return nil
+    }
+
+    static func recordLookupCandidates(_ record: TrustRecord) -> [String] {
+        var ordered: [String] = []
+        var seen: Set<String> = []
+
+        func appendCandidates(from raw: String?) {
+            for candidate in lookupCandidates(for: raw) where seen.insert(candidate).inserted {
+                ordered.append(candidate)
+            }
+        }
+
+        appendCandidates(from: record.deviceId)
+        appendCandidates(from: record.currentDeviceIdMetadata)
+        for knownDeviceId in record.knownDeviceIdsMetadata ?? [] {
+            appendCandidates(from: knownDeviceId)
+        }
+        appendCandidates(from: capabilityValue(prefix: "peerEndpoint=", in: record.capabilities))
+        appendCandidates(from: capabilityValue(prefix: "declaredDeviceId=", in: record.capabilities))
+        return ordered
+    }
+
+    static func recordMatches(
+        _ record: TrustRecord,
+        candidates: Set<String>,
+        candidateLowercased: Set<String>,
+        candidateDisplayNamesLower: Set<String> = []
+    ) -> Bool {
+        guard !record.isTombstone else { return false }
+
+        for recordCandidate in recordLookupCandidates(record) {
+            if candidates.contains(recordCandidate) || candidateLowercased.contains(recordCandidate.lowercased()) {
+                return true
+            }
+        }
+
+        guard let deviceName = trimmedIdentifier(record.deviceName)?.lowercased(),
+              !deviceName.isEmpty else {
+            return false
+        }
+        return candidateDisplayNamesLower.contains(deviceName)
+    }
+
+    private static func hostAlias(from identifier: String) -> String? {
+        guard let normalized = normalizedIdentifier(identifier) else { return nil }
+        if normalized.hasPrefix("host:") {
+            return hostAlias(fromIPAddress: String(normalized.dropFirst("host:".count)))
+        }
+        if normalized.hasPrefix("peer:") {
+            return hostAlias(fromIPAddress: String(normalized.dropFirst("peer:".count)))
+        }
+        return nil
+    }
+
+    static func hostAlias(fromIPAddress raw: String?) -> String? {
+        guard var token = normalizedIdentifier(raw),
+              !token.isEmpty else {
+            return nil
+        }
+
+        if token.hasPrefix("host:") {
+            token = String(token.dropFirst("host:".count))
+        } else if token.hasPrefix("peer:") {
+            token = String(token.dropFirst("peer:".count))
+        }
+
+        if token.hasPrefix("[") && token.hasSuffix("]") && token.count >= 2 {
+            token = String(token.dropFirst().dropLast())
+        }
+
+        if token.hasPrefix("["),
+           let closingBracket = token.firstIndex(of: "]") {
+            token = String(token[token.index(after: token.startIndex)..<closingBracket])
+        }
+
+        if let percent = token.firstIndex(of: "%") {
+            token = String(token[..<percent])
+        }
+
+        if token.contains(":"),
+           let dot = token.lastIndex(of: "."),
+           token[token.index(after: dot)...].allSatisfy({ $0.isNumber }) {
+            token = String(token[..<dot])
+        } else {
+            let parts = token.split(separator: ".")
+            if parts.count == 5,
+               parts.dropLast().allSatisfy({ Int($0) != nil }),
+               let port = Int(parts.last ?? ""),
+               (0...65535).contains(port) {
+                token = parts.dropLast().map(String.init).joined(separator: ".")
+            }
+        }
+
+        if token.hasPrefix("[") && token.hasSuffix("]") && token.count >= 2 {
+            token = String(token.dropFirst().dropLast())
+        }
+
+        let normalized = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return nil }
+        return "host:\(normalized)"
+    }
+
+    private static func bonjourAlias(from identifier: String) -> String? {
+        guard let trimmed = trimmedIdentifier(identifier),
+              trimmed.lowercased().hasPrefix("bonjour:") else {
+            return nil
+        }
+
+        let payload = String(trimmed.dropFirst("bonjour:".count))
+        let parts = payload.split(separator: "@", maxSplits: 1).map(String.init)
+        guard let name = parts.first, !name.isEmpty else { return nil }
+        let domain = parts.count > 1 ? parts[1] : "local."
+        return bonjourAlias(name: name, domain: domain)
+    }
+
+    private static func bonjourAlias(name: String?, domain: String?) -> String? {
+        guard let rawName = trimmedIdentifier(name) else { return nil }
+
+        let rawDomain = domain?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "local."
+        let normalizedDomain: String
+        if rawDomain.isEmpty {
+            normalizedDomain = "local."
+        } else if rawDomain.hasSuffix(".") {
+            normalizedDomain = rawDomain.lowercased()
+        } else {
+            normalizedDomain = "\(rawDomain.lowercased())."
+        }
+
+        return "bonjour:\(rawName.lowercased())@\(normalizedDomain)"
+    }
+}

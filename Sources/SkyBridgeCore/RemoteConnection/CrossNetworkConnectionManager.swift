@@ -29,6 +29,7 @@ private struct WebRTCEncodedScreenFrame: Sendable, Equatable {
     let imageData: Data
     let timestamp: TimeInterval
     let format: String
+    let isSyncFrame: Bool
 }
 
 private enum RemoteMessageTypeWire: String, Codable {
@@ -81,6 +82,7 @@ private struct ScreenDataWire: Codable {
     let imageData: Data
     let timestamp: TimeInterval
     let format: String?
+    let isSyncFrame: Bool?
 }
 
 @available(macOS 14.0, iOS 17.0, *)
@@ -120,12 +122,32 @@ private final class LatestWebRTCEncodedFrameStore: @unchecked Sendable {
 @MainActor
 public final class CrossNetworkConnectionManager: ObservableObject {
 
+    public enum ConnectionCodeLeaseMode: String, CaseIterable, Sendable {
+        case shortLived
+        case dayStable
+
+        public var validDuration: TimeInterval {
+            switch self {
+            case .shortLived:
+                return 10 * 60
+            case .dayStable:
+                return 24 * 60 * 60
+            }
+        }
+    }
+
     /// Shared instance so multiple views (connection + file transfer) can operate on the same active WebRTC session.
     public static let shared = CrossNetworkConnectionManager()
 
  // MARK: - 发布属性
 
     @Published public var connectionCode: String?
+    @Published public private(set) var connectionCodeExpiresAt: Date?
+    @Published public var connectionCodeLeaseMode: ConnectionCodeLeaseMode = .shortLived {
+        didSet {
+            UserDefaults.standard.set(connectionCodeLeaseMode.rawValue, forKey: Self.connectionCodeLeaseModeDefaultsKey)
+        }
+    }
     @Published public var qrCodeData: Data?
     @Published public var availableCloudDevices: [CloudDevice] = []
     @Published public var connectionStatus: CrossNetworkConnectionStatus = .idle
@@ -153,7 +175,9 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     public static let legacyConnectionCodeLength = 6
     public static let preferredConnectionCodeLength = 8
     public static let maximumConnectionCodeLength = 16
+    private static let connectionCodeLeaseModeDefaultsKey = "cross_network_connection_code_lease_mode.macos"
     private var activeSessionReconnectTimeoutTask: Task<Void, Never>?
+    private var activeConnectionCodeLeaseMode: ConnectionCodeLeaseMode?
 
     private struct SessionSnapshotMetadata: Sendable {
         let snapshotToken: UUID
@@ -261,6 +285,10 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             }
         )
         self.deviceFingerprint = Self.generateDeviceFingerprint()
+        if let rawMode = UserDefaults.standard.string(forKey: Self.connectionCodeLeaseModeDefaultsKey),
+           let mode = ConnectionCodeLeaseMode(rawValue: rawMode) {
+            self.connectionCodeLeaseMode = mode
+        }
 
         logger.info("跨网络连接管理器初始化完成")
     }
@@ -371,6 +399,12 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                         self.signalingHealth = .healthy
                     }
                     self.signalingRecoveryTasksBySessionId.removeValue(forKey: sessionID)
+                    return
+                } catch is CancellationError {
+                    self.signalingRecoveryTasksBySessionId.removeValue(forKey: sessionID)
+                    self.logger.debug(
+                        "ℹ️ signaling recovery cancelled: session=\(sessionID, privacy: .public) attempt=\(attempt + 1, privacy: .public)"
+                    )
                     return
                 } catch {
                     self.logger.error(
@@ -704,7 +738,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             let plaintext = try JSONEncoder().encode(remoteMessage)
             let ciphertext = try encryptAppPayload(plaintext, with: keys)
             let padded = TrafficPadding.wrapIfEnabled(ciphertext, label: "tx/webrtc-clipboard")
-            try sendFramed(padded, over: session)
+            try await sendFramed(padded, over: session)
         } catch {
             logger.error("❌ WebRTC 会话剪贴板发送失败: \(error.localizedDescription, privacy: .public)")
         }
@@ -756,6 +790,10 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             try? handle.write(contentsOf: data)
         } else {
             try? data.write(to: statusURL, options: .atomic)
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o600],
+                ofItemAtPath: statusURL.path
+            )
         }
     }
 
@@ -1022,7 +1060,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         webrtcRemoteDesktopHeartbeatAtBySessionId[sessionID] = Date()
         webrtcRemoteLivenessWatchdogTasksBySessionId[sessionID] = Task { @MainActor [weak self] in
             guard let self else { return }
-            let heartbeatTimeoutSeconds: TimeInterval = 8.0
+            let heartbeatTimeoutSeconds: TimeInterval = 12.0
             let handshakeGraceTimeoutSeconds: TimeInterval = 30.0
             let transportReadyAt = Date()
 
@@ -1412,6 +1450,8 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         // 8) 重置状态
         currentConnection = nil
         connectionCode = nil
+        connectionCodeExpiresAt = nil
+        activeConnectionCodeLeaseMode = nil
         qrCodeData = nil
         activeSessionReconnectTimeoutTask?.cancel()
         activeSessionReconnectTimeoutTask = nil
@@ -1805,6 +1845,17 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     /// 生成服务器签发的智能连接码（当前默认 8 位）
     public func generateConnectionCode() async throws -> String {
         logger.info("生成智能连接码")
+        let requestedLeaseMode = connectionCodeLeaseMode
+        if let existing = connectionCode,
+           activeConnectionCodeLeaseMode == requestedLeaseMode,
+           case .waiting(let activeCode) = connectionStatus,
+           activeCode == existing {
+            return existing
+        }
+        if connectionCode != nil,
+           activeConnectionCodeLeaseMode != requestedLeaseMode {
+            await disconnect()
+        }
         connectionStatus = .generating
         readiness = .idle
 
@@ -1813,7 +1864,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         let lease = try await signalServer.registerConnectionCode(
             admissionToken: admissionLease.token,
             deviceName: Host.current().localizedName ?? "Mac",
-            validDuration: 600
+            validDuration: requestedLeaseMode.validDuration
         )
         let code = lease.code
         webrtcSignalingAuthTokenBySessionId[lease.sessionID] = lease.sessionToken
@@ -1822,6 +1873,8 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 
         // 2) 当前主路径由服务端发放短期 code + initiator token，code 同时作为 WebRTC sessionId。
         self.connectionCode = code
+        self.connectionCodeExpiresAt = Date().addingTimeInterval(lease.expiresIn)
+        self.activeConnectionCodeLeaseMode = requestedLeaseMode
         self.connectionStatus = .waiting(code: code)
         self.readiness = .idle
 
@@ -2440,6 +2493,11 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         appendSmokeStatus("signal-server-error session=\(sessionID ?? "-") error=\(reason)")
 
         guard let sessionID else {
+            if reason == "server_error",
+               webrtcSessionsBySessionId.keys.contains(where: isTransportEstablished(for:)) {
+                logger.warning("ℹ️ ignore unscoped signaling server_error after transport establishment")
+                return
+            }
             connectionStatus = .failed("Signaling error: \(reason)")
             readiness = .idle
             return
@@ -2630,15 +2688,15 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         return sealed.combined ?? Data()
     }
 
-    private func sendFramed(_ payload: Data, over session: WebRTCSession) throws {
-        try session.sendFramedPayload(payload)
+    private func sendFramed(_ payload: Data, over session: WebRTCSession) async throws {
+        try await session.sendFramedPayloadAsync(payload)
     }
 
-    private func sendFileTransferMessage(sessionID: String, session: WebRTCSession, keys: SessionKeys, message: CrossNetworkFileTransferMessage) throws {
+    private func sendFileTransferMessage(sessionID: String, session: WebRTCSession, keys: SessionKeys, message: CrossNetworkFileTransferMessage) async throws {
         let plain = try JSONEncoder().encode(message)
         let enc = try encryptAppPayload(plain, with: keys)
         let padded = TrafficPadding.wrapIfEnabled(enc, label: "tx/webrtc-file")
-        try sendFramed(padded, over: session)
+        try await sendFramed(padded, over: session)
     }
 
     /// Send a local file to the currently connected iOS peer over WebRTC DataChannel (zero-config cross-network).
@@ -2694,7 +2752,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 totalChunks: totalChunks,
                 mimeType: nil
             )
-            try sendFileTransferMessage(sessionID: sessionID, session: session, keys: keys, message: meta)
+            try await sendFileTransferMessage(sessionID: sessionID, session: session, keys: keys, message: meta)
 
             _ = try await waitForFileTransferMessage(sessionID: sessionID, transferId: transferId, op: .metadataAck, timeoutSeconds: 15)
 
@@ -2723,7 +2781,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     chunkSha256: CrossNetworkCrypto.sha256(data),
                     rawSize: data.count
                 )
-                try sendFileTransferMessage(sessionID: sessionID, session: session, keys: keys, message: msg)
+                try await sendFileTransferMessage(sessionID: sessionID, session: session, keys: keys, message: msg)
 
                 let ack: CrossNetworkFileTransferMessage = try await {
                     () async throws -> CrossNetworkFileTransferMessage in
@@ -2741,7 +2799,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                             lastError = error
                             // Best-effort resend: safe because receiver writes at fixed offset.
                             do {
-                                try sendFileTransferMessage(sessionID: sessionID, session: session, keys: keys, message: msg)
+                                try await sendFileTransferMessage(sessionID: sessionID, session: session, keys: keys, message: msg)
                             } catch {
                                 lastError = error
                                 break
@@ -2772,7 +2830,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 receivedBytes: fileSize,
                 fileSha256: fileSha
             )
-            try sendFileTransferMessage(sessionID: sessionID, session: session, keys: keys, message: done)
+            try await sendFileTransferMessage(sessionID: sessionID, session: session, keys: keys, message: done)
             _ = try await waitForFileTransferMessage(sessionID: sessionID, transferId: transferId, op: .completeAck, timeoutSeconds: 30)
 
             FileTransferManager.shared.completeExternalOutboundTransfer(transferId: transferId)
@@ -3495,7 +3553,8 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 height: height,
                 imageData: jpg,
                 timestamp: Date().timeIntervalSince1970,
-                format: "jpeg"
+                format: "jpeg",
+                isSyncFrame: true
             )
         }
 
@@ -3570,7 +3629,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 guard let self else { return }
 
 #if os(macOS)
-                let heartbeatTimeoutSeconds: TimeInterval = 8.0
+                let heartbeatTimeoutSeconds: TimeInterval = 12.0
                 let overlaySampleStride = 6
                 let sampler = RemoteDesktopInteractionTelemetrySampler()
                 var transportPath: WebRTCSession.ICETransportPath = .unknown
@@ -3704,7 +3763,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             guard self.webrtcScreenStreamingTasksBySessionId[sessionID] == nil else { return }
             self.webrtcScreenStreamingTasksBySessionId[sessionID] = Task { @MainActor [weak self] in
                 guard let self else { return }
-                let heartbeatTimeoutSeconds: TimeInterval = 8.0
+                let heartbeatTimeoutSeconds: TimeInterval = 12.0
                 let screenFrameChunkBytes = 16 * 1024
                 var bytesSent: Int = 0
                 var framesSent: Int = 0
@@ -3718,7 +3777,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 var lastBackpressureReportAt = Date.distantPast
                 let encodedFrameStore = LatestWebRTCEncodedFrameStore()
 #if os(macOS)
-                var directEncoder: WebRTCCGDisplayVideoEncoder?
+                var directCaptureStreamer: ScreenCaptureKitStreamer?
                 var lastHardwareFrameAt = Date.distantPast
                 let damageTracker = CoarseDisplayDamageTracker()
                 var pendingDamageReport: RemoteDesktopDamageReport?
@@ -3726,7 +3785,9 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 
                 defer {
 #if os(macOS)
-                    directEncoder?.stop()
+                    Task { @MainActor in
+                        directCaptureStreamer?.stop()
+                    }
 #endif
                     encodedFrameStore.clear()
                     self.webrtcScreenStreamingTasksBySessionId.removeValue(forKey: sessionID)
@@ -3771,53 +3832,89 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 func ensureDirectEncoder(
                     for videoPolicy: WebRTCRemoteDesktopVideoPolicy
                 ) async -> Bool {
-                    guard videoPolicy.usesHardwareEncoder else {
-                        if let directEncoder {
-                            directEncoder.stop()
+                    let nativeVideoTrackEnabled = session.supportsNativeScreenVideoTrack
+                    guard videoPolicy.usesHardwareEncoder || nativeVideoTrackEnabled else {
+                        if let directCaptureStreamer {
+                            directCaptureStreamer.stop()
                             self.logger.info(
-                                "🛑 WebRTC 直连硬编停止，回退到 JPEG: session=\(sessionID, privacy: .public)"
+                                "🛑 WebRTC ScreenCaptureKit 直连硬编停止，回退到 JPEG: session=\(sessionID, privacy: .public)"
                             )
                         }
-                        directEncoder = nil
+                        directCaptureStreamer = nil
                         encodedFrameStore.clear()
                         return false
                     }
 
                     if let current = lastVideoPolicy,
                        current == videoPolicy,
-                       directEncoder != nil {
+                       directCaptureStreamer != nil {
                         return true
                     }
 
-                    directEncoder?.stop()
-                    directEncoder = nil
+                    directCaptureStreamer?.stop()
+                    directCaptureStreamer = nil
                     encodedFrameStore.clear()
 
-                    let encoder = WebRTCCGDisplayVideoEncoder()
-                    encoder.onEncodedFrame = { data, width, height, frameType in
-                        encodedFrameStore.store(
-                            .init(
+                    let captureStreamer = ScreenCaptureKitStreamer()
+                    if nativeVideoTrackEnabled {
+                        captureStreamer.onRawFrame = { pixelBuffer, presentationTimeStamp in
+                            let width = CVPixelBufferGetWidth(pixelBuffer)
+                            let height = CVPixelBufferGetHeight(pixelBuffer)
+                            let timeStampNs: Int64
+                            if presentationTimeStamp.isValid,
+                               presentationTimeStamp.seconds.isFinite {
+                                timeStampNs = Int64(
+                                    max(
+                                        0,
+                                        (presentationTimeStamp.seconds * 1_000_000_000.0).rounded()
+                                    )
+                                )
+                            } else {
+                                timeStampNs = Int64(Date().timeIntervalSince1970 * 1_000_000_000.0)
+                            }
+                            session.prepareOutgoingScreenVideo(
                                 width: width,
                                 height: height,
-                                imageData: data,
-                                timestamp: Date().timeIntervalSince1970,
-                                format: Self.remoteFrameFormatName(frameType: frameType, payload: data)
+                                fps: videoPolicy.targetFrameRate
                             )
+                            session.pushVideoFrame(
+                                pixelBuffer: pixelBuffer,
+                                timeStampNs: timeStampNs
+                            )
+                        }
+                    } else {
+                        captureStreamer.onEncodedFrame = { data, width, height, frameType, isSyncFrame in
+                            encodedFrameStore.store(
+                                .init(
+                                    width: width,
+                                    height: height,
+                                    imageData: data,
+                                    timestamp: Date().timeIntervalSince1970,
+                                    format: Self.remoteFrameFormatName(frameType: frameType, payload: data),
+                                    isSyncFrame: isSyncFrame
+                                )
+                            )
+                        }
+                    }
+                    captureStreamer.onCaptureIssue = { issue in
+                        self.logger.warning(
+                            "⚠️ WebRTC ScreenCaptureKit 采集提示: session=\(sessionID, privacy: .public) issue=\(issue, privacy: .public)"
                         )
                     }
 
                     do {
-                        try encoder.start(
+                        try await captureStreamer.start(
                             preferredCodec: videoPolicy.codec,
                             preferredSize: videoPolicy.preferredSize,
                             targetFPS: videoPolicy.targetFrameRate,
                             keyFrameInterval: videoPolicy.keyFrameInterval,
-                            bitstreamFormat: .annexB
+                            captureCursorInVideo: !nativeVideoTrackEnabled,
+                            bitstreamFormat: nativeVideoTrackEnabled ? .native : .annexB
                         )
-                        directEncoder = encoder
+                        directCaptureStreamer = captureStreamer
                         self.logger.info(
                             """
-                            🎥 WebRTC 直连硬编已启动: session=\(sessionID, privacy: .public) \
+                            🎥 WebRTC ScreenCaptureKit 直连硬编已启动: session=\(sessionID, privacy: .public) \
                             codec=\(Self.remoteFrameFormatName(frameType: videoPolicy.codec, payload: Data()), privacy: .public) \
                             fps=\(videoPolicy.targetFrameRate, privacy: .public) \
                             size=\(Int(videoPolicy.preferredSize.width), privacy: .public)x\(Int(videoPolicy.preferredSize.height), privacy: .public) \
@@ -3825,18 +3922,18 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                             """
                         )
                         self.appendSmokeStatus(
-                            "stream-hardware-started session=\(sessionID) codec=\(Self.remoteFrameFormatName(frameType: videoPolicy.codec, payload: Data()))"
+                            "stream-sck-started session=\(sessionID) codec=\(nativeVideoTrackEnabled ? "webrtc-native-video" : Self.remoteFrameFormatName(frameType: videoPolicy.codec, payload: Data()))"
                         )
                         return true
                     } catch {
-                        encoder.stop()
-                        directEncoder = nil
+                        captureStreamer.stop()
+                        directCaptureStreamer = nil
                         encodedFrameStore.clear()
                         self.logger.error(
-                            "⚠️ WebRTC 直连硬编启动失败，回退 JPEG: session=\(sessionID, privacy: .public) err=\(error.localizedDescription, privacy: .public)"
+                            "⚠️ WebRTC ScreenCaptureKit 直连硬编启动失败，回退 JPEG: session=\(sessionID, privacy: .public) err=\(error.localizedDescription, privacy: .public)"
                         )
                         self.appendSmokeStatus(
-                            "stream-hardware-start-failed session=\(sessionID) codec=\(Self.remoteFrameFormatName(frameType: videoPolicy.codec, payload: Data())) error=\(error.localizedDescription)"
+                            "stream-sck-start-failed session=\(sessionID) codec=\(Self.remoteFrameFormatName(frameType: videoPolicy.codec, payload: Data())) error=\(error.localizedDescription)"
                         )
                         return false
                     }
@@ -3872,6 +3969,11 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                             transportPath = newPath
                         }
                         lastTransportProbeAt = Date()
+                    }
+                    let streamConfig = self.webrtcRemoteStreamConfigurationBySessionId[sessionID]
+                    let useDedicatedScreenChannel = streamConfig?.screenDataChannelEnabled == true
+                    if useDedicatedScreenChannel {
+                        try? session.ensureScreenDataChannel()
                     }
                     let selectedVideoPolicy = currentVideoPolicy(for: transportPath)
                     let budget = currentBudget(for: transportPath, videoPolicy: selectedVideoPolicy)
@@ -3931,10 +4033,25 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 #if os(macOS)
                     _ = await ensureDirectEncoder(for: videoPolicy)
                     if self.consumePendingWebRTCStreamRefresh(for: sessionID) {
-                        directEncoder?.requestKeyFrameRefresh(reason: "viewer-stream-refresh")
+                        directCaptureStreamer?.requestKeyFrameRefresh(reason: "viewer-stream-refresh")
                         self.logger.info(
                             "🪄 WebRTC viewer 请求关键帧刷新: session=\(sessionID, privacy: .public)"
                         )
+                    }
+                    if session.supportsNativeScreenVideoTrack {
+                        if lastSentFormat != "webrtc-native-video" {
+                            self.appendSmokeStatus(
+                                "stream-format session=\(sessionID) format=webrtc-native-video"
+                            )
+                            lastSentFormat = "webrtc-native-video"
+                        }
+                        lastVideoPolicy = videoPolicy
+                        do {
+                            try await Task.sleep(for: .milliseconds(250))
+                        } catch {
+                            break
+                        }
+                        continue
                     }
 #endif
                     lastVideoPolicy = videoPolicy
@@ -3944,7 +4061,9 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     } catch {
                         break
                     }
-                    let bufferedAmount = session.dataChannelBufferedAmountBytes()
+                    let bufferedAmount = useDedicatedScreenChannel
+                        ? session.screenDataChannelBufferedAmountBytes()
+                        : session.dataChannelBufferedAmountBytes()
                     if bufferedAmount > budget.maxBufferedAmountBytes {
                         self.logger.debug(
                             "⏳ WebRTC 屏幕推流背压：跳过本帧 buffered=\(Int(bufferedAmount), privacy: .public) budget=\(Int(budget.maxBufferedAmountBytes), privacy: .public)"
@@ -3967,25 +4086,6 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     }
 #if os(macOS)
                     if capturedFrame == nil {
-                        let damageTrackingEnabled = self.webrtcRemoteStreamConfigurationBySessionId[sessionID]?.damageTrackingEnabled ?? true
-                        if videoPolicy.usesHardwareEncoder,
-                           let image = CGDisplayCreateImage(CGMainDisplayID()) {
-                            if damageTrackingEnabled {
-                                if let report = damageTracker.analyze(image: image) {
-                                    pendingDamageReport = report
-                                    directEncoder?.encode(
-                                        image: image,
-                                        timestamp: Date().timeIntervalSince1970
-                                    )
-                                }
-                            } else {
-                                directEncoder?.encode(
-                                    image: image,
-                                    timestamp: Date().timeIntervalSince1970
-                                )
-                            }
-                        }
-
                         let directEncodedFrame = videoPolicy.usesHardwareEncoder
                             ? encodedFrameStore.takeLatest()
                             : nil
@@ -3996,7 +4096,8 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                                 height: encodedFrame.height,
                                 imageData: encodedFrame.imageData,
                                 timestamp: encodedFrame.timestamp,
-                                format: encodedFrame.format
+                                format: encodedFrame.format,
+                                isSyncFrame: encodedFrame.isSyncFrame
                             )
                         } else if videoPolicy.usesHardwareEncoder {
                             if Date().timeIntervalSince(lastHardwareFrameAt) > 1.0 {
@@ -4024,7 +4125,8 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                             height: img.height,
                             imageData: jpg,
                             timestamp: Date().timeIntervalSince1970,
-                            format: "jpeg"
+                            format: "jpeg",
+                            isSyncFrame: true
                         )
                     }
                     guard let sd = capturedFrame else {
@@ -4058,14 +4160,19 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                         )
                         lastSentFormat = formatLabel
                     }
-                    guard let payload = try? JSONEncoder().encode(sd) else { continue }
-                    let msg = RemoteMessageWire(type: .screenData, payload: payload)
-                    guard let plain = try? JSONEncoder().encode(msg) else { continue }
+                    let plain = RemoteDesktopScreenFrameWire.encode(
+                        width: sd.width,
+                        height: sd.height,
+                        imageData: sd.imageData,
+                        timestamp: sd.timestamp,
+                        format: sd.format,
+                        isSyncFrame: sd.isSyncFrame
+                    )
 
                     do {
                         let enc = try encryptAppPayload(plain, with: keys)
                         let padded = TrafficPadding.wrapIfEnabled(enc, label: "tx/webrtc-screen")
-                        try await session.sendFramedPayloadAsync(
+                        try await session.sendScreenFramedPayloadAsync(
                             padded,
                             maxChunkBytes: screenFrameChunkBytes,
                             maxBufferedAmountBytes: budget.maxBufferedAmountBytes
@@ -4158,6 +4265,8 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                                     print("🧪 mac app message=heartbeat")
                                 case .clipboard:
                                     print("🧪 mac app message=clipboard")
+                                case .peerDisconnecting(let payload):
+                                    print("🧪 mac app message=peerDisconnecting deviceId=\(payload.deviceId ?? "nil")")
                                 case .ping(let payload):
                                     print("🧪 mac app message=ping id=\(payload.id)")
                                 case .pong(let payload):
@@ -4993,6 +5102,9 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                                     let previousConfig = self.webrtcRemoteStreamConfigurationBySessionId[sessionID]
                                     self.webrtcRemoteStreamConfigurationBySessionId[sessionID] = config
                                     self.webrtcRemoteVideoFormatsBySessionId[sessionID] = self.effectiveWebRTCRemoteVideoFormats(for: sessionID)
+                                    if config.screenDataChannelEnabled == true {
+                                        try? session.ensureScreenDataChannel()
+                                    }
                                     self.logger.info(
                                         """
                                         🎛️ WebRTC 收到远控流策略: session=\(sessionID, privacy: .public) \
@@ -5521,26 +5633,39 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             .replacingOccurrences(of: "=", with: "")
     }
 
-    nonisolated fileprivate static func decodeBase64Payload(_ raw: String) -> Data? {
-        var candidates: [String] = []
-        candidates.append(raw)
-        if let decoded = raw.removingPercentEncoding, !decoded.isEmpty {
-            candidates.append(decoded)
-        }
-
-        for candidate in candidates {
-            if let data = Data(base64Encoded: candidate, options: [.ignoreUnknownCharacters]) {
-                return data
-            }
-            let normalized = candidate
-                .replacingOccurrences(of: "-", with: "+")
-                .replacingOccurrences(of: "_", with: "/")
-            let padded = normalized + String(repeating: "=", count: (4 - (normalized.count % 4)) % 4)
-            if let data = Data(base64Encoded: padded, options: [.ignoreUnknownCharacters]) {
+    nonisolated static func decodeBase64Payload(_ raw: String) -> Data? {
+        for candidate in strictBase64URLCandidates(from: raw) {
+            if let data = Data(base64Encoded: candidate) {
                 return data
             }
         }
         return nil
+    }
+
+    nonisolated private static func strictBase64URLCandidates(from raw: String) -> [String] {
+        let rawCandidates = [raw, raw.removingPercentEncoding]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        let allowedCharacters = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_+/=")
+        var normalizedCandidates: [String] = []
+        var seen = Set<String>()
+
+        for rawCandidate in rawCandidates {
+            let compactScalars = rawCandidate.unicodeScalars.filter { !CharacterSet.whitespacesAndNewlines.contains($0) }
+            guard !compactScalars.isEmpty else { continue }
+            guard compactScalars.allSatisfy({ allowedCharacters.contains($0) }) else { continue }
+
+            let normalized = String(String.UnicodeScalarView(compactScalars))
+                .replacingOccurrences(of: "-", with: "+")
+                .replacingOccurrences(of: "_", with: "/")
+            let padded = normalized + String(repeating: "=", count: (4 - (normalized.count % 4)) % 4)
+            if seen.insert(padded).inserted {
+                normalizedCandidates.append(padded)
+            }
+        }
+
+        return normalizedCandidates
     }
 
     private static func decodeDynamicQRCodePayload(from jsonData: Data) throws -> DynamicQRCodeData {

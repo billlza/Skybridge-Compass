@@ -278,6 +278,12 @@ public struct TransferState: Sendable {
 @MainActor
 public class FileTransferManager: ObservableObject {
     public static let instance = FileTransferManager()
+    private static let historyStore = CodablePersistenceStore<[FileTransfer]>(
+        location: .protectedApplicationSupport(
+            path: "FileTransfer/history.json",
+            legacyUserDefaultsKey: "transfer_history"
+        )
+    )
     
     // MARK: - Published Properties
     
@@ -434,38 +440,7 @@ public class FileTransferManager: ObservableObject {
             // 这里尝试用发现管理器的最新记录补全（尤其是 `_skybridge-transfer._tcp`）。
             let resolvedDevice = resolveLatestTransferDevice(from: device)
 
-            let endpoint: NWEndpoint
-            let transferServiceType = DiscoveredDevice.fileTransferServiceType
-            let parsedBonjour = parseBonjourIdentity(from: resolvedDevice.id)
-            let bonjourName = resolvedDevice.bonjourServiceName ?? parsedBonjour?.name
-            let bonjourDomain = resolvedDevice.bonjourServiceDomain ?? parsedBonjour?.domain ?? "local."
-            let hasTransferService =
-                resolvedDevice.services.contains(transferServiceType)
-                || resolvedDevice.bonjourServiceType == transferServiceType
-
-            if hasTransferService {
-                endpoint = .service(
-                    name: bonjourName ?? resolvedDevice.name,
-                    type: transferServiceType,
-                    domain: bonjourDomain,
-                    interface: nil
-                )
-            } else if let ip = bestIPAddress(for: resolvedDevice) {
-                let port = resolvedDevice.fileTransferPort ?? FileTransferConstants.defaultPort
-                endpoint = .hostPort(host: .init(ip), port: .init(integerLiteral: port))
-            } else if let bonjourName, !bonjourName.isEmpty {
-                SkyBridgeLogger.shared.info(
-                    "📡 文件传输未发现独立端口，尝试使用 Bonjour 名称回退连接: name=\(bonjourName) domain=\(bonjourDomain)"
-                )
-                endpoint = .service(
-                    name: bonjourName,
-                    type: transferServiceType,
-                    domain: bonjourDomain,
-                    interface: nil
-                )
-            } else {
-                throw FileTransferError.invalidDestination
-            }
+            let endpoint = try await makeTransferEndpoint(for: resolvedDevice)
 
             let connection = try await createConnection(to: endpoint)
             defer { connection.cancel() }
@@ -499,7 +474,17 @@ public class FileTransferManager: ObservableObject {
     // MARK: - Cross-network (WebRTC DataChannel) send
 
     private func resolveLatestTransferDevice(from device: DiscoveredDevice) -> DiscoveredDevice {
-        let discovered = DeviceDiscoveryManager.instance.discoveredDevices
+        var discovered = DeviceDiscoveryManager.instance.discoveredDevices
+        discovered.append(contentsOf: connectionManager.activeConnections.map(\.device))
+        let peerResolved = connectionManager.resolvedPeerDevice(for: device)
+        if !discovered.contains(where: { Self.areEquivalentTransferDevices($0, peerResolved) }) {
+            discovered.insert(peerResolved, at: 0)
+        }
+        if let canonical = DeviceDiscoveryManager.instance.canonicalDiscoveredDevice(for: device),
+           !discovered.contains(where: { Self.areEquivalentTransferDevices($0, canonical) }) {
+            discovered.insert(canonical, at: 0)
+        }
+
         let resolved = Self.resolveBestTransferDevice(target: device, discovered: discovered)
         if resolved.id != device.id
             || resolved.bonjourServiceType != device.bonjourServiceType
@@ -509,6 +494,88 @@ public class FileTransferManager: ObservableObject {
             )
         }
         return resolved
+    }
+
+    private func makeTransferEndpoint(for device: DiscoveredDevice) async throws -> NWEndpoint {
+        let transferServiceType = DiscoveredDevice.fileTransferServiceType
+        let bonjourName = preferredTransferServiceName(for: device)
+        let bonjourDomain = preferredTransferServiceDomain(for: device)
+        let hasTransferService = Self.hasExplicitLANTransferService(device)
+        let explicitTransferPort = device.fileTransferPort
+        let hasActivePeerSession = activePeerSessionExists(for: device)
+
+        if hasTransferService {
+            return .service(
+                name: bonjourName ?? device.name,
+                type: transferServiceType,
+                domain: bonjourDomain,
+                interface: nil
+            )
+        }
+
+        if let bonjourName, !bonjourName.isEmpty,
+           (device.supportsFileTransfer || explicitTransferPort != nil || hasActivePeerSession) {
+            SkyBridgeLogger.shared.info(
+                "📡 文件传输优先使用推断的 Bonjour 服务连接: name=\(bonjourName) domain=\(bonjourDomain)"
+            )
+            return .service(
+                name: bonjourName,
+                type: transferServiceType,
+                domain: bonjourDomain,
+                interface: nil
+            )
+        }
+
+        if let ip = bestIPAddress(for: device), let port = explicitTransferPort {
+            return .hostPort(host: .init(ip), port: .init(integerLiteral: port))
+        }
+
+        if let resolvedIP = await resolveTransferIPAddress(for: device),
+           let port = explicitTransferPort {
+            SkyBridgeLogger.shared.info(
+                "📡 文件传输已解析到主服务地址: name=\(device.name) ip=\(resolvedIP) port=\(port)"
+            )
+            return .hostPort(host: .init(resolvedIP), port: .init(integerLiteral: port))
+        }
+
+        if hasActivePeerSession,
+           let activePeerIP = connectionManager.activePeerHostAddress(for: device) {
+            SkyBridgeLogger.shared.warning(
+                "⚠️ 文件传输目标缺少独立服务公告，已基于活跃 P2P 会话回退到直连端口 \(FileTransferConstants.defaultPort): name=\(device.name) ip=\(activePeerIP)"
+            )
+            return .hostPort(
+                host: .init(activePeerIP),
+                port: .init(integerLiteral: explicitTransferPort ?? FileTransferConstants.defaultPort)
+            )
+        }
+
+        if device.supportsFileTransfer, let resolvedIP = await resolveTransferIPAddress(for: device) {
+            SkyBridgeLogger.shared.warning(
+                "⚠️ 文件传输目标仅声明能力但未提供独立端口，拒绝猜测默认端口: name=\(device.name) ip=\(resolvedIP)"
+            )
+        }
+
+        if device.supportsFileTransfer {
+            throw FileTransferError.transferFailed("设备未声明独立文件传输端点，已拒绝对默认 8080 端口进行猜测连接")
+        }
+
+        throw FileTransferError.invalidDestination
+    }
+
+    private func activePeerSessionExists(for device: DiscoveredDevice) -> Bool {
+        if connectionManager.resolvedConnectionStatus(for: device) == .connected {
+            return true
+        }
+
+        let resolvedDevice = connectionManager.resolvedPeerDevice(for: device)
+        let targetAliases = Set(PeerIdentityAliasResolver.aliasKeys(for: resolvedDevice))
+            .union(PeerIdentityAliasResolver.aliasKeys(for: device))
+
+        guard !targetAliases.isEmpty else { return false }
+        return connectionManager.activeConnections.contains { connection in
+            let candidateAliases = Set(PeerIdentityAliasResolver.aliasKeys(for: connection.device))
+            return !candidateAliases.isDisjoint(with: targetAliases)
+        }
     }
 
     private func shouldUseCrossNetworkTransport(for device: DiscoveredDevice) -> Bool {
@@ -556,10 +623,24 @@ public class FileTransferManager: ObservableObject {
         return bestScore > targetScore ? bestCandidate : target
     }
 
+    private static func areEquivalentTransferDevices(
+        _ lhs: DiscoveredDevice,
+        _ rhs: DiscoveredDevice
+    ) -> Bool {
+        if lhs.id == rhs.id {
+            return true
+        }
+
+        let lhsAliases = Set(PeerIdentityAliasResolver.aliasKeys(for: lhs))
+        let rhsAliases = Set(PeerIdentityAliasResolver.aliasKeys(for: rhs))
+        return !lhsAliases.isEmpty && !rhsAliases.isEmpty && !lhsAliases.isDisjoint(with: rhsAliases)
+    }
+
     private static func transferResolutionScore(candidate: DiscoveredDevice, target: DiscoveredDevice) -> Int {
         let targetIdentity = normalizedTransferIdentity(target.id)
         let candidateIdentity = normalizedTransferIdentity(candidate.id)
         let exactIdMatch = !targetIdentity.isEmpty && targetIdentity == candidateIdentity
+        let stableExactIdMatch = exactIdMatch && isStableTransferIdentity(candidate.id)
 
         let targetIP = bestTransferIPAddress(for: target)
         let candidateIP = bestTransferIPAddress(for: candidate)
@@ -582,7 +663,11 @@ public class FileTransferManager: ObservableObject {
         }
 
         var score = 0
-        if exactIdMatch { score += 300 }
+        if stableExactIdMatch {
+            score += 300
+        } else if exactIdMatch {
+            score += 80
+        }
         if ipMatch { score += 250 }
         if bonjourMatch { score += 220 }
         if nameMatch { score += 160 }
@@ -597,6 +682,17 @@ public class FileTransferManager: ObservableObject {
         if !candidate.services.isEmpty { score += 40 }
 
         return score
+    }
+
+    private static func isStableTransferIdentity(_ raw: String?) -> Bool {
+        let normalized = normalizedTransferIdentity(raw)
+        guard !normalized.isEmpty else {
+            return false
+        }
+        return !(normalized.hasPrefix("host:")
+            || normalized.hasPrefix("peer:")
+            || normalized.hasPrefix("bonjour:")
+            || normalized.hasPrefix("recent:"))
     }
 
     private static func normalizedTransferIdentity(_ raw: String?) -> String {
@@ -652,42 +748,82 @@ public class FileTransferManager: ObservableObject {
     }
 
     private static func sanitizeTransferAddress(_ raw: String?) -> String? {
-        guard var token = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !token.isEmpty else {
-            return nil
-        }
-
-        if token.hasPrefix("host:") {
-            token = String(token.dropFirst("host:".count))
-        } else if token.hasPrefix("peer:") {
-            token = String(token.dropFirst("peer:".count))
-        } else if token.hasPrefix("ip:") {
-            token = String(token.dropFirst("ip:".count))
-        }
-
-        if token.hasPrefix("[") && token.hasSuffix("]") {
-            token = String(token.dropFirst().dropLast())
-        }
-
-        if token.contains(":"),
-           let dot = token.lastIndex(of: "."),
-           token[token.index(after: dot)...].allSatisfy({ $0.isNumber }) {
-            token = String(token[..<dot])
-        } else {
-            let parts = token.split(separator: ".")
-            if parts.count == 5,
-               parts.dropLast().allSatisfy({ Int($0) != nil }),
-               let port = Int(parts.last ?? ""),
-               (0...65535).contains(port) {
-                token = parts.dropLast().map(String.init).joined(separator: ".")
-            }
-        }
-
-        let sanitized = token.trimmingCharacters(in: .whitespacesAndNewlines)
-        return sanitized.isEmpty ? nil : sanitized
+        ConnectableAddressCanonicalizer.lookupKey(raw)
     }
 
     private func preferredTransferDevice(_ lhs: DiscoveredDevice, _ rhs: DiscoveredDevice) -> DiscoveredDevice {
         transferDeviceScore(rhs) > transferDeviceScore(lhs) ? rhs : lhs
+    }
+
+    static func hasExplicitLANTransferService(_ device: DiscoveredDevice) -> Bool {
+        device.services.contains(DiscoveredDevice.fileTransferServiceType)
+            || device.bonjourServiceType == DiscoveredDevice.fileTransferServiceType
+    }
+
+    private func preferredTransferServiceName(for device: DiscoveredDevice) -> String? {
+        for candidate in transferIdentityCandidates(for: device) {
+            if let bonjourServiceName = candidate.bonjourServiceName,
+               isPlausibleServiceInstanceName(bonjourServiceName) {
+                return bonjourServiceName.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            if let parsed = parseBonjourIdentity(from: candidate.id),
+               isPlausibleServiceInstanceName(parsed.name) {
+                return parsed.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            if isPlausibleServiceInstanceName(candidate.name) {
+                return candidate.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+        return nil
+    }
+
+    private func preferredTransferServiceDomain(for device: DiscoveredDevice) -> String {
+        for candidate in transferIdentityCandidates(for: device) {
+            if let domain = candidate.bonjourServiceDomain?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !domain.isEmpty {
+                return domain
+            }
+            if let parsed = parseBonjourIdentity(from: candidate.id) {
+                return parsed.domain
+            }
+        }
+        return "local."
+    }
+
+    private func transferIdentityCandidates(for device: DiscoveredDevice) -> [DiscoveredDevice] {
+        var candidates: [DiscoveredDevice] = []
+
+        func append(_ candidate: DiscoveredDevice?) {
+            guard let candidate else { return }
+            if candidates.contains(where: { Self.areEquivalentTransferDevices($0, candidate) }) {
+                return
+            }
+            candidates.append(candidate)
+        }
+
+        append(device)
+        append(connectionManager.resolvedPeerDevice(for: device))
+        append(DeviceDiscoveryManager.instance.canonicalDiscoveredDevice(for: device))
+        for active in connectionManager.activeConnections.map(\.device) where Self.areEquivalentTransferDevices(active, device) {
+            append(active)
+        }
+        return candidates
+    }
+
+    private func isPlausibleServiceInstanceName(_ raw: String?) -> Bool {
+        guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else {
+            return false
+        }
+        let lowercased = raw.lowercased()
+        if lowercased == "unknown device" || lowercased == "未知设备" {
+            return false
+        }
+        if let sanitized = sanitizeAddress(raw),
+           sanitized == lowercased || sanitized == raw {
+            return false
+        }
+        return true
     }
 
     private func transferDeviceScore(_ device: DiscoveredDevice) -> Int {
@@ -732,6 +868,39 @@ public class FileTransferManager: ObservableObject {
             ?? sanitizeAddress(addressFromIdentifier(device.id))
     }
 
+    private func resolveTransferIPAddress(for device: DiscoveredDevice) async -> String? {
+        var candidates: [DiscoveredDevice] = []
+
+        func append(_ candidate: DiscoveredDevice?) {
+            guard let candidate else { return }
+            if candidates.contains(where: { Self.areEquivalentTransferDevices($0, candidate) }) {
+                return
+            }
+            candidates.append(candidate)
+        }
+
+        append(device)
+        append(connectionManager.resolvedPeerDevice(for: device))
+        append(DeviceDiscoveryManager.instance.canonicalDiscoveredDevice(for: device))
+        append(resolveLatestTransferDevice(from: device))
+
+        for candidate in candidates {
+            if let ip = bestIPAddress(for: candidate) {
+                return ip
+            }
+            if let activePeerIP = connectionManager.activePeerHostAddress(for: candidate),
+               let sanitized = sanitizeAddress(activePeerIP) {
+                return sanitized
+            }
+            if let resolved = await DeviceDiscoveryManager.instance.resolveEndpoint(candidate),
+               let sanitized = sanitizeAddress(resolved) {
+                return sanitized
+            }
+        }
+
+        return nil
+    }
+
     private func addressFromIdentifier(_ identifier: String) -> String? {
         if identifier.hasPrefix("host:") {
             return String(identifier.dropFirst("host:".count))
@@ -743,38 +912,7 @@ public class FileTransferManager: ObservableObject {
     }
 
     private func sanitizeAddress(_ raw: String?) -> String? {
-        guard var token = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !token.isEmpty else {
-            return nil
-        }
-
-        if token.hasPrefix("host:") {
-            token = String(token.dropFirst("host:".count))
-        } else if token.hasPrefix("peer:") {
-            token = String(token.dropFirst("peer:".count))
-        } else if token.hasPrefix("ip:") {
-            token = String(token.dropFirst("ip:".count))
-        }
-
-        if token.hasPrefix("[") && token.hasSuffix("]") {
-            token = String(token.dropFirst().dropLast())
-        }
-
-        if token.contains(":"),
-           let dot = token.lastIndex(of: "."),
-           token[token.index(after: dot)...].allSatisfy({ $0.isNumber }) {
-            token = String(token[..<dot])
-        } else {
-            let parts = token.split(separator: ".")
-            if parts.count == 5,
-               parts.dropLast().allSatisfy({ Int($0) != nil }),
-               let port = Int(parts.last ?? ""),
-               (0...65535).contains(port) {
-                token = parts.dropLast().map(String.init).joined(separator: ".")
-            }
-        }
-
-        let sanitized = token.trimmingCharacters(in: .whitespacesAndNewlines)
-        return sanitized.isEmpty ? nil : sanitized
+        ConnectableAddressCanonicalizer.connectionTarget(raw)
     }
 
     private func sendFileOverWebRTC(
@@ -1013,6 +1151,51 @@ public class FileTransferManager: ObservableObject {
     /// 获取下载目录
     public func getDownloadsDirectory() -> URL {
         downloadsDirectory
+    }
+
+    /// 解析当前仍然有效的本地文件 URL。
+    /// 历史记录里的 `localPath` 可能来自旧的 iOS 沙盒容器路径；若路径失效，则回退到当前 Downloads 目录按文件名恢复。
+    public func resolveExistingLocalFileURL(for transfer: FileTransfer) -> URL? {
+        let safeFileName = (transfer.fileName as NSString).lastPathComponent
+        let currentDownloadsURL = downloadsDirectory.appendingPathComponent(safeFileName, isDirectory: false)
+
+        let candidates: [URL] = {
+            var urls: [URL] = []
+            if let localPath = transfer.localPath, !localPath.isEmpty {
+                urls.append(URL(fileURLWithPath: localPath))
+            }
+            urls.append(currentDownloadsURL)
+            return urls
+        }()
+
+        for candidate in candidates where fileManager.fileExists(atPath: candidate.path) {
+            if transfer.localPath != candidate.path {
+                upsertLocalPath(candidate.path, for: transfer.id)
+            }
+            return candidate
+        }
+
+        guard let contents = try? fileManager.contentsOfDirectory(
+            at: downloadsDirectory,
+            includingPropertiesForKeys: nil
+        ) else {
+            return nil
+        }
+
+        let expectedStem = (safeFileName as NSString).deletingPathExtension
+        let expectedExt = (safeFileName as NSString).pathExtension.lowercased()
+
+        if let recovered = contents.first(where: { url in
+            let candidateName = url.lastPathComponent
+            let candidateStem = (candidateName as NSString).deletingPathExtension
+            let candidateExt = (candidateName as NSString).pathExtension.lowercased()
+            return candidateStem == expectedStem && candidateExt == expectedExt
+        }) {
+            upsertLocalPath(recovered.path, for: transfer.id)
+            return recovered
+        }
+
+        return nil
     }
 
     private func makeUniqueDestinationURL(fileName: String) -> URL {
@@ -1368,6 +1551,29 @@ public class FileTransferManager: ObservableObject {
                 }
             }
             let once = Once()
+            final class Accumulator: @unchecked Sendable {
+                private let lock = NSLock()
+                private var storage = Data()
+
+                func append(_ data: Data) {
+                    lock.lock()
+                    storage.append(data)
+                    lock.unlock()
+                }
+
+                func count() -> Int {
+                    lock.lock()
+                    defer { lock.unlock() }
+                    return storage.count
+                }
+
+                func snapshot() -> Data {
+                    lock.lock()
+                    defer { lock.unlock() }
+                    return storage
+                }
+            }
+            let accumulator = Accumulator()
 
             if let timeout, timeout > 0 {
                 queue.asyncAfter(deadline: .now() + timeout) {
@@ -1377,25 +1583,36 @@ public class FileTransferManager: ObservableObject {
                 }
             }
 
-            connection.receive(minimumIncompleteLength: length, maximumLength: length) { data, _, isComplete, error in
-                if let error = error {
-                    once.run {
-                        continuation.resume(throwing: FileTransferError.networkError(error.localizedDescription))
+            @Sendable func receiveMore() {
+                let remaining = max(1, length - accumulator.count())
+                connection.receive(minimumIncompleteLength: 1, maximumLength: remaining) { data, _, isComplete, error in
+                    if let error = error {
+                        once.run {
+                            continuation.resume(throwing: FileTransferError.networkError(error.localizedDescription))
+                        }
+                        return
                     }
-                } else if let data = data, data.count == length {
-                    once.run {
-                        continuation.resume(returning: data)
+                    if let data, !data.isEmpty {
+                        accumulator.append(data)
                     }
-                } else if isComplete {
-                    once.run {
-                        continuation.resume(throwing: FileTransferError.transferFailed("Connection closed"))
+                    if accumulator.count() == length {
+                        let completed = accumulator.snapshot()
+                        once.run {
+                            continuation.resume(returning: completed)
+                        }
+                        return
                     }
-                } else {
-                    once.run {
-                        continuation.resume(throwing: FileTransferError.transferFailed("No data received"))
+                    if isComplete {
+                        once.run {
+                            continuation.resume(throwing: FileTransferError.transferFailed("Connection closed"))
+                        }
+                        return
                     }
+                    receiveMore()
                 }
             }
+
+            receiveMore()
         }
 
         // 下载限速（KB/s），0 表示不限制。仅做“消费端节流”，减少写盘/处理速度。
@@ -1905,18 +2122,13 @@ public class FileTransferManager: ObservableObject {
     // MARK: - Persistence
     
     private func loadHistory() {
-        guard let data = UserDefaults.standard.data(forKey: "transfer_history"),
-              let history = try? JSONDecoder().decode([FileTransfer].self, from: data) else {
-            return
-        }
-        transferHistory = history
+        transferHistory = Self.historyStore.load() ?? []
     }
     
     private func saveHistory() {
         // 只保留最近 100 条记录
         let historyToSave = Array(transferHistory.prefix(100))
-        guard let data = try? JSONEncoder().encode(historyToSave) else { return }
-        UserDefaults.standard.set(data, forKey: "transfer_history")
+        try? Self.historyStore.save(historyToSave)
     }
 }
 

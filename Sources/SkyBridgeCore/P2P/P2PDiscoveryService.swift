@@ -396,12 +396,10 @@ public class P2PDiscoveryService: BaseManager {
         // For "refresh", we keep browsers/listener running and simply clear transient caches.
         logger.info("🔄 刷新设备列表（软刷新：不停止扫描/不重启广播）")
         discoveredDevices.removeAll()
-        connections.values.forEach { $0.cancel() }
-        connections.removeAll()
-        authenticatedConnections.values.forEach { $0.disconnect() }
-        authenticatedConnections.removeAll()
         txtResolveCooldown.removeAll()
-        connectionStatus = .disconnected
+        if connections.isEmpty && authenticatedConnections.isEmpty {
+            connectionStatus = .disconnected
+        }
         // Ensure advertising is on while scanning.
         if isScanning, !isAdvertising {
             startAdvertising()
@@ -422,11 +420,9 @@ public class P2PDiscoveryService: BaseManager {
             browsers.removeAll()
         }
 
-        connections.values.forEach { $0.cancel() }
-        connections.removeAll()
-        authenticatedConnections.values.forEach { $0.disconnect() }
-        authenticatedConnections.removeAll()
-        connectionStatus = .disconnected
+        if connections.isEmpty && authenticatedConnections.isEmpty {
+            connectionStatus = .disconnected
+        }
 
         stopAdvertising()
     }
@@ -444,12 +440,13 @@ public class P2PDiscoveryService: BaseManager {
         _ device: DiscoveredDevice,
         routePreference: ConnectionRoutePreference
     ) async throws {
+        let device = resolveLatestConnectableDevice(from: device)
         logger.info("尝试连接到设备: \(device.name)")
         NetworkActivityLogStore.shared.record(
             category: "p2p",
             message: "connect start device=\(device.name) route=\(String(describing: routePreference))"
         )
-        let deviceKey = device.id.uuidString
+        let deviceKey = stableConnectionKey(for: device)
         connections[deviceKey]?.cancel()
         connections.removeValue(forKey: deviceKey)
         if let existingAuthenticated = authenticatedConnections.removeValue(forKey: deviceKey) {
@@ -484,9 +481,20 @@ public class P2PDiscoveryService: BaseManager {
             shouldFallbackToDefaultSkyBridgePort
             || device.source == .skybridgeBonjour
             || device.source == .skybridgeP2P
+        let hasLinkLocalAddress = {
+            if let ipv6 = device.ipv6?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+               ipv6.hasPrefix("fe80:") {
+                return true
+            }
+            if let ipv4 = device.ipv4?.trimmingCharacters(in: .whitespacesAndNewlines),
+               ipv4.hasPrefix("169.254.") {
+                return true
+            }
+            return false
+        }()
         let shouldAttemptBonjourService = !serviceNameCandidates.isEmpty
             && serviceNameCandidates.contains(where: { !isLikelyIPAddress($0) })
-            && (hasBonjourIdentifier || hasSkyBridgeControlHint || (device.ipv4 == nil && device.ipv6 == nil))
+            && (hasBonjourIdentifier || hasSkyBridgeControlHint || hasLinkLocalAddress || (device.ipv4 == nil && device.ipv6 == nil))
 
         var bonjourEndpointAttempts: [NWEndpoint] = []
         if shouldAttemptBonjourService {
@@ -898,6 +906,39 @@ public class P2PDiscoveryService: BaseManager {
         return [.automatic]
     }
 
+    private func stableConnectionKey(for device: DiscoveredDevice) -> String {
+        if let persistentDeviceId = device.deviceId?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !persistentDeviceId.isEmpty {
+            return persistentDeviceId
+        }
+        if let uniqueIdentifier = device.uniqueIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !uniqueIdentifier.isEmpty {
+            return uniqueIdentifier
+        }
+        return device.id.uuidString
+    }
+
+    private func resolveLatestConnectableDevice(from device: DiscoveredDevice) -> DiscoveredDevice {
+        let strongIdentity = (deviceId: device.deviceId, pubKeyFP: device.pubKeyFP)
+        guard let matchIndex = findDiscoveredDeviceIndex(
+            name: device.name,
+            ipv4: device.ipv4,
+            ipv6: device.ipv6,
+            bonjourIdentifier: device.uniqueIdentifier,
+            strongIdentity: strongIdentity
+        ) else {
+            return device
+        }
+
+        let refreshed = discoveredDevices[matchIndex]
+        if refreshed.id != device.id {
+            logger.info(
+                "ℹ️ 连接目标已刷新为最新发现快照: \(device.name, privacy: .public) \(device.id.uuidString, privacy: .public) -> \(refreshed.id.uuidString, privacy: .public)"
+            )
+        }
+        return refreshed
+    }
+
     private func normalizedConnectableServiceTypes(from rawTypes: [String]) -> [String] {
         let allowedTypes: Set<String> = ["_skybridge._tcp", "_skybridge._udp"]
         var seen = Set<String>()
@@ -1074,18 +1115,36 @@ public class P2PDiscoveryService: BaseManager {
     }
 
  /// 断开与指定设备的连接
-    public func disconnectFromDevice(_ deviceId: String) {
+    @discardableResult
+    public func disconnectFromDevice(_ deviceId: String) -> Bool {
         logger.info("🔌 断开设备连接: \(deviceId)")
 
-        if let authenticated = authenticatedConnections.removeValue(forKey: deviceId) {
-            authenticated.disconnect()
+        let targetAliases = Set(PeerTrustLookup.lookupCandidates(for: deviceId))
+        let directMatches = [deviceId]
+        let activeKeys = Set(connections.keys).union(authenticatedConnections.keys)
+        let aliasedMatches = activeKeys.filter { candidate in
+            let candidateAliases = Set(PeerTrustLookup.lookupCandidates(for: candidate))
+            return !candidateAliases.isDisjoint(with: targetAliases)
         }
-        connections[deviceId]?.cancel()
-        connections.removeValue(forKey: deviceId)
+        let keysToDisconnect = Array(Set(directMatches).union(aliasedMatches))
 
-        if connections.isEmpty {
+        guard !keysToDisconnect.isEmpty else {
+            logger.info("ℹ️ 未找到匹配的活跃连接: \(deviceId)")
+            return false
+        }
+
+        for key in keysToDisconnect {
+            if let authenticated = authenticatedConnections.removeValue(forKey: key) {
+                authenticated.disconnect()
+            }
+            connections[key]?.cancel()
+            connections.removeValue(forKey: key)
+        }
+
+        if connections.isEmpty && authenticatedConnections.isEmpty {
             connectionStatus = .disconnected
         }
+        return true
     }
 
  /// 发送数据到指定设备
@@ -1108,23 +1167,33 @@ public class P2PDiscoveryService: BaseManager {
  // MARK: - Bonjour 广播（本机作为服务端）
 
  /// 启动广播服务（Bonjour）
-    @MainActor public func startAdvertising() {
+    @MainActor public func startAdvertising(forceRebind: Bool = false) {
         logger.info("📡 开始广播服务")
-        if isAdvertising {
-            logger.debug("📡 广播已在运行，忽略重复启动")
-            return
-        }
-        if let existing = listener {
-            existing.cancel()
-            listener = nil
-        }
 
         Task { @MainActor in
-            if await ServiceAdvertiserCenter.shared.isAdvertising("_skybridge._tcp") {
-                logger.debug("📡 广播中心已在运行，忽略重复启动")
-                isAdvertising = true
+            let centerAdvertising = await ServiceAdvertiserCenter.shared.isAdvertising("_skybridge._tcp")
+            if !forceRebind, isAdvertising, centerAdvertising {
+                logger.debug("📡 广播已在运行，忽略重复启动")
                 return
             }
+
+            if centerAdvertising {
+                if forceRebind {
+                    logger.info("🔁 强制重绑 _skybridge._tcp 广播监听")
+                } else if !isAdvertising {
+                    logger.warning("⚠️ 检测到 _skybridge._tcp 被外部组件占用，切换到 P2PDiscoveryService 独占监听")
+                }
+                await ServiceAdvertiserCenter.shared.stopAdvertising("_skybridge._tcp")
+            } else if isAdvertising {
+                logger.warning("⚠️ _skybridge._tcp 广播状态失配：内部标记为运行中，但中央监听器已丢失，执行自愈重绑")
+            }
+
+            if let existing = listener {
+                existing.cancel()
+                listener = nil
+            }
+            isAdvertising = false
+
             do {
                 let port = try await ServiceAdvertiserCenter.shared.startAdvertising(
                     serviceName: getDeviceName(),
@@ -2046,6 +2115,7 @@ public class P2PDiscoveryService: BaseManager {
                                 }
 
                                 let localId = await SelfIdentityProvider.shared.snapshot().deviceId
+                                let endpoints = ServiceEndpointRegistry.shared.snapshot()
                                 let reply = AppMessage.pairingIdentityExchange(.init(
                                     deviceId: localId,
                                     kemPublicKeys: kemKeys,
@@ -2053,7 +2123,10 @@ public class P2PDiscoveryService: BaseManager {
                                     modelName: "Mac",
                                     platform: "macOS",
                                     osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
-                                    chip: nil
+                                    chip: nil,
+                                    capabilities: ["clipboard_sync", "file_transfer", "remote_desktop", "remote_control"],
+                                    fileTransferPort: endpoints.fileTransferPort,
+                                    remoteControlPort: endpoints.remoteControlPort
                                 ))
                                 let outPlain = try JSONEncoder().encode(reply)
                                 let outCipher = try encryptAppPayload(outPlain, with: keys)
@@ -2067,6 +2140,33 @@ public class P2PDiscoveryService: BaseManager {
                                 let outCipher = try encryptAppPayload(outPlain, with: keys)
                                 let outPadded = TrafficPadding.wrapIfEnabled(outCipher, label: "tx")
                                 try await sendFramed(outPadded)
+
+                            case .peerDisconnecting(let payload):
+                                let disconnectDisplayName =
+                                    payload.deviceName
+                                    ?? displayNameFromPeerId(peer.deviceId)
+                                let trimmedDisconnectPeerId =
+                                    payload.deviceId?.trimmingCharacters(in: .whitespacesAndNewlines)
+                                let disconnectPeerId =
+                                    (trimmedDisconnectPeerId?.isEmpty == false ? trimmedDisconnectPeerId : nil)
+                                    ?? peerIdForPresence
+
+                                await MainActor.run {
+                                    ConnectionPresenceService.shared.markDisconnected(peerId: peerIdForPresence)
+                                    UnifiedOnlineDeviceManager.shared.markDeviceAsDisconnected(
+                                        peerId: disconnectPeerId,
+                                        displayName: disconnectDisplayName
+                                    )
+                                    if didMarkEstablished {
+                                        self.activeInboundSessions = max(0, self.activeInboundSessions - 1)
+                                        didMarkEstablished = false
+                                    }
+                                    if self.activeInboundSessions == 0, self.connections.isEmpty {
+                                        self.connectionStatus = .disconnected
+                                    }
+                                }
+                                connection.cancel()
+                                return
 
                             case .pong, .heartbeat, .clipboard:
                                 break
@@ -2521,7 +2621,7 @@ public class P2PDiscoveryService: BaseManager {
         return InboundPresenceResolution(
             name: fallbackName.isEmpty ? "P2P Peer" : fallbackName,
             displayAddress: fallbackAddress,
-            transferPort: 8080
+            transferPort: Int(ServiceEndpointRegistry.shared.snapshot().fileTransferPort ?? 8080)
         )
     }
 

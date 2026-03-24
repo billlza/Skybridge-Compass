@@ -56,7 +56,12 @@ public actor KeychainManager {
     // MARK: - Basic Key Operations
     
     /// 导入密钥
-    public nonisolated func importKey(data: Data, service: String, account: String) -> Bool {
+    public nonisolated func importKey(
+        data: Data,
+        service: String,
+        account: String,
+        accessibility: CFString = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+    ) -> Bool {
         if Self.useInMemoryKeychain {
             let key = service + "|" + account
             Self.inMemoryLock.lock()
@@ -69,7 +74,7 @@ public actor KeychainManager {
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
+            kSecAttrAccessible as String: accessibility,
             kSecValueData as String: data
         ]
         
@@ -130,7 +135,12 @@ public actor KeychainManager {
     /// 存储对称密钥
     public nonisolated func storeSymmetricKey(_ key: SymmetricKey, account: String) -> Bool {
         let data = key.withUnsafeBytes { Data($0) }
-        return importKey(data: data, service: "SkyBridge.SymmetricKey", account: account)
+        return importKey(
+            data: data,
+            service: "SkyBridge.SymmetricKey",
+            account: account,
+            accessibility: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        )
     }
     
     /// 加载对称密钥
@@ -151,8 +161,17 @@ public actor KeychainManager {
         let privData = privateKey.rawRepresentation
         let pubData = publicKey.rawRepresentation
         
-        let ok1 = importKey(data: privData, service: "SkyBridge.P256Priv", account: tag)
-        let ok2 = importKey(data: pubData, service: "SkyBridge.P256Pub", account: tag)
+        let ok1 = importKey(
+            data: privData,
+            service: "SkyBridge.P256Priv",
+            account: tag,
+            accessibility: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        )
+        let ok2 = importKey(
+            data: pubData,
+            service: "SkyBridge.P256Pub",
+            account: tag
+        )
         
         if !ok1 || !ok2 {
             return nil
@@ -185,8 +204,17 @@ public actor KeychainManager {
         let privData = privateKey.rawRepresentation
         let pubData = publicKey.rawRepresentation
         
-        let ok1 = importKey(data: privData, service: "SkyBridge.P256KAPriv", account: tag)
-        let ok2 = importKey(data: pubData, service: "SkyBridge.P256KAPub", account: tag)
+        let ok1 = importKey(
+            data: privData,
+            service: "SkyBridge.P256KAPriv",
+            account: tag,
+            accessibility: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        )
+        let ok2 = importKey(
+            data: pubData,
+            service: "SkyBridge.P256KAPub",
+            account: tag
+        )
         
         if !ok1 || !ok2 {
             return nil
@@ -213,8 +241,17 @@ public actor KeychainManager {
         let privData = privateKey.rawRepresentation
         let pubData = publicKey.rawRepresentation
         
-        let ok1 = importKey(data: privData, service: "SkyBridge.Ed25519Priv", account: tag)
-        let ok2 = importKey(data: pubData, service: "SkyBridge.Ed25519Pub", account: tag)
+        let ok1 = importKey(
+            data: privData,
+            service: "SkyBridge.Ed25519Priv",
+            account: tag,
+            accessibility: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        )
+        let ok2 = importKey(
+            data: pubData,
+            service: "SkyBridge.Ed25519Pub",
+            account: tag
+        )
         
         if !ok1 || !ok2 {
             return nil
@@ -247,8 +284,17 @@ public actor KeychainManager {
         let privData = privateKey.rawRepresentation
         let pubData = publicKey.rawRepresentation
         
-        let ok1 = importKey(data: privData, service: "SkyBridge.X25519Priv", account: tag)
-        let ok2 = importKey(data: pubData, service: "SkyBridge.X25519Pub", account: tag)
+        let ok1 = importKey(
+            data: privData,
+            service: "SkyBridge.X25519Priv",
+            account: tag,
+            accessibility: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        )
+        let ok2 = importKey(
+            data: pubData,
+            service: "SkyBridge.X25519Pub",
+            account: tag
+        )
         
         if !ok1 || !ok2 {
             return nil
@@ -379,7 +425,11 @@ public actor KeychainManager {
 @available(iOS 17.0, *)
 private extension KeychainManager {
     /// Save a generic password item addressed only by account (for backward compatibility with older storage).
-    func saveGenericPassword(account: String, data: Data) throws {
+    func saveGenericPassword(
+        account: String,
+        data: Data,
+        accessibility: CFString = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+    ) throws {
         if Self.useInMemoryKeychain {
             let key = "GenericPassword|" + account
             Self.inMemoryLock.lock()
@@ -392,7 +442,7 @@ private extension KeychainManager {
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrAccount as String: account,
             kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+            kSecAttrAccessible as String: accessibility
         ]
         
         SecItemDelete(query as CFDictionary)
@@ -449,7 +499,11 @@ private extension KeychainManager {
 @available(iOS 17.0, *)
 public extension KeychainManager {
     nonisolated func savePrivateKey(_ key: Data, identifier: String) throws {
-        try saveGenericPasswordSync(account: identifier, data: key)
+        try saveGenericPasswordSync(
+            account: identifier,
+            data: key,
+            accessibility: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        )
     }
     
     nonisolated func savePublicKey(_ key: Data, identifier: String) throws {
@@ -470,7 +524,11 @@ public extension KeychainManager {
     
     // MARK: - Sync helpers for nonisolated access
     
-    private nonisolated func saveGenericPasswordSync(account: String, data: Data) throws {
+    private nonisolated func saveGenericPasswordSync(
+        account: String,
+        data: Data,
+        accessibility: CFString = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+    ) throws {
         if Self.useInMemoryKeychain {
             let key = "GenericPassword|" + account
             Self.inMemoryLock.lock()
@@ -483,7 +541,7 @@ public extension KeychainManager {
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrAccount as String: account,
             kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+            kSecAttrAccessible as String: accessibility
         ]
         
         SecItemDelete(query as CFDictionary)
@@ -620,7 +678,11 @@ public extension KeychainManager {
         try saveGenericPasswordSync(account: "nebula.baseURL", data: Data(baseURLTrimmed.utf8))
         try saveGenericPasswordSync(account: "nebula.clientId", data: Data(clientIdTrimmed.utf8))
         if let clientSecretTrimmed, !clientSecretTrimmed.isEmpty {
-            try saveGenericPasswordSync(account: "nebula.clientSecret", data: Data(clientSecretTrimmed.utf8))
+            try saveGenericPasswordSync(
+                account: "nebula.clientSecret",
+                data: Data(clientSecretTrimmed.utf8),
+                accessibility: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+            )
         } else {
             deleteGenericPasswordSync(account: "nebula.clientSecret")
         }
@@ -628,7 +690,12 @@ public extension KeychainManager {
         _ = importKey(data: Data(baseURLTrimmed.utf8), service: "SkyBridge.Nebula", account: "BaseURL")
         _ = importKey(data: Data(clientIdTrimmed.utf8), service: "SkyBridge.Nebula", account: "ClientId")
         if let clientSecretTrimmed, !clientSecretTrimmed.isEmpty {
-            _ = importKey(data: Data(clientSecretTrimmed.utf8), service: "SkyBridge.Nebula", account: "ClientSecret")
+            _ = importKey(
+                data: Data(clientSecretTrimmed.utf8),
+                service: "SkyBridge.Nebula",
+                account: "ClientSecret",
+                accessibility: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+            )
         } else {
             _ = deleteKey(service: "SkyBridge.Nebula", account: "ClientSecret")
         }
@@ -670,7 +737,11 @@ public extension KeychainManager {
     
     nonisolated func storeAuthSession(_ session: AuthSession) throws {
         let data = try JSONEncoder().encode(session)
-        try saveGenericPasswordSync(account: "auth.session", data: data)
+        try saveGenericPasswordSync(
+            account: "auth.session",
+            data: data,
+            accessibility: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        )
     }
     
     nonisolated func loadAuthSession() -> AuthSession? {

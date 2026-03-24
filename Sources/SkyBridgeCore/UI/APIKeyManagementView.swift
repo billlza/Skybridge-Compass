@@ -107,27 +107,22 @@ public struct APIKeyManagementView: View {
                 
  // SMS服务配置
                 Section("SMS服务配置") {
-                    APIKeyRow(
-                        title: "访问密钥ID",
-                        value: $smsAccessKeyID,
-                        placeholder: "输入SMS访问密钥ID",
-                        onSave: { id in
+                    Text("手机号验证码现已改为服务端发送。请在服务端配置 Supabase send_sms hook 和 Aliyun SMS，避免在客户端存放 AccessKey/Secret。")
+                        .font(.footnote)
+                        .foregroundColor(.secondary)
+
+                    if !smsAccessKeyID.isEmpty || !smsAccessKeySecret.isEmpty {
+                        Button(role: .destructive) {
                             Task {
-                                await saveSMSConfig()
+                                await clearLegacySMSConfig()
+                            }
+                        } label: {
+                            HStack {
+                                Image(systemName: "trash")
+                                Text("清除本机旧短信凭证")
                             }
                         }
-                    )
-                    
-                    APIKeyRow(
-                        title: "访问密钥Secret",
-                        value: $smsAccessKeySecret,
-                        placeholder: "输入SMS访问密钥Secret",
-                        onSave: { secret in
-                            Task {
-                                await saveSMSConfig()
-                            }
-                        }
-                    )
+                    }
                 }
                 
  // 管理操作
@@ -346,6 +341,26 @@ public struct APIKeyManagementView: View {
         
         await loadCurrentAPIKeys()
     }
+
+    private func clearLegacySMSConfig() async {
+        let keychain = KeychainManager.shared
+
+        do {
+            try keychain.deleteAPIKey(service: "SkyBridge.SMS", account: "AccessKeyId")
+            try keychain.deleteAPIKey(service: "SkyBridge.SMS", account: "AccessKeySecret")
+            await MainActor.run {
+                alertMessage = "已清除本机旧短信凭证"
+                showingAlert = true
+            }
+        } catch {
+            await MainActor.run {
+                alertMessage = "清除短信凭证失败: \(error.localizedDescription)"
+                showingAlert = true
+            }
+        }
+
+        await loadCurrentAPIKeys()
+    }
     
     private func migrateFromEnvironment() async {
         let keychain = KeychainManager.shared
@@ -393,23 +408,10 @@ public struct APIKeyManagementView: View {
             }
         }
         
- // 迁移SMS配置
-        let smsAccessKeyID = ProcessInfo.processInfo.environment["SMS_ACCESS_KEY_ID"] ?? ""
-        let smsAccessKeySecret = ProcessInfo.processInfo.environment["SMS_ACCESS_KEY_SECRET"] ?? ""
-        
-        if !smsAccessKeyID.isEmpty && !smsAccessKeySecret.isEmpty {
-            do {
-                try keychain.storeSMSConfig(accessKeyId: smsAccessKeyID, accessKeySecret: smsAccessKeySecret)
-                migratedCount += 1
-            } catch {
-                logger.error("迁移SMS配置失败: \(error.localizedDescription)")
-            }
-        }
-        
         await MainActor.run {
             alertMessage = ignoredServiceRoleKey
                 ? "成功迁移 \(migratedCount) 个配置项到安全存储，已忽略客户端不应保存的 SUPABASE_SERVICE_ROLE_KEY"
-                : "成功迁移 \(migratedCount) 个配置项到安全存储"
+                : "成功迁移 \(migratedCount) 个配置项到安全存储。SMS 凭证已改为仅服务端保存，不再迁移到客户端。"
             logger.info("从环境变量迁移了 \(migratedCount) 个配置项到Keychain")
             showingAlert = true
         }

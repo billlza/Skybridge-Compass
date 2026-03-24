@@ -14,10 +14,12 @@
     "node": ">=20.0.0"
   },
   "dependencies": {
+    "@alicloud/dypnsapi20170525": "^2.0.0",
+    "@alicloud/openapi-client": "^0.4.15",
     "cors": "^2.8.5",
-    "express": "^4.22.1",
-    "redis": "^4.7.1",
-    "uuid": "^9.0.1",
-    "ws": "^8.19.0"
+    "express": "^5.2.1",
+    "redis": "^5.11.0",
+    "standardwebhooks": "^1.0.0",
+    "ws": "^8.20.0"
   }
 }

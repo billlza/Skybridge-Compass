@@ -394,6 +394,28 @@ struct CrossNetworkConnectionView: View {
 
                     if let code = connectionManager.connectionCode {
                         VStack(spacing: 12) {
+                            Picker(
+                                LocalizationManager.shared.localizedString("connection.codeMode.title"),
+                                selection: $connectionManager.connectionCodeLeaseMode
+                            ) {
+                                Text(LocalizationManager.shared.localizedString("connection.codeMode.short"))
+                                    .tag(CrossNetworkConnectionManager.ConnectionCodeLeaseMode.shortLived)
+                                Text(LocalizationManager.shared.localizedString("connection.codeMode.day"))
+                                    .tag(CrossNetworkConnectionManager.ConnectionCodeLeaseMode.dayStable)
+                            }
+                            .pickerStyle(.segmented)
+                            .frame(width: 280)
+
+                            Text(
+                                connectionManager.connectionCodeLeaseMode == .dayStable
+                                    ? LocalizationManager.shared.localizedString("connection.codeMode.dayHint")
+                                    : LocalizationManager.shared.localizedString("connection.codeMode.shortHint")
+                            )
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.center)
+                            .frame(width: 280)
+
                             Text(code)
                                 .font(.system(size: 48, weight: .bold, design: .rounded))
                                 .tracking(8)
@@ -456,6 +478,28 @@ struct CrossNetworkConnectionView: View {
                             .cornerRadius(12)
                         }
                         .buttonStyle(.plain)
+
+                        Picker(
+                            LocalizationManager.shared.localizedString("connection.codeMode.title"),
+                            selection: $connectionManager.connectionCodeLeaseMode
+                        ) {
+                            Text(LocalizationManager.shared.localizedString("connection.codeMode.short"))
+                                .tag(CrossNetworkConnectionManager.ConnectionCodeLeaseMode.shortLived)
+                            Text(LocalizationManager.shared.localizedString("connection.codeMode.day"))
+                                .tag(CrossNetworkConnectionManager.ConnectionCodeLeaseMode.dayStable)
+                        }
+                        .pickerStyle(.segmented)
+                        .frame(width: 280)
+
+                        Text(
+                            connectionManager.connectionCodeLeaseMode == .dayStable
+                                ? LocalizationManager.shared.localizedString("connection.codeMode.dayHint")
+                                : LocalizationManager.shared.localizedString("connection.codeMode.shortHint")
+                        )
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                        .frame(width: 280)
                     }
                 }
 
@@ -508,7 +552,14 @@ struct CrossNetworkConnectionView: View {
                 FeatureTag(icon: "speedometer", text: LocalizationManager.shared.localizedString("connection.fast"))
                 FeatureTag(icon: "p.circle.fill", text: LocalizationManager.shared.localizedString("connection.p2p.priority"))
                 FeatureTag(icon: "arrow.triangle.branch", text: LocalizationManager.shared.localizedString("connection.smart.relay"))
-                FeatureTag(icon: "hourglass", text: LocalizationManager.shared.localizedString("connection.validity.10min"))
+                FeatureTag(
+                    icon: "hourglass",
+                    text: LocalizationManager.shared.localizedString(
+                        connectionManager.connectionCodeLeaseMode == .dayStable
+                            ? "connection.validity.1day"
+                            : "connection.validity.10min"
+                    )
+                )
             }
         }
     }
@@ -533,7 +584,9 @@ struct CrossNetworkConnectionView: View {
  // 操作按钮
             if case .connected = connectionManager.connectionStatus {
                 Button(LocalizationManager.shared.localizedString("action.disconnect")) {
- // 断开逻辑
+                    Task {
+                        await connectionManager.disconnect()
+                    }
                 }
                 .buttonStyle(.bordered)
             }

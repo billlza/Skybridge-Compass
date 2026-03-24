@@ -38,10 +38,16 @@
 "connection.smartCode.generate" = "生成连接码";
 "connection.smartCode.placeholder" = "输入连接码";
 "connection.smartCode.connect" = "连接";
+"connection.codeMode.title" = "连接码模式";
+"connection.codeMode.short" = "短时码";
+"connection.codeMode.day" = "全天固定码";
+"connection.codeMode.shortHint" = "默认安全模式，连接码短时有效并自动轮换。";
+"connection.codeMode.dayHint" = "24 小时内保持同一个连接码，适合省电后再连接。";
 "connection.fast" = "高速连接";
 "connection.p2p.priority" = "P2P 优先";
 "connection.smart.relay" = "智能中继";
 "connection.validity.10min" = "10分钟有效";
+"connection.validity.1day" = "24小时有效";
 
 /* Dashboard */
 "dashboard.unknownIP" = "未知 IP";
@@ -662,6 +668,7 @@
 "transferStatus.failed" = "失败";
 "transferStatus.cancelled" = "已取消";
 "action.close" = "关闭";
+"action.disconnect" = "断开";
 "action.share" = "分享";
 "status.idle" = "空闲";
 "status.adaptiveTuning" = "自适应调谐";

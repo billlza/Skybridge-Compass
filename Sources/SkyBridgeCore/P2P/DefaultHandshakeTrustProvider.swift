@@ -9,75 +9,12 @@ struct DefaultHandshakeTrustProvider: HandshakeTrustProvider, Sendable {
         return raw
     }
 
-    private func normalizeBonjourIdentifier(_ identifier: String) -> String? {
-        guard identifier.hasPrefix("bonjour:") else { return nil }
-        let payload = String(identifier.dropFirst("bonjour:".count))
-        let pieces = payload.split(separator: "@", maxSplits: 1).map(String.init)
-        guard let rawName = pieces.first?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !rawName.isEmpty else {
-            return nil
-        }
-        let rawDomain = pieces.count > 1 ? pieces[1] : "local"
-        let domain = rawDomain.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            ? "local"
-            : rawDomain.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return "bonjour:\(rawName)@\(domain)"
-    }
-
     private func trustLookupCandidates(for deviceId: String) -> [String] {
-        var ordered: [String] = []
-        var seen: Set<String> = []
-
-        func append(_ value: String?) {
-            guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else { return }
-            guard !seen.contains(value) else { return }
-            seen.insert(value)
-            ordered.append(value)
-        }
-
-        func appendDerived(from identifier: String) {
-            append(identifier)
-
-            if identifier.hasPrefix("recent:") {
-                let inner = String(identifier.dropFirst("recent:".count))
-                append(inner)
-                appendDerived(from: inner)
-            }
-
-            if identifier.hasPrefix("id:") {
-                append(String(identifier.dropFirst("id:".count)))
-            }
-
-            if identifier.hasPrefix("mac:bonjour:") {
-                append(String(identifier.dropFirst("mac:".count)))
-            }
-
-            if identifier.hasPrefix("fp:") {
-                append(String(identifier.dropFirst("fp:".count)))
-            }
-
-            if identifier.hasPrefix("name:") {
-                append(String(identifier.dropFirst("name:".count)))
-            }
-
-            if let normalizedBonjour = normalizeBonjourIdentifier(identifier) {
-                append(normalizedBonjour)
-            }
-        }
-
-        appendDerived(from: deviceId)
-        return ordered
+        PeerTrustLookup.lookupCandidates(for: deviceId)
     }
 
     private func capabilityValue(prefix: String, in capabilities: [String]) -> String? {
-        for capability in capabilities {
-            guard capability.hasPrefix(prefix) else { continue }
-            let value = String(capability.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
-            if !value.isEmpty {
-                return value
-            }
-        }
-        return nil
+        PeerTrustLookup.capabilityValue(prefix: prefix, in: capabilities)
     }
 
     @MainActor
@@ -102,25 +39,11 @@ struct DefaultHandshakeTrustProvider: HandshakeTrustProvider, Sendable {
                 continue
             }
 
-            if normalizedCandidates.contains(record.deviceId) {
-                matched[record.deviceId] = record
-                continue
-            }
-
-            if let peerEndpoint = capabilityValue(prefix: "peerEndpoint=", in: record.capabilities),
-               normalizedCandidates.contains(peerEndpoint) {
-                matched[record.deviceId] = record
-                continue
-            }
-
-            if let declaredDeviceId = capabilityValue(prefix: "declaredDeviceId=", in: record.capabilities),
-               normalizedCandidates.contains(declaredDeviceId) {
-                matched[record.deviceId] = record
-                continue
-            }
-
-            if let deviceName = trimmedNonEmpty(record.deviceName),
-               normalizedCandidatesLower.contains(deviceName.lowercased()) {
+            if PeerTrustLookup.recordMatches(
+                record,
+                candidates: normalizedCandidates,
+                candidateLowercased: normalizedCandidatesLower
+            ) {
                 matched[record.deviceId] = record
             }
         }

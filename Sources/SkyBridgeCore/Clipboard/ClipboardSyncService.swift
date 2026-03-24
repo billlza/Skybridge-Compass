@@ -83,9 +83,18 @@ public final class ClipboardSyncService: ObservableObject, ClipboardSyncServiceP
     public var onSendToDevice: ((_ data: Data, _ deviceID: String) async throws -> Void)?
     public var onBroadcast: ((_ data: Data) async throws -> Void)?
 
-    // 持久化 Key
-    private let configKey = "com.skybridge.clipboard.config"
-    private let historyKey = "com.skybridge.clipboard.history"
+    private static let configurationStore = CodablePersistenceStore<ClipboardSyncConfiguration>(
+        location: .protectedApplicationSupport(
+            path: "Clipboard/configuration.json",
+            legacyUserDefaultsKey: "com.skybridge.clipboard.config"
+        )
+    )
+    private static let historyStore = CodablePersistenceStore<[ClipboardHistoryEntry]>(
+        location: .protectedApplicationSupport(
+            path: "Clipboard/history.json",
+            legacyUserDefaultsKey: "com.skybridge.clipboard.history"
+        )
+    )
 
     // MARK: - Initialization
 
@@ -459,31 +468,19 @@ public final class ClipboardSyncService: ObservableObject, ClipboardSyncServiceP
     // MARK: - Private Methods - Persistence
 
     private func saveConfiguration() {
-        if let data = try? JSONEncoder().encode(configuration) {
-            UserDefaults.standard.set(data, forKey: configKey)
-        }
+        try? Self.configurationStore.save(configuration)
     }
 
     private static func loadConfiguration() -> ClipboardSyncConfiguration? {
-        guard let data = UserDefaults.standard.data(forKey: "com.skybridge.clipboard.config"),
-              let config = try? JSONDecoder().decode(ClipboardSyncConfiguration.self, from: data) else {
-            return nil
-        }
-        return config
+        Self.configurationStore.load()
     }
 
     private func saveHistory() {
-        if let data = try? JSONEncoder().encode(history) {
-            UserDefaults.standard.set(data, forKey: historyKey)
-        }
+        try? Self.historyStore.save(history)
     }
 
     private static func loadHistory() -> [ClipboardHistoryEntry] {
-        guard let data = UserDefaults.standard.data(forKey: "com.skybridge.clipboard.history"),
-              let history = try? JSONDecoder().decode([ClipboardHistoryEntry].self, from: data) else {
-            return []
-        }
-        return history
+        Self.historyStore.load() ?? []
     }
 
     // MARK: - Private Methods - Utilities

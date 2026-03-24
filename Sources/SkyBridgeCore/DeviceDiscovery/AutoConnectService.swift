@@ -41,6 +41,12 @@ public struct PairedDevice: Codable, Identifiable, Sendable {
 public class AutoConnectService: ObservableObject {
     
     public static let shared = AutoConnectService()
+    private static let pairedDevicesStore = CodablePersistenceStore<[PairedDevice]>(
+        location: .protectedApplicationSupport(
+            path: "DeviceDiscovery/paired-devices.json",
+            legacyUserDefaultsKey: "PairedDevices"
+        )
+    )
     
  // MARK: - 发布属性
     
@@ -75,7 +81,6 @@ public class AutoConnectService: ObservableObject {
     private let logger = Logger(subsystem: "com.skybridge.device", category: "AutoConnect")
     private var cancellables = Set<AnyCancellable>()
     private var monitoringTask: Task<Void, Never>?
-    private let userDefaultsKey = "PairedDevices"
     
     private init() {
         loadPairedDevices()
@@ -110,24 +115,17 @@ public class AutoConnectService: ObservableObject {
  // MARK: - 配对设备管理
     
     private func loadPairedDevices() {
-        guard let data = UserDefaults.standard.data(forKey: userDefaultsKey) else {
+        guard let devices = Self.pairedDevicesStore.load() else {
             logger.info("📋 无已保存的配对设备")
             return
         }
-        
-        do {
-            let devices = try JSONDecoder().decode([PairedDevice].self, from: data)
-            pairedDevices = devices
-            logger.info("📋 加载了 \(devices.count) 个配对设备")
-        } catch {
-            logger.error("❌ 加载配对设备失败: \(error.localizedDescription)")
-        }
+        pairedDevices = devices
+        logger.info("📋 加载了 \(devices.count) 个配对设备")
     }
     
     private func savePairedDevices() {
         do {
-            let data = try JSONEncoder().encode(pairedDevices)
-            UserDefaults.standard.set(data, forKey: userDefaultsKey)
+            try Self.pairedDevicesStore.save(pairedDevices)
             logger.debug("💾 保存了 \(self.pairedDevices.count) 个配对设备")
         } catch {
             logger.error("❌ 保存配对设备失败: \(error.localizedDescription)")
@@ -423,4 +421,3 @@ public extension Notification.Name {
     static let deviceDiscovered = Notification.Name("com.skybridge.deviceDiscovered")
     static let checkPairedDevicesAvailability = Notification.Name("com.skybridge.checkPairedDevicesAvailability")
 }
-

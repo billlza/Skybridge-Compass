@@ -48,6 +48,7 @@ public final class FileTransferListenerService: ObservableObject {
         let (boundListener, boundPort) = try await makeStartedListener(parameters: parameters, preferredPort: preferredPort)
         listener = boundListener
         activePort = boundPort
+        ServiceEndpointRegistry.shared.setFileTransferPort(boundPort)
         configureBonjour(on: boundListener, port: boundPort)
     }
     
@@ -55,6 +56,7 @@ public final class FileTransferListenerService: ObservableObject {
         listener?.cancel()
         listener = nil
         activePort = nil
+        ServiceEndpointRegistry.shared.setFileTransferPort(nil)
         netService?.stop()
         netService = nil
     }
@@ -168,6 +170,7 @@ public final class FileTransferListenerService: ObservableObject {
                     case .ready:
                         let boundPort = listener.port?.rawValue ?? 0
                         self.activePort = boundPort
+                        ServiceEndpointRegistry.shared.setFileTransferPort(boundPort)
                         self.log.info("✅ FileTransfer listener ready on \(boundPort)")
                         if !startState.finished {
                             startState.finished = true
@@ -216,6 +219,7 @@ public final class FileTransferListenerService: ObservableObject {
     private func handleIncoming(_ connection: NWConnection) {
         let deviceId: String
         let deviceName: String
+        let endpointDescription = String(describing: connection.endpoint)
         if case let .hostPort(host, _) = connection.endpoint {
             deviceId = "\(host)"
             deviceName = "\(host)"
@@ -223,11 +227,40 @@ public final class FileTransferListenerService: ObservableObject {
             deviceId = UUID().uuidString
             deviceName = "Unknown"
         }
+
+        log.info(
+            "📥 FileTransfer incoming connection accepted: peer=\(deviceId, privacy: .public) endpoint=\(endpointDescription, privacy: .public)"
+        )
+
+        connection.stateUpdateHandler = { [weak self] state in
+            guard let self else { return }
+            let rendered: String
+            switch state {
+            case .setup:
+                rendered = "setup"
+            case .waiting(let error):
+                rendered = "waiting \(error)"
+            case .preparing:
+                rendered = "preparing"
+            case .ready:
+                rendered = "ready"
+            case .failed(let error):
+                rendered = "failed \(error)"
+            case .cancelled:
+                rendered = "cancelled"
+            @unknown default:
+                rendered = "unknown"
+            }
+            self.log.info(
+                "📥 FileTransfer connection state: peer=\(deviceId, privacy: .public) state=\(rendered, privacy: .public)"
+            )
+        }
         
         connection.start(queue: queue)
         
         Task { @MainActor in
             do {
+                self.log.info("📥 FileTransfer handing connection to receiveFile: peer=\(deviceId, privacy: .public)")
                 try await self.manager.receiveFile(from: connection, fallbackDeviceId: deviceId, fallbackDeviceName: deviceName)
             } catch {
                 self.log.error("❌ receiveFile failed: \(error.localizedDescription)")

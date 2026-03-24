@@ -417,10 +417,17 @@ public class DeviceDiscoveryManager: BaseManager {
                 if !snap.deviceId.isEmpty { txt["deviceId"] = snap.deviceId }
                 if !snap.pubKeyFP.isEmpty { txt["pubKeyFP"] = snap.pubKeyFP }
                 txt["capabilities"] = "file,file_transfer,rdview,rdcontrol,remote_control,remote_desktop,clipboard"
-                txt["transferPort"] = "8080"
-                txt["fileTransferPort"] = "8080"
-                txt["remotePort"] = "5901"
-                txt["remoteControlPort"] = "5901"
+                let endpoints = ServiceEndpointRegistry.shared.snapshot()
+                if let transferPort = endpoints.fileTransferPort, transferPort > 0 {
+                    let port = String(transferPort)
+                    txt["transferPort"] = port
+                    txt["fileTransferPort"] = port
+                }
+                if let remotePort = endpoints.remoteControlPort, remotePort > 0 {
+                    let port = String(remotePort)
+                    txt["remotePort"] = port
+                    txt["remoteControlPort"] = port
+                }
  // 通过统一广播中心启动，避免跨管理器重复监听同一服务类型
                 let port = try await ServiceAdvertiserCenter.shared.startAdvertising(
                     serviceName: getDeviceName(),
@@ -908,6 +915,7 @@ public class DeviceDiscoveryManager: BaseManager {
                                 }()
                                 let localOS = ProcessInfo.processInfo.operatingSystemVersionString
                                 let localName = Host.current().localizedName
+                                let endpoints = ServiceEndpointRegistry.shared.snapshot()
                                 let localModel: String? = {
 #if os(macOS)
                                     return "Mac"
@@ -924,7 +932,10 @@ public class DeviceDiscoveryManager: BaseManager {
                                     modelName: localModel,
                                     platform: localPlatform,
                                     osVersion: localOS,
-                                    chip: nil
+                                    chip: nil,
+                                    capabilities: ["clipboard_sync", "file_transfer", "remote_desktop", "remote_control"],
+                                    fileTransferPort: endpoints.fileTransferPort,
+                                    remoteControlPort: endpoints.remoteControlPort
                                 ))
                                 let outPlain = try JSONEncoder().encode(reply)
                                 let outCipher = try encryptAppPayload(outPlain, with: keys)

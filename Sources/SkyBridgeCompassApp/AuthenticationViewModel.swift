@@ -664,18 +664,8 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
 
  /// 通过智能通道发送验证码（含重试/降级/风控）
     private func sendPhoneCode(isResend: Bool) async {
- // 基础校验
         guard isValidPhoneNumber(phoneNumber) else {
             await MainActor.run { errorMessage = "请输入正确的手机号码" }
-            return
-        }
-
- // 确保设备指纹
-        if deviceFingerprint == nil {
-            await loadDeviceFingerprint()
-        }
-        guard let fingerprint = deviceFingerprint else {
-            await MainActor.run { errorMessage = "设备校验失败，请重试" }
             return
         }
 
@@ -684,49 +674,26 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
             errorMessage = nil
         }
 
- // 发送验证码
-        let context = VerificationCodeService.SendContext(
-            phoneNumber: phoneNumber,
-            deviceFingerprint: fingerprint,
-            ip: "client", // 服务器侧获取真实IP
-            isResend: isResend,
-            captchaPassed: captchaPassed
-        )
-
-        let result = await VerificationCodeService.shared.sendVerificationCode(
-            context: context
-        )
-
         await MainActor.run {
-            isProcessing = false
+            requiresCaptcha = false
+            showCaptchaView = false
+        }
 
-            if result.success {
- // 发送成功，启动倒计时
+        do {
+            _ = try await authService.sendPhoneVerificationCode(to: phoneNumber)
+            await MainActor.run {
+                isProcessing = false
                 isPhoneCodeSent = true
                 startPhoneCodeCountdown()
                 captchaPassed = false
-                requiresCaptcha = false
-                errorMessage = "验证码已发送"
-            } else {
- // 需要验证码
-                if result.requiresCaptcha {
-                    requiresCaptcha = true
-                    showCaptchaView = true
-                    errorMessage = result.errorMessage ?? "请完成安全验证"
-                    return
-                }
-
- // 普通失败，显示原因
-                errorMessage = result.errorMessage ?? "发送验证码失败，请稍后重试"
-
- // 如果有下一次可重试时间，则更新倒计时提示
-                if let nextRetry = result.nextRetryAvailableAt {
-                    let seconds = Int(nextRetry.timeIntervalSinceNow)
-                    if seconds > 0 {
-                        phoneCodeCountdown = seconds
-                        isPhoneCodeSent = false
-                    }
-                }
+                errorMessage = isResend ? "验证码已重新发送" : "验证码已发送"
+            }
+        } catch {
+            await MainActor.run {
+                isProcessing = false
+                errorMessage = isResend
+                    ? "重新发送失败: \(error.localizedDescription)"
+                    : "发送验证码失败: \(error.localizedDescription)"
             }
         }
     }

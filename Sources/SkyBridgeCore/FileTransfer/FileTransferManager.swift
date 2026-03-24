@@ -434,11 +434,12 @@ public class FileTransferManager: BaseManager {
 
         } catch {
             transfer.status = .failed
+            transfer.completedAt = Date()
             transfer.error = error.localizedDescription
             logger.error("❌ 文件发送失败: \(fileName) - \(error)")
             lastTransferActivityAt = Date()
 
- // 发送传输失败通知
+	 // 发送传输失败通知
             NotificationCenter.default.post(
                 name: Notification.Name("FileTransferFailed"),
                 object: nil,
@@ -450,10 +451,12 @@ public class FileTransferManager: BaseManager {
                 ]
             )
 
+            moveToHistory(transfer)
+            updateTransferringStatus()
             throw error
         }
 
- // 移动到历史记录
+	 // 移动到历史记录
         moveToHistory(transfer)
         updateTransferringStatus()
     }
@@ -467,6 +470,7 @@ public class FileTransferManager: BaseManager {
 
         let metadata: FileMetadata
         do {
+            logger.info("📋 等待文件传输元数据: peer=\(fallbackDeviceId, privacy: .public)")
  // 接收文件元数据
             metadata = try await receiveFileMetadata(from: connection)
         } catch {
@@ -1033,6 +1037,7 @@ public class FileTransferManager: BaseManager {
  // 接收头部
         let headerData = try await receiveData(length: 8, from: connection)
         let header = parseHeader(headerData)
+        logger.info("📋 文件元数据头已到达: type=\(header.type.rawValue, privacy: .public) length=\(header.length, privacy: .public)")
 
         guard header.type == .metadata else {
             throw FileTransferError.invalidHeader
@@ -1315,6 +1320,29 @@ public class FileTransferManager: BaseManager {
                 }
             }
             let once = Once()
+            final class Accumulator: @unchecked Sendable {
+                private let lock = NSLock()
+                private var storage = Data()
+
+                func append(_ data: Data) {
+                    lock.lock()
+                    storage.append(data)
+                    lock.unlock()
+                }
+
+                func count() -> Int {
+                    lock.lock()
+                    defer { lock.unlock() }
+                    return storage.count
+                }
+
+                func snapshot() -> Data {
+                    lock.lock()
+                    defer { lock.unlock() }
+                    return storage
+                }
+            }
+            let accumulator = Accumulator()
 
             if let timeout, timeout > 0 {
                 DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout) {
@@ -1324,25 +1352,36 @@ public class FileTransferManager: BaseManager {
                 }
             }
 
-            connection.receive(minimumIncompleteLength: length, maximumLength: length) { data, _, isComplete, error in
-                if let error = error {
-                    once.run {
-                        continuation.resume(throwing: error)
+            @Sendable func receiveMore() {
+                let remaining = max(1, length - accumulator.count())
+                connection.receive(minimumIncompleteLength: 1, maximumLength: remaining) { data, _, isComplete, error in
+                    if let error = error {
+                        once.run {
+                            continuation.resume(throwing: error)
+                        }
+                        return
                     }
-                } else if let data = data, data.count == length {
-                    once.run {
-                        continuation.resume(returning: data)
+                    if let data, !data.isEmpty {
+                        accumulator.append(data)
                     }
-                } else if isComplete {
-                    once.run {
-                        continuation.resume(throwing: FileTransferError.connectionClosed)
+                    if accumulator.count() == length {
+                        let completed = accumulator.snapshot()
+                        once.run {
+                            continuation.resume(returning: completed)
+                        }
+                        return
                     }
-                } else {
-                    once.run {
-                        continuation.resume(throwing: FileTransferError.connectionClosed)
+                    if isComplete {
+                        once.run {
+                            continuation.resume(throwing: FileTransferError.connectionClosed)
+                        }
+                        return
                     }
+                    receiveMore()
                 }
             }
+
+            receiveMore()
         }
     }
 

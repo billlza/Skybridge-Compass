@@ -47,6 +47,7 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
     private var capturedDisplayPixelSize: CGSize = .zero
     private let stateLock = NSLock()
     private var lastSampleBufferAt: Date = .distantPast
+    private var lastMeaningfulSampleAt: Date = .distantPast
     private var lastEncodedFrameAt: Date = .distantPast
     private let sampleOutputQueue = DispatchQueue(
         label: "com.skybridge.compass.sck.output",
@@ -56,9 +57,10 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
     private var screenParametersObserver: NSObjectProtocol?
     private var activeSpaceObserver: NSObjectProtocol?
 
- /// 编码后视频帧的回调
+/// 编码后视频帧的回调
  /// - 参数说明：data 为压缩后比特流；w/h 为视频维度；type 为帧类型（h264/hevc）
-    var onEncodedFrame: ((Data, Int, Int, RemoteFrameType) -> Void)?
+    var onEncodedFrame: ((Data, Int, Int, RemoteFrameType, Bool) -> Void)?
+    var onRawFrame: ((CVPixelBuffer, CMTime) -> Void)?
     var onDamageReport: ((RemoteDesktopDamageReport) -> Void)?
     var onCaptureIssue: ((String) -> Void)?
 
@@ -137,13 +139,14 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
         configuration.height = height
         configuration.pixelFormat = kCVPixelFormatType_32BGRA // 原始帧，后续由VTCompressionSession进行压缩
         configuration.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(configuredFPS))
+        configuration.queueDepth = lowLatencyEnabled ? 3 : 5
         configuration.capturesAudio = false
         configuration.showsCursor = captureCursorInVideo
 
         output = StreamOutput(owner: self)
         let filter = SCContentFilter(display: display, excludingWindows: [])
         stream = SCStream(filter: filter, configuration: configuration, delegate: nil)
-        if !jpegMode {
+        if !jpegMode && onRawFrame == nil {
             try setupCompressionSession(width: width, height: height, codec: codecType)
         }
 
@@ -169,6 +172,7 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
         started = false
         stateLock.lock()
         lastSampleBufferAt = .distantPast
+        lastMeaningfulSampleAt = .distantPast
         lastEncodedFrameAt = .distantPast
         stateLock.unlock()
         stream?.stopCapture()
@@ -334,11 +338,17 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
             default: return kVTProfileLevel_H264_High_AutoLevel
             }
         }()
+        let prioritizeEncodingSpeed = lowLatencyEnabled || configuredFPS >= 60 || (width * height) >= 2_000_000
+
         VTSessionSetProperty(cs, key: kVTCompressionPropertyKey_ProfileLevel, value: profileValue)
         VTSessionSetProperty(cs, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
         VTSessionSetProperty(cs, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: NSNumber(value: configuredFPS))
         VTSessionSetProperty(cs, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
-        VTSessionSetProperty(cs, key: kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality, value: kCFBooleanFalse)
+        VTSessionSetProperty(
+            cs,
+            key: kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality,
+            value: prioritizeEncodingSpeed ? kCFBooleanTrue : kCFBooleanFalse
+        )
         VTSessionSetProperty(cs, key: kVTCompressionPropertyKey_MaximizePowerEfficiency, value: kCFBooleanFalse)
         VTSessionSetProperty(cs, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: NSNumber(value: 1))
         if codecType == kCMVideoCodecType_H264 {
@@ -348,7 +358,18 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
         let keyInterval = lowLatencyEnabled ? max(10, min(configuredKeyInterval, 30)) : configuredKeyInterval
         VTSessionSetProperty(cs, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: NSNumber(value: keyInterval))
         VTSessionSetProperty(cs, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: NSNumber(value: lowLatencyEnabled ? 0.5 : 1.0))
-        VTSessionSetProperty(cs, key: kVTCompressionPropertyKey_Quality, value: NSNumber(value: compressionQualityValue()))
+        VTSessionSetProperty(
+            cs,
+            key: kVTCompressionPropertyKey_Quality,
+            value: NSNumber(
+                value: effectiveCompressionQuality(
+                    width: width,
+                    height: height,
+                    fps: configuredFPS,
+                    prioritizeEncodingSpeed: prioritizeEncodingSpeed
+                )
+            )
+        )
         let averageBitRate = targetAverageBitRate(codec: codecType, width: width, height: height, fps: configuredFPS)
         VTSessionSetProperty(cs, key: kVTCompressionPropertyKey_AverageBitRate, value: NSNumber(value: averageBitRate))
         let hardLimitBytesPerSecond = max(Int(Double(averageBitRate) * 1.35 / 8.0), 512_000)
@@ -372,6 +393,28 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
         case .high: return 0.78
         case .ultra: return 0.92
         }
+    }
+
+    private func effectiveCompressionQuality(
+        width: Int,
+        height: Int,
+        fps: Int,
+        prioritizeEncodingSpeed: Bool
+    ) -> Float {
+        var quality = compressionQualityValue()
+        let megapixels = Double(max(width * height, 1)) / 1_000_000.0
+
+        if prioritizeEncodingSpeed {
+            if megapixels >= 2.5 || fps >= 60 {
+                quality = min(quality, 0.52)
+            } else {
+                quality = min(quality, 0.60)
+            }
+        } else if megapixels >= 4.0 {
+            quality = min(quality, 0.68)
+        }
+
+        return quality
     }
 
     private func targetAverageBitRate(codec: CMVideoCodecType, width: Int, height: Int, fps: Int) -> Int {
@@ -430,10 +473,14 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
         streamer.handleCompressedSample(sampleBuffer)
     }
 
-    func healthSnapshot() -> (lastSampleBufferAt: Date, lastEncodedFrameAt: Date) {
+    func healthSnapshot() -> (
+        lastSampleBufferAt: Date,
+        lastMeaningfulSampleAt: Date,
+        lastEncodedFrameAt: Date
+    ) {
         stateLock.lock()
         defer { stateLock.unlock() }
-        return (lastSampleBufferAt, lastEncodedFrameAt)
+        return (lastSampleBufferAt, lastMeaningfulSampleAt, lastEncodedFrameAt)
     }
 
     @MainActor
@@ -458,6 +505,12 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
     private func noteSampleBufferReceived() {
         stateLock.lock()
         lastSampleBufferAt = Date()
+        stateLock.unlock()
+    }
+
+    private func noteMeaningfulSampleReceived() {
+        stateLock.lock()
+        lastMeaningfulSampleAt = Date()
         stateLock.unlock()
     }
 
@@ -503,7 +556,7 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
 
         let type: RemoteFrameType = (codecType == kCMVideoCodecType_HEVC) ? .hevc : .h264
         noteEncodedFrameEmitted()
-        onEncodedFrame?(payload, width, height, type)
+        onEncodedFrame?(payload, width, height, type, isSyncSample(sampleBuffer))
     }
 
     private func annexBPayload(from sampleBuffer: CMSampleBuffer, payload: Data) -> Data? {
@@ -674,7 +727,13 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
 
         // 复用 onEncodedFrame：frameType 用 .bgra 标记“非 H26x”，上层可按 magic 判断是否 JPEG
         noteEncodedFrameEmitted()
-        onEncodedFrame?(mutable as Data, CVPixelBufferGetWidth(pixelBuffer), CVPixelBufferGetHeight(pixelBuffer), .bgra)
+        onEncodedFrame?(
+            mutable as Data,
+            CVPixelBufferGetWidth(pixelBuffer),
+            CVPixelBufferGetHeight(pixelBuffer),
+            .bgra,
+            true
+        )
     }
 
     private func emitDamageReportIfAvailable(
@@ -750,6 +809,14 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
         return array.first
     }
 
+    private func frameStatus(from sampleBuffer: CMSampleBuffer) -> SCFrameStatus? {
+        guard let attachments = sampleAttachments(from: sampleBuffer),
+              let statusNumber = attachments[SCStreamFrameInfo.status] as? NSNumber else {
+            return nil
+        }
+        return SCFrameStatus(rawValue: statusNumber.intValue)
+    }
+
     private func fallbackDamageReport(for pixelBuffer: CVPixelBuffer) -> RemoteDesktopDamageReport {
         let rect = CGRect(
             x: 0,
@@ -801,16 +868,31 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
             guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
             owner.emitDamageReportIfAvailable(sampleBuffer: sampleBuffer, pixelBuffer: pixelBuffer)
 
-            if let attachments = owner.sampleAttachments(from: sampleBuffer),
-               let statusNumber = attachments[SCStreamFrameInfo.status] as? NSNumber,
-               let status = SCFrameStatus(rawValue: statusNumber.intValue),
-               status == .idle {
-                return
+            if let frameStatus = owner.frameStatus(from: sampleBuffer) {
+                switch frameStatus {
+                case .idle, .blank, .suspended, .stopped:
+                    return
+                case .started:
+                    return
+                case .complete:
+                    owner.noteMeaningfulSampleReceived()
+                @unknown default:
+                    return
+                }
+            } else {
+                owner.noteMeaningfulSampleReceived()
             }
 
             // JPEG 模式：直接把 pixelBuffer 转成 JPEG，回调出去
             if owner.jpegMode {
                 owner.handleJPEGPixelBuffer(pixelBuffer)
+                return
+            }
+
+            if let onRawFrame = owner.onRawFrame {
+                owner.noteEncodedFrameEmitted()
+                let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+                onRawFrame(pixelBuffer, pts)
                 return
             }
 

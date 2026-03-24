@@ -1,6 +1,9 @@
 import SwiftUI
 import UniformTypeIdentifiers
 import QuickLook
+#if canImport(UIKit)
+import UIKit
+#endif
 
 @available(iOS 17.0, *)
 struct FileTransferView: View {
@@ -11,6 +14,7 @@ struct FileTransferView: View {
     @State private var showFilePicker = false
     @State private var targetDevice: DiscoveredDevice?
     @State private var previewItem: FilePreviewItem?
+    @State private var shareItem: FilePreviewItem?
     @State private var fileOpenErrorMessage: String?
 
     private var isUITestFilesScenario: Bool {
@@ -55,6 +59,9 @@ struct FileTransferView: View {
             }
             .sheet(item: $previewItem) { item in
                 FileQuickLookPreview(url: item.url)
+            }
+            .sheet(item: $shareItem) { item in
+                FileShareSheet(items: [item.url])
             }
             .alert(RuntimeLocalization.string("无法打开文件"), isPresented: Binding(
                 get: { fileOpenErrorMessage != nil },
@@ -234,7 +241,8 @@ struct FileTransferView: View {
                 ForEach(fileTransferManager.transferHistory) { transfer in
                     FileTransferHistoryCard(
                         transfer: transfer,
-                        onOpenFile: openLocalFile
+                        onOpenFile: openLocalFile,
+                        onShareFile: shareLocalFile
                     )
                 }
             }
@@ -295,16 +303,26 @@ struct FileTransferView: View {
         }
     }
 
-    private func openLocalFile(_ url: URL) {
-        let path = url.path
-        guard FileManager.default.fileExists(atPath: path) else {
+    private func openLocalFile(_ transfer: FileTransfer) {
+        guard let resolvedURL = fileTransferManager.resolveExistingLocalFileURL(for: transfer) else {
             fileOpenErrorMessage = String(
                 format: RuntimeLocalization.string("文件不存在，可能已被删除。\n路径：%@"),
-                path
+                transfer.localPath ?? "Downloads/\(transfer.fileName)"
             )
             return
         }
-        previewItem = FilePreviewItem(url: url)
+        previewItem = FilePreviewItem(url: resolvedURL)
+    }
+
+    private func shareLocalFile(_ transfer: FileTransfer) {
+        guard let resolvedURL = fileTransferManager.resolveExistingLocalFileURL(for: transfer) else {
+            fileOpenErrorMessage = String(
+                format: RuntimeLocalization.string("文件不存在，可能已被删除。\n路径：%@"),
+                transfer.localPath ?? "Downloads/\(transfer.fileName)"
+            )
+            return
+        }
+        shareItem = FilePreviewItem(url: resolvedURL)
     }
 }
 
@@ -491,7 +509,8 @@ struct FileTransferCard: View {
 
 struct FileTransferHistoryCard: View {
     let transfer: FileTransfer
-    let onOpenFile: (URL) -> Void
+    let onOpenFile: (FileTransfer) -> Void
+    let onShareFile: (FileTransfer) -> Void
 
     private var relativeTimestampText: String {
         let formatter = RelativeDateTimeFormatter()
@@ -548,10 +567,17 @@ struct FileTransferHistoryCard: View {
                     Spacer()
                     
                     Button(RuntimeLocalization.string("打开")) {
-                        onOpenFile(URL(fileURLWithPath: localPath))
+                        onOpenFile(transfer)
                     }
                     .font(.caption2)
                     .foregroundColor(.cyan)
+                    .buttonStyle(.borderless)
+
+                    Button(RuntimeLocalization.string("导出")) {
+                        onShareFile(transfer)
+                    }
+                    .font(.caption2)
+                    .foregroundColor(.white.opacity(0.75))
                     .buttonStyle(.borderless)
                 }
             }
@@ -607,6 +633,18 @@ private struct FileQuickLookPreview: UIViewControllerRepresentable {
             url as NSURL
         }
     }
+}
+
+private struct FileShareSheet: UIViewControllerRepresentable {
+    let items: [Any]
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        let controller = UIActivityViewController(activityItems: items, applicationActivities: nil)
+        controller.excludedActivityTypes = nil
+        return controller
+    }
+
+    func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
 }
 
 // MARK: - Preview

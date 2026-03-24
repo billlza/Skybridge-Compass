@@ -25,31 +25,16 @@ extension DevicePermissionManager {
  /// 检查屏幕录制权限
  /// - Returns: 权限状态
     public func checkScreenRecordingPermission() async -> SBPermissionStatus {
-        if CGPreflightScreenCaptureAccess() {
-            return .authorized
-        }
-        do {
-            _ = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-            return .authorized
-        } catch {
-            return .denied
-        }
+        await ScreenCaptureAuthorizationProbe.shared.isAuthorized() ? .authorized : .denied
     }
     
  /// 请求屏幕录制权限
  /// 注意：macOS 不支持直接请求屏幕录制权限，需要用户手动授权
  /// - Returns: 是否已授权
     public func requestScreenRecordingPermission() async -> Bool {
-        let status = await checkScreenRecordingPermission()
-        if status == .authorized {
-            return true
+        await ScreenCaptureAuthorizationProbe.shared.requestAuthorizationIfNeeded {
+            ScreenCapturePermissionSettingsOpener.open()
         }
-
-        let granted = await MainActor.run { CGRequestScreenCaptureAccess() }
-        if !granted {
-            openScreenRecordingSettings()
-        }
-        return granted
     }
     
  /// 打开屏幕录制权限设置
@@ -220,15 +205,7 @@ public final class PlatformPermissionMonitor: ObservableObject {
  // MARK: - Private Methods
     
     private func checkScreenRecordingPermissionInternal() async -> SBPermissionStatus {
-        if CGPreflightScreenCaptureAccess() {
-            return .authorized
-        }
-        do {
-            _ = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-            return .authorized
-        } catch {
-            return .denied
-        }
+        await ScreenCaptureAuthorizationProbe.shared.isAuthorized() ? .authorized : .denied
     }
     
     private nonisolated func checkAccessibilityPermissionInternal() -> SBPermissionStatus {

@@ -38,10 +38,16 @@
 "connection.smartCode.generate" = "コード生成";
 "connection.smartCode.placeholder" = "コードを入力";
 "connection.smartCode.connect" = "接続";
+"connection.codeMode.title" = "コードモード";
+"connection.codeMode.short" = "短期";
+"connection.codeMode.day" = "1日固定";
+"connection.codeMode.shortHint" = "標準の安全モードです。接続コードは短時間で自動更新されます。";
+"connection.codeMode.dayHint" = "24時間同じコードを維持します。一時的に省電力に入っても再接続しやすくなります。";
 "connection.fast" = "高速接続";
 "connection.p2p.priority" = "P2P優先";
 "connection.smart.relay" = "スマートリレー";
 "connection.validity.10min" = "10分間有効";
+"connection.validity.1day" = "24時間有効";
 
 /* Dashboard */
 "dashboard.unknownIP" = "不明なIP";
@@ -606,6 +612,7 @@
 "transferStatus.failed" = "失敗";
 "transferStatus.cancelled" = "キャンセル済み";
 "action.close" = "閉じる";
+"action.disconnect" = "切断";
 "action.share" = "共有";
 "status.idle" = "待機中";
 "status.adaptiveTuning" = "アダプティブ調整";

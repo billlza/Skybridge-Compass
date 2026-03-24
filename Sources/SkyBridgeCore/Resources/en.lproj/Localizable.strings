@@ -38,10 +38,16 @@
 "connection.smartCode.generate" = "Generate Code";
 "connection.smartCode.placeholder" = "Enter Connection Code";
 "connection.smartCode.connect" = "Connect";
+"connection.codeMode.title" = "Code Mode";
+"connection.codeMode.short" = "Short-Lived";
+"connection.codeMode.day" = "One Day";
+"connection.codeMode.shortHint" = "Default secure mode. The code is short-lived and rotates automatically.";
+"connection.codeMode.dayHint" = "Keeps the same code for 24 hours, useful after temporary power saving or reconnecting later.";
 "connection.fast" = "High Speed";
 "connection.p2p.priority" = "P2P Priority";
 "connection.smart.relay" = "Smart Relay";
 "connection.validity.10min" = "Valid for 10 mins";
+"connection.validity.1day" = "Valid for 24 hours";
 
 /* Dashboard */
 "dashboard.unknownIP" = "Unknown IP";
@@ -635,6 +641,7 @@
 "transferStatus.failed" = "Failed";
 "transferStatus.cancelled" = "Cancelled";
 "action.close" = "Close";
+"action.disconnect" = "Disconnect";
 "action.share" = "Share";
 "status.idle" = "Idle";
 "status.adaptiveTuning" = "Adaptive Tuning";

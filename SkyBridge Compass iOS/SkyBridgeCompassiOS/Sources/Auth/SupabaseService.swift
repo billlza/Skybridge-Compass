@@ -180,6 +180,48 @@ public final class SupabaseService: ObservableObject {
         return try await performAuthRequest(request)
     }
 
+    public func sendPhoneOTP(phone: String) async throws {
+        let config = try requireConfiguration()
+
+        let endpoint = config.url.appendingPathComponent("auth/v1/otp")
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(config.anonKey)", forHTTPHeaderField: "Authorization")
+        request.setValue(config.anonKey, forHTTPHeaderField: "apikey")
+        request.httpBody = try JSONSerialization.data(
+            withJSONObject: ["phone": Self.normalizedPhoneForSupabase(phone)]
+        )
+
+        let (data, response) = try await urlSession.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw SupabaseError.invalidResponse }
+        guard (200...299).contains(http.statusCode) else {
+            let body = String(data: data, encoding: .utf8)
+            throw SupabaseError.httpStatus(code: http.statusCode, message: body)
+        }
+    }
+
+    public func signInWithPhone(phone: String, token: String) async throws -> AuthSession {
+        let config = try requireConfiguration()
+
+        let endpoint = config.url.appendingPathComponent("auth/v1/token")
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(config.anonKey)", forHTTPHeaderField: "Authorization")
+        request.setValue(config.anonKey, forHTTPHeaderField: "apikey")
+        request.httpBody = try JSONSerialization.data(
+            withJSONObject: [
+                "phone": Self.normalizedPhoneForSupabase(phone),
+                "token": token,
+                "type": "sms",
+                "grant_type": "otp"
+            ]
+        )
+
+        return try await performAuthRequest(request)
+    }
+
     /// 刷新 access token（当 JWT 过期 / bad_jwt 时使用）
     public func refreshSession(refreshToken: String) async throws -> AuthSession {
         let config = try requireConfiguration()
@@ -382,7 +424,7 @@ public final class SupabaseService: ObservableObject {
                 accessToken: authResponse.accessToken,
                 refreshToken: authResponse.refreshToken,
                 userIdentifier: authResponse.user.id,
-                displayName: authResponse.user.userMetadata?.displayName ?? (authResponse.user.email ?? "用户"),
+                displayName: authResponse.user.userMetadata?.displayName ?? (authResponse.user.phone ?? authResponse.user.email ?? "用户"),
                 email: authResponse.user.email,
                 avatarURL: authResponse.user.userMetadata?.avatarURL,
                 nebulaId: authResponse.user.userMetadata?.nebulaId,
@@ -393,6 +435,20 @@ public final class SupabaseService: ObservableObject {
         } catch {
             throw SupabaseError.network(error)
         }
+    }
+
+    private static func normalizedPhoneForSupabase(_ rawPhone: String) -> String {
+        let sanitized = rawPhone.filter { $0.isNumber || $0 == "+" }
+        if sanitized.hasPrefix("+") {
+            return sanitized
+        }
+        if sanitized.hasPrefix("86"), sanitized.count == 13 {
+            return "+\(sanitized)"
+        }
+        if sanitized.count == 11, sanitized.hasPrefix("1") {
+            return "+86\(sanitized)"
+        }
+        return sanitized
     }
 }
 
@@ -411,11 +467,13 @@ private struct SupabaseAuthResponse: Codable {
 private struct SupabaseUser: Codable {
     let id: String
     let email: String?
+    let phone: String?
     let userMetadata: SupabaseUserMetadata?
 
     enum CodingKeys: String, CodingKey {
         case id
         case email
+        case phone
         case userMetadata = "user_metadata"
     }
 }

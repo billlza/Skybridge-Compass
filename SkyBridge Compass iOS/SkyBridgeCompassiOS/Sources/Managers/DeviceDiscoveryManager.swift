@@ -261,7 +261,7 @@ enum PeerIdentityAliasResolver {
         return nil
     }
 
-    private static func hostAlias(fromIPAddress raw: String?) -> String? {
+    static func hostAlias(fromIPAddress raw: String?) -> String? {
         guard var token = raw?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
               !token.isEmpty else {
             return nil
@@ -372,6 +372,9 @@ public class DeviceDiscoveryManager: ObservableObject {
 
     /// endpoint debugDescription -> stable deviceId（用于处理 removed 事件时定位缓存项）
     private var endpointToDeviceId: [String: String] = [:]
+
+    /// 每个浏览器当前仍持有的 endpoint 快照；用于区分“设备静默在线”与“设备已真正离线”。
+    private var liveBrowseEndpointKeysByServiceType: [DiscoveryServiceType: Set<String>] = [:]
 
     /// host/bonjour 等别名 -> 稳定 deviceId，避免入站连接退化成临时 host 身份
     private var identityAliasToDeviceId: [String: String] = [:]
@@ -506,6 +509,7 @@ public class DeviceDiscoveryManager: ObservableObject {
             SkyBridgeLogger.shared.debug("⏹️ 停止浏览器: \(serviceType.rawValue)")
         }
         browsers.removeAll()
+        liveBrowseEndpointKeysByServiceType.removeAll()
         
         // 停止清理定时器
         cleanupTimer?.invalidate()
@@ -521,20 +525,20 @@ public class DeviceDiscoveryManager: ObservableObject {
     
     /// 刷新设备列表
     public func refresh() async {
-        // UX fix:
-        // Do NOT hard stop/start NWBrowser instances as a "refresh". It causes stop/start storms,
-        // breaks ongoing handshakes/transfers, and leads to reconnect loops.
-        // Instead, do a soft refresh: clear caches and let existing browsers continue delivering results.
-        deviceCache.removeAll()
-        endpointToDeviceId.removeAll()
-        identityAliasToDeviceId.removeAll()
-        deviceLastActivity.removeAll()
-        updateDiscoveredDevices()
-
         if !isDiscovering {
+            deviceCache.removeAll()
+            endpointToDeviceId.removeAll()
+            identityAliasToDeviceId.removeAll()
+            deviceLastActivity.removeAll()
+            liveBrowseEndpointKeysByServiceType.removeAll()
+            updateDiscoveredDevices()
             try? await startDiscovery()
         } else {
+            // Soft refresh only.  Keep the current cache alive and let the
+            // active browser snapshots decide which devices are still present.
             reconcileBrowsersForCurrentMode()
+            cleanupStaleDevices()
+            updateDiscoveredDevices()
         }
     }
 
@@ -647,6 +651,7 @@ public class DeviceDiscoveryManager: ObservableObject {
         for stale in staleTypes {
             browsers[stale]?.cancel()
             browsers.removeValue(forKey: stale)
+            liveBrowseEndpointKeysByServiceType.removeValue(forKey: stale)
             SkyBridgeLogger.shared.debug("⏹️ 停止非当前模式浏览器: \(stale.rawValue)")
         }
 
@@ -714,11 +719,13 @@ public class DeviceDiscoveryManager: ObservableObject {
             }
             self.error = error
             browsers.removeValue(forKey: serviceType)
+            liveBrowseEndpointKeysByServiceType.removeValue(forKey: serviceType)
             scheduleBrowserRecovery(for: serviceType, reason: "failed")
             
         case .cancelled:
             SkyBridgeLogger.shared.debug("⏹️ 浏览器已取消: \(serviceType.rawValue)")
             browsers.removeValue(forKey: serviceType)
+            liveBrowseEndpointKeysByServiceType.removeValue(forKey: serviceType)
             scheduleBrowserRecovery(for: serviceType, reason: "cancelled")
             
         default:
@@ -731,6 +738,9 @@ public class DeviceDiscoveryManager: ObservableObject {
         changes: Set<NWBrowser.Result.Change>,
         serviceType: DiscoveryServiceType
     ) async {
+        liveBrowseEndpointKeysByServiceType[serviceType] = Set(
+            results.map { $0.endpoint.debugDescription }
+        )
         for change in changes {
             switch change {
             case .added(let result):
@@ -777,12 +787,28 @@ public class DeviceDiscoveryManager: ObservableObject {
     private func handleDeviceRemoved(_ result: NWBrowser.Result, serviceType: DiscoveryServiceType) async {
         let endpointKey = result.endpoint.debugDescription
         let deviceId = endpointToDeviceId[endpointKey] ?? endpointKey
+        let protectedIdentifiers = P2PConnectionManager.instance.protectedDiscoveryIdentifiers
+        let activeIdentifiers = P2PConnectionManager.instance.activeDiscoveryIdentifiers
+        let removalAliases = Set(PeerIdentityAliasResolver.lookupCandidates(for: deviceId))
+        let shouldPreserve = protectedIdentifiers.contains(deviceId) || !removalAliases.isDisjoint(with: protectedIdentifiers)
+        let shouldMarkConnected = activeIdentifiers.contains(deviceId) || !removalAliases.isDisjoint(with: activeIdentifiers)
 
         guard var existing = deviceCache[deviceId] else {
             deviceCache.removeValue(forKey: deviceId)
             deviceLastActivity.removeValue(forKey: deviceId)
             endpointToDeviceId.removeValue(forKey: endpointKey)
             updateDiscoveredDevices()
+            return
+        }
+
+        if shouldPreserve {
+            existing.lastSeen = Date()
+            existing.isConnected = shouldMarkConnected
+            deviceCache[deviceId] = existing
+            deviceLastActivity[deviceId] = Date()
+            endpointToDeviceId.removeValue(forKey: endpointKey)
+            updateDiscoveredDevices()
+            SkyBridgeLogger.shared.debug("ℹ️ 活跃对等端仍受保护，保留服务元数据: \(existing.name) via \(serviceType.displayName)")
             return
         }
 
@@ -1454,6 +1480,48 @@ public class DeviceDiscoveryManager: ObservableObject {
 
         return endpointKey
     }
+
+    func canonicalDiscoveredDevice(for device: DiscoveredDevice) -> DiscoveredDevice? {
+        var candidateIds: [String] = []
+        var seen = Set<String>()
+
+        func append(_ raw: String?) {
+            guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !raw.isEmpty,
+                  seen.insert(raw).inserted else {
+                return
+            }
+            candidateIds.append(raw)
+        }
+
+        append(device.id)
+        for alias in PeerIdentityAliasResolver.lookupCandidates(for: device.id) {
+            append(identityAliasToDeviceId[alias])
+        }
+        for alias in PeerIdentityAliasResolver.aliasKeys(for: device) {
+            append(identityAliasToDeviceId[alias])
+        }
+        if let ipAddress = device.ipAddress,
+           let alias = PeerIdentityAliasResolver.hostAlias(fromIPAddress: ipAddress) {
+            append(identityAliasToDeviceId[alias])
+        }
+        if let bonjourServiceName = device.bonjourServiceName,
+           let alias = PeerIdentityAliasResolver.lookupCandidates(
+                for: "bonjour:\(bonjourServiceName)@\(device.bonjourServiceDomain ?? "local.")"
+           ).first {
+            append(identityAliasToDeviceId[alias])
+        }
+
+        for candidateId in candidateIds {
+            if let cached = deviceCache[candidateId] {
+                return cached
+            }
+            if let discovered = discoveredDevices.first(where: { $0.id == candidateId }) {
+                return discovered
+            }
+        }
+        return nil
+    }
     
     // MARK: - Private Methods - TXT Record
     
@@ -1531,8 +1599,23 @@ public class DeviceDiscoveryManager: ObservableObject {
     private func cleanupStaleDevices() {
         let now = Date()
         var removedCount = 0
+        let protectedIdentifiers = P2PConnectionManager.instance.protectedDiscoveryIdentifiers
+        let activeIdentifiers = P2PConnectionManager.instance.activeDiscoveryIdentifiers
         
         for (deviceId, lastActivity) in deviceLastActivity {
+            let deviceAliases = Set(PeerIdentityAliasResolver.lookupCandidates(for: deviceId))
+            let isProtected = protectedIdentifiers.contains(deviceId) || !deviceAliases.isDisjoint(with: protectedIdentifiers)
+            let isActivelyConnected = activeIdentifiers.contains(deviceId) || !deviceAliases.isDisjoint(with: activeIdentifiers)
+            let hasLiveEndpoint = hasLiveBrowseEndpoint(for: deviceId)
+            if isProtected || hasLiveEndpoint {
+                deviceLastActivity[deviceId] = now
+                if var device = deviceCache[deviceId] {
+                    device.lastSeen = now
+                    device.isConnected = isActivelyConnected
+                    deviceCache[deviceId] = device
+                }
+                continue
+            }
             if now.timeIntervalSince(lastActivity) > deviceTimeout {
                 deviceCache.removeValue(forKey: deviceId)
                 deviceLastActivity.removeValue(forKey: deviceId)
@@ -1544,6 +1627,23 @@ public class DeviceDiscoveryManager: ObservableObject {
             updateDiscoveredDevices()
             SkyBridgeLogger.shared.debug("🧹 清理了 \(removedCount) 个过期设备")
         }
+    }
+
+    private func hasLiveBrowseEndpoint(for deviceId: String) -> Bool {
+        let targetAliases = Set(PeerIdentityAliasResolver.lookupCandidates(for: deviceId))
+        guard !targetAliases.isEmpty else { return false }
+
+        for endpointKeys in liveBrowseEndpointKeysByServiceType.values {
+            for endpointKey in endpointKeys {
+                guard let mappedDeviceId = endpointToDeviceId[endpointKey] else { continue }
+                let mappedAliases = Set(PeerIdentityAliasResolver.lookupCandidates(for: mappedDeviceId))
+                if !targetAliases.isDisjoint(with: mappedAliases) {
+                    return true
+                }
+            }
+        }
+
+        return false
     }
     
     /// 更新发现的设备列表
@@ -1573,6 +1673,60 @@ public class DeviceDiscoveryManager: ObservableObject {
         // 目前所有发现的设备都可能兼容
         // 后续可以根据 TXT 记录中的 pqc 字段过滤
         discoveredDevices
+    }
+
+    struct DebugState {
+        let deviceCache: [String: DiscoveredDevice]
+        let endpointToDeviceId: [String: String]
+        let liveBrowseEndpointKeysByServiceType: [DiscoveryServiceType: Set<String>]
+        let deviceLastActivity: [String: Date]
+        let isDiscovering: Bool
+    }
+
+    static func debugMakeIsolatedInstance() -> DeviceDiscoveryManager {
+        DeviceDiscoveryManager()
+    }
+
+    func debugCaptureState() -> DebugState {
+        DebugState(
+            deviceCache: deviceCache,
+            endpointToDeviceId: endpointToDeviceId,
+            liveBrowseEndpointKeysByServiceType: liveBrowseEndpointKeysByServiceType,
+            deviceLastActivity: deviceLastActivity,
+            isDiscovering: isDiscovering
+        )
+    }
+
+    func debugRestoreState(_ state: DebugState) {
+        deviceCache = state.deviceCache
+        endpointToDeviceId = state.endpointToDeviceId
+        liveBrowseEndpointKeysByServiceType = state.liveBrowseEndpointKeysByServiceType
+        deviceLastActivity = state.deviceLastActivity
+        isDiscovering = state.isDiscovering
+        updateDiscoveredDevices()
+    }
+
+    func debugSeedDiscoveryState(
+        devices: [DiscoveredDevice],
+        lastActivity: Date,
+        endpointToDeviceId: [String: String],
+        liveBrowseEndpointKeysByServiceType: [DiscoveryServiceType: Set<String>],
+        isDiscovering: Bool = false
+    ) {
+        deviceCache = Dictionary(uniqueKeysWithValues: devices.map { ($0.id, $0) })
+        deviceLastActivity = Dictionary(uniqueKeysWithValues: devices.map { ($0.id, lastActivity) })
+        self.endpointToDeviceId = endpointToDeviceId
+        self.liveBrowseEndpointKeysByServiceType = liveBrowseEndpointKeysByServiceType
+        self.isDiscovering = isDiscovering
+        updateDiscoveredDevices()
+    }
+
+    func debugRunCleanupStaleDevices() {
+        cleanupStaleDevices()
+    }
+
+    var debugCachedDeviceIds: Set<String> {
+        Set(deviceCache.keys)
     }
     
     /// 解析服务端点以获取 IP 地址
@@ -1604,6 +1758,44 @@ public class DeviceDiscoveryManager: ObservableObject {
         }
 
         return resolved
+    }
+
+    public func setConnectionLiveness(for device: DiscoveredDevice, isConnected: Bool) {
+        var candidateIds: Set<String> = []
+
+        func append(_ raw: String?) {
+            guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !raw.isEmpty else {
+                return
+            }
+            candidateIds.insert(raw)
+        }
+
+        append(device.id)
+        for alias in PeerIdentityAliasResolver.lookupCandidates(for: device.id) {
+            append(identityAliasToDeviceId[alias])
+        }
+        for alias in PeerIdentityAliasResolver.aliasKeys(for: device) {
+            append(identityAliasToDeviceId[alias])
+        }
+        if let canonical = canonicalDiscoveredDevice(for: device) {
+            append(canonical.id)
+        }
+
+        let timestamp = Date()
+        var updated = false
+        for candidateId in candidateIds {
+            guard var cached = deviceCache[candidateId] else { continue }
+            cached.isConnected = isConnected
+            cached.lastSeen = timestamp
+            deviceCache[candidateId] = cached
+            deviceLastActivity[candidateId] = timestamp
+            updated = true
+        }
+
+        if updated {
+            updateDiscoveredDevices()
+        }
     }
 
     private func resolveBonjourServiceIPAddress(

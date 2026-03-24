@@ -68,7 +68,7 @@ public final class ClipboardManager: ObservableObject {
     /// 最小发送间隔（秒），用于“限速/降噪”
     @Published public var minSendIntervalSeconds: Double = 0.8
 
-    /// 历史记录（持久化到 UserDefaults）
+    /// 历史记录（持久化到受保护的本地状态文件）
     @Published public private(set) var history: [ClipboardHistoryEntry] = []
 
     /// 按设备的最近同步信息（用于“按设备状态面板”）
@@ -98,7 +98,12 @@ public final class ClipboardManager: ObservableObject {
 
     private var lastSendAt: Date?
 
-    private let historyStorageKey = "clipboard.history.v1"
+    private static let historyStore = CodablePersistenceStore<[ClipboardHistoryEntry]>(
+        location: .protectedApplicationSupport(
+            path: "Clipboard/history.json",
+            legacyUserDefaultsKey: "clipboard.history.v1"
+        )
+    )
     
     // MARK: - Callbacks
     
@@ -114,8 +119,7 @@ public final class ClipboardManager: ObservableObject {
     private init() {}
 
     public func loadHistory() {
-        guard let data = UserDefaults.standard.data(forKey: historyStorageKey) else { return }
-        history = (try? JSONDecoder().decode([ClipboardHistoryEntry].self, from: data)) ?? []
+        history = Self.historyStore.load() ?? []
         trimHistoryIfNeeded()
     }
 
@@ -131,8 +135,7 @@ public final class ClipboardManager: ObservableObject {
     }
 
     private func saveHistory() {
-        let data = (try? JSONEncoder().encode(history)) ?? Data()
-        UserDefaults.standard.set(data, forKey: historyStorageKey)
+        try? Self.historyStore.save(history)
     }
 
     /// 便捷启用（不关心 sessionId 的场景，例如 Settings 中的全局启用）

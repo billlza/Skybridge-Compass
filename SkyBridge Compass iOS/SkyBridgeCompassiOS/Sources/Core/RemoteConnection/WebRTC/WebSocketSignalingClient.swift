@@ -9,6 +9,68 @@ public actor WebSocketSignalingClient {
         case unknown
     }
 
+    public enum SignalingBackend: String, Sendable, Equatable, Hashable {
+        case urlSession
+        case native
+    }
+
+    public enum SignalingLifecyclePhase: String, Sendable, Equatable {
+        case idle
+        case connecting
+        case socketOpen
+        case bound
+        case reconnecting
+        case closing
+        case closed
+        case failed
+    }
+
+    public enum SignalingFailureClass: String, Sendable, Equatable {
+        case authBindRejected
+        case invalidShardOrSessionMismatch
+        case tokenExpired
+        case transientNetwork
+        case transientServer
+        case protocolViolation
+    }
+
+    public struct SignalingHandleID: Sendable, Equatable, Hashable {
+        public let sessionId: String
+        public let backend: SignalingBackend
+        public let generation: Int
+
+        public init(sessionId: String, backend: SignalingBackend, generation: Int) {
+            self.sessionId = sessionId
+            self.backend = backend
+            self.generation = generation
+        }
+    }
+
+    public struct SignalingLifecycleEvent: Sendable, Equatable {
+        public let handleId: SignalingHandleID
+        public let phase: SignalingLifecyclePhase
+        public let serverFrameType: String?
+        public let failureClass: SignalingFailureClass?
+        public let errorDescription: String?
+        public let occurredAt: Date
+
+        public init(
+            handleId: SignalingHandleID,
+            phase: SignalingLifecyclePhase,
+            serverFrameType: String? = nil,
+            failureClass: SignalingFailureClass? = nil,
+            errorDescription: String? = nil,
+            occurredAt: Date = Date()
+        ) {
+            self.handleId = handleId
+            self.phase = phase
+            self.serverFrameType = serverFrameType
+            self.failureClass = failureClass
+            self.errorDescription = errorDescription
+            self.occurredAt = occurredAt
+        }
+    }
+
     public struct SignalingServerFrame: Decodable, Sendable, Equatable {
         public let type: String
         public let error: String?
@@ -22,129 +84,196 @@ public actor WebSocketSignalingClient {
 
     public enum SignalingError: LocalizedError {
         case notConnected
+        case connectTimedOut
+        case sendRequiresBound
+        case serverRejected(String)
+        case backendFailed(SignalingBackend, String)
 
         public var errorDescription: String? {
             switch self {
             case .notConnected:
                 return "信令 WebSocket 未连接"
+            case .connectTimedOut:
+                return "信令 WebSocket 连接超时"
+            case .sendRequiresBound:
+                return "信令通道尚未 bound，不能发送业务消息"
+            case .serverRejected(let reason):
+                return "信令服务器拒绝请求: \(reason)"
+            case .backendFailed(let backend, let reason):
+                return "信令后端 \(backend.rawValue) 失败: \(reason)"
             }
         }
     }
 
-    private let logger = Logger(subsystem: "com.skybridge.compass.ios", category: "WebRTCSignalingWS")
+    private enum BackendSelectionPolicy: String {
+        case auto
+        case urlsession
+
+        static func current() -> BackendSelectionPolicy {
+            let raw = ProcessInfo.processInfo.environment["SKYBRIDGE_SIGNALING_TRANSPORT"]?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased() ?? ""
+            return BackendSelectionPolicy(rawValue: raw) ?? .auto
+        }
+    }
+
+    private enum TransportAttempt: Equatable {
+        case urlSession(proxyBypass: Bool)
+
+        var backend: SignalingBackend { .urlSession }
+
+        var label: String {
+            switch self {
+            case .urlSession(let proxyBypass):
+                return proxyBypass ? "urlsession-proxy-bypass" : "urlsession"
+            }
+        }
+    }
+
+    private let logger = Logger(subsystem: "com.skybridge.signal", category: "WebRTCSignalingWS")
     private let url: URL
-    private var task: URLSessionWebSocketTask?
-    private let session: URLSession
-    private var receiveLoopTask: Task<Void, Never>?
-    
+    private let sessionId: String
+    private var nextSequenceGeneration: Int
+    private let connectionTimeout: Duration = .seconds(5)
+    private static let websocketRequestTimeoutSeconds: TimeInterval = 120
+    private static let websocketResourceTimeoutSeconds: TimeInterval = 60 * 60 * 24
+    private let selectionPolicy: BackendSelectionPolicy
+
+    private var currentHandle: SignalingHandleID?
+    private var lifecyclePhase: SignalingLifecyclePhase = .idle
+    private var isBound: Bool = false
+    private var isSocketOpen: Bool = false
+    private var hasEverBound: Bool = false
+    private var isConnectingSequence: Bool = false
+    private var connectWaiters: [CheckedContinuation<Void, Error>] = []
+    private var terminalErrorsByHandle: [SignalingHandleID: Error] = [:]
+
+    private var urlSession: URLSession?
+    private var urlSessionDelegate: URLSessionSignalingDelegate?
+    private var urlTask: URLSessionWebSocketTask?
+    private var urlReceiveLoopTask: Task<Void, Never>?
+
     public var onEnvelope: (@Sendable (WebRTCSignalingEnvelope) -> Void)?
     public var onServerFrame: (@Sendable (SignalingServerFrame) -> Void)?
+    public var onLifecycleEvent: (@Sendable (SignalingLifecycleEvent) -> Void)?
     public var onTrace: (@Sendable (String) -> Void)?
-    
-    public init(url: URL) {
+
+    public init(url: URL, sessionId: String, generation: Int) {
         self.url = url
-        self.session = URLSession(configuration: .default)
+        self.sessionId = sessionId
+        self.nextSequenceGeneration = generation
+        self.selectionPolicy = BackendSelectionPolicy.current()
     }
-    
+
     public func setOnEnvelope(_ handler: (@Sendable (WebRTCSignalingEnvelope) -> Void)?) {
-        self.onEnvelope = handler
+        onEnvelope = handler
     }
 
     public func setOnServerFrame(_ handler: (@Sendable (SignalingServerFrame) -> Void)?) {
-        self.onServerFrame = handler
+        onServerFrame = handler
+    }
+
+    public func setOnLifecycleEvent(_ handler: (@Sendable (SignalingLifecycleEvent) -> Void)?) {
+        onLifecycleEvent = handler
     }
 
     public func setOnTrace(_ handler: (@Sendable (String) -> Void)?) {
-        self.onTrace = handler
+        onTrace = handler
     }
-    
-    public func connect() {
-        guard task == nil else { return }
-        let t = session.webSocketTask(with: url)
-        self.task = t
-        t.resume()
-        logger.info("connecting signaling websocket… \(Self.redactedURLString(self.url), privacy: .public)")
-        onTrace?("connect url=\(Self.redactedURLString(self.url))")
-        startReceiveLoop()
+
+    public func connect() async {
+        do {
+            try await connectOrThrow()
+        } catch {
+            logger.error("❌ signaling websocket connect failed: \(error.localizedDescription, privacy: .public)")
+        }
     }
-    
-    public func close() {
+
+    public func connectOrThrow(timeout: Duration? = nil) async throws {
+        if isBound {
+            return
+        }
+        if isConnectingSequence {
+            try await waitForBound()
+            return
+        }
+
+        isConnectingSequence = true
+        defer { isConnectingSequence = false }
+
+        do {
+            try await performConnectSequence(timeout: timeout ?? connectionTimeout)
+            resumeConnectWaiters()
+        } catch {
+            failConnectWaiters(with: error)
+            throw error
+        }
+    }
+
+    public func close() async {
+        if let currentHandle {
+            emitLifecycle(
+                phase: .closing,
+                handleId: currentHandle,
+                errorDescription: nil,
+                failureClass: nil,
+                serverFrameType: nil
+            )
+        }
+
+        isBound = false
+        isSocketOpen = false
+        lifecyclePhase = .closed
+        terminalErrorsByHandle.removeAll()
         onTrace?("close")
-        receiveLoopTask?.cancel()
-        receiveLoopTask = nil
-        task?.cancel(with: .goingAway, reason: nil)
-        task = nil
+
+        await cleanupURLSessionTransport()
+
+        if let currentHandle {
+            emitLifecycle(
+                phase: .closed,
+                handleId: currentHandle,
+                errorDescription: nil,
+                failureClass: nil,
+                serverFrameType: nil
+            )
+        }
+
+        currentHandle = nil
+        failConnectWaiters(with: SignalingError.notConnected)
     }
-    
+
     public func send(_ envelope: WebRTCSignalingEnvelope) async throws {
-        guard let task else {
+        try await connectOrThrow()
+        guard isBound, let handleId = currentHandle else {
+            throw SignalingError.sendRequiresBound
+        }
+        guard let urlTask else {
             throw SignalingError.notConnected
         }
+
         let data = try JSONEncoder().encode(envelope)
         guard let text = String(data: data, encoding: .utf8) else { return }
         onTrace?(
-            "send session=\(envelope.sessionId) type=\(envelope.type.rawValue) from=\(envelope.from) to=\(envelope.to ?? "-") auth=\(envelope.authToken == nil ? 0 : 1)"
+            "send session=\(envelope.sessionId) type=\(envelope.type.rawValue) from=\(envelope.from) to=\(envelope.to ?? "-") auth=\(envelope.authToken == nil ? 0 : 1) backend=\(handleId.backend.rawValue)"
         )
-        try await task.send(.string(text))
-    }
-    
-    private func startReceiveLoop() {
-        guard receiveLoopTask == nil else { return }
-        receiveLoopTask = Task { [weak self] in
-            guard let self else { return }
-            await self.receiveLoop()
-        }
-    }
-    
-    private func receiveLoop() async {
-        defer { receiveLoopTask = nil }
-        onTrace?("receive-loop start")
-        while !Task.isCancelled {
-            guard let task else { return }
-            do {
-                let msg = try await task.receive()
-                switch msg {
-                case .string(let text):
-                    handleText(text)
-                case .data(let data):
-                    if let text = String(data: data, encoding: .utf8) {
-                        handleText(text)
-                    }
-                @unknown default:
-                    break
-                }
-            } catch {
-                logger.error("signaling receive failed: \(error.localizedDescription, privacy: .public)")
-                onTrace?("receive-loop failed error=\(error.localizedDescription)")
-                task.cancel(with: .goingAway, reason: nil)
-                self.task = nil
-                return
+        do {
+            try await urlTask.send(.string(text))
+        } catch {
+            let ns = error as NSError
+            if ns.domain == NSURLErrorDomain {
+                throw SignalingError.notConnected
             }
+            throw error
         }
-        onTrace?("receive-loop ended cancelled=\(Task.isCancelled ? 1 : 0)")
     }
-    
-    private func handleText(_ text: String) {
-        switch Self.parseInboundText(text) {
-        case .envelope(let env):
-            onTrace?(
-                "recv-envelope session=\(env.sessionId) type=\(env.type.rawValue) from=\(env.from) to=\(env.to ?? "-") auth=\(env.authToken == nil ? 0 : 1)"
-            )
-            onEnvelope?(env)
-        case .serverFrame(let frame):
-            onTrace?(
-                "recv-server-frame type=\(frame.type) session=\(frame.sessionId ?? "-") error=\(frame.error ?? "-")"
-            )
-            onServerFrame?(frame)
-            if frame.isError {
-                logger.error("❌ signaling server error: \(frame.error ?? "unknown", privacy: .public)")
-            } else {
-                logger.debug("ℹ️ signaling server frame: type=\(frame.type, privacy: .public)")
-            }
-        case .unknown:
-            onTrace?("recv-unknown bytes=\(text.utf8.count)")
-            logger.debug("ignoring non-envelope message: \(text.prefix(200), privacy: .public)")
-        }
+
+    public func currentLifecyclePhase() -> SignalingLifecyclePhase {
+        lifecyclePhase
+    }
+
+    public func currentHandleID() -> SignalingHandleID? {
+        currentHandle
     }
 
     public static func parseInboundText(_ text: String) -> InboundMessage {
@@ -167,5 +296,431 @@ public actor WebSocketSignalingClient {
             return URLQueryItem(name: item.name, value: "<redacted>")
         }
         return components.string ?? components.host ?? "<redacted>"
+    }
+
+    private func performConnectSequence(timeout: Duration) async throws {
+        let attempts = transportAttempts()
+        var lastError: Error = SignalingError.connectTimedOut
+        let sequenceGeneration = nextSequenceGeneration
+        nextSequenceGeneration += 1
+
+        for attempt in attempts {
+            let handleId = SignalingHandleID(
+                sessionId: sessionId,
+                backend: attempt.backend,
+                generation: sequenceGeneration
+            )
+            currentHandle = handleId
+            isBound = false
+            isSocketOpen = false
+            terminalErrorsByHandle[handleId] = nil
+
+            let phase: SignalingLifecyclePhase = hasEverBound ? .reconnecting : .connecting
+            lifecyclePhase = phase
+            emitLifecycle(
+                phase: phase,
+                handleId: handleId,
+                errorDescription: nil,
+                failureClass: nil,
+                serverFrameType: nil
+            )
+            onTrace?("connect backend=\(attempt.label) url=\(Self.redactedURLString(self.url))")
+
+            do {
+                switch attempt {
+                case .urlSession(let proxyBypass):
+                    try await connectViaURLSession(
+                        handleId: handleId,
+                        proxyBypass: proxyBypass,
+                        timeout: timeout
+                    )
+                }
+                return
+            } catch {
+                lastError = error
+                if error is CancellationError {
+                    logger.debug(
+                        "ℹ️ signaling connect attempt cancelled: session=\(self.sessionId, privacy: .public) backend=\(attempt.label, privacy: .public)"
+                    )
+                } else {
+                    logger.error(
+                        "❌ signaling connect attempt failed: session=\(self.sessionId, privacy: .public) backend=\(attempt.label, privacy: .public) err=\(error.localizedDescription, privacy: .public)"
+                    )
+                }
+                onTrace?("connect-failed backend=\(attempt.label) err=\(error.localizedDescription)")
+                await cleanupURLSessionTransport()
+                if currentHandle == handleId {
+                    currentHandle = nil
+                }
+            }
+        }
+
+        throw lastError
+    }
+
+    private func transportAttempts() -> [TransportAttempt] {
+        switch selectionPolicy {
+        case .urlsession:
+            return [.urlSession(proxyBypass: false)]
+        case .auto:
+            return [.urlSession(proxyBypass: false), .urlSession(proxyBypass: true)]
+        }
+    }
+
+    private func connectViaURLSession(
+        handleId: SignalingHandleID,
+        proxyBypass: Bool,
+        timeout: Duration
+    ) async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.waitsForConnectivity = true
+        config.timeoutIntervalForRequest = max(
+            Self.websocketRequestTimeoutSeconds,
+            Self.durationSeconds(timeout)
+        )
+        config.timeoutIntervalForResource = max(
+            Self.websocketResourceTimeoutSeconds,
+            Self.durationSeconds(timeout)
+        )
+        config.allowsConstrainedNetworkAccess = true
+        config.allowsExpensiveNetworkAccess = true
+        if proxyBypass {
+            config.connectionProxyDictionary = [
+                "HTTPEnable": false,
+                "HTTPSEnable": false,
+                "SOCKSEnable": false
+            ]
+        }
+
+        let delegate = URLSessionSignalingDelegate(
+            onOpen: { [weakSelf = ActorBox(self)] in
+                Task { await weakSelf.value?.handleSocketOpen(handleId: handleId) }
+            },
+            onClose: { [weakSelf = ActorBox(self)] closeCode, _ in
+                Task {
+                    await weakSelf.value?.handleClosed(
+                        handleId: handleId,
+                        errorDescription: "websocket closed (\(closeCode.rawValue))"
+                    )
+                }
+            }
+        )
+        let session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
+        let task = session.webSocketTask(with: url)
+        urlSessionDelegate = delegate
+        urlSession = session
+        urlTask = task
+        task.resume()
+        startURLSessionReceiveLoop(handleId: handleId, task: task)
+
+        do {
+            try await waitUntilBound(handleId: handleId, timeout: timeout)
+        } catch {
+            if proxyBypass || !shouldRetryBypassingProxy(error) {
+                throw error
+            }
+            throw SignalingError.backendFailed(.urlSession, error.localizedDescription)
+        }
+    }
+
+    private func startURLSessionReceiveLoop(handleId: SignalingHandleID, task: URLSessionWebSocketTask) {
+        urlReceiveLoopTask?.cancel()
+        urlReceiveLoopTask = Task { [weakSelf = ActorBox(self)] in
+            while !Task.isCancelled {
+                do {
+                    let message = try await task.receive()
+                    switch message {
+                    case .string(let text):
+                        await weakSelf.value?.handleText(handleId: handleId, text: text)
+                    case .data(let data):
+                        if let text = String(data: data, encoding: .utf8) {
+                            await weakSelf.value?.handleText(handleId: handleId, text: text)
+                        }
+                    @unknown default:
+                        break
+                    }
+                } catch {
+                    await weakSelf.value?.handleErrored(handleId: handleId, error: error)
+                    return
+                }
+            }
+        }
+    }
+
+    private func waitUntilBound(handleId: SignalingHandleID, timeout: Duration) async throws {
+        let deadline = Date().addingTimeInterval(Self.durationSeconds(timeout))
+        while Date() < deadline {
+            if currentHandle == handleId, isBound {
+                return
+            }
+            if let error = terminalErrorsByHandle[handleId] {
+                throw error
+            }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        throw SignalingError.connectTimedOut
+    }
+
+    private func waitForBound() async throws {
+        if isBound {
+            return
+        }
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            connectWaiters.append(continuation)
+        }
+    }
+
+    private func resumeConnectWaiters() {
+        let waiters = connectWaiters
+        connectWaiters.removeAll(keepingCapacity: false)
+        for waiter in waiters {
+            waiter.resume()
+        }
+    }
+
+    private func failConnectWaiters(with error: Error) {
+        guard !connectWaiters.isEmpty else { return }
+        let waiters = connectWaiters
+        connectWaiters.removeAll(keepingCapacity: false)
+        for waiter in waiters {
+            waiter.resume(throwing: error)
+        }
+    }
+
+    private func handleSocketOpen(handleId: SignalingHandleID) {
+        if currentHandle == handleId {
+            isSocketOpen = true
+            lifecyclePhase = .socketOpen
+        }
+        emitLifecycle(
+            phase: .socketOpen,
+            handleId: handleId,
+            errorDescription: nil,
+            failureClass: nil,
+            serverFrameType: nil
+        )
+        onTrace?("socket-open backend=\(handleId.backend.rawValue)")
+    }
+
+    private func handleText(handleId: SignalingHandleID, text: String) {
+        switch Self.parseInboundText(text) {
+        case .envelope(let env):
+            onTrace?(
+                "recv-envelope session=\(env.sessionId) type=\(env.type.rawValue) from=\(env.from) to=\(env.to ?? "-") auth=\(env.authToken == nil ? 0 : 1)"
+            )
+            onEnvelope?(env)
+        case .serverFrame(let frame):
+            onTrace?(
+                "recv-server-frame type=\(frame.type) session=\(frame.sessionId ?? "-") error=\(frame.error ?? "-")"
+            )
+            onServerFrame?(frame)
+            if frame.type == "bound" {
+                if currentHandle == handleId {
+                    isSocketOpen = true
+                    isBound = true
+                    hasEverBound = true
+                    lifecyclePhase = .bound
+                }
+                emitLifecycle(
+                    phase: .bound,
+                    handleId: handleId,
+                    errorDescription: nil,
+                    failureClass: nil,
+                    serverFrameType: frame.type
+                )
+                return
+            }
+            if frame.isError {
+                let reason = frame.error ?? "unknown"
+                let error = SignalingError.serverRejected(reason)
+                terminalErrorsByHandle[handleId] = error
+                if currentHandle == handleId {
+                    isBound = false
+                    lifecyclePhase = .failed
+                }
+                emitLifecycle(
+                    phase: .failed,
+                    handleId: handleId,
+                    errorDescription: reason,
+                    failureClass: Self.classifyServerError(reason),
+                    serverFrameType: frame.type
+                )
+                logger.error("❌ signaling server error: \(reason, privacy: .public)")
+            }
+        case .unknown:
+            onTrace?("recv-unknown bytes=\(text.utf8.count)")
+            logger.debug("ignoring non-envelope message: \(text.prefix(200), privacy: .public)")
+        }
+    }
+
+    private func handleClosed(handleId: SignalingHandleID, errorDescription: String) async {
+        if currentHandle == handleId {
+            isSocketOpen = false
+            isBound = false
+            lifecyclePhase = .closed
+        }
+        terminalErrorsByHandle[handleId] = SignalingError.notConnected
+        emitLifecycle(
+            phase: .closed,
+            handleId: handleId,
+            errorDescription: errorDescription,
+            failureClass: .transientNetwork,
+            serverFrameType: nil
+        )
+        onTrace?("closed backend=\(handleId.backend.rawValue) reason=\(errorDescription)")
+    }
+
+    private func handleErrored(handleId: SignalingHandleID, error: Error) async {
+        if currentHandle == handleId {
+            isSocketOpen = false
+            isBound = false
+            lifecyclePhase = .failed
+        }
+        terminalErrorsByHandle[handleId] = error
+        emitLifecycle(
+            phase: .failed,
+            handleId: handleId,
+            errorDescription: error.localizedDescription,
+            failureClass: Self.classifyTransportError(error),
+            serverFrameType: nil
+        )
+        onTrace?("errored backend=\(handleId.backend.rawValue) err=\(error.localizedDescription)")
+    }
+
+    private func emitLifecycle(
+        phase: SignalingLifecyclePhase,
+        handleId: SignalingHandleID,
+        errorDescription: String?,
+        failureClass: SignalingFailureClass?,
+        serverFrameType: String?
+    ) {
+        onLifecycleEvent?(
+            SignalingLifecycleEvent(
+                handleId: handleId,
+                phase: phase,
+                serverFrameType: serverFrameType,
+                failureClass: failureClass,
+                errorDescription: errorDescription
+            )
+        )
+    }
+
+    private func cleanupURLSessionTransport() async {
+        urlReceiveLoopTask?.cancel()
+        urlReceiveLoopTask = nil
+        if let urlTask {
+            urlTask.cancel(with: .goingAway, reason: nil)
+        }
+        urlTask = nil
+        urlSession?.invalidateAndCancel()
+        urlSession = nil
+        urlSessionDelegate = nil
+    }
+
+    private static func classifyServerError(_ reason: String) -> SignalingFailureClass {
+        let normalized = reason.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if normalized.contains("token") && normalized.contains("expired") {
+            return .tokenExpired
+        }
+        if normalized.contains("auth")
+            || normalized.contains("unauthorized")
+            || normalized.contains("forbidden")
+            || normalized.contains("bind_rejected") {
+            return .authBindRejected
+        }
+        if normalized.contains("invalid shard")
+            || normalized.contains("invalid session")
+            || normalized.contains("session mismatch")
+            || normalized.contains("scope mismatch")
+            || normalized.contains("unknown shard")
+            || normalized.contains("room_full") {
+            return .invalidShardOrSessionMismatch
+        }
+        if normalized.contains("protocol") || normalized.contains("malformed") {
+            return .protocolViolation
+        }
+        return .transientServer
+    }
+
+    private static func classifyTransportError(_ error: Error) -> SignalingFailureClass {
+        let ns = error as NSError
+        if ns.domain == NSURLErrorDomain || ns.domain == NSPOSIXErrorDomain {
+            return .transientNetwork
+        }
+        let message = ns.localizedDescription.lowercased()
+        if message.contains("socket is not connected")
+            || message.contains("socket未连接")
+            || message.contains("network")
+            || message.contains("timed out") {
+            return .transientNetwork
+        }
+        return .transientServer
+    }
+
+    private func shouldRetryBypassingProxy(_ error: Error) -> Bool {
+        let message = (error as NSError).localizedDescription.lowercased()
+        if message.contains("127.0.0.1")
+            || message.contains("1082")
+            || message.contains("socket is not connected")
+            || message.contains("socket未连接") {
+            return true
+        }
+
+        let ns = error as NSError
+        if ns.domain == NSURLErrorDomain {
+            switch ns.code {
+            case NSURLErrorSecureConnectionFailed,
+                 NSURLErrorCannotConnectToHost,
+                 NSURLErrorTimedOut,
+                 NSURLErrorNetworkConnectionLost,
+                 NSURLErrorCannotFindHost,
+                 NSURLErrorDNSLookupFailed:
+                return true
+            default:
+                break
+            }
+        }
+
+        return false
+    }
+
+    private static func durationSeconds(_ duration: Duration) -> Double {
+        let components = duration.components
+        return Double(components.seconds) + Double(components.attoseconds) / 1_000_000_000_000_000_000.0
+    }
+}
+
+private final class ActorBox<T: Actor>: @unchecked Sendable {
+    weak var value: T?
+    init(_ value: T) { self.value = value }
+}
+
+private final class URLSessionSignalingDelegate: NSObject, URLSessionWebSocketDelegate {
+    private let onOpen: @Sendable () -> Void
+    private let onClose: @Sendable (URLSessionWebSocketTask.CloseCode, Data?) -> Void
+
+    init(
+        onOpen: @escaping @Sendable () -> Void,
+        onClose: @escaping @Sendable (URLSessionWebSocketTask.CloseCode, Data?) -> Void
+    ) {
+        self.onOpen = onOpen
+        self.onClose = onClose
+    }
+
+    nonisolated func urlSession(
+        _ session: URLSession,
+        webSocketTask: URLSessionWebSocketTask,
+        didOpenWithProtocol protocol: String?
+    ) {
+        onOpen()
+    }
+
+    nonisolated func urlSession(
+        _ session: URLSession,
+        webSocketTask: URLSessionWebSocketTask,
+        didCloseWith closeCode: URLSessionWebSocketTask.CloseCode,
+        reason: Data?
+    ) {
+        onClose(closeCode, reason)
     }
 }

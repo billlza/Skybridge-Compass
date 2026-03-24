@@ -55,6 +55,10 @@
 	<string>SkyBridge 需要访问相机以扫描设备配对二维码。</string>
 	<key>NSSupportsLiveActivities</key>
 	<true/>
+	<key>LSSupportsOpeningDocumentsInPlace</key>
+	<true/>
+	<key>UIFileSharingEnabled</key>
+	<true/>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
 	<key>UISupportedInterfaceOrientations</key>

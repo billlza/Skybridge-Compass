@@ -952,7 +952,8 @@ public class SettingsManager: ObservableObject, Sendable {
         title: String,
         body: String,
         identifier: String = UUID().uuidString,
-        categoryIdentifier: String? = nil
+        categoryIdentifier: String? = nil,
+        userInfo: [AnyHashable: Any] = [:]
     ) {
         guard showSystemNotifications else { return }
 
@@ -972,6 +973,9 @@ public class SettingsManager: ObservableObject, Sendable {
         content.sound = enableSoundAlerts ? .default : nil
         if let categoryIdentifier {
             content.categoryIdentifier = categoryIdentifier
+        }
+        if !userInfo.isEmpty {
+            content.userInfo = userInfo
         }
 
         let request = UNNotificationRequest(identifier: identifier, content: content, trigger: nil)
