@@ -2534,6 +2534,37 @@ public class RemoteDesktopManager: ObservableObject {
         isStreaming = false
         configureSessionClipboardSync()
 
+        if !tearDownTransport {
+            await decoder.cleanup()
+
+            currentFrame = nil
+            flushRenderedVideoFeeds()
+            renderPipelineStatus = .waiting
+            lastDamageRectCount = 0
+            lastDamageUsesFullFrameFallback = false
+            currentCursorPayload = nil
+            currentOverlayPayload = nil
+#if canImport(UIKit)
+            currentCursorImage = nil
+#endif
+            latency = 0
+            resolution = .zero
+            pendingFrames.removeAll()
+            decodeQueueWaitingForSyncFrame = false
+            resetFrameTelemetry()
+            lastViewerInteractionAt = nil
+            lastContinuityRecoveryAt = nil
+            transportStatusText = currentTransportStatusText()
+
+            let hasPreservedTransport = currentConnection != nil && activeTransportMode != .none
+            state = hasPreservedTransport ? .connected : .disconnected
+
+            if wasCrossNetworkTransport && hasPreservedTransport {
+                crossNetwork.armIdleConnectionReminderIfNeeded()
+            }
+            return
+        }
+
         if shouldDisconnectCrossNetworkSession {
             await crossNetwork.disconnect(clearSnapshot: true)
         }

@@ -331,6 +331,42 @@ final class RegressionHardeningTests: XCTestCase {
     }
 
     @MainActor
+    func testDashboardViewModelRefreshesStatusWhenNegotiatedSuitePublishes() async {
+        let manager = P2PConnectionManager.instance
+        let viewModel = DashboardViewModel.shared
+        let runtimePeerId = "host:192.168.1.57"
+        let declaredDeviceId = UUID().uuidString.lowercased()
+        let stablePeerId = "id:\(declaredDeviceId)"
+        let connectedText = RuntimeLocalization.string("已连接")
+
+        manager.installTestPeerRuntimeState(
+            runtimePeerId: runtimePeerId,
+            status: .connected,
+            name: "Classic Peer",
+            ipAddress: "192.168.1.57"
+        )
+        _ = manager.testPromotePeerPresentationIdentity(
+            runtimePeerId: runtimePeerId,
+            declaredDeviceId: declaredDeviceId,
+            deviceName: "Stable Mac",
+            modelName: "MacBook Pro",
+            platform: "macOS",
+            osVersion: "15.0"
+        )
+
+        await Task.yield()
+        XCTAssertEqual(viewModel.topConnectionPresentation.statusText, connectedText)
+
+        manager.testInstallNegotiatedSuite(.x25519Ed25519, for: runtimePeerId)
+
+        await Task.yield()
+        XCTAssertEqual(viewModel.topConnectionPresentation.statusText, "Classic\(connectedText)")
+
+        manager.testSimulateTerminalCleanup(runtimePeerId: runtimePeerId)
+        XCTAssertNil(manager.negotiatedSuiteByDeviceId[stablePeerId])
+    }
+
+    @MainActor
     func testP2PConnectionManagerResolvesPresentationPeerIdBackToRuntimePeerId() {
         let manager = P2PConnectionManager.instance
         let runtimePeerId = "host:192.168.1.62"

@@ -542,7 +542,6 @@ struct RemoteDesktopStreamView: View {
                 await remoteDesktopManager.disconnect()
             } else {
                 await remoteDesktopManager.disconnect(tearDownTransport: false)
-                await p2pConnectionManager.disconnect(from: connection.device)
             }
             await MainActor.run {
                 onDisconnect()

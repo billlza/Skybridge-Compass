@@ -1970,6 +1970,36 @@ public class P2PConnectionManager: ObservableObject {
         return nil
     }
 
+    public func resolvedNegotiatedSuite(for device: DiscoveredDevice) -> CryptoSuite? {
+        let resolvedDevice = resolvedPeerDevice(for: device)
+        let runtimePeerId = runtimePeerId(forAnyPeerId: resolvedDevice.id)
+        let presentationPeerId = presentationPeerId(for: runtimePeerId)
+
+        let directCandidates = [
+            device.id,
+            resolvedDevice.id,
+            runtimePeerId,
+            presentationPeerId
+        ]
+        for candidate in directCandidates {
+            if let suite = negotiatedSuiteByDeviceId[candidate] {
+                return suite
+            }
+        }
+
+        let aliases = Set(PeerIdentityAliasResolver.aliasKeys(for: resolvedDevice))
+            .union(PeerIdentityAliasResolver.aliasKeys(for: device))
+            .union(PeerIdentityAliasResolver.lookupCandidates(for: runtimePeerId))
+            .union(PeerIdentityAliasResolver.lookupCandidates(for: presentationPeerId))
+        for candidate in stateKeysMatchingAliases(aliases, keys: negotiatedSuiteByDeviceId.keys) {
+            if let suite = negotiatedSuiteByDeviceId[candidate] {
+                return suite
+            }
+        }
+
+        return nil
+    }
+
     public func resolvedConnectionError(for device: DiscoveredDevice) -> String? {
         let resolvedDevice = resolvedPeerDevice(for: device)
         let targetAliases = Set(PeerIdentityAliasResolver.aliasKeys(for: resolvedDevice))
@@ -3187,7 +3217,33 @@ public class P2PConnectionManager: ObservableObject {
     
     /// 获取设备的协商套件
     public func getNegotiatedSuite(for deviceId: String) -> CryptoSuite? {
-        sessionKeys[canonicalPeerLookupKey(deviceId)]?.negotiatedSuite
+        let canonicalDeviceId = canonicalPeerLookupKey(deviceId)
+        if let suite = sessionKeys[canonicalDeviceId]?.negotiatedSuite {
+            return suite
+        }
+        if let suite = negotiatedSuiteByDeviceId[deviceId] {
+            return suite
+        }
+
+        let runtimePeerId = runtimePeerId(forAnyPeerId: deviceId)
+        let presentationPeerId = presentationPeerId(for: runtimePeerId)
+        let directCandidates = [canonicalDeviceId, runtimePeerId, presentationPeerId]
+        for candidate in directCandidates {
+            if let suite = negotiatedSuiteByDeviceId[candidate] {
+                return suite
+            }
+        }
+
+        let aliases = Set(PeerIdentityAliasResolver.lookupCandidates(for: deviceId))
+            .union(PeerIdentityAliasResolver.lookupCandidates(for: runtimePeerId))
+            .union(PeerIdentityAliasResolver.lookupCandidates(for: presentationPeerId))
+        for candidate in stateKeysMatchingAliases(aliases, keys: negotiatedSuiteByDeviceId.keys) {
+            if let suite = negotiatedSuiteByDeviceId[candidate] {
+                return suite
+            }
+        }
+
+        return nil
     }
     
     private func send(data: Data, over connection: NWConnection) async throws {

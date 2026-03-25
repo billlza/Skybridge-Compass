@@ -173,6 +173,13 @@ public class DashboardViewModel: ObservableObject {
                 self?.updateMetrics()
             }
             .store(in: &cancellables)
+
+        P2PConnectionManager.instance.$negotiatedSuiteByDeviceId
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.updateConnectionPresentation()
+            }
+            .store(in: &cancellables)
         
         // 监听文件传输变化（活跃 + 历史），确保首页能看到“进行中/已完成”
         Publishers.CombineLatest(
@@ -267,6 +274,7 @@ public class DashboardViewModel: ObservableObject {
     }
 
     private func updateConnectionPresentation() {
+        let connectionManager = P2PConnectionManager.instance
         let latestPeerConnection = activeConnections
             .sorted { $0.connectedAt > $1.connectedAt }
             .first
@@ -274,7 +282,7 @@ public class DashboardViewModel: ObservableObject {
                 ConnectionPresentationPeer(
                     displayName: connection.device.name,
                     cryptoKind: nil,
-                    suite: P2PConnectionManager.instance.negotiatedSuiteByDeviceId[connection.device.id]?.rawValue,
+                    suite: connectionManager.resolvedNegotiatedSuite(for: connection.device)?.rawValue,
                     guardStatus: RuntimeLocalization.string("守护中"),
                     connectedAt: connection.connectedAt
                 )

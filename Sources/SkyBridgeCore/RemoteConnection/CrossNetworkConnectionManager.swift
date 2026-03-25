@@ -1859,36 +1859,46 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         connectionStatus = .generating
         readiness = .idle
 
-        let localBinding = try await currentPathLocalBinding()
-        let admissionLease = try await requestAdmissionLease(for: localBinding)
-        let lease = try await signalServer.registerConnectionCode(
-            admissionToken: admissionLease.token,
-            deviceName: Host.current().localizedName ?? "Mac",
-            validDuration: requestedLeaseMode.validDuration
-        )
-        let code = lease.code
-        webrtcSignalingAuthTokenBySessionId[lease.sessionID] = lease.sessionToken
-        webrtcTurnAdmissionLeaseBySessionId[lease.sessionID] = lease.turnAdmissionLease
-        currentPathSignalingOriginBySessionId[lease.sessionID] = lease.signalingServerOrigin
+        do {
+            let localBinding = try await currentPathLocalBinding()
+            let admissionLease = try await requestAdmissionLease(for: localBinding)
+            let lease = try await signalServer.registerConnectionCode(
+                admissionToken: admissionLease.token,
+                deviceName: Host.current().localizedName ?? "Mac",
+                validDuration: requestedLeaseMode.validDuration
+            )
+            let code = lease.code
+            webrtcSignalingAuthTokenBySessionId[lease.sessionID] = lease.sessionToken
+            webrtcTurnAdmissionLeaseBySessionId[lease.sessionID] = lease.turnAdmissionLease
+            currentPathSignalingOriginBySessionId[lease.sessionID] = lease.signalingServerOrigin
 
-        // 2) 当前主路径由服务端发放短期 code + initiator token，code 同时作为 WebRTC sessionId。
-        self.connectionCode = code
-        self.connectionCodeExpiresAt = Date().addingTimeInterval(lease.expiresIn)
-        self.activeConnectionCodeLeaseMode = requestedLeaseMode
-        self.connectionStatus = .waiting(code: code)
-        self.readiness = .idle
+            // 2) 当前主路径由服务端发放短期 code + initiator token，code 同时作为 WebRTC sessionId。
+            self.connectionCode = code
+            self.connectionCodeExpiresAt = Date().addingTimeInterval(lease.expiresIn)
+            self.activeConnectionCodeLeaseMode = requestedLeaseMode
+            self.connectionStatus = .waiting(code: code)
+            self.readiness = .idle
 
-        // 3) 启动 WebRTC offerer（等待对端输入同一 code 后 join，同会话完成 SDP/ICE，DataChannel ready）
-        startWebRTCOfferSession(sessionID: lease.sessionID)
+            // 3) 启动 WebRTC offerer（等待对端输入同一 code 后 join，同会话完成 SDP/ICE，DataChannel ready）
+            startWebRTCOfferSession(sessionID: lease.sessionID)
 
-        logger.info("✅ 连接码生成成功: \(code)")
-        return code
+            logger.info("✅ 连接码生成成功: \(code)")
+            return code
+        } catch {
+            logger.error("❌ 生成连接码失败: \(error.localizedDescription, privacy: .public)")
+            connectionStatus = .failed(error.localizedDescription)
+            readiness = .idle
+            throw error
+        }
     }
 
     /// 通过连接码连接
     public func connectWithCode(_ code: String) async throws -> RemoteConnection {
         guard let normalized = Self.normalizeConnectionCode(code) else {
-            throw CrossNetworkConnectionError.invalidDevice
+            let error = CrossNetworkConnectionError.invalidDevice
+            connectionStatus = .failed(error.localizedDescription)
+            readiness = .idle
+            throw error
         }
         logger.info("使用连接码连接: \(normalized)")
 
@@ -1929,114 +1939,121 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         connectionStatus = .connecting
         readiness = .idle
 
-        let localBinding = try await currentPathLocalBinding()
-        let admissionLease = try await requestAdmissionLease(for: localBinding)
-        let lookup = try await signalServer.lookupConnectionCode(
-            admissionToken: admissionLease.token,
-            code: normalized
-        )
-        _ = try validateCurrentPathOrigin(lookup.signalingServerOrigin)
-        webrtcSignalingAuthTokenBySessionId[lookup.sessionID] = lookup.sessionToken
-        webrtcTurnAdmissionLeaseBySessionId[lookup.sessionID] = lookup.turnAdmissionLease
-        currentPathSignalingOriginBySessionId[lookup.sessionID] = lookup.signalingServerOrigin
-        currentPathExpectedRemoteAuthorityBySessionId[lookup.sessionID] = CurrentPathRemoteAuthority(
-            deviceId: lookup.initiatorDeviceId,
-            protocolSigningAlgorithm: lookup.initiatorProtocolSigningAlgorithm,
-            protocolPublicKeyFingerprint: lookup.initiatorProtocolPublicKeyFingerprint,
-            protocolPublicKeyBytes: nil,
-            deviceName: lookup.initiatorDeviceName
-        )
-        let snapshotMetadata = prepareSessionSnapshotMetadata(
-            sessionID: sessionID,
-            source: .code,
-            deviceId: lookup.initiatorDeviceId,
-            deviceName: lookup.initiatorDeviceName
-        )
-        activatePreparedSessionSnapshot(sessionID: sessionID, phase: .connecting)
-
-        try await ensureSignalingConnected(shardKey: sessionID)
-
-        // 动态获取 TURN 凭据（带缓存和回退）
-        let ice = await SkyBridgeServerConfig.dynamicICEConfig(
-            sessionID: sessionID,
-            turnAdmissionLease: webrtcTurnAdmissionLeaseBySessionId[sessionID]
-        )
-        logICEPlan(ice, context: "连接码模式")
-
-        let localDeviceId = localBinding.deviceId
-        let session = WebRTCSession(sessionId: sessionID, localDeviceId: localDeviceId, role: .answerer, ice: ice)
-
-        session.onLocalAnswer = { [weak self] sdp in
-            guard let self else { return }
-            Task { @MainActor in
-                self.webrtcLatestAnswerBySessionId[sessionID] = sdp
-                await self.sendSignal(.init(sessionId: sessionID, from: localDeviceId, type: .answer, payload: .init(sdp: sdp)))
-            }
-        }
-        session.onLocalICECandidate = { [weak self] payload in
-            guard let self else { return }
-            Task { @MainActor in
-                self.cacheLocalICECandidate(payload, for: sessionID)
-                await self.sendSignal(.init(sessionId: sessionID, from: localDeviceId, type: .iceCandidate, payload: payload))
-            }
-        }
-        session.onDisconnected = { [weak self] reason in
-            guard let self else { return }
-            Task { @MainActor in
-                guard self.webrtcSessionsBySessionId[sessionID] != nil else { return }
-                self.cleanupWebRTCSession(
-                    sessionID,
-                    reason: "transport_disconnected:\(reason)",
-                    disconnectKind: .transient,
-                    snapshotToken: snapshotMetadata.snapshotToken
-                )
-                self.connectionStatus = .failed("WebRTC transport disconnected: \(reason)")
-                self.readiness = .idle
-            }
-        }
-        session.onReady = { [weak self] in
-            guard let self else { return }
-            Task { @MainActor in
-                self.logger.info("✅ WebRTC answerer ready: session=\(sessionID, privacy: .public)")
-                self.stopJoinHeartbeat(for: sessionID)
-                self.currentConnection = RemoteConnection(id: sessionID, deviceName: "Remote Device", transport: .webrtc(session))
-                self.connectionStatus = .connecting
-                self.readiness = .transportReady(sessionId: sessionID)
-                self.startWebRTCLivenessWatchdogIfNeeded(for: sessionID)
-                self.updatePreparedSessionSnapshot(
-                    sessionID: sessionID,
-                    phase: .transportReady,
-                    deviceId: lookup.initiatorDeviceId,
-                    deviceName: lookup.initiatorDeviceName,
-                    snapshotToken: snapshotMetadata.snapshotToken
-                )
-                self.startWebRTCInboundHandshakeAndControlLoop(sessionID: sessionID, session: session, endpointDescription: "webrtc:\(sessionID)")
-            }
-        }
-
-        webrtcSessionsBySessionId[sessionID] = session
-
         do {
-            try session.start()
-        } catch {
-            logger.error("❌ connectWithCode(WebRTC) start failed: \(error.localizedDescription, privacy: .public)")
-            cleanupWebRTCSession(
-                sessionID,
-                reason: "answerer_start_failed",
-                disconnectKind: .explicit,
-                snapshotToken: snapshotMetadata.snapshotToken
+            let localBinding = try await currentPathLocalBinding()
+            let admissionLease = try await requestAdmissionLease(for: localBinding)
+            let lookup = try await signalServer.lookupConnectionCode(
+                admissionToken: admissionLease.token,
+                code: normalized
             )
+            _ = try validateCurrentPathOrigin(lookup.signalingServerOrigin)
+            webrtcSignalingAuthTokenBySessionId[lookup.sessionID] = lookup.sessionToken
+            webrtcTurnAdmissionLeaseBySessionId[lookup.sessionID] = lookup.turnAdmissionLease
+            currentPathSignalingOriginBySessionId[lookup.sessionID] = lookup.signalingServerOrigin
+            currentPathExpectedRemoteAuthorityBySessionId[lookup.sessionID] = CurrentPathRemoteAuthority(
+                deviceId: lookup.initiatorDeviceId,
+                protocolSigningAlgorithm: lookup.initiatorProtocolSigningAlgorithm,
+                protocolPublicKeyFingerprint: lookup.initiatorProtocolPublicKeyFingerprint,
+                protocolPublicKeyBytes: nil,
+                deviceName: lookup.initiatorDeviceName
+            )
+            let snapshotMetadata = prepareSessionSnapshotMetadata(
+                sessionID: sessionID,
+                source: .code,
+                deviceId: lookup.initiatorDeviceId,
+                deviceName: lookup.initiatorDeviceName
+            )
+            activatePreparedSessionSnapshot(sessionID: sessionID, phase: .connecting)
+
+            try await ensureSignalingConnected(shardKey: sessionID)
+
+            // 动态获取 TURN 凭据（带缓存和回退）
+            let ice = await SkyBridgeServerConfig.dynamicICEConfig(
+                sessionID: sessionID,
+                turnAdmissionLease: webrtcTurnAdmissionLeaseBySessionId[sessionID]
+            )
+            logICEPlan(ice, context: "连接码模式")
+
+            let localDeviceId = localBinding.deviceId
+            let session = WebRTCSession(sessionId: sessionID, localDeviceId: localDeviceId, role: .answerer, ice: ice)
+
+            session.onLocalAnswer = { [weak self] sdp in
+                guard let self else { return }
+                Task { @MainActor in
+                    self.webrtcLatestAnswerBySessionId[sessionID] = sdp
+                    await self.sendSignal(.init(sessionId: sessionID, from: localDeviceId, type: .answer, payload: .init(sdp: sdp)))
+                }
+            }
+            session.onLocalICECandidate = { [weak self] payload in
+                guard let self else { return }
+                Task { @MainActor in
+                    self.cacheLocalICECandidate(payload, for: sessionID)
+                    await self.sendSignal(.init(sessionId: sessionID, from: localDeviceId, type: .iceCandidate, payload: payload))
+                }
+            }
+            session.onDisconnected = { [weak self] reason in
+                guard let self else { return }
+                Task { @MainActor in
+                    guard self.webrtcSessionsBySessionId[sessionID] != nil else { return }
+                    self.cleanupWebRTCSession(
+                        sessionID,
+                        reason: "transport_disconnected:\(reason)",
+                        disconnectKind: .transient,
+                        snapshotToken: snapshotMetadata.snapshotToken
+                    )
+                    self.connectionStatus = .failed("WebRTC transport disconnected: \(reason)")
+                    self.readiness = .idle
+                }
+            }
+            session.onReady = { [weak self] in
+                guard let self else { return }
+                Task { @MainActor in
+                    self.logger.info("✅ WebRTC answerer ready: session=\(sessionID, privacy: .public)")
+                    self.stopJoinHeartbeat(for: sessionID)
+                    self.currentConnection = RemoteConnection(id: sessionID, deviceName: "Remote Device", transport: .webrtc(session))
+                    self.connectionStatus = .connecting
+                    self.readiness = .transportReady(sessionId: sessionID)
+                    self.startWebRTCLivenessWatchdogIfNeeded(for: sessionID)
+                    self.updatePreparedSessionSnapshot(
+                        sessionID: sessionID,
+                        phase: .transportReady,
+                        deviceId: lookup.initiatorDeviceId,
+                        deviceName: lookup.initiatorDeviceName,
+                        snapshotToken: snapshotMetadata.snapshotToken
+                    )
+                    self.startWebRTCInboundHandshakeAndControlLoop(sessionID: sessionID, session: session, endpointDescription: "webrtc:\(sessionID)")
+                }
+            }
+
+            webrtcSessionsBySessionId[sessionID] = session
+
+            do {
+                try session.start()
+            } catch {
+                logger.error("❌ connectWithCode(WebRTC) start failed: \(error.localizedDescription, privacy: .public)")
+                cleanupWebRTCSession(
+                    sessionID,
+                    reason: "answerer_start_failed",
+                    disconnectKind: .explicit,
+                    snapshotToken: snapshotMetadata.snapshotToken
+                )
+                connectionStatus = .failed(error.localizedDescription)
+                readiness = .idle
+                throw error
+            }
+
+            // 主动加入会话并在短时间内心跳重发，避免 WS 时序抖动导致 offer 丢失。
+            await sendSignal(.init(sessionId: sessionID, from: localDeviceId, type: .join, payload: nil), retries: 2)
+            startJoinHeartbeat(for: sessionID)
+            let connection = RemoteConnection(id: sessionID, deviceName: "Remote Device", transport: .webrtc(session))
+            logger.info("✅ 通过连接码开始连接（等待对端 offer）")
+            return connection
+        } catch {
+            logger.error("❌ 连接码连接失败: \(error.localizedDescription, privacy: .public)")
             connectionStatus = .failed(error.localizedDescription)
             readiness = .idle
             throw error
         }
-
-        // 主动加入会话并在短时间内心跳重发，避免 WS 时序抖动导致 offer 丢失。
-        await sendSignal(.init(sessionId: sessionID, from: localDeviceId, type: .join, payload: nil), retries: 2)
-        startJoinHeartbeat(for: sessionID)
-        let connection = RemoteConnection(id: sessionID, deviceName: "Remote Device", transport: .webrtc(session))
-        logger.info("✅ 通过连接码开始连接（等待对端 offer）")
-        return connection
     }
 
  // MARK: - 私有方法 - P2P 连接建立

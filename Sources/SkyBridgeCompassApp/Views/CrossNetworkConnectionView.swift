@@ -440,7 +440,13 @@ struct CrossNetworkConnectionView: View {
 
                                 Button(action: {
                                     Task {
-                                        try? await connectionManager.generateConnectionCode()
+                                        do {
+                                            qrCodeErrorMessage = nil
+                                            _ = try await connectionManager.generateConnectionCode()
+                                        } catch {
+                                            logger.error("❌ 重新生成连接码失败: \(error.localizedDescription, privacy: .public)")
+                                            qrCodeErrorMessage = error.localizedDescription
+                                        }
                                     }
                                 }) {
                                     Label(LocalizationManager.shared.localizedString("connection.regenerate"), systemImage: "arrow.clockwise")
@@ -462,7 +468,13 @@ struct CrossNetworkConnectionView: View {
                     } else {
                         Button(action: {
                             Task {
-                                try? await connectionManager.generateConnectionCode()
+                                do {
+                                    qrCodeErrorMessage = nil
+                                    _ = try await connectionManager.generateConnectionCode()
+                                } catch {
+                                    logger.error("❌ 生成连接码失败: \(error.localizedDescription, privacy: .public)")
+                                    qrCodeErrorMessage = error.localizedDescription
+                                }
                             }
                         }) {
                             VStack(spacing: 16) {
@@ -528,7 +540,13 @@ struct CrossNetworkConnectionView: View {
 
                         Button(action: {
                             Task {
-                                try? await connectionManager.connectWithCode(inputCode)
+                                do {
+                                    qrCodeErrorMessage = nil
+                                    _ = try await connectionManager.connectWithCode(inputCode)
+                                } catch {
+                                    logger.error("❌ 连接码连接失败: \(error.localizedDescription, privacy: .public)")
+                                    qrCodeErrorMessage = error.localizedDescription
+                                }
                             }
                         }) {
                             HStack {
