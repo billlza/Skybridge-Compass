@@ -310,7 +310,7 @@ else
   install_name_tool -add_rpath "@executable_path/../Frameworks" "${APP_BIN}" 2>/dev/null || true
 fi
 
-log "拷贝 Swift 运行时 dylib 到 .app/Contents/Frameworks/（Xcode 26+/Swift 6.2 工具链）"
+log "拷贝 Swift 运行时 dylib 到 .app/Contents/Frameworks/（Xcode 26+/Swift 6.3 工具链）"
 # 说明：在部分 Xcode/toolchain 下 --unsigned-destination 行为异常，这里使用 --destination。
 if xcrun -f swift-stdlib-tool >/dev/null 2>&1; then
   xcrun swift-stdlib-tool --copy --verbose \

@@ -4,9 +4,9 @@
 
 ### 系统要求
 - macOS 14.0+ (Sonoma 或更新版本)
-- Xcode 26.2+ 
+- Xcode 26.4+
 - iOS 17.0+ 模拟器或真机
-- Swift 6.2+
+- Swift 6.3+
 - Apple 开发者账号（用于真机测试）
 
 ### 依赖项
@@ -88,7 +88,7 @@ open SkyBridgeCompass-iOS.xcodeproj
 ### 问题 2: 编译错误 - Swift 版本不匹配
 
 **解决方案：**
-- 确保使用 Xcode 26.2+ 和 Swift 6.2+
+- 确保使用 Xcode 26.4+ 和 Swift 6.3+
 - 更新到最新的 Xcode 版本
 
 ### 问题 3: 本地网络权限不起作用

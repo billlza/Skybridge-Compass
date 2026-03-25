@@ -498,7 +498,7 @@ public class DeviceDiscoveryManager: BaseManager {
     }
  /// 异步添加发现的设备（后台解析 + 主线程回填）
     private func addDiscoveredDeviceAsync(from result: NWBrowser.Result, serviceType: String) {
-        Task.detached { [serviceType, weak self] in
+        Task(priority: .userInitiated) { [serviceType, weak self] in
             guard let self = self else { return }
 
             let deviceName = Self.DDM_ExtractDeviceName(result)
@@ -517,7 +517,7 @@ public class DeviceDiscoveryManager: BaseManager {
             }
 
  // 推断设备来源
-            let source = await self.inferSource(from: serviceType)
+            let source = self.inferSource(from: serviceType)
 
             var device = DiscoveredDevice(
                 id: UUID(),
@@ -663,7 +663,7 @@ public class DeviceDiscoveryManager: BaseManager {
             // iOS 端会在此连接上发起 HandshakeDriver 握手；这里必须读取并回包，否则对端必然 timeout
             // 重要：DeviceDiscoveryManager 是 @MainActor；入站读取/握手必须放到后台，
             // 否则主线程繁忙时会“只打印启用通道”但永远读不到帧。
-            Task.detached(priority: .userInitiated) {
+            Task(priority: .userInitiated) {
                 await Self.consumeInboundHandshakeOrControlChannel(connection)
             }
         case .failed(let error):

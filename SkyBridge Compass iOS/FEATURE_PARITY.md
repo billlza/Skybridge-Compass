@@ -30,9 +30,8 @@
 - **AppIcon/资产**：`Assets.xcassets/AppIcon` 已补齐并接入 Xcode Resources build phase
 - **隐私权限文案**：`Info.plist` 已补齐本地网络/Bonjour/相机/照片等描述
 - **版本号**：`CFBundleShortVersionString=1.0.0`、`CFBundleVersion=1`（可按发布节奏递增）
-- **构建设置**：工程 `SWIFT_VERSION` 提升到 6.0（贴近 Swift 6.2 代码与推荐设置）
+- **构建设置**：工程 `SWIFT_VERSION` 提升到 6.0（贴近 Swift 6.3 代码与推荐设置）
 - **功能一致性**：对照 macOS 端做一次“互通冒烟测试”
   - 发现 → 连接 → PQC 验证 → 文件传输（双向）
   - 远程桌面（如承诺给用户）/否则 UI 标注 Beta
-
 

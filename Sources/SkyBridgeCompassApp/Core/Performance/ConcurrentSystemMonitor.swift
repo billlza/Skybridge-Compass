@@ -54,17 +54,30 @@ public actor ConcurrentSystemMonitor {
         monitoringTasks[type]?.cancel()
 
         let interval: TimeInterval
+        let priority: _Concurrency.TaskPriority
         switch type {
-        case .cpu: interval = 1.0
-        case .gpu: interval = 1.0
-        case .memory: interval = 2.0
-        case .network: interval = 1.0
-        case .battery: interval = 10.0
-        case .thermal: interval = 2.0
+        case .cpu:
+            interval = 1.0
+            priority = .medium
+        case .gpu:
+            interval = 1.0
+            priority = .medium
+        case .memory:
+            interval = 2.0
+            priority = .background
+        case .network:
+            interval = 1.0
+            priority = .medium
+        case .battery:
+            interval = 10.0
+            priority = .background
+        case .thermal:
+            interval = 2.0
+            priority = .background
         }
 
         let monitorType = type
-        monitoringTasks[type] = Task.detached { [weak self] in
+        monitoringTasks[type] = Task(priority: priority) { [weak self] in
             guard let self else { return }
             while !Task.isCancelled {
                 await self.performMonitoring(for: monitorType)

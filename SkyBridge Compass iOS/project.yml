@@ -4,7 +4,12 @@ options:
   bundleIdPrefix: com.skybridge
   deploymentTarget:
     iOS: "17.0"
-  xcodeVersion: "26.3"
+  xcodeVersion: "26.4"
+
+settings:
+  base:
+    # Note: SWIFT_VERSION is the Swift language major (6.0). Minor (6.3+) is provided by the Xcode 26.4 toolchain.
+    SWIFT_VERSION: "6.0"
 
 packages:
   WebRTCLocal:
@@ -19,6 +24,13 @@ targets:
     info:
       path: "SkyBridgeCompassiOS/Supporting Files/Info.plist"
       properties:
+        CFBundleURLTypes:
+          - CFBundleURLName: com.skybridge.compass.ios
+            CFBundleURLSchemes:
+              - skybridge
+        NEBULA_BASE_URL: "https://nebula.skybridge.com"
+        NEBULA_CLIENT_ID: "skybridge_compass_ios"
+        NEBULA_CLIENT_SECRET: ""
         NSSupportsLiveActivities: true
         NSLocalNetworkUsageDescription: "SkyBridge 需要访问本地网络以发现和连接附近设备。"
         NSBonjourServices:
@@ -26,6 +38,12 @@ targets:
           - _skybridge._udp
           - _skybridge-transfer._tcp
           - _skybridge-remote._tcp
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        NSLocationWhenInUseUsageDescription: "SkyBridge 使用你的位置信息来获取本地天气并优化网络状态展示。"
+        NSCameraUsageDescription: "SkyBridge 需要访问相机以扫描设备配对二维码。"
+        LSSupportsOpeningDocumentsInPlace: true
+        UIFileSharingEnabled: true
         UILaunchStoryboardName: LaunchScreen
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait

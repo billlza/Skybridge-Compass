@@ -1218,7 +1218,7 @@ struct AdvancedPreferencesView: View {
                             .font(.caption)
                             .foregroundColor(.secondary)
 
-                        Text("专为 Apple Silicon 优化 • 采用 Swift 6.2 构建")
+                        Text("专为 Apple Silicon 优化 • 采用 Swift 6.3 构建")
                             .font(.caption2)
                             .foregroundColor(.secondary)
                     }
@@ -1639,7 +1639,7 @@ struct AboutPreferencesView: View {
                     Text("核心框架")
                         .font(.headline)
 
-                    TechRow(icon: "swift", name: "Swift 6.2", description: "并发安全、现代化语法")
+                    TechRow(icon: "swift", name: "Swift 6.3", description: "并发安全、现代化语法")
                     TechRow(icon: "swiftui", name: "SwiftUI", description: "声明式 UI 框架")
                     TechRow(icon: "apple.logo", name: "Metal 4", description: "高性能图形渲染")
                     TechRow(icon: "cube.transparent", name: "MetalFX", description: "帧插值和超分辨率")

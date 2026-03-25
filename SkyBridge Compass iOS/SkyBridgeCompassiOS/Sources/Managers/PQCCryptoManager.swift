@@ -96,29 +96,43 @@ public class PQCCryptoManager: ObservableObject {
         }
         return .preferPQC
     }
+
+    private nonisolated static func generateAndPersistPrimaryKeyPairs(
+        using provider: any CryptoProvider,
+        keychainManager: KeychainManager,
+        suite: CryptoSuite
+    ) async throws -> (kem: KeyPair, sig: KeyPair) {
+        async let kem = provider.generateKeyPair(for: .keyExchange)
+        async let sig = provider.generateKeyPair(for: .signing)
+        let generated = try await (kem: kem, sig: sig)
+
+        try keychainManager.savePrivateKey(generated.kem.privateKey.bytes, identifier: "pqc.kem.private.\(suite.wireId)")
+        try keychainManager.savePublicKey(generated.kem.publicKey.bytes, identifier: "pqc.kem.public.\(suite.wireId)")
+        try keychainManager.savePrivateKey(generated.sig.privateKey.bytes, identifier: "pqc.sig.private.\(suite.wireId)")
+        try keychainManager.savePublicKey(generated.sig.publicKey.bytes, identifier: "pqc.sig.public.\(suite.wireId)")
+        return generated
+    }
     
     /// 生成密钥对
     public func generateKeyPair() async throws {
         SkyBridgeLogger.shared.info("🔑 正在生成密钥对 (Suite: \(currentSuite.rawValue))...")
 
-        // 冷启动性能：将重型密钥生成放到后台线程，避免阻塞主线程/UI。
+        // 冷启动性能：将重型密钥生成和 Keychain 落盘都放到后台阶段，避免阻塞主线程/UI。
         let provider = cryptoProvider
+        let suite = currentSuite
+        let keychainManager = keychainManager
         let (kemKeyPair, sigKeyPair) = try await Task.detached(priority: .userInitiated) {
-            let kem = try await provider.generateKeyPair(for: .keyExchange)
-            let sig = try await provider.generateKeyPair(for: .signing)
-            return (kem, sig)
+            try await Self.generateAndPersistPrimaryKeyPairs(
+                using: provider,
+                keychainManager: keychainManager,
+                suite: suite
+            )
         }.value
 
         kemPrivateKey = SecureBytes(data: kemKeyPair.privateKey.bytes)
         kemPublicKey = kemKeyPair.publicKey.bytes
         signingPrivateKey = SecureBytes(data: sigKeyPair.privateKey.bytes)
         signingPublicKey = sigKeyPair.publicKey.bytes
-
-        // 保存到 Keychain
-        try keychainManager.savePrivateKey(kemKeyPair.privateKey.bytes, identifier: "pqc.kem.private.\(currentSuite.wireId)")
-        try keychainManager.savePublicKey(kemKeyPair.publicKey.bytes, identifier: "pqc.kem.public.\(currentSuite.wireId)")
-        try keychainManager.savePrivateKey(sigKeyPair.privateKey.bytes, identifier: "pqc.sig.private.\(currentSuite.wireId)")
-        try keychainManager.savePublicKey(sigKeyPair.publicKey.bytes, identifier: "pqc.sig.public.\(currentSuite.wireId)")
 
         hasKeyPair = true
         keyGenerationDate = Date()

@@ -454,7 +454,7 @@ struct AboutWindow: View {
                 HStack(spacing: 20) {
                     TechBadge(icon: "cpu", text: "Apple Silicon")
                     TechBadge(icon: "cube.transparent", text: "Metal 4")
-                    TechBadge(icon: "bolt.fill", text: "Swift 6.2")
+                    TechBadge(icon: "bolt.fill", text: "Swift 6.3")
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -503,7 +503,7 @@ struct AboutWindow: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
                 
-                Text("专为 Apple Silicon 优化 • 采用 Swift 6.2 构建")
+                Text("专为 Apple Silicon 优化 • 采用 Swift 6.3 构建")
                     .font(.caption2)
                     .foregroundColor(.secondary)
             }

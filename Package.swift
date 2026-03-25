@@ -1,4 +1,4 @@
-// swift-tools-version: 6.2
+// swift-tools-version: 6.3
 import Foundation
 import PackageDescription
 
@@ -10,7 +10,8 @@ let webRTCHeadersIncludePath = "\(packageRootPath)/Sources/Vendor/WebRTCHeaders"
 // Why: Swift does not provide a compile-time "SDK has PQC types" check for structs like MLKEM/MLDSA.
 // If we define HAS_APPLE_PQC_SDK while compiling against an older SDK, the build will fail.
 //
-// Therefore we enable it only when the build environment explicitly opts in (release pipeline / Xcode 26).
+// With the Swift 6.3 / Xcode 26.4 baseline, the bundled Apple SDK already contains the PQC types.
+// Keep a manual override so packaging/debugging can still force-disable the native path when needed.
 func shouldEnableApplePQCSDK() -> Bool {
     if let rawOverride = ProcessInfo.processInfo.environment["SKYBRIDGE_ENABLE_APPLE_PQC_SDK"]?
         .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -24,58 +25,11 @@ func shouldEnableApplePQCSDK() -> Bool {
             break
         }
     }
-    // Auto-enable when building with a 26.x SDK (Xcode 26 / iOS 26 / macOS 26).
-    //
-    // Notes:
-    // - In Xcode builds, SDKROOT is sometimes an unversioned path like ".../MacOSX.sdk".
-    // - But the build environment often exposes a target triple / SDK name that includes "26.0".
-    //
-    // We therefore look at multiple hints, and enable when ANY suggests a 26.x SDK.
-    let hints: [String] = [
-        ProcessInfo.processInfo.environment["SDKROOT"] ?? "",
-        ProcessInfo.processInfo.environment["SDK_NAME"] ?? "",
-        ProcessInfo.processInfo.environment["PLATFORM_NAME"] ?? "",
-        ProcessInfo.processInfo.environment["TARGET_TRIPLE"] ?? "",
-        ProcessInfo.processInfo.environment["SWIFT_TARGET_TRIPLE"] ?? "",
-        ProcessInfo.processInfo.environment["LLVM_TARGET_TRIPLE"] ?? ""
-    ]
-    let joined = hints.joined(separator: " ").lowercased()
-    if joined.contains("macosx26") { return true }
-    if joined.contains("iphoneos26") { return true }
-    if joined.contains("iphonesimulator26") { return true }
-
-    // Final fallback: ask Xcode which SDKs are installed.
-    // This works even when SDKROOT/SDK_NAME are not exported (common in some SwiftPM/Xcode invocation paths).
-    //
-    // Safety: defining HAS_APPLE_PQC_SDK is safe as long as the SDK *has* the PQC types; runtime gating is
-    // still done via `#available(iOS 26, macOS 26, *)`.
-    func sdkMajorVersion(_ sdk: String) -> Int? {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
-        proc.arguments = ["--sdk", sdk, "--show-sdk-version"]
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        proc.standardError = Pipe()
-        do {
-            try proc.run()
-        } catch {
-            return nil
-        }
-        proc.waitUntilExit()
-        guard proc.terminationStatus == 0 else { return nil }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        guard let raw = String(data: data, encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-              let first = raw.split(separator: ".").first,
-              let major = Int(first) else { return nil }
-        return major
-    }
-
-    if let major = sdkMajorVersion("macosx"), major >= 26 { return true }
-    if let major = sdkMajorVersion("iphoneos"), major >= 26 { return true }
-    if let major = sdkMajorVersion("iphonesimulator"), major >= 26 { return true }
-
+    #if swift(>=6.3)
+    return true
+    #else
     return false
+    #endif
 }
 
 let enableApplePQCSDK: Bool = shouldEnableApplePQCSDK()
@@ -224,7 +178,7 @@ let package = Package(
                 "SkyBridgeWidgetShared"
             ],
             path: "Sources/SkyBridgeCore",
-            // 排除文档文件，避免未处理文件警告 - 符合Swift 6.2.3最佳实践
+            // 排除文档文件，避免未处理文件警告 - 符合 Swift 6.3 最佳实践
             exclude: [
                 "RemoteDesktop/UltraStream/README.md",
                 "Weather/PerformanceOptimization.md"
@@ -248,7 +202,7 @@ let package = Package(
                 // Apple Silicon特定优化
                 .define("APPLE_SILICON_OPTIMIZED"),
                 .define("ARM64_NATIVE"),
-                // Swift 6.2 严格并发控制
+                // Swift 6.3 严格并发控制
                 .enableUpcomingFeature("StrictConcurrency"),
                 // Suppress deprecated declarations coming from imported Objective‑C headers inside WebRTC.xcframework
                 // (e.g., RTCNSGLVideoView uses NSOpenGLView/NSOpenGLPixelFormat which are deprecated on macOS).
@@ -295,7 +249,7 @@ let package = Package(
                 // Apple Silicon特定优化
                 .define("APPLE_SILICON_OPTIMIZED"),
                 .define("ARM64_NATIVE"),
-                // Swift 6.2 严格并发控制
+                // Swift 6.3 严格并发控制
                 .enableUpcomingFeature("StrictConcurrency"),
                 // Suppress deprecated declarations coming from imported Objective‑C headers inside WebRTC.xcframework
                 // (e.g., RTCNSGLVideoView uses NSOpenGLView/NSOpenGLPixelFormat which are deprecated on macOS).
@@ -360,7 +314,7 @@ let package = Package(
                 .product(name: "OrderedCollections", package: "swift-collections")
             ],
             path: "Sources/SkyBridgeCompassApp",
-            // 排除配置文件和文档 - 符合Swift 6.2.1最佳实践
+            // 排除配置文件和文档 - 符合 Swift 6.3 最佳实践
             exclude: [
                 "Info.plist",
                 "SkyBridgeCompassApp.entitlements",
@@ -511,6 +465,6 @@ let package = Package(
         )
     ],
     swiftLanguageModes: [
-        .v6 // 启用Swift 6.2完整语言模式，包括严格并发检查和新特性
+        .v6 // 启用 Swift 6.3 完整语言模式，包括严格并发检查和新特性
     ]
 )

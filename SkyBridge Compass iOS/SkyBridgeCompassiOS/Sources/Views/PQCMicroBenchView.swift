@@ -323,8 +323,9 @@ struct PQCMicroBenchView: View {
         sigSuite: String,
         provider: any CryptoProvider
     ) async throws -> SuiteRuntimeRecord {
-        let kem = try await provider.generateKeyPair(for: .keyExchange)
-        let sig = try await provider.generateKeyPair(for: .signing)
+        async let kemKeyPair = provider.generateKeyPair(for: .keyExchange)
+        async let sigKeyPair = provider.generateKeyPair(for: .signing)
+        let (kem, sig) = try await (kemKeyPair, sigKeyPair)
         let runtime = SuiteRuntime(
             provider: provider,
             kemPublicKey: kem.publicKey.bytes,

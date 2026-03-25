@@ -80,29 +80,27 @@ public final class FileTransferListenerService: ObservableObject {
         
         // Try to include stable identity if available (best-effort, non-blocking).
         if #available(macOS 14.0, *) {
-            Task.detached { [weak self] in
+            Task { [weak self] in
                 guard let self else { return }
                 let snap = await SelfIdentityProvider.shared.snapshot()
-                await MainActor.run {
-                    var updated = txt
-                    if !snap.deviceId.isEmpty { updated["deviceId"] = snap.deviceId }
-                    if !snap.pubKeyFP.isEmpty { updated["pubKeyFP"] = snap.pubKeyFP }
-                    updated["uniqueId"] = (snap.deviceId.isEmpty ? serviceName : snap.deviceId)
-                    listener.service = NWListener.Service(name: serviceName, type: self.serviceType, domain: self.serviceDomain, txtRecord: updated)
-                    
-                    // Keep NetService fallback TXT in sync (best-effort).
-                    var updatedData = self.makeNetServiceTXTData(
-                        serviceName: serviceName,
-                        deviceId: snap.deviceId.isEmpty ? nil : snap.deviceId,
-                        pubKeyFP: snap.pubKeyFP.isEmpty ? nil : snap.pubKeyFP,
-                        port: port
-                    )
-                    // Ensure uniqueId aligns with deviceId when available.
-                    if !snap.deviceId.isEmpty {
-                        updatedData["uniqueId"] = snap.deviceId.data(using: .utf8) ?? Data()
-                    }
-                    self.netService?.setTXTRecord(NetService.data(fromTXTRecord: updatedData))
+                var updated = txt
+                if !snap.deviceId.isEmpty { updated["deviceId"] = snap.deviceId }
+                if !snap.pubKeyFP.isEmpty { updated["pubKeyFP"] = snap.pubKeyFP }
+                updated["uniqueId"] = (snap.deviceId.isEmpty ? serviceName : snap.deviceId)
+                listener.service = NWListener.Service(name: serviceName, type: self.serviceType, domain: self.serviceDomain, txtRecord: updated)
+
+                // Keep NetService fallback TXT in sync (best-effort).
+                var updatedData = self.makeNetServiceTXTData(
+                    serviceName: serviceName,
+                    deviceId: snap.deviceId.isEmpty ? nil : snap.deviceId,
+                    pubKeyFP: snap.pubKeyFP.isEmpty ? nil : snap.pubKeyFP,
+                    port: port
+                )
+                // Ensure uniqueId aligns with deviceId when available.
+                if !snap.deviceId.isEmpty {
+                    updatedData["uniqueId"] = snap.deviceId.data(using: .utf8) ?? Data()
                 }
+                self.netService?.setTXTRecord(NetService.data(fromTXTRecord: updatedData))
             }
         }
         

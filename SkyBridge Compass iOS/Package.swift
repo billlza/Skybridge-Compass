@@ -1,4 +1,4 @@
-// swift-tools-version: 6.2
+// swift-tools-version: 6.3
 // SkyBridge Compass iOS - Swift Package Configuration
 // 与 macOS 版本共享核心模块，支持 iOS 17 - iOS 26
 
@@ -11,13 +11,13 @@ import Foundation
 // where executing external processes (e.g. `xcrun`) and relying on build env vars can be unreliable.
 //
 // Instead, we gate PQC compilation on the toolchain Swift version:
-// - Xcode 26.x ships Swift 6.2+ and the iOS 26 SDK with CryptoKit PQC types (MLKEM/MLDSA).
+// - Xcode 26.4+ ships Swift 6.3 and the iOS 26 SDK with CryptoKit PQC types (MLKEM/MLDSA).
 // - Older Xcode versions won't satisfy this and will compile without PQC support.
 //
 // Manual override (rare): set SKYBRIDGE_FORCE_DISABLE_APPLE_PQC_SDK=1 to force classic-only compilation.
 let enableApplePQCSDK: Bool = {
     if ProcessInfo.processInfo.environment["SKYBRIDGE_FORCE_DISABLE_APPLE_PQC_SDK"] == "1" { return false }
-    #if swift(>=6.2)
+    #if swift(>=6.3)
     return true
     #else
     return false

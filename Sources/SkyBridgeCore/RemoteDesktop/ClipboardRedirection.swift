@@ -29,8 +29,11 @@ public final class ClipboardRedirectionManager: ObservableObject, @unchecked Sen
  /// 剪贴板变化观察者
     private var pasteboardChangeObserver: NSObjectProtocol?
     
- /// 远程剪贴板数据缓存（避免循环同步）
+/// 远程剪贴板数据缓存（避免循环同步）
     private var lastRemoteClipboardHash: String?
+
+    /// 本地剪贴板变化计数，放在 actor 状态里避免定时器跨域捕获局部可变值。
+    private var localClipboardChangeCount: Int = 0
     
  /// 同步队列（避免并发问题）
     private let syncQueue = DispatchQueue(label: "com.skybridge.clipboard.sync", attributes: .concurrent)
@@ -76,7 +79,7 @@ public final class ClipboardRedirectionManager: ObservableObject, @unchecked Sen
         stopMonitoringLocalClipboard()
         
         let pasteboard = NSPasteboard.general
-        var changeCount = pasteboard.changeCount
+        localClipboardChangeCount = pasteboard.changeCount
         
  // 使用定时器轮询（macOS 26.x 推荐方式）
         pasteboardChangeObserver = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
@@ -84,8 +87,8 @@ public final class ClipboardRedirectionManager: ObservableObject, @unchecked Sen
                 guard let self, self.isEnabled else { return }
                 let pasteboard = NSPasteboard.general
                 let currentChangeCount = pasteboard.changeCount
-                if currentChangeCount != changeCount {
-                    changeCount = currentChangeCount
+                if currentChangeCount != self.localClipboardChangeCount {
+                    self.localClipboardChangeCount = currentChangeCount
                     self.handleLocalClipboardChange()
                 }
             }
@@ -203,4 +206,3 @@ public final class ClipboardRedirectionManager: ObservableObject, @unchecked Sen
 // MARK: - 导入 CryptoKit 用于哈希计算
 
 import CryptoKit
-

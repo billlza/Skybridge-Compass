@@ -204,14 +204,14 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
  // 改为事件驱动 + 防抖，无需定时器
 
  // 在后台并发启动所有浏览器
-        Task.detached(priority: .userInitiated) { [weak self] in
+        Task(priority: .userInitiated) { [weak self] in
             await self?.startBrowsersConcurrently()
         }
 
  // `_skybridge._tcp` 广播由 P2PDiscoveryService 独占，避免监听器与入站处理权冲突。
         if advertisesLocalSkyBridgeService {
             let serviceTypeForBroadcast = "_skybridge._tcp"
-            Task.detached(priority: .utility) { [weak self, serviceTypeForBroadcast] in
+            Task(priority: .utility) { [weak self, serviceTypeForBroadcast] in
                 await self?.startAdvertisingBackground(serviceType: serviceTypeForBroadcast)
             }
         }
@@ -268,7 +268,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         flushTask = nil
 
  // 取消所有浏览器（在后台）
-        Task.detached { [weak self] in
+        Task { [weak self] in
             guard let self = self else { return }
             await MainActor.run {
                 for browser in self.browsers {
@@ -650,7 +650,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
 
         browser.browseResultsChangedHandler = { [weak self] results, changes in
  // 在后台队列处理结果变化
-            Task.detached(priority: .userInitiated) {
+            Task(priority: .userInitiated) {
                 await self?.handleBrowseResultsChanged(results: results, changes: changes, serviceType: serviceType)
             }
         }
@@ -1422,18 +1422,15 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
     }
 
     private func handleBrowserStateUpdate(_ state: NWBrowser.State, for serviceType: String) {
- // 异步记录日志，不阻塞
-        Task.detached(priority: .background) { [weak self] in
-            switch state {
-            case .ready:
-                self?.logger.info("🔍 浏览器就绪: \(serviceType)")
-            case .failed(let error):
-                self?.logger.error("❌ 浏览器失败 [\(serviceType)]: \(error)")
-            case .cancelled:
-                self?.logger.info("⏹️ 浏览器已取消: \(serviceType)")
-            default:
-                break
-            }
+        switch state {
+        case .ready:
+            logger.info("🔍 浏览器就绪: \(serviceType)")
+        case .failed(let error):
+            logger.error("❌ 浏览器失败 [\(serviceType)]: \(error)")
+        case .cancelled:
+            logger.info("⏹️ 浏览器已取消: \(serviceType)")
+        default:
+            break
         }
     }
 
@@ -1456,7 +1453,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
     private func startAdvertising() {
  // 在后台异步启动 Bonjour 广播，避免占用主线程 RunLoop
         logger.info("📡 开始广播")
-        Task.detached(priority: .utility) { [weak self] in
+        Task(priority: .utility) { [weak self] in
             guard let self = self else { return }
  // 使用统一广播中心，确保同一服务类型只存在一个 NWListener，且运行在全局队列
             do {
@@ -1575,7 +1572,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         connection.stateUpdateHandler = { state in
             switch state {
             case .ready:
-                Task.detached(priority: .userInitiated) {
+                Task(priority: .userInitiated) {
                     await Self.consumeInboundHandshakeOrControlChannel(connection)
                 }
             case .failed, .cancelled:

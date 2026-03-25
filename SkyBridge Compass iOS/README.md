@@ -20,13 +20,13 @@ SkyBridge Compass 的 iOS 版本 - 跨平台设备管理与远程控制应用
 - **iOS 17.0+**（运行目标）  
 - **iOS 26 SDK +**（仅当你要启用 Apple CryptoKit PQC：ML‑KEM/ML‑DSA）
 - **iPadOS 17.0+**
-- **Xcode 26.2+**
-- **Swift 6.2+**
+- **Xcode 26.4+**
+- **Swift 6.3+**
 
 ## 技术栈
 
 ### 核心技术
-- Swift 6.2 (Strict Concurrency)
+- Swift 6.3 (Strict Concurrency)
 - SwiftUI + UIKit
 - Network Framework (P2P 通信)
 - CryptoKit + liboqs (后量子加密)
@@ -69,6 +69,10 @@ SkyBridge Compass iOS/
 - **密钥交换**: ML-KEM-768 / Kyber768
 - **签名验证**: ML-DSA-65 / Dilithium3
 - **混合加密**: X-Wing (Kyber768 + X25519)
+
+说明：
+- 当前仓库的 **论文 / 冻结 artifact 基线** 仍围绕上面这组套件展开。
+- 即便 Apple 原生 PQC API 后续暴露了更高档位或更优实现，当前分支也先把它视为 **实现演进**；只有在重新跑完整 artifact 和论文表格后，才把它升级为论文中的主结论或主基线。
 
 #### 当前“实际协商”的 suite（你现在跑起来看到的）
 - **在随仓库提交的 `SkyBridgeCompass-iOS.xcodeproj` 中**：

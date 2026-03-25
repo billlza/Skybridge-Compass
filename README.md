@@ -24,8 +24,8 @@ SkyBridge Compass Pro 是一个以 **跨平台协议内核（SkyBridgeCore）** 
 
 - macOS 14+
 - Apple Silicon（arm64）Mac（当前 vendored XCFramework 仅提供 arm64 slice，Intel x86_64 暂不支持）
-- Xcode 26.2+
-- Swift 6.2+（由 Xcode 版本提供）
+- Xcode 26.4+
+- Swift 6.3+（由 Xcode 版本提供）
 
 ## Apple PQC（iOS 26+/macOS 26+）在分发包中自动启用
 
@@ -208,6 +208,14 @@ Source archive checksums（immutability 辅助证据）：
 
 说明：
 - 本仓库仍在持续演进；如需形成新的投稿/归档快照，请在最终提交前重新刷新 `artifact` pin 与归档校验和。
+- 当前工作分支已经升级到 `Swift 6.3 / Xcode 26.4`，并会继续吸收实现级优化；这些变更默认视为 **post-artifact engineering evolution**，不会自动改写主论文当前冻结的定量结论。
+- 只有在重新生成 `Artifacts/*.csv`、刷新 `Docs/tables/` / `Docs/supp_tables/`、并重编主论文与 Supplementary PDF 之后，才应更新论文中的数字、artifact pin 和归档校验和。
+
+### 当前分支与论文快照的 PQC 边界
+
+- 当前论文冻结基线仍以 `ML-KEM-768` / `ML-DSA-65` / `X-Wing` 为主，并对应 `2026-01-23` 的 artifact 快照。
+- Apple 平台原生 PQC 能力集合可能比论文基线更宽；当前分支可以继续吸收实现、调度、并发和工程层优化，但**不应**在未重跑实验前把论文主基线直接切换到新的算法档位或新的性能数字。
+- 如果后续决定把论文主线演进到新的 Apple-native PQC 档位或新的 benchmark 结果，建议作为一次明确的 `artifact refresh` 处理，而不是把它混进现有冻结快照。
 
 最小复核流程（需要本机已安装 Xcode/Swift 与 TeXLive；PQC SDK 仅在 macOS 26+ 可用）：
 

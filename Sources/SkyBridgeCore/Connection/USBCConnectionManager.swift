@@ -61,6 +61,9 @@ public struct USBDeviceInfo: Sendable {
 /// USB-C连接管理器 - 支持MFi认证和多设备类型识别
 @MainActor
 public final class USBCConnectionManager: ObservableObject {
+    private final class ResumeState: @unchecked Sendable {
+        var resumed = false
+    }
 
  // MARK: - 发布属性
 
@@ -293,14 +296,14 @@ public final class USBCConnectionManager: ObservableObject {
         let connectionId = UUID()
 
         return try await withCheckedThrowingContinuation { continuation in
-            var resumed = false
+            let resumeState = ResumeState()
 
             connection.stateUpdateHandler = { state in
                 Task { @MainActor in
                     switch state {
                     case .ready:
-                        if !resumed {
-                            resumed = true
+                        if !resumeState.resumed {
+                            resumeState.resumed = true
                             self.connections[connectionId] = connection
                             self.updateStats(for: connectionId)
 
@@ -309,14 +312,14 @@ public final class USBCConnectionManager: ObservableObject {
                             continuation.resume(returning: activeConnection)
                         }
                     case .failed(let error):
-                        if !resumed {
-                            resumed = true
+                        if !resumeState.resumed {
+                            resumeState.resumed = true
                             self.logger.error("USB-C连接失败: \(error.localizedDescription)")
                             continuation.resume(throwing: error)
                         }
                     case .cancelled:
-                        if !resumed {
-                            resumed = true
+                        if !resumeState.resumed {
+                            resumeState.resumed = true
                             continuation.resume(throwing: ConnectionError.networkUnreachable)
                         }
                     default:
