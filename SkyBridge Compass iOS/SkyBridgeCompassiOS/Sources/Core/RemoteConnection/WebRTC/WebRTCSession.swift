@@ -504,6 +504,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             }
             self.hasRemoteDescription = true
             self.flushPendingRemoteICECandidates()
+            self.inspectRemoteVideoTrackIfAvailable(peerConnection: pc)
             self.onTrace?("set-remote-offer applied session=\(self.sessionId)")
             self.createAnswer()
         }
@@ -539,6 +540,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
                 if pc.signalingState == .stable || pc.remoteDescription != nil {
                     self.hasRemoteDescription = true
                     self.flushPendingRemoteICECandidates()
+                    self.inspectRemoteVideoTrackIfAvailable(peerConnection: pc)
                     self.logger.debug("ℹ️ remote answer already applied; ignore. sessionId=\(self.sessionId, privacy: .public)")
                     self.onTrace?("set-remote-answer ignored stable session=\(self.sessionId)")
                     return
@@ -549,6 +551,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             }
             self.hasRemoteDescription = true
             self.flushPendingRemoteICECandidates()
+            self.inspectRemoteVideoTrackIfAvailable(peerConnection: pc)
             self.onTrace?("set-remote-answer applied session=\(self.sessionId)")
         }
 #endif
@@ -636,6 +639,15 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         remoteVideoTrack = track
         onTrace?("remote-video-track session=\(sessionId) ready=\(track != nil ? 1 : 0)")
         onRemoteVideoTrack?(track)
+    }
+
+    private func inspectRemoteVideoTrackIfAvailable(peerConnection: RTCPeerConnection) {
+        for transceiver in peerConnection.transceivers where transceiver.mediaType == .video {
+            if let track = transceiver.receiver.track as? RTCVideoTrack {
+                captureRemoteVideoTrack(track)
+                return
+            }
+        }
     }
 #endif
     
