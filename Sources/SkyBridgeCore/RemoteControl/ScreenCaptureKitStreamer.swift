@@ -58,6 +58,7 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
     private var compressionCallbackRefcon: UnsafeMutableRawPointer?
     private var screenParametersObserver: NSObjectProtocol?
     private var activeSpaceObserver: NSObjectProtocol?
+    private var activeApplicationObserver: NSObjectProtocol?
 
 /// 编码后视频帧的回调
  /// - 参数说明：data 为压缩后比特流；w/h 为视频维度；type 为帧类型（h264/hevc）
@@ -213,8 +214,17 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
         guard started else { return }
         let now = Date()
         var shouldTrigger = false
+        let minimumInterval: TimeInterval = {
+            if reason.contains("active-application") || reason.contains("active-space") {
+                return 0.12
+            }
+            if reason.contains("display-parameters") {
+                return 0.20
+            }
+            return 0.35
+        }()
         stateLock.lock()
-        if now.timeIntervalSince(lastSceneCutRecoveryAt) >= 0.35 {
+        if now.timeIntervalSince(lastSceneCutRecoveryAt) >= minimumInterval {
             lastSceneCutRecoveryAt = now
             pendingParameterSetReannounce = true
             shouldTrigger = true
@@ -248,6 +258,24 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
                 self.requestSceneCutRecovery(reason: "active-space-changed")
             }
         }
+        activeApplicationObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: nil
+        ) { [weak self] notification in
+            let activatedBundleIdentifier = (
+                notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            )?.bundleIdentifier
+            Task { @MainActor [weak self] in
+                guard let self, self.started else { return }
+                if let bundleIdentifier = activatedBundleIdentifier,
+                   !bundleIdentifier.isEmpty {
+                    self.requestSceneCutRecovery(reason: "active-application-\(bundleIdentifier)", count: 4)
+                } else {
+                    self.requestSceneCutRecovery(reason: "active-application-changed", count: 4)
+                }
+            }
+        }
 #endif
     }
 
@@ -261,6 +289,10 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
         if let activeSpaceObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(activeSpaceObserver)
             self.activeSpaceObserver = nil
+        }
+        if let activeApplicationObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(activeApplicationObserver)
+            self.activeApplicationObserver = nil
         }
 #endif
     }
@@ -778,7 +810,8 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
         guard shouldTreatDamageAsSceneCut(report, pixelBuffer: pixelBuffer) else { return }
         Task { @MainActor [weak self] in
             self?.requestSceneCutRecovery(
-                reason: report.fullFrameFallback ? "full-frame-damage" : "damage-surge"
+                reason: report.fullFrameFallback ? "full-frame-damage" : "damage-surge",
+                count: report.fullFrameFallback ? 4 : 3
             )
         }
     }

@@ -321,15 +321,29 @@ struct RemoteDesktopStreamView: View {
     private func remoteScreenView(geometry: GeometryProxy) -> some View {
         Group {
 #if canImport(WebRTC)
-            if shouldUseNativeCrossNetworkVideo,
-               let remoteTrack = crossNetworkManager.remoteVideoTrack {
-                RemoteDesktopNativeVideoSurface(
-                    track: remoteTrack,
-                    resolution: remoteDesktopManager.resolution,
-                    cursorPayload: remoteDesktopManager.currentCursorPayload,
-                    cursorImage: remoteDesktopManager.currentCursorImage,
-                    overlayPayload: remoteDesktopManager.currentOverlayPayload
-                )
+            if let remoteTrack = nativeCrossNetworkVideoTrack {
+                ZStack {
+                    RemoteDesktopNativeVideoSurface(
+                        track: remoteTrack,
+                        resolution: remoteDesktopManager.resolution,
+                        cursorPayload: remoteDesktopManager.currentCursorPayload,
+                        cursorImage: remoteDesktopManager.currentCursorImage,
+                        overlayPayload: remoteDesktopManager.currentOverlayPayload
+                    )
+
+                    if !crossNetworkManager.remoteVideoTrackHasRenderedFrame {
+                        RemoteDesktopCompositedSurface(
+                            feed: remoteDesktopManager.videoFrameFeed,
+                            metalFeed: remoteDesktopManager.metalVideoFrameFeed,
+                            fallbackFrame: remoteDesktopManager.currentFrame,
+                            pipeline: remoteDesktopManager.renderPipelineStatus,
+                            resolution: remoteDesktopManager.resolution,
+                            cursorPayload: remoteDesktopManager.currentCursorPayload,
+                            cursorImage: remoteDesktopManager.currentCursorImage,
+                            overlayPayload: remoteDesktopManager.currentOverlayPayload
+                        )
+                    }
+                }
             } else {
                 RemoteDesktopCompositedSurface(
                     feed: remoteDesktopManager.videoFrameFeed,
@@ -363,6 +377,15 @@ struct RemoteDesktopStreamView: View {
     private var isUsingNativeCrossNetworkVideo: Bool {
         connection.device.capabilities.contains(RemoteDesktopManager.crossNetworkDeviceCapability)
             || connection.device.advertisedCapabilities.contains(RemoteDesktopManager.crossNetworkDeviceCapability)
+    }
+
+    private var nativeCrossNetworkVideoTrack: RTCVideoTrack? {
+#if canImport(WebRTC)
+        guard isUsingNativeCrossNetworkVideo else { return nil }
+        return crossNetworkManager.remoteVideoTrack
+#else
+        return nil
+#endif
     }
 
     private var shouldUseNativeCrossNetworkVideo: Bool {
