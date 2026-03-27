@@ -175,6 +175,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     private var screenDataChannel: RTCDataChannel?
     private var remoteVideoTrack: RTCVideoTrack?
     private var videoTransceiver: RTCRtpTransceiver?
+    private var remoteVideoTrackInspectionTask: Task<Void, Never>?
     private var pendingRemoteICECandidates: [RTCIceCandidate] = []
     private var seenRemoteICECandidateKeys: Set<String> = []
 #endif
@@ -228,6 +229,8 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         screenDataChannel = nil
         remoteVideoTrack = nil
         videoTransceiver = nil
+        remoteVideoTrackInspectionTask?.cancel()
+        remoteVideoTrackInspectionTask = nil
         peerConnection?.close()
         peerConnection = nil
         if sslHeld {
@@ -505,6 +508,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             self.hasRemoteDescription = true
             self.flushPendingRemoteICECandidates()
             self.inspectRemoteVideoTrackIfAvailable(peerConnection: pc)
+            self.scheduleRemoteVideoTrackInspection(peerConnection: pc, reason: "set-remote-offer")
             self.onTrace?("set-remote-offer applied session=\(self.sessionId)")
             self.createAnswer()
         }
@@ -541,6 +545,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
                     self.hasRemoteDescription = true
                     self.flushPendingRemoteICECandidates()
                     self.inspectRemoteVideoTrackIfAvailable(peerConnection: pc)
+                    self.scheduleRemoteVideoTrackInspection(peerConnection: pc, reason: "set-remote-answer-stable")
                     self.logger.debug("ℹ️ remote answer already applied; ignore. sessionId=\(self.sessionId, privacy: .public)")
                     self.onTrace?("set-remote-answer ignored stable session=\(self.sessionId)")
                     return
@@ -552,6 +557,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             self.hasRemoteDescription = true
             self.flushPendingRemoteICECandidates()
             self.inspectRemoteVideoTrackIfAvailable(peerConnection: pc)
+            self.scheduleRemoteVideoTrackInspection(peerConnection: pc, reason: "set-remote-answer")
             self.onTrace?("set-remote-answer applied session=\(self.sessionId)")
         }
 #endif
@@ -637,6 +643,11 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     private func captureRemoteVideoTrack(_ track: RTCVideoTrack?) {
         guard remoteVideoTrack !== track else { return }
         remoteVideoTrack = track
+        if track != nil {
+            logger.info("🎬 detected remote native video track. sessionId=\(self.sessionId, privacy: .public)")
+            remoteVideoTrackInspectionTask?.cancel()
+            remoteVideoTrackInspectionTask = nil
+        }
         onTrace?("remote-video-track session=\(sessionId) ready=\(track != nil ? 1 : 0)")
         onRemoteVideoTrack?(track)
     }
@@ -647,6 +658,28 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
                 captureRemoteVideoTrack(track)
                 return
             }
+        }
+    }
+
+    private func scheduleRemoteVideoTrackInspection(
+        peerConnection: RTCPeerConnection,
+        reason: String
+    ) {
+        guard remoteVideoTrack == nil else { return }
+        remoteVideoTrackInspectionTask?.cancel()
+        remoteVideoTrackInspectionTask = Task { [weak self] in
+            guard let self else { return }
+            for attempt in 1...15 {
+                try? await Task.sleep(for: .milliseconds(200))
+                guard !Task.isCancelled else { return }
+                self.inspectRemoteVideoTrackIfAvailable(peerConnection: peerConnection)
+                if self.remoteVideoTrack != nil {
+                    self.onTrace?("remote-video-track inspection-success session=\(self.sessionId) reason=\(reason) attempt=\(attempt)")
+                    return
+                }
+            }
+            self.logger.debug("ℹ️ remote native video track still unavailable after inspection. sessionId=\(self.sessionId, privacy: .public) reason=\(reason, privacy: .public)")
+            self.onTrace?("remote-video-track inspection-timeout session=\(self.sessionId) reason=\(reason)")
         }
     }
 #endif
@@ -1137,6 +1170,10 @@ extension WebRTCSession: RTCPeerConnectionDelegate {
     public func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceConnectionState) {
         logger.info("ICE connection state: \(String(describing: newState), privacy: .public)")
         onTrace?("ice-connection-state session=\(sessionId) state=\(String(describing: newState))")
+        if newState == .connected || newState == .completed {
+            inspectRemoteVideoTrackIfAvailable(peerConnection: peerConnection)
+            scheduleRemoteVideoTrackInspection(peerConnection: peerConnection, reason: "ice-connected")
+        }
         switch newState {
         case .failed:
             notifyDisconnectedIfNeeded(reason: "ice_failed")
@@ -1179,6 +1216,8 @@ extension WebRTCSession: RTCPeerConnectionDelegate {
             self.dataChannel = dataChannel
         }
         dataChannel.delegate = self
+        inspectRemoteVideoTrackIfAvailable(peerConnection: peerConnection)
+        scheduleRemoteVideoTrackInspection(peerConnection: peerConnection, reason: "data-channel-open")
         onTrace?("did-open-data-channel session=\(sessionId) label=\(dataChannel.label)")
         if isControlChannel(dataChannel) {
             notifyReadyIfNeeded()
