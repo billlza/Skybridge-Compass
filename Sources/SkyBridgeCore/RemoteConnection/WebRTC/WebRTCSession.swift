@@ -167,6 +167,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     private var localVideoTrack: RTCVideoTrack?
     private var localVideoTransceiver: RTCRtpTransceiver?
     private var localVideoCapturer: RTCVideoCapturer?
+    private var didLogOutgoingNativeVideoFrame = false
     private var pendingRemoteICECandidates: [RTCIceCandidate] = []
     private var seenRemoteICECandidateKeys: Set<String> = []
 #endif
@@ -235,6 +236,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         localVideoSource = nil
         localVideoTransceiver = nil
         localVideoCapturer = nil
+        didLogOutgoingNativeVideoFrame = false
         peerConnection?.close()
         peerConnection = nil
         if sslHeld {
@@ -771,12 +773,19 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
 #if canImport(WebRTC)
         guard let localVideoSource,
               let localVideoCapturer else { return }
-        let buffer = RTCCVPixelBuffer(pixelBuffer: pixelBuffer)
+        let cvBuffer = RTCCVPixelBuffer(pixelBuffer: pixelBuffer)
+        let buffer = cvBuffer.toI420()
         let frame = RTCVideoFrame(
             buffer: buffer,
             rotation: ._0,
             timeStampNs: timeStampNs
         )
+        if !didLogOutgoingNativeVideoFrame {
+            didLogOutgoingNativeVideoFrame = true
+            logger.info(
+                "🎥 submitting first native WebRTC screen frame. sessionId=\(self.sessionId, privacy: .public) size=\(CVPixelBufferGetWidth(pixelBuffer), privacy: .public)x\(CVPixelBufferGetHeight(pixelBuffer), privacy: .public) pixelFormat=\(CVPixelBufferGetPixelFormatType(pixelBuffer), privacy: .public)"
+            )
+        }
         localVideoSource.capturer(localVideoCapturer, didCapture: frame)
 #endif
     }
