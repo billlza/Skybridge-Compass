@@ -28,6 +28,9 @@ struct CurrentPathProbe {
         case "auth-export":
             let includeSecrets = arguments.contains("--include-secrets")
             try await exportAuthSession(includeSecrets: includeSecrets)
+        case "register-current":
+            let deviceName = parseStringFlag("--device-name", from: arguments)
+            try await registerCurrentDevice(deviceName: deviceName)
         case "code-create":
             let ttl = parseIntFlag("--ttl", from: arguments) ?? 300
             try await createCode(validDuration: TimeInterval(ttl))
@@ -80,6 +83,7 @@ struct CurrentPathProbe {
         Usage:
           swift run CurrentPathProbe status
           swift run CurrentPathProbe auth-export [--include-secrets]
+          swift run CurrentPathProbe register-current [--device-name "Bill's Mac"]
           swift run CurrentPathProbe code-create [--ttl 300]
           swift run CurrentPathProbe bridge-connect <code> [--state-dir /path/to/state] [--timeout-seconds 45] [--hold-seconds 0]
           swift run CurrentPathProbe approve-device <pending-device-id> --pending-fingerprint <fp> [--pending-algorithm Ed25519] [--device-name "Ubuntu Node"]
@@ -135,6 +139,25 @@ struct CurrentPathProbe {
             "signaling_server_origin": lease.signalingServerOrigin,
             "device_id": context.binding.deviceId,
             "protocol_public_key_fingerprint": context.binding.protocolPublicKeyFingerprint
+        ])
+    }
+
+    private static func registerCurrentDevice(deviceName: String?) async throws {
+        let context = try await currentContext()
+        let signalServer = makeSignalServer(accessToken: context.accessToken, tenantID: context.tenantID)
+        let registered = try await signalServer.registerCurrentDevice(
+            binding: context.binding,
+            deviceName: deviceName ?? Host.current().localizedName ?? "Mac"
+        )
+        try printJSONObject([
+            "tenant_id": registered.tenantId,
+            "user_id": registered.userId,
+            "device_id": registered.deviceId,
+            "protocol_signing_algorithm": registered.protocolSigningAlgorithm.rawValue,
+            "protocol_public_key_fingerprint": registered.protocolPublicKeyFingerprint,
+            "device_name": registered.deviceName ?? NSNull(),
+            "status": registered.status,
+            "approval_method": registered.approvalMethod ?? NSNull()
         ])
     }
 

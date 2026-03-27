@@ -31,6 +31,21 @@ final class SelfIdentityProviderTests: XCTestCase {
         
         XCTAssertEqual(snapshot.deviceId, snapshot2.deviceId, "deviceId 应保持一致")
     }
+
+    /// 测试：SelfIdentityProvider 与协议身份管理器使用同一份稳定 deviceId
+    func testDeviceIdMatchesProtocolIdentitySource() async throws {
+        let provider = SelfIdentityProvider.shared
+        await provider.loadOrCreate()
+
+        let snapshot = await provider.snapshot()
+        let protocolIdentityDeviceID = await DeviceIdentityKeyManager.shared.getDeviceId()
+
+        XCTAssertEqual(
+            snapshot.deviceId,
+            protocolIdentityDeviceID,
+            "SelfIdentityProvider 应与 DeviceIdentityKeyManager 使用同一份稳定 deviceId"
+        )
+    }
     
  /// 测试：公钥指纹生成
     func testPubKeyFingerprintGeneration() async throws {

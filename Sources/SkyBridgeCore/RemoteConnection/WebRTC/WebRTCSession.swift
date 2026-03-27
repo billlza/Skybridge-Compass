@@ -186,11 +186,20 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     private let outboundScreenFrameGate = WebRTCOutboundFrameGate()
     private var pendingInboundDataBuffers: [Data] = []
     private var pendingInboundScreenDataBuffers: [Data] = []
-    // Native screen video track is still experimental in our current viewer stack.
-    // Keep it opt-in so the default transport stays aligned with the negotiated
-    // SBRF/DataChannel contract until native-track negotiation is explicit.
-    private let prefersNativeOutgoingScreenTrack =
-        ProcessInfo.processInfo.environment["SKYBRIDGE_ENABLE_WEBRTC_NATIVE_SCREEN_TRACK"] == "1"
+    // Native screen video is the primary cross-network path on macOS.
+    // Other platforms stay on the framed DataChannel path unless explicitly enabled.
+    private let prefersNativeOutgoingScreenTrack: Bool = {
+        if let raw = ProcessInfo.processInfo.environment["SKYBRIDGE_ENABLE_WEBRTC_NATIVE_SCREEN_TRACK"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !raw.isEmpty {
+            return raw == "1"
+        }
+#if os(macOS)
+        return true
+#else
+        return false
+#endif
+    }()
     
     public init(sessionId: String, localDeviceId: String, role: Role, ice: ICEConfig) {
         self.sessionId = sessionId
@@ -578,7 +587,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     }
 
     public func sendScreen(_ data: Data) throws {
-        try send(data, preferScreenChannel: true, fallbackToControlChannel: true)
+        try send(data, preferScreenChannel: true, fallbackToControlChannel: false)
     }
 
     private func send(
@@ -609,13 +618,12 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     }
 
     public func sendScreenFramedPayload(_ payload: Data, maxChunkBytes: Int = 8 * 1024) throws {
-        let useDedicatedScreenChannel = hasOpenScreenDataChannel()
         try sendFramedPayload(
             payload,
             maxChunkBytes: maxChunkBytes,
-            preferScreenChannel: useDedicatedScreenChannel,
-            fallbackToControlChannel: true,
-            lock: useDedicatedScreenChannel ? outboundScreenFrameLock : outboundFrameLock
+            preferScreenChannel: true,
+            fallbackToControlChannel: false,
+            lock: outboundScreenFrameLock
         )
     }
 
@@ -675,16 +683,15 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         pollInterval: Duration = .milliseconds(10),
         drainTimeout: Duration = .seconds(5)
     ) async throws {
-        let useDedicatedScreenChannel = hasOpenScreenDataChannel()
         try await sendFramedPayloadAsync(
             payload,
             maxChunkBytes: maxChunkBytes,
             maxBufferedAmountBytes: maxBufferedAmountBytes,
             pollInterval: pollInterval,
             drainTimeout: drainTimeout,
-            preferScreenChannel: useDedicatedScreenChannel,
-            fallbackToControlChannel: true,
-            gate: useDedicatedScreenChannel ? outboundScreenFrameGate : outboundFrameGate
+            preferScreenChannel: true,
+            fallbackToControlChannel: false,
+            gate: outboundScreenFrameGate
         )
     }
 
@@ -801,7 +808,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
 #endif
     }
 
-    private func hasOpenScreenDataChannel() -> Bool {
+    public func hasOpenScreenDataChannel() -> Bool {
 #if canImport(WebRTC)
         guard let screenDataChannel else { return false }
         return screenDataChannel.readyState == .open
@@ -911,12 +918,34 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             logger.warning("⚠️ failed to create native screen video transceiver. sessionId=\(self.sessionId, privacy: .public)")
             return
         }
+        configureOutgoingScreenSenderParametersIfNeeded(transceiver.sender)
 
         localVideoSource = videoSource
         localVideoTrack = videoTrack
         localVideoCapturer = videoCapturer
         localVideoTransceiver = transceiver
         videoSource.adaptOutputFormat(toWidth: 1280, height: 720, fps: 60)
+        logger.info(
+            "🎥 native WebRTC screen track enabled. sessionId=\(self.sessionId, privacy: .public) fps=\(60, privacy: .public)"
+        )
+    }
+
+    private func configureOutgoingScreenSenderParametersIfNeeded(_ sender: RTCRtpSender) {
+        let parameters = sender.parameters
+        parameters.degradationPreference = NSNumber(
+            value: RTCDegradationPreference.maintainResolution.rawValue
+        )
+        if !parameters.encodings.isEmpty {
+            parameters.encodings = parameters.encodings.map { encoding in
+                encoding.isActive = true
+                encoding.maxFramerate = NSNumber(value: 60)
+                encoding.maxBitrateBps = NSNumber(value: 16_000_000)
+                encoding.bitratePriority = 4.0
+                encoding.networkPriority = .high
+                return encoding
+            }
+        }
+        sender.parameters = parameters
     }
     
 #if canImport(WebRTC)

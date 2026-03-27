@@ -721,8 +721,19 @@ public struct EnhancedDeviceDiscoveryView: View {
                             .background(Color.white)
                             .cornerRadius(12)
                             .shadow(color: .black.opacity(0.1), radius: 4)
+                            .overlay(alignment: .topTrailing) {
+                                Image(systemName: "arrow.clockwise.circle.fill")
+                                    .font(.system(size: 28))
+                                    .foregroundStyle(.white, Color.blue)
+                                    .padding(10)
+                            }
+                            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            .help("点击二维码立即刷新")
+                            .onTapGesture {
+                                Task { await generateDynamicQRCodeFromUI(trigger: "tap_qr_refresh") }
+                            }
 
-                        Text(LocalizationManager.shared.localizedString("discovery.qrCode.scanPrompt"))
+                        Text("扫描此二维码，点击二维码可立即刷新")
                             .font(.caption)
                             .foregroundColor(.secondary)
 

@@ -633,6 +633,7 @@ private struct RootContainerView: View {
         .task(id: authModel.currentSession) {
             await localPeerServices.startIfNeeded()
             await dashboardModel.updateAuthentication(session: authModel.currentSession)
+            await CurrentPathDeviceActivationCoordinator.shared.syncIfNeeded(session: authModel.currentSession)
         }
         .animation(.easeInOut(duration: 0.25), value: authModel.currentSession != nil)
         .overlay(alignment: .topTrailing) {

@@ -585,8 +585,26 @@ public class QRCodeScannerViewController: UIViewController {
                 }
             } else {
                 self.delegate?.scanner(self.scanner, didFailWithError: QRCodeScannerError.permissionDenied)
+                self.presentPermissionDeniedAlertIfNeeded()
             }
         }
+    }
+
+    private func presentPermissionDeniedAlertIfNeeded() {
+        guard presentedViewController == nil else { return }
+        let alert = UIAlertController(
+            title: "Scan Error",
+            message: "摄像头权限被拒绝，请在系统设置中允许访问",
+            preferredStyle: .alert
+        )
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
+        alert.addAction(
+            UIAlertAction(title: "去设置", style: .default) { _ in
+                guard let settingsURL = URL(string: UIApplication.openSettingsURLString) else { return }
+                UIApplication.shared.open(settingsURL)
+            }
+        )
+        present(alert, animated: true)
     }
 }
 

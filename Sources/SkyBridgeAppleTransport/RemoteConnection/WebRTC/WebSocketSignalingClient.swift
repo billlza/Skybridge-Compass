@@ -387,10 +387,20 @@ public actor WebSocketSignalingClient {
         case .native:
             return [.native]
         case .auto:
-            var attempts: [TransportAttempt] = [.urlSession(proxyBypass: false), .urlSession(proxyBypass: true)]
+            var attempts: [TransportAttempt] = []
+#if os(macOS)
             if nativeFallbackEnabled {
                 attempts.append(.native)
             }
+            attempts.append(.urlSession(proxyBypass: false))
+            attempts.append(.urlSession(proxyBypass: true))
+#else
+            attempts.append(.urlSession(proxyBypass: false))
+            attempts.append(.urlSession(proxyBypass: true))
+            if nativeFallbackEnabled {
+                attempts.append(.native)
+            }
+#endif
             return attempts
         }
     }

@@ -180,11 +180,14 @@ function select_release_build_dir() {
   local xcode_product="${XCODE_BUILD_DIR}/${EXECUTABLE}"
   local swiftpm_product="${SWIFTPM_RELEASE_BUILD_DIR}/${EXECUTABLE}"
 
-  if [[ -e "${swiftpm_product}" ]]; then
-    if [[ ! -e "${xcode_product}" || "$(product_mtime "${swiftpm_product}")" -ge "$(product_mtime "${xcode_product}")" ]]; then
-      echo "${SWIFTPM_RELEASE_BUILD_DIR}"
-      return
-    fi
+  if [[ -x "${xcode_product}" ]]; then
+    echo "${XCODE_BUILD_DIR}"
+    return
+  fi
+
+  if [[ "${SKYBRIDGE_PACKAGE_ALLOW_SWIFTPM_RELEASE_FALLBACK:-0}" == "1" ]] && [[ -x "${swiftpm_product}" ]]; then
+    echo "${SWIFTPM_RELEASE_BUILD_DIR}"
+    return
   fi
 
   echo "${XCODE_BUILD_DIR}"
@@ -264,6 +267,7 @@ if [[ "${SKIP_BUILD}" != "1" ]]; then
                -derivedDataPath "${ROOT_DIR}/.build/xcode" \
                build
   fi
+  BUILD_DIR="$(select_release_build_dir)"
 else
   log "按 SKIP_BUILD=1 跳过构建，直接复用已有产物"
   assert_release_product_is_fresh "${BUILD_DIR}/${EXECUTABLE}"
@@ -272,8 +276,13 @@ fi
 # 校验构建产物是否存在
 if [[ ! -x "${BUILD_DIR}/${EXECUTABLE}" ]]; then
   echo "错误：未找到可执行文件 ${BUILD_DIR}/${EXECUTABLE}。请先完成 Release 构建。" >&2
+  if [[ "${SKYBRIDGE_PACKAGE_ALLOW_SWIFTPM_RELEASE_FALLBACK:-0}" != "1" ]]; then
+    echo "提示：如需明确允许回退到 SwiftPM release 产物，请设置 SKYBRIDGE_PACKAGE_ALLOW_SWIFTPM_RELEASE_FALLBACK=1。" >&2
+  fi
   exit 1
 fi
+
+log "本次打包使用构建目录: ${BUILD_DIR}"
 
 log "清理旧的 dist 目录并创建 .app 结构"
 rm -rf "${APP_DIR}"

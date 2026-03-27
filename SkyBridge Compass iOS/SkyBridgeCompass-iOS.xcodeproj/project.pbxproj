@@ -3,23 +3,24 @@
 	archiveVersion = 1;
 	classes = {
 	};
-	objectVersion = 63;
+	objectVersion = 77;
 	objects = {
 
 /* Begin PBXBuildFile section */
+		04076E229294D9656744F5A1 /* ConnectionCodeFormatTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9478092B3A3B83EBEE873237 /* ConnectionCodeFormatTests.swift */; };
 		0738F8013C52A20FD9AE961B /* ApplePQCProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = DDB697072B181F5CE4F84C7A /* ApplePQCProvider.swift */; };
 		0BD313C4C5139FFF7F6DE35D /* QuickActionButtonView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 56BC016A1595D3C5E14E5591 /* QuickActionButtonView.swift */; };
 		0DE9AEC41B80EF9BA6D6A92E /* PolicyDecisionSnapshot.swift in Sources */ = {isa = PBXBuildFile; fileRef = 828E67B857C238E15711B76B /* PolicyDecisionSnapshot.swift */; };
 		0E5069CF10CF3ACCC50FC447 /* TrafficPaddingStats.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C8BC4110A76F282B0C36F40 /* TrafficPaddingStats.swift */; };
 		0FBDB93D535E9FC6BF131AFE /* P2PModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 878E3E2906E362BCC3C1BE74 /* P2PModels.swift */; };
-			10757D91A1F50BDA2D2E42C3 /* WeatherCardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A7A54A6561B171AE6B4CE43 /* WeatherCardView.swift */; };
-			A1B2C3D4E5F6011111111111 /* SkyBridgeCompassiOSUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F6022222222222 /* SkyBridgeCompassiOSUITests.swift */; };
+		10757D91A1F50BDA2D2E42C3 /* WeatherCardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A7A54A6561B171AE6B4CE43 /* WeatherCardView.swift */; };
 		13BBA0D66C6D557D9F1C2B90 /* SkyBridgeActivityAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 37E0C1A2D462FAE735D9AC04 /* SkyBridgeActivityAttributes.swift */; };
 		14E02A1A1E1A3F5CC4FE7412 /* SkyBridgeLogger.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE64C860FF7171D678F95743 /* SkyBridgeLogger.swift */; };
 		174D5857250DDFB578699097 /* ClassicProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = F52F5CF8B45AF2C5F7793D7D /* ClassicProvider.swift */; };
 		175622266915CD82E3A560FD /* SkyBridgeCompass-Widgets.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = C6A172C4D3294DB3396F66BA /* SkyBridgeCompass-Widgets.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		1AB2680B9B6A4DB64E3080B0 /* PolicyDecisionParityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5685E5E2CD346A62A01BD79 /* PolicyDecisionParityTests.swift */; };
 		1B5FEDF47D8BD8ACE762B266 /* SkyBridgeLiveActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 25762A7C3639ADB0F3389B46 /* SkyBridgeLiveActivity.swift */; };
+		21F7515E81816DFE00794824 /* NebulaPublicClientOAuth.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B5171CE346450D6EB7ABD1E /* NebulaPublicClientOAuth.swift */; };
 		23E57B94C7A9792227AA0FD2 /* LocalizationManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = B610CADD6D63AE00BE1F232D /* LocalizationManager.swift */; };
 		2608A8D411EECC8FFB5202F3 /* TrafficPadding.swift in Sources */ = {isa = PBXBuildFile; fileRef = E75A3366A6C7B572423B5D44 /* TrafficPadding.swift */; };
 		27F6713FCFAA0E62E7D0ABC2 /* PQCVerificationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E39D6C541D431957B758E14 /* PQCVerificationView.swift */; };
@@ -30,6 +31,7 @@
 		2D01D7366348A6CFA80A6457 /* OQSPQCProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = C06FDCDA25CD7B86D6519B4D /* OQSPQCProvider.swift */; };
 		2E4645FD7F22D357C46E4131 /* P2PConnectionManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 93B830497EF129318237FE28 /* P2PConnectionManager.swift */; };
 		3081BF69EF4C1CB4F8F01EED /* SettingsManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 659727828D97800AA64D41C4 /* SettingsManager.swift */; };
+		34275B3455303BC36565A6E0 /* WebRTCSignalingFaultInjectionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E43049DEB4E29371EFB1B375 /* WebRTCSignalingFaultInjectionTests.swift */; };
 		3791BAA6FC4869628D7C0283 /* SkyBridgeActivityAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 37E0C1A2D462FAE735D9AC04 /* SkyBridgeActivityAttributes.swift */; };
 		3BB7359087A9EF49C86CE078 /* OfflineMessageQueue.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3294588CD7895F56B550A5DC /* OfflineMessageQueue.swift */; };
 		3D4AE0820CA4A146EBE72AA6 /* WeatherManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1FF1477AA66D565DCBFC1FB /* WeatherManager.swift */; };
@@ -37,24 +39,25 @@
 		404680039CB34D5EC03789D1 /* HandshakeDriver.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2DD43FFE9C9B153C2496625 /* HandshakeDriver.swift */; };
 		406D5BF6DA5DADD9AC2E7B5D /* BetaBannerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 392C43BFC3AF2C36DD4D7E06 /* BetaBannerView.swift */; };
 		45F136FD199310261A6665EA /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = EEEDE03DB889E42BACA14386 /* Models.swift */; };
+		477C7D982841FA810C806D81 /* CrossNetworkConnectPayloadDecodingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD4191C1EC9823156E067462 /* CrossNetworkConnectPayloadDecodingTests.swift */; };
 		484844AADC672182602C11A4 /* WebRTC in Frameworks */ = {isa = PBXBuildFile; productRef = 76123964202BD611B7E681E7 /* WebRTC */; };
 		4892CDE284E0F7A86EF1A073 /* RemoteDesktopView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 501DCB71160A60C330C17929 /* RemoteDesktopView.swift */; };
 		4E34F3BCA3DD81A901CC7DA4 /* KEMPublicKeyInfo.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0E8C6F3243F617884D831144 /* KEMPublicKeyInfo.swift */; };
 		50EC8B5726CAF191F7BA6198 /* WebRTCSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 45402D803823C9E08DB50A64 /* WebRTCSession.swift */; };
 		52D6DF4337B60C409888370C /* ActivityKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 8583EB3BEA85C4C8D8FC97C2 /* ActivityKit.framework */; };
 		54C71E79C7748E435213E3D9 /* FileTransferNetworkService.swift in Sources */ = {isa = PBXBuildFile; fileRef = F93EC0B2E0AD70ADB64A1231 /* FileTransferNetworkService.swift */; };
+		583C16868866DF91809BA256 /* ConnectLinkFormatTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 24F23783410F5E90DFA7192E /* ConnectLinkFormatTests.swift */; };
 		5891EEE7D4966C16F568445A /* PQCMicroBenchView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11836F0EEEF86B3B57A2F4CE /* PQCMicroBenchView.swift */; };
 		58CEE1C24851B675376CBBB7 /* SupabaseService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 490C0A61773E98D07F084DC6 /* SupabaseService.swift */; };
-		58E8B2A1A1C24D1E8F0B1C22 /* NebulaPublicClientOAuth.swift in Sources */ = {isa = PBXBuildFile; fileRef = 58E8B2A0A1C24D1E8F0B1C22 /* NebulaPublicClientOAuth.swift */; };
 		5AF4B12373F8955D228412F0 /* SupabaseConfig.plist in Resources */ = {isa = PBXBuildFile; fileRef = 40944D05DD176ECF8A8E7BDB /* SupabaseConfig.plist */; };
-		4D0F9A282A0B4F4AA96C1A01 /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = 4D0F9A292A0B4F4AA96C1A01 /* Localizable.strings */; };
 		5C11C0249C43AED260C81E89 /* AuthenticationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B68E3A442804F03C62887E08 /* AuthenticationView.swift */; };
+		5DCD1595987CE16988ACC125 /* CurrentPathTrustedDeviceStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4070718AFE727B04D180A3BB /* CurrentPathTrustedDeviceStoreTests.swift */; };
 		5F2704328C4CFAE111CE91B9 /* ClipboardManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 831AD13F1950B5F99A30CD7A /* ClipboardManager.swift */; };
-		F1A2B3C4D5E6F7012345678A /* CodablePersistenceStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1A2B3C4D5E6F70123456789 /* CodablePersistenceStore.swift */; };
 		5FC455D2316C3C8EA7B12D57 /* HandshakePadding.swift in Sources */ = {isa = PBXBuildFile; fileRef = 053FDF90F358AEE09BA7D06C /* HandshakePadding.swift */; };
 		621F7A0A1EEFC4728F1A3DDE /* AppIntents.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 840F0A7CE3B95CE644FCB56E /* AppIntents.framework */; };
 		6B2BE9727DB870A7EAEC8A0C /* HandshakeMessages.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD79DE03EB5BE43A7F4DD6C7 /* HandshakeMessages.swift */; };
 		6B446A20FFDC3D344FADCE74 /* TrustedDeviceStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 380347E9DAA089B6533D6F89 /* TrustedDeviceStore.swift */; };
+		6C29FF78EF4FB9EC482B42A4 /* PQCRekeyElectionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA492E325F7E54E1EEEE4A95 /* PQCRekeyElectionTests.swift */; };
 		6E09A1C0BA0D0DC065416C07 /* LiquidGlass.swift in Sources */ = {isa = PBXBuildFile; fileRef = 96686BD469796B5833E0C8E5 /* LiquidGlass.swift */; };
 		6E30BE5F047F9D36C1C5DAA3 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = B8FD2B5D6AB6A664E8469945 /* Assets.xcassets */; };
 		6EDDCB3576434AEF05E5AC02 /* HandshakeTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = F30A1E033F74728B441A3A94 /* HandshakeTypes.swift */; };
@@ -73,13 +76,8 @@
 		959456034AC8CD9FAF2E5A08 /* ThemeConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 54AD8F4C687F9B90B67B4329 /* ThemeConfiguration.swift */; };
 		9B1311542C3BB9B1E34608F0 /* NebulaIDGenerator.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD6CE3E346837A1B1449284F /* NebulaIDGenerator.swift */; };
 		A30B6ADBE722CB3EDFFBF5A0 /* PolicyDecisionTestVectors.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D702D54FA811F70FC96D595 /* PolicyDecisionTestVectors.swift */; };
-		AA1F00C12F60000100499668 /* ConnectionCodeFormatTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1F00C32F60000100499668 /* ConnectionCodeFormatTests.swift */; };
-		AA1F00C22F60000100499668 /* ConnectLinkFormatTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1F00C42F60000100499668 /* ConnectLinkFormatTests.swift */; };
-		AA1F00C52F60010100499668 /* PQCRekeyElectionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1F00C62F60010100499668 /* PQCRekeyElectionTests.swift */; };
+		A3A0C50292CB73B7B9B2C9DF /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = 1A6B4413FB32FD653E7C976B /* Localizable.strings */; };
 		A5DF44B0F65FD8FBCAD30855 /* StatCardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74C91A71B2D7745DA114BC0D /* StatCardView.swift */; };
-		A90F76AC2F532AC400499668 /* RegressionHardeningTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A90F76AB2F532AC400499668 /* RegressionHardeningTests.swift */; };
-		A90F76AF2F532D7200499668 /* SignalingRetryController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A90F76AE2F532D7200499668 /* SignalingRetryController.swift */; };
-		A90F76B12F532DEF00499668 /* WebRTCSignalingFaultInjectionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A90F76B02F532DEF00499668 /* WebRTCSignalingFaultInjectionTests.swift */; };
 		AE8919E0A149251A09F85FAB /* CrossNetworkWebRTCManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6AF4DA70A289A8E7E1F8127F /* CrossNetworkWebRTCManager.swift */; };
 		B1B9B9CEAC26CE690F5AA4B5 /* QRCodeManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5DDF016BC637DB6BD9133EE /* QRCodeManager.swift */; };
 		B63FBF31E5051CE20BCC324C /* DashboardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CBF0FB136AD9A05FA2390FB8 /* DashboardView.swift */; };
@@ -88,6 +86,7 @@
 		B9B1776A08627F2AC1499D85 /* FallbackSemanticsParityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4160F9F87D13AA571CE03308 /* FallbackSemanticsParityTests.swift */; };
 		BD414DF97653B25F80AEB1BE /* SkyBridgeWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7091B30AA7A2A4E924E8B127 /* SkyBridgeWidget.swift */; };
 		C2B6620F00166A0067A1098D /* ObservabilityContractTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9094F55BF7BC5003D8D38290 /* ObservabilityContractTests.swift */; };
+		C409A7A544AF844FA7075302 /* CodablePersistenceStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = EFEE05D6C3AF8D2866C95178 /* CodablePersistenceStore.swift */; };
 		C6210C5AF8FBC51FFF891C5F /* STUNClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B630923A8C82956F7AF30D2 /* STUNClient.swift */; };
 		C63671A4B9ADB0BF39C59AE3 /* LiveActivityManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 85C26B001A92135612CB4326 /* LiveActivityManager.swift */; };
 		C6AB0D6871AEA8B0CBE52CDE /* BackgroundTaskManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A8BA9484E500F84365476521 /* BackgroundTaskManager.swift */; };
@@ -98,15 +97,16 @@
 		D48DEA0AFDEF88C30B975527 /* WebSocketSignalingClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCCAB31F19CCC3E4592E39F2 /* WebSocketSignalingClient.swift */; };
 		D6205CFEDCD592F0D5F9C778 /* RealNetworkE2EBenchView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B42B0B30F1B4C09183AA5A10 /* RealNetworkE2EBenchView.swift */; };
 		D7466B71CF052E1AB9FBD95A /* KEMTrustStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D02F165A3577BDC88F31411B /* KEMTrustStoreTests.swift */; };
+		D79A5F708106BDB15F42D05A /* SignalingRetryController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B1ADCB01BB1D0E58DE6A566 /* SignalingRetryController.swift */; };
 		DCEFA18F51EEAC5A498234D7 /* CapabilityResolutionParityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABC561404FEB156CA37E8009 /* CapabilityResolutionParityTests.swift */; };
 		E23B454FC096814D60AACC6E /* SkyBridgeServerConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF1C80121FB209395A52D1EA /* SkyBridgeServerConfig.swift */; };
 		E63EE125B6AD059FF590C497 /* CrossNetworkFileTransferWire.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04D6D6415B0A07A13BB2CBD9 /* CrossNetworkFileTransferWire.swift */; };
 		E6D2CD92125AAF348588CF6F /* OQSRAII in Frameworks */ = {isa = PBXBuildFile; productRef = EE00C62C33482B8E88952EF2 /* OQSRAII */; };
 		E87EA46CB143DBA0844971B8 /* DashboardViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A8C33908075FD8A37E4E338 /* DashboardViewModel.swift */; };
 		E9701CEDADDB8A8DC07A64EC /* SignatureProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F1CC7B506C8E76656604ADA /* SignatureProvider.swift */; };
-		EA4C38A12FB6E4C100B0C001 /* CurrentPathTrustedDeviceStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA4C38A12FB6E4C100B0C002 /* CurrentPathTrustedDeviceStoreTests.swift */; };
 		EAFF93330E52DC06EDC2EAAC /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A0305E276D18233D04F43A8 /* ContentView.swift */; };
 		EE2CFADE97B5CC575F298B16 /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = F20BA2C69C251DBFBCE544C2 /* LaunchScreen.storyboard */; };
+		EFCDCE64CE9B9D05C8643818 /* RegressionHardeningTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0EAD1A5FAF905D530CC04BEA /* RegressionHardeningTests.swift */; };
 		F2556D8F7DC3375417FA77A7 /* SkyBridgeCompassApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 708048CCAF3C9A5F66CD6BC9 /* SkyBridgeCompassApp.swift */; };
 		F6A3A2FB648E97C975A85CDF /* P2PConnectionService.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0FE3F62F373FF39190A15F9 /* P2PConnectionService.swift */; };
 		F93336A0B86B8AC90B4CFC9D /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B6E3549C2F24F52AB68417B /* SettingsView.swift */; };
@@ -115,21 +115,14 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
-			0E8A456CE048751AAB437655 /* PBXContainerItemProxy */ = {
-				isa = PBXContainerItemProxy;
-				containerPortal = 6280607F820FB09902AB1EFB /* Project object */;
-				proxyType = 1;
-				remoteGlobalIDString = 537E084BA6452ABCF8886C45;
-				remoteInfo = "SkyBridgeCompass-iOS";
-			};
-			A1B2C3D4E5F6055555555555 /* PBXContainerItemProxy */ = {
-				isa = PBXContainerItemProxy;
-				containerPortal = 6280607F820FB09902AB1EFB /* Project object */;
-				proxyType = 1;
-				remoteGlobalIDString = 537E084BA6452ABCF8886C45;
-				remoteInfo = "SkyBridgeCompass-iOS";
-			};
-			DEFE45977C6381EAD62ECD7F /* PBXContainerItemProxy */ = {
+		0E8A456CE048751AAB437655 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 6280607F820FB09902AB1EFB /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 537E084BA6452ABCF8886C45;
+			remoteInfo = "SkyBridgeCompass-iOS";
+		};
+		DEFE45977C6381EAD62ECD7F /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 6280607F820FB09902AB1EFB /* Project object */;
 			proxyType = 1;
@@ -159,24 +152,25 @@
 		0C8BC4110A76F282B0C36F40 /* TrafficPaddingStats.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrafficPaddingStats.swift; sourceTree = "<group>"; };
 		0E21B54FF5A99E91F29D5F40 /* PlatformAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlatformAdapter.swift; sourceTree = "<group>"; };
 		0E8C6F3243F617884D831144 /* KEMPublicKeyInfo.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KEMPublicKeyInfo.swift; sourceTree = "<group>"; };
+		0EAD1A5FAF905D530CC04BEA /* RegressionHardeningTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RegressionHardeningTests.swift; sourceTree = "<group>"; };
 		11836F0EEEF86B3B57A2F4CE /* PQCMicroBenchView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PQCMicroBenchView.swift; sourceTree = "<group>"; };
+		200749F1EDBF7A3393A36454 /* zh-Hans */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "zh-Hans"; path = "zh-Hans.lproj/Localizable.strings"; sourceTree = "<group>"; };
+		24F23783410F5E90DFA7192E /* ConnectLinkFormatTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectLinkFormatTests.swift; sourceTree = "<group>"; };
 		25762A7C3639ADB0F3389B46 /* SkyBridgeLiveActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkyBridgeLiveActivity.swift; sourceTree = "<group>"; };
+		2B1ADCB01BB1D0E58DE6A566 /* SignalingRetryController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignalingRetryController.swift; sourceTree = "<group>"; };
 		2B6E3549C2F24F52AB68417B /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
-			2F8ED07B5F59B57133CC0DEE /* SkyBridgeCompassiOSTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = SkyBridgeCompassiOSTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-			A1B2C3D4E5F6022222222222 /* SkyBridgeCompassiOSUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkyBridgeCompassiOSUITests.swift; sourceTree = "<group>"; };
-			A1B2C3D4E5F6033333333333 /* SkyBridgeCompassiOSUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = SkyBridgeCompassiOSUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-			3294588CD7895F56B550A5DC /* OfflineMessageQueue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OfflineMessageQueue.swift; sourceTree = "<group>"; };
+		2F8ED07B5F59B57133CC0DEE /* SkyBridgeCompassiOSTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = SkyBridgeCompassiOSTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		3294588CD7895F56B550A5DC /* OfflineMessageQueue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OfflineMessageQueue.swift; sourceTree = "<group>"; };
 		37E0C1A2D462FAE735D9AC04 /* SkyBridgeActivityAttributes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkyBridgeActivityAttributes.swift; sourceTree = "<group>"; };
 		380347E9DAA089B6533D6F89 /* TrustedDeviceStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrustedDeviceStore.swift; sourceTree = "<group>"; };
 		392C43BFC3AF2C36DD4D7E06 /* BetaBannerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BetaBannerView.swift; sourceTree = "<group>"; };
+		3AB33BB3B4B1284F6328390B /* ja */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = ja; path = ja.lproj/Localizable.strings; sourceTree = "<group>"; };
+		4070718AFE727B04D180A3BB /* CurrentPathTrustedDeviceStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CurrentPathTrustedDeviceStoreTests.swift; sourceTree = "<group>"; };
 		40944D05DD176ECF8A8E7BDB /* SupabaseConfig.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = SupabaseConfig.plist; sourceTree = "<group>"; };
-		4D0F9A2A2A0B4F4AA96C1A01 /* en */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = en; path = en.lproj/Localizable.strings; sourceTree = "<group>"; };
-		4D0F9A2B2A0B4F4AA96C1A01 /* ja */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = ja; path = ja.lproj/Localizable.strings; sourceTree = "<group>"; };
-		4D0F9A2C2A0B4F4AA96C1A01 /* zh-Hans */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "zh-Hans"; path = "zh-Hans.lproj/Localizable.strings"; sourceTree = "<group>"; };
 		4160F9F87D13AA571CE03308 /* FallbackSemanticsParityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FallbackSemanticsParityTests.swift; sourceTree = "<group>"; };
 		45402D803823C9E08DB50A64 /* WebRTCSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebRTCSession.swift; sourceTree = "<group>"; };
 		490C0A61773E98D07F084DC6 /* SupabaseService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SupabaseService.swift; sourceTree = "<group>"; };
-		58E8B2A0A1C24D1E8F0B1C22 /* NebulaPublicClientOAuth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NebulaPublicClientOAuth.swift; sourceTree = "<group>"; };
+		4B5171CE346450D6EB7ABD1E /* NebulaPublicClientOAuth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NebulaPublicClientOAuth.swift; sourceTree = "<group>"; };
 		501DCB71160A60C330C17929 /* RemoteDesktopView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteDesktopView.swift; sourceTree = "<group>"; };
 		54AD8F4C687F9B90B67B4329 /* ThemeConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThemeConfiguration.swift; sourceTree = "<group>"; };
 		56BC016A1595D3C5E14E5591 /* QuickActionButtonView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickActionButtonView.swift; sourceTree = "<group>"; };
@@ -198,7 +192,6 @@
 		7DB4CCFA78A457A620FEAF9F /* DeviceDiscoveryManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceDiscoveryManager.swift; sourceTree = "<group>"; };
 		828E67B857C238E15711B76B /* PolicyDecisionSnapshot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PolicyDecisionSnapshot.swift; sourceTree = "<group>"; };
 		831AD13F1950B5F99A30CD7A /* ClipboardManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipboardManager.swift; sourceTree = "<group>"; };
-		F1A2B3C4D5E6F70123456789 /* CodablePersistenceStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodablePersistenceStore.swift; sourceTree = "<group>"; };
 		840F0A7CE3B95CE644FCB56E /* AppIntents.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AppIntents.framework; path = System/Library/Frameworks/AppIntents.framework; sourceTree = SDKROOT; };
 		8583EB3BEA85C4C8D8FC97C2 /* ActivityKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = ActivityKit.framework; path = System/Library/Frameworks/ActivityKit.framework; sourceTree = SDKROOT; };
 		85C26B001A92135612CB4326 /* LiveActivityManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveActivityManager.swift; sourceTree = "<group>"; };
@@ -209,20 +202,15 @@
 		9094F55BF7BC5003D8D38290 /* ObservabilityContractTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ObservabilityContractTests.swift; sourceTree = "<group>"; };
 		920CB7EAE7C04D712E34DF01 /* DeviceRowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceRowView.swift; sourceTree = "<group>"; };
 		93B830497EF129318237FE28 /* P2PConnectionManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = P2PConnectionManager.swift; sourceTree = "<group>"; };
+		9478092B3A3B83EBEE873237 /* ConnectionCodeFormatTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionCodeFormatTests.swift; sourceTree = "<group>"; };
 		96686BD469796B5833E0C8E5 /* LiquidGlass.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiquidGlass.swift; sourceTree = "<group>"; };
 		9BE5FEA7CC6B032C4D623243 /* CloudKitSyncManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudKitSyncManager.swift; sourceTree = "<group>"; };
 		9E5263289EA47395D52657D8 /* RemoteDesktopManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteDesktopManager.swift; sourceTree = "<group>"; };
 		A36B559F342929CA0C046D28 /* LogStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LogStore.swift; sourceTree = "<group>"; };
 		A3AEF34FAD525B93EAF2F1A9 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		A8BA9484E500F84365476521 /* BackgroundTaskManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundTaskManager.swift; sourceTree = "<group>"; };
-		A90F76AB2F532AC400499668 /* RegressionHardeningTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RegressionHardeningTests.swift; sourceTree = "<group>"; };
-		A90F76AD2F532AF900499668 /* RiskAuditChecklist.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = RiskAuditChecklist.md; sourceTree = "<group>"; };
-		A90F76AE2F532D7200499668 /* SignalingRetryController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignalingRetryController.swift; sourceTree = "<group>"; };
-		A90F76B02F532DEF00499668 /* WebRTCSignalingFaultInjectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebRTCSignalingFaultInjectionTests.swift; sourceTree = "<group>"; };
-		AA1F00C32F60000100499668 /* ConnectionCodeFormatTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionCodeFormatTests.swift; sourceTree = "<group>"; };
-		AA1F00C42F60000100499668 /* ConnectLinkFormatTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectLinkFormatTests.swift; sourceTree = "<group>"; };
-		AA1F00C62F60010100499668 /* PQCRekeyElectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PQCRekeyElectionTests.swift; sourceTree = "<group>"; };
 		ABC561404FEB156CA37E8009 /* CapabilityResolutionParityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CapabilityResolutionParityTests.swift; sourceTree = "<group>"; };
+		AD4191C1EC9823156E067462 /* CrossNetworkConnectPayloadDecodingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CrossNetworkConnectPayloadDecodingTests.swift; sourceTree = "<group>"; };
 		AD79DE03EB5BE43A7F4DD6C7 /* HandshakeMessages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HandshakeMessages.swift; sourceTree = "<group>"; };
 		AF1C80121FB209395A52D1EA /* SkyBridgeServerConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkyBridgeServerConfig.swift; sourceTree = "<group>"; };
 		B1FF1477AA66D565DCBFC1FB /* WeatherManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WeatherManager.swift; sourceTree = "<group>"; };
@@ -237,6 +225,7 @@
 		C24D4C02334AEE78AB048F9E /* P2PKEMIdentityKeyStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = P2PKEMIdentityKeyStore.swift; sourceTree = "<group>"; };
 		C2DD43FFE9C9B153C2496625 /* HandshakeDriver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HandshakeDriver.swift; sourceTree = "<group>"; };
 		C6A172C4D3294DB3396F66BA /* SkyBridgeCompass-Widgets.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = "SkyBridgeCompass-Widgets.appex"; sourceTree = BUILT_PRODUCTS_DIR; };
+		C77CC754A2E81659A30B3AC1 /* en */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = en; path = en.lproj/Localizable.strings; sourceTree = "<group>"; };
 		CB548BD7E1294222D8CCC2DB /* CryptoProviderFactory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CryptoProviderFactory.swift; sourceTree = "<group>"; };
 		CBF0FB136AD9A05FA2390FB8 /* DashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardView.swift; sourceTree = "<group>"; };
 		CE64C860FF7171D678F95743 /* SkyBridgeLogger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkyBridgeLogger.swift; sourceTree = "<group>"; };
@@ -246,14 +235,16 @@
 		D5685E5E2CD346A62A01BD79 /* PolicyDecisionParityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PolicyDecisionParityTests.swift; sourceTree = "<group>"; };
 		D5DDF016BC637DB6BD9133EE /* QRCodeManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRCodeManager.swift; sourceTree = "<group>"; };
 		D745F1B7ED48440187298913 /* AppMessage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppMessage.swift; sourceTree = "<group>"; };
+		DA492E325F7E54E1EEEE4A95 /* PQCRekeyElectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PQCRekeyElectionTests.swift; sourceTree = "<group>"; };
 		DDB697072B181F5CE4F84C7A /* ApplePQCProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApplePQCProvider.swift; sourceTree = "<group>"; };
 		DF504A11EB980FBB3004D271 /* AuthenticationManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthenticationManager.swift; sourceTree = "<group>"; };
+		E43049DEB4E29371EFB1B375 /* WebRTCSignalingFaultInjectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebRTCSignalingFaultInjectionTests.swift; sourceTree = "<group>"; };
 		E75A3366A6C7B572423B5D44 /* TrafficPadding.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrafficPadding.swift; sourceTree = "<group>"; };
 		E8C00600750038AF17C8EB31 /* DeviceDiscoveryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceDiscoveryView.swift; sourceTree = "<group>"; };
 		EE8FFD8D359DBC468D19075B /* WidgetKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WidgetKit.framework; path = System/Library/Frameworks/WidgetKit.framework; sourceTree = SDKROOT; };
 		EEEDE03DB889E42BACA14386 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
-		EA4C38A12FB6E4C100B0C002 /* CurrentPathTrustedDeviceStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CurrentPathTrustedDeviceStoreTests.swift; sourceTree = "<group>"; };
 		EFAF3D9DF476661D0BFB7941 /* SkyBridgeCompass-iOS.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = "SkyBridgeCompass-iOS.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		EFEE05D6C3AF8D2866C95178 /* CodablePersistenceStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodablePersistenceStore.swift; sourceTree = "<group>"; };
 		F20BA2C69C251DBFBCE544C2 /* LaunchScreen.storyboard */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; path = LaunchScreen.storyboard; sourceTree = "<group>"; };
 		F30A1E033F74728B441A3A94 /* HandshakeTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HandshakeTypes.swift; sourceTree = "<group>"; };
 		F3D6F438C5BF4F8C3A594442 /* KEMTrustStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KEMTrustStore.swift; sourceTree = "<group>"; };
@@ -285,32 +276,24 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-			F257460870D046BFF960F0BA /* Frameworks */ = {
-				isa = PBXFrameworksBuildPhase;
-				buildActionMask = 2147483647;
-				files = (
-					621F7A0A1EEFC4728F1A3DDE /* AppIntents.framework in Frameworks */,
-				);
-				runOnlyForDeploymentPostprocessing = 0;
-			};
-			A1B2C3D4E5F6066666666666 /* Frameworks */ = {
-				isa = PBXFrameworksBuildPhase;
-				buildActionMask = 2147483647;
-				files = (
-				);
-				runOnlyForDeploymentPostprocessing = 0;
-			};
+		F257460870D046BFF960F0BA /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				621F7A0A1EEFC4728F1A3DDE /* AppIntents.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
-			03F70A41D63801AEDAF221E2 /* Products */ = {
-				isa = PBXGroup;
-				children = (
-					EFAF3D9DF476661D0BFB7941 /* SkyBridgeCompass-iOS.app */,
-					C6A172C4D3294DB3396F66BA /* SkyBridgeCompass-Widgets.appex */,
-					2F8ED07B5F59B57133CC0DEE /* SkyBridgeCompassiOSTests.xctest */,
-					A1B2C3D4E5F6033333333333 /* SkyBridgeCompassiOSUITests.xctest */,
-				);
+		03F70A41D63801AEDAF221E2 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				EFAF3D9DF476661D0BFB7941 /* SkyBridgeCompass-iOS.app */,
+				C6A172C4D3294DB3396F66BA /* SkyBridgeCompass-Widgets.appex */,
+				2F8ED07B5F59B57133CC0DEE /* SkyBridgeCompassiOSTests.xctest */,
+			);
 			name = Products;
 			sourceTree = "<group>";
 		};
@@ -355,34 +338,27 @@
 			path = Network;
 			sourceTree = "<group>";
 		};
-			39BB4D8E9F48D029BFDD9F57 /* SkyBridgeCompassiOSTests */ = {
-				isa = PBXGroup;
-				children = (
+		39BB4D8E9F48D029BFDD9F57 /* SkyBridgeCompassiOSTests */ = {
+			isa = PBXGroup;
+			children = (
 				ABC561404FEB156CA37E8009 /* CapabilityResolutionParityTests.swift */,
-				AA1F00C32F60000100499668 /* ConnectionCodeFormatTests.swift */,
-				AA1F00C42F60000100499668 /* ConnectLinkFormatTests.swift */,
-				AA1F00C62F60010100499668 /* PQCRekeyElectionTests.swift */,
-				EA4C38A12FB6E4C100B0C002 /* CurrentPathTrustedDeviceStoreTests.swift */,
+				9478092B3A3B83EBEE873237 /* ConnectionCodeFormatTests.swift */,
+				24F23783410F5E90DFA7192E /* ConnectLinkFormatTests.swift */,
+				AD4191C1EC9823156E067462 /* CrossNetworkConnectPayloadDecodingTests.swift */,
+				4070718AFE727B04D180A3BB /* CurrentPathTrustedDeviceStoreTests.swift */,
 				4160F9F87D13AA571CE03308 /* FallbackSemanticsParityTests.swift */,
 				D02F165A3577BDC88F31411B /* KEMTrustStoreTests.swift */,
 				9094F55BF7BC5003D8D38290 /* ObservabilityContractTests.swift */,
 				D5685E5E2CD346A62A01BD79 /* PolicyDecisionParityTests.swift */,
 				5D702D54FA811F70FC96D595 /* PolicyDecisionTestVectors.swift */,
-				A90F76AB2F532AC400499668 /* RegressionHardeningTests.swift */,
-				A90F76B02F532DEF00499668 /* WebRTCSignalingFaultInjectionTests.swift */,
+				DA492E325F7E54E1EEEE4A95 /* PQCRekeyElectionTests.swift */,
+				0EAD1A5FAF905D530CC04BEA /* RegressionHardeningTests.swift */,
+				E43049DEB4E29371EFB1B375 /* WebRTCSignalingFaultInjectionTests.swift */,
 			);
-				path = SkyBridgeCompassiOSTests;
-				sourceTree = "<group>";
-			};
-			A1B2C3D4E5F6044444444444 /* SkyBridgeCompassiOSUITests */ = {
-				isa = PBXGroup;
-				children = (
-					A1B2C3D4E5F6022222222222 /* SkyBridgeCompassiOSUITests.swift */,
-				);
-				path = SkyBridgeCompassiOSUITests;
-				sourceTree = "<group>";
-			};
-			403CBBDCE3C167F7E3EF36C2 /* SkyBridgeCompassiOS */ = {
+			path = SkyBridgeCompassiOSTests;
+			sourceTree = "<group>";
+		};
+		403CBBDCE3C167F7E3EF36C2 /* SkyBridgeCompassiOS */ = {
 			isa = PBXGroup;
 			children = (
 				EE5434AD687E69CC94F01FC6 /* Sources */,
@@ -473,10 +449,10 @@
 			isa = PBXGroup;
 			children = (
 				04D6D6415B0A07A13BB2CBD9 /* CrossNetworkFileTransferWire.swift */,
+				2B1ADCB01BB1D0E58DE6A566 /* SignalingRetryController.swift */,
 				45402D803823C9E08DB50A64 /* WebRTCSession.swift */,
 				BFC46A911014433AFE4D3B1A /* WebRTCSignalingEnvelope.swift */,
 				FCCAB31F19CCC3E4592E39F2 /* WebSocketSignalingClient.swift */,
-				A90F76AE2F532D7200499668 /* SignalingRetryController.swift */,
 			);
 			path = WebRTC;
 			sourceTree = "<group>";
@@ -508,17 +484,15 @@
 		};
 		B55949760F23D445644575EB = {
 			isa = PBXGroup;
-				children = (
-					92FDC970131C05A02838C80E /* Packages */,
-					FD919CD6A1AD0CEA831170C9 /* Resources */,
-					403CBBDCE3C167F7E3EF36C2 /* SkyBridgeCompassiOS */,
-					39BB4D8E9F48D029BFDD9F57 /* SkyBridgeCompassiOSTests */,
-					A1B2C3D4E5F6044444444444 /* SkyBridgeCompassiOSUITests */,
-					297AD52CD355D33FD4AE1BFB /* Supporting Files */,
+			children = (
+				92FDC970131C05A02838C80E /* Packages */,
+				FD919CD6A1AD0CEA831170C9 /* Resources */,
+				403CBBDCE3C167F7E3EF36C2 /* SkyBridgeCompassiOS */,
+				39BB4D8E9F48D029BFDD9F57 /* SkyBridgeCompassiOSTests */,
+				297AD52CD355D33FD4AE1BFB /* Supporting Files */,
 				62BE32F1C64718CA8ED7151A /* Widgets */,
 				E4C4142A1C9CD93F8C89639C /* Frameworks */,
 				03F70A41D63801AEDAF221E2 /* Products */,
-				A90F76AD2F532AF900499668 /* RiskAuditChecklist.md */,
 			);
 			sourceTree = "<group>";
 		};
@@ -563,7 +537,7 @@
 			children = (
 				C0184331B19EE502746CAEC9 /* AuthSession.swift */,
 				FD6CE3E346837A1B1449284F /* NebulaIDGenerator.swift */,
-				58E8B2A0A1C24D1E8F0B1C22 /* NebulaPublicClientOAuth.swift */,
+				4B5171CE346450D6EB7ABD1E /* NebulaPublicClientOAuth.swift */,
 				490C0A61773E98D07F084DC6 /* SupabaseService.swift */,
 			);
 			path = Auth;
@@ -626,8 +600,8 @@
 			children = (
 				DF504A11EB980FBB3004D271 /* AuthenticationManager.swift */,
 				831AD13F1950B5F99A30CD7A /* ClipboardManager.swift */,
-				F1A2B3C4D5E6F70123456789 /* CodablePersistenceStore.swift */,
 				9BE5FEA7CC6B032C4D623243 /* CloudKitSyncManager.swift */,
+				EFEE05D6C3AF8D2866C95178 /* CodablePersistenceStore.swift */,
 				6AF4DA70A289A8E7E1F8127F /* CrossNetworkWebRTCManager.swift */,
 				7DB4CCFA78A457A620FEAF9F /* DeviceDiscoveryManager.swift */,
 				D0464B520BF8BF54AE9F3BB1 /* FileTransferManager.swift */,
@@ -692,7 +666,7 @@
 			isa = PBXGroup;
 			children = (
 				B8FD2B5D6AB6A664E8469945 /* Assets.xcassets */,
-				4D0F9A292A0B4F4AA96C1A01 /* Localizable.strings */,
+				1A6B4413FB32FD653E7C976B /* Localizable.strings */,
 				40944D05DD176ECF8A8E7BDB /* SupabaseConfig.plist */,
 			);
 			name = Resources;
@@ -743,11 +717,11 @@
 			productReference = EFAF3D9DF476661D0BFB7941 /* SkyBridgeCompass-iOS.app */;
 			productType = "com.apple.product-type.application";
 		};
-			C67CFB04F930238C86B4F49F /* SkyBridgeCompassiOSTests */ = {
-				isa = PBXNativeTarget;
-				buildConfigurationList = DA73EDFABF3F7E7FE7024846 /* Build configuration list for PBXNativeTarget "SkyBridgeCompassiOSTests" */;
-				buildPhases = (
-					75A6C6E5C458DC9C541E2407 /* Sources */,
+		C67CFB04F930238C86B4F49F /* SkyBridgeCompassiOSTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = DA73EDFABF3F7E7FE7024846 /* Build configuration list for PBXNativeTarget "SkyBridgeCompassiOSTests" */;
+			buildPhases = (
+				75A6C6E5C458DC9C541E2407 /* Sources */,
 				F257460870D046BFF960F0BA /* Frameworks */,
 			);
 			buildRules = (
@@ -759,28 +733,9 @@
 			packageProductDependencies = (
 			);
 			productName = SkyBridgeCompassiOSTests;
-				productReference = 2F8ED07B5F59B57133CC0DEE /* SkyBridgeCompassiOSTests.xctest */;
-				productType = "com.apple.product-type.bundle.unit-test";
-			};
-			A1B2C3D4E5F6099999999999 /* SkyBridgeCompassiOSUITests */ = {
-				isa = PBXNativeTarget;
-				buildConfigurationList = A1B2C3D4E5F60C0C0C0C0C0C /* Build configuration list for PBXNativeTarget "SkyBridgeCompassiOSUITests" */;
-				buildPhases = (
-					A1B2C3D4E5F6077777777777 /* Sources */,
-					A1B2C3D4E5F6066666666666 /* Frameworks */,
-				);
-				buildRules = (
-				);
-				dependencies = (
-					A1B2C3D4E5F6088888888888 /* PBXTargetDependency */,
-				);
-				name = SkyBridgeCompassiOSUITests;
-				packageProductDependencies = (
-				);
-				productName = SkyBridgeCompassiOSUITests;
-				productReference = A1B2C3D4E5F6033333333333 /* SkyBridgeCompassiOSUITests.xctest */;
-				productType = "com.apple.product-type.bundle.ui-testing";
-			};
+			productReference = 2F8ED07B5F59B57133CC0DEE /* SkyBridgeCompassiOSTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -788,7 +743,7 @@
 			isa = PBXProject;
 			attributes = {
 				BuildIndependentTargetsInParallel = YES;
-				LastUpgradeCheck = 2630;
+				LastUpgradeCheck = 2640;
 				TargetAttributes = {
 					225DF6CFF206BFB832FBB9A7 = {
 						DevelopmentTeam = YKUPL7Z869;
@@ -796,17 +751,13 @@
 					537E084BA6452ABCF8886C45 = {
 						DevelopmentTeam = YKUPL7Z869;
 					};
-						C67CFB04F930238C86B4F49F = {
-							DevelopmentTeam = YKUPL7Z869;
-						};
-						A1B2C3D4E5F6099999999999 = {
-							DevelopmentTeam = YKUPL7Z869;
-							TestTargetID = 537E084BA6452ABCF8886C45;
-						};
+					C67CFB04F930238C86B4F49F = {
+						DevelopmentTeam = YKUPL7Z869;
 					};
+				};
 			};
 			buildConfigurationList = 4676BBA15B2AF04FA6DE61F3 /* Build configuration list for PBXProject "SkyBridgeCompass-iOS" */;
-			compatibilityVersion = "Xcode 16.0";
+			compatibilityVersion = "Xcode 14.0";
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
@@ -821,14 +772,14 @@
 				D8ECB200A6C3588FB2C19E78 /* XCLocalSwiftPackageReference "LocalPackages/OQSRAIILocal" */,
 				4BF7ADB923E18CDD4BFB1197 /* XCLocalSwiftPackageReference "LocalPackages/WebRTCLocal" */,
 			);
+			preferredProjectObjectVersion = 77;
 			projectDirPath = "";
 			projectRoot = "";
-				targets = (
-					225DF6CFF206BFB832FBB9A7 /* SkyBridgeCompass-Widgets */,
-					537E084BA6452ABCF8886C45 /* SkyBridgeCompass-iOS */,
-					C67CFB04F930238C86B4F49F /* SkyBridgeCompassiOSTests */,
-					A1B2C3D4E5F6099999999999 /* SkyBridgeCompassiOSUITests */,
-				);
+			targets = (
+				225DF6CFF206BFB832FBB9A7 /* SkyBridgeCompass-Widgets */,
+				537E084BA6452ABCF8886C45 /* SkyBridgeCompass-iOS */,
+				C67CFB04F930238C86B4F49F /* SkyBridgeCompassiOSTests */,
+			);
 		};
 /* End PBXProject section */
 
@@ -838,8 +789,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				6E30BE5F047F9D36C1C5DAA3 /* Assets.xcassets in Resources */,
-				4D0F9A282A0B4F4AA96C1A01 /* Localizable.strings in Resources */,
 				EE2CFADE97B5CC575F298B16 /* LaunchScreen.storyboard in Resources */,
+				A3A0C50292CB73B7B9B2C9DF /* Localizable.strings in Resources */,
 				5AF4B12373F8955D228412F0 /* SupabaseConfig.plist in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -857,34 +808,27 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-			75A6C6E5C458DC9C541E2407 /* Sources */ = {
-				isa = PBXSourcesBuildPhase;
-				buildActionMask = 2147483647;
-				files = (
-				A90F76B12F532DEF00499668 /* WebRTCSignalingFaultInjectionTests.swift in Sources */,
-				AA1F00C12F60000100499668 /* ConnectionCodeFormatTests.swift in Sources */,
-				AA1F00C22F60000100499668 /* ConnectLinkFormatTests.swift in Sources */,
-				AA1F00C52F60010100499668 /* PQCRekeyElectionTests.swift in Sources */,
+		75A6C6E5C458DC9C541E2407 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
 				DCEFA18F51EEAC5A498234D7 /* CapabilityResolutionParityTests.swift in Sources */,
-				EA4C38A12FB6E4C100B0C001 /* CurrentPathTrustedDeviceStoreTests.swift in Sources */,
+				583C16868866DF91809BA256 /* ConnectLinkFormatTests.swift in Sources */,
+				04076E229294D9656744F5A1 /* ConnectionCodeFormatTests.swift in Sources */,
+				477C7D982841FA810C806D81 /* CrossNetworkConnectPayloadDecodingTests.swift in Sources */,
+				5DCD1595987CE16988ACC125 /* CurrentPathTrustedDeviceStoreTests.swift in Sources */,
 				B9B1776A08627F2AC1499D85 /* FallbackSemanticsParityTests.swift in Sources */,
 				D7466B71CF052E1AB9FBD95A /* KEMTrustStoreTests.swift in Sources */,
 				C2B6620F00166A0067A1098D /* ObservabilityContractTests.swift in Sources */,
+				6C29FF78EF4FB9EC482B42A4 /* PQCRekeyElectionTests.swift in Sources */,
 				1AB2680B9B6A4DB64E3080B0 /* PolicyDecisionParityTests.swift in Sources */,
-				A90F76AC2F532AC400499668 /* RegressionHardeningTests.swift in Sources */,
 				A30B6ADBE722CB3EDFFBF5A0 /* PolicyDecisionTestVectors.swift in Sources */,
-				);
-				runOnlyForDeploymentPostprocessing = 0;
-			};
-			A1B2C3D4E5F6077777777777 /* Sources */ = {
-				isa = PBXSourcesBuildPhase;
-				buildActionMask = 2147483647;
-				files = (
-					A1B2C3D4E5F6011111111111 /* SkyBridgeCompassiOSUITests.swift in Sources */,
-				);
-				runOnlyForDeploymentPostprocessing = 0;
-			};
-			7CA7A40061289EF0A3A3E718 /* Sources */ = {
+				EFCDCE64CE9B9D05C8643818 /* RegressionHardeningTests.swift in Sources */,
+				34275B3455303BC36565A6E0 /* WebRTCSignalingFaultInjectionTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		7CA7A40061289EF0A3A3E718 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -895,11 +839,10 @@
 				5C11C0249C43AED260C81E89 /* AuthenticationView.swift in Sources */,
 				C6AB0D6871AEA8B0CBE52CDE /* BackgroundTaskManager.swift in Sources */,
 				406D5BF6DA5DADD9AC2E7B5D /* BetaBannerView.swift in Sources */,
-				A90F76AF2F532D7200499668 /* SignalingRetryController.swift in Sources */,
 				174D5857250DDFB578699097 /* ClassicProvider.swift in Sources */,
 				5F2704328C4CFAE111CE91B9 /* ClipboardManager.swift in Sources */,
-				F1A2B3C4D5E6F7012345678A /* CodablePersistenceStore.swift in Sources */,
 				80E7233868CBFCAA2004173E /* CloudKitSyncManager.swift in Sources */,
+				C409A7A544AF844FA7075302 /* CodablePersistenceStore.swift in Sources */,
 				EAFF93330E52DC06EDC2EAAC /* ContentView.swift in Sources */,
 				D45C5A6CF3E34BECD4805E05 /* CoreTypes.swift in Sources */,
 				E63EE125B6AD059FF590C497 /* CrossNetworkFileTransferWire.swift in Sources */,
@@ -928,7 +871,7 @@
 				CDD8DC74867897BB930E446C /* LogStore.swift in Sources */,
 				45F136FD199310261A6665EA /* Models.swift in Sources */,
 				9B1311542C3BB9B1E34608F0 /* NebulaIDGenerator.swift in Sources */,
-				58E8B2A1A1C24D1E8F0B1C22 /* NebulaPublicClientOAuth.swift in Sources */,
+				21F7515E81816DFE00794824 /* NebulaPublicClientOAuth.swift in Sources */,
 				2D01D7366348A6CFA80A6457 /* OQSPQCProvider.swift in Sources */,
 				3BB7359087A9EF49C86CE078 /* OfflineMessageQueue.swift in Sources */,
 				2E4645FD7F22D357C46E4131 /* P2PConnectionManager.swift in Sources */,
@@ -948,6 +891,7 @@
 				C6210C5AF8FBC51FFF891C5F /* STUNClient.swift in Sources */,
 				3081BF69EF4C1CB4F8F01EED /* SettingsManager.swift in Sources */,
 				F93336A0B86B8AC90B4CFC9D /* SettingsView.swift in Sources */,
+				D79A5F708106BDB15F42D05A /* SignalingRetryController.swift in Sources */,
 				E9701CEDADDB8A8DC07A64EC /* SignatureProvider.swift in Sources */,
 				13BBA0D66C6D557D9F1C2B90 /* SkyBridgeActivityAttributes.swift in Sources */,
 				F2556D8F7DC3375417FA77A7 /* SkyBridgeCompassApp.swift in Sources */,
@@ -971,36 +915,31 @@
 		};
 /* End PBXSourcesBuildPhase section */
 
-/* Begin PBXVariantGroup section */
-		4D0F9A292A0B4F4AA96C1A01 /* Localizable.strings */ = {
-			isa = PBXVariantGroup;
-			children = (
-				4D0F9A2A2A0B4F4AA96C1A01 /* en */,
-				4D0F9A2B2A0B4F4AA96C1A01 /* ja */,
-				4D0F9A2C2A0B4F4AA96C1A01 /* zh-Hans */,
-			);
-			name = Localizable.strings;
-			sourceTree = "<group>";
-		};
-/* End PBXVariantGroup section */
-
 /* Begin PBXTargetDependency section */
 		A5D882D0AC6E2C52158B3CF4 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = 225DF6CFF206BFB832FBB9A7 /* SkyBridgeCompass-Widgets */;
 			targetProxy = DEFE45977C6381EAD62ECD7F /* PBXContainerItemProxy */;
 		};
-			BF9C7AAAE9E71C747962B55A /* PBXTargetDependency */ = {
-				isa = PBXTargetDependency;
-				target = 537E084BA6452ABCF8886C45 /* SkyBridgeCompass-iOS */;
-				targetProxy = 0E8A456CE048751AAB437655 /* PBXContainerItemProxy */;
-			};
-			A1B2C3D4E5F6088888888888 /* PBXTargetDependency */ = {
-				isa = PBXTargetDependency;
-				target = 537E084BA6452ABCF8886C45 /* SkyBridgeCompass-iOS */;
-				targetProxy = A1B2C3D4E5F6055555555555 /* PBXContainerItemProxy */;
-			};
+		BF9C7AAAE9E71C747962B55A /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 537E084BA6452ABCF8886C45 /* SkyBridgeCompass-iOS */;
+			targetProxy = 0E8A456CE048751AAB437655 /* PBXContainerItemProxy */;
+		};
 /* End PBXTargetDependency section */
+
+/* Begin PBXVariantGroup section */
+		1A6B4413FB32FD653E7C976B /* Localizable.strings */ = {
+			isa = PBXVariantGroup;
+			children = (
+				C77CC754A2E81659A30B3AC1 /* en */,
+				3AB33BB3B4B1284F6328390B /* ja */,
+				200749F1EDBF7A3393A36454 /* zh-Hans */,
+			);
+			name = Localizable.strings;
+			sourceTree = "<group>";
+		};
+/* End PBXVariantGroup section */
 
 /* Begin XCBuildConfiguration section */
 		21023B9CA97199D49C37954C /* Release */ = {
@@ -1016,30 +955,32 @@
 					"@executable_path/Frameworks",
 					"@loader_path/Frameworks",
 				);
-				OTHER_CFLAGS = (
+				OTHER_CFLAGS = "$(inherited) -Wno-incomplete-umbrella";
+				OTHER_CPLUSPLUSFLAGS = "$(inherited) -Wno-incomplete-umbrella";
+				OTHER_SWIFT_FLAGS = (
 					"$(inherited)",
+					"-Xcc",
+					"-I",
+					"-Xcc",
+					"$(SRCROOT)/../Sources/Vendor/WebRTCHeaders",
+					"-Xcc",
 					"-Wno-incomplete-umbrella",
 				);
-				OTHER_CPLUSPLUSFLAGS = (
-					"$(inherited)",
-					"-Wno-incomplete-umbrella",
-				);
-				OTHER_SWIFT_FLAGS = "$(inherited) -Xcc -I -Xcc $(SRCROOT)/../Sources/Vendor/WebRTCHeaders -Xcc -Wno-incomplete-umbrella";
 				PRODUCT_BUNDLE_IDENTIFIER = com.skybridge.compass.ios.tests;
 				SDKROOT = iphoneos;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited)";
 				"SWIFT_ACTIVE_COMPILATION_CONDITIONS[sdk=iphoneos26*]" = "$(inherited) HAS_APPLE_PQC_SDK";
 				"SWIFT_ACTIVE_COMPILATION_CONDITIONS[sdk=iphonesimulator26*]" = "$(inherited) HAS_APPLE_PQC_SDK";
-				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_STRICT_CONCURRENCY = targeted;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/SkyBridgeCompass-iOS.app/SkyBridgeCompass-iOS";
 			};
 			name = Release;
 		};
-			61B0AC4B37F17134A87E0634 /* Debug */ = {
-				isa = XCBuildConfiguration;
-				buildSettings = {
-					BUNDLE_LOADER = "$(TEST_HOST)";
+		61B0AC4B37F17134A87E0634 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
 				CLANG_WARN_INCOMPLETE_UMBRELLA = NO;
 				CODE_SIGNING_ALLOWED = YES;
 				DEVELOPMENT_TEAM = YKUPL7Z869;
@@ -1049,63 +990,29 @@
 					"@executable_path/Frameworks",
 					"@loader_path/Frameworks",
 				);
-				OTHER_CFLAGS = (
+				OTHER_CFLAGS = "$(inherited) -Wno-incomplete-umbrella";
+				OTHER_CPLUSPLUSFLAGS = "$(inherited) -Wno-incomplete-umbrella";
+				OTHER_SWIFT_FLAGS = (
 					"$(inherited)",
+					"-Xcc",
+					"-I",
+					"-Xcc",
+					"$(SRCROOT)/../Sources/Vendor/WebRTCHeaders",
+					"-Xcc",
 					"-Wno-incomplete-umbrella",
 				);
-				OTHER_CPLUSPLUSFLAGS = (
-					"$(inherited)",
-					"-Wno-incomplete-umbrella",
-				);
-				OTHER_SWIFT_FLAGS = "$(inherited) -Xcc -I -Xcc $(SRCROOT)/../Sources/Vendor/WebRTCHeaders -Xcc -Wno-incomplete-umbrella";
 				PRODUCT_BUNDLE_IDENTIFIER = com.skybridge.compass.ios.tests;
 				SDKROOT = iphoneos;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited)";
 				"SWIFT_ACTIVE_COMPILATION_CONDITIONS[sdk=iphoneos26*]" = "$(inherited) HAS_APPLE_PQC_SDK";
 				"SWIFT_ACTIVE_COMPILATION_CONDITIONS[sdk=iphonesimulator26*]" = "$(inherited) HAS_APPLE_PQC_SDK";
-				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_STRICT_CONCURRENCY = targeted;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/SkyBridgeCompass-iOS.app/SkyBridgeCompass-iOS";
-				};
-				name = Debug;
 			};
-			A1B2C3D4E5F60A0A0A0A0A0A /* Debug */ = {
-				isa = XCBuildConfiguration;
-				buildSettings = {
-					CODE_SIGNING_ALLOWED = YES;
-					DEVELOPMENT_TEAM = YKUPL7Z869;
-					GENERATE_INFOPLIST_FILE = YES;
-					IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-					PRODUCT_BUNDLE_IDENTIFIER = com.skybridge.compass.ios.uitests;
-					PRODUCT_NAME = "$(TARGET_NAME)";
-					SDKROOT = iphoneos;
-					SWIFT_OPTIMIZATION_LEVEL = "-Onone";
-					SWIFT_STRICT_CONCURRENCY = complete;
-					SWIFT_VERSION = 6.0;
-					TARGETED_DEVICE_FAMILY = "1,2";
-					TEST_TARGET_NAME = "SkyBridgeCompass-iOS";
-				};
-				name = Debug;
-			};
-			A1B2C3D4E5F60B0B0B0B0B0B /* Release */ = {
-				isa = XCBuildConfiguration;
-				buildSettings = {
-					CODE_SIGNING_ALLOWED = YES;
-					DEVELOPMENT_TEAM = YKUPL7Z869;
-					GENERATE_INFOPLIST_FILE = YES;
-					IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-					PRODUCT_BUNDLE_IDENTIFIER = com.skybridge.compass.ios.uitests;
-					PRODUCT_NAME = "$(TARGET_NAME)";
-					SDKROOT = iphoneos;
-					SWIFT_COMPILATION_MODE = wholemodule;
-					SWIFT_STRICT_CONCURRENCY = complete;
-					SWIFT_VERSION = 6.0;
-					TARGETED_DEVICE_FAMILY = "1,2";
-					TEST_TARGET_NAME = "SkyBridgeCompass-iOS";
-				};
-				name = Release;
-			};
-			749DA873F5B0CE38987EE16E /* Debug */ = {
+			name = Debug;
+		};
+		749DA873F5B0CE38987EE16E /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				DEVELOPMENT_TEAM = YKUPL7Z869;
@@ -1117,7 +1024,7 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.skybridge.compass.ios.widgets;
 				SDKROOT = iphoneos;
-				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_STRICT_CONCURRENCY = targeted;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Debug;
@@ -1190,7 +1097,7 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.skybridge.compass.ios.widgets;
 				SDKROOT = iphoneos;
-				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_STRICT_CONCURRENCY = targeted;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Release;
@@ -1207,21 +1114,23 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				OTHER_CFLAGS = (
+				OTHER_CFLAGS = "$(inherited) -Wno-incomplete-umbrella";
+				OTHER_CPLUSPLUSFLAGS = "$(inherited) -Wno-incomplete-umbrella";
+				OTHER_SWIFT_FLAGS = (
 					"$(inherited)",
+					"-Xcc",
+					"-I",
+					"-Xcc",
+					"$(SRCROOT)/../Sources/Vendor/WebRTCHeaders",
+					"-Xcc",
 					"-Wno-incomplete-umbrella",
 				);
-				OTHER_CPLUSPLUSFLAGS = (
-					"$(inherited)",
-					"-Wno-incomplete-umbrella",
-				);
-				OTHER_SWIFT_FLAGS = "$(inherited) -Xcc -I -Xcc $(SRCROOT)/../Sources/Vendor/WebRTCHeaders -Xcc -Wno-incomplete-umbrella";
 				PRODUCT_BUNDLE_IDENTIFIER = com.skybridge.compass.ios;
 				SDKROOT = iphoneos;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited)";
 				"SWIFT_ACTIVE_COMPILATION_CONDITIONS[sdk=iphoneos26*]" = "$(inherited) HAS_APPLE_PQC_SDK";
 				"SWIFT_ACTIVE_COMPILATION_CONDITIONS[sdk=iphonesimulator26*]" = "$(inherited) HAS_APPLE_PQC_SDK";
-				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_STRICT_CONCURRENCY = targeted;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Debug;
@@ -1238,21 +1147,23 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				OTHER_CFLAGS = (
+				OTHER_CFLAGS = "$(inherited) -Wno-incomplete-umbrella";
+				OTHER_CPLUSPLUSFLAGS = "$(inherited) -Wno-incomplete-umbrella";
+				OTHER_SWIFT_FLAGS = (
 					"$(inherited)",
+					"-Xcc",
+					"-I",
+					"-Xcc",
+					"$(SRCROOT)/../Sources/Vendor/WebRTCHeaders",
+					"-Xcc",
 					"-Wno-incomplete-umbrella",
 				);
-				OTHER_CPLUSPLUSFLAGS = (
-					"$(inherited)",
-					"-Wno-incomplete-umbrella",
-				);
-				OTHER_SWIFT_FLAGS = "$(inherited) -Xcc -I -Xcc $(SRCROOT)/../Sources/Vendor/WebRTCHeaders -Xcc -Wno-incomplete-umbrella";
 				PRODUCT_BUNDLE_IDENTIFIER = com.skybridge.compass.ios;
 				SDKROOT = iphoneos;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited)";
 				"SWIFT_ACTIVE_COMPILATION_CONDITIONS[sdk=iphoneos26*]" = "$(inherited) HAS_APPLE_PQC_SDK";
 				"SWIFT_ACTIVE_COMPILATION_CONDITIONS[sdk=iphonesimulator26*]" = "$(inherited) HAS_APPLE_PQC_SDK";
-				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_STRICT_CONCURRENCY = targeted;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Release;
@@ -1341,25 +1252,16 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;
 		};
-			DA73EDFABF3F7E7FE7024846 /* Build configuration list for PBXNativeTarget "SkyBridgeCompassiOSTests" */ = {
-				isa = XCConfigurationList;
-				buildConfigurations = (
-					61B0AC4B37F17134A87E0634 /* Debug */,
-					21023B9CA97199D49C37954C /* Release */,
-				);
-				defaultConfigurationIsVisible = 0;
-				defaultConfigurationName = Debug;
-			};
-			A1B2C3D4E5F60C0C0C0C0C0C /* Build configuration list for PBXNativeTarget "SkyBridgeCompassiOSUITests" */ = {
-				isa = XCConfigurationList;
-				buildConfigurations = (
-					A1B2C3D4E5F60A0A0A0A0A0A /* Debug */,
-					A1B2C3D4E5F60B0B0B0B0B0B /* Release */,
-				);
-				defaultConfigurationIsVisible = 0;
-				defaultConfigurationName = Debug;
-			};
-			F271314E895EDF4A945446C9 /* Build configuration list for PBXNativeTarget "SkyBridgeCompass-Widgets" */ = {
+		DA73EDFABF3F7E7FE7024846 /* Build configuration list for PBXNativeTarget "SkyBridgeCompassiOSTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				61B0AC4B37F17134A87E0634 /* Debug */,
+				21023B9CA97199D49C37954C /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		F271314E895EDF4A945446C9 /* Build configuration list for PBXNativeTarget "SkyBridgeCompass-Widgets" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				749DA873F5B0CE38987EE16E /* Debug */,

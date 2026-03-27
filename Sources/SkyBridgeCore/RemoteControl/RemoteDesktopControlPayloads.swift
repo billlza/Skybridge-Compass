@@ -120,6 +120,7 @@ public struct RemoteDesktopStreamConfiguration: Codable, Sendable, Equatable {
     public let lossRecoveryMode: String?
     public let screenFrameTransport: String?
     public let screenDataChannelEnabled: Bool?
+    public let nativeVideoTrackReady: Bool?
     public let streamRefreshToken: UInt64?
     public let sentAt: TimeInterval
 
@@ -144,6 +145,7 @@ public struct RemoteDesktopStreamConfiguration: Codable, Sendable, Equatable {
         lossRecoveryMode: String? = nil,
         screenFrameTransport: String? = nil,
         screenDataChannelEnabled: Bool? = nil,
+        nativeVideoTrackReady: Bool? = nil,
         streamRefreshToken: UInt64? = nil,
         sentAt: TimeInterval = Date().timeIntervalSince1970
     ) {
@@ -167,6 +169,7 @@ public struct RemoteDesktopStreamConfiguration: Codable, Sendable, Equatable {
         self.lossRecoveryMode = lossRecoveryMode
         self.screenFrameTransport = screenFrameTransport
         self.screenDataChannelEnabled = screenDataChannelEnabled
+        self.nativeVideoTrackReady = nativeVideoTrackReady
         self.streamRefreshToken = streamRefreshToken
         self.sentAt = sentAt
     }

@@ -22,6 +22,11 @@ public actor SelfIdentityProvider {
     private(set) var macSet: Set<String> = []
     
     private init() {}
+
+    private enum DeviceIDStorage {
+        static let service = "SkyBridge.SelfIdentity"
+        static let account = "deviceId"
+    }
     
  // MARK: - 加载或创建本机身份
     
@@ -149,29 +154,67 @@ public actor SelfIdentityProvider {
  // MARK: - 私有加载逻辑
     
     private func loadOrCreateDeviceId() async {
-        let service = "SkyBridge.SelfIdentity"
-        let account = "deviceId"
-        
- // 尝试从 Keychain 读取（nonisolated 方法，不需要 await）
-        if let data = KeychainManager.shared.exportKey(service: service, account: account),
-           let existing = String(data: data, encoding: .utf8), !existing.isEmpty {
+        let protocolIdentityDeviceID = await DeviceIdentityKeyManager.shared
+            .getDeviceId()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if !protocolIdentityDeviceID.isEmpty {
+            let currentStored = loadPersistedDeviceId()
+            if currentStored != protocolIdentityDeviceID {
+                if persistDeviceId(protocolIdentityDeviceID) {
+                    if let currentStored, !currentStored.isEmpty {
+                        logger.notice(
+                            "🔁 SelfIdentityProvider deviceId migrated to protocol identity source: old=\(currentStored.prefix(8), privacy: .public)... new=\(protocolIdentityDeviceID.prefix(8), privacy: .public)..."
+                        )
+                    } else {
+                        logger.debug("📱 SelfIdentityProvider deviceId mirrored from protocol identity source: \(protocolIdentityDeviceID.prefix(8))...")
+                    }
+                } else if let currentStored, !currentStored.isEmpty {
+                    logger.error("❌ SelfIdentityProvider deviceId migration persistence failed; using protocol identity ID in-memory")
+                }
+            } else {
+                logger.debug("📱 SelfIdentityProvider 使用协议身份 deviceId: \(protocolIdentityDeviceID.prefix(8))...")
+            }
+            deviceId = protocolIdentityDeviceID
+            return
+        }
+
+        if let existing = loadPersistedDeviceId() {
             deviceId = existing
             logger.debug("📱 从 Keychain 加载 deviceId: \(existing.prefix(8))...")
             return
         }
-        
- // 首次启动：生成新 UUID 并持久化
+
         let newId = UUID().uuidString
-        let data = Data(newId.utf8)
-        let success = KeychainManager.shared.importKey(data: data, service: service, account: account)
-        
-        if success {
+        if persistDeviceId(newId) {
             deviceId = newId
             logger.info("🆕 生成新 deviceId 并已持久化: \(newId.prefix(8))...")
         } else {
             logger.error("❌ deviceId 持久化失败，使用临时 ID")
-            deviceId = newId // 仍使用，但重启后会变
+            deviceId = newId
         }
+    }
+
+    private func loadPersistedDeviceId() -> String? {
+        if let data = KeychainManager.shared.exportKey(
+            service: DeviceIDStorage.service,
+            account: DeviceIDStorage.account
+        ),
+           let existing = String(data: data, encoding: .utf8),
+           !existing.isEmpty {
+            return existing
+        }
+        return nil
+    }
+
+    @discardableResult
+    private func persistDeviceId(_ deviceId: String) -> Bool {
+        guard let data = deviceId.data(using: .utf8) else { return false }
+        return KeychainManager.shared.importKey(
+            data: data,
+            service: DeviceIDStorage.service,
+            account: DeviceIDStorage.account
+        )
     }
     
     private func loadPubKeyFingerprint() async {

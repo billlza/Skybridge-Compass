@@ -101,6 +101,43 @@ public actor SignalServerClient {
         public let initiatorProtocolPublicKeyFingerprint: String
     }
 
+    public struct RegisterCurrentDeviceRequestBody: Encodable, Sendable {
+        public let deviceId: String
+        public let protocolSigningAlgorithm: ProtocolSigningAlgorithm
+        public let protocolPublicKeyFingerprint: String
+        public let clientVersion: String
+        public let protocolVersion: String
+        public let deviceName: String
+    }
+
+    public struct RegisteredDeviceResponseBody: Decodable, Sendable {
+        public let registered: Bool
+        public let activated: Bool
+        public let device: RegisteredDeviceBody
+    }
+
+    public struct RegisteredDeviceBody: Decodable, Sendable, Equatable {
+        public let tenantId: String
+        public let userId: String
+        public let deviceId: String
+        public let protocolSigningAlgorithm: ProtocolSigningAlgorithm
+        public let protocolPublicKeyFingerprint: String
+        public let deviceName: String?
+        public let status: String
+        public let approvalMethod: String?
+
+        enum CodingKeys: String, CodingKey {
+            case tenantId = "tenant_id"
+            case userId = "user_id"
+            case deviceId = "device_id"
+            case protocolSigningAlgorithm = "protocol_signing_algorithm"
+            case protocolPublicKeyFingerprint = "protocol_public_key_fingerprint"
+            case deviceName = "device_name"
+            case status
+            case approvalMethod = "approval_method"
+        }
+    }
+
     public struct AdmissionChallenge: Sendable, Equatable {
         public let challengeID: String
         public let nonce: String
@@ -274,6 +311,7 @@ public actor SignalServerClient {
     public static let registerCodePath = "/api/webrtc/register-code"
     public static let registerSessionPath = "/api/webrtc/register-session"
     public static let redeemSessionPath = "/api/webrtc/redeem-session"
+    public static let registerCurrentDevicePath = "/api/devices/register-current"
 
     public init(
         urlSession: URLSession = .shared,
@@ -490,6 +528,27 @@ public actor SignalServerClient {
             initiatorProtocolSigningAlgorithm: response.initiatorProtocolSigningAlgorithm,
             initiatorProtocolPublicKeyFingerprint: response.initiatorProtocolPublicKeyFingerprint
         )
+    }
+
+    public func registerCurrentDevice(
+        binding: ProtocolIdentityBinding,
+        deviceName: String
+    ) async throws -> RegisteredDeviceBody {
+        let requestBody = RegisterCurrentDeviceRequestBody(
+            deviceId: binding.deviceId,
+            protocolSigningAlgorithm: binding.protocolSigningAlgorithm,
+            protocolPublicKeyFingerprint: binding.protocolPublicKeyFingerprint,
+            clientVersion: clientVersionProvider(),
+            protocolVersion: protocolVersionProvider(),
+            deviceName: deviceName
+        )
+        let response: RegisteredDeviceResponseBody = try await performJSONRequest(
+            path: Self.registerCurrentDevicePath,
+            method: "POST",
+            body: try JSONEncoder().encode(requestBody),
+            requiresUserAuthentication: true
+        )
+        return response.device
     }
 
     public static func lookupCodePath(for code: String) -> String {

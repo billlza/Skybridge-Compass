@@ -665,7 +665,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     }
 
     public func sendScreen(_ data: Data) throws {
-        try send(data, preferScreenChannel: true, fallbackToControlChannel: true)
+        try send(data, preferScreenChannel: true, fallbackToControlChannel: false)
     }
 
     private func send(
@@ -696,13 +696,12 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     }
 
     public func sendScreenFramedPayload(_ payload: Data, maxChunkBytes: Int = 8 * 1024) throws {
-        let useDedicatedScreenChannel = hasOpenScreenDataChannel()
         try sendFramedPayload(
             payload,
             maxChunkBytes: maxChunkBytes,
-            preferScreenChannel: useDedicatedScreenChannel,
-            fallbackToControlChannel: true,
-            lock: useDedicatedScreenChannel ? outboundScreenFrameLock : outboundFrameLock
+            preferScreenChannel: true,
+            fallbackToControlChannel: false,
+            lock: outboundScreenFrameLock
         )
     }
 
@@ -762,16 +761,15 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         pollInterval: Duration = .milliseconds(10),
         drainTimeout: Duration = .seconds(5)
     ) async throws {
-        let useDedicatedScreenChannel = hasOpenScreenDataChannel()
         try await sendFramedPayloadAsync(
             payload,
             maxChunkBytes: maxChunkBytes,
             maxBufferedAmountBytes: maxBufferedAmountBytes,
             pollInterval: pollInterval,
             drainTimeout: drainTimeout,
-            preferScreenChannel: useDedicatedScreenChannel,
-            fallbackToControlChannel: true,
-            gate: useDedicatedScreenChannel ? outboundScreenFrameGate : outboundFrameGate
+            preferScreenChannel: true,
+            fallbackToControlChannel: false,
+            gate: outboundScreenFrameGate
         )
     }
 
@@ -855,7 +853,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
 #endif
     }
 
-    private func hasOpenScreenDataChannel() -> Bool {
+    public func hasOpenScreenDataChannel() -> Bool {
 #if canImport(WebRTC)
         guard let screenDataChannel else { return false }
         return screenDataChannel.readyState == .open

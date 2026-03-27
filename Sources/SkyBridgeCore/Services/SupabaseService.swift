@@ -1298,7 +1298,10 @@ extension SupabaseService {
 
                 return AuthSession(
                     accessToken: authResponse.accessToken,
-                    refreshToken: authResponse.refreshToken,
+                    refreshToken: AuthenticationService.mergedRefreshToken(
+                        authResponse.refreshToken,
+                        fallback: refreshToken
+                    ),
                     userIdentifier: authResponse.user.id,
                     nebulaId: authResponse.user.preferredNebulaId,
                     displayName: preferredDisplayName,

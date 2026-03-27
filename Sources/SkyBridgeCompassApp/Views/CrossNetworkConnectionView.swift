@@ -183,8 +183,19 @@ struct CrossNetworkConnectionView: View {
                             .background(Color.white)
                             .cornerRadius(12)
                             .shadow(radius: 4)
+                            .overlay(alignment: .topTrailing) {
+                                Image(systemName: "arrow.clockwise.circle.fill")
+                                    .font(.system(size: 28))
+                                    .foregroundStyle(.white, Color.blue)
+                                    .padding(10)
+                            }
+                            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            .help("点击二维码立即刷新")
+                            .onTapGesture {
+                                Task { await generateDynamicQRCodeFromUI(trigger: "cross_network_window_tap_qr_refresh") }
+                            }
 
-                        Text(LocalizationManager.shared.localizedString("connection.qrcode.scanInstruction"))
+                        Text("扫描此二维码，点击二维码可立即刷新")
                             .font(.caption)
                             .foregroundColor(.secondary)
 
@@ -197,6 +208,16 @@ struct CrossNetworkConnectionView: View {
                                     .foregroundColor(.secondary)
                             }
                         }
+
+                        Button {
+                            Task { await generateDynamicQRCodeFromUI(trigger: "cross_network_window_regenerate_qr") }
+                        } label: {
+                            Label(
+                                LocalizationManager.shared.localizedString("action.refresh"),
+                                systemImage: "arrow.clockwise"
+                            )
+                        }
+                        .buttonStyle(.bordered)
                     } else {
                         Button(action: {
                             Task { await generateDynamicQRCodeFromUI(trigger: "cross_network_window_generate_qr") }

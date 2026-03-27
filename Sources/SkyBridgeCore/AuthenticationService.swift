@@ -74,6 +74,9 @@ import Combine
         }
         guard let refreshToken = currentSession.refreshToken?.trimmingCharacters(in: .whitespacesAndNewlines),
               !refreshToken.isEmpty else {
+            if forceRefresh || shouldRefreshAccessToken(currentSession.accessToken) {
+                throw AuthenticationError.server("登录已过期，请重新登录")
+            }
             return currentSession.accessToken
         }
 
@@ -89,10 +92,22 @@ import Combine
             refreshedSession = try self.session(fromNebulaResult: nebulaResult)
         }
 
-        try store(session: refreshedSession)
-        sessionSubject.send(refreshedSession)
-        await TenantAccessController.shared.bindAuthentication(session: refreshedSession)
-        return refreshedSession.accessToken
+        let mergedSession = AuthSession(
+            accessToken: refreshedSession.accessToken,
+            refreshToken: Self.mergedRefreshToken(
+                refreshedSession.refreshToken,
+                fallback: currentSession.refreshToken
+            ),
+            userIdentifier: refreshedSession.userIdentifier,
+            nebulaId: refreshedSession.nebulaId,
+            displayName: refreshedSession.displayName,
+            issuedAt: refreshedSession.issuedAt
+        )
+
+        try store(session: mergedSession)
+        sessionSubject.send(mergedSession)
+        await TenantAccessController.shared.bindAuthentication(session: mergedSession)
+        return mergedSession.accessToken
     }
 
     private let sessionSubject = CurrentValueSubject<AuthSession?, Never>(nil)
@@ -353,6 +368,20 @@ import Combine
 
     private func loadSessionFromKeychain() throws -> AuthSession? {
         KeychainManager.shared.loadAuthSession()
+    }
+
+    nonisolated static func mergedRefreshToken(_ candidate: String?, fallback: String?) -> String? {
+        let trimmedCandidate = candidate?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let trimmedCandidate, !trimmedCandidate.isEmpty {
+            return trimmedCandidate
+        }
+
+        let trimmedFallback = fallback?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let trimmedFallback, !trimmedFallback.isEmpty {
+            return trimmedFallback
+        }
+
+        return nil
     }
 
     private static func loadConfigurationFromEnvironment() -> Configuration? {

@@ -3,6 +3,43 @@ import XCTest
 
 @available(iOS 17.0, *)
 final class WebRTCSignalingFaultInjectionTests: XCTestCase {
+    func testInboundFrameParserReassemblesValidFragmentedPayload() {
+        var parser = CrossNetworkWebRTCManager.InboundFrameParser(maxInboundFrameBytes: 1024)
+        let payload = Data("hello-webrtc".utf8)
+        let framed = framedPayload(payload)
+
+        parser.append(Data(framed.prefix(3)))
+        XCTAssertFalse(parser.canProbeDirectCompatibility)
+        XCTAssertNil(parser.nextPayload(sessionId: "S1", logLabel: "test"))
+
+        parser.append(Data(framed.dropFirst(3)))
+        XCTAssertEqual(parser.nextPayload(sessionId: "S1", logLabel: "test"), payload)
+        XCTAssertTrue(parser.canProbeDirectCompatibility)
+    }
+
+    func testInboundFrameParserClearsBufferAfterInvalidLengthPrefix() {
+        var parser = CrossNetworkWebRTCManager.InboundFrameParser(maxInboundFrameBytes: 1024)
+        parser.append(Data([0xFF, 0xFF, 0xFF, 0xFF]))
+
+        XCTAssertNil(parser.nextPayload(sessionId: "S2", logLabel: "test"))
+        XCTAssertTrue(parser.canProbeDirectCompatibility)
+
+        let payload = Data("recovered".utf8)
+        parser.append(framedPayload(payload))
+        XCTAssertEqual(parser.nextPayload(sessionId: "S2", logLabel: "test"), payload)
+    }
+
+    func testInboundFrameParserOnlyAllowsDirectProbeWhenNoPartialFrameIsBuffered() {
+        var parser = CrossNetworkWebRTCManager.InboundFrameParser(maxInboundFrameBytes: 1024)
+        let payload = Data("frame".utf8)
+        let framed = framedPayload(payload)
+
+        XCTAssertTrue(parser.canProbeDirectCompatibility)
+        parser.append(Data(framed.prefix(2)))
+        XCTAssertFalse(parser.canProbeDirectCompatibility)
+        XCTAssertNil(parser.nextPayload(sessionId: "S3", logLabel: "test"))
+    }
+
     func testInvalidWebSocketURLFailsFastWithoutRetry() async {
         await Task { @MainActor in
             let probe = RetryProbe()
@@ -128,6 +165,56 @@ final class WebRTCSignalingFaultInjectionTests: XCTestCase {
             XCTAssertTrue(redacted.contains("st=%3Credacted%3E") || redacted.contains("st=<redacted>"))
         }.value
     }
+
+    @MainActor
+    func testSessionScopedSignalingURLPrefersCurrentPathOrigin() {
+        let resolved = CrossNetworkWebRTCManager.resolvedSignalingWebSocketURLString(
+            signalingOrigin: "https://signal.example.com:8443",
+            fallbackWebSocketURL: "wss://fallback.example.com/ws"
+        )
+        XCTAssertEqual(resolved, "wss://signal.example.com:8443/ws")
+    }
+
+    @MainActor
+    func testSessionScopedSignalingURLFallsBackForInvalidOrigin() {
+        let fallback = "wss://fallback.example.com/ws"
+        let resolved = CrossNetworkWebRTCManager.resolvedSignalingWebSocketURLString(
+            signalingOrigin: "not a url",
+            fallbackWebSocketURL: fallback
+        )
+        XCTAssertEqual(resolved, fallback)
+    }
+
+    @MainActor
+    func testSignalingRecoveryIsSuppressedDuringLocalTeardown() {
+        XCTAssertTrue(
+            CrossNetworkWebRTCManager.shouldScheduleSignalingRecovery(
+                isTransportEstablished: true,
+                suppressRecovery: false
+            )
+        )
+        XCTAssertFalse(
+            CrossNetworkWebRTCManager.shouldScheduleSignalingRecovery(
+                isTransportEstablished: true,
+                suppressRecovery: true
+            )
+        )
+        XCTAssertFalse(
+            CrossNetworkWebRTCManager.shouldScheduleSignalingRecovery(
+                isTransportEstablished: false,
+                suppressRecovery: false
+            )
+        )
+    }
+}
+
+@available(iOS 17.0, *)
+private func framedPayload(_ payload: Data) -> Data {
+    var framed = Data()
+    var length = UInt32(payload.count).bigEndian
+    withUnsafeBytes(of: &length) { framed.append(contentsOf: $0) }
+    framed.append(payload)
+    return framed
 }
 
 @available(iOS 17.0, *)

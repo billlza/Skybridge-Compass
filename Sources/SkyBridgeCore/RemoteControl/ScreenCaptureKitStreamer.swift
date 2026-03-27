@@ -43,12 +43,14 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
     private var captureCursorInVideo = true
     private var hasEmittedParameterSets = false
     private var pendingForcedKeyFrames = 0
+    private var pendingParameterSetReannounce = false
     private var capturedDisplayID: CGDirectDisplayID?
     private var capturedDisplayPixelSize: CGSize = .zero
     private let stateLock = NSLock()
     private var lastSampleBufferAt: Date = .distantPast
     private var lastMeaningfulSampleAt: Date = .distantPast
     private var lastEncodedFrameAt: Date = .distantPast
+    private var lastSceneCutRecoveryAt: Date = .distantPast
     private let sampleOutputQueue = DispatchQueue(
         label: "com.skybridge.compass.sck.output",
         qos: .userInteractive
@@ -105,7 +107,8 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
         self.bitstreamFormat = bitstreamFormat
         hasEmittedParameterSets = false
         pendingForcedKeyFrames = 2
- // 读取编码档位与低延迟设置（主线程安全）
+        pendingParameterSetReannounce = false
+// 读取编码档位与低延迟设置（主线程安全）
         let settings = RemoteDesktopSettingsManager.shared.settings
         preferredProfile = settings.displaySettings.encodingProfile
         preferredQuality = settings.displaySettings.videoQuality
@@ -146,7 +149,7 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
         output = StreamOutput(owner: self)
         let filter = SCContentFilter(display: display, excludingWindows: [])
         stream = SCStream(filter: filter, configuration: configuration, delegate: nil)
-        if !jpegMode && onRawFrame == nil {
+        if !jpegMode && onEncodedFrame != nil {
             try setupCompressionSession(width: width, height: height, codec: codecType)
         }
 
@@ -188,9 +191,11 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
         releaseCompressionCallbackContext()
         hasEmittedParameterSets = false
         pendingForcedKeyFrames = 0
+        pendingParameterSetReannounce = false
         captureCursorInVideo = true
         capturedDisplayID = nil
         capturedDisplayPixelSize = .zero
+        lastSceneCutRecoveryAt = .distantPast
         logger.info("🛑 ScreenCaptureKit 采集已停止")
     }
 
@@ -201,6 +206,23 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
         pendingForcedKeyFrames = max(pendingForcedKeyFrames, clampedCount)
         stateLock.unlock()
         logger.info("🪄 请求关键帧刷新: \(reason, privacy: .public)")
+    }
+
+    @MainActor
+    private func requestSceneCutRecovery(reason: String, count: Int = 3) {
+        guard started else { return }
+        let now = Date()
+        var shouldTrigger = false
+        stateLock.lock()
+        if now.timeIntervalSince(lastSceneCutRecoveryAt) >= 0.35 {
+            lastSceneCutRecoveryAt = now
+            pendingParameterSetReannounce = true
+            shouldTrigger = true
+        }
+        stateLock.unlock()
+        guard shouldTrigger else { return }
+        requestKeyFrameRefresh(reason: "scene-cut-\(reason)", count: count)
+        logger.info("🎬 检测到场景切换，已强制请求 IDR 与参数集重宣告: \(reason, privacy: .public)")
     }
 
     @MainActor
@@ -223,7 +245,7 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self, self.started else { return }
-                self.requestKeyFrameRefresh(reason: "active-space-changed")
+                self.requestSceneCutRecovery(reason: "active-space-changed")
             }
         }
 #endif
@@ -258,7 +280,7 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
             return
         }
 
-        requestKeyFrameRefresh(reason: "display-parameters-changed")
+        requestSceneCutRecovery(reason: "display-parameters-changed")
     }
 
     private func displayPixelSize(for displayID: CGDirectDisplayID, fallback: CGSize) -> CGSize {
@@ -528,6 +550,14 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
         return [kVTEncodeFrameOptionKey_ForceKeyFrame as String: kCFBooleanTrue as Any] as CFDictionary
     }
 
+    private func consumePendingParameterSetReannounce() -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard pendingParameterSetReannounce else { return false }
+        pendingParameterSetReannounce = false
+        return true
+    }
+
     private func handleCompressedSample(_ sampleBuffer: CMSampleBuffer) {
         guard let dataBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { return }
         let totalLength = CMBlockBufferGetDataLength(dataBuffer)
@@ -566,7 +596,10 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
         let headerLength = max(1, nalUnitHeaderLength(from: formatDescription))
         guard headerLength <= 4 else { return nil }
 
-        let shouldPrependParameterSets = isSyncSample(sampleBuffer) || !hasEmittedParameterSets
+        let shouldPrependParameterSets =
+            isSyncSample(sampleBuffer)
+            || !hasEmittedParameterSets
+            || consumePendingParameterSetReannounce()
         var output = Data()
         if shouldPrependParameterSets,
            let parameterSets = parameterSetsAnnexB(from: formatDescription),
@@ -742,6 +775,31 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
     ) {
         guard let report = damageReport(from: sampleBuffer, pixelBuffer: pixelBuffer) else { return }
         onDamageReport?(report)
+        guard shouldTreatDamageAsSceneCut(report, pixelBuffer: pixelBuffer) else { return }
+        Task { @MainActor [weak self] in
+            self?.requestSceneCutRecovery(
+                reason: report.fullFrameFallback ? "full-frame-damage" : "damage-surge"
+            )
+        }
+    }
+
+    private func shouldTreatDamageAsSceneCut(
+        _ report: RemoteDesktopDamageReport,
+        pixelBuffer: CVPixelBuffer
+    ) -> Bool {
+        if report.fullFrameFallback {
+            return true
+        }
+
+        let totalArea = Double(max(CVPixelBufferGetWidth(pixelBuffer) * CVPixelBufferGetHeight(pixelBuffer), 1))
+        let dirtyArea = min(
+            totalArea,
+            report.rects.reduce(0.0) { partial, rect in
+                partial + max(rect.width, 0) * max(rect.height, 0)
+            }
+        )
+        let dirtyCoverage = dirtyArea / totalArea
+        return dirtyCoverage >= 0.45 || report.rects.count >= 18
     }
 
     private func damageReport(
@@ -893,7 +951,6 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
                 owner.noteEncodedFrameEmitted()
                 let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
                 onRawFrame(pixelBuffer, pts)
-                return
             }
 
             guard let cs = owner.compressionSession else { return }
