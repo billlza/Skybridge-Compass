@@ -168,6 +168,8 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     private var localVideoTransceiver: RTCRtpTransceiver?
     private var localVideoCapturer: RTCVideoCapturer?
     private var didLogOutgoingNativeVideoFrame = false
+    private var outgoingNativeVideoFrameCount: UInt64 = 0
+    private var lastOutgoingNativeVideoFrameLogAt: Date = .distantPast
     private var pendingRemoteICECandidates: [RTCIceCandidate] = []
     private var seenRemoteICECandidateKeys: Set<String> = []
 #endif
@@ -237,6 +239,8 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         localVideoTransceiver = nil
         localVideoCapturer = nil
         didLogOutgoingNativeVideoFrame = false
+        outgoingNativeVideoFrameCount = 0
+        lastOutgoingNativeVideoFrameLogAt = .distantPast
         peerConnection?.close()
         peerConnection = nil
         if sslHeld {
@@ -787,6 +791,14 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             )
         }
         localVideoSource.capturer(localVideoCapturer, didCapture: frame)
+        outgoingNativeVideoFrameCount &+= 1
+        let now = Date()
+        if now.timeIntervalSince(lastOutgoingNativeVideoFrameLogAt) >= 2.0 {
+            lastOutgoingNativeVideoFrameLogAt = now
+            logger.info(
+                "📈 native WebRTC screen frames submitted: sessionId=\(self.sessionId, privacy: .public) count=\(self.outgoingNativeVideoFrameCount, privacy: .public)"
+            )
+        }
 #endif
     }
 
@@ -941,16 +953,10 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
 
     private func configureOutgoingScreenSenderParametersIfNeeded(_ sender: RTCRtpSender) {
         let parameters = sender.parameters
-        parameters.degradationPreference = NSNumber(
-            value: RTCDegradationPreference.maintainResolution.rawValue
-        )
         if !parameters.encodings.isEmpty {
             parameters.encodings = parameters.encodings.map { encoding in
                 encoding.isActive = true
                 encoding.maxFramerate = NSNumber(value: 60)
-                encoding.maxBitrateBps = NSNumber(value: 16_000_000)
-                encoding.bitratePriority = 4.0
-                encoding.networkPriority = .high
                 return encoding
             }
         }
