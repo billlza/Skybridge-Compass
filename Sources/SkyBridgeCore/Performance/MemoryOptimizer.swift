@@ -23,15 +23,13 @@ public final class MemoryOptimizer: BaseManager, @unchecked Sendable {
         
  // 启动内存监控
         Task {
-            await memoryMonitor.startMonitoring()
+            memoryMonitor.startMonitoring()
         }
     }
     
     deinit {
- // 在deinit中不能使用异步操作，改为同步停止
-        Task.detached { [memoryMonitor] in
-            await memoryMonitor.stopMonitoring()
-        }
+        // 同步停止内存监控，避免 Task 生命周期问题
+        memoryMonitor.stopMonitoringSync()
     }
     
  // MARK: - 公共接口
@@ -72,7 +70,7 @@ public final class MemoryOptimizer: BaseManager, @unchecked Sendable {
         guard !data.isEmpty else { return [] }
         
         let optimalBatchSize = batchSize ?? calculateOptimalBatchSize(for: data.count)
-        let memoryInfo = await memoryMonitor.getCurrentMemoryInfo()
+        let memoryInfo = memoryMonitor.getCurrentMemoryInfo()
         
         logger.debug("处理大数据集: \(data.count)项，批次大小: \(optimalBatchSize)，可用内存: \(memoryInfo.availableMemory)MB")
         
@@ -136,7 +134,7 @@ public final class MemoryOptimizer: BaseManager, @unchecked Sendable {
     
  /// 智能图像缓存管理 - 基于内存压力和使用频率
     public func cacheImage(_ imageData: Data, forKey key: String, priority: CachePriority = .normal) async {
-        let memoryInfo = await memoryMonitor.getCurrentMemoryInfo()
+        let memoryInfo = memoryMonitor.getCurrentMemoryInfo()
         
  // 根据内存压力调整缓存策略
         let shouldCache: Bool
@@ -174,7 +172,7 @@ public final class MemoryOptimizer: BaseManager, @unchecked Sendable {
         operation: ImageOperation,
         maxConcurrency: Int? = nil
     ) async throws -> [String: Data] {
-        let memoryInfo = await memoryMonitor.getCurrentMemoryInfo()
+        let memoryInfo = memoryMonitor.getCurrentMemoryInfo()
         
  // 根据内存情况调整并发数
         let concurrency = maxConcurrency ?? {
@@ -238,7 +236,7 @@ public final class MemoryOptimizer: BaseManager, @unchecked Sendable {
     
  /// 创建优化的内存上下文
     private func createOptimizedMemoryContext() async -> MemoryContext {
-        let memoryInfo = await memoryMonitor.getCurrentMemoryInfo()
+        let memoryInfo = memoryMonitor.getCurrentMemoryInfo()
         return MemoryContext(
             availableMemory: memoryInfo.availableMemory,
             memoryPressure: memoryInfo.memoryPressure,
@@ -500,7 +498,7 @@ private struct CacheEntry {
 // MARK: - 内存监控器
 
 @available(macOS 14.0, *)
-private actor MemoryMonitor {
+private final class MemoryMonitor: @unchecked Sendable {
     private var isMonitoring = false
     private var currentMemoryInfo = MemoryInfo(availableMemory: 0, memoryPressure: 0)
     private var monitoringTask: Task<Void, Never>?
@@ -510,14 +508,21 @@ private actor MemoryMonitor {
         isMonitoring = true
         
         monitoringTask = Task {
-            while !Task.isCancelled && isMonitoring {
-                updateMemoryInfo()
+            while !Task.isCancelled && self.isMonitoring {
+                self.updateMemoryInfo()
                 try? await Task.sleep(nanoseconds: 2_000_000_000) // 2秒更新一次
             }
         }
     }
     
     func stopMonitoring() {
+        isMonitoring = false
+        monitoringTask?.cancel()
+        monitoringTask = nil
+    }
+
+    /// 同步停止监控（用于 deinit）
+    func stopMonitoringSync() {
         isMonitoring = false
         monitoringTask?.cancel()
         monitoringTask = nil

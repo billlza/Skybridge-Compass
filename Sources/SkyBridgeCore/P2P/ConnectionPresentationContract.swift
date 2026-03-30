@@ -357,7 +357,7 @@ public enum ConnectionPresentationContract {
             suite: snapshot.negotiatedSuite,
             guardStatus: input.labels.crossNetworkGuardStatus
         ) ?? normalized(snapshot.deviceName) ?? input.labels.crossNetworkGuardStatus
-        let degraded = input.signalingHealth == .degradedRecoverable || input.signalingHealth == .degradedFatal
+        let degraded = input.signalingHealth == .degradedFatal
         let effectiveDetail = degraded ? [detail, "信令降级"].joined(separator: " · ") : detail
         return ConnectionPresentation(
             phase: .connected,
@@ -455,7 +455,7 @@ public enum ConnectionPresentationContract {
         input: ConnectionPresentationInput,
         signalingHealth: SignalingSessionHealth?
     ) -> ConnectionDisplayState {
-        if signalingHealth == .degradedRecoverable || signalingHealth == .degradedFatal {
+        if signalingHealth == .degradedFatal {
             return .connectedDegradedSignaling
         }
 

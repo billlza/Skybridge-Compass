@@ -326,4 +326,39 @@ final class NebulaIdentityAndConnectionPresentationTests: XCTestCase {
         XCTAssertEqual(degradedPresentation.statusText, "Apple PQC已连接")
         XCTAssertTrue(degradedPresentation.detailText?.contains("信令降级") == true)
     }
+
+    func testCrossNetworkSnapshotKeepsHealthyDisplayStateWhenSignalingIsRecoverablyDegraded() {
+        let labels = ConnectionPresentationLabels(
+            connectedText: "已连接",
+            disconnectedText: "未连接",
+            connectingText: "连接中",
+            reconnectingText: "重连中",
+            defaultGuardStatus: "守护中",
+            crossNetworkGuardStatus: "跨网已连接"
+        )
+
+        let presentation = ConnectionPresentationContract.evaluate(
+            ConnectionPresentationInput(
+                labels: labels,
+                fileTransferActive: false,
+                latestPeerConnection: nil,
+                latestConnectedDevice: nil,
+                activeSessionSnapshot: ActiveSessionSnapshot(
+                    sessionId: "session-recoverable",
+                    source: .qr,
+                    phase: .handshakeComplete,
+                    deviceId: "peer-2",
+                    deviceName: "Mac Studio",
+                    negotiatedSuite: "ML-KEM-768"
+                ),
+                defaultPQCModeLabel: "Apple PQC",
+                compatibilityModeEnabled: false,
+                signalingHealth: .degradedRecoverable
+            )
+        )
+
+        XCTAssertEqual(presentation.phase, .connected)
+        XCTAssertNotEqual(presentation.displayState, .connectedDegradedSignaling)
+        XCTAssertFalse(presentation.detailText?.contains("信令降级") == true)
+    }
 }
