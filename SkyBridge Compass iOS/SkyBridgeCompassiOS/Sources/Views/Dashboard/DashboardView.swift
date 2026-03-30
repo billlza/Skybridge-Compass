@@ -151,6 +151,12 @@ public struct DashboardView: View {
                 selectedTab = .remote
             }
         }
+        .onChange(of: crossNetworkManager.state) { _, newValue in
+            if case .failed(let msg) = newValue,
+               !msg.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                crossNetworkAlertMessage = msg
+            }
+        }
         .sheet(item: $showingDeviceDetail) { device in
             DeviceDetailSheet(device: device)
         }
@@ -1179,7 +1185,6 @@ private struct QRCodeHubSheet: View {
                             Button {
                                 let code = codeInput
                                 onConnectWithCode(code)
-                                dismiss()
                             } label: {
                                 HStack(spacing: 10) {
                                     Image(systemName: "arrow.right.circle.fill")
