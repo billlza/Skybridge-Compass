@@ -126,6 +126,15 @@ class RegistryStore {
     });
   }
 
+  async bootstrapRegisterDevice(payload) {
+    return this.request({
+      path: '/rest/v1/rpc/bootstrap_register_device_v5',
+      method: 'POST',
+      useServiceRole: true,
+      body: payload
+    });
+  }
+
   async request({ path, method = 'GET', useServiceRole = true, accessToken = '', body = null }) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);

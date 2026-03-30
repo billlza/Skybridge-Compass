@@ -1713,6 +1713,31 @@ app.post('/api/devices/enroll/first', rlControl, asyncRoute(async (req, res) => 
   res.json({ enrolled: true, device: result });
 }));
 
+app.post('/api/devices/register-current', rlControl, asyncRoute(async (req, res) => {
+  const context = await loadAuthenticatedDeviceContext(req, { requireRegisteredDevice: false });
+  await assertPublicCapabilityAvailable('register_current_device', context.tenantId);
+  const deviceName = typeof req.body?.deviceName === 'string' ? req.body.deviceName.slice(0, 128) : '';
+  const existing = await registryStore.getRegisteredDevice({
+    tenantId: context.tenantId,
+    userId: context.user.id,
+    deviceId: context.binding.deviceId,
+    protocolSigningAlgorithm: context.binding.protocolSigningAlgorithm,
+    protocolPublicKeyFingerprint: context.binding.protocolPublicKeyFingerprint
+  });
+  if (!existing && !currentAllowBootstrapDeviceAuth) {
+    throw makeError('device_not_registered', 403);
+  }
+  const result = await registryStore.bootstrapRegisterDevice({
+    p_tenant_id: context.tenantId,
+    p_user_id: context.user.id,
+    p_device_id: context.binding.deviceId,
+    p_protocol_signing_algorithm: context.binding.protocolSigningAlgorithm,
+    p_protocol_public_key_fingerprint: context.binding.protocolPublicKeyFingerprint,
+    p_device_name: deviceName
+  });
+  res.json({ registered: true, activated: !existing, device: result });
+}));
+
 app.post('/api/devices/enroll/confirm', rlControl, asyncRoute(async (req, res) => {
   const context = await loadAuthenticatedDeviceContext(req, { requireRegisteredDevice: true });
   await assertPublicCapabilityAvailable('enroll_confirm', context.tenantId);

@@ -19,6 +19,7 @@ class FakeRegistryStore {
   constructor() {
     this.configured = true;
     this.syntheticOnlyDeviceIds = new Set();
+    this.bootstrapCalls = [];
   }
 
   async verifyAccessToken(accessToken) {
@@ -57,6 +58,20 @@ class FakeRegistryStore {
 
   clearSyntheticOnly(deviceId) {
     this.syntheticOnlyDeviceIds.delete(deviceId);
+  }
+
+  async bootstrapRegisterDevice(payload) {
+    this.bootstrapCalls.push(payload);
+    return {
+      tenant_id: payload.p_tenant_id,
+      user_id: payload.p_user_id,
+      device_id: payload.p_device_id,
+      protocol_signing_algorithm: payload.p_protocol_signing_algorithm,
+      protocol_public_key_fingerprint: String(payload.p_protocol_public_key_fingerprint || '').toLowerCase(),
+      device_name: payload.p_device_name || 'Trusted Device',
+      status: 'active',
+      approval_method: 'bootstrap'
+    };
   }
 }
 
@@ -251,6 +266,57 @@ test('turn credentials accept bootstrap-auth synthetic devices', async () => {
     assert.ok(Array.isArray(json.uris));
   } finally {
     registryStore.clearSyntheticOnly(syntheticInitiator.deviceId);
+  }
+});
+
+test('register-current keeps existing registered devices active without bootstrap activation flag', async () => {
+  const binding = makeIdentityBinding('register-current-existing');
+  const response = await postJSON('/api/devices/register-current', {
+    requiresAuth: true,
+    body: {
+      deviceId: binding.deviceId,
+      protocolSigningAlgorithm: binding.protocolSigningAlgorithm,
+      protocolPublicKeyFingerprint: binding.protocolPublicKeyFingerprint,
+      clientVersion: '1.0.0',
+      protocolVersion: '1',
+      deviceName: 'Current Mac'
+    }
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(response.json.registered, true);
+  assert.equal(response.json.activated, false);
+  assert.equal(response.json.device.device_id, binding.deviceId);
+  assert.equal(response.json.device.status, 'active');
+  assert.equal(response.json.device.device_name, 'Current Mac');
+  assert.equal(response.json.device.approval_method, 'bootstrap');
+});
+
+test('register-current bootstraps the first current-path device when auth bootstrap is allowed', async () => {
+  const binding = makeIdentityBinding('register-current-bootstrap');
+  registryStore.allowSyntheticOnly(binding.deviceId);
+  try {
+    const response = await postJSON('/api/devices/register-current', {
+      requiresAuth: true,
+      body: {
+        deviceId: binding.deviceId,
+        protocolSigningAlgorithm: binding.protocolSigningAlgorithm,
+        protocolPublicKeyFingerprint: binding.protocolPublicKeyFingerprint,
+        clientVersion: '1.0.0',
+        protocolVersion: '1',
+        deviceName: 'Bootstrap Mac'
+      }
+    });
+
+    assert.equal(response.status, 200);
+    assert.equal(response.json.registered, true);
+    assert.equal(response.json.activated, true);
+    assert.equal(response.json.device.device_id, binding.deviceId);
+    assert.equal(response.json.device.device_name, 'Bootstrap Mac');
+    assert.equal(response.json.device.status, 'active');
+    assert.equal(response.json.device.approval_method, 'bootstrap');
+  } finally {
+    registryStore.clearSyntheticOnly(binding.deviceId);
   }
 });
 
