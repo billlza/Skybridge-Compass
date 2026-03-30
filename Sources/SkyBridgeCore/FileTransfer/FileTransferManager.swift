@@ -10,6 +10,12 @@ import UserNotifications
 /// 文件传输管理器 - 负责高速文件传输，支持分块传输和断点续传
 @MainActor
 public class FileTransferManager: BaseManager {
+    private static let transferHistoryStore = CodablePersistenceStore<[PersistedFileTransferHistoryEntry]>(
+        location: .protectedApplicationSupport(
+            path: "FileTransfer/manager-history.json",
+            legacyUserDefaultsKey: "FileTransferManager.History"
+        )
+    )
 
     /// Shared instance used across the app (so WebRTC / listeners can update the same model the UI observes).
     public static let shared = FileTransferManager()
@@ -38,6 +44,7 @@ public class FileTransferManager: BaseManager {
     @MainActor private var lastTransferActivityAt: Date?
     @MainActor private var activityGraceTask: Task<Void, Never>?
     private let transferActivityGraceSeconds: Double = 12.0
+    private let historyStore: CodablePersistenceStore<[PersistedFileTransferHistoryEntry]>
 
     #if canImport(UserNotifications)
     private static func canUseUserNotificationsSafely() -> Bool {
@@ -54,7 +61,16 @@ public class FileTransferManager: BaseManager {
 
  /// 初始化文件传输管理器
     public init() {
+        self.historyStore = Self.transferHistoryStore
         super.init(category: "FileTransferManager")
+        loadPersistedHistory()
+        logger.info("📁 初始化文件传输管理器")
+    }
+
+    init(historyStore: CodablePersistenceStore<[PersistedFileTransferHistoryEntry]>) {
+        self.historyStore = historyStore
+        super.init(category: "FileTransferManager")
+        loadPersistedHistory()
         logger.info("📁 初始化文件传输管理器")
     }
 
@@ -78,8 +94,7 @@ public class FileTransferManager: BaseManager {
     public override func cleanup() {
  // 清理所有传输记录
         activeTransfers.removeAll()
-        transferHistory.removeAll()
-        logger.info("📁 文件传输管理器资源已清理")
+        logger.info("📁 文件传输管理器资源已清理（保留历史记录）")
     }
 
  // MARK: - 公共方法
@@ -945,6 +960,7 @@ public class FileTransferManager: BaseManager {
  /// 清理历史记录
     public func clearHistory() {
         transferHistory.removeAll()
+        persistTransferHistory(removeWhenEmpty: true)
         logger.info("🗑️ 清理传输历史记录")
     }
 
@@ -1556,6 +1572,34 @@ public class FileTransferManager: BaseManager {
         if transferHistory.count > 100 {
             transferHistory.removeFirst()
         }
+        persistTransferHistory()
+    }
+
+    private func loadPersistedHistory() {
+        guard let persisted = historyStore.load() else {
+            transferHistory = []
+            return
+        }
+        transferHistory = persisted.map(\.asRuntimeTransfer)
+        logger.info("📚 已恢复传输历史记录: \(self.transferHistory.count, privacy: .public) 条")
+    }
+
+    private func persistTransferHistory(removeWhenEmpty: Bool = false) {
+        if transferHistory.isEmpty, removeWhenEmpty {
+            do {
+                try historyStore.remove()
+            } catch {
+                logger.error("❌ 删除传输历史持久化文件失败: \(error.localizedDescription, privacy: .public)")
+            }
+            return
+        }
+
+        let persisted = transferHistory.map(PersistedFileTransferHistoryEntry.init)
+        do {
+            try historyStore.save(persisted)
+        } catch {
+            logger.error("❌ 持久化传输历史失败: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     private func postTransferProgressNotification(for transfer: FileTransfer) {
@@ -1695,6 +1739,93 @@ public class FileTransferManager: BaseManager {
 
 // MARK: - 数据模型
 
+struct PersistedFileTransferHistoryEntry: Codable, Sendable {
+    let id: String
+    let fileName: String
+    let fileSize: Int64
+    let deviceId: String
+    let direction: TransferDirection
+    let createdAt: Date
+    let status: TransferStatus
+    let progress: Double
+    let transferredBytes: Int64
+    let transferSpeed: Double
+    let estimatedTimeRemaining: TimeInterval
+    let networkQuality: NetworkQuality
+    let averageSpeed: Double
+    let peakSpeed: Double
+    let completedAt: Date?
+    let error: String?
+    let fileHash: String?
+    let localPath: URL?
+    let compression: String?
+    let scanResult: FileScanResult?
+    let deviceIPAddress: String?
+    let devicePort: Int
+    let deviceName: String?
+    let resumeOffset: Int64
+    let resumeDataPath: URL?
+
+    init(_ transfer: FileTransfer) {
+        self.id = transfer.id
+        self.fileName = transfer.fileName
+        self.fileSize = transfer.fileSize
+        self.deviceId = transfer.deviceId
+        self.direction = transfer.direction
+        self.createdAt = transfer.createdAt
+        self.status = transfer.status
+        self.progress = transfer.progress
+        self.transferredBytes = transfer.transferredBytes
+        self.transferSpeed = transfer.transferSpeed
+        self.estimatedTimeRemaining = transfer.estimatedTimeRemaining
+        self.networkQuality = transfer.networkQuality
+        self.averageSpeed = transfer.averageSpeed
+        self.peakSpeed = transfer.peakSpeed
+        self.completedAt = transfer.completedAt
+        self.error = transfer.error
+        self.fileHash = transfer.fileHash
+        self.localPath = transfer.localPath
+        self.compression = transfer.compression
+        self.scanResult = transfer.scanResult
+        self.deviceIPAddress = transfer.deviceIPAddress
+        self.devicePort = transfer.devicePort
+        self.deviceName = transfer.deviceName
+        self.resumeOffset = transfer.resumeOffset
+        self.resumeDataPath = transfer.resumeDataPath
+    }
+
+    var asRuntimeTransfer: FileTransfer {
+        let transfer = FileTransfer(
+            id: id,
+            fileName: fileName,
+            fileSize: fileSize,
+            deviceId: deviceId,
+            direction: direction,
+            status: status,
+            createdAt: createdAt
+        )
+        transfer.progress = progress
+        transfer.transferredBytes = transferredBytes
+        transfer.transferSpeed = transferSpeed
+        transfer.estimatedTimeRemaining = estimatedTimeRemaining
+        transfer.networkQuality = networkQuality
+        transfer.averageSpeed = averageSpeed
+        transfer.peakSpeed = peakSpeed
+        transfer.completedAt = completedAt
+        transfer.error = error
+        transfer.fileHash = fileHash
+        transfer.localPath = localPath
+        transfer.compression = compression
+        transfer.scanResult = scanResult
+        transfer.deviceIPAddress = deviceIPAddress
+        transfer.devicePort = devicePort
+        transfer.deviceName = deviceName
+        transfer.resumeOffset = resumeOffset
+        transfer.resumeDataPath = resumeDataPath
+        return transfer
+    }
+}
+
 /// 文件传输对象
 public class FileTransfer: ObservableObject, Identifiable {
     public let id: String
@@ -1738,15 +1869,23 @@ public class FileTransfer: ObservableObject, Identifiable {
     private var speedSamples: [Double] = []
     private let maxSpeedSamples = 10 // 保留最近10个速度样本用于平均值计算
 
-    public init(id: String, fileName: String, fileSize: Int64, deviceId: String, direction: TransferDirection, status: TransferStatus) {
+    public init(
+        id: String,
+        fileName: String,
+        fileSize: Int64,
+        deviceId: String,
+        direction: TransferDirection,
+        status: TransferStatus,
+        createdAt: Date = Date()
+    ) {
         self.id = id
         self.fileName = fileName
         self.fileSize = fileSize
         self.deviceId = deviceId
         self.direction = direction
         self.status = status
-        self.createdAt = Date()
-        self.lastUpdateTime = Date()
+        self.createdAt = createdAt
+        self.lastUpdateTime = createdAt
     }
 
  /// 更新传输进度和统计信息
@@ -1900,7 +2039,7 @@ public class FileTransfer: ObservableObject, Identifiable {
 }
 
 /// 网络质量枚举
-public enum NetworkQuality: String, CaseIterable {
+public enum NetworkQuality: String, CaseIterable, Codable, Sendable {
     case excellent = "优秀"
     case good = "良好"
     case fair = "一般"
@@ -1981,13 +2120,13 @@ private struct FileTransferReceipt: Codable {
 }
 
 /// 传输方向
-public enum TransferDirection: String, CaseIterable {
+public enum TransferDirection: String, CaseIterable, Codable, Sendable {
     case incoming = "接收"
     case outgoing = "发送"
 }
 
 /// 传输状态
-public enum TransferStatus: String, CaseIterable {
+public enum TransferStatus: String, CaseIterable, Codable, Sendable {
     case preparing = "准备中"
     case transferring = "传输中"
     case paused = "已暂停"

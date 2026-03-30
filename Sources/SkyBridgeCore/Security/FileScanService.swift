@@ -434,6 +434,8 @@ public struct FileScanResult: Sendable {
     }
 }
 
+extension FileScanResult: Codable {}
+
 /// 文件扫描服务 - 提供恶意软件检测功能
 /// macOS 集成 XProtect 和 Gatekeeper 进行安全扫描
 public actor FileScanService {
