@@ -89,6 +89,211 @@ private actor WebRTCOutboundFrameGate {
 }
 #endif
 
+#if canImport(WebRTC)
+@available(iOS 17.0, *)
+extension WebRTCSession {
+    struct RemoteInboundVideoStatsSample: Equatable {
+        let type: String
+        let values: [String: NSObject]
+    }
+
+    struct RemoteInboundVideoStatsSnapshot: Equatable {
+        let statType: String
+        let packetsReceived: Int?
+        let bytesReceived: Int?
+        let framesReceived: Int?
+        let framesDecoded: Int?
+        let frameWidth: Int?
+        let frameHeight: Int?
+
+        var size: CGSize? {
+            guard let frameWidth, let frameHeight,
+                  frameWidth > 0, frameHeight > 0 else {
+                return nil
+            }
+            return CGSize(width: frameWidth, height: frameHeight)
+        }
+
+        var hasPacketEvidence: Bool {
+            (framesDecoded ?? 0) > 0
+                || (framesReceived ?? 0) > 0
+                || (bytesReceived ?? 0) > 0
+                || (packetsReceived ?? 0) > 0
+        }
+
+        var hasFrameEvidence: Bool {
+            guard size != nil else { return false }
+            return hasPacketEvidence
+        }
+
+        var summary: String {
+            [
+                "type=\(statType)",
+                "packets=\(packetsReceived.map(String.init) ?? "-")",
+                "bytes=\(bytesReceived.map(String.init) ?? "-")",
+                "framesReceived=\(framesReceived.map(String.init) ?? "-")",
+                "framesDecoded=\(framesDecoded.map(String.init) ?? "-")",
+                "size=\(frameWidth.map(String.init) ?? "-")x\(frameHeight.map(String.init) ?? "-")"
+            ].joined(separator: " ")
+        }
+    }
+
+    static func remoteInboundVideoStatsSnapshot(
+        from samples: [RemoteInboundVideoStatsSample]
+    ) -> RemoteInboundVideoStatsSnapshot? {
+        let videoSamples = samples.filter { sample in
+            let sampleType = sample.type.lowercased()
+            if sampleType == "data-channel"
+                || sampleType == "candidate-pair"
+                || sampleType == "transport"
+                || sampleType == "local-candidate"
+                || sampleType == "remote-candidate" {
+                return false
+            }
+            let kind = stringValue(sample.values, key: "kind")?.lowercased()
+                ?? stringValue(sample.values, key: "mediaType")?.lowercased()
+            if let kind, kind != "video" {
+                return false
+            }
+            return kind == "video"
+                || sampleType == "inbound-rtp"
+                || sampleType == "track"
+                || sampleType == "receiver"
+                || sampleType == "media-source"
+                || sampleType == "media-playout"
+                || sample.values["frameWidth"] != nil
+                || sample.values["frameHeight"] != nil
+                || sample.values["framesDecoded"] != nil
+                || sample.values["framesReceived"] != nil
+        }
+
+        guard !videoSamples.isEmpty else { return nil }
+
+        let primaryType = videoSamples
+            .max { lhs, rhs in samplePriority(lhs) < samplePriority(rhs) }?
+            .type ?? "aggregate"
+
+        var packetsReceived: Int?
+        var bytesReceived: Int?
+        var framesReceived: Int?
+        var framesDecoded: Int?
+        var frameWidth: Int?
+        var frameHeight: Int?
+
+        for sample in videoSamples {
+            packetsReceived = mergeMetric(
+                packetsReceived,
+                intValue(sample.values, key: "packetsReceived")
+            )
+            bytesReceived = mergeMetric(
+                bytesReceived,
+                intValue(sample.values, key: "bytesReceived")
+            )
+            framesReceived = mergeMetric(
+                framesReceived,
+                intValue(sample.values, key: "framesReceived")
+            )
+            framesDecoded = mergeMetric(
+                framesDecoded,
+                intValue(sample.values, key: "framesDecoded")
+            )
+            frameWidth = mergeMetric(
+                frameWidth,
+                intValue(sample.values, key: "frameWidth")
+                    ?? intValue(sample.values, key: "width")
+            )
+            frameHeight = mergeMetric(
+                frameHeight,
+                intValue(sample.values, key: "frameHeight")
+                    ?? intValue(sample.values, key: "height")
+            )
+        }
+
+        return RemoteInboundVideoStatsSnapshot(
+            statType: primaryType,
+            packetsReceived: packetsReceived,
+            bytesReceived: bytesReceived,
+            framesReceived: framesReceived,
+            framesDecoded: framesDecoded,
+            frameWidth: frameWidth,
+            frameHeight: frameHeight
+        )
+    }
+
+    private static func samplePriority(_ sample: RemoteInboundVideoStatsSample) -> Int {
+        var score = 0
+        switch sample.type.lowercased() {
+        case "inbound-rtp":
+            score += 500
+        case "track":
+            score += 300
+        case "media-playout":
+            score += 200
+        default:
+            break
+        }
+        if intValue(sample.values, key: "framesDecoded") != nil { score += 100 }
+        if intValue(sample.values, key: "frameWidth") != nil || intValue(sample.values, key: "width") != nil {
+            score += 50
+        }
+        if intValue(sample.values, key: "frameHeight") != nil || intValue(sample.values, key: "height") != nil {
+            score += 50
+        }
+        return score
+    }
+
+    private static func snapshotPriority(_ snapshot: RemoteInboundVideoStatsSnapshot) -> Int {
+        var score = 0
+        if snapshot.hasFrameEvidence { score += 10_000 }
+        score += min(snapshot.framesDecoded ?? 0, 5_000)
+        score += min(snapshot.framesReceived ?? 0, 2_500)
+        score += min((snapshot.bytesReceived ?? 0) / 1_024, 1_000)
+        switch snapshot.statType.lowercased() {
+        case "inbound-rtp":
+            score += 200
+        case "track":
+            score += 150
+        case "media-playout":
+            score += 100
+        default:
+            break
+        }
+        return score
+    }
+
+    private static func mergeMetric(_ current: Int?, _ candidate: Int?) -> Int? {
+        switch (current, candidate) {
+        case let (lhs?, rhs?):
+            return max(lhs, rhs)
+        case (nil, let rhs?):
+            return rhs
+        default:
+            return current
+        }
+    }
+
+    private static func intValue(_ values: [String: NSObject], key: String) -> Int? {
+        guard let raw = values[key] else { return nil }
+        if let number = raw as? NSNumber {
+            return number.intValue
+        }
+        if let string = raw as? NSString {
+            return Int(string.doubleValue.rounded())
+        }
+        return nil
+    }
+
+    private static func stringValue(_ values: [String: NSObject], key: String) -> String? {
+        guard let raw = values[key] else { return nil }
+        if let string = raw as? NSString {
+            let value = string.trimmingCharacters(in: .whitespacesAndNewlines)
+            return value.isEmpty ? nil : value
+        }
+        return String(describing: raw)
+    }
+}
+#endif
+
 @available(iOS 17.0, *)
 public final class WebRTCSession: NSObject, @unchecked Sendable {
     public enum Role: Sendable { case offerer, answerer }
@@ -165,6 +370,8 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
 #if canImport(WebRTC)
     public var onRemoteVideoTrack: ((RTCVideoTrack?) -> Void)?
 #endif
+    public var onRemoteVideoFrameEvidence: (@Sendable (CGSize, String) -> Void)?
+    public var onRemoteVideoFirstPacket: (@Sendable () -> Void)?
     public var onReady: (@Sendable () -> Void)?
     public var onDisconnected: (@Sendable (String) -> Void)?
     public var onTrace: (@Sendable (String) -> Void)?
@@ -174,8 +381,11 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     private var dataChannel: RTCDataChannel?
     private var screenDataChannel: RTCDataChannel?
     private var remoteVideoTrack: RTCVideoTrack?
+    private var remoteVideoReceiver: RTCRtpReceiver?
     private var videoTransceiver: RTCRtpTransceiver?
     private var remoteVideoTrackInspectionTask: Task<Void, Never>?
+    private var remoteVideoFrameEvidenceTask: Task<Void, Never>?
+    private var didEmitRemoteVideoFrameEvidence = false
     private var pendingRemoteICECandidates: [RTCIceCandidate] = []
     private var seenRemoteICECandidateKeys: Set<String> = []
 #endif
@@ -228,9 +438,14 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         screenDataChannel?.close()
         screenDataChannel = nil
         remoteVideoTrack = nil
+        remoteVideoReceiver?.delegate = nil
+        remoteVideoReceiver = nil
         videoTransceiver = nil
         remoteVideoTrackInspectionTask?.cancel()
         remoteVideoTrackInspectionTask = nil
+        remoteVideoFrameEvidenceTask?.cancel()
+        remoteVideoFrameEvidenceTask = nil
+        didEmitRemoteVideoFrameEvidence = false
         peerConnection?.close()
         peerConnection = nil
         if sslHeld {
@@ -640,22 +855,189 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         videoTransceiver = peerConnection.addTransceiver(of: .video, init: transceiverInit)
     }
 
-    private func captureRemoteVideoTrack(_ track: RTCVideoTrack?) {
-        guard remoteVideoTrack !== track else { return }
+    private func captureRemoteVideoTrack(_ track: RTCVideoTrack?, receiver: RTCRtpReceiver? = nil) {
+        if let receiver {
+            if remoteVideoReceiver?.isEqual(receiver) == false {
+                remoteVideoReceiver?.delegate = nil
+            }
+            remoteVideoReceiver = receiver
+            remoteVideoReceiver?.delegate = self
+        }
+        guard remoteVideoTrack !== track else {
+            if track != nil,
+               remoteVideoFrameEvidenceTask == nil,
+               !didEmitRemoteVideoFrameEvidence {
+                startRemoteVideoFrameEvidenceObservation()
+            }
+            return
+        }
+        let previousTrackId = remoteVideoTrack?.trackId.trimmingCharacters(in: .whitespacesAndNewlines)
+        let incomingTrackId = track?.trackId.trimmingCharacters(in: .whitespacesAndNewlines)
+        let isTrackRebind =
+            (previousTrackId?.isEmpty == false)
+            && previousTrackId == incomingTrackId
+            && track != nil
+        if let incomingTrackId,
+           !incomingTrackId.isEmpty,
+           isTrackRebind {
+            logger.info(
+                "🔁 rebind remote native video track after receiver replaced backing instance. sessionId=\(self.sessionId, privacy: .public) trackId=\(incomingTrackId, privacy: .public)"
+            )
+            onTrace?("remote-video-track rebind session=\(sessionId) trackId=\(incomingTrackId)")
+        }
+        remoteVideoFrameEvidenceTask?.cancel()
+        remoteVideoFrameEvidenceTask = nil
+        didEmitRemoteVideoFrameEvidence = isTrackRebind ? didEmitRemoteVideoFrameEvidence : false
         remoteVideoTrack = track
         if track != nil {
             logger.info("🎬 detected remote native video track. sessionId=\(self.sessionId, privacy: .public)")
             remoteVideoTrackInspectionTask?.cancel()
             remoteVideoTrackInspectionTask = nil
+            startRemoteVideoFrameEvidenceObservation()
+        } else {
+            didEmitRemoteVideoFrameEvidence = false
+            remoteVideoReceiver = nil
         }
         onTrace?("remote-video-track session=\(sessionId) ready=\(track != nil ? 1 : 0)")
         onRemoteVideoTrack?(track)
     }
 
+    private func startRemoteVideoFrameEvidenceObservation() {
+        guard !didEmitRemoteVideoFrameEvidence else { return }
+        remoteVideoFrameEvidenceTask?.cancel()
+        remoteVideoFrameEvidenceTask = Task { [weak self] in
+            guard let self else { return }
+            var attempt = 0
+            var lastProbeLogAt = Date.distantPast
+            var didEmitPacketEvidence = false
+            while !Task.isCancelled {
+                if attempt > 0 {
+                    let delay: Duration = attempt < 8 ? .milliseconds(250) : .seconds(1)
+                    try? await Task.sleep(for: delay)
+                }
+                attempt += 1
+                guard !Task.isCancelled else { return }
+                guard self.peerConnection != nil, self.remoteVideoTrack != nil else { return }
+                let receiverSamples: [RemoteInboundVideoStatsSample]
+                if let receiver = self.resolveRemoteVideoReceiver() {
+                    receiverSamples = await self.remoteInboundVideoStatsSamples(for: receiver)
+                    guard !Task.isCancelled else { return }
+                } else {
+                    receiverSamples = []
+                }
+
+                var snapshots: [RemoteInboundVideoStatsSnapshot] = []
+                if let receiverSnapshot = Self.remoteInboundVideoStatsSnapshot(from: receiverSamples) {
+                    snapshots.append(receiverSnapshot)
+                }
+                if snapshots.isEmpty || !snapshots.contains(where: \.hasFrameEvidence) {
+                    let peerSamples = await self.allPeerConnectionVideoStatsSamples()
+                    guard !Task.isCancelled else { return }
+                    if let peerSnapshot = Self.remoteInboundVideoStatsSnapshot(from: peerSamples) {
+                        snapshots.append(peerSnapshot)
+                    }
+                }
+
+                guard let snapshot = snapshots.max(
+                    by: { lhs, rhs in Self.snapshotPriority(lhs) < Self.snapshotPriority(rhs) }
+                ) else {
+                    continue
+                }
+
+                let now = Date()
+                if now.timeIntervalSince(lastProbeLogAt) >= 1.0 {
+                    lastProbeLogAt = now
+                    self.logger.debug(
+                        "📈 remote native video receiver stats probe. sessionId=\(self.sessionId, privacy: .public) \(snapshot.summary, privacy: .public)"
+                    )
+                    self.onTrace?(
+                        "remote-video-stats session=\(self.sessionId) \(snapshot.summary)"
+                    )
+                }
+
+                if snapshot.hasPacketEvidence, !didEmitPacketEvidence {
+                    didEmitPacketEvidence = true
+                    self.onRemoteVideoFirstPacket?()
+                }
+
+                guard snapshot.hasFrameEvidence, let size = snapshot.size else {
+                    continue
+                }
+                guard !self.didEmitRemoteVideoFrameEvidence else { return }
+                self.didEmitRemoteVideoFrameEvidence = true
+                self.remoteVideoFrameEvidenceTask = nil
+                self.logger.info(
+                    "🎬 remote native video receiver stats confirmed first frame. sessionId=\(self.sessionId, privacy: .public) \(snapshot.summary, privacy: .public)"
+                )
+                self.onTrace?(
+                    "remote-video-frame-evidence session=\(self.sessionId) source=receiver-stats \(snapshot.summary)"
+                )
+                self.onRemoteVideoFrameEvidence?(size, "receiver-stats")
+                return
+            }
+        }
+    }
+
+    private func remoteInboundVideoStatsSamples(
+        for receiver: RTCRtpReceiver
+    ) async -> [RemoteInboundVideoStatsSample] {
+        await withCheckedContinuation { continuation in
+            guard let peerConnection else {
+                continuation.resume(returning: [])
+                return
+            }
+            peerConnection.statistics(for: receiver) { report in
+                let samples = report.statistics.values.map { statistic in
+                    RemoteInboundVideoStatsSample(type: statistic.type, values: statistic.values)
+                }
+                continuation.resume(returning: samples)
+            }
+        }
+    }
+
+    private func allPeerConnectionVideoStatsSamples() async -> [RemoteInboundVideoStatsSample] {
+        await withCheckedContinuation { continuation in
+            guard let peerConnection else {
+                continuation.resume(returning: [])
+                return
+            }
+            peerConnection.statistics { report in
+                let samples = report.statistics.values.map { statistic in
+                    RemoteInboundVideoStatsSample(type: statistic.type, values: statistic.values)
+                }
+                continuation.resume(returning: samples)
+            }
+        }
+    }
+
+    private func resolveRemoteVideoReceiver() -> RTCRtpReceiver? {
+        if let remoteVideoReceiver {
+            remoteVideoReceiver.delegate = self
+            return remoteVideoReceiver
+        }
+        if let receiver = videoTransceiver?.receiver {
+            remoteVideoReceiver = receiver
+            remoteVideoReceiver?.delegate = self
+            return receiver
+        }
+        guard let peerConnection else { return nil }
+        for transceiver in peerConnection.transceivers where transceiver.mediaType == .video {
+            remoteVideoReceiver = transceiver.receiver
+            remoteVideoReceiver?.delegate = self
+            return transceiver.receiver
+        }
+        for receiver in peerConnection.receivers where receiver.track is RTCVideoTrack {
+            remoteVideoReceiver = receiver
+            remoteVideoReceiver?.delegate = self
+            return receiver
+        }
+        return nil
+    }
+
     private func inspectRemoteVideoTrackIfAvailable(peerConnection: RTCPeerConnection) {
         for transceiver in peerConnection.transceivers where transceiver.mediaType == .video {
             if let track = transceiver.receiver.track as? RTCVideoTrack {
-                captureRemoteVideoTrack(track)
+                captureRemoteVideoTrack(track, receiver: transceiver.receiver)
                 return
             }
         }
@@ -1199,14 +1581,14 @@ extension WebRTCSession: RTCPeerConnectionDelegate {
         didStartReceivingOn transceiver: RTCRtpTransceiver
     ) {
         guard transceiver.mediaType == .video else { return }
-        captureRemoteVideoTrack(transceiver.receiver.track as? RTCVideoTrack)
+        captureRemoteVideoTrack(transceiver.receiver.track as? RTCVideoTrack, receiver: transceiver.receiver)
     }
     public func peerConnection(
         _ peerConnection: RTCPeerConnection,
         didAdd rtpReceiver: RTCRtpReceiver,
         streams mediaStreams: [RTCMediaStream]
     ) {
-        captureRemoteVideoTrack(rtpReceiver.track as? RTCVideoTrack)
+        captureRemoteVideoTrack(rtpReceiver.track as? RTCVideoTrack, receiver: rtpReceiver)
     }
     public func peerConnection(_ peerConnection: RTCPeerConnection, didRemove candidates: [RTCIceCandidate]) {}
     public func peerConnection(_ peerConnection: RTCPeerConnection, didOpen dataChannel: RTCDataChannel) {
@@ -1222,6 +1604,19 @@ extension WebRTCSession: RTCPeerConnectionDelegate {
         if isControlChannel(dataChannel) {
             notifyReadyIfNeeded()
         }
+    }
+}
+
+@available(iOS 17.0, *)
+extension WebRTCSession: RTCRtpReceiverDelegate {
+    public func rtpReceiver(
+        _ rtpReceiver: RTCRtpReceiver,
+        didReceiveFirstPacketFor mediaType: RTCRtpMediaType
+    ) {
+        guard mediaType == .video else { return }
+        logger.info("📡 remote native video receiver got first RTP packet. sessionId=\(self.sessionId, privacy: .public)")
+        onTrace?("remote-video-first-packet session=\(sessionId)")
+        onRemoteVideoFirstPacket?()
     }
 }
 

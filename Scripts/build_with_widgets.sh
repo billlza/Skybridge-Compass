@@ -126,11 +126,20 @@ for framework in "$BUILD_DIR"/*.framework; do
     fi
 done
 
+# 兼容主二进制里已有的 @executable_path/../lib 运行时查找路径。
+rm -rf "$APP_BUNDLE/Contents/lib"
+ln -s "Frameworks" "$APP_BUNDLE/Contents/lib"
+log_info "已创建兼容链接: Contents/lib -> Frameworks"
+
 # 确保主可执行文件可以从 Frameworks 目录加载动态框架
 APP_EXECUTABLE_PATH="$APP_BUNDLE/Contents/MacOS/$APP_EXECUTABLE"
 if ! otool -l "$APP_EXECUTABLE_PATH" 2>/dev/null | grep -q "@executable_path/../Frameworks"; then
     log_info "注入 Frameworks rpath..."
-    install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP_EXECUTABLE_PATH" 2>/dev/null || true
+    if install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP_EXECUTABLE_PATH" 2>/dev/null; then
+        log_info "Frameworks rpath 注入成功"
+    else
+        log_info "Frameworks rpath 注入失败，将依赖 Contents/lib 兼容链接"
+    fi
 fi
 
 # 复制 SPM 资源 bundle

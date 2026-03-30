@@ -1034,10 +1034,16 @@ private enum SignalingSessionHealth: String, Sendable, Equatable {
 #if canImport(WebRTC)
 private final class RemoteVideoTrackHeartbeatRenderer: NSObject, RTCVideoRenderer {
     var onFrame: (@Sendable (CGSize) -> Void)?
+    var onSize: (@Sendable (CGSize) -> Void)?
     private var lastKnownSize: CGSize = .zero
 
     func setSize(_ size: CGSize) {
         lastKnownSize = size
+        guard size.width > 0, size.height > 0 else { return }
+        let handler = onSize
+        DispatchQueue.main.async {
+            handler?(size)
+        }
     }
 
     func renderFrame(_ frame: RTCVideoFrame?) {
@@ -1108,8 +1114,14 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     @Published public private(set) var remoteDeviceId: String?
 #if canImport(WebRTC)
     @Published public private(set) var remoteVideoTrack: RTCVideoTrack?
+    @Published public private(set) var remoteVideoTrackReadyForPromotion = false
     @Published public private(set) var remoteVideoTrackHasRenderedFrame = false
     @Published public private(set) var remoteVideoTrackFrameSize: CGSize = .zero
+    private var remoteVideoTrackHasReceivedFirstPacket = false
+    private var remoteVideoTrackConfirmationTask: Task<Void, Never>?
+    private var remoteVideoTrackPacketConfirmationTask: Task<Void, Never>?
+    private var remoteVideoTrackDetectedAt: Date?
+    private var lastScreenDataAt: Date?
 #endif
     @Published public private(set) var localConnectionCode: String?
     @Published public private(set) var localConnectionCodeExpiresAt: Date?
@@ -1779,8 +1791,12 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         session?.close()
         session = nil
         currentSessionId = nil
+        lastScreenData = nil
 #if canImport(WebRTC)
         installRemoteVideoTrack(nil)
+        remoteVideoTrackReadyForPromotion = false
+        remoteVideoTrackDetectedAt = nil
+        lastScreenDataAt = nil
 #endif
         handshakeDriver = nil
         handshakePeerId = nil
@@ -1845,37 +1861,243 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
 
 #if canImport(WebRTC)
     private func installRemoteVideoTrack(_ track: RTCVideoTrack?) {
+        let currentTrackId = remoteVideoTrack?.trackId.trimmingCharacters(in: .whitespacesAndNewlines)
+        let incomingTrackId = track?.trackId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard remoteVideoTrack !== track else {
+            scheduleRemoteVideoTrackConfirmationIfNeeded(trigger: "track-unchanged")
+            return
+        }
+        let isTrackRebind =
+            (currentTrackId?.isEmpty == false)
+            && currentTrackId == incomingTrackId
+            && track != nil
+        if let incomingTrackId, isTrackRebind {
+            SkyBridgeLogger.shared.info(
+                "🔁 WebRTC 原生视频轨实例已更换，重新绑定 renderer: trackId=\(incomingTrackId)"
+            )
+        }
+        let preservedPromotionReady = remoteVideoTrackReadyForPromotion
+        let preservedRenderedFrame = remoteVideoTrackHasRenderedFrame
+        let preservedFrameSize = remoteVideoTrackFrameSize
+        let preservedFirstPacket = remoteVideoTrackHasReceivedFirstPacket
+
         if let currentTrack = remoteVideoTrack,
            let heartbeatRenderer = remoteVideoHeartbeatRenderer {
             currentTrack.remove(heartbeatRenderer)
         }
 
+        remoteVideoTrackConfirmationTask?.cancel()
+        remoteVideoTrackConfirmationTask = nil
+        remoteVideoTrackPacketConfirmationTask?.cancel()
+        remoteVideoTrackPacketConfirmationTask = nil
         remoteVideoTrack = track
-        remoteVideoTrackHasRenderedFrame = false
-        remoteVideoTrackFrameSize = .zero
+        let shouldPreservePromotionEvidence =
+            track != nil && (isTrackRebind || preservedRenderedFrame || preservedFirstPacket)
+        let shouldPreserveRenderedEvidence = track != nil && isTrackRebind && preservedRenderedFrame
+        let shouldPreservePacketEvidence = track != nil && isTrackRebind && preservedFirstPacket
+        remoteVideoTrackReadyForPromotion = shouldPreservePromotionEvidence ? preservedPromotionReady : false
+        remoteVideoTrackHasRenderedFrame = shouldPreserveRenderedEvidence ? preservedRenderedFrame : false
+        remoteVideoTrackFrameSize = shouldPreservePromotionEvidence ? preservedFrameSize : .zero
+        remoteVideoTrackHasReceivedFirstPacket = shouldPreservePacketEvidence ? preservedFirstPacket : false
+        remoteVideoTrackDetectedAt = track == nil
+            ? nil
+            : (isTrackRebind ? remoteVideoTrackDetectedAt ?? Date() : Date())
         remoteVideoHeartbeatRenderer = nil
 
-        guard let track else { return }
+        guard let track else {
+            remoteVideoTrackReadyForPromotion = false
+            remoteVideoTrackHasReceivedFirstPacket = false
+            return
+        }
 
         let heartbeatRenderer = RemoteVideoTrackHeartbeatRenderer()
+        heartbeatRenderer.onSize = { [weak self] size in
+            Task { @MainActor [weak self] in
+                self?.noteRemoteVideoTrackResolutionAvailable(size, source: "heartbeat-set-size")
+            }
+        }
         heartbeatRenderer.onFrame = { [weak self] size in
             Task { @MainActor [weak self] in
-                guard let self else { return }
-                guard size.width > 0, size.height > 0 else { return }
-                self.noteCurrentSessionActivity()
-                self.remoteVideoTrackFrameSize = size
-                RemoteDesktopManager.instance.noteCrossNetworkNativeVideoFrame(size)
-                if !self.remoteVideoTrackHasRenderedFrame {
-                    self.remoteVideoTrackHasRenderedFrame = true
-                    SkyBridgeLogger.shared.info(
-                        "🎬 WebRTC 原生视频轨已收到首帧: \(Int(size.width))x\(Int(size.height))"
-                    )
-                    RemoteDesktopManager.instance.handleCrossNetworkNativeVideoTrackRenderedFirstFrame()
-                }
+                self?.noteRemoteVideoTrackRenderedFrame(size, source: "heartbeat-renderer")
             }
         }
         remoteVideoHeartbeatRenderer = heartbeatRenderer
         track.add(heartbeatRenderer)
+        scheduleRemoteVideoTrackConfirmationIfNeeded(trigger: "track-installed")
+    }
+
+    @MainActor
+    private func scheduleRemoteVideoTrackConfirmationIfNeeded(trigger: String) {
+        guard currentSessionId != nil, remoteVideoTrack != nil else { return }
+        guard !remoteVideoTrackHasRenderedFrame else { return }
+        remoteVideoTrackConfirmationTask?.cancel()
+        remoteVideoTrackConfirmationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                try await Task.sleep(for: .milliseconds(350))
+            } catch {
+                return
+            }
+            guard self.currentSessionId != nil, self.remoteVideoTrack != nil else { return }
+            guard !self.remoteVideoTrackHasRenderedFrame else { return }
+            guard let size = self.bestAvailableRemoteVideoEvidenceSize() else { return }
+            self.markRemoteVideoTrackReadyForPromotion(size: size, source: trigger)
+        }
+    }
+
+    @MainActor
+    func noteRemoteVideoTrackRenderedFrame(_ size: CGSize, source: String) {
+        guard size.width > 0, size.height > 0 else { return }
+        guard currentSessionId != nil else { return }
+        remoteVideoTrackConfirmationTask?.cancel()
+        remoteVideoTrackConfirmationTask = nil
+        noteCurrentSessionActivity()
+        remoteVideoTrackFrameSize = size
+        remoteVideoTrackHasReceivedFirstPacket = true
+        markRemoteVideoTrackReadyForPromotion(size: size, source: source)
+        guard Self.isActualNativeRenderEvidence(source: source) else { return }
+        RemoteDesktopManager.instance.noteCrossNetworkNativeVideoFrame(size)
+        if !remoteVideoTrackHasRenderedFrame {
+            remoteVideoTrackHasRenderedFrame = true
+            SkyBridgeLogger.shared.info(
+                "🎬 WebRTC 原生视频轨已收到首帧: \(Int(size.width))x\(Int(size.height)) source=\(source)"
+            )
+            RemoteDesktopManager.instance.handleCrossNetworkNativeVideoTrackRenderedFirstFrame()
+        }
+    }
+
+    @MainActor
+    func noteRemoteVideoTrackReceivedFirstPacket(source: String) {
+        guard currentSessionId != nil else { return }
+        noteCurrentSessionActivity()
+        remoteVideoTrackHasReceivedFirstPacket = true
+        if remoteVideoTrackHasRenderedFrame { return }
+        if let size = bestAvailableRemoteVideoEvidenceSize() {
+            markRemoteVideoTrackReadyForPromotion(size: size, source: source)
+            scheduleRemoteVideoTrackPacketConfirmationIfNeeded(size: size, source: source)
+            return
+        }
+        SkyBridgeLogger.shared.debug("ℹ️ WebRTC 原生视频轨已收到首个 RTP 包，等待分辨率证据后确认首帧 source=\(source)")
+    }
+
+    @MainActor
+    func noteRemoteVideoTrackResolutionAvailable(_ size: CGSize, source: String) {
+        guard size.width > 0, size.height > 0 else { return }
+        remoteVideoTrackFrameSize = size
+        if remoteVideoTrackHasRenderedFrame {
+            return
+        }
+        if remoteVideoTrackHasReceivedFirstPacket {
+            markRemoteVideoTrackReadyForPromotion(size: size, source: source)
+            scheduleRemoteVideoTrackPacketConfirmationIfNeeded(size: size, source: source)
+            return
+        }
+        if remoteVideoTrack != nil {
+            scheduleRemoteVideoTrackConfirmationIfNeeded(trigger: source)
+        }
+    }
+
+    @MainActor
+    private func bestAvailableRemoteVideoEvidenceSize() -> CGSize? {
+        if remoteVideoTrackFrameSize.width > 0, remoteVideoTrackFrameSize.height > 0 {
+            return remoteVideoTrackFrameSize
+        }
+        if let lastScreenData,
+           lastScreenData.width > 0,
+           lastScreenData.height > 0 {
+            return CGSize(width: lastScreenData.width, height: lastScreenData.height)
+        }
+        let managerResolution = RemoteDesktopManager.instance.resolution
+        if managerResolution.width > 0, managerResolution.height > 0 {
+            return managerResolution
+        }
+        return nil
+    }
+
+    func inferredNativeVideoTrackReady(
+        now: Date = Date(),
+        minimumTrackAge: TimeInterval = 0.35,
+        maximumFallbackSilence: TimeInterval = 1.5
+    ) -> Bool {
+        guard currentSessionId != nil else { return false }
+        guard remoteVideoTrack != nil else { return false }
+        if remoteVideoTrackReadyForPromotion || remoteVideoTrackHasRenderedFrame {
+            return true
+        }
+        guard let remoteVideoTrackDetectedAt else { return false }
+        guard now.timeIntervalSince(remoteVideoTrackDetectedAt) >= minimumTrackAge else { return false }
+        guard let lastScreenDataAt else { return false }
+        guard now.timeIntervalSince(lastScreenDataAt) <= maximumFallbackSilence else { return false }
+        return bestAvailableRemoteVideoEvidenceSize() != nil
+    }
+
+    @MainActor
+    private func maybeConfirmRemoteVideoTrackFromFallbackEvidence(
+        now: Date = Date(),
+        minimumTrackAge: TimeInterval = 0.5,
+        maximumFallbackSilence: TimeInterval = 0.4
+    ) {
+        guard currentSessionId != nil else { return }
+        guard remoteVideoTrack != nil else { return }
+        guard !remoteVideoTrackHasRenderedFrame else { return }
+        guard let remoteVideoTrackDetectedAt else { return }
+        guard now.timeIntervalSince(remoteVideoTrackDetectedAt) >= minimumTrackAge else { return }
+        guard let lastScreenDataAt else { return }
+        guard now.timeIntervalSince(lastScreenDataAt) <= maximumFallbackSilence else { return }
+        guard let size = bestAvailableRemoteVideoEvidenceSize() else { return }
+        markRemoteVideoTrackReadyForPromotion(size: size, source: "fallback-screen-data-confirmed")
+    }
+
+    @MainActor
+    private func markRemoteVideoTrackReadyForPromotion(size: CGSize, source: String) {
+        guard size.width > 0, size.height > 0 else { return }
+        remoteVideoTrackFrameSize = size
+        if !remoteVideoTrackReadyForPromotion {
+            remoteVideoTrackReadyForPromotion = true
+            SkyBridgeLogger.shared.info(
+                "🎬 WebRTC 原生视频轨已确认可切主链: \(Int(size.width))x\(Int(size.height)) source=\(source)"
+            )
+            RemoteDesktopManager.instance.handleCrossNetworkNativeVideoTrackPromotionReady()
+        }
+    }
+
+    @MainActor
+    private func scheduleRemoteVideoTrackPacketConfirmationIfNeeded(size: CGSize, source: String) {
+        guard size.width > 0, size.height > 0 else { return }
+        guard remoteVideoTrackReadyForPromotion else { return }
+        guard remoteVideoTrackHasReceivedFirstPacket else { return }
+        guard !remoteVideoTrackHasRenderedFrame else { return }
+        remoteVideoTrackPacketConfirmationTask?.cancel()
+        remoteVideoTrackPacketConfirmationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                try await Task.sleep(for: .milliseconds(300))
+            } catch {
+                return
+            }
+            guard self.currentSessionId != nil, self.remoteVideoTrack != nil else { return }
+            guard self.remoteVideoTrackReadyForPromotion else { return }
+            guard self.remoteVideoTrackHasReceivedFirstPacket else { return }
+            guard !self.remoteVideoTrackHasRenderedFrame else { return }
+            self.noteRemoteVideoTrackRenderedFrame(
+                size,
+                source: "receiver-packet-confirmed:\(source)"
+            )
+        }
+    }
+
+    private static func isActualNativeRenderEvidence(source: String) -> Bool {
+        switch source {
+        case "heartbeat-renderer", "rtc-mtl-video-view", "receiver-stats":
+            return true
+        case let value where value.hasPrefix("receiver-packet-confirmed:"):
+            return true
+        // fallback-screen-data-confirmed 证明 WebRTC 原生轨确实在收到帧（从 fallback 数据推断）
+        case "fallback-screen-data-confirmed":
+            return true
+        default:
+            return false
+        }
     }
 #endif
 
@@ -3352,6 +3574,22 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
                       self.currentSessionId == sessionId,
                       self.session === s else { return }
                 self.installRemoteVideoTrack(track)
+            }
+        }
+        s.onRemoteVideoFrameEvidence = { [weak self] size, source in
+            DispatchQueue.main.async { [weak self] in
+                guard let self,
+                      self.currentSessionId == sessionId,
+                      self.session === s else { return }
+                self.noteRemoteVideoTrackRenderedFrame(size, source: source)
+            }
+        }
+        s.onRemoteVideoFirstPacket = { [weak self] in
+            DispatchQueue.main.async { [weak self] in
+                guard let self,
+                      self.currentSessionId == sessionId,
+                      self.session === s else { return }
+                self.noteRemoteVideoTrackReceivedFirstPacket(source: "receiver-first-packet")
             }
         }
 #endif
@@ -5135,6 +5373,10 @@ private extension CrossNetworkWebRTCManager {
         if let screenData = RemoteDesktopScreenFrameWire.decodeIfPresent(plaintext) {
             noteCurrentSessionActivity()
             lastScreenData = screenData
+#if canImport(WebRTC)
+            lastScreenDataAt = Date()
+            maybeConfirmRemoteVideoTrackFromFallbackEvidence(now: lastScreenDataAt ?? Date())
+#endif
             NotificationCenter.default.post(
                 name: Notification.Name("CrossNetworkScreenDataUpdated"),
                 object: nil
@@ -5147,6 +5389,10 @@ private extension CrossNetworkWebRTCManager {
            let screenData = try? JSONDecoder().decode(ScreenData.self, from: msg.payload) {
             noteCurrentSessionActivity()
             lastScreenData = screenData
+#if canImport(WebRTC)
+            lastScreenDataAt = Date()
+            maybeConfirmRemoteVideoTrackFromFallbackEvidence(now: lastScreenDataAt ?? Date())
+#endif
             NotificationCenter.default.post(
                 name: Notification.Name("CrossNetworkScreenDataUpdated"),
                 object: nil
@@ -5549,9 +5795,35 @@ private extension CrossNetworkWebRTCManager {
         var srflx = 0
         var relay = 0
         var prflx = 0
+        var mediaSections = 0
+        var hasVideo = false
+        var videoDirection = "unspecified"
+        var inVideoSection = false
 
         for rawLine in sdp.split(whereSeparator: \.isNewline) {
             let line = rawLine.trimmingCharacters(in: .whitespaces)
+            if line.hasPrefix("m=") {
+                mediaSections += 1
+                inVideoSection = line.hasPrefix("m=video ")
+                if inVideoSection {
+                    hasVideo = true
+                    videoDirection = "unspecified"
+                }
+                continue
+            }
+
+            if inVideoSection, line.hasPrefix("a=") {
+                if line == "a=sendrecv" {
+                    videoDirection = "sendrecv"
+                } else if line == "a=sendonly" {
+                    videoDirection = "sendonly"
+                } else if line == "a=recvonly" {
+                    videoDirection = "recvonly"
+                } else if line == "a=inactive" {
+                    videoDirection = "inactive"
+                }
+            }
+
             guard line.hasPrefix("a=candidate:") else { continue }
             total += 1
             let lower = line.lowercased()
@@ -5566,6 +5838,6 @@ private extension CrossNetworkWebRTCManager {
             }
         }
 
-        return "candidates total=\(total) host=\(host) srflx=\(srflx) relay=\(relay) prflx=\(prflx)"
+        return "media=\(mediaSections) hasVideo=\(hasVideo) videoDir=\(videoDirection) candidates total=\(total) host=\(host) srflx=\(srflx) relay=\(relay) prflx=\(prflx)"
     }
 }

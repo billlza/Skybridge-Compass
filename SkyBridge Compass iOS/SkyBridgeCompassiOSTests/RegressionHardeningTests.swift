@@ -127,6 +127,46 @@ final class RegressionHardeningTests: XCTestCase {
         )
     }
 
+    func testViewerCapabilityDoesNotImplyRemoteControlHostSupport() {
+        let viewerOnly = DiscoveredDevice(
+            id: "id:\(UUID().uuidString.lowercased())",
+            name: "Viewer iPhone",
+            modelName: "iPhone 16 Pro",
+            platform: .iOS,
+            osVersion: "18.0",
+            ipAddress: nil,
+            services: [],
+            portMap: [:],
+            signalStrength: -50,
+            lastSeen: Date(),
+            isConnected: true,
+            isTrusted: false,
+            publicKey: nil,
+            advertisedCapabilities: ["remote_desktop_viewer"],
+            capabilities: ["remote_desktop_viewer"]
+        )
+        XCTAssertFalse(viewerOnly.supportsRemoteControl)
+
+        let controlHost = DiscoveredDevice(
+            id: "id:\(UUID().uuidString.lowercased())",
+            name: "Remote Mac",
+            modelName: "MacBook Pro",
+            platform: .macOS,
+            osVersion: "15.0",
+            ipAddress: "192.168.1.20",
+            services: [],
+            portMap: [DiscoveredDevice.remoteControlServiceType: 5901],
+            signalStrength: -42,
+            lastSeen: Date(),
+            isConnected: true,
+            isTrusted: true,
+            publicKey: nil,
+            advertisedCapabilities: ["remote_desktop", "remote_control"],
+            capabilities: ["remote_desktop", "remote_control"]
+        )
+        XCTAssertTrue(controlHost.supportsRemoteControl)
+    }
+
     @MainActor
     func testDeviceDiscoveryCleanupPreservesSilentDeviceWhenBrowserStillHasLiveEndpoint() {
         let manager = DeviceDiscoveryManager.debugMakeIsolatedInstance()
@@ -199,6 +239,67 @@ final class RegressionHardeningTests: XCTestCase {
                 activeTransportModeIsLAN: true,
                 isCurrentLANConnection: true,
                 state: .connected
+            )
+        )
+    }
+
+    @MainActor
+    func testCrossNetworkNativeReadyAnnouncementAllowsForcedFirstFrameConfirmation() {
+        let now = Date()
+
+        XCTAssertTrue(
+            RemoteDesktopManager.shouldAnnounceCrossNetworkNativeVideoReady(
+                activeTransportModeIsCrossNetwork: true,
+                hasCurrentConnection: true,
+                hasRenderedNativeFrame: true,
+                lastSentNativeVideoTrackReady: false,
+                force: true,
+                lastAnnouncementAt: now,
+                now: now
+            )
+        )
+    }
+
+    @MainActor
+    func testCrossNetworkNativeReadyAnnouncementSkipsRedundantResendAfterAck() {
+        XCTAssertFalse(
+            RemoteDesktopManager.shouldAnnounceCrossNetworkNativeVideoReady(
+                activeTransportModeIsCrossNetwork: true,
+                hasCurrentConnection: true,
+                hasRenderedNativeFrame: true,
+                lastSentNativeVideoTrackReady: true,
+                force: false,
+                lastAnnouncementAt: nil,
+                now: Date()
+            )
+        )
+    }
+
+    @MainActor
+    func testCrossNetworkNativeReadyAnnouncementThrottlesUntilRetryWindowExpires() {
+        let now = Date()
+
+        XCTAssertFalse(
+            RemoteDesktopManager.shouldAnnounceCrossNetworkNativeVideoReady(
+                activeTransportModeIsCrossNetwork: true,
+                hasCurrentConnection: true,
+                hasRenderedNativeFrame: true,
+                lastSentNativeVideoTrackReady: false,
+                force: false,
+                lastAnnouncementAt: now.addingTimeInterval(-0.2),
+                now: now
+            )
+        )
+
+        XCTAssertTrue(
+            RemoteDesktopManager.shouldAnnounceCrossNetworkNativeVideoReady(
+                activeTransportModeIsCrossNetwork: true,
+                hasCurrentConnection: true,
+                hasRenderedNativeFrame: true,
+                lastSentNativeVideoTrackReady: false,
+                force: false,
+                lastAnnouncementAt: now.addingTimeInterval(-0.8),
+                now: now
             )
         )
     }
@@ -1406,5 +1507,96 @@ final class RegressionHardeningTests: XCTestCase {
         XCTAssertEqual(pending.count, 1)
         XCTAssertEqual(pending.first?.imageData, syncFrame.imageData)
         XCTAssertFalse(waitingForSyncFrame)
+    }
+
+    func testWebRTCSessionRemoteInboundVideoStatsSnapshotDetectsDecodedVideoFrameEvidence() {
+        let samples = [
+            WebRTCSession.RemoteInboundVideoStatsSample(
+                type: "inbound-rtp",
+                values: [
+                    "kind": NSString(string: "video"),
+                    "packetsReceived": NSNumber(value: 47),
+                    "bytesReceived": NSNumber(value: 94_288),
+                    "framesReceived": NSNumber(value: 8),
+                    "framesDecoded": NSNumber(value: 7),
+                    "frameWidth": NSNumber(value: 2_056),
+                    "frameHeight": NSNumber(value: 1_329)
+                ]
+            )
+        ]
+
+        let snapshot = WebRTCSession.remoteInboundVideoStatsSnapshot(from: samples)
+
+        XCTAssertEqual(snapshot?.statType, "inbound-rtp")
+        XCTAssertTrue(snapshot?.hasFrameEvidence == true)
+        XCTAssertEqual(snapshot?.size, CGSize(width: 2_056, height: 1_329))
+    }
+
+    func testWebRTCSessionRemoteInboundVideoStatsSnapshotIgnoresAudioOnlySamples() {
+        let samples = [
+            WebRTCSession.RemoteInboundVideoStatsSample(
+                type: "inbound-rtp",
+                values: [
+                    "kind": NSString(string: "audio"),
+                    "packetsReceived": NSNumber(value: 128),
+                    "bytesReceived": NSNumber(value: 4_096)
+                ]
+            )
+        ]
+
+        XCTAssertNil(WebRTCSession.remoteInboundVideoStatsSnapshot(from: samples))
+    }
+
+    func testWebRTCSessionRemoteInboundVideoStatsSnapshotMergesInboundAndTrackSamples() {
+        let samples = [
+            WebRTCSession.RemoteInboundVideoStatsSample(
+                type: "inbound-rtp",
+                values: [
+                    "kind": NSString(string: "video"),
+                    "packetsReceived": NSNumber(value: 47),
+                    "bytesReceived": NSNumber(value: 94_288),
+                    "framesReceived": NSNumber(value: 8),
+                    "framesDecoded": NSNumber(value: 7)
+                ]
+            ),
+            WebRTCSession.RemoteInboundVideoStatsSample(
+                type: "track",
+                values: [
+                    "kind": NSString(string: "video"),
+                    "frameWidth": NSNumber(value: 2_056),
+                    "frameHeight": NSNumber(value: 1_329)
+                ]
+            )
+        ]
+
+        let snapshot = WebRTCSession.remoteInboundVideoStatsSnapshot(from: samples)
+
+        XCTAssertEqual(snapshot?.statType, "inbound-rtp")
+        XCTAssertEqual(snapshot?.framesDecoded, 7)
+        XCTAssertEqual(snapshot?.size, CGSize(width: 2_056, height: 1_329))
+        XCTAssertTrue(snapshot?.hasFrameEvidence == true)
+    }
+
+    func testWebRTCSessionRemoteInboundVideoStatsSnapshotIgnoresTransportSideReports() {
+        let samples = [
+            WebRTCSession.RemoteInboundVideoStatsSample(
+                type: "candidate-pair",
+                values: [
+                    "kind": NSString(string: "video"),
+                    "packetsReceived": NSNumber(value: 40_312),
+                    "bytesReceived": NSNumber(value: 48_836_959)
+                ]
+            ),
+            WebRTCSession.RemoteInboundVideoStatsSample(
+                type: "data-channel",
+                values: [
+                    "kind": NSString(string: "video"),
+                    "packetsReceived": NSNumber(value: 20_993),
+                    "bytesReceived": NSNumber(value: 25_438_840)
+                ]
+            )
+        ]
+
+        XCTAssertNil(WebRTCSession.remoteInboundVideoStatsSnapshot(from: samples))
     }
 }

@@ -473,6 +473,10 @@ public class FileTransferManager: ObservableObject {
 
     // MARK: - Cross-network (WebRTC DataChannel) send
 
+    func preferredQuickSendDevice(for device: DiscoveredDevice) -> DiscoveredDevice {
+        resolveLatestTransferDevice(from: device)
+    }
+
     private func resolveLatestTransferDevice(from device: DiscoveredDevice) -> DiscoveredDevice {
         var discovered = DeviceDiscoveryManager.instance.discoveredDevices
         discovered.append(contentsOf: connectionManager.activeConnections.map(\.device))
@@ -485,7 +489,17 @@ public class FileTransferManager: ObservableObject {
             discovered.insert(canonical, at: 0)
         }
 
-        let resolved = Self.resolveBestTransferDevice(target: device, discovered: discovered)
+        var resolved = Self.resolveBestTransferDevice(target: device, discovered: discovered)
+        if shouldUseUniqueTransferCandidateFallback(for: resolved, original: device) {
+            let platformHint = resolved.platform != .unknown ? resolved.platform : device.platform
+            let uniqueTransferCandidates = discovered.filter { candidate in
+                (Self.hasExplicitLANTransferService(candidate) || candidate.fileTransferPort != nil)
+                    && (platformHint == .unknown || candidate.platform == platformHint)
+            }
+            if uniqueTransferCandidates.count == 1, let only = uniqueTransferCandidates.first {
+                resolved = preferredTransferDevice(resolved, only)
+            }
+        }
         if resolved.id != device.id
             || resolved.bonjourServiceType != device.bonjourServiceType
             || resolved.portMap != device.portMap {
@@ -500,8 +514,8 @@ public class FileTransferManager: ObservableObject {
         let transferServiceType = DiscoveredDevice.fileTransferServiceType
         let bonjourName = preferredTransferServiceName(for: device)
         let bonjourDomain = preferredTransferServiceDomain(for: device)
-        let hasTransferService = Self.hasExplicitLANTransferService(device)
-        let explicitTransferPort = device.fileTransferPort
+        let hasTransferService = hasAdvertisedTransferService(for: device)
+        let explicitTransferPort = preferredTransferPort(for: device)
         let hasActivePeerSession = activePeerSessionExists(for: device)
 
         if hasTransferService {
@@ -539,7 +553,7 @@ public class FileTransferManager: ObservableObject {
         }
 
         if hasActivePeerSession,
-           let activePeerIP = connectionManager.activePeerHostAddress(for: device) {
+           let activePeerIP = activePeerTransferAddress(for: device) {
             SkyBridgeLogger.shared.warning(
                 "⚠️ 文件传输目标缺少独立服务公告，已基于活跃 P2P 会话回退到直连端口 \(FileTransferConstants.defaultPort): name=\(device.name) ip=\(activePeerIP)"
             )
@@ -560,6 +574,28 @@ public class FileTransferManager: ObservableObject {
         }
 
         throw FileTransferError.invalidDestination
+    }
+
+    private func hasAdvertisedTransferService(for device: DiscoveredDevice) -> Bool {
+        transferIdentityCandidates(for: device).contains(where: Self.hasExplicitLANTransferService)
+    }
+
+    private func preferredTransferPort(for device: DiscoveredDevice) -> UInt16? {
+        for candidate in transferIdentityCandidates(for: device) {
+            if let port = candidate.fileTransferPort, port > 0 {
+                return port
+            }
+        }
+        return nil
+    }
+
+    private func activePeerTransferAddress(for device: DiscoveredDevice) -> String? {
+        for candidate in transferIdentityCandidates(for: device) {
+            if let activePeerIP = connectionManager.activePeerHostAddress(for: candidate) {
+                return activePeerIP
+            }
+        }
+        return nil
     }
 
     private func activePeerSessionExists(for device: DiscoveredDevice) -> Bool {
@@ -753,6 +789,25 @@ public class FileTransferManager: ObservableObject {
 
     private func preferredTransferDevice(_ lhs: DiscoveredDevice, _ rhs: DiscoveredDevice) -> DiscoveredDevice {
         transferDeviceScore(rhs) > transferDeviceScore(lhs) ? rhs : lhs
+    }
+
+    private func shouldUseUniqueTransferCandidateFallback(
+        for device: DiscoveredDevice,
+        original: DiscoveredDevice
+    ) -> Bool {
+        if Self.hasExplicitLANTransferService(device) || device.fileTransferPort != nil {
+            return false
+        }
+        guard activePeerSessionExists(for: device) || activePeerSessionExists(for: original) else {
+            return false
+        }
+        if device.id.hasPrefix("host:") || device.id.hasPrefix("peer:") {
+            return true
+        }
+        if Self.sanitizeTransferAddress(device.name) != nil {
+            return true
+        }
+        return normalizeDeviceName(device.name).contains(":")
     }
 
     static func hasExplicitLANTransferService(_ device: DiscoveredDevice) -> Bool {

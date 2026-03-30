@@ -1085,6 +1085,12 @@ public class P2PConnectionManager: ObservableObject {
         if frame.count == 38, (try? HandshakeFinished.decode(from: frame)) != nil {
             return true
         }
+        // MessageA / MessageB 在当前协议下都明显大于心跳/RTT 探测包，
+        // 这里先做长度与版本的保守预筛，避免把普通业务密文误当成握手包，
+        // 进而触发“unknown suite”告警噪声。
+        guard frame.count >= 96, frame.first == HandshakeConstants.protocolVersion else {
+            return false
+        }
         // MessageA / MessageB：长度通常 < 2KB，且可以被解码（用于避免误解密）
         if (try? HandshakeMessageA.decode(from: frame)) != nil { return true }
         if (try? HandshakeMessageB.decode(from: frame)) != nil { return true }
@@ -1245,7 +1251,9 @@ public class P2PConnectionManager: ObservableObject {
     }
 
     private func localPeerServiceHints() -> (capabilities: [String], fileTransferPort: UInt16?, remoteControlPort: UInt16?) {
-        let capabilities = ["clipboard_sync", "file_transfer"]
+        // iOS 支持作为远程桌面的查看器端（rdview），可以通过 P2P 连接控制已配对的 Mac
+        // 但不支持作为被控端（rdcontrol），因为 iOS 系统不允许外部输入注入
+        let capabilities = ["clipboard_sync", "file_transfer", "remote_desktop"]
         return (capabilities, nil, nil)
     }
 

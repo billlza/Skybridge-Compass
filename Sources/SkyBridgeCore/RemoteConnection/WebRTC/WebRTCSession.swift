@@ -168,6 +168,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     private var localVideoTransceiver: RTCRtpTransceiver?
     private var localVideoCapturer: RTCVideoCapturer?
     private var didLogOutgoingNativeVideoFrame = false
+    private var didLogMissingOutgoingNativeVideoPipeline = false
     private var outgoingNativeVideoFrameCount: UInt64 = 0
     private var lastOutgoingNativeVideoFrameLogAt: Date = .distantPast
     private var pendingRemoteICECandidates: [RTCIceCandidate] = []
@@ -239,6 +240,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         localVideoTransceiver = nil
         localVideoCapturer = nil
         didLogOutgoingNativeVideoFrame = false
+        didLogMissingOutgoingNativeVideoPipeline = false
         outgoingNativeVideoFrameCount = 0
         lastOutgoingNativeVideoFrameLogAt = .distantPast
         peerConnection?.close()
@@ -756,7 +758,10 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
 
     public var supportsNativeScreenVideoTrack: Bool {
 #if canImport(WebRTC)
-        prefersNativeOutgoingScreenTrack && localVideoTrack != nil
+        prefersNativeOutgoingScreenTrack
+            && localVideoTrack != nil
+            && localVideoSource != nil
+            && localVideoCapturer != nil
 #else
         false
 #endif
@@ -776,21 +781,37 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     public func pushVideoFrame(pixelBuffer: CVPixelBuffer, timeStampNs: Int64) {
 #if canImport(WebRTC)
         guard let localVideoSource,
-              let localVideoCapturer else { return }
-        let cvBuffer = RTCCVPixelBuffer(pixelBuffer: pixelBuffer)
-        let buffer = cvBuffer.toI420()
-        let frame = RTCVideoFrame(
-            buffer: buffer,
-            rotation: ._0,
-            timeStampNs: timeStampNs
-        )
-        if !didLogOutgoingNativeVideoFrame {
-            didLogOutgoingNativeVideoFrame = true
-            logger.info(
-                "🎥 submitting first native WebRTC screen frame. sessionId=\(self.sessionId, privacy: .public) size=\(CVPixelBufferGetWidth(pixelBuffer), privacy: .public)x\(CVPixelBufferGetHeight(pixelBuffer), privacy: .public) pixelFormat=\(CVPixelBufferGetPixelFormatType(pixelBuffer), privacy: .public)"
-            )
+              let localVideoCapturer else {
+            if !didLogMissingOutgoingNativeVideoPipeline {
+                didLogMissingOutgoingNativeVideoPipeline = true
+                logger.warning(
+                    """
+                    ⚠️ native WebRTC screen frame dropped: outgoing pipeline not ready. \
+                    sessionId=\(self.sessionId, privacy: .public) \
+                    trackReady=\(self.localVideoTrack != nil, privacy: .public) \
+                    sourceReady=\(self.localVideoSource != nil, privacy: .public) \
+                    capturerReady=\(self.localVideoCapturer != nil, privacy: .public)
+                    """
+                )
+            }
+            return
         }
-        localVideoSource.capturer(localVideoCapturer, didCapture: frame)
+        didLogMissingOutgoingNativeVideoPipeline = false
+        autoreleasepool {
+            let buffer = RTCCVPixelBuffer(pixelBuffer: pixelBuffer)
+            let frame = RTCVideoFrame(
+                buffer: buffer,
+                rotation: ._0,
+                timeStampNs: timeStampNs
+            )
+            if !didLogOutgoingNativeVideoFrame {
+                didLogOutgoingNativeVideoFrame = true
+                logger.info(
+                    "🎥 submitting first native WebRTC screen frame. sessionId=\(self.sessionId, privacy: .public) size=\(CVPixelBufferGetWidth(pixelBuffer), privacy: .public)x\(CVPixelBufferGetHeight(pixelBuffer), privacy: .public) pixelFormat=\(CVPixelBufferGetPixelFormatType(pixelBuffer), privacy: .public)"
+                )
+            }
+            localVideoSource.capturer(localVideoCapturer, didCapture: frame)
+        }
         outgoingNativeVideoFrameCount &+= 1
         let now = Date()
         if now.timeIntervalSince(lastOutgoingNativeVideoFrameLogAt) >= 2.0 {
@@ -961,6 +982,10 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             }
         }
         sender.parameters = parameters
+    }
+
+    static func offerToReceiveVideoConstraintValue(hasNegotiatedVideoTransceiver: Bool) -> String {
+        hasNegotiatedVideoTransceiver ? "true" : "false"
     }
     
 #if canImport(WebRTC)
@@ -1136,7 +1161,18 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
 
     private func createOffer() {
         guard let pc = peerConnection else { return }
-        let constraints = RTCMediaConstraints(mandatoryConstraints: ["OfferToReceiveAudio": "false", "OfferToReceiveVideo": "false"], optionalConstraints: nil)
+        let constraints = RTCMediaConstraints(
+            mandatoryConstraints: [
+                "OfferToReceiveAudio": "false",
+                // Keep the negotiated video m-line alive whenever we've attached
+                // a native screen-video transceiver; hardcoding false here can
+                // suppress the remote track on the viewer side.
+                "OfferToReceiveVideo": Self.offerToReceiveVideoConstraintValue(
+                    hasNegotiatedVideoTransceiver: localVideoTransceiver != nil
+                ),
+            ],
+            optionalConstraints: nil
+        )
         pc.offer(for: constraints) { [weak self] sdp, error in
             guard let self else { return }
             if let error {
@@ -1152,6 +1188,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
                     self.logger.error("❌ setLocalDescription(offer) failed: \(err.localizedDescription, privacy: .public)")
                     return
                 }
+                self.logLocalSDPSummary(kind: "offer", sdp: sdpString)
                 self.lastEmittedLocalSDP = sdpString
                 self.onLocalOffer?(sdpString)
             }
@@ -1160,7 +1197,15 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     
     private func createAnswer() {
         guard let pc = peerConnection else { return }
-        let constraints = RTCMediaConstraints(mandatoryConstraints: ["OfferToReceiveAudio": "false", "OfferToReceiveVideo": "false"], optionalConstraints: nil)
+        let constraints = RTCMediaConstraints(
+            mandatoryConstraints: [
+                "OfferToReceiveAudio": "false",
+                "OfferToReceiveVideo": Self.offerToReceiveVideoConstraintValue(
+                    hasNegotiatedVideoTransceiver: localVideoTransceiver != nil
+                ),
+            ],
+            optionalConstraints: nil
+        )
         pc.answer(for: constraints) { [weak self] sdp, error in
             guard let self else { return }
             if let error {
@@ -1176,10 +1221,40 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
                     self.logger.error("❌ setLocalDescription(answer) failed: \(err.localizedDescription, privacy: .public)")
                     return
                 }
+                self.logLocalSDPSummary(kind: "answer", sdp: sdpString)
                 self.lastEmittedLocalSDP = sdpString
                 self.onLocalAnswer?(sdpString)
             }
         }
+    }
+
+    private func logLocalSDPSummary(kind: String, sdp: String) {
+        let hasVideoMedia = sdp.contains("\r\nm=video ") || sdp.hasPrefix("m=video ")
+        let direction: String = {
+            if sdp.contains("\r\na=sendrecv") || sdp.hasPrefix("a=sendrecv") {
+                return "sendrecv"
+            }
+            if sdp.contains("\r\na=sendonly") || sdp.hasPrefix("a=sendonly") {
+                return "sendonly"
+            }
+            if sdp.contains("\r\na=recvonly") || sdp.hasPrefix("a=recvonly") {
+                return "recvonly"
+            }
+            if sdp.contains("\r\na=inactive") || sdp.hasPrefix("a=inactive") {
+                return "inactive"
+            }
+            return "unspecified"
+        }()
+        logger.info(
+            """
+            📄 local SDP ready. sessionId=\(self.sessionId, privacy: .public) \
+            kind=\(kind, privacy: .public) \
+            hasVideo=\(hasVideoMedia, privacy: .public) \
+            direction=\(direction, privacy: .public) \
+            nativeTrack=\(self.localVideoTrack != nil, privacy: .public) \
+            nativeTransceiver=\(self.localVideoTransceiver != nil, privacy: .public)
+            """
+        )
     }
 
     private func emitCompletedLocalDescriptionIfNeeded() {
@@ -1189,6 +1264,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         guard !sdp.isEmpty, sdp != lastEmittedLocalSDP else { return }
         lastEmittedLocalSDP = sdp
         logger.info("🔁 emitting gathered local description. sessionId=\(self.sessionId, privacy: .public) role=\(String(describing: self.role), privacy: .public)")
+        logLocalSDPSummary(kind: role == .offerer ? "offer-gathered" : "answer-gathered", sdp: sdp)
         switch role {
         case .offerer:
             onLocalOffer?(sdp)

@@ -12,6 +12,18 @@ import Testing
 import Foundation
 @testable import SkyBridgeCore
 
+private actor SessionStateRecorder {
+    private(set) var states: [SignalingSessionState] = []
+
+    func record(_ state: SignalingSessionState) {
+        states.append(state)
+    }
+
+    func count() -> Int {
+        states.count
+    }
+}
+
 // MARK: - SignalingService Tests
 
 @Suite("SignalingService Tests")
@@ -125,10 +137,10 @@ struct SignalingServiceTests {
             localDeviceId: "test-device-id"
         )
         
-        var stateChanges: [SignalingSessionState] = []
+        let stateRecorder = SessionStateRecorder()
         signalingService.onSessionStateChange = { state in
-            Task { @MainActor in
-                stateChanges.append(state)
+            Task {
+                await stateRecorder.record(state)
             }
         }
         
@@ -140,6 +152,7 @@ struct SignalingServiceTests {
         
  // 状态应该保持 idle（因为本来就没加入）
         #expect(signalingService.sessionState == .idle)
+        _ = await stateRecorder.count()
     }
     
  // MARK: - Error Type Tests

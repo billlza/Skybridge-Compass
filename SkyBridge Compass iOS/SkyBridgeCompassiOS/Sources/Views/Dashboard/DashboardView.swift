@@ -1892,109 +1892,138 @@ private struct DashboardNotificationBellButton: View {
         }
         .buttonStyle(.plain)
         .sheet(isPresented: $showCenter) {
-            NavigationStack {
-                Group {
-                    if events.isEmpty && inFlightTransfers.isEmpty {
-                        ContentUnavailableView("暂无通知", systemImage: "bell.slash")
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    } else {
-                        ScrollView {
-                            VStack(alignment: .leading, spacing: 14) {
-                                if !inFlightTransfers.isEmpty {
-                                    VStack(alignment: .leading, spacing: 8) {
-                                        Text("进行中的传输")
-                                            .font(.caption.weight(.semibold))
-                                            .foregroundStyle(.secondary)
+            ZStack {
+                DashboardView.QuantumGlassBackground(enableAnimations: false, enableWeatherEffects: false)
 
-                                        ForEach(sortedInFlightTransfers) { transfer in
-                                            VStack(alignment: .leading, spacing: 6) {
-                                                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                                                    Image(systemName: transfer.isIncoming ? "arrow.down.circle.fill" : "arrow.up.circle.fill")
-                                                        .foregroundStyle(transfer.isIncoming ? .green : .blue)
-                                                    Text(transfer.fileName)
-                                                        .font(.subheadline.weight(.semibold))
-                                                        .lineLimit(1)
-                                                    Spacer(minLength: 0)
-                                                    Text("\(Int((min(max(transfer.progress, 0), 1) * 100).rounded(.down)))%")
-                                                        .font(.caption.monospacedDigit())
-                                                        .foregroundStyle(.secondary)
-                                                }
+                NavigationStack {
+                    Group {
+                        if events.isEmpty && inFlightTransfers.isEmpty {
+                            ContentUnavailableView("暂无通知", systemImage: "bell.slash")
+                                .foregroundStyle(.white.opacity(0.82))
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        } else {
+                            ScrollView {
+                                VStack(alignment: .leading, spacing: 18) {
+                                    if !inFlightTransfers.isEmpty {
+                                        VStack(alignment: .leading, spacing: 10) {
+                                            Text("进行中的传输")
+                                                .font(.caption.weight(.semibold))
+                                                .foregroundStyle(.white.opacity(0.74))
 
-                                                ProgressView(value: min(max(transfer.progress, 0), 1))
-                                                    .tint(transfer.isIncoming ? .green : .blue)
+                                            ForEach(sortedInFlightTransfers) { transfer in
+                                                VStack(alignment: .leading, spacing: 8) {
+                                                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                                        Image(systemName: transfer.isIncoming ? "arrow.down.circle.fill" : "arrow.up.circle.fill")
+                                                            .foregroundStyle(transfer.isIncoming ? .green : .cyan)
+                                                        Text(transfer.fileName)
+                                                            .font(.subheadline.weight(.semibold))
+                                                            .foregroundStyle(.white)
+                                                            .lineLimit(1)
+                                                        Spacer(minLength: 0)
+                                                        Text("\(Int((min(max(transfer.progress, 0), 1) * 100).rounded(.down)))%")
+                                                            .font(.caption.monospacedDigit())
+                                                            .foregroundStyle(.white.opacity(0.72))
+                                                    }
 
-                                                HStack(spacing: 6) {
-                                                    if !transfer.remotePeer.isEmpty {
-                                                        Text(transfer.remotePeer)
+                                                    ProgressView(value: min(max(transfer.progress, 0), 1))
+                                                        .tint(transfer.isIncoming ? .green : .cyan)
+
+                                                    HStack(spacing: 6) {
+                                                        if !transfer.remotePeer.isEmpty {
+                                                            Text(transfer.remotePeer)
+                                                                .lineLimit(1)
+                                                        }
+                                                        Text("·")
+                                                        Text(speedDisplay(transfer.speedBytesPerSecond))
+                                                        Text("·")
+                                                        Text("\(byteCount(transfer.transferredBytes))/\(byteCount(transfer.totalBytes))")
+                                                    }
+                                                    .font(.caption2)
+                                                    .foregroundStyle(.white.opacity(0.68))
+
+                                                    if transfer.isIncoming, let location = localLocationHint(path: transfer.localPath) {
+                                                        Text(String(format: RuntimeLocalization.string("保存到 %@"), location))
+                                                            .font(.caption2)
+                                                            .foregroundStyle(.white.opacity(0.68))
                                                             .lineLimit(1)
                                                     }
-                                                    Text("·")
-                                                    Text(speedDisplay(transfer.speedBytesPerSecond))
-                                                    Text("·")
-                                                    Text("\(byteCount(transfer.transferredBytes))/\(byteCount(transfer.totalBytes))")
                                                 }
-                                                .font(.caption2)
-                                                .foregroundStyle(.secondary)
-
-                                                if transfer.isIncoming, let location = localLocationHint(path: transfer.localPath) {
-                                                    Text(String(format: RuntimeLocalization.string("保存到 %@"), location))
-                                                        .font(.caption2)
-                                                        .foregroundStyle(.secondary)
-                                                        .lineLimit(1)
-                                                }
+                                                .padding(12)
+                                                .background(
+                                                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                                        .fill(Color.black.opacity(0.28))
+                                                )
+                                                .overlay(
+                                                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                                        .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                                                )
                                             }
-                                            .padding(10)
-                                            .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                                         }
                                     }
-                                }
 
-                                if !events.isEmpty {
-                                    VStack(alignment: .leading, spacing: 8) {
-                                        Text("事件记录")
-                                            .font(.caption.weight(.semibold))
-                                            .foregroundStyle(.secondary)
+                                    if !events.isEmpty {
+                                        VStack(alignment: .leading, spacing: 10) {
+                                            Text("事件记录")
+                                                .font(.caption.weight(.semibold))
+                                                .foregroundStyle(.white.opacity(0.74))
 
-                                        ForEach(events) { item in
-                                            HStack(alignment: .top, spacing: 10) {
-                                                Image(systemName: item.iconName)
-                                                    .foregroundColor(item.color)
-                                                    .frame(width: 16)
-                                                VStack(alignment: .leading, spacing: 3) {
-                                                    Text(item.title)
-                                                        .font(.subheadline.weight(.semibold))
-                                                    if let detail = item.detail, !detail.isEmpty {
-                                                        Text(detail)
-                                                            .font(.caption)
-                                                            .foregroundStyle(.secondary)
+                                            ForEach(events) { item in
+                                                HStack(alignment: .top, spacing: 10) {
+                                                    Image(systemName: item.iconName)
+                                                        .foregroundColor(item.color)
+                                                        .frame(width: 16)
+                                                    VStack(alignment: .leading, spacing: 4) {
+                                                        Text(item.title)
+                                                            .font(.subheadline.weight(.semibold))
+                                                            .foregroundStyle(.white)
+                                                        if let detail = item.detail, !detail.isEmpty {
+                                                            Text(detail)
+                                                                .font(.caption)
+                                                                .foregroundStyle(.white.opacity(0.72))
+                                                        }
+                                                        Text(item.timestampFormatted)
+                                                            .font(.caption2)
+                                                            .foregroundStyle(.white.opacity(0.56))
                                                     }
-                                                    Text(item.timestampFormatted)
-                                                        .font(.caption2)
-                                                        .foregroundStyle(.secondary)
+                                                    Spacer(minLength: 0)
                                                 }
-                                                Spacer(minLength: 0)
+                                                .padding(12)
+                                                .background(
+                                                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                                        .fill(Color.black.opacity(0.28))
+                                                )
+                                                .overlay(
+                                                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                                        .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                                                )
                                             }
-                                            .padding(10)
-                                            .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                                         }
                                     }
                                 }
+                                .padding()
                             }
-                            .padding()
+                            .scrollIndicators(.hidden)
                         }
                     }
-                }
-                .navigationTitle("通知中心")
-                .toolbar {
-                    ToolbarItem(placement: .topBarTrailing) {
-                        Button("清空") {
-                            events.removeAll()
-                            unreadCount = 0
+                    .background(Color.clear)
+                    .navigationTitle("通知中心")
+                    .navigationBarTitleDisplayMode(.large)
+                    .toolbar {
+                        ToolbarItem(placement: .topBarTrailing) {
+                            Button("清空") {
+                                events.removeAll()
+                                unreadCount = 0
+                            }
+                            .foregroundStyle(events.isEmpty ? .white.opacity(0.35) : .white.opacity(0.9))
+                            .disabled(events.isEmpty)
                         }
-                        .disabled(events.isEmpty)
                     }
+                    .toolbarBackground(.hidden, for: .navigationBar)
+                    .toolbarColorScheme(.dark, for: .navigationBar)
                 }
             }
+            .preferredColorScheme(.dark)
+            .presentationBackground(.clear)
             .presentationDetents([.medium, .large])
             .presentationDragIndicator(.visible)
         }

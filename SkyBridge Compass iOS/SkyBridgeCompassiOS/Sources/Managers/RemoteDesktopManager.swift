@@ -562,7 +562,6 @@ final class RemoteVideoFrameFeed: ObservableObject {
     }
 
     func markDisplayedFrame() {
-        guard !hasDisplayedFrame else { return }
         hasDisplayedFrame = true
         frameVersion &+= 1
     }
@@ -604,15 +603,15 @@ final class RemoteMetalVideoFrameFeed: ObservableObject {
     }
 
     func markDisplayedFrame() {
-        guard !hasDisplayedFrame else { return }
         hasDisplayedFrame = true
         frameVersion &+= 1
     }
 
     func takeLatestFrame() -> DecodedPixelBufferFrame? {
-        let frame = latestFrame
-        latestFrame = nil
-        return frame
+        // 不要清空 latestFrame - 保留它用于重复显示
+        // MTKView 的 draw(in:) 可能以 60fps 调用，但帧到达速度可能更低
+        // 如果清空，会导致 draw(in:) 取不到帧而显示空白
+        return latestFrame
     }
 
     func flush(removeDisplayedImage: Bool = true) {
@@ -635,6 +634,7 @@ actor VideoDecoder {
         case h264
         case hevc
     }
+    private let nominalPresentationStep = CMTime(value: 1, timescale: 60)
     private var formatDescription: CMVideoFormatDescription?
     private var decompressionSession: VTDecompressionSession?
     private var activeCodec: Codec?
@@ -1146,17 +1146,17 @@ actor VideoDecoder {
         guard sbStatus == noErr, let sampleBuffer else {
             throw RemoteDesktopError.decodingFailed("CMSampleBufferCreate failed (status=\(sbStatus))")
         }
-        setDisplayImmediatelyAttachment(on: sampleBuffer)
         return sampleBuffer
     }
 
     private func nextDecodePresentationTimeStamp() -> CMTime {
         let now = CMClockGetTime(CMClockGetHostTimeClock())
-        if let lastPresentationTimeStamp,
-           now <= lastPresentationTimeStamp {
-            let advanced = CMTimeAdd(lastPresentationTimeStamp, CMTime(value: 1, timescale: 600))
-            self.lastPresentationTimeStamp = advanced
-            return advanced
+        if let lastPresentationTimeStamp {
+            let minimumNext = CMTimeAdd(lastPresentationTimeStamp, nominalPresentationStep)
+            if now < minimumNext {
+                self.lastPresentationTimeStamp = minimumNext
+                return minimumNext
+            }
         }
         lastPresentationTimeStamp = now
         return now
@@ -2181,6 +2181,7 @@ public class RemoteDesktopManager: ObservableObject {
     private var clipboardListenerToken: UUID?
     private var pendingViewerSettingsTask: Task<Void, Never>?
     private var lastSentStreamConfiguration: RemoteDesktopStreamConfigurationPayload?
+    private var lastCrossNetworkNativeReadyAnnouncementAt: Date?
     private var lastIncomingStreamSignature: IncomingStreamSignature?
     private var streamRefreshTokenCounter: UInt64 = 0
     private var lastRefreshRequestAt: Date?
@@ -2202,12 +2203,17 @@ public class RemoteDesktopManager: ObservableObject {
     private var statsWindowStartTime: Date?
     private var receivedFramesInStatsWindow: Int = 0
     private var decodedFramesInStatsWindow: Int = 0
+    private var rendererEnqueuedFramesInStatsWindow: Int = 0
     private var displayedFramesInStatsWindow: Int = 0
     private var lastViewerInteractionAt: Date?
     private var lastContinuityRecoveryAt: Date?
     private var streamContinuityWatchdogTask: Task<Void, Never>?
     private var firstFrameContinuityTask: Task<Void, Never>?
     private var interactionContinuityTask: Task<Void, Never>?
+    private var crossNetworkNativePromotionWatchdogTask: Task<Void, Never>?
+    private var crossNetworkNativeReadySuppressed = false
+    private var lastMetalFallbackAt: Date?
+    private var stableSampleBufferFramesSinceMetalFallback: Int = 0
     
     private init() {
         viewerSettings = Self.loadViewerSettings()
@@ -2234,7 +2240,14 @@ public class RemoteDesktopManager: ObservableObject {
         statsWindowStartTime = nil
         receivedFramesInStatsWindow = 0
         decodedFramesInStatsWindow = 0
+        rendererEnqueuedFramesInStatsWindow = 0
         displayedFramesInStatsWindow = 0
+        lastCrossNetworkNativeReadyAnnouncementAt = nil
+        crossNetworkNativePromotionWatchdogTask?.cancel()
+        crossNetworkNativePromotionWatchdogTask = nil
+        crossNetworkNativeReadySuppressed = false
+        lastMetalFallbackAt = nil
+        stableSampleBufferFramesSinceMetalFallback = 0
         decodedVideoRendererPreference = preferredDecodedVideoRenderer()
         metalAwaitingFirstDisplaySince = nil
         invalidateDecodePipelineState()
@@ -2524,10 +2537,13 @@ public class RemoteDesktopManager: ObservableObject {
         firstFrameContinuityTask?.cancel()
         interactionContinuityTask?.cancel()
         streamContinuityWatchdogTask?.cancel()
+        crossNetworkNativePromotionWatchdogTask?.cancel()
         firstFrameWatchdogTask = nil
         firstFrameContinuityTask = nil
         interactionContinuityTask = nil
         streamContinuityWatchdogTask = nil
+        crossNetworkNativePromotionWatchdogTask = nil
+        crossNetworkNativeReadySuppressed = false
         if state == .streaming {
             state = .connected
         }
@@ -2546,10 +2562,13 @@ public class RemoteDesktopManager: ObservableObject {
         firstFrameContinuityTask?.cancel()
         interactionContinuityTask?.cancel()
         streamContinuityWatchdogTask?.cancel()
+        crossNetworkNativePromotionWatchdogTask?.cancel()
         firstFrameWatchdogTask = nil
         firstFrameContinuityTask = nil
         interactionContinuityTask = nil
         streamContinuityWatchdogTask = nil
+        crossNetworkNativePromotionWatchdogTask = nil
+        crossNetworkNativeReadySuppressed = false
         
         // 关闭连接
         networkConnection?.stateUpdateHandler = nil
@@ -2648,11 +2667,18 @@ public class RemoteDesktopManager: ObservableObject {
         guard activeTransportMode == .crossNetwork else { return }
         guard size.width > 0, size.height > 0 else { return }
         resolution = size
+        crossNetwork.noteRemoteVideoTrackResolutionAvailable(
+            size,
+            source: "remote-desktop-resolution"
+        )
     }
 
     @MainActor
     func noteCrossNetworkNativeVideoFrame(_ size: CGSize) {
         guard activeTransportMode == .crossNetwork else { return }
+        crossNetworkNativePromotionWatchdogTask?.cancel()
+        crossNetworkNativePromotionWatchdogTask = nil
+        crossNetworkNativeReadySuppressed = false
         let now = Date()
         if size.width > 0, size.height > 0 {
             resolution = size
@@ -2662,6 +2688,83 @@ public class RemoteDesktopManager: ObservableObject {
         noteDecodedFrame(at: now)
         noteDisplayedFrame(at: now)
         updateRenderPipeline(.webrtcNativeVideo)
+        announceCrossNetworkNativeVideoReadyIfNeeded(force: false, now: now)
+    }
+
+    static func shouldAnnounceCrossNetworkNativeVideoReady(
+        activeTransportModeIsCrossNetwork: Bool,
+        hasCurrentConnection: Bool,
+        hasRenderedNativeFrame: Bool,
+        lastSentNativeVideoTrackReady: Bool,
+        force: Bool,
+        lastAnnouncementAt: Date?,
+        now: Date,
+        minimumInterval: TimeInterval = 0.5
+    ) -> Bool {
+        guard activeTransportModeIsCrossNetwork, hasCurrentConnection, hasRenderedNativeFrame else {
+            return false
+        }
+        if !force && lastSentNativeVideoTrackReady {
+            return false
+        }
+        if !force,
+           let lastAnnouncementAt,
+           now.timeIntervalSince(lastAnnouncementAt) < minimumInterval {
+            return false
+        }
+        return true
+    }
+
+    @MainActor
+    private func announceCrossNetworkNativeVideoReadyIfNeeded(force: Bool, now: Date = Date()) {
+        let inferredNativeReady = !crossNetworkNativeReadySuppressed
+            && crossNetwork.inferredNativeVideoTrackReady(now: now)
+        let shouldAnnounce = Self.shouldAnnounceCrossNetworkNativeVideoReady(
+            activeTransportModeIsCrossNetwork: activeTransportMode == .crossNetwork,
+            hasCurrentConnection: currentConnection != nil,
+            hasRenderedNativeFrame: crossNetwork.remoteVideoTrackHasRenderedFrame || inferredNativeReady,
+            lastSentNativeVideoTrackReady: lastSentStreamConfiguration?.nativeVideoTrackReady == true,
+            force: force,
+            lastAnnouncementAt: lastCrossNetworkNativeReadyAnnouncementAt,
+            now: now
+        )
+        guard shouldAnnounce else { return }
+        if inferredNativeReady, !crossNetwork.remoteVideoTrackHasRenderedFrame {
+            SkyBridgeLogger.shared.info(
+                "🎬 基于原生轨存在与稳定 fallback 证据，保守确认 nativeReady=true"
+            )
+            scheduleCrossNetworkNativePromotionWatchdog()
+        } else if crossNetwork.remoteVideoTrackHasRenderedFrame {
+            crossNetworkNativePromotionWatchdogTask?.cancel()
+            crossNetworkNativePromotionWatchdogTask = nil
+        }
+        lastCrossNetworkNativeReadyAnnouncementAt = now
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.pushViewerStreamConfiguration(force: true)
+        }
+    }
+
+    @MainActor
+    private func scheduleCrossNetworkNativePromotionWatchdog(timeout: Duration = .milliseconds(2500)) {
+        crossNetworkNativePromotionWatchdogTask?.cancel()
+        crossNetworkNativePromotionWatchdogTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                try await Task.sleep(for: timeout)
+            } catch {
+                return
+            }
+            guard self.activeTransportMode == .crossNetwork else { return }
+            guard self.currentConnection != nil else { return }
+            guard !self.crossNetwork.remoteVideoTrackHasRenderedFrame else { return }
+            guard self.lastSentStreamConfiguration?.nativeVideoTrackReady == true else { return }
+            self.crossNetworkNativeReadySuppressed = true
+            SkyBridgeLogger.shared.warning(
+                "⚠️ WebRTC 原生视频轨在 promotion 窗口内未确认首帧，已回退到持续 fallback"
+            )
+            await self.pushViewerStreamConfiguration(force: true)
+        }
     }
 
     func canPresentRemoteDesktopOption(for device: DiscoveredDevice) -> Bool {
@@ -2670,15 +2773,8 @@ public class RemoteDesktopManager: ObservableObject {
         }
 
         let resolved = resolveLatestRemoteDesktopDevice(from: device)
-        let liveLANSessionExists =
-            connectionManager.resolvedConnectionStatus(for: resolved) == .connected
-            || connectionManager.resolvedConnectionStatus(for: device) == .connected
-        let liveLANAddressAvailable =
-            connectionManager.activePeerHostAddress(for: resolved) != nil
-            || connectionManager.activePeerHostAddress(for: device) != nil
-
-        if liveLANSessionExists,
-           resolved.platform == .macOS || liveLANAddressAvailable {
+        if hasPeerAddressBackedRemoteDesktopFallback(for: resolved)
+            || hasPeerAddressBackedRemoteDesktopFallback(for: device) {
             return true
         }
 
@@ -2736,10 +2832,13 @@ public class RemoteDesktopManager: ObservableObject {
         firstFrameContinuityTask?.cancel()
         interactionContinuityTask?.cancel()
         streamContinuityWatchdogTask?.cancel()
+        crossNetworkNativePromotionWatchdogTask?.cancel()
         firstFrameWatchdogTask = nil
         firstFrameContinuityTask = nil
         interactionContinuityTask = nil
         streamContinuityWatchdogTask = nil
+        crossNetworkNativePromotionWatchdogTask = nil
+        crossNetworkNativeReadySuppressed = false
         networkConnection?.stateUpdateHandler = nil
         networkConnection?.cancel()
         networkConnection = nil
@@ -2841,11 +2940,11 @@ public class RemoteDesktopManager: ObservableObject {
     }
 
     func handleCrossNetworkNativeVideoTrackRenderedFirstFrame() {
-        guard activeTransportMode == .crossNetwork, isStreaming else { return }
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            await self.pushViewerStreamConfiguration(force: true)
-        }
+        announceCrossNetworkNativeVideoReadyIfNeeded(force: true)
+    }
+
+    func handleCrossNetworkNativeVideoTrackPromotionReady() {
+        announceCrossNetworkNativeVideoReadyIfNeeded(force: false)
     }
 
     private func configureSessionClipboardSync() {
@@ -2936,6 +3035,10 @@ public class RemoteDesktopManager: ObservableObject {
             supportedFormats: Self.supportedRemoteVideoFormats(),
             at: now
         )
+        let inferredNativeReady = activeTransportMode == .crossNetwork
+            && !crossNetworkNativeReadySuppressed
+            ? crossNetwork.inferredNativeVideoTrackReady(now: now)
+            : false
         let dimensions = viewerSettings.resolution.dimensions
         let transportTuning = viewerSettings.transportTuning
         return RemoteDesktopStreamConfigurationPayload(
@@ -2962,7 +3065,7 @@ public class RemoteDesktopManager: ObservableObject {
                 : "sbrf-v1",
             screenDataChannelEnabled: activeTransportMode != .crossNetwork ? true : false,
             nativeVideoTrackReady: activeTransportMode == .crossNetwork
-                ? crossNetwork.remoteVideoTrackHasRenderedFrame
+                ? (crossNetwork.remoteVideoTrackHasRenderedFrame || inferredNativeReady)
                 : nil,
             streamRefreshToken: refreshStream ? nextStreamRefreshToken() : nil
         )
@@ -2997,8 +3100,9 @@ public class RemoteDesktopManager: ObservableObject {
     }
 
     private func preferredDecodedVideoRenderer() -> DecodedVideoRendererPreference {
-        // Cross-network DataChannel video has been more stable through
-        // AVSampleBufferDisplayLayer than the custom Metal path.
+        // Prefer the paced sample-buffer renderer for cross-network fallback
+        // H.264/HEVC until the custom Metal path proves it can sustain
+        // continuous present callbacks under real device load.
         if activeTransportMode == .crossNetwork {
             return .sampleBuffer
         }
@@ -3021,6 +3125,13 @@ public class RemoteDesktopManager: ObservableObject {
     }
 
     private func updateRenderPipeline(_ pipeline: RemoteDesktopRenderPipeline) {
+        if activeTransportMode == .crossNetwork,
+           crossNetwork.remoteVideoTrackHasRenderedFrame,
+           renderPipelineStatus == .webrtcNativeVideo,
+           pipeline != .webrtcNativeVideo,
+           pipeline != .waiting {
+            return
+        }
         guard renderPipelineStatus != pipeline else { return }
         renderPipelineStatus = pipeline
         switch pipeline {
@@ -3158,6 +3269,14 @@ public class RemoteDesktopManager: ObservableObject {
                 domain: bonjourDomain,
                 interface: nil
             )
+        }
+
+        if let activePeerAddress = peerAddressBackedRemoteDesktopAddress(for: device) {
+            let port = device.remoteControlPort ?? RemoteDesktopConstants.defaultPort
+            SkyBridgeLogger.shared.info(
+                "📡 远控使用已建立 P2P 会话的对端地址回退连接: host=\(activePeerAddress) port=\(port)"
+            )
+            return .hostPort(host: .init(activePeerAddress), port: .init(integerLiteral: port))
         }
 
         if let ip = bestIPAddress(for: device),
@@ -3383,6 +3502,10 @@ public class RemoteDesktopManager: ObservableObject {
             return true
         }
 
+        if hasPeerAddressBackedRemoteDesktopFallback(for: device) {
+            return true
+        }
+
         if preferredRemoteDesktopServiceName(for: device) != nil {
             return true
         }
@@ -3400,6 +3523,36 @@ public class RemoteDesktopManager: ObservableObject {
         }
 
         return false
+    }
+
+    private func hasPeerAddressBackedRemoteDesktopFallback(for device: DiscoveredDevice) -> Bool {
+        peerAddressBackedRemoteDesktopAddress(for: device) != nil
+    }
+
+    private func peerAddressBackedRemoteDesktopAddress(for device: DiscoveredDevice) -> String? {
+        let resolved = connectionManager.resolvedPeerDevice(for: device)
+        let status = connectionManager.resolvedConnectionStatus(for: resolved)
+            ?? connectionManager.resolvedConnectionStatus(for: device)
+        guard status == .connected else {
+            return nil
+        }
+
+        let candidate = resolved.platform == .macOS ? resolved : device
+        guard candidate.platform == .macOS || candidate.supportsRemoteControl else {
+            return nil
+        }
+
+        if let activePeerAddress = connectionManager.activePeerHostAddress(for: resolved),
+           let sanitized = sanitizeAddress(activePeerAddress) {
+            return sanitized
+        }
+
+        if let activePeerAddress = connectionManager.activePeerHostAddress(for: device),
+           let sanitized = sanitizeAddress(activePeerAddress) {
+            return sanitized
+        }
+
+        return nil
     }
 
     private func resolveRemoteDesktopIPAddress(for device: DiscoveredDevice) async -> String? {
@@ -3858,6 +4011,12 @@ public class RemoteDesktopManager: ObservableObject {
         await handleIncomingStreamTopologyChangeIfNeeded(for: screenData)
         // 更新分辨率
         resolution = CGSize(width: screenData.width, height: screenData.height)
+        if activeTransportMode == .crossNetwork {
+            crossNetwork.noteRemoteVideoTrackResolutionAvailable(
+                resolution,
+                source: "fallback-screen-data"
+            )
+        }
         
         // 计算延迟
         let currentTimestamp = Date().timeIntervalSince1970
@@ -4029,8 +4188,13 @@ public class RemoteDesktopManager: ObservableObject {
         logRemoteDesktopPipelineStatsIfNeeded(at: now)
     }
 
-    private func noteDisplayedFrame(at now: Date) {
+    private func noteVideoRendererEnqueuedFrame(at now: Date) {
         lastVideoRendererEnqueueAt = now
+        rendererEnqueuedFramesInStatsWindow += 1
+        noteFrameProgress(at: now)
+    }
+
+    private func noteDisplayedFrame(at now: Date) {
         lastDisplayedFrameTime = now
         displayedFramesInStatsWindow += 1
         logRemoteDesktopPipelineStatsIfNeeded(at: now)
@@ -4059,17 +4223,18 @@ public class RemoteDesktopManager: ObservableObject {
         }
         if renderPipelineStatus == .sampleBufferDisplayLayer,
            decodedFramesInStatsWindow > 0,
-           displayedFramesInStatsWindow == 0 {
+           rendererEnqueuedFramesInStatsWindow == 0 {
             Task { @MainActor [weak self] in
-                await self?.handleStreamContinuityStall(reason: "sample-buffer-no-display")
+                await self?.handleStreamContinuityStall(reason: "sample-buffer-no-enqueue")
             }
         }
         SkyBridgeLogger.shared.debug(
-            "📈 远控链路统计: recv=\(receivedFramesInStatsWindow) decode=\(decodedFramesInStatsWindow) display=\(displayedFramesInStatsWindow) pending=\(pendingFrames.count) inflight=\(inFlightDecodeCount) waitingSync=\(decodeQueueWaitingForSyncFrame) pipeline=\(renderPipelineStatus.rawValue)"
+            "📈 远控链路统计: recv=\(receivedFramesInStatsWindow) decode=\(decodedFramesInStatsWindow) enqueue=\(rendererEnqueuedFramesInStatsWindow) display=\(displayedFramesInStatsWindow) pending=\(pendingFrames.count) inflight=\(inFlightDecodeCount) waitingSync=\(decodeQueueWaitingForSyncFrame) pipeline=\(renderPipelineStatus.rawValue)"
         )
         self.statsWindowStartTime = now
         receivedFramesInStatsWindow = 0
         decodedFramesInStatsWindow = 0
+        rendererEnqueuedFramesInStatsWindow = 0
         displayedFramesInStatsWindow = 0
     }
 
@@ -4099,6 +4264,8 @@ public class RemoteDesktopManager: ObservableObject {
         guard decodedVideoRendererPreference != .sampleBuffer else { return }
         decodedVideoRendererPreference = .sampleBuffer
         metalAwaitingFirstDisplaySince = nil
+        lastMetalFallbackAt = Date()
+        stableSampleBufferFramesSinceMetalFallback = 0
         metalVideoFrameFeed.flush(removeDisplayedImage: true)
         updateRenderPipeline(.sampleBufferDisplayLayer)
         SkyBridgeLogger.shared.warning("⚠️ Metal 渲染未消费新帧，已回退到 AVSampleBufferDisplayLayer")
@@ -4108,12 +4275,39 @@ public class RemoteDesktopManager: ObservableObject {
         guard decodedVideoRendererPreference != .cgImage else { return }
         decodedVideoRendererPreference = .cgImage
         metalAwaitingFirstDisplaySince = nil
+        lastMetalFallbackAt = nil
+        stableSampleBufferFramesSinceMetalFallback = 0
         flushRenderedVideoFeeds(removeDisplayedImage: true)
         if let lastGoodFrozenFrame {
             currentFrame = lastGoodFrozenFrame
         }
         updateRenderPipeline(.stillImageFallback)
         SkyBridgeLogger.shared.warning("⚠️ 视频渲染层未消费新帧，已回退到逐帧 CGImage 渲染")
+    }
+
+    private func maybeRestoreMetalRendererAfterStableSampleBuffer(at now: Date) async {
+        guard activeTransportMode == .lan else { return }
+        guard preferredDecodedVideoRenderer() == .metal else { return }
+        guard decodedVideoRendererPreference == .sampleBuffer else { return }
+        guard renderPipelineStatus == .sampleBufferDisplayLayer else { return }
+        guard RemoteDesktopDecodeQueuePolicy.isPredictiveVideoFormat(lastIncomingStreamSignature?.format) else {
+            return
+        }
+        guard let lastMetalFallbackAt else { return }
+        guard now.timeIntervalSince(lastMetalFallbackAt) >= 1.0 else { return }
+
+        stableSampleBufferFramesSinceMetalFallback += 1
+        guard stableSampleBufferFramesSinceMetalFallback >= 24 else { return }
+
+        decodedVideoRendererPreference = .metal
+        stableSampleBufferFramesSinceMetalFallback = 0
+        self.lastMetalFallbackAt = nil
+        metalAwaitingFirstDisplaySince = nil
+        await requestStreamRefreshIfNeeded(
+            reason: "sample-buffer-stable-restore-metal",
+            minimumInterval: 1.0
+        )
+        SkyBridgeLogger.shared.info("♻️ AVSampleBufferDisplayLayer 已稳定，准备恢复 Metal Renderer")
     }
 
     private func makeCGImage(from pixelBufferFrame: DecodedPixelBufferFrame) -> CGImage? {
@@ -4147,10 +4341,12 @@ public class RemoteDesktopManager: ObservableObject {
                    now.timeIntervalSince(lastProgressAt) >= 1.0 {
                     self.zeroMeasuredFrameRate(at: now)
                 }
+                // 修复：增加 Metal 首帧超时阈值到 2.5 秒，给 MTKView 更多时间完成首帧渲染
+                // 原代码 1.0 秒在设备热启动或 GPU 繁忙时过于激进
                 if self.renderPipelineStatus == .metalRenderer,
                    self.lastDisplayedFrameTime == nil,
                    let firstAwaitingDisplayAt = self.metalAwaitingFirstDisplaySince,
-                   now.timeIntervalSince(firstAwaitingDisplayAt) >= 1.0 {
+                   now.timeIntervalSince(firstAwaitingDisplayAt) >= 2.5 {
                     await self.handleStreamContinuityStall(reason: "metal-first-display-timeout")
                     continue
                 }
@@ -4234,7 +4430,7 @@ public class RemoteDesktopManager: ObservableObject {
         }
         if (reason == "frames-arriving-without-display"
             || reason == "frames-decoding-without-display"
-            || reason == "sample-buffer-no-display"),
+            || reason == "sample-buffer-no-enqueue"),
            renderPipelineStatus == .sampleBufferDisplayLayer {
             lastContinuityRecoveryAt = now
             zeroMeasuredFrameRate(at: now)
@@ -4270,15 +4466,21 @@ public class RemoteDesktopManager: ObservableObject {
         presentationTimeStamp _: CMTime,
         remainingQueueDepth _: Int
     ) async {
+        let now = Date()
         videoFrameFeed.markDisplayedFrame()
-        noteDisplayedFrame(at: Date())
+        noteVideoRendererEnqueuedFrame(at: now)
+        noteDisplayedFrame(at: now)
+        await maybeRestoreMetalRendererAfterStableSampleBuffer(at: now)
     }
 
     func handleMetalRendererDidDisplayFrame(
         presentationTimeStamp _: CMTime
     ) async {
         metalAwaitingFirstDisplaySince = nil
+        lastMetalFallbackAt = nil
+        stableSampleBufferFramesSinceMetalFallback = 0
         metalVideoFrameFeed.markDisplayedFrame()
+        SkyBridgeLogger.shared.debug("[Metal] frame displayed, version=\(metalVideoFrameFeed.frameVersion)")
         noteDisplayedFrame(at: Date())
     }
 
@@ -4316,11 +4518,13 @@ public class RemoteDesktopManager: ObservableObject {
             case .metal:
                 if lastDisplayedFrameTime == nil {
                     metalAwaitingFirstDisplaySince = metalAwaitingFirstDisplaySince ?? now
+                    SkyBridgeLogger.shared.debug("[Metal] 首帧等待显示，metalAwaitingFirstDisplaySince=\(metalAwaitingFirstDisplaySince!)")
                 } else {
                     metalAwaitingFirstDisplaySince = nil
                 }
                 videoFrameFeed.flush(removeDisplayedImage: false)
                 metalVideoFrameFeed.enqueue(frame: frame)
+                SkyBridgeLogger.shared.debug("[Metal] enqueue frame, version=\(metalVideoFrameFeed.frameVersion), ts=\(frame.presentationTimeStamp)")
                 updateRenderPipeline(.metalRenderer)
             case .sampleBuffer:
                 metalAwaitingFirstDisplaySince = nil

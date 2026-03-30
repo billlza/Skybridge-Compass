@@ -178,9 +178,9 @@ public extension DiscoveredDevice {
     }
 
     var supportsRemoteControl: Bool {
-        capabilities.contains("remote_desktop") ||
-        capabilities.contains("remote_control") ||
-        services.contains(Self.remoteControlServiceType)
+        capabilities.contains("remote_control")
+            || remoteControlPort != nil
+            || services.contains(Self.remoteControlServiceType)
     }
 
     func port(for serviceType: String) -> UInt16? {

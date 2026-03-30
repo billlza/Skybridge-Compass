@@ -579,6 +579,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         if #available(macOS 14.0, iOS 17.0, *) {
             handshakeDriverLock.withLock { $0 = nil }
             sessionKeysLock.withLock { $0 = nil }
+            lastPairingIdentityExchangeSentAtLock.withLock { $0 = nil }
             let stalePairKey = soaPairKeyLock.withLock { state -> Data? in
                 let current = state
                 state = nil
@@ -637,6 +638,13 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
                 soaPairKeyLock.withLock { $0 = nil }
             }
             await MainActor.run { self.status = .authenticated }
+            do {
+                try await sendPairingIdentityExchange(force: true)
+            } catch {
+                SkyBridgeLogger.p2p.warning(
+                    "⚠️ post-auth pairingIdentityExchange send failed: \(error.localizedDescription, privacy: .public)"
+                )
+            }
             startMetricsIfNeeded()
         } catch {
             soaPairKeyLock.withLock { $0 = nil }
@@ -2066,6 +2074,40 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         return Array(merged).sorted()
     }
 
+    private func resolvedCapabilities(
+        existing: [String]?,
+        incoming: [String]
+    ) -> [String] {
+        var flagCapabilities: Set<String> = []
+        var keyedCapabilities: [String: String] = [:]
+
+        func ingest(_ items: [String], preferIncoming: Bool) {
+            for raw in items {
+                let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty else { continue }
+
+                let parts = trimmed.split(separator: "=", maxSplits: 1).map(String.init)
+                if parts.count == 2 {
+                    let key = parts[0].trimmingCharacters(in: .whitespacesAndNewlines)
+                    let value = parts[1].trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !key.isEmpty, !value.isEmpty else { continue }
+                    if preferIncoming || keyedCapabilities[key] == nil {
+                        keyedCapabilities[key] = value
+                    }
+                } else {
+                    flagCapabilities.insert(trimmed)
+                }
+            }
+        }
+
+        ingest(existing ?? [], preferIncoming: false)
+        ingest(incoming, preferIncoming: true)
+
+        return flagCapabilities.sorted() + keyedCapabilities.keys.sorted().compactMap { key in
+            keyedCapabilities[key].map { "\(key)=\($0)" }
+        }
+    }
+
     @available(macOS 14.0, iOS 17.0, *)
     private func persistPeerKEMTrustRecords(from payload: AppMessage.PairingIdentityExchangePayload) async throws {
         guard let declaredDeviceId = normalizedNonEmptyString(payload.deviceId) else { return }
@@ -2084,11 +2126,22 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         var baseCapabilities = [String]()
         baseCapabilities.append("trusted")
         baseCapabilities.append("pqc_bootstrap")
-        baseCapabilities.append("platform=\(platform)")
-        baseCapabilities.append("osVersion=\(osVersion)")
-        baseCapabilities.append("modelName=\(modelName)")
-        baseCapabilities.append("chip=\(chip)")
+        for capability in payload.capabilities ?? [] {
+            if let capability = normalizedNonEmptyString(capability) {
+                baseCapabilities.append(capability)
+            }
+        }
+        if !platform.isEmpty { baseCapabilities.append("platform=\(platform)") }
+        if !osVersion.isEmpty { baseCapabilities.append("osVersion=\(osVersion)") }
+        if !modelName.isEmpty { baseCapabilities.append("modelName=\(modelName)") }
+        if !chip.isEmpty { baseCapabilities.append("chip=\(chip)") }
         baseCapabilities.append("peerEndpoint=\(peerDeviceId)")
+        if let fileTransferPort = payload.fileTransferPort, fileTransferPort > 0 {
+            baseCapabilities.append("fileTransferPort=\(fileTransferPort)")
+        }
+        if let remoteControlPort = payload.remoteControlPort, remoteControlPort > 0 {
+            baseCapabilities.append("remoteControlPort=\(remoteControlPort)")
+        }
 
         var bootstrapIds: [String] = []
         var bootstrapSeen: Set<String> = []
@@ -2191,7 +2244,10 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
     ) async throws {
         let trust = TrustSyncService.shared
         let existing = trust.getTrustRecord(deviceId: deviceId)
-        let mergedCapabilities = Array(Set((existing?.capabilities ?? []) + capabilities)).sorted()
+        let mergedCapabilities = resolvedCapabilities(
+            existing: existing?.capabilities,
+            incoming: capabilities
+        )
         let mergedKEM = mergedKEMPublicKeys(existing: existing?.kemPublicKeys, incoming: incomingKEMKeys)
         let resolvedDisplayName = normalizedNonEmptyString(displayName)
             ?? existing?.deviceName

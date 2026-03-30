@@ -100,6 +100,34 @@ log_step() {
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 }
 
+verify_app_runtime_layout() {
+    local app_bundle="$1"
+    local app_bin="$app_bundle/Contents/MacOS/SkyBridgeCompassApp"
+    local frameworks_webrtc="$app_bundle/Contents/Frameworks/WebRTC.framework/WebRTC"
+    local compat_webrtc="$app_bundle/Contents/lib/WebRTC.framework/WebRTC"
+
+    if [[ ! -x "$app_bin" ]]; then
+        log_error "主可执行文件不存在或不可执行: $app_bin"
+        exit 1
+    fi
+
+    if otool -L "$app_bin" 2>/dev/null | grep -q "@rpath/WebRTC.framework/WebRTC"; then
+        if [[ ! -e "$frameworks_webrtc" ]]; then
+            log_error "App 依赖 WebRTC.framework，但 Frameworks 内缺少: $frameworks_webrtc"
+            exit 1
+        fi
+        if [[ ! -e "$compat_webrtc" ]]; then
+            log_error "App 依赖 WebRTC.framework，但兼容路径缺少: $compat_webrtc"
+            exit 1
+        fi
+        if otool -l "$app_bin" 2>/dev/null | grep -q "@executable_path/../Frameworks"; then
+            log_info "运行时校验通过: 主二进制包含 Frameworks rpath，且 WebRTC 可通过 Frameworks/lib 双路径命中"
+        else
+            log_info "运行时校验提示: 主二进制未显式包含 Frameworks rpath，将依赖 Contents/lib 兼容路径"
+        fi
+    fi
+}
+
 scrub_bundle_custom_icon() {
     local bundle_path="$1"
     local bundle_icon_path
@@ -255,6 +283,7 @@ else
 fi
 
 log_success "App Bundle 已就绪: $APP_BUNDLE"
+verify_app_runtime_layout "$APP_BUNDLE"
 
 if [[ "$SKIP_SIGN" == false ]]; then
     if [[ -z "$SIGNING_IDENTITY" ]]; then
@@ -270,6 +299,8 @@ if [[ "$SKIP_SIGN" == false ]]; then
 else
     log_info "按 --skip-sign 要求，跳过签名步骤"
 fi
+
+verify_app_runtime_layout "$APP_BUNDLE"
 
 log_step "步骤 4: 创建 DMG"
 

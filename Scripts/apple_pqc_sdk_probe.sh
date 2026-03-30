@@ -8,8 +8,8 @@ skybridge_detect_apple_pqc_sdk() {
     SKYBRIDGE_PQC_PROBE_ERROR=""
     SKYBRIDGE_PQC_SDK_AVAILABLE=0
 
-    probe_src="$(mktemp /tmp/skybridge-pqc-probe.XXXXXX.swift)"
-    probe_err="$(mktemp /tmp/skybridge-pqc-probe.XXXXXX.err)"
+    probe_src="$(mktemp "${TMPDIR:-/tmp}/skybridge-pqc-probe.XXXXXX.swift")"
+    probe_err="$(mktemp "${TMPDIR:-/tmp}/skybridge-pqc-probe.XXXXXX.err")"
 
     cat >"$probe_src" <<'EOF'
 import CryptoKit
@@ -45,4 +45,3 @@ EOF
 
     rm -f "$probe_src" "$probe_err"
 }
-

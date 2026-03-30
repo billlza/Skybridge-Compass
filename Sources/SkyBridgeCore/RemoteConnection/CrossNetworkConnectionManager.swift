@@ -3931,8 +3931,32 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 var lastAwaitingRefreshReportAt = Date.distantPast
                 let encodedFrameStore = LatestWebRTCEncodedFrameStore()
 #if os(macOS)
+                final class WarmupProbeRateLimiter: @unchecked Sendable {
+                    private let lock = NSLock()
+                    private let minInterval: TimeInterval
+                    private var lastAcceptedAt = Date.distantPast
+
+                    init(minInterval: TimeInterval) {
+                        self.minInterval = minInterval
+                    }
+
+                    func shouldAccept(at now: Date) -> Bool {
+                        lock.lock()
+                        defer { lock.unlock() }
+                        if now.timeIntervalSince(lastAcceptedAt) < minInterval {
+                            return false
+                        }
+                        lastAcceptedAt = now
+                        return true
+                    }
+                }
                 var directCaptureStreamer: ScreenCaptureKitStreamer?
                 var lastHardwareFrameAt = Date.distantPast
+                var lastDirectEncoderStartAt = Date.distantPast
+                let nativeWarmupProbeMinInterval: TimeInterval = 1.0 / 15.0
+                let nativeWarmupProbeRateLimiter = WarmupProbeRateLimiter(
+                    minInterval: nativeWarmupProbeMinInterval
+                )
                 let damageTracker = CoarseDisplayDamageTracker()
                 var pendingDamageReport: RemoteDesktopDamageReport?
 #endif
@@ -4001,6 +4025,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                         directCaptureStreamer = nil
                         encodedFrameStore.clear()
                         lastNativeVideoWarmBackupEnabled = nil
+                        lastDirectEncoderStartAt = .distantPast
                         return false
                     }
 
@@ -4015,7 +4040,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     directCaptureStreamer = nil
                     encodedFrameStore.clear()
                     lastNativeVideoWarmBackupEnabled = nativeVideoWarmBackupEnabled
-
+                    lastDirectEncoderStartAt = .distantPast
                     func storeEncodedFrame(
                         _ data: Data,
                         width: Int,
@@ -4036,8 +4061,17 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     }
 
                     let captureStreamer = ScreenCaptureKitStreamer()
+                    let captureFPS = nativeVideoWarmBackupEnabled
+                        ? min(videoPolicy.targetFrameRate, 24)
+                        : videoPolicy.targetFrameRate
                     if nativeVideoTrackEnabled {
                         captureStreamer.onRawFrame = { pixelBuffer, presentationTimeStamp in
+                            if nativeVideoWarmBackupEnabled {
+                                let now = Date()
+                                if !nativeWarmupProbeRateLimiter.shouldAccept(at: now) {
+                                    return
+                                }
+                            }
                             let width = CVPixelBufferGetWidth(pixelBuffer)
                             let height = CVPixelBufferGetHeight(pixelBuffer)
                             let timeStampNs: Int64
@@ -4055,7 +4089,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                             session.prepareOutgoingScreenVideo(
                                 width: width,
                                 height: height,
-                                fps: videoPolicy.targetFrameRate
+                                fps: captureFPS
                             )
                             session.pushVideoFrame(
                                 pixelBuffer: pixelBuffer,
@@ -4094,7 +4128,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                         try await captureStreamer.start(
                             preferredCodec: videoPolicy.codec,
                             preferredSize: videoPolicy.preferredSize,
-                            targetFPS: videoPolicy.targetFrameRate,
+                            targetFPS: captureFPS,
                             keyFrameInterval: videoPolicy.keyFrameInterval,
                             captureCursorInVideo: !nativeVideoTrackEnabled,
                             bitstreamFormat: nativeVideoTrackEnabled && !nativeVideoWarmBackupEnabled
@@ -4102,6 +4136,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                                 : .annexB
                         )
                         directCaptureStreamer = captureStreamer
+                        lastDirectEncoderStartAt = Date()
                         let streamMode: String = {
                             if nativeVideoTrackEnabled {
                                 return nativeVideoWarmBackupEnabled
@@ -4114,7 +4149,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                             """
                             🎥 WebRTC ScreenCaptureKit 直连硬编已启动: session=\(sessionID, privacy: .public) \
                             codec=\(Self.remoteFrameFormatName(frameType: videoPolicy.codec, payload: Data()), privacy: .public) \
-                            fps=\(videoPolicy.targetFrameRate, privacy: .public) \
+                            fps=\(captureFPS, privacy: .public) \
                             size=\(Int(videoPolicy.preferredSize.width), privacy: .public)x\(Int(videoPolicy.preferredSize.height), privacy: .public) \
                             reason=\(videoPolicy.reason, privacy: .public) \
                             mode=\(streamMode, privacy: .public)
@@ -4128,6 +4163,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                         captureStreamer.stop()
                         directCaptureStreamer = nil
                         encodedFrameStore.clear()
+                        lastDirectEncoderStartAt = .distantPast
                         self.logger.error(
                             "⚠️ WebRTC ScreenCaptureKit 直连硬编启动失败，回退 JPEG: session=\(sessionID, privacy: .public) err=\(error.localizedDescription, privacy: .public)"
                         )
@@ -4325,11 +4361,16 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     }
 #if os(macOS)
                     if capturedFrame == nil {
-                        let directEncodedFrame = videoPolicy.usesHardwareEncoder
+                        let nativeVideoTrackReady =
+                            self.webrtcRemoteStreamConfigurationBySessionId[sessionID]?.nativeVideoTrackReady == true
+                        let nativeVideoWarmBackupEnabled =
+                            session.supportsNativeScreenVideoTrack && !nativeVideoTrackReady
+                        let directEncodedFrame = (videoPolicy.usesHardwareEncoder || nativeVideoWarmBackupEnabled)
                             ? encodedFrameStore.takeLatest()
                             : nil
                         if let encodedFrame = directEncodedFrame {
-                            lastHardwareFrameAt = Date()
+                            let now = Date()
+                            lastHardwareFrameAt = now
                             capturedFrame = ScreenDataWire(
                                 width: encodedFrame.width,
                                 height: encodedFrame.height,
@@ -4338,8 +4379,19 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                                 format: encodedFrame.format,
                                 isSyncFrame: encodedFrame.isSyncFrame
                             )
-                        } else if videoPolicy.usesHardwareEncoder {
-                            if Date().timeIntervalSince(lastHardwareFrameAt) > 1.0 {
+                        } else if videoPolicy.usesHardwareEncoder || nativeVideoWarmBackupEnabled {
+                            let outputBaselineAt: Date = {
+                                var baseline = lastHardwareFrameAt
+                                if lastDirectEncoderStartAt > baseline {
+                                    baseline = lastDirectEncoderStartAt
+                                }
+                                if let requestedAt = awaitingRefreshRequestedAt,
+                                   requestedAt > baseline {
+                                    baseline = requestedAt
+                                }
+                                return baseline
+                            }()
+                            if Date().timeIntervalSince(outputBaselineAt) > 1.0 {
                                 self.appendSmokeStatus(
                                     "stream-hardware-wait session=\(sessionID) codec=\(Self.remoteFrameFormatName(frameType: videoPolicy.codec, payload: Data()))"
                                 )

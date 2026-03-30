@@ -31,10 +31,14 @@ function codesign_target() {
   if [[ "${IS_ADHOC_SIGNING}" -eq 0 ]]; then
     codesign --force --sign "${SIGN_IDENTITY}" --options runtime --timestamp "${target}" >/dev/null 2>&1
   else
-    # 对 ad-hoc 场景先移除旧签名，清掉 runtime/library validation 标志，
+    # 对 ad-hoc 场景：直接强制覆盖签名，清除任何现有签名（包括 runtime/library validation 标志），
     # 避免加载第三方 Framework 时触发 Team ID 校验失败。
-    codesign --remove-signature "${target}" >/dev/null 2>&1 || true
-    codesign --force --sign - "${target}" >/dev/null 2>&1
+    # 使用 --deep 确保 framework 内部的所有组件都被重签名
+    codesign --force --sign - --deep "${target}" >/dev/null 2>&1 || {
+      # 如果 --deep 失败，尝试先移除签名再重签
+      codesign --remove-signature "${target}" >/dev/null 2>&1 || true
+      codesign --force --sign - "${target}" >/dev/null 2>&1
+    }
   fi
 }
 
@@ -206,6 +210,7 @@ CONTENTS_DIR="${APP_DIR}/Contents"
 MACOS_DIR="${CONTENTS_DIR}/MacOS"
 RES_DIR="${CONTENTS_DIR}/Resources"
 FW_DIR="${CONTENTS_DIR}/Frameworks"
+LEGACY_FW_LINK="${CONTENTS_DIR}/lib"
 SIGN_IDENTITY="${IDENTITY:-$(select_identity)}"
 APP_PACKAGING_ENTITLEMENTS="${ROOT_DIR}/Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.packaging.entitlements"
 SKIP_BUILD="${SKIP_BUILD:-0}"
@@ -310,13 +315,43 @@ if [[ "${found_framework}" -eq 0 ]]; then
   log "未找到 .framework 产物（若运行时报 dyld 缺失，请检查构建产物）"
 fi
 
+# 兼容现有二进制的历史 rpath（@executable_path/../lib）。
+# 这里保留标准的 Contents/Frameworks 布局，同时提供 lib -> Frameworks 软链接，
+# 避免 install_name_tool 未生效时 dyld 找不到嵌入式第三方框架。
+if [[ -L "${LEGACY_FW_LINK}" || -e "${LEGACY_FW_LINK}" ]]; then
+  rm -rf "${LEGACY_FW_LINK}"
+fi
+ln -s "Frameworks" "${LEGACY_FW_LINK}"
+log "已创建兼容链接: ${LEGACY_FW_LINK} -> Frameworks"
+
 # 确保可执行文件包含 Frameworks rpath（用于加载 @rpath/*.framework）
 APP_BIN="${MACOS_DIR}/${EXECUTABLE}"
 if otool -l "${APP_BIN}" 2>/dev/null | grep -q "@executable_path/../Frameworks"; then
   log "已存在 rpath: @executable_path/../Frameworks"
 else
   log "注入 rpath: @executable_path/../Frameworks"
-  install_name_tool -add_rpath "@executable_path/../Frameworks" "${APP_BIN}" 2>/dev/null || true
+  if install_name_tool -add_rpath "@executable_path/../Frameworks" "${APP_BIN}" >/dev/null 2>&1; then
+    log "Frameworks rpath 注入成功"
+  else
+    log "警告：Frameworks rpath 注入失败，将依赖 Contents/lib 兼容链接"
+  fi
+fi
+if otool -l "${APP_BIN}" 2>/dev/null | grep -q "@executable_path/../Frameworks"; then
+  log "校验通过：主二进制已包含 Frameworks rpath"
+else
+  log "校验提示：主二进制仍未包含 Frameworks rpath，继续保留 lib -> Frameworks 兼容布局"
+fi
+
+if otool -L "${APP_BIN}" 2>/dev/null | grep -q "@rpath/WebRTC.framework/WebRTC"; then
+  if [[ ! -e "${FW_DIR}/WebRTC.framework/WebRTC" ]]; then
+    echo "错误：主二进制依赖 WebRTC.framework，但 ${FW_DIR}/WebRTC.framework/WebRTC 不存在。" >&2
+    exit 1
+  fi
+  if [[ ! -e "${LEGACY_FW_LINK}/WebRTC.framework/WebRTC" ]]; then
+    echo "错误：主二进制依赖 WebRTC.framework，但兼容路径 ${LEGACY_FW_LINK}/WebRTC.framework/WebRTC 不存在。" >&2
+    exit 1
+  fi
+  log "校验通过：WebRTC.framework 可通过 Frameworks/lib 双路径定位"
 fi
 
 log "拷贝 Swift 运行时 dylib 到 .app/Contents/Frameworks/（Xcode 26+/Swift 6.3 工具链）"

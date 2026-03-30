@@ -101,7 +101,7 @@ struct FileTransferView: View {
                 return false
             }()
             
-            if connectionManager.activeConnections.isEmpty && !hasCrossNetwork {
+            if lanQuickSendDevices.isEmpty && !hasCrossNetwork {
                 emptyDeviceState
             } else {
                 ScrollView(.horizontal, showsIndicators: false) {
@@ -133,11 +133,11 @@ struct FileTransferView: View {
                                 }
                             )
                         }
-                        ForEach(connectionManager.activeConnections) { connection in
+                        ForEach(lanQuickSendDevices, id: \.id) { device in
                             DeviceQuickSendCard(
-                                device: connection.device,
+                                device: device,
                                 onTap: {
-                                    handleQuickSendTargetSelection(connection.device)
+                                    handleQuickSendTargetSelection(device)
                                 }
                             )
                         }
@@ -153,6 +153,23 @@ struct FileTransferView: View {
             RoundedRectangle(cornerRadius: 20, style: .continuous)
                 .stroke(LinearGradient(colors: [.white.opacity(0.2), .clear], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1)
         )
+    }
+
+    private var lanQuickSendDevices: [DiscoveredDevice] {
+        var seen: Set<String> = []
+        var devices: [DiscoveredDevice] = []
+
+        for connection in connectionManager.activeConnections {
+            let resolved = fileTransferManager.preferredQuickSendDevice(
+                for: connectionManager.resolvedPeerDevice(for: connection.device)
+            )
+            let key = resolved.id.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if seen.insert(key).inserted {
+                devices.append(resolved)
+            }
+        }
+
+        return devices
     }
     
     private var emptyDeviceState: some View {

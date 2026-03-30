@@ -524,7 +524,9 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
         let context = unmanaged.takeUnretainedValue()
         defer { unmanaged.release() }
         guard let streamer = context.activeStreamer() else { return }
-        streamer.handleCompressedSample(sampleBuffer)
+        autoreleasepool {
+            streamer.handleCompressedSample(sampleBuffer)
+        }
     }
 
     func healthSnapshot() -> (
@@ -908,6 +910,18 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
         return SCFrameStatus(rawValue: statusNumber.intValue)
     }
 
+    static func shouldProcessFrame(with status: SCFrameStatus?) -> Bool {
+        guard let status else { return true }
+        switch status {
+        case .idle, .blank, .suspended, .stopped:
+            return false
+        case .started, .complete:
+            return true
+        @unknown default:
+            return false
+        }
+    }
+
     private func fallbackDamageReport(for pixelBuffer: CVPixelBuffer) -> RemoteDesktopDamageReport {
         let rect = CGRect(
             x: 0,
@@ -952,55 +966,49 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
         init(owner: ScreenCaptureKitStreamer) { self.owner = owner }
 
         func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of outputType: SCStreamOutputType) {
- // guard let 处理 owner 和 compressionSession
-            guard let owner = owner else { return }
-            owner.noteSampleBufferReceived()
- // guard let 处理 pixelBuffer (外部输入)
-            guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-            owner.emitDamageReportIfAvailable(sampleBuffer: sampleBuffer, pixelBuffer: pixelBuffer)
+            autoreleasepool {
+    // guard let 处理 owner 和 compressionSession
+                guard let owner = owner else { return }
+                owner.noteSampleBufferReceived()
+    // guard let 处理 pixelBuffer (外部输入)
+                guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+                owner.emitDamageReportIfAvailable(sampleBuffer: sampleBuffer, pixelBuffer: pixelBuffer)
 
-            if let frameStatus = owner.frameStatus(from: sampleBuffer) {
-                switch frameStatus {
-                case .idle, .blank, .suspended, .stopped:
-                    return
-                case .started:
-                    return
-                case .complete:
-                    owner.noteMeaningfulSampleReceived()
-                @unknown default:
+                let frameStatus = owner.frameStatus(from: sampleBuffer)
+                guard ScreenCaptureKitStreamer.shouldProcessFrame(with: frameStatus) else {
                     return
                 }
-            } else {
+                // `.started` 帧已经带着可用 pixelBuffer；继续丢弃会让 native/raw 与 encoded/fallback 两条送帧链一起饿死。
                 owner.noteMeaningfulSampleReceived()
-            }
 
-            // JPEG 模式：直接把 pixelBuffer 转成 JPEG，回调出去
-            if owner.jpegMode {
-                owner.handleJPEGPixelBuffer(pixelBuffer)
-                return
-            }
+                // JPEG 模式：直接把 pixelBuffer 转成 JPEG，回调出去
+                if owner.jpegMode {
+                    owner.handleJPEGPixelBuffer(pixelBuffer)
+                    return
+                }
 
-            if let onRawFrame = owner.onRawFrame {
-                owner.noteEncodedFrameEmitted()
-                let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-                onRawFrame(pixelBuffer, pts)
-            }
+                if let onRawFrame = owner.onRawFrame {
+                    owner.noteEncodedFrameEmitted()
+                    let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+                    onRawFrame(pixelBuffer, pts)
+                }
 
-            guard let cs = owner.compressionSession else { return }
-            var flags = VTEncodeInfoFlags()
-            let pts = CMTime(value: CMTimeValue(Date().timeIntervalSince1970 * 1000), timescale: 1000)
-            let status = VTCompressionSessionEncodeFrame(
-                cs,
-                imageBuffer: pixelBuffer,
-                presentationTimeStamp: pts,
-                duration: CMTime.zero,
-                frameProperties: owner.nextFramePropertiesForEncode(),
-                sourceFrameRefcon: nil,
-                infoFlagsOut: &flags
-            )
-            if status != noErr {
-                owner.logger.error("❌ VTCompressionSessionEncodeFrame failed: status=\(status, privacy: .public)")
-                owner.onCaptureIssue?("encode-status-\(status)")
+                guard let cs = owner.compressionSession else { return }
+                var flags = VTEncodeInfoFlags()
+                let pts = CMTime(value: CMTimeValue(Date().timeIntervalSince1970 * 1000), timescale: 1000)
+                let status = VTCompressionSessionEncodeFrame(
+                    cs,
+                    imageBuffer: pixelBuffer,
+                    presentationTimeStamp: pts,
+                    duration: CMTime.zero,
+                    frameProperties: owner.nextFramePropertiesForEncode(),
+                    sourceFrameRefcon: nil,
+                    infoFlagsOut: &flags
+                )
+                if status != noErr {
+                    owner.logger.error("❌ VTCompressionSessionEncodeFrame failed: status=\(status, privacy: .public)")
+                    owner.onCaptureIssue?("encode-status-\(status)")
+                }
             }
         }
     }

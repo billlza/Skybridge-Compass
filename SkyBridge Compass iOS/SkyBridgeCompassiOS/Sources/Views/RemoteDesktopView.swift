@@ -756,8 +756,7 @@ private struct RemoteDesktopStreamSettingsSheet: View {
                             guard let overlay = remoteDesktopManager.currentOverlayPayload else {
                                 return "等待 overlay"
                             }
-                            let selectionSummary = overlay.selectionRects.isEmpty ? "无选区" : "\(overlay.selectionRects.count) 选区"
-                            return overlay.focusRect == nil ? selectionSummary : selectionSummary + " · 焦点框"
+                            return overlay.selectionRects.isEmpty ? "无选区" : "\(overlay.selectionRects.count) 选区"
                         }()
                     )
                     LabeledContent(
@@ -918,6 +917,10 @@ private struct RemoteDesktopRTCVideoView: UIViewRepresentable {
 
         func videoView(_ videoView: any RTCVideoRenderer, didChangeVideoSize size: CGSize) {
             Task { @MainActor in
+                CrossNetworkWebRTCManager.instance.noteRemoteVideoTrackRenderedFrame(
+                    size,
+                    source: "rtc-mtl-video-view"
+                )
                 RemoteDesktopManager.instance.updateCrossNetworkNativeVideoResolution(size)
             }
         }
@@ -933,6 +936,14 @@ private struct RemoteDesktopRenderedSurface: View {
     let pipeline: RemoteDesktopRenderPipeline
 
     var body: some View {
+        // 显式访问 frameVersion 以触发 SwiftUI 在每帧到达时重新计算 body
+        // 通过将 frameVersion 作为参数传递给 UIViewRepresentable，
+        // SwiftUI 会在每帧到达时调用 updateUIView
+        let metalFrameVersion = metalFeed.frameVersion
+        let metalFlushVersion = metalFeed.flushVersion
+        let feedFrameVersion = feed.frameVersion
+        let feedFlushVersion = feed.flushVersion
+
         Group {
             switch pipeline {
             case .webrtcNativeVideo:
@@ -944,26 +955,50 @@ private struct RemoteDesktopRenderedSurface: View {
                     loadingView
                 }
             case .metalRenderer:
-                RemoteDesktopMetalVideoView(feed: metalFeed)
+                RemoteDesktopMetalVideoView(
+                    feed: metalFeed,
+                    frameVersion: metalFrameVersion,
+                    flushVersion: metalFlushVersion
+                )
             case .sampleBufferDisplayLayer:
-                RemoteDesktopSampleBufferVideoView(feed: feed)
+                RemoteDesktopSampleBufferVideoView(
+                    feed: feed,
+                    frameVersion: feedFrameVersion,
+                    flushVersion: feedFlushVersion
+                )
             case .stillImageFallback:
                 if let fallbackFrame {
                     Image(decorative: fallbackFrame, scale: 1.0, orientation: .up)
                         .resizable()
                         .aspectRatio(contentMode: .fit)
                 } else if metalFeed.hasFrame {
-                    RemoteDesktopMetalVideoView(feed: metalFeed)
+                    RemoteDesktopMetalVideoView(
+                        feed: metalFeed,
+                        frameVersion: metalFrameVersion,
+                        flushVersion: metalFlushVersion
+                    )
                 } else if feed.hasFrame {
-                    RemoteDesktopSampleBufferVideoView(feed: feed)
+                    RemoteDesktopSampleBufferVideoView(
+                        feed: feed,
+                        frameVersion: feedFrameVersion,
+                        flushVersion: feedFlushVersion
+                    )
                 } else {
                     loadingView
                 }
             case .waiting:
                 if metalFeed.hasFrame {
-                    RemoteDesktopMetalVideoView(feed: metalFeed)
+                    RemoteDesktopMetalVideoView(
+                        feed: metalFeed,
+                        frameVersion: metalFrameVersion,
+                        flushVersion: metalFlushVersion
+                    )
                 } else if feed.hasFrame {
-                    RemoteDesktopSampleBufferVideoView(feed: feed)
+                    RemoteDesktopSampleBufferVideoView(
+                        feed: feed,
+                        frameVersion: feedFrameVersion,
+                        flushVersion: feedFlushVersion
+                    )
                 } else if let fallbackFrame {
                     Image(decorative: fallbackFrame, scale: 1.0, orientation: .up)
                         .resizable()
@@ -982,7 +1017,11 @@ private struct RemoteDesktopRenderedSurface: View {
                 .resizable()
                 .aspectRatio(contentMode: .fit)
         } else if feed.hasFrame {
-            RemoteDesktopSampleBufferVideoView(feed: feed)
+            RemoteDesktopSampleBufferVideoView(
+                feed: feed,
+                frameVersion: feed.frameVersion,
+                flushVersion: feed.flushVersion
+            )
         } else {
             loadingView
         }
@@ -1008,18 +1047,6 @@ private struct RemoteDesktopInteractionOverlayView: View {
 
             ZStack(alignment: .topLeading) {
                 if let overlayPayload {
-                    if let focusRect = overlayPayload.focusRect {
-                        let rect = mappedRect(focusRect, scaleX: scaleX, scaleY: scaleY)
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .stroke(Color.cyan.opacity(0.95), lineWidth: 2)
-                            .background(
-                                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                    .fill(Color.cyan.opacity(0.08))
-                            )
-                            .frame(width: rect.width, height: rect.height)
-                            .offset(x: rect.minX, y: rect.minY)
-                    }
-
                     ForEach(Array(overlayPayload.selectionRects.enumerated()), id: \.offset) { entry in
                         let rect = mappedRect(entry.element, scaleX: scaleX, scaleY: scaleY)
                         RoundedRectangle(cornerRadius: 8, style: .continuous)
@@ -1125,6 +1152,8 @@ private func remoteAspectFitSize(contentSize: CGSize, containerSize: CGSize) -> 
 @available(iOS 17.0, *)
 private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
     let feed: RemoteMetalVideoFrameFeed
+    let frameVersion: UInt64
+    let flushVersion: UInt64
     private let remoteDesktopManager = RemoteDesktopManager.instance
 
     func makeCoordinator() -> Coordinator {
@@ -1149,26 +1178,39 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
 
     @MainActor
     func updateUIView(_ uiView: MetalVideoContainerView, context: Context) {
+        // 诊断日志：追踪 updateUIView 调用
+        if context.coordinator.updateCallCount % 50 == 0 {
+            print("[Metal] updateUIView called, frameVersion=\(frameVersion), flushVersion=\(flushVersion)")
+        }
+        context.coordinator.updateCallCount &+= 1
+
         context.coordinator.attach(to: uiView)
 
-        if context.coordinator.lastFlushVersion != feed.flushVersion {
-            context.coordinator.lastFlushVersion = feed.flushVersion
+        if context.coordinator.lastFlushVersion != flushVersion {
+            print("[Metal] flush triggered, flushVersion=\(flushVersion)")
+            context.coordinator.lastFlushVersion = flushVersion
             context.coordinator.flush(
                 view: uiView,
                 removeDisplayedImage: feed.removeDisplayedImageOnFlush
             )
         }
 
-        guard context.coordinator.lastFrameVersion != feed.frameVersion else { return }
-        context.coordinator.lastFrameVersion = feed.frameVersion
+        guard context.coordinator.lastFrameVersion != frameVersion else {
+            return
+        }
+        context.coordinator.lastFrameVersion = frameVersion
 
+        // takeLatestFrame 不再清空帧，所以 nil 只会在从未 enqueue 过帧时出现
         if let frame = feed.takeLatestFrame() {
+            print("[Metal] ✅ displaying frame version=\(frameVersion)")
             context.coordinator.display(
                 frame: frame,
                 version: context.coordinator.lastFrameVersion,
                 in: uiView
             )
         }
+        // 如果 takeLatestFrame 返回 nil，说明还没有帧到达，等待下一帧
+        // 不要打印错误日志，这是正常现象（frameVersion 增加但帧尚未准备好）
     }
 
     @MainActor
@@ -1178,6 +1220,7 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
         let renderer = MetalVideoRenderer()
         var lastFrameVersion: UInt64 = 0
         var lastFlushVersion: UInt64 = 0
+        var updateCallCount: UInt64 = 0
 
         init(onFrameDisplayed: @escaping @Sendable (CMTime) -> Void) {
             self.onFrameDisplayed = onFrameDisplayed
@@ -1228,8 +1271,10 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
             metalView.device = renderer.device
             metalView.delegate = renderer
             metalView.framebufferOnly = false
-            metalView.enableSetNeedsDisplay = true
-            metalView.isPaused = true
+            // Use VSync-driven continuous draws so later frames can't be lost
+            // when multiple setNeedsDisplay calls get coalesced during decode.
+            metalView.enableSetNeedsDisplay = false
+            metalView.isPaused = false
             metalView.preferredFramesPerSecond = 60
             metalView.isOpaque = true
             metalView.backgroundColor = .black
@@ -1248,6 +1293,7 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
         private var needsClear = true
         private let inFlightSemaphore = DispatchSemaphore(value: 2)
         var onFrameDisplayed: (@Sendable (CMTime) -> Void)?
+        var drawCallCount: UInt64 = 0
 
         override init() {
             if let device = device {
@@ -1270,12 +1316,23 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
             currentFrameVersion = version
             needsClear = false
             stateLock.unlock()
+
+            // 修复：确保 drawableSize 有效，避免 draw(in:) 因尺寸为零而跳过
+            guard view.bounds.width > 0, view.bounds.height > 0 else {
+                // view 尚未布局完成，等待下一帧
+                return
+            }
+
             let drawableScale = view.window?.screen.scale ?? UIScreen.main.scale
             view.contentScaleFactor = drawableScale
             view.drawableSize = CGSize(
                 width: max(view.bounds.width * drawableScale, 1),
                 height: max(view.bounds.height * drawableScale, 1)
             )
+
+            // 修复：显式触发 draw(in:) 调用，确保新帧被立即渲染
+            // MTKView 在 isPaused=false 时会定期调用 draw(in:)，但可能错过最新帧
+            // 通过设置 needsDisplay，确保新帧到达时立即触发渲染
             view.setNeedsDisplay()
         }
 
@@ -1288,13 +1345,17 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
                 lastDisplayedFrameVersion = 0
                 needsClear = true
                 stateLock.unlock()
-                view.setNeedsDisplay()
             }
         }
 
         func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
 
         func draw(in view: MTKView) {
+            drawCallCount &+= 1
+            if drawCallCount % 30 == 1 {
+                print("[Metal] draw(in:) called, drawableSize=\(view.drawableSize), drawCount=\(drawCallCount)")
+            }
+
             guard view.drawableSize.width > 0, view.drawableSize.height > 0 else {
                 return
             }
@@ -1309,26 +1370,31 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
             shouldClear = needsClear
             stateLock.unlock()
 
+            // 调试日志：降低日志频率
+            if frameVersion != lastDisplayedVersion || shouldClear {
+                print("[Metal] draw: frameVersion=\(frameVersion), lastDisplayed=\(lastDisplayedVersion), hasFrame=\(frame != nil ? "yes" : "no"), shouldClear=\(shouldClear)")
+            }
+
             guard shouldClear || frame != nil else {
                 return
             }
-            guard inFlightSemaphore.wait(timeout: .now()) == .success else {
-                view.setNeedsDisplay()
+            guard inFlightSemaphore.wait(timeout: .now() + .milliseconds(50)) == .success else {
                 return
+            }
+            var shouldSignalSemaphoreOnExit = true
+            defer {
+                if shouldSignalSemaphoreOnExit {
+                    inFlightSemaphore.signal()
+                }
             }
             guard let drawable = view.currentDrawable,
                   let commandQueue,
                   let commandBuffer = commandQueue.makeCommandBuffer() else {
-                inFlightSemaphore.signal()
-                view.setNeedsDisplay()
                 return
             }
 
             guard let frame, let ciContext else {
-                guard shouldClear else {
-                    inFlightSemaphore.signal()
-                    return
-                }
+                guard shouldClear else { return }
                 if let passDescriptor = view.currentRenderPassDescriptor,
                    let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: passDescriptor) {
                     encoder.endEncoding()
@@ -1336,6 +1402,7 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
                 commandBuffer.addCompletedHandler { [inFlightSemaphore] _ in
                     inFlightSemaphore.signal()
                 }
+                shouldSignalSemaphoreOnExit = false
                 commandBuffer.present(drawable)
                 commandBuffer.commit()
                 stateLock.lock()
@@ -1344,10 +1411,12 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
                 return
             }
 
+            // 如果帧版本与已显示的版本相同，跳过渲染（正常情况，避免重复渲染）
             guard frameVersion != 0, frameVersion != lastDisplayedVersion else {
-                inFlightSemaphore.signal()
                 return
             }
+
+            print("[Metal] ✅ rendering frame version=\(frameVersion)")  // 保留关键渲染日志
 
             let image = CIImage(cvPixelBuffer: frame.pixelBuffer)
             let drawableBounds = CGRect(
@@ -1378,6 +1447,7 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
                 self?.stateLock.unlock()
                 onFrameDisplayed?(presentationTimeStamp)
             }
+            shouldSignalSemaphoreOnExit = false
             commandBuffer.present(drawable)
             commandBuffer.commit()
         }
@@ -1387,6 +1457,8 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
 @available(iOS 17.0, *)
 private struct RemoteDesktopSampleBufferVideoView: UIViewRepresentable {
     let feed: RemoteVideoFrameFeed
+    let frameVersion: UInt64
+    let flushVersion: UInt64
     private let remoteDesktopManager = RemoteDesktopManager.instance
 
     func makeCoordinator() -> Coordinator {
@@ -1422,18 +1494,18 @@ private struct RemoteDesktopSampleBufferVideoView: UIViewRepresentable {
 
     @MainActor
     func updateUIView(_ uiView: SampleBufferDisplayView, context: Context) {
-        context.coordinator.attach(to: uiView)
+        context.coordinator.bind(feed: feed, to: uiView)
 
-        if context.coordinator.lastFlushVersion != feed.flushVersion {
-            context.coordinator.lastFlushVersion = feed.flushVersion
+        if context.coordinator.lastFlushVersion != flushVersion {
+            context.coordinator.lastFlushVersion = flushVersion
             context.coordinator.flush(
                 view: uiView,
                 removeDisplayedImage: feed.removeDisplayedImageOnFlush
             )
         }
 
-        guard context.coordinator.lastFrameVersion != feed.frameVersion else { return }
-        context.coordinator.lastFrameVersion = feed.frameVersion
+        guard context.coordinator.lastFrameVersion != frameVersion else { return }
+        context.coordinator.lastFrameVersion = frameVersion
 
         context.coordinator.enqueuePendingFrames(from: feed, view: uiView)
     }
@@ -1447,11 +1519,13 @@ private struct RemoteDesktopSampleBufferVideoView: UIViewRepresentable {
         private let onDecodeFailure: @Sendable (String?) -> Void
         private let onRequiresFlush: @Sendable () -> Void
         private let onFrameEnqueued: @Sendable (CMTime, Int) -> Void
+        private weak var activeFeed: RemoteVideoFrameFeed?
         private weak var attachedView: SampleBufferDisplayView?
-        private weak var attachedRenderer: AVSampleBufferVideoRenderer?
+        private weak var attachedLayer: AVSampleBufferDisplayLayer?
         private var notificationTokens: [NSObjectProtocol] = []
         private var bufferedFrames: [DisplaySampleBufferFrame] = []
         private var isDrainScheduled = false
+        private var framePumpTask: Task<Void, Never>?
         var lastFrameVersion: UInt64 = 0
         var lastFlushVersion: UInt64 = 0
 
@@ -1471,12 +1545,15 @@ private struct RemoteDesktopSampleBufferVideoView: UIViewRepresentable {
             detachObservers()
             attachedView = view
             view.configureIfNeeded()
-            let renderer = view.sampleBufferDisplayLayer.sampleBufferRenderer
-            attachedRenderer = renderer
-            installObservers(for: renderer)
-            if #available(iOS 17.4, *) {
-                renderer.presentationTimeExpectation = .none
-            }
+            let layer = view.sampleBufferDisplayLayer
+            attachedLayer = layer
+        }
+
+        @MainActor
+        func bind(feed: RemoteVideoFrameFeed, to view: SampleBufferDisplayView) {
+            activeFeed = feed
+            attach(to: view)
+            ensureFramePumpRunning()
         }
 
         @MainActor
@@ -1485,15 +1562,14 @@ private struct RemoteDesktopSampleBufferVideoView: UIViewRepresentable {
             let frames = feed.takePendingFrames()
             guard !frames.isEmpty else { return }
             rendererQueue.async { [weak self] in
-                guard let self,
-                      let renderer = self.attachedRenderer else { return }
+                guard let self else { return }
                 self.bufferedFrames.append(contentsOf: frames)
                 if self.bufferedFrames.count > Self.maxBufferedFrames {
                     self.bufferedFrames.removeFirst(
                         self.bufferedFrames.count - Self.maxBufferedFrames
                     )
                 }
-                self.drainBufferedFrames(using: renderer)
+                self.drainBufferedFrames()
             }
         }
 
@@ -1502,37 +1578,66 @@ private struct RemoteDesktopSampleBufferVideoView: UIViewRepresentable {
             attach(to: view)
             rendererQueue.async { [weak self] in
                 guard let self,
-                      let renderer = self.attachedRenderer else { return }
+                      let layer = self.attachedLayer else { return }
                 self.bufferedFrames.removeAll(keepingCapacity: true)
                 self.isDrainScheduled = false
-                renderer.stopRequestingMediaData()
-                renderer.flush(removingDisplayedImage: removeDisplayedImage, completionHandler: nil)
-                if #available(iOS 17.4, *) {
-                    renderer.presentationTimeExpectation = .none
+                layer.stopRequestingMediaData()
+                if removeDisplayedImage {
+                    layer.flushAndRemoveImage()
+                } else {
+                    layer.flush()
                 }
             }
         }
 
-        private func drainBufferedFrames(using renderer: AVSampleBufferVideoRenderer) {
-            guard !isDrainScheduled else { return }
-            isDrainScheduled = true
-
-            while !bufferedFrames.isEmpty {
-                if renderer.requiresFlushToResumeDecoding {
-                    bufferedFrames.removeAll(keepingCapacity: true)
-                    isDrainScheduled = false
-                    renderer.flush(removingDisplayedImage: false, completionHandler: nil)
-                    onRequiresFlush()
-                    return
+        @MainActor
+        private func ensureFramePumpRunning() {
+            guard framePumpTask == nil else { return }
+            framePumpTask = Task { @MainActor [weak self] in
+                guard let self else { return }
+                while !Task.isCancelled {
+                    if let feed = self.activeFeed,
+                       let view = self.attachedView {
+                        self.enqueuePendingFrames(from: feed, view: view)
+                    }
+                    do {
+                        try await Task.sleep(for: .milliseconds(16))
+                    } catch {
+                        return
+                    }
                 }
-
-                let frame = bufferedFrames.removeLast()
-                bufferedFrames.removeAll(keepingCapacity: true)
-                renderer.enqueue(frame.sampleBuffer)
-                onFrameEnqueued(frame.presentationTimeStamp, bufferedFrames.count)
             }
+        }
 
-            isDrainScheduled = false
+        private func drainBufferedFrames() {
+            guard !isDrainScheduled else { return }
+            guard let layer = attachedLayer else { return }
+            isDrainScheduled = true
+            layer.stopRequestingMediaData()
+            layer.requestMediaDataWhenReady(on: rendererQueue) { [weak self] in
+                guard let self,
+                      let layer = self.attachedLayer else { return }
+                while layer.isReadyForMoreMediaData {
+                    if layer.requiresFlushToResumeDecoding {
+                        self.bufferedFrames.removeAll(keepingCapacity: true)
+                        self.isDrainScheduled = false
+                        layer.stopRequestingMediaData()
+                        layer.flush()
+                        self.onRequiresFlush()
+                        return
+                    }
+
+                    guard !self.bufferedFrames.isEmpty else {
+                        self.isDrainScheduled = false
+                        layer.stopRequestingMediaData()
+                        return
+                    }
+
+                    let frame = self.bufferedFrames.removeFirst()
+                    layer.enqueue(frame.sampleBuffer)
+                    self.onFrameEnqueued(frame.presentationTimeStamp, self.bufferedFrames.count)
+                }
+            }
         }
 
         private func installObservers(for renderer: AVSampleBufferVideoRenderer) {
@@ -1568,6 +1673,7 @@ private struct RemoteDesktopSampleBufferVideoView: UIViewRepresentable {
         }
 
         deinit {
+            framePumpTask?.cancel()
             detachObservers()
         }
     }
@@ -1582,7 +1688,6 @@ private struct RemoteDesktopSampleBufferVideoView: UIViewRepresentable {
         }
 
         private var didConfigureLayer = false
-        private var controlTimebase: CMTimebase?
 
         @MainActor
         func configureIfNeeded() {
@@ -1594,15 +1699,10 @@ private struct RemoteDesktopSampleBufferVideoView: UIViewRepresentable {
 
             sampleBufferDisplayLayer.videoGravity = .resizeAspect
             sampleBufferDisplayLayer.preventsDisplaySleepDuringVideoPlayback = false
-            // Do NOT set a controlTimebase.  All sample buffers carry the
-            // kCMSampleAttachmentKey_DisplayImmediately attachment, which
-            // tells the layer to render each frame instantly.  A running
-            // controlTimebase conflicts with displayImmediately and can
-            // cause the layer to schedule frames "in the future", leading
-            // to a first-frame-only-freeze where the IDR is shown but all
-            // subsequent P-frames are never displayed.
+            // All display sample buffers are tagged with
+            // kCMSampleAttachmentKey_DisplayImmediately, so an active control
+            // timebase can cause later frames to be scheduled instead of shown.
             sampleBufferDisplayLayer.controlTimebase = nil
-            controlTimebase = nil
         }
 
         func flush(removeDisplayedImage: Bool) {
