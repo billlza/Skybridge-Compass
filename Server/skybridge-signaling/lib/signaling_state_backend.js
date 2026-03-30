@@ -109,6 +109,12 @@ function normalizeActiveMember(member, fallbackDeviceId = null) {
   };
 }
 
+function isRetryableRedisWatchError(error) {
+  const name = String(error?.name || error?.constructor?.name || '').trim();
+  const message = String(error?.message || '').toLowerCase();
+  return name === 'WatchError' || message.includes('watched keys has been changed');
+}
+
 function ephemeralRecordFromStorage(raw) {
   const parsed = safeJsonParse(raw);
   if (!parsed || typeof parsed !== 'object') return null;
@@ -755,36 +761,45 @@ class RedisSignalingStateBackend {
     const key = this.codeKey(code);
     return this.executeIsolated(async (isolated) => {
       for (let attempt = 0; attempt < 5; attempt++) {
-        await isolated.watch(key);
-        const raw = await isolated.get(key);
-        if (!raw) {
-          await isolated.unwatch();
-          await isolated.sRem(this.codeIndexKey(), code);
-          return null;
-        }
-        const item = connectionRecordFromStorage(raw);
-        if (!item || Date.now() > item.expiresAt || item.revokedAt) {
-          const tx = isolated.multi();
-          tx.del(key);
-          tx.sRem(this.codeIndexKey(), code);
-          await tx.exec();
-          return null;
-        }
-        const nextItem = deepClone(item);
-        const result = mutator(nextItem);
-        if (result === false) {
-          await isolated.unwatch();
-          return item;
-        }
-        const execResult = await isolated.multi()
-          .set(key, connectionRecordToStorage(nextItem), {
-            XX: true,
-            PX: Math.max(1, nextItem.expiresAt - Date.now())
-          })
-          .sAdd(this.codeIndexKey(), code)
-          .exec();
-        if (execResult) {
-          return nextItem;
+        try {
+          await isolated.watch(key);
+          const raw = await isolated.get(key);
+          if (!raw) {
+            await isolated.unwatch();
+            await isolated.sRem(this.codeIndexKey(), code);
+            return null;
+          }
+          const item = connectionRecordFromStorage(raw);
+          if (!item || Date.now() > item.expiresAt || item.revokedAt) {
+            const tx = isolated.multi();
+            tx.del(key);
+            tx.sRem(this.codeIndexKey(), code);
+            await tx.exec();
+            return null;
+          }
+          const nextItem = deepClone(item);
+          const result = mutator(nextItem);
+          if (result === false) {
+            await isolated.unwatch();
+            return item;
+          }
+          const execResult = await isolated.multi()
+            .set(key, connectionRecordToStorage(nextItem), {
+              XX: true,
+              PX: Math.max(1, nextItem.expiresAt - Date.now())
+            })
+            .sAdd(this.codeIndexKey(), code)
+            .exec();
+          if (execResult) {
+            return nextItem;
+          }
+        } catch (error) {
+          if (!isRetryableRedisWatchError(error)) {
+            throw error;
+          }
+          try {
+            await isolated.unwatch();
+          } catch (_) {}
         }
       }
       throw new Error(`redis optimistic update failed for code=${code}`);
@@ -893,78 +908,87 @@ class RedisSignalingStateBackend {
     const key = this.iceUsageKey(sessionId);
     return this.executeIsolated(async (isolated) => {
       for (let attempt = 0; attempt < 5; attempt++) {
-        await isolated.watch(key);
-        const current = iceUsageFromStorage(await isolated.get(key)) || {
-          hashes: [],
-          perPeerBytes: {},
-          totalBytes: 0,
-          totalCount: 0,
-          expiresAt: Date.now() + this.iceTtlMs,
-          killed: false,
-          reason: null
-        };
-        if (current.expiresAt <= Date.now()) {
-          current.hashes = [];
-          current.perPeerBytes = {};
-          current.totalBytes = 0;
-          current.totalCount = 0;
-          current.killed = false;
-          current.reason = null;
-        }
-        current.expiresAt = Date.now() + this.iceTtlMs;
-        if (current.killed) {
-          await isolated.unwatch();
-          return { accepted: false, duplicate: false, killed: true, reason: current.reason };
-        }
-        if (current.hashes.includes(candidateHash)) {
-          await isolated.unwatch();
-          return {
-            accepted: false,
-            duplicate: true,
+        try {
+          await isolated.watch(key);
+          const current = iceUsageFromStorage(await isolated.get(key)) || {
+            hashes: [],
+            perPeerBytes: {},
+            totalBytes: 0,
+            totalCount: 0,
+            expiresAt: Date.now() + this.iceTtlMs,
             killed: false,
-            totalBytes: current.totalBytes,
-            totalCount: current.totalCount,
-            peerBytes: toInteger(current.perPeerBytes[peerId], 0)
+            reason: null
           };
-        }
-        const nextTotalCount = current.totalCount + 1;
-        const nextTotalBytes = current.totalBytes + byteSize;
-        const nextPeerBytes = toInteger(current.perPeerBytes[peerId], 0) + byteSize;
-        if (nextTotalCount > limits.maxPerSession) {
-          current.killed = true;
-          current.reason = 'ice_count_limit';
-        } else if (nextTotalBytes > limits.maxBytesPerSession) {
-          current.killed = true;
-          current.reason = 'ice_bytes_limit';
-        } else if (nextPeerBytes > limits.maxBytesPerPeerPerSession) {
-          current.killed = true;
-          current.reason = 'ice_peer_bytes_limit';
-        }
-        if (current.killed) {
+          if (current.expiresAt <= Date.now()) {
+            current.hashes = [];
+            current.perPeerBytes = {};
+            current.totalBytes = 0;
+            current.totalCount = 0;
+            current.killed = false;
+            current.reason = null;
+          }
+          current.expiresAt = Date.now() + this.iceTtlMs;
+          if (current.killed) {
+            await isolated.unwatch();
+            return { accepted: false, duplicate: false, killed: true, reason: current.reason };
+          }
+          if (current.hashes.includes(candidateHash)) {
+            await isolated.unwatch();
+            return {
+              accepted: false,
+              duplicate: true,
+              killed: false,
+              totalBytes: current.totalBytes,
+              totalCount: current.totalCount,
+              peerBytes: toInteger(current.perPeerBytes[peerId], 0)
+            };
+          }
+          const nextTotalCount = current.totalCount + 1;
+          const nextTotalBytes = current.totalBytes + byteSize;
+          const nextPeerBytes = toInteger(current.perPeerBytes[peerId], 0) + byteSize;
+          if (nextTotalCount > limits.maxPerSession) {
+            current.killed = true;
+            current.reason = 'ice_count_limit';
+          } else if (nextTotalBytes > limits.maxBytesPerSession) {
+            current.killed = true;
+            current.reason = 'ice_bytes_limit';
+          } else if (nextPeerBytes > limits.maxBytesPerPeerPerSession) {
+            current.killed = true;
+            current.reason = 'ice_peer_bytes_limit';
+          }
+          if (current.killed) {
+            const execResult = await isolated.multi()
+              .set(key, JSON.stringify(current), { PX: this.iceTtlMs })
+              .exec();
+            if (execResult) {
+              return { accepted: false, duplicate: false, killed: true, reason: current.reason };
+            }
+            continue;
+          }
+          current.hashes.push(candidateHash);
+          current.perPeerBytes[peerId] = nextPeerBytes;
+          current.totalBytes = nextTotalBytes;
+          current.totalCount = nextTotalCount;
           const execResult = await isolated.multi()
             .set(key, JSON.stringify(current), { PX: this.iceTtlMs })
             .exec();
           if (execResult) {
-            return { accepted: false, duplicate: false, killed: true, reason: current.reason };
+            return {
+              accepted: true,
+              duplicate: false,
+              killed: false,
+              totalBytes: current.totalBytes,
+              totalCount: current.totalCount,
+              peerBytes: nextPeerBytes
+            };
           }
-          continue;
-        }
-        current.hashes.push(candidateHash);
-        current.perPeerBytes[peerId] = nextPeerBytes;
-        current.totalBytes = nextTotalBytes;
-        current.totalCount = nextTotalCount;
-        const execResult = await isolated.multi()
-          .set(key, JSON.stringify(current), { PX: this.iceTtlMs })
-          .exec();
-        if (execResult) {
-          return {
-            accepted: true,
-            duplicate: false,
-            killed: false,
-            totalBytes: current.totalBytes,
-            totalCount: current.totalCount,
-            peerBytes: nextPeerBytes
-          };
+        } catch (error) {
+          if (!isRetryableRedisWatchError(error)) {
+            throw error;
+          }
+          try {
+            await isolated.unwatch();
+          } catch (_) {}
         }
       }
       throw new Error(`redis optimistic ice usage update failed for session=${sessionId}`);
@@ -1105,26 +1129,35 @@ class RedisSignalingStateBackend {
     const key = this.ephemeralKey(kind, id);
     return this.executeIsolated(async (isolated) => {
       for (let attempt = 0; attempt < 5; attempt++) {
-        await isolated.watch(key);
-        const current = ephemeralRecordFromStorage(await isolated.get(key));
-        if (!current || Date.now() > toInteger(current.expiresAt, 0)) {
-          await isolated.multi().del(key).exec();
-          return null;
-        }
-        const nextRecord = deepClone(current);
-        const result = mutator(nextRecord);
-        if (result === false) {
-          await isolated.unwatch();
-          return current;
-        }
-        const execResult = await isolated.multi()
-          .set(key, JSON.stringify(nextRecord), {
-            XX: true,
-            PX: Math.max(1, nextRecord.expiresAt - Date.now())
-          })
-          .exec();
-        if (execResult) {
-          return nextRecord;
+        try {
+          await isolated.watch(key);
+          const current = ephemeralRecordFromStorage(await isolated.get(key));
+          if (!current || Date.now() > toInteger(current.expiresAt, 0)) {
+            await isolated.multi().del(key).exec();
+            return null;
+          }
+          const nextRecord = deepClone(current);
+          const result = mutator(nextRecord);
+          if (result === false) {
+            await isolated.unwatch();
+            return current;
+          }
+          const execResult = await isolated.multi()
+            .set(key, JSON.stringify(nextRecord), {
+              XX: true,
+              PX: Math.max(1, nextRecord.expiresAt - Date.now())
+            })
+            .exec();
+          if (execResult) {
+            return nextRecord;
+          }
+        } catch (error) {
+          if (!isRetryableRedisWatchError(error)) {
+            throw error;
+          }
+          try {
+            await isolated.unwatch();
+          } catch (_) {}
         }
       }
       throw new Error(`redis optimistic ephemeral update failed for kind=${kind} id=${id}`);
@@ -1248,5 +1281,9 @@ function createSignalingStateBackend(options) {
 module.exports = {
   createSignalingStateBackend,
   normalizeActiveMember,
-  unique
+  unique,
+  __test: {
+    RedisSignalingStateBackend,
+    isRetryableRedisWatchError
+  }
 };
