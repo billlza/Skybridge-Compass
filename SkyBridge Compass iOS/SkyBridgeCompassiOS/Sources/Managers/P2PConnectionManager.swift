@@ -14,6 +14,22 @@ import UIKit
 @MainActor
 public class P2PConnectionManager: ObservableObject {
     public static let instance = P2PConnectionManager()
+
+    public struct RekeyPresentationStatus: Sendable, Equatable {
+        public let fromSuite: String
+        public let toSuite: String
+        public let startedAt: Date
+
+        public init(
+            fromSuite: String,
+            toSuite: String,
+            startedAt: Date = Date()
+        ) {
+            self.fromSuite = fromSuite
+            self.toSuite = toSuite
+            self.startedAt = startedAt
+        }
+    }
     
     // MARK: - Published Properties
     
@@ -28,6 +44,8 @@ public class P2PConnectionManager: ObservableObject {
     /// 每个设备当前协商的加密套件（用于 UI/LiveActivity 在 rekey 后正确刷新）
     /// 注意：`sessionKeys` 不是 @Published，因此仅更新 `sessionKeys` 不会触发 SwiftUI 刷新。
     @Published public private(set) var negotiatedSuiteByDeviceId: [String: CryptoSuite] = [:]
+    /// 每个设备当前的 rekey 展示态（Classic -> PQC / X-Wing 等），用于 UI 在切换期间展示真实进度。
+    @Published public private(set) var rekeyStatusByDeviceId: [String: RekeyPresentationStatus] = [:]
 
     var shouldPreserveReachabilityInBackground: Bool {
         !connections.isEmpty
@@ -36,6 +54,7 @@ public class P2PConnectionManager: ObservableObject {
             || !reconnectTasks.isEmpty
             || !bootstrapRekeyTasks.isEmpty
             || !rekeyInProgress.isEmpty
+            || !rekeyStatusByDeviceId.isEmpty
             || pendingPairingTrustRequest != nil
     }
 
@@ -48,6 +67,7 @@ public class P2PConnectionManager: ObservableObject {
         rootIdentifiers.formUnion(heartbeatTasks.keys)
         rootIdentifiers.formUnion(bootstrapRekeyTasks.keys)
         rootIdentifiers.formUnion(rekeyInProgress)
+        rootIdentifiers.formUnion(rekeyStatusByDeviceId.keys)
         rootIdentifiers.formUnion(peerPresentationIdByRuntimePeerId.keys)
         rootIdentifiers.formUnion(peerPresentationIdByRuntimePeerId.values)
         rootIdentifiers.formUnion(activeConnections.map(\.device.id))
@@ -1030,6 +1050,7 @@ public class P2PConnectionManager: ObservableObject {
         case .failed(let reason):
             handshakeDrivers.removeValue(forKey: peerId)
             rekeyInProgress.remove(peerId)
+            clearRekeyPresentationStatus(for: peerId)
             currentHandshakeState = "握手失败: \(reason)"
             lastError = "\(reason)"
             connectionStatusByDeviceId[peerId] = .failed
@@ -1070,7 +1091,12 @@ public class P2PConnectionManager: ObservableObject {
             return nil
         }
 
+        let currentSuite = sessionKeys[peerId]?.negotiatedSuite.rawValue
+            ?? resolvedNegotiatedSuite(forAnyPeerId: peerId)?.rawValue
+            ?? "Classic"
+        let targetSuite = preferredRekeyTargetSuite(offeredSuites: messageA.supportedSuites) ?? currentSuite
         sessionKeys.removeValue(forKey: peerId)
+        setRekeyPresentationStatus(for: peerId, fromSuite: currentSuite, toSuite: targetSuite)
         rekeyInProgress.insert(peerId)
         currentHandshakeState = "收到对端 rekey 请求，重新握手中..."
         SkyBridgeLogger.shared.info(
@@ -1357,6 +1383,8 @@ public class P2PConnectionManager: ObservableObject {
     private func scheduleBootstrapRekeyIfNeeded(peerId: String, suiteRaw: String) {
         guard bootstrapRekeyTasks[peerId] == nil else { return }
         let peerIds = connectionStatePeerIds(for: peerId)
+        let fromSuite = resolvedNegotiatedSuite(forAnyPeerId: peerId)?.rawValue ?? "Classic"
+        setRekeyPresentationStatus(for: peerId, fromSuite: fromSuite, toSuite: suiteRaw)
         
         // Surface a stable "pending approval/keys" state to prevent reconnect storms.
         for effectivePeerId in peerIds {
@@ -1380,6 +1408,7 @@ public class P2PConnectionManager: ObservableObject {
             let keysNow = await KEMTrustStore.shared.kemPublicKeys(for: peerId)
             guard keysNow.keys.contains(where: { $0.rawValue == suiteRaw }) else {
                 let known = keysNow.keys.map(\.rawValue).sorted().joined(separator: ",")
+                self.clearRekeyPresentationStatus(for: peerId)
                 SkyBridgeLogger.shared.warning(
                     "⏳ 等待对端 KEM 公钥超时（targetSuite=\(suiteRaw) knownSuites=\(known)）。" +
                     "请在 macOS 弹窗选择允许后重试，或稍后手动点击“重新握手”。"
@@ -1398,6 +1427,7 @@ public class P2PConnectionManager: ObservableObject {
                 for effectivePeerId in self.connectionStatePeerIds(for: peerId) {
                     self.connectionErrorByDeviceId[effectivePeerId] = "PQC 切换失败：\(error.localizedDescription)"
                 }
+                self.clearRekeyPresentationStatus(for: peerId)
                 SkyBridgeLogger.shared.error("❌ rekeyToPreferPQC failed: \(error.localizedDescription)")
             }
         }
@@ -1825,6 +1855,10 @@ public class P2PConnectionManager: ObservableObject {
             negotiatedSuiteByDeviceId.removeValue(forKey: key)
         }
 
+        for key in stateKeysMatchingAliases(aliases, keys: rekeyStatusByDeviceId.keys) {
+            rekeyStatusByDeviceId.removeValue(forKey: key)
+        }
+
         for key in stateKeysMatchingAliases(aliases, keys: connectionStatusByDeviceId.keys)
             where key != runtimePeerId && key != presentationPeerId {
             connectionStatusByDeviceId.removeValue(forKey: key)
@@ -2002,6 +2036,36 @@ public class P2PConnectionManager: ObservableObject {
         for candidate in stateKeysMatchingAliases(aliases, keys: negotiatedSuiteByDeviceId.keys) {
             if let suite = negotiatedSuiteByDeviceId[candidate] {
                 return suite
+            }
+        }
+
+        return nil
+    }
+
+    public func resolvedRekeyStatus(for device: DiscoveredDevice) -> RekeyPresentationStatus? {
+        let resolvedDevice = resolvedPeerDevice(for: device)
+        let runtimePeerId = runtimePeerId(forAnyPeerId: resolvedDevice.id)
+        let presentationPeerId = presentationPeerId(for: runtimePeerId)
+
+        let directCandidates = [
+            device.id,
+            resolvedDevice.id,
+            runtimePeerId,
+            presentationPeerId
+        ]
+        for candidate in directCandidates {
+            if let status = rekeyStatusByDeviceId[candidate] {
+                return status
+            }
+        }
+
+        let aliases = Set(PeerIdentityAliasResolver.aliasKeys(for: resolvedDevice))
+            .union(PeerIdentityAliasResolver.aliasKeys(for: device))
+            .union(PeerIdentityAliasResolver.lookupCandidates(for: runtimePeerId))
+            .union(PeerIdentityAliasResolver.lookupCandidates(for: presentationPeerId))
+        for candidate in stateKeysMatchingAliases(aliases, keys: rekeyStatusByDeviceId.keys) {
+            if let status = rekeyStatusByDeviceId[candidate] {
+                return status
             }
         }
 
@@ -2360,6 +2424,70 @@ public class P2PConnectionManager: ObservableObject {
         return [runtimePeerId, presentationPeerId]
     }
 
+    private func resolvedNegotiatedSuite(forAnyPeerId peerId: String) -> CryptoSuite? {
+        let runtimePeerId = runtimePeerId(forAnyPeerId: peerId)
+        let presentationPeerId = presentationPeerId(for: runtimePeerId)
+        let directCandidates = [peerId, runtimePeerId, presentationPeerId]
+
+        for candidate in directCandidates {
+            if let suite = negotiatedSuiteByDeviceId[candidate] {
+                return suite
+            }
+        }
+
+        let aliases = connectionAliasSet(for: runtimePeerId)
+        for candidate in stateKeysMatchingAliases(aliases, keys: negotiatedSuiteByDeviceId.keys) {
+            if let suite = negotiatedSuiteByDeviceId[candidate] {
+                return suite
+            }
+        }
+
+        return sessionKeys[runtimePeerId]?.negotiatedSuite
+    }
+
+    private func preferredRekeyTargetSuite(offeredSuites: [CryptoSuite] = []) -> String? {
+        if let preferredOfferedPQC = offeredSuites.first(where: { $0.isPQCGroup }) {
+            return preferredOfferedPQC.rawValue
+        }
+        if let firstOffered = offeredSuites.first {
+            return firstOffered.rawValue
+        }
+
+        let provider = CryptoProviderFactory.make(policy: effectiveSelectionPolicy(enforcePQC: true))
+        return provider.supportedSuites.first(where: { $0.isPQCGroup })?.rawValue
+    }
+
+    private func setRekeyPresentationStatus(
+        for runtimePeerId: String,
+        fromSuite: String,
+        toSuite: String,
+        startedAt: Date = Date()
+    ) {
+        let normalizedFrom = fromSuite.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedTo = toSuite.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedFrom.isEmpty, !normalizedTo.isEmpty else { return }
+
+        let status = RekeyPresentationStatus(
+            fromSuite: normalizedFrom,
+            toSuite: normalizedTo,
+            startedAt: startedAt
+        )
+        for peerId in connectionStatePeerIds(for: runtimePeerId) {
+            rekeyStatusByDeviceId[peerId] = status
+        }
+    }
+
+    private func clearRekeyPresentationStatus(for runtimePeerId: String) {
+        let aliases = connectionAliasSet(for: runtimePeerId)
+        for key in stateKeysMatchingAliases(aliases, keys: rekeyStatusByDeviceId.keys) {
+            rekeyStatusByDeviceId.removeValue(forKey: key)
+        }
+
+        for peerId in connectionStatePeerIds(for: runtimePeerId) {
+            rekeyStatusByDeviceId.removeValue(forKey: peerId)
+        }
+    }
+
     private func platform(from raw: String?) -> DevicePlatform {
         guard let normalized = raw?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
               !normalized.isEmpty else {
@@ -2413,6 +2541,12 @@ public class P2PConnectionManager: ObservableObject {
             negotiatedSuiteByDeviceId[presentationPeerId] = suite
         } else {
             negotiatedSuiteByDeviceId.removeValue(forKey: presentationPeerId)
+        }
+
+        if let rekeyStatus = rekeyStatusByDeviceId[runtimePeerId] {
+            rekeyStatusByDeviceId[presentationPeerId] = rekeyStatus
+        } else {
+            rekeyStatusByDeviceId.removeValue(forKey: presentationPeerId)
         }
 
         if let preferredDevice {
@@ -2922,6 +3056,7 @@ public class P2PConnectionManager: ObservableObject {
         if presentationPeerId != deviceId {
             negotiatedSuiteByDeviceId[presentationPeerId] = keys.negotiatedSuite
         }
+        clearRekeyPresentationStatus(for: deviceId)
 
         // Keep Live Activity in sync with the latest negotiated suite (e.g., after Classic -> PQC rekey).
         let name =
@@ -3116,8 +3251,14 @@ public class P2PConnectionManager: ObservableObject {
     /// 强制用 preferPQC=true 重新握手（用于完成 KEM 公钥交换后的“立刻切换到 PQC suite”）
     public func rekeyToPreferPQC(deviceId: String, allowSOA: Bool = true) async throws {
         let deviceId = canonicalPeerLookupKey(deviceId)
+        let fromSuite = resolvedNegotiatedSuite(forAnyPeerId: deviceId)?.rawValue ?? "Classic"
+        let targetSuite = preferredRekeyTargetSuite() ?? fromSuite
+        setRekeyPresentationStatus(for: deviceId, fromSuite: fromSuite, toSuite: targetSuite)
         rekeyInProgress.insert(deviceId)
-        defer { rekeyInProgress.remove(deviceId) }
+        defer {
+            rekeyInProgress.remove(deviceId)
+            clearRekeyPresentationStatus(for: deviceId)
+        }
         guard let connection = connections[deviceId] else { throw P2PError.connectionFailed }
         let device = discoveryManager.discoveredDevices.first(where: { $0.id == deviceId })
             ?? DiscoveredDevice(id: deviceId, name: deviceId, modelName: "", platform: .unknown, osVersion: "Unknown")

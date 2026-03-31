@@ -234,11 +234,11 @@ struct SkyBridgeCompassApp: App {
                     .frame(width: 72, height: 72)
                     .shadow(color: .blue.opacity(0.28), radius: 18, x: 0, y: 10)
 
-                    Text("SkyBridge Compass Pro")
+                    Text(startupText("startup.productName"))
                         .font(.largeTitle.weight(.medium))
                         .foregroundColor(.white)
 
-                    Text("正在启动应用程序...")
+                    Text(startupText("startup.subtitle.launching"))
                         .font(.headline)
                         .foregroundColor(.secondary)
                 }
@@ -250,18 +250,34 @@ struct SkyBridgeCompassApp: App {
                         .progressViewStyle(LinearProgressViewStyle())
                         .tint(.blue)
                         .frame(width: 300)
+                        .animation(.easeOut(duration: 0.2), value: startupCoordinator.progress)
 
  // 当前阶段和组件
                     VStack(spacing: 8) {
-                        Text(startupCoordinator.currentStage.description)
+                        Text(startupText(startupCoordinator.currentStage.localizationKey))
                             .font(.subheadline.weight(.medium))
                             .foregroundColor(.white)
 
-                        if !startupCoordinator.currentLoadingComponent.isEmpty {
-                            Text("正在加载: \(startupCoordinator.currentLoadingComponent)")
+                        if let currentStep = startupCoordinator.currentStep {
+                            Text(
+                                startupText(
+                                    "startup.loading.format",
+                                    startupText(currentStep.localizationKey)
+                                )
+                            )
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                         }
+
+                        Text(
+                            startupText(
+                                "startup.progress.steps",
+                                String(startupCoordinator.completedStepCount),
+                                String(startupCoordinator.totalStepCount)
+                            )
+                        )
+                        .font(.caption)
+                        .foregroundColor(.secondary)
 
                         Text("\(Int(startupCoordinator.progress * 100))%")
                             .font(.caption.monospacedDigit())
@@ -271,7 +287,7 @@ struct SkyBridgeCompassApp: App {
 
  // 错误信息（如果有）
                 if let error = startupCoordinator.startupError {
-                    Text("启动错误: \(error)")
+                    Text(startupText("startup.error.format", error))
                         .font(.caption)
                         .foregroundColor(.red)
                         .padding()
@@ -281,6 +297,18 @@ struct SkyBridgeCompassApp: App {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+    }
+
+    private func startupText(_ key: String) -> String {
+        localizationManager.localizedString(key)
+    }
+
+    private func startupText(_ key: String, _ arguments: CVarArg...) -> String {
+        String(
+            format: localizationManager.localizedString(key),
+            locale: localizationManager.locale,
+            arguments: arguments
+        )
     }
 
     init() {

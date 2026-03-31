@@ -154,6 +154,9 @@ public enum CryptoProviderFactory {
     private static func makeAppleStrictPQCProvider() -> any CryptoProvider {
         #if HAS_APPLE_PQC_SDK
         if #available(iOS 26.0, macOS 26.0, *) {
+            if nativeSuitePreference() == .xwing, isAppleXWingAvailable() {
+                return AppleXWingCryptoProvider()
+            }
             return ApplePQCCryptoProvider()
         }
         #endif
@@ -182,9 +185,8 @@ public enum CryptoProviderFactory {
         case .requirePQC:
             #if HAS_APPLE_PQC_SDK
             if capability.hasApplePQC {
-                // Strict-PQC must be stable and broadly supported. Do NOT let user preference
-                // (e.g., X-Wing hybrid) become a hard dependency for strict gates/bootstraps.
-                // X-Wing is benchmarked separately as a supplemental suite.
+                // Strict-PQC means "no classic fallback", not "force ML-KEM regardless of user choice".
+                // When native PQC is available, honor the user's preferred native suite inside the PQC group.
                 return makeAppleStrictPQCProvider()
             }
             #endif

@@ -2228,8 +2228,11 @@ public class P2PDiscoveryService: BaseManager {
 
                         if peerHasPQCGroup {
                             selection = policy.requirePQC ? .requirePQC : .preferPQC
-                            cryptoProvider = CryptoProviderFactory.make(policy: selection)
-                            let localPQCSuites = DeviceIdentityKeyManager.pairingIdentityAdvertisedPQCSuites(using: cryptoProvider)
+                            cryptoProvider = CryptoProviderFactory.makeInboundPQCResponderProvider(
+                                policy: selection,
+                                peerSupportedSuites: messageA.supportedSuites
+                            )
+                            let localPQCSuites = CryptoProviderFactory.handshakeOfferedPQCSuites(using: cryptoProvider)
 
                             if localPQCSuites.isEmpty {
                                 if policy.requirePQC {

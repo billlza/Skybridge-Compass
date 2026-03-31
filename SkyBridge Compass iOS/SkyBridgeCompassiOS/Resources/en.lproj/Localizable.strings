@@ -237,6 +237,7 @@
 "在线" = "Online";
 "离线" = "Offline";
 "不可用" = "Unavailable";
+"Rekey 中" = "Rekeying";
 "Apple PQC" = "Apple PQC";
 "liboqs" = "liboqs";
 "X-Wing" = "X-Wing";

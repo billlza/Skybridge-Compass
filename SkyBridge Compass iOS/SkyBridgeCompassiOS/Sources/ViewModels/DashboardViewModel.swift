@@ -180,6 +180,13 @@ public class DashboardViewModel: ObservableObject {
                 self?.updateConnectionPresentation()
             }
             .store(in: &cancellables)
+
+        P2PConnectionManager.instance.$rekeyStatusByDeviceId
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.updateConnectionPresentation()
+            }
+            .store(in: &cancellables)
         
         // 监听文件传输变化（活跃 + 历史），确保首页能看到“进行中/已完成”
         Publishers.CombineLatest(
@@ -279,7 +286,17 @@ public class DashboardViewModel: ObservableObject {
             .sorted { $0.connectedAt > $1.connectedAt }
             .first
             .map { connection in
-                ConnectionPresentationPeer(
+                if let rekey = connectionManager.resolvedRekeyStatus(for: connection.device) {
+                    return ConnectionPresentationPeer(
+                        displayName: connection.device.name,
+                        cryptoKind: nil,
+                        suite: rekey.toSuite,
+                        guardStatus: RuntimeLocalization.string("Rekey 中"),
+                        connectedAt: connection.connectedAt
+                    )
+                }
+
+                return ConnectionPresentationPeer(
                     displayName: connection.device.name,
                     cryptoKind: nil,
                     suite: connectionManager.resolvedNegotiatedSuite(for: connection.device)?.rawValue,

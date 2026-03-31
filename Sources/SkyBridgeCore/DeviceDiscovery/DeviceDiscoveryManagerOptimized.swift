@@ -2130,8 +2130,11 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
 
                         if peerHasPQCGroup {
                             selection = (effectivePolicy.requirePQC ? .requirePQC : .preferPQC)
-                            cryptoProvider = CryptoProviderFactory.make(policy: selection)
-                            let localPQCSuites = DeviceIdentityKeyManager.pairingIdentityAdvertisedPQCSuites(using: cryptoProvider)
+                            cryptoProvider = CryptoProviderFactory.makeInboundPQCResponderProvider(
+                                policy: selection,
+                                peerSupportedSuites: messageA.supportedSuites
+                            )
+                            let localPQCSuites = CryptoProviderFactory.handshakeOfferedPQCSuites(using: cryptoProvider)
 
                             if localPQCSuites.isEmpty {
                                 if effectivePolicy.requirePQC {

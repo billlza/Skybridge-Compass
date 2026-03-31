@@ -132,11 +132,9 @@ public enum CryptoProviderFactory {
         case .requirePQC:
             #if HAS_APPLE_PQC_SDK
             if capability.hasApplePQC {
-                // Strict-PQC mode should pick a stable, widely supported suite (ML-KEM/ML-DSA).
-                // X-Wing is measured separately and must not become a hard dependency for strict gates.
-                if #available(iOS 26.0, macOS 26.0, *) {
-                    return ApplePQCCryptoProvider()
-                }
+                // Strict-PQC means "stay within the PQC group without classic fallback".
+                // When the user explicitly prefers X-Wing and the runtime supports it, honor that choice.
+                return makeAppleNativeProvider()
             }
             #endif
             if capability.hasLiboqs {
@@ -184,6 +182,39 @@ public enum CryptoProviderFactory {
         }
         #endif
         return UnavailablePQCProvider()
+    }
+
+    public static func makeInboundPQCResponderProvider(
+        policy: SelectionPolicy,
+        peerSupportedSuites: [CryptoSuite]
+    ) -> any CryptoProvider {
+        let baseProvider = make(policy: policy)
+
+        #if HAS_APPLE_PQC_SDK
+        if #available(iOS 26.0, macOS 26.0, *), baseProvider.tier == .nativePQC {
+            let peerSupportsXWing = peerSupportedSuites.contains {
+                $0.providerCompatibilitySuite.wireId == CryptoSuite.xwingMLDSA.providerCompatibilitySuite.wireId
+            }
+            let peerSupportsMLKEM = peerSupportedSuites.contains {
+                $0.providerCompatibilitySuite.wireId == CryptoSuite.mlkem768MLDSA65.providerCompatibilitySuite.wireId
+            }
+
+            switch (peerSupportsXWing, peerSupportsMLKEM) {
+            case (true, false):
+                return AppleXWingCryptoProvider()
+            case (false, true):
+                return ApplePQCCryptoProvider()
+            default:
+                return baseProvider
+            }
+        }
+        #endif
+
+        return baseProvider
+    }
+
+    public static func handshakeOfferedPQCSuites(using provider: any CryptoProvider) -> [CryptoSuite] {
+        provider.supportedSuites.filter { $0.isPQCGroup }
     }
 
  /// 发射 Provider 选择事件
