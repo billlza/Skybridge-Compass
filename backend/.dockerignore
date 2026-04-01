@@ -1,7 +1,0 @@
-target
-.env
-.env.*
-.DS_Store
-.git
-.gitignore
-

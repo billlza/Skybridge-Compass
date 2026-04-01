@@ -1,25 +1,57 @@
-services:
-  backend:
-    build:
-      context: ./backend
-    environment:
-      SKYBRIDGE_BIND_HOST: 0.0.0.0
-      SKYBRIDGE_BIND_PORT: 8080
-      # Allow the local frontend during dev/demo.
-      SKYBRIDGE_WEB_ORIGIN: http://localhost:3000
-    ports:
-      - "8080:8080"
+version: '3.8'
 
+services:
+  # Frontend service
   frontend:
     build:
-      context: ./frontend
+      context: .
+      dockerfile: Dockerfile.frontend
       args:
-        NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL}
-        NEXT_PUBLIC_SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY}
-    environment:
-      NODE_ENV: production
+        VITE_SUPABASE_URL: ${VITE_SUPABASE_URL}
+        VITE_SUPABASE_ANON_KEY: ${VITE_SUPABASE_ANON_KEY}
+    container_name: sinan-frontend
+    ports:
+      - "80:80"
+    restart: unless-stopped
+    networks:
+      - sinan-network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+  # Backend service (optional - if using Rust backend instead of Supabase Functions)
+  backend:
+    build:
+      context: ./rust-backend
+      dockerfile: Dockerfile
+    container_name: sinan-backend
     ports:
       - "3000:3000"
+    environment:
+      - HOST=0.0.0.0
+      - PORT=3000
+      - DATABASE_URL=${DATABASE_URL}
+      - SUPABASE_URL=${VITE_SUPABASE_URL}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+      - SUPABASE_ANON_KEY=${VITE_SUPABASE_ANON_KEY}
+      - JWT_SECRET=${JWT_SECRET}
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000,http://localhost:4173,http://127.0.0.1:4173,https://skybridge-compass.vercel.app,https://nebula-technologies.net,https://www.nebula-technologies.net,https://skybridge.com,https://www.skybridge.com}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    restart: unless-stopped
+    networks:
+      - sinan-network
     depends_on:
-      - backend
+      - frontend
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
 
+networks:
+  sinan-network:
+    driver: bridge

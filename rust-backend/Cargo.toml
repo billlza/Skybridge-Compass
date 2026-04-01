@@ -1,0 +1,71 @@
+[package]
+name = "sinan-backend"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "High-performance Rust backend for Sinan/Yunqiao platform"
+authors = ["Sinan Team"]
+
+[dependencies]
+# Web framework
+axum = { version = "0.8", features = ["macros"] }
+axum-extra = { version = "0.10", features = ["typed-header"] }
+tower = { version = "0.5", features = ["full"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "compression-gzip"] }
+
+# Async runtime
+tokio = { version = "1.42", features = ["full"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Database
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json"] }
+
+# Authentication
+jsonwebtoken = "9.3"
+
+# HTTP client (for Supabase auth verification)
+reqwest = { version = "0.12", features = ["json"] }
+
+# Utilities
+uuid = { version = "1.11", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+regex = "1.11"
+rand = "0.8"
+base64 = "0.22"
+aes-gcm = "0.10"
+sha2 = "0.10"
+url = "2.5"
+
+# Configuration
+dotenvy = "0.15"
+
+# Error handling
+thiserror = "2.0"
+anyhow = "1.0"
+
+# Logging & Tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# OpenTelemetry for distributed tracing
+opentelemetry = "0.27"
+opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
+opentelemetry-otlp = "0.27"
+tracing-opentelemetry = "0.28"
+
+# Validation
+validator = { version = "0.19", features = ["derive"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+opt-level = 3
+
+[profile.dev]
+opt-level = 0
+debug = true
