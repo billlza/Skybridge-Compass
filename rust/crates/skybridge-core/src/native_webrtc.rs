@@ -1,13 +1,8 @@
-use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use aes_gcm::aead::{Aead, KeyInit};
-use aes_gcm::{Aes256Gcm, Nonce};
 use anyhow::{Result, anyhow, bail};
 use bytes::Bytes;
-use getrandom::fill as fill_random;
-use serde_json::{Value, json};
 use tokio::sync::{Mutex, mpsc};
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
@@ -23,11 +18,10 @@ use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
 use crate::{
-    ClassicHandleResult, ClassicInitiatorConfig, ClassicInitiatorHandshake,
-    ClassicResponderConfig, ClassicResponderHandshake, ClassicSessionKeys, CryptoSuite,
+    ClassicHandleResult, ClassicInitiatorConfig, ClassicInitiatorHandshake, ClassicSessionKeys,
     PqcInitiatorConfig, PqcInitiatorHandshake, PqcResponderConfig, PqcResponderHandshake,
-    ProtocolIdentityBinding, RuntimeSessionKeepaliveKind, RuntimeSessionRole, TurnCredentials,
-    WebRtcMessageType, WebRtcSignalingEnvelope, WebRtcSignalingPayload,
+    RuntimeSessionKeepaliveKind, RuntimeSessionRole, TurnCredentials, WebRtcMessageType,
+    WebRtcSignalingEnvelope, WebRtcSignalingPayload,
 };
 
 const CONTROL_CHANNEL_LABEL: &str = "skybridge";
@@ -40,18 +34,8 @@ pub struct NativeWebRtcConfig {
     pub role: RuntimeSessionRole,
     pub turn_credentials: Option<TurnCredentials>,
     pub classic_initiator: Option<ClassicInitiatorConfig>,
-    pub classic_responder: Option<ClassicResponderConfig>,
     pub pqc_initiator: Option<PqcInitiatorConfig>,
-    pub pqc_initiator_template: Option<PqcInitiatorTemplate>,
     pub pqc_responder: Option<PqcResponderConfig>,
-}
-
-#[derive(Debug, Clone)]
-pub struct PqcInitiatorTemplate {
-    pub local_binding: ProtocolIdentityBinding,
-    pub signing_secret_key: Vec<u8>,
-    pub local_device_name: Option<String>,
-    pub preferred_suites: Vec<CryptoSuite>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -61,8 +45,8 @@ pub enum NativeWebRtcEvent {
     HandshakeComplete {
         negotiated_suite: String,
     },
-    AppPayload {
-        data: Vec<u8>,
+    ApplicationPayload {
+        payload: Vec<u8>,
     },
     Keepalive {
         kind: RuntimeSessionKeepaliveKind,
@@ -80,16 +64,13 @@ struct NativeWebRtcState {
     remote_description_set: bool,
     transport_ready_emitted: bool,
     transport_disconnected_emitted: bool,
-    last_handshake_transcript_hash: Option<Vec<u8>>,
+    handshake_complete_emitted: bool,
     inbound_framed_buffer: Vec<u8>,
     handshake: Option<NativeSessionHandshake>,
-    rekey_handshake: Option<NativeSessionHandshake>,
     established_session_keys: Option<ClassicSessionKeys>,
     heartbeat_task_started: bool,
     next_ping_id: u64,
     pending_remote_candidates: Vec<RTCIceCandidateInit>,
-    pqc_responder_config: Option<PqcResponderConfig>,
-    pqc_initiator_template: Option<PqcInitiatorTemplate>,
 }
 
 #[derive(Debug)]
@@ -100,7 +81,6 @@ enum NativeInitiatorHandshake {
 
 #[derive(Debug)]
 enum NativeResponderHandshake {
-    Classic(ClassicResponderHandshake),
     Pqc(PqcResponderHandshake),
 }
 
@@ -125,6 +105,13 @@ impl NativeInitiatorHandshake {
         }
     }
 
+    fn build_heartbeat_frame(&self) -> Result<Vec<u8>> {
+        match self {
+            Self::Classic(handshake) => handshake.build_heartbeat_frame(),
+            Self::Pqc(handshake) => handshake.build_heartbeat_frame(),
+        }
+    }
+
     fn build_pong_frame(&self, id: u64) -> Result<Vec<u8>> {
         match self {
             Self::Classic(handshake) => handshake.build_pong_frame(id),
@@ -132,10 +119,17 @@ impl NativeInitiatorHandshake {
         }
     }
 
-    fn is_waiting_for_message_b(&self) -> bool {
+    fn build_ping_frame(&self, id: u64) -> Result<Vec<u8>> {
         match self {
-            Self::Classic(handshake) => handshake.is_waiting_for_message_b(),
-            Self::Pqc(handshake) => handshake.is_waiting_for_message_b(),
+            Self::Classic(handshake) => handshake.build_ping_frame(id),
+            Self::Pqc(handshake) => handshake.build_ping_frame(id),
+        }
+    }
+
+    fn build_application_frame(&self, payload: &[u8]) -> Result<Vec<u8>> {
+        match self {
+            Self::Classic(handshake) => handshake.build_application_frame(payload),
+            Self::Pqc(handshake) => handshake.build_application_frame(payload),
         }
     }
 }
@@ -143,15 +137,31 @@ impl NativeInitiatorHandshake {
 impl NativeResponderHandshake {
     fn handle_frame(&mut self, frame: &[u8]) -> Result<ClassicHandleResult> {
         match self {
-            Self::Classic(handshake) => handshake.handle_frame(frame),
             Self::Pqc(handshake) => handshake.handle_frame(frame),
+        }
+    }
+
+    fn build_heartbeat_frame(&self) -> Result<Vec<u8>> {
+        match self {
+            Self::Pqc(handshake) => handshake.build_heartbeat_frame(),
         }
     }
 
     fn build_pong_frame(&self, id: u64) -> Result<Vec<u8>> {
         match self {
-            Self::Classic(handshake) => handshake.build_pong_frame(id),
             Self::Pqc(handshake) => handshake.build_pong_frame(id),
+        }
+    }
+
+    fn build_ping_frame(&self, id: u64) -> Result<Vec<u8>> {
+        match self {
+            Self::Pqc(handshake) => handshake.build_ping_frame(id),
+        }
+    }
+
+    fn build_application_frame(&self, payload: &[u8]) -> Result<Vec<u8>> {
+        match self {
+            Self::Pqc(handshake) => handshake.build_application_frame(payload),
         }
     }
 }
@@ -171,6 +181,13 @@ impl NativeSessionHandshake {
         }
     }
 
+    fn build_heartbeat_frame(&self) -> Result<Vec<u8>> {
+        match self {
+            Self::Initiator(handshake) => handshake.build_heartbeat_frame(),
+            Self::Responder(handshake) => handshake.build_heartbeat_frame(),
+        }
+    }
+
     fn build_pong_frame(&self, id: u64) -> Result<Vec<u8>> {
         match self {
             Self::Initiator(handshake) => handshake.build_pong_frame(id),
@@ -178,10 +195,17 @@ impl NativeSessionHandshake {
         }
     }
 
-    fn is_waiting_for_message_b(&self) -> bool {
+    fn build_ping_frame(&self, id: u64) -> Result<Vec<u8>> {
         match self {
-            Self::Initiator(handshake) => handshake.is_waiting_for_message_b(),
-            Self::Responder(_) => false,
+            Self::Initiator(handshake) => handshake.build_ping_frame(id),
+            Self::Responder(handshake) => handshake.build_ping_frame(id),
+        }
+    }
+
+    fn build_application_frame(&self, payload: &[u8]) -> Result<Vec<u8>> {
+        match self {
+            Self::Initiator(handshake) => handshake.build_application_frame(payload),
+            Self::Responder(handshake) => handshake.build_application_frame(payload),
         }
     }
 }
@@ -189,7 +213,6 @@ impl NativeSessionHandshake {
 struct NativeWebRtcInner {
     session_id: String,
     local_device_id: String,
-    local_device_name: Option<String>,
     role: RuntimeSessionRole,
     peer: RTCPeerConnection,
     events_tx: mpsc::Sender<NativeWebRtcEvent>,
@@ -202,56 +225,13 @@ pub struct NativeWebRtcSession {
     events_rx: mpsc::Receiver<NativeWebRtcEvent>,
 }
 
-struct DecryptedAppPayload {
-    plaintext: Vec<u8>,
-    pong_id: Option<u64>,
-    observed_pong_id: Option<u64>,
-    observed_heartbeat: bool,
+#[derive(Clone)]
+pub struct NativeWebRtcHandle {
+    inner: Arc<NativeWebRtcInner>,
 }
 
 impl NativeWebRtcSession {
     pub async fn new(config: NativeWebRtcConfig) -> Result<Self> {
-        let classic_responder_config = config.classic_responder.clone();
-        let pqc_responder_config = config.pqc_responder.clone();
-        let pqc_initiator_template = config
-            .pqc_initiator_template
-            .clone()
-            .or_else(|| {
-                config.pqc_initiator.as_ref().map(|value| PqcInitiatorTemplate {
-                    local_binding: value.local_binding.clone(),
-                    signing_secret_key: value.signing_secret_key.clone(),
-                    local_device_name: value.local_device_name.clone(),
-                    preferred_suites: value.preferred_suites.clone(),
-                })
-            });
-        let local_device_name = config
-            .classic_initiator
-            .as_ref()
-            .and_then(|value| value.local_device_name.clone())
-            .or_else(|| {
-                config
-                    .classic_responder
-                    .as_ref()
-                    .and_then(|value| value.local_device_name.clone())
-            })
-            .or_else(|| {
-                config
-                    .pqc_initiator
-                    .as_ref()
-                    .and_then(|value| value.local_device_name.clone())
-            })
-            .or_else(|| {
-                config
-                    .pqc_initiator_template
-                    .as_ref()
-                    .and_then(|value| value.local_device_name.clone())
-            })
-            .or_else(|| {
-                config
-                    .pqc_responder
-                    .as_ref()
-                    .and_then(|value| value.local_device_name.clone())
-            });
         let mut media_engine = MediaEngine::default();
         media_engine.register_default_codecs()?;
         let api = APIBuilder::new().with_media_engine(media_engine).build();
@@ -266,7 +246,6 @@ impl NativeWebRtcSession {
         let inner = Arc::new(NativeWebRtcInner {
             session_id: config.session_id,
             local_device_id: config.local_device_id,
-            local_device_name,
             role: config.role,
             peer,
             events_tx,
@@ -274,26 +253,20 @@ impl NativeWebRtcSession {
             state: Mutex::new(NativeWebRtcState {
                 handshake: match (
                     config.classic_initiator,
-                    classic_responder_config,
                     config.pqc_initiator,
                     config.pqc_responder,
                 ) {
-                    (_, _, Some(config), _) => Some(NativeSessionHandshake::Initiator(
+                    (_, Some(config), _) => Some(NativeSessionHandshake::Initiator(
                         NativeInitiatorHandshake::Pqc(PqcInitiatorHandshake::new(config)?),
                     )),
-                    (Some(config), _, None, _) => Some(NativeSessionHandshake::Initiator(
+                    (Some(config), None, _) => Some(NativeSessionHandshake::Initiator(
                         NativeInitiatorHandshake::Classic(ClassicInitiatorHandshake::new(config)?),
                     )),
-                    (None, Some(config), None, _) => Some(NativeSessionHandshake::Responder(
-                        NativeResponderHandshake::Classic(ClassicResponderHandshake::new(config)?),
-                    )),
-                    (None, _, None, Some(config)) => Some(NativeSessionHandshake::Responder(
+                    (None, None, Some(config)) => Some(NativeSessionHandshake::Responder(
                         NativeResponderHandshake::Pqc(PqcResponderHandshake::new(config)?),
                     )),
-                    (None, None, None, None) => None,
+                    (None, None, None) => None,
                 },
-                pqc_responder_config,
-                pqc_initiator_template,
                 ..NativeWebRtcState::default()
             }),
         });
@@ -388,18 +361,16 @@ impl NativeWebRtcSession {
         Ok(())
     }
 
-    pub async fn send_app_payload(&self, payload: Vec<u8>) -> Result<()> {
-        self.inner.send_app_payload_bytes(payload).await
+    pub fn handle(&self) -> NativeWebRtcHandle {
+        NativeWebRtcHandle {
+            inner: Arc::clone(&self.inner),
+        }
     }
+}
 
-    pub async fn start_outbound_pqc_rekey(
-        &self,
-        peer_device_id: Option<String>,
-        peer_kem_public_keys: BTreeMap<CryptoSuite, Vec<u8>>,
-    ) -> Result<bool> {
-        self.inner
-            .start_outbound_pqc_rekey(peer_device_id, peer_kem_public_keys)
-            .await
+impl NativeWebRtcHandle {
+    pub async fn send_application_payload(&self, payload: &[u8]) -> Result<()> {
+        self.inner.send_application_payload(payload).await
     }
 }
 
@@ -664,86 +635,6 @@ impl NativeWebRtcInner {
         Ok(())
     }
 
-    async fn send_app_payload_bytes(&self, payload: Vec<u8>) -> Result<()> {
-        let ciphertext = {
-            let state = self.state.lock().await;
-            let keys = state
-                .established_session_keys
-                .as_ref()
-                .ok_or_else(|| anyhow!("native WebRTC session is not established"))?;
-            encrypt_application_payload(keys, &payload)?
-        };
-        let data_channel = self
-            .data_channel
-            .lock()
-            .await
-            .clone()
-            .ok_or_else(|| anyhow!("data channel is not attached"))?;
-        self.send_framed_payload(&data_channel, &ciphertext).await
-    }
-
-    async fn start_outbound_pqc_rekey(
-        self: &Arc<Self>,
-        peer_device_id: Option<String>,
-        peer_kem_public_keys: BTreeMap<CryptoSuite, Vec<u8>>,
-    ) -> Result<bool> {
-        let outbound_message_a = {
-            let mut state = self.state.lock().await;
-            let Some(established) = state.established_session_keys.as_ref() else {
-                return Ok(false);
-            };
-            if CryptoSuite::from_name(&established.negotiated_suite).is_some_and(|suite| suite.is_pqc())
-            {
-                return Ok(false);
-            }
-            if state.rekey_handshake.is_some() {
-                return Ok(false);
-            }
-            let template = state
-                .pqc_initiator_template
-                .clone()
-                .ok_or_else(|| anyhow!("local PQC identity is unavailable for outbound rekey"))?;
-            if peer_kem_public_keys.is_empty() {
-                return Ok(false);
-            }
-            let mut handshake =
-                NativeSessionHandshake::Initiator(NativeInitiatorHandshake::Pqc(
-                    PqcInitiatorHandshake::new(PqcInitiatorConfig {
-                        local_binding: template.local_binding,
-                        signing_secret_key: template.signing_secret_key,
-                        local_device_name: template.local_device_name,
-                        preferred_suites: template.preferred_suites,
-                        peer_kem_public_keys,
-                    })?,
-                ));
-            let message_a = handshake.start()?;
-            if message_a.is_empty() {
-                return Ok(false);
-            }
-            state.rekey_handshake = Some(handshake);
-            if let Some(peer_device_id) = peer_device_id {
-                debug!(
-                    kind = "native_webrtc.rekey.outbound_started",
-                    session_id = %self.session_id,
-                    role = ?self.role,
-                    peer_device_id = %peer_device_id,
-                    bytes = message_a.len(),
-                    "starting outbound PQC rekey"
-                );
-            }
-            message_a
-        };
-        let data_channel = self
-            .data_channel
-            .lock()
-            .await
-            .clone()
-            .ok_or_else(|| anyhow!("data channel is not attached"))?;
-        self.send_framed_payload(&data_channel, &outbound_message_a)
-            .await?;
-        Ok(true)
-    }
-
     async fn handle_data_channel_open(
         self: &Arc<Self>,
         data_channel: Arc<RTCDataChannel>,
@@ -849,150 +740,7 @@ impl NativeWebRtcInner {
     }
 
     async fn handle_framed_payload(self: &Arc<Self>, payload: Vec<u8>) -> Result<()> {
-        if let Some(decrypted) = self.try_decrypt_application_payload(&payload).await? {
-            if let Some(ping_id) = decrypted.pong_id {
-                info!(
-                    kind = "native_webrtc.keepalive.pong_reply",
-                    session_id = %self.session_id,
-                    role = ?self.role,
-                    ping_id = ping_id,
-                    "replying to encrypted keepalive ping"
-                );
-                let outbound = {
-                    let state = self.state.lock().await;
-                    let keys = state
-                        .established_session_keys
-                        .as_ref()
-                        .ok_or_else(|| anyhow!("native WebRTC session is not established"))?;
-                    encrypt_application_payload(keys, &build_pong_plaintext(ping_id)?)?
-                };
-                let data_channel = self
-                    .data_channel
-                    .lock()
-                    .await
-                    .clone()
-                    .ok_or_else(|| anyhow!("data channel is not attached"))?;
-                self.send_framed_payload(&data_channel, &outbound).await?;
-                self.emit_keepalive_event(RuntimeSessionKeepaliveKind::PongReplied, Some(ping_id))
-                    .await;
-            }
-
-            if decrypted.observed_heartbeat {
-                info!(
-                    kind = "native_webrtc.keepalive.heartbeat_received",
-                    session_id = %self.session_id,
-                    role = ?self.role,
-                    "received encrypted heartbeat"
-                );
-                self.emit_keepalive_event(RuntimeSessionKeepaliveKind::HeartbeatReceived, None)
-                    .await;
-            }
-
-            if let Some(pong_id) = decrypted.observed_pong_id {
-                info!(
-                    kind = "native_webrtc.keepalive.pong_received",
-                    session_id = %self.session_id,
-                    role = ?self.role,
-                    ping_id = pong_id,
-                    "received encrypted keepalive pong"
-                );
-                self.emit_keepalive_event(RuntimeSessionKeepaliveKind::PongReceived, Some(pong_id))
-                    .await;
-            }
-
-            if !decrypted.observed_heartbeat
-                && decrypted.pong_id.is_none()
-                && decrypted.observed_pong_id.is_none()
-            {
-                self.events_tx
-                    .send(NativeWebRtcEvent::AppPayload {
-                        data: decrypted.plaintext,
-                    })
-                    .await
-                    .map_err(|_| anyhow!("native_webrtc_event_receiver_dropped"))?;
-            }
-            self.ensure_heartbeat_task().await?;
-            return Ok(());
-        }
-
-        let established = {
-            let state = self.state.lock().await;
-            state.established_session_keys.is_some()
-        };
-        if established {
-            let created_responder = self.prepare_rekey_responder_if_needed(&payload).await?;
-            if created_responder {
-                debug!(
-                    kind = "native_webrtc.rekey.inbound_reprocess",
-                    session_id = %self.session_id,
-                    role = ?self.role,
-                    bytes = payload.len(),
-                    "reprocessing inbound MessageA after creating rekey responder"
-                );
-            }
-
-            let actions = {
-                let mut state = self.state.lock().await;
-                if let Some(handshake) = state.rekey_handshake.as_mut() {
-                    handshake.handle_frame(&payload)?
-                } else {
-                    ClassicHandleResult::default()
-                }
-            };
-            self.apply_handshake_actions(actions, true).await?;
-            return Ok(());
-        }
-
-        let should_ignore = {
-            let state = self.state.lock().await;
-            state.handshake.as_ref().is_some_and(|handshake| {
-                handshake.is_waiting_for_message_b() && looks_like_handshake_message_a(&payload)
-            }) && state.pqc_responder_config.is_none()
-        };
-        if should_ignore {
-            info!(
-                kind = "native_webrtc.handshake.simultaneous_open_ignored",
-                session_id = %self.session_id,
-                role = ?self.role,
-                bytes = payload.len(),
-                "ignoring inbound MessageA while waiting for MessageB because no responder config is available"
-            );
-            return Ok(());
-        }
-
-        let maybe_responder_config = {
-            let mut state = self.state.lock().await;
-            if state.handshake.as_ref().is_some_and(|handshake| {
-                handshake.is_waiting_for_message_b() && looks_like_handshake_message_a(&payload)
-            }) {
-                let responder_config = state.pqc_responder_config.clone();
-                if let Some(config) = responder_config.clone() {
-                    info!(
-                        kind = "native_webrtc.handshake.simultaneous_open_yield",
-                        session_id = %self.session_id,
-                        role = ?self.role,
-                        bytes = payload.len(),
-                        "switching from initiator to PQC responder after receiving an inbound MessageA"
-                    );
-                    state.handshake = Some(NativeSessionHandshake::Responder(
-                        NativeResponderHandshake::Pqc(PqcResponderHandshake::new(config.clone())?),
-                    ));
-                }
-                responder_config
-            } else {
-                None
-            }
-        };
-        if maybe_responder_config.is_some() {
-            debug!(
-                kind = "native_webrtc.handshake.simultaneous_open_reprocess",
-                session_id = %self.session_id,
-                role = ?self.role,
-                bytes = payload.len(),
-                "reprocessing inbound MessageA after handshake role switch"
-            );
-        }
-
+        let payload = unwrap_traffic_padding_if_needed(&payload);
         let actions = {
             let mut state = self.state.lock().await;
             if let Some(handshake) = state.handshake.as_mut() {
@@ -1001,49 +749,7 @@ impl NativeWebRtcInner {
                 ClassicHandleResult::default()
             }
         };
-        self.apply_handshake_actions(actions, false).await
-    }
 
-    async fn try_decrypt_application_payload(
-        &self,
-        payload: &[u8],
-    ) -> Result<Option<DecryptedAppPayload>> {
-        let keys = {
-            let state = self.state.lock().await;
-            state.established_session_keys.clone()
-        };
-        let Some(keys) = keys else {
-            return Ok(None);
-        };
-        decrypt_application_payload(&keys, payload)
-    }
-
-    async fn prepare_rekey_responder_if_needed(self: &Arc<Self>, payload: &[u8]) -> Result<bool> {
-        let mut state = self.state.lock().await;
-        if state.rekey_handshake.is_some() || !looks_like_handshake_message_a(payload) {
-            return Ok(false);
-        }
-        let Some(config) = state.pqc_responder_config.clone() else {
-            return Ok(false);
-        };
-        info!(
-            kind = "native_webrtc.rekey.inbound_started",
-            session_id = %self.session_id,
-            role = ?self.role,
-            bytes = payload.len(),
-            "starting inbound PQC rekey responder after receiving a handshake MessageA"
-        );
-        state.rekey_handshake = Some(NativeSessionHandshake::Responder(
-            NativeResponderHandshake::Pqc(PqcResponderHandshake::new(config)?),
-        ));
-        Ok(true)
-    }
-
-    async fn apply_handshake_actions(
-        self: &Arc<Self>,
-        actions: ClassicHandleResult,
-        from_rekey: bool,
-    ) -> Result<()> {
         if !actions.outbound_frames.is_empty() {
             let data_channel = self
                 .data_channel
@@ -1058,12 +764,13 @@ impl NativeWebRtcInner {
 
         if let Some(established) = actions.established {
             self.mark_handshake_complete(established).await?;
-            if from_rekey {
-                let mut state = self.state.lock().await;
-                if let Some(handshake) = state.rekey_handshake.take() {
-                    state.handshake = Some(handshake);
-                }
-            }
+        }
+
+        if let Some(payload) = actions.app_payload {
+            self.events_tx
+                .send(NativeWebRtcEvent::ApplicationPayload { payload })
+                .await
+                .map_err(|_| anyhow!("native_webrtc_event_receiver_dropped"))?;
         }
 
         if let Some(pong_id) = actions.pong_id {
@@ -1076,12 +783,10 @@ impl NativeWebRtcInner {
             );
             let outbound = {
                 let state = self.state.lock().await;
-                let handshake = if from_rekey {
-                    state.rekey_handshake.as_ref().or(state.handshake.as_ref())
-                } else {
-                    state.handshake.as_ref()
-                }
-                .ok_or_else(|| anyhow!("native handshake missing"))?;
+                let handshake = state
+                    .handshake
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("native handshake missing"))?;
                 handshake.build_pong_frame(pong_id)?
             };
             let data_channel = self
@@ -1121,6 +826,7 @@ impl NativeWebRtcInner {
         if actions.heartbeat_requested {
             self.ensure_heartbeat_task().await?;
         }
+
         Ok(())
     }
 
@@ -1131,14 +837,12 @@ impl NativeWebRtcInner {
         let should_emit = {
             let mut state = self.state.lock().await;
             state.established_session_keys = Some(established.clone());
-            let transcript_hash = established.transcript_hash.clone();
-            let should_emit = state
-                .last_handshake_transcript_hash
-                .as_ref()
-                .map(|current| current != &transcript_hash)
-                .unwrap_or(true);
-            state.last_handshake_transcript_hash = Some(transcript_hash);
-            should_emit
+            if state.handshake_complete_emitted {
+                false
+            } else {
+                state.handshake_complete_emitted = true;
+                true
+            }
         };
         if should_emit {
             info!(
@@ -1233,14 +937,11 @@ impl NativeWebRtcInner {
     async fn send_heartbeat_once(self: &Arc<Self>) -> Result<()> {
         let heartbeat_frame = {
             let state = self.state.lock().await;
-            let keys = state
-                .established_session_keys
+            let handshake = state
+                .handshake
                 .as_ref()
-                .ok_or_else(|| anyhow!("native WebRTC session is not established"))?;
-            encrypt_application_payload(keys, &build_heartbeat_plaintext(
-                &self.local_device_id,
-                self.local_device_name.as_deref(),
-            )?)?
+                .ok_or_else(|| anyhow!("native handshake missing"))?;
+            handshake.build_heartbeat_frame()?
         };
         let data_channel = self
             .data_channel
@@ -1267,11 +968,11 @@ impl NativeWebRtcInner {
             let mut state = self.state.lock().await;
             let ping_id = state.next_ping_id;
             state.next_ping_id = state.next_ping_id.saturating_add(1);
-            let keys = state
-                .established_session_keys
+            let handshake = state
+                .handshake
                 .as_ref()
-                .ok_or_else(|| anyhow!("native WebRTC session is not established"))?;
-            let ping_frame = encrypt_application_payload(keys, &build_ping_plaintext(ping_id)?)?;
+                .ok_or_else(|| anyhow!("native handshake missing"))?;
+            let ping_frame = handshake.build_ping_frame(ping_id)?;
             (ping_id, ping_frame)
         };
         let data_channel = self
@@ -1312,11 +1013,28 @@ impl NativeWebRtcInner {
         Ok(())
     }
 
+    async fn send_application_payload(&self, payload: &[u8]) -> Result<()> {
+        let outbound = {
+            let state = self.state.lock().await;
+            let handshake = state
+                .handshake
+                .as_ref()
+                .ok_or_else(|| anyhow!("native handshake missing"))?;
+            handshake.build_application_frame(payload)?
+        };
+        let data_channel = self
+            .data_channel
+            .lock()
+            .await
+            .clone()
+            .ok_or_else(|| anyhow!("data channel is not attached"))?;
+        self.send_framed_payload(&data_channel, &outbound).await
+    }
+
     async fn emit_transport_disconnected(&self, reason: Option<String>) {
         let should_emit = {
             let mut state = self.state.lock().await;
             state.established_session_keys = None;
-            state.rekey_handshake = None;
             state.heartbeat_task_started = false;
             state.next_ping_id = 0;
             if state.transport_disconnected_emitted {
@@ -1388,133 +1106,9 @@ fn now_unix_seconds() -> f64 {
         .unwrap_or_default()
 }
 
-fn apple_reference_seconds_now() -> f64 {
-    now_unix_seconds() - 978_307_200.0
-}
-
-fn build_heartbeat_plaintext(
-    local_device_id: &str,
-    local_device_name: Option<&str>,
-) -> Result<Vec<u8>> {
-    Ok(serde_json::to_vec(&json!({
-        "heartbeat": {
-            "sentAt": apple_reference_seconds_now(),
-            "deviceId": local_device_id,
-            "deviceName": local_device_name,
-            "platform": std::env::consts::OS,
-            "remoteVideoFormats": ["bgra"],
-        }
-    }))?)
-}
-
-fn build_ping_plaintext(id: u64) -> Result<Vec<u8>> {
-    Ok(serde_json::to_vec(&json!({ "ping": { "id": id } }))?)
-}
-
-fn build_pong_plaintext(id: u64) -> Result<Vec<u8>> {
-    Ok(serde_json::to_vec(&json!({ "pong": { "id": id } }))?)
-}
-
-fn encrypt_application_payload(session_keys: &ClassicSessionKeys, plaintext: &[u8]) -> Result<Vec<u8>> {
-    let cipher = Aes256Gcm::new_from_slice(&session_keys.send_key)
-        .map_err(|error| anyhow!("invalid AES-256 key: {error}"))?;
-    let mut nonce_bytes = [0u8; 12];
-    fill_random(&mut nonce_bytes)?;
-    let ciphertext_and_tag = cipher
-        .encrypt(Nonce::from_slice(&nonce_bytes), plaintext)
-        .map_err(|error| anyhow!("failed to encrypt app payload: {error}"))?;
-    let mut combined = nonce_bytes.to_vec();
-    combined.extend_from_slice(&ciphertext_and_tag);
-    Ok(combined)
-}
-
-fn decrypt_application_payload(
-    session_keys: &ClassicSessionKeys,
-    payload: &[u8],
-) -> Result<Option<DecryptedAppPayload>> {
-    if payload.len() < 12 + 16 {
-        return Ok(None);
-    }
-    let cipher = Aes256Gcm::new_from_slice(&session_keys.receive_key)
-        .map_err(|error| anyhow!("invalid AES-256 key: {error}"))?;
-    let plaintext = match cipher.decrypt(Nonce::from_slice(&payload[..12]), &payload[12..]) {
-        Ok(plaintext) => plaintext,
-        Err(_) => return Ok(None),
-    };
-    let value: Option<Value> = serde_json::from_slice(&plaintext).ok();
-    let pong_id = value
-        .as_ref()
-        .and_then(|value| value.get("ping"))
-        .and_then(|ping| ping.get("id"))
-        .and_then(Value::as_u64);
-    let observed_pong_id = value
-        .as_ref()
-        .and_then(|value| value.get("pong"))
-        .and_then(|pong| pong.get("id"))
-        .and_then(Value::as_u64);
-    let observed_heartbeat = value
-        .as_ref()
-        .is_some_and(|value| value.get("heartbeat").is_some());
-    Ok(Some(DecryptedAppPayload {
-        plaintext,
-        pong_id,
-        observed_pong_id,
-        observed_heartbeat,
-    }))
-}
-
-fn looks_like_handshake_message_a(frame: &[u8]) -> bool {
-    let unwrapped = unwrap_handshake_padding(frame);
-    if unwrapped.len() < 1 + 2 + 2 + 32 + 2 {
-        return false;
-    }
-    if unwrapped[0] != 1 {
-        return false;
-    }
-
-    let mut offset = 1usize;
-    let supported_suites = match read_u16_le_checked(&unwrapped, &mut offset) {
-        Some(value) if (1..=8).contains(&value) => value as usize,
-        _ => return false,
-    };
-    let suites_bytes = supported_suites.checked_mul(2).unwrap_or(usize::MAX);
-    if offset.checked_add(suites_bytes).is_none_or(|end| end > unwrapped.len()) {
-        return false;
-    }
-    offset += suites_bytes;
-
-    let key_shares = match read_u16_le_checked(&unwrapped, &mut offset) {
-        Some(value) if value <= supported_suites as u16 => value as usize,
-        _ => return false,
-    };
-    for _ in 0..key_shares {
-        offset += 2;
-        let share_len = match read_u16_le_checked(&unwrapped, &mut offset) {
-            Some(value) => value as usize,
-            None => return false,
-        };
-        if offset.checked_add(share_len).is_none_or(|end| end > unwrapped.len()) {
-            return false;
-        }
-        offset += share_len;
-    }
-
-    if offset.checked_add(32 + 2).is_none_or(|end| end > unwrapped.len()) {
-        return false;
-    }
-    true
-}
-
-fn read_u16_le_checked(data: &[u8], offset: &mut usize) -> Option<u16> {
-    let end = offset.checked_add(2)?;
-    let bytes = data.get(*offset..end)?;
-    *offset = end;
-    Some(u16::from_le_bytes([bytes[0], bytes[1]]))
-}
-
-fn unwrap_handshake_padding(data: &[u8]) -> Vec<u8> {
-    const HANDSHAKE_PADDING_MAGIC: &[u8; 4] = b"SBP1";
-    if data.len() < 8 || &data[..4] != HANDSHAKE_PADDING_MAGIC {
+fn unwrap_traffic_padding_if_needed(data: &[u8]) -> Vec<u8> {
+    const TRAFFIC_PADDING_MAGIC: &[u8; 4] = b"SBP2";
+    if data.len() < 8 || &data[..4] != TRAFFIC_PADDING_MAGIC {
         return data.to_vec();
     }
     let actual_len = u32::from_be_bytes([data[4], data[5], data[6], data[7]]) as usize;
@@ -1529,12 +1123,10 @@ mod tests {
     use std::collections::BTreeMap;
 
     use anyhow::Result;
-    use ed25519_dalek::SigningKey;
 
     use super::*;
     use crate::{
-        ClassicInitiatorConfig, ClassicResponderConfig, CryptoSuite, PqcInitiatorConfig,
-        PqcResponderConfig, ProtocolIdentityBinding, ProtocolSigningAlgorithm,
+        CryptoSuite, PqcInitiatorConfig, PqcResponderConfig, ProtocolIdentityBinding,
         RustPqcIdentityMaterial,
     };
 
@@ -1562,7 +1154,7 @@ mod tests {
                                 handshake_count += 1;
                                 observed.push(event);
                             }
-                            NativeWebRtcEvent::AppPayload { .. } => observed.push(event),
+                            NativeWebRtcEvent::ApplicationPayload { .. } => observed.push(event),
                             NativeWebRtcEvent::Keepalive { .. } => {}
                             NativeWebRtcEvent::TransportDisconnected { .. } => observed.push(event),
                         }
@@ -1580,7 +1172,7 @@ mod tests {
                                 handshake_count += 1;
                                 observed.push(event);
                             }
-                            NativeWebRtcEvent::AppPayload { .. } => observed.push(event),
+                            NativeWebRtcEvent::ApplicationPayload { .. } => observed.push(event),
                             NativeWebRtcEvent::Keepalive { .. } => {}
                             NativeWebRtcEvent::TransportDisconnected { .. } => observed.push(event),
                         }
@@ -1606,9 +1198,7 @@ mod tests {
             role: RuntimeSessionRole::Initiator,
             turn_credentials: None,
             classic_initiator: None,
-            classic_responder: None,
             pqc_initiator: None,
-            pqc_initiator_template: None,
             pqc_responder: None,
         })
         .await?;
@@ -1618,9 +1208,7 @@ mod tests {
             role: RuntimeSessionRole::Responder,
             turn_credentials: None,
             classic_initiator: None,
-            classic_responder: None,
             pqc_initiator: None,
-            pqc_initiator_template: None,
             pqc_responder: None,
         })
         .await?;
@@ -1668,7 +1256,6 @@ mod tests {
             role: RuntimeSessionRole::Initiator,
             turn_credentials: None,
             classic_initiator: None,
-            classic_responder: None,
             pqc_initiator: Some(PqcInitiatorConfig {
                 local_binding: ProtocolIdentityBinding::new(
                     "device-1234567890abcd",
@@ -1690,7 +1277,6 @@ mod tests {
                     ),
                 ]),
             }),
-            pqc_initiator_template: None,
             pqc_responder: None,
         })
         .await?;
@@ -1700,9 +1286,7 @@ mod tests {
             role: RuntimeSessionRole::Responder,
             turn_credentials: None,
             classic_initiator: None,
-            classic_responder: None,
             pqc_initiator: None,
-            pqc_initiator_template: None,
             pqc_responder: Some(PqcResponderConfig {
                 local_binding: ProtocolIdentityBinding::new(
                     "device-fedcba0987654321",
@@ -1761,83 +1345,55 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn native_webrtc_bootstraps_classic_then_rekeys_to_pqc_before_app_payload() -> Result<()> {
-        let initiator_secret = [0x31; 32];
-        let responder_secret = [0x52; 32];
-        let initiator_signing = SigningKey::from_bytes(&initiator_secret);
-        let responder_signing = SigningKey::from_bytes(&responder_secret);
-        let initiator_pqc = RustPqcIdentityMaterial::generate()?;
-        let responder_pqc = RustPqcIdentityMaterial::generate()?;
-
+    async fn native_webrtc_delivers_application_payload_after_pqc_handshake() -> Result<()> {
+        let initiator_identity = RustPqcIdentityMaterial::generate()?;
+        let responder_identity = RustPqcIdentityMaterial::generate()?;
         let mut initiator = NativeWebRtcSession::new(NativeWebRtcConfig {
-            session_id: "native-classic-rekey-test".to_owned(),
+            session_id: "native-app-payload-test".to_owned(),
             local_device_id: "device-a".to_owned(),
             role: RuntimeSessionRole::Initiator,
             turn_credentials: None,
-            classic_initiator: Some(ClassicInitiatorConfig {
+            classic_initiator: None,
+            pqc_initiator: Some(PqcInitiatorConfig {
                 local_binding: ProtocolIdentityBinding::new(
-                    "device-aaaaaaaaaaaaaaaa",
-                    ProtocolSigningAlgorithm::Ed25519,
-                    initiator_signing.verifying_key().to_bytes().to_vec(),
+                    "device-1234567890abcd",
+                    initiator_identity.signing_algorithm,
+                    initiator_identity.signing_public_key.clone(),
                     None,
                 )?,
-                signing_secret_key: initiator_secret.to_vec(),
-                local_device_name: Some("Classic Initiator".to_owned()),
-            }),
-            classic_responder: None,
-            pqc_initiator: None,
-            pqc_initiator_template: Some(PqcInitiatorTemplate {
-                local_binding: ProtocolIdentityBinding::new(
-                    "device-aaaaaaaaaaaaaaaa",
-                    initiator_pqc.signing_algorithm,
-                    initiator_pqc.signing_public_key.clone(),
-                    None,
-                )?,
-                signing_secret_key: initiator_pqc.signing_secret_key.clone(),
-                local_device_name: Some("Classic Initiator".to_owned()),
+                signing_secret_key: initiator_identity.signing_secret_key.clone(),
+                local_device_name: Some("Rust PQC Initiator".to_owned()),
                 preferred_suites: vec![CryptoSuite::XWING_MLDSA, CryptoSuite::MLKEM768_MLDSA65],
+                peer_kem_public_keys: BTreeMap::from([
+                    (
+                        CryptoSuite::XWING_MLDSA,
+                        responder_identity.xwing_public_key.clone(),
+                    ),
+                    (
+                        CryptoSuite::MLKEM768_MLDSA65,
+                        responder_identity.mlkem768_public_key.clone(),
+                    ),
+                ]),
             }),
             pqc_responder: None,
         })
         .await?;
-
         let mut responder = NativeWebRtcSession::new(NativeWebRtcConfig {
-            session_id: "native-classic-rekey-test".to_owned(),
+            session_id: "native-app-payload-test".to_owned(),
             local_device_id: "device-b".to_owned(),
             role: RuntimeSessionRole::Responder,
             turn_credentials: None,
             classic_initiator: None,
-            classic_responder: Some(ClassicResponderConfig {
-                local_binding: ProtocolIdentityBinding::new(
-                    "device-bbbbbbbbbbbbbbbb",
-                    ProtocolSigningAlgorithm::Ed25519,
-                    responder_signing.verifying_key().to_bytes().to_vec(),
-                    None,
-                )?,
-                signing_secret_key: responder_secret.to_vec(),
-                local_device_name: Some("Classic Responder".to_owned()),
-            }),
             pqc_initiator: None,
-            pqc_initiator_template: Some(PqcInitiatorTemplate {
-                local_binding: ProtocolIdentityBinding::new(
-                    "device-bbbbbbbbbbbbbbbb",
-                    responder_pqc.signing_algorithm,
-                    responder_pqc.signing_public_key.clone(),
-                    None,
-                )?,
-                signing_secret_key: responder_pqc.signing_secret_key.clone(),
-                local_device_name: Some("Classic Responder".to_owned()),
-                preferred_suites: vec![CryptoSuite::XWING_MLDSA, CryptoSuite::MLKEM768_MLDSA65],
-            }),
             pqc_responder: Some(PqcResponderConfig {
                 local_binding: ProtocolIdentityBinding::new(
-                    "device-bbbbbbbbbbbbbbbb",
-                    responder_pqc.signing_algorithm,
-                    responder_pqc.signing_public_key.clone(),
+                    "device-fedcba0987654321",
+                    responder_identity.signing_algorithm,
+                    responder_identity.signing_public_key.clone(),
                     None,
                 )?,
-                local_device_name: Some("Classic Responder".to_owned()),
-                identity: responder_pqc.clone(),
+                local_device_name: Some("Rust PQC Responder".to_owned()),
+                identity: responder_identity,
                 supported_suites: vec![CryptoSuite::XWING_MLDSA, CryptoSuite::MLKEM768_MLDSA65],
             }),
         })
@@ -1847,93 +1403,50 @@ mod tests {
         responder.start().await?;
         initiator.notify_remote_join("device-b").await?;
 
-        let classic_observed = timeout(
+        let _ = timeout(
             Duration::from_secs(20),
             pump_events(&mut initiator, &mut responder, 2, 2),
         )
         .await
-        .map_err(|_| anyhow!("native_webrtc_classic_bootstrap_timeout"))??;
-        let classic_suites = classic_observed
-            .iter()
-            .filter_map(|event| match event {
-                NativeWebRtcEvent::HandshakeComplete { negotiated_suite } => {
-                    Some(negotiated_suite.as_str())
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(classic_suites, vec!["X25519", "X25519"]);
+        .map_err(|_| anyhow!("native_webrtc_app_payload_test_timeout"))??;
 
-        assert!(initiator
-            .start_outbound_pqc_rekey(
-                Some("device-bbbbbbbbbbbbbbbb".to_owned()),
-                BTreeMap::from([
-                    (
-                        CryptoSuite::XWING_MLDSA,
-                        responder_pqc.xwing_public_key.clone(),
-                    ),
-                    (
-                        CryptoSuite::MLKEM768_MLDSA65,
-                        responder_pqc.mlkem768_public_key.clone(),
-                    ),
-                ]),
-            )
-            .await?);
+        initiator
+            .handle()
+            .send_application_payload(br#"{"op":"ping_file_channel"}"#)
+            .await?;
 
-        let rekey_observed = timeout(
-            Duration::from_secs(20),
-            pump_events(&mut initiator, &mut responder, 0, 2),
-        )
-        .await
-        .map_err(|_| anyhow!("native_webrtc_rekey_timeout"))??;
-        let rekey_suites = rekey_observed
-            .iter()
-            .filter_map(|event| match event {
-                NativeWebRtcEvent::HandshakeComplete { negotiated_suite } => {
-                    Some(negotiated_suite.as_str())
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(rekey_suites.len(), 2);
-        assert!(rekey_suites
-            .iter()
-            .all(|suite| *suite == "X-Wing" || *suite == "ML-KEM-768"));
-
-        let expected = br#"{"transfer":"metadata"}"#.to_vec();
-        initiator.send_app_payload(expected.clone()).await?;
-
-        let mut received = None;
-        for _ in 0..128 {
-            tokio::select! {
-                event = initiator.next_event() => {
-                    if let Some(NativeWebRtcEvent::SignalingEnvelope(envelope)) = event {
-                        responder.handle_signaling_envelope(&envelope).await?;
-                    }
-                }
-                event = responder.next_event() => {
-                    if let Some(event) = event {
-                        match event {
-                            NativeWebRtcEvent::SignalingEnvelope(envelope) => initiator.handle_signaling_envelope(&envelope).await?,
-                            NativeWebRtcEvent::AppPayload { data } => {
-                                received = Some(data);
-                                break;
-                            }
-                            NativeWebRtcEvent::TransportReady
-                            | NativeWebRtcEvent::HandshakeComplete { .. }
-                            | NativeWebRtcEvent::Keepalive { .. }
-                            | NativeWebRtcEvent::TransportDisconnected { .. } => {}
+        let observed = timeout(Duration::from_secs(10), async {
+            loop {
+                tokio::select! {
+                    event = initiator.next_event() => {
+                        if let Some(NativeWebRtcEvent::SignalingEnvelope(envelope)) = event {
+                            responder.handle_signaling_envelope(&envelope).await?;
                         }
                     }
+                    event = responder.next_event() => {
+                        if let Some(event) = event {
+                            match event {
+                                NativeWebRtcEvent::SignalingEnvelope(envelope) => {
+                                    initiator.handle_signaling_envelope(&envelope).await?;
+                                }
+                                NativeWebRtcEvent::ApplicationPayload { payload } => {
+                                    return Ok::<Vec<u8>, anyhow::Error>(payload);
+                                }
+                                NativeWebRtcEvent::TransportReady
+                                | NativeWebRtcEvent::HandshakeComplete { .. }
+                                | NativeWebRtcEvent::Keepalive { .. }
+                                | NativeWebRtcEvent::TransportDisconnected { .. } => {}
+                            }
+                        }
+                    }
+                    _ = tokio::time::sleep(Duration::from_millis(50)) => {}
                 }
-                _ = tokio::time::sleep(Duration::from_millis(50)) => {}
             }
-            if received.is_some() {
-                break;
-            }
-        }
+        })
+        .await
+        .map_err(|_| anyhow!("timed out waiting for application payload"))??;
 
-        assert_eq!(received, Some(expected));
+        assert_eq!(observed, br#"{"op":"ping_file_channel"}"#.to_vec());
 
         initiator.close().await?;
         responder.close().await?;

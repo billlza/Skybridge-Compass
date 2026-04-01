@@ -8,12 +8,7 @@ use hmac::{Hmac, Mac};
 use hpke::aead::ChaCha20Poly1305;
 use hpke::kdf::HkdfSha256;
 use hpke::kem::X25519HkdfSha256;
-use hpke::{
-    Deserializable, Kem as KemTrait, OpModeR, OpModeS, Serializable, setup_receiver,
-    setup_sender,
-};
-use rand::SeedableRng;
-use rand::rngs::StdRng;
+use hpke::{Deserializable, Kem as KemTrait, OpModeR, Serializable, setup_receiver};
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -51,13 +46,6 @@ pub struct ClassicInitiatorConfig {
     pub local_device_name: Option<String>,
 }
 
-#[derive(Debug, Clone)]
-pub struct ClassicResponderConfig {
-    pub local_binding: ProtocolIdentityBinding,
-    pub signing_secret_key: Vec<u8>,
-    pub local_device_name: Option<String>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClassicSessionKeys {
     pub send_key: Vec<u8>,
@@ -74,6 +62,7 @@ pub struct ClassicHandleResult {
     pub pong_id: Option<u64>,
     pub observed_pong_id: Option<u64>,
     pub observed_heartbeat: bool,
+    pub app_payload: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -118,12 +107,6 @@ struct PongPayload {
 enum InitiatorState {
     Idle,
     WaitingForMessageB(WaitingForMessageBState),
-    WaitingForFinished(WaitingForFinishedState),
-    Established(ClassicSessionKeys),
-}
-
-enum ResponderState {
-    Idle,
     WaitingForFinished(WaitingForFinishedState),
     Established(ClassicSessionKeys),
 }
@@ -173,23 +156,9 @@ pub struct ClassicInitiatorHandshake {
     state: InitiatorState,
 }
 
-pub struct ClassicResponderHandshake {
-    config: ClassicResponderConfig,
-    state: ResponderState,
-}
-
 impl std::fmt::Debug for ClassicInitiatorHandshake {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ClassicInitiatorHandshake")
-            .field("device_id", &self.config.local_binding.device_id)
-            .field("state", &self.state_label())
-            .finish()
-    }
-}
-
-impl std::fmt::Debug for ClassicResponderHandshake {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ClassicResponderHandshake")
             .field("device_id", &self.config.local_binding.device_id)
             .field("state", &self.state_label())
             .finish()
@@ -314,10 +283,6 @@ impl ClassicInitiatorHandshake {
         }
     }
 
-    pub fn is_waiting_for_message_b(&self) -> bool {
-        matches!(self.state, InitiatorState::WaitingForMessageB(_))
-    }
-
     pub fn build_heartbeat_frame(&self) -> Result<Vec<u8>> {
         let session_keys = self
             .established_session_keys()
@@ -356,6 +321,13 @@ impl ClassicInitiatorHandshake {
                 ping: PingPayload { id },
             },
         )
+    }
+
+    pub fn build_application_frame(&self, payload: &[u8]) -> Result<Vec<u8>> {
+        let session_keys = self
+            .established_session_keys()
+            .ok_or_else(|| anyhow!("classic handshake is not established"))?;
+        build_encrypted_app_frame_bytes(session_keys, payload)
     }
 
     pub fn established_session_keys(&self) -> Option<&ClassicSessionKeys> {
@@ -401,145 +373,11 @@ impl ClassicInitiatorHandshake {
                     pong_id: None,
                     observed_pong_id: None,
                     observed_heartbeat: false,
+                    app_payload: None,
                 })
             }
             InitiatorState::Established(_) => Ok(ClassicHandleResult::default()),
             InitiatorState::Idle => bail!("received Finished before classic handshake started"),
-        }
-    }
-}
-
-impl ClassicResponderHandshake {
-    pub fn new(config: ClassicResponderConfig) -> Result<Self> {
-        if config.local_binding.protocol_signing_algorithm != ProtocolSigningAlgorithm::Ed25519 {
-            bail!("classic responder handshake only supports Ed25519 identities");
-        }
-        if config.signing_secret_key.len() != 32 {
-            bail!("ed25519 signing secret key must be 32 bytes");
-        }
-        Ok(Self {
-            config,
-            state: ResponderState::Idle,
-        })
-    }
-
-    pub fn handle_frame(&mut self, frame: &[u8]) -> Result<ClassicHandleResult> {
-        let unwrapped = unwrap_handshake_padding(frame);
-
-        if let Ok(finished) = decode_finished_frame(&unwrapped) {
-            return self.handle_finished(finished);
-        }
-
-        match &mut self.state {
-            ResponderState::Idle => {
-                let message_a = decode_message_a(&unwrapped)?;
-                let (message_b, session_keys) =
-                    build_responder_message_b_and_keys(&self.config, &message_a)?;
-                let responder_finished = encode_finished_frame(
-                    FinishedDirection::ResponderToInitiator,
-                    &session_keys.send_key,
-                    &session_keys.transcript_hash,
-                )?;
-                self.state =
-                    ResponderState::WaitingForFinished(WaitingForFinishedState { session_keys });
-                Ok(ClassicHandleResult {
-                    outbound_frames: vec![message_b, responder_finished],
-                    ..Default::default()
-                })
-            }
-            ResponderState::WaitingForFinished(waiting) => {
-                if let Some(message) =
-                    try_handle_encrypted_app_message(&unwrapped, &waiting.session_keys)?
-                {
-                    return Ok(message);
-                }
-                bail!("unexpected frame while waiting for classic initiator Finished")
-            }
-            ResponderState::Established(keys) => {
-                if let Some(message) = try_handle_encrypted_app_message(&unwrapped, keys)? {
-                    return Ok(message);
-                }
-                Ok(ClassicHandleResult::default())
-            }
-        }
-    }
-
-    pub fn build_heartbeat_frame(&self) -> Result<Vec<u8>> {
-        let session_keys = self
-            .established_session_keys()
-            .ok_or_else(|| anyhow!("classic responder handshake is not established"))?;
-        let payload = HeartbeatEnvelope {
-            heartbeat: HeartbeatPayload {
-                sent_at: apple_reference_seconds_now(),
-                device_id: Some(self.config.local_binding.device_id.clone()),
-                device_name: self.config.local_device_name.clone(),
-                platform: HEARTBEAT_PLATFORM.to_owned(),
-                remote_video_formats: vec![HEARTBEAT_REMOTE_VIDEO_FORMAT.to_owned()],
-            },
-        };
-        build_encrypted_app_frame(session_keys, &payload)
-    }
-
-    pub fn build_pong_frame(&self, id: u64) -> Result<Vec<u8>> {
-        let session_keys = self
-            .established_session_keys()
-            .ok_or_else(|| anyhow!("classic responder handshake is not established"))?;
-        build_encrypted_app_frame(
-            session_keys,
-            &PongEnvelope {
-                pong: PongPayload { id },
-            },
-        )
-    }
-
-    pub fn build_ping_frame(&self, id: u64) -> Result<Vec<u8>> {
-        let session_keys = self
-            .established_session_keys()
-            .ok_or_else(|| anyhow!("classic responder handshake is not established"))?;
-        build_encrypted_app_frame(
-            session_keys,
-            &PingEnvelope {
-                ping: PingPayload { id },
-            },
-        )
-    }
-
-    pub fn established_session_keys(&self) -> Option<&ClassicSessionKeys> {
-        match &self.state {
-            ResponderState::WaitingForFinished(waiting) => Some(&waiting.session_keys),
-            ResponderState::Established(keys) => Some(keys),
-            ResponderState::Idle => None,
-        }
-    }
-
-    fn handle_finished(&mut self, finished: FinishedFrame) -> Result<ClassicHandleResult> {
-        match &mut self.state {
-            ResponderState::Idle => {
-                bail!("received classic initiator Finished before processing MessageA")
-            }
-            ResponderState::WaitingForFinished(waiting) => {
-                verify_finished(
-                    &waiting.session_keys,
-                    FinishedDirection::InitiatorToResponder,
-                    &finished,
-                )?;
-                let established = waiting.session_keys.clone();
-                self.state = ResponderState::Established(established.clone());
-                Ok(ClassicHandleResult {
-                    established: Some(established),
-                    heartbeat_requested: true,
-                    ..Default::default()
-                })
-            }
-            ResponderState::Established(_) => Ok(ClassicHandleResult::default()),
-        }
-    }
-
-    fn state_label(&self) -> &'static str {
-        match self.state {
-            ResponderState::Idle => "idle",
-            ResponderState::WaitingForFinished(_) => "waiting_for_finished",
-            ResponderState::Established(_) => "established",
         }
     }
 }
@@ -567,99 +405,6 @@ struct DecodedMessageB {
     encrypted_payload_tag: Vec<u8>,
     identity_public_key: Vec<u8>,
     signature: [u8; 64],
-}
-
-struct DecodedMessageA {
-    initiator_share: Vec<u8>,
-    client_nonce: [u8; 32],
-    transcript_hash_a: [u8; 32],
-}
-
-fn decode_message_a(frame: &[u8]) -> Result<DecodedMessageA> {
-    let mut offset = 0usize;
-    let version = *frame
-        .get(offset)
-        .ok_or_else(|| anyhow!("messageA too short"))?;
-    offset += 1;
-    if version != HANDSHAKE_VERSION {
-        bail!("messageA version mismatch");
-    }
-
-    let supported_count = read_u16_le(frame, &mut offset)? as usize;
-    let mut offered_classic = false;
-    for _ in 0..supported_count {
-        if read_u16_le(frame, &mut offset)? == CLASSIC_SUITE_WIRE_ID {
-            offered_classic = true;
-        }
-    }
-    if !offered_classic {
-        bail!("classic suite was not offered in MessageA");
-    }
-
-    let key_share_count = read_u16_le(frame, &mut offset)? as usize;
-    let mut initiator_share = None;
-    for _ in 0..key_share_count {
-        let suite_wire_id = read_u16_le(frame, &mut offset)?;
-        let share_len = read_u16_le(frame, &mut offset)? as usize;
-        let share = read_exact(frame, &mut offset, share_len)?.to_vec();
-        if suite_wire_id == CLASSIC_SUITE_WIRE_ID {
-            initiator_share = Some(share);
-        }
-    }
-    let initiator_share =
-        initiator_share.ok_or_else(|| anyhow!("MessageA missing classic initiator share"))?;
-
-    let client_nonce_bytes = read_exact(frame, &mut offset, 32)?;
-    let mut client_nonce = [0u8; 32];
-    client_nonce.copy_from_slice(client_nonce_bytes);
-
-    let capabilities_len = read_u16_le(frame, &mut offset)? as usize;
-    let _ = read_exact(frame, &mut offset, capabilities_len)?;
-    let policy_len = read_u16_le(frame, &mut offset)? as usize;
-    let _ = read_exact(frame, &mut offset, policy_len)?;
-    let identity_public_key_len = read_u16_le(frame, &mut offset)? as usize;
-    let identity_public_key = read_exact(frame, &mut offset, identity_public_key_len)?.to_vec();
-    let unsigned_end = offset;
-
-    let signature_len = read_u16_le(frame, &mut offset)? as usize;
-    if signature_len != 64 {
-        bail!("unsupported messageA signature length");
-    }
-    let signature_bytes = read_exact(frame, &mut offset, signature_len)?;
-    let mut signature = [0u8; 64];
-    signature.copy_from_slice(signature_bytes);
-
-    if offset < frame.len() {
-        let secure_enclave_signature_len = read_u16_le(frame, &mut offset)? as usize;
-        let _ = read_exact(frame, &mut offset, secure_enclave_signature_len)?;
-    }
-    if offset != frame.len() {
-        bail!("unexpected trailing bytes in messageA");
-    }
-
-    let identity = decode_identity_public_key(&identity_public_key)?;
-    if identity.algorithm != ProtocolSigningAlgorithm::Ed25519 {
-        bail!("unsupported messageA identity algorithm");
-    }
-
-    let unsigned = &frame[..unsigned_end];
-    let mut preimage = Vec::from(HANDSHAKE_A_DOMAIN);
-    preimage.extend_from_slice(unsigned);
-    let verifying_key = VerifyingKey::from_bytes(&identity.public_key)
-        .map_err(|error| anyhow!("invalid initiator ed25519 public key: {error}"))?;
-    verifying_key
-        .verify(&preimage, &Signature::from_bytes(&signature))
-        .map_err(|error| anyhow!("messageA signature verification failed: {error}"))?;
-
-    let transcript_hash_a = Sha256::digest(unsigned);
-    let mut transcript_hash_a_bytes = [0u8; 32];
-    transcript_hash_a_bytes.copy_from_slice(transcript_hash_a.as_ref());
-
-    Ok(DecodedMessageA {
-        initiator_share,
-        client_nonce,
-        transcript_hash_a: transcript_hash_a_bytes,
-    })
 }
 
 fn decode_message_b(frame: &[u8]) -> Result<DecodedMessageB> {
@@ -819,88 +564,6 @@ fn process_message_b(
     )
 }
 
-fn build_responder_message_b_and_keys(
-    config: &ClassicResponderConfig,
-    message_a: &DecodedMessageA,
-) -> Result<(Vec<u8>, ClassicSessionKeys)> {
-    let signing_key = signing_key_from_bytes(&config.signing_secret_key)?;
-    let initiator_public_key =
-        <<ClassicKem as KemTrait>::PublicKey as Deserializable>::from_bytes(
-            &message_a.initiator_share,
-        )
-        .map_err(|error| anyhow!("invalid MessageA classic initiator share: {error}"))?;
-    let mut csprng = StdRng::from_os_rng();
-    let (encapped_key, mut sender) = setup_sender::<ClassicAead, ClassicKdf, ClassicKem, _>(
-        &OpModeS::Base,
-        &initiator_public_key,
-        KEM_DEM_INFO,
-        &mut csprng,
-    )
-    .map_err(|error| anyhow!("failed to set up classic HPKE sender: {error}"))?;
-    let responder_share = encapped_key.to_bytes().to_vec();
-    let encrypted_payload_ciphertext = sender
-        .seal(&classic_capabilities_bytes(), KEM_DEM_INFO)
-        .map_err(|error| anyhow!("failed to seal classic MessageB payload: {error}"))?;
-    let encrypted_payload_combined =
-        encode_hpke_sealed_box(&responder_share, &encrypted_payload_ciphertext);
-
-    let mut exporter_context = Vec::from(KEM_DEM_EXPORT_PREFIX);
-    append_u16_le(&mut exporter_context, CLASSIC_SUITE_WIRE_ID);
-    exporter_context.extend_from_slice(KEM_DEM_INFO);
-    let mut session_secret = [0u8; 32];
-    sender
-        .export(&exporter_context, &mut session_secret)
-        .map_err(|error| anyhow!("failed to export classic HPKE session secret: {error}"))?;
-
-    let mut server_nonce = [0u8; 32];
-    fill_random(&mut server_nonce)?;
-    let identity_public_key = encode_identity_public_key(
-        config.local_binding.protocol_signing_algorithm,
-        &config.local_binding.protocol_public_key_bytes,
-    )?;
-
-    let mut message_b_unsigned = Vec::new();
-    message_b_unsigned.push(HANDSHAKE_VERSION);
-    append_u16_le(&mut message_b_unsigned, CLASSIC_SUITE_WIRE_ID);
-    append_u16_le(&mut message_b_unsigned, responder_share.len() as u16);
-    message_b_unsigned.extend_from_slice(&responder_share);
-    message_b_unsigned.extend_from_slice(&server_nonce);
-    append_u16_le(
-        &mut message_b_unsigned,
-        encrypted_payload_combined.len() as u16,
-    );
-    message_b_unsigned.extend_from_slice(&encrypted_payload_combined);
-    append_u16_le(&mut message_b_unsigned, identity_public_key.len() as u16);
-    message_b_unsigned.extend_from_slice(&identity_public_key);
-
-    let payload_hash = Sha256::digest(&encrypted_payload_combined);
-    let mut signature_preimage = Vec::from(HANDSHAKE_B_DOMAIN);
-    signature_preimage.extend_from_slice(&message_a.transcript_hash_a);
-    append_u16_le(&mut signature_preimage, CLASSIC_SUITE_WIRE_ID);
-    append_u16_le(&mut signature_preimage, responder_share.len() as u16);
-    signature_preimage.extend_from_slice(&responder_share);
-    signature_preimage.extend_from_slice(&server_nonce);
-    signature_preimage.extend_from_slice(&payload_hash);
-    append_u16_le(&mut signature_preimage, identity_public_key.len() as u16);
-    signature_preimage.extend_from_slice(&identity_public_key);
-    let signature = signing_key.sign(&signature_preimage).to_bytes();
-
-    let mut message_b = message_b_unsigned.clone();
-    append_u16_le(&mut message_b, signature.len() as u16);
-    message_b.extend_from_slice(&signature);
-    append_u16_le(&mut message_b, 0);
-
-    let transcript_hash_b = Sha256::digest(&message_b_unsigned);
-    let session_keys = derive_responder_session_keys(
-        &session_secret,
-        &message_a.client_nonce,
-        &server_nonce,
-        &message_a.transcript_hash_a,
-        transcript_hash_b.as_ref(),
-    )?;
-    Ok((message_b, session_keys))
-}
-
 fn message_b_encoded_without_signature(message_b: &DecodedMessageB) -> Vec<u8> {
     let mut encoded = Vec::new();
     encoded.push(HANDSHAKE_VERSION);
@@ -967,28 +630,6 @@ fn derive_session_keys(
     })
 }
 
-fn derive_responder_session_keys(
-    shared_secret: &[u8; 32],
-    client_nonce: &[u8; 32],
-    server_nonce: &[u8; 32],
-    transcript_hash_a: &[u8; 32],
-    transcript_hash_b: &[u8],
-) -> Result<ClassicSessionKeys> {
-    let initiator_view = derive_session_keys(
-        shared_secret,
-        client_nonce,
-        server_nonce,
-        transcript_hash_a,
-        transcript_hash_b,
-    )?;
-    Ok(ClassicSessionKeys {
-        send_key: initiator_view.receive_key,
-        receive_key: initiator_view.send_key,
-        negotiated_suite: initiator_view.negotiated_suite,
-        transcript_hash: initiator_view.transcript_hash,
-    })
-}
-
 fn verify_finished(
     session_keys: &ClassicSessionKeys,
     expected_direction: FinishedDirection,
@@ -997,7 +638,10 @@ fn verify_finished(
     if finished.direction != expected_direction {
         bail!("unexpected Finished direction");
     }
-    let base_key = &session_keys.receive_key;
+    let base_key = match expected_direction {
+        FinishedDirection::ResponderToInitiator => &session_keys.receive_key,
+        FinishedDirection::InitiatorToResponder => &session_keys.send_key,
+    };
     let info = match expected_direction {
         FinishedDirection::ResponderToInitiator => FINISHED_R2I_INFO,
         FinishedDirection::InitiatorToResponder => FINISHED_I2R_INFO,
@@ -1064,12 +708,19 @@ fn build_encrypted_app_frame<T: Serialize>(
     payload: &T,
 ) -> Result<Vec<u8>> {
     let plaintext = serde_json::to_vec(payload)?;
+    build_encrypted_app_frame_bytes(session_keys, &plaintext)
+}
+
+fn build_encrypted_app_frame_bytes(
+    session_keys: &ClassicSessionKeys,
+    plaintext: &[u8],
+) -> Result<Vec<u8>> {
     let cipher = Aes256Gcm::new_from_slice(&session_keys.send_key)
         .map_err(|error| anyhow!("invalid AES-256 key: {error}"))?;
     let mut nonce_bytes = [0u8; 12];
     fill_random(&mut nonce_bytes)?;
     let ciphertext_and_tag = cipher
-        .encrypt(Nonce::from_slice(&nonce_bytes), plaintext.as_ref())
+        .encrypt(Nonce::from_slice(&nonce_bytes), plaintext)
         .map_err(|error| anyhow!("failed to encrypt app payload: {error}"))?;
     let mut combined = nonce_bytes.to_vec();
     combined.extend_from_slice(&ciphertext_and_tag);
@@ -1091,7 +742,12 @@ fn try_handle_encrypted_app_message(
     };
     let value: Value = match serde_json::from_slice(&plaintext) {
         Ok(value) => value,
-        Err(_) => return Ok(None),
+        Err(_) => {
+            return Ok(Some(ClassicHandleResult {
+                app_payload: Some(plaintext),
+                ..Default::default()
+            }));
+        }
     };
     let pong_id = value
         .get("ping")
@@ -1101,6 +757,7 @@ fn try_handle_encrypted_app_message(
         .get("pong")
         .and_then(|pong| pong.get("id"))
         .and_then(Value::as_u64);
+    let is_keepalive = value.get("heartbeat").is_some() || pong_id.is_some() || observed_pong_id.is_some();
     Ok(Some(ClassicHandleResult {
         outbound_frames: Vec::new(),
         established: None,
@@ -1108,6 +765,7 @@ fn try_handle_encrypted_app_message(
         pong_id,
         observed_pong_id,
         observed_heartbeat: value.get("heartbeat").is_some(),
+        app_payload: (!is_keepalive).then_some(plaintext),
     }))
 }
 
@@ -1227,21 +885,6 @@ fn decode_hpke_sealed_box(data: &[u8]) -> Result<DecodedHpkeSealedBox> {
     })
 }
 
-fn encode_hpke_sealed_box(encapsulated_key: &[u8], ciphertext: &[u8]) -> Vec<u8> {
-    let mut out = Vec::new();
-    out.extend_from_slice(b"HPKE");
-    out.push(2);
-    append_u16_le(&mut out, CLASSIC_SUITE_WIRE_ID);
-    append_u16_le(&mut out, 0);
-    append_u16_le(&mut out, encapsulated_key.len() as u16);
-    out.push(0);
-    out.push(0);
-    out.extend_from_slice(&(ciphertext.len() as u32).to_le_bytes());
-    out.extend_from_slice(encapsulated_key);
-    out.extend_from_slice(ciphertext);
-    out
-}
-
 fn encode_string(out: &mut Vec<u8>, value: &str) {
     let bytes = value.as_bytes();
     out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
@@ -1301,7 +944,7 @@ mod tests {
         };
         let encoded = encode_finished_frame(
             FinishedDirection::InitiatorToResponder,
-            &keys.receive_key,
+            &keys.send_key,
             &keys.transcript_hash,
         )?;
         let decoded = decode_finished_frame(&encoded)?;
@@ -1388,59 +1031,6 @@ mod tests {
             .ok_or_else(|| anyhow!("expected encrypted pong payload to parse"))?;
         assert_eq!(parsed_pong.pong_id, None);
         assert_eq!(parsed_pong.observed_pong_id, Some(9));
-        Ok(())
-    }
-
-    #[test]
-    fn classic_initiator_and_responder_complete_handshake() -> Result<()> {
-        let initiator_secret = [0x11; 32];
-        let responder_secret = [0x22; 32];
-        let initiator_signing = SigningKey::from_bytes(&initiator_secret);
-        let responder_signing = SigningKey::from_bytes(&responder_secret);
-        let mut initiator = ClassicInitiatorHandshake::new(ClassicInitiatorConfig {
-            local_binding: ProtocolIdentityBinding::new(
-                "device-initiator-1234",
-                ProtocolSigningAlgorithm::Ed25519,
-                initiator_signing.verifying_key().to_bytes().to_vec(),
-                None,
-            )?,
-            signing_secret_key: initiator_secret.to_vec(),
-            local_device_name: Some("Classic Initiator".to_owned()),
-        })?;
-        let mut responder = ClassicResponderHandshake::new(ClassicResponderConfig {
-            local_binding: ProtocolIdentityBinding::new(
-                "device-responder-5678",
-                ProtocolSigningAlgorithm::Ed25519,
-                responder_signing.verifying_key().to_bytes().to_vec(),
-                None,
-            )?,
-            signing_secret_key: responder_secret.to_vec(),
-            local_device_name: Some("Classic Responder".to_owned()),
-        })?;
-
-        let message_a = initiator.start()?;
-        let responder_result = responder.handle_frame(&message_a)?;
-        assert_eq!(responder_result.outbound_frames.len(), 2);
-
-        let initiator_result = initiator.handle_frame(&responder_result.outbound_frames[0])?;
-        assert!(initiator_result.established.is_none());
-
-        let initiator_finished = initiator.handle_frame(&responder_result.outbound_frames[1])?;
-        assert!(initiator_finished.established.is_some());
-        assert_eq!(initiator_finished.outbound_frames.len(), 1);
-
-        let responder_finished = responder.handle_frame(&initiator_finished.outbound_frames[0])?;
-        assert!(responder_finished.established.is_some());
-
-        let initiator_keys = initiator
-            .established_session_keys()
-            .ok_or_else(|| anyhow!("initiator missing established keys"))?;
-        let responder_keys = responder
-            .established_session_keys()
-            .ok_or_else(|| anyhow!("responder missing established keys"))?;
-        assert_eq!(initiator_keys.send_key, responder_keys.receive_key);
-        assert_eq!(initiator_keys.receive_key, responder_keys.send_key);
-        assert_eq!(initiator_keys.transcript_hash, responder_keys.transcript_hash);
         Ok(())
     }
 }

@@ -8,18 +8,18 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use directories::ProjectDirs;
 use skybridge_core::{
-    AgentHealthSnapshot, AgentRuntimeStatus, ClassicResponderConfig, CryptoSuite, EventLevel,
-    InboundMessage, LocalIdentityState, ManagedSessionControl, NativeWebRtcConfig,
-    NativeWebRtcEvent, NativeWebRtcSession, PqcInitiatorConfig, PqcInitiatorTemplate,
-    PqcResponderConfig, RuntimeSessionRole, RuntimeSessionState, RuntimeSessionTransportEvent,
-    SignalServerClient, SignalingConnection, SignalingLifecyclePhase, SignalingRuntimeEvent,
-    StructuredEvent, make_join_envelope,
+    AgentHealthSnapshot, AgentRuntimeStatus, CryptoSuite, EventLevel, InboundMessage,
+    LocalIdentityState, ManagedSessionControl, NativeWebRtcConfig, NativeWebRtcEvent,
+    NativeWebRtcSession, PqcInitiatorConfig, PqcResponderConfig, RuntimeSessionRole,
+    RuntimeSessionState, RuntimeSessionTransportEvent, SignalServerClient, SignalingConnection,
+    SignalingLifecyclePhase, SignalingRuntimeEvent, StructuredEvent, make_join_envelope,
 };
 use time::OffsetDateTime;
 use tokio::fs;
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 use tokio::time::interval;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use tracing_appender::non_blocking::WorkerGuard;
@@ -31,6 +31,7 @@ use crate::state::{
     load_managed_session_controls, load_session_registry, remove_managed_session_control,
     signing_binding, store_session_registry,
 };
+use crate::transfer_runtime::SessionTransferRuntime;
 
 static TRACING_GUARD: OnceLock<WorkerGuard> = OnceLock::new();
 
@@ -38,11 +39,44 @@ const ENV_PEER_MLKEM768_PUBLIC_KEY_B64: &str = "SKYBRIDGE_PQC_PEER_MLKEM768_PUBL
 const ENV_PEER_XWING_PUBLIC_KEY_B64: &str = "SKYBRIDGE_PQC_PEER_XWING_PUBLIC_KEY_BASE64";
 const ENV_PQC_PREFERRED_SUITE: &str = "SKYBRIDGE_PQC_PREFERRED_SUITE";
 const ENV_PQC_BRIDGE_IDENTITY: &str = "SKYBRIDGE_PQC_BRIDGE_IDENTITY";
+const JOIN_RESEND_INTERVAL: Duration = Duration::from_secs(2);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentCryptoMode {
+    Auto,
+    Xwing,
+    Mlkem,
+    Classic,
+}
+
+impl AgentCryptoMode {
+    fn requested_pqc_suite(self) -> Option<CryptoSuite> {
+        match self {
+            Self::Xwing => Some(CryptoSuite::XWING_MLDSA),
+            Self::Mlkem => Some(CryptoSuite::MLKEM768_MLDSA65),
+            Self::Auto | Self::Classic => None,
+        }
+    }
+
+    fn allows_classic(self) -> bool {
+        matches!(self, Self::Auto | Self::Classic)
+    }
+
+    fn supported_pqc_suites(self) -> Vec<CryptoSuite> {
+        match self {
+            Self::Auto => vec![CryptoSuite::XWING_MLDSA, CryptoSuite::MLKEM768_MLDSA65],
+            Self::Xwing => vec![CryptoSuite::XWING_MLDSA],
+            Self::Mlkem => vec![CryptoSuite::MLKEM768_MLDSA65],
+            Self::Classic => Vec::new(),
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct AgentRuntimeOptions {
     pub state_dir: Option<PathBuf>,
     pub heartbeat_interval: Duration,
+    pub crypto_mode: AgentCryptoMode,
 }
 
 impl Default for AgentRuntimeOptions {
@@ -50,6 +84,7 @@ impl Default for AgentRuntimeOptions {
         Self {
             state_dir: None,
             heartbeat_interval: Duration::from_secs(2),
+            crypto_mode: AgentCryptoMode::Auto,
         }
     }
 }
@@ -76,7 +111,6 @@ pub fn resolve_paths(state_dir_override: Option<PathBuf>) -> Result<AgentPaths> 
             .ok_or_else(|| anyhow!("failed to resolve platform state directory"))?;
         dirs.state_dir()
             .or_else(|| Some(dirs.data_local_dir()))
-            .or_else(|| Some(dirs.data_dir()))
             .ok_or_else(|| anyhow!("platform state directory is unavailable"))?
             .to_path_buf()
     };
@@ -127,7 +161,7 @@ pub async fn run_agent(options: AgentRuntimeOptions) -> Result<()> {
         options.heartbeat_interval,
         cancel.clone(),
     );
-    let supervisor_task = spawn_supervisor(paths.clone(), cancel.clone());
+    let supervisor_task = spawn_supervisor(paths.clone(), cancel.clone(), options.crypto_mode);
 
     wait_for_shutdown_signal().await;
     cancel.cancel();
@@ -262,7 +296,11 @@ fn spawn_heartbeat(
     })
 }
 
-fn spawn_supervisor(paths: AgentPaths, cancel: CancellationToken) -> JoinHandle<()> {
+fn spawn_supervisor(
+    paths: AgentPaths,
+    cancel: CancellationToken,
+    crypto_mode: AgentCryptoMode,
+) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut ticker = interval(Duration::from_secs(5));
         ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -276,7 +314,9 @@ fn spawn_supervisor(paths: AgentPaths, cancel: CancellationToken) -> JoinHandle<
                     break;
                 }
                 _ = ticker.tick() => {
-                    if let Err(error) = reconcile_managed_sessions(&paths, &cancel, &mut workers).await {
+                    if let Err(error) =
+                        reconcile_managed_sessions(&paths, &cancel, &mut workers, crypto_mode).await
+                    {
                         warn!(
                             kind = "agent.supervisor.reconcile_failed",
                             state_dir = %paths.root.display(),
@@ -298,12 +338,13 @@ fn spawn_supervisor(paths: AgentPaths, cancel: CancellationToken) -> JoinHandle<
 fn pqc_bridge_identity_enabled() -> bool {
     std::env::var(ENV_PQC_BRIDGE_IDENTITY)
         .ok()
-        .is_some_and(|value| {
-            matches!(
+        .map(|value| {
+            !matches!(
                 value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes"
+                "0" | "false" | "no" | "off"
             )
         })
+        .unwrap_or(true)
 }
 
 async fn build_pqc_initiator_config_from_env(
@@ -311,8 +352,9 @@ async fn build_pqc_initiator_config_from_env(
     identity: &DeviceIdentityMaterial,
     local_binding: &skybridge_core::ProtocolIdentityBinding,
     role: RuntimeSessionRole,
+    crypto_mode: AgentCryptoMode,
 ) -> Result<Option<PqcInitiatorConfig>> {
-    if role != RuntimeSessionRole::Initiator {
+    if role != RuntimeSessionRole::Initiator || crypto_mode == AgentCryptoMode::Classic {
         return Ok(None);
     }
 
@@ -341,11 +383,11 @@ async fn build_pqc_initiator_config_from_env(
     }
 
     let bridge_identity = pqc_bridge_identity_enabled();
+    let requested_suite = crypto_mode.requested_pqc_suite();
 
     if peer_kem_public_keys.is_empty() {
         if local_binding.protocol_signing_algorithm
             == skybridge_core::ProtocolSigningAlgorithm::MlDsa65
-            || bridge_identity
         {
             bail!(
                 "ML-DSA-65 protocol identity selected but no peer PQC public keys are configured via {} or {}",
@@ -353,7 +395,24 @@ async fn build_pqc_initiator_config_from_env(
                 ENV_PEER_MLKEM768_PUBLIC_KEY_B64
             );
         }
+        if let Some(required_suite) = requested_suite {
+            bail!(
+                "selected {} but no peer PQC public key is configured via {} or {}",
+                required_suite,
+                ENV_PEER_XWING_PUBLIC_KEY_B64,
+                ENV_PEER_MLKEM768_PUBLIC_KEY_B64
+            );
+        }
         return Ok(None);
+    }
+
+    if let Some(required_suite) = requested_suite {
+        if !peer_kem_public_keys.contains_key(&required_suite) {
+            bail!(
+                "selected {} but the matching peer public key is not configured",
+                required_suite
+            );
+        }
     }
 
     let (pqc_binding, signing_secret_key) = if local_binding.protocol_signing_algorithm
@@ -385,17 +444,22 @@ async fn build_pqc_initiator_config_from_env(
         )
     } else {
         bail!(
-            "peer PQC public keys are configured, but the local protocol identity is {}; set SKYBRIDGE_PROTOCOL_SIGNING_ALGORITHM=ML-DSA-65 first",
-            local_binding.protocol_signing_algorithm
+            "peer PQC public keys are configured, but the local protocol identity is {}; enable {} or set SKYBRIDGE_PROTOCOL_SIGNING_ALGORITHM=ML-DSA-65 first",
+            local_binding.protocol_signing_algorithm,
+            ENV_PQC_BRIDGE_IDENTITY
         );
     };
-    let preferred_suite = std::env::var(ENV_PQC_PREFERRED_SUITE)
-        .ok()
-        .and_then(|value| CryptoSuite::from_name(&value));
     let mut preferred_suites = Vec::new();
-    if let Some(preferred_suite) = preferred_suite {
-        if peer_kem_public_keys.contains_key(&preferred_suite) {
-            preferred_suites.push(preferred_suite);
+    if let Some(required_suite) = requested_suite {
+        preferred_suites.push(required_suite);
+    } else {
+        let preferred_suite = std::env::var(ENV_PQC_PREFERRED_SUITE)
+            .ok()
+            .and_then(|value| CryptoSuite::from_name(&value));
+        if let Some(preferred_suite) = preferred_suite {
+            if peer_kem_public_keys.contains_key(&preferred_suite) {
+                preferred_suites.push(preferred_suite);
+            }
         }
     }
     for candidate in [CryptoSuite::XWING_MLDSA, CryptoSuite::MLKEM768_MLDSA65] {
@@ -417,8 +481,12 @@ async fn build_pqc_responder_config(
     paths: &AgentPaths,
     identity: &DeviceIdentityMaterial,
     local_binding: &skybridge_core::ProtocolIdentityBinding,
-    _role: RuntimeSessionRole,
+    role: RuntimeSessionRole,
+    crypto_mode: AgentCryptoMode,
 ) -> Result<Option<PqcResponderConfig>> {
+    if role != RuntimeSessionRole::Responder || crypto_mode == AgentCryptoMode::Classic {
+        return Ok(None);
+    }
     let bridge_identity = pqc_bridge_identity_enabled();
     if local_binding.protocol_signing_algorithm != skybridge_core::ProtocolSigningAlgorithm::MlDsa65
         && !bridge_identity
@@ -451,83 +519,7 @@ async fn build_pqc_responder_config(
         local_binding: pqc_binding,
         local_device_name: Some(identity.state.device.device_name.clone()),
         identity: pqc_identity,
-        supported_suites: vec![CryptoSuite::XWING_MLDSA, CryptoSuite::MLKEM768_MLDSA65],
-    }))
-}
-
-async fn build_pqc_initiator_template(
-    paths: &AgentPaths,
-    identity: &DeviceIdentityMaterial,
-    local_binding: &skybridge_core::ProtocolIdentityBinding,
-) -> Result<Option<PqcInitiatorTemplate>> {
-    let bridge_identity = pqc_bridge_identity_enabled();
-    if local_binding.protocol_signing_algorithm != skybridge_core::ProtocolSigningAlgorithm::MlDsa65
-        && !bridge_identity
-    {
-        return Ok(None);
-    }
-
-    let (pqc_binding, signing_secret_key) = if local_binding.protocol_signing_algorithm
-        == skybridge_core::ProtocolSigningAlgorithm::MlDsa65
-    {
-        let signing_secret_key = identity
-            .signing_key
-            .mldsa65_secret_key_bytes()
-            .ok_or_else(|| anyhow!("missing ML-DSA-65 signing secret key"))?;
-        (local_binding.clone(), signing_secret_key)
-    } else {
-        let pqc_identity = ensure_rust_pqc_identity(paths).await?;
-        (
-            skybridge_core::ProtocolIdentityBinding::new(
-                local_binding.device_id.clone(),
-                pqc_identity.signing_algorithm,
-                pqc_identity.signing_public_key.clone(),
-                None,
-            )
-            .map_err(anyhow::Error::from)?,
-            pqc_identity.signing_secret_key,
-        )
-    };
-
-    let preferred_suite = std::env::var(ENV_PQC_PREFERRED_SUITE)
-        .ok()
-        .and_then(|value| CryptoSuite::from_name(&value));
-    let mut preferred_suites = Vec::new();
-    if let Some(preferred_suite) = preferred_suite {
-        preferred_suites.push(preferred_suite);
-    }
-    for candidate in [CryptoSuite::XWING_MLDSA, CryptoSuite::MLKEM768_MLDSA65] {
-        if !preferred_suites.contains(&candidate) {
-            preferred_suites.push(candidate);
-        }
-    }
-
-    Ok(Some(PqcInitiatorTemplate {
-        local_binding: pqc_binding,
-        signing_secret_key,
-        local_device_name: Some(identity.state.device.device_name.clone()),
-        preferred_suites,
-    }))
-}
-
-fn build_classic_responder_config(
-    identity: &DeviceIdentityMaterial,
-    local_binding: &skybridge_core::ProtocolIdentityBinding,
-    role: RuntimeSessionRole,
-) -> Result<Option<ClassicResponderConfig>> {
-    if role != RuntimeSessionRole::Responder
-        || local_binding.protocol_signing_algorithm != skybridge_core::ProtocolSigningAlgorithm::Ed25519
-    {
-        return Ok(None);
-    }
-    let signing_secret_key = identity
-        .signing_key
-        .ed25519_secret_key_bytes()
-        .ok_or_else(|| anyhow!("classic responder requires an Ed25519 protocol identity"))?;
-    Ok(Some(ClassicResponderConfig {
-        local_binding: local_binding.clone(),
-        signing_secret_key,
-        local_device_name: Some(identity.state.device.device_name.clone()),
+        supported_suites: crypto_mode.supported_pqc_suites(),
     }))
 }
 
@@ -535,6 +527,7 @@ async fn reconcile_managed_sessions(
     paths: &AgentPaths,
     root_cancel: &CancellationToken,
     workers: &mut std::collections::BTreeMap<String, CancellationToken>,
+    crypto_mode: AgentCryptoMode,
 ) -> Result<()> {
     let controls = load_managed_session_controls(paths).await?;
     let desired = controls
@@ -563,7 +556,7 @@ async fn reconcile_managed_sessions(
         let worker_paths = paths.clone();
         tokio::spawn(async move {
             if let Err(error) =
-                run_managed_session(worker_paths, control, worker_cancel.clone()).await
+                run_managed_session(worker_paths, control, worker_cancel.clone(), crypto_mode).await
             {
                 warn!(
                     kind = "agent.session.worker_failed",
@@ -582,6 +575,7 @@ async fn run_managed_session(
     paths: AgentPaths,
     control: ManagedSessionControl,
     cancel: CancellationToken,
+    crypto_mode: AgentCryptoMode,
 ) -> Result<()> {
     info!(
         kind = "agent.session.worker_started",
@@ -598,50 +592,88 @@ async fn run_managed_session(
     )?;
     let identity = ensure_device_identity(&paths).await?;
     let local_binding = signing_binding(&identity)?;
-    let pqc_initiator =
-        build_pqc_initiator_config_from_env(&paths, &identity, &local_binding, control.role)
-            .await?;
-    let pqc_initiator_template =
-        build_pqc_initiator_template(&paths, &identity, &local_binding).await?;
+    let pqc_initiator = build_pqc_initiator_config_from_env(
+        &paths,
+        &identity,
+        &local_binding,
+        control.role,
+        crypto_mode,
+    )
+    .await?;
     let pqc_responder =
-        build_pqc_responder_config(&paths, &identity, &local_binding, control.role).await?;
-    let classic_responder = build_classic_responder_config(&identity, &local_binding, control.role)?;
+        build_pqc_responder_config(&paths, &identity, &local_binding, control.role, crypto_mode)
+            .await?;
+    let classic_initiator = (control.role == RuntimeSessionRole::Initiator
+        && pqc_initiator.is_none()
+        && crypto_mode.allows_classic())
+    .then(|| -> Result<skybridge_core::ClassicInitiatorConfig> {
+        let signing_secret_key = identity
+            .signing_key
+            .ed25519_secret_key_bytes()
+            .ok_or_else(|| anyhow!("classic initiator requires an Ed25519 protocol identity"))?;
+        Ok(skybridge_core::ClassicInitiatorConfig {
+            local_binding: local_binding.clone(),
+            signing_secret_key,
+            local_device_name: Some(identity.state.device.device_name.clone()),
+        })
+    })
+    .transpose()?;
+    let classic_responder = (control.role == RuntimeSessionRole::Responder
+        && pqc_responder.is_none()
+        && crypto_mode.allows_classic())
+    .then(|| -> Result<skybridge_core::ClassicResponderConfig> {
+        let signing_secret_key = identity
+            .signing_key
+            .ed25519_secret_key_bytes()
+            .ok_or_else(|| anyhow!("classic responder requires an Ed25519 protocol identity"))?;
+        Ok(skybridge_core::ClassicResponderConfig {
+            local_binding: local_binding.clone(),
+            signing_secret_key,
+            local_device_name: Some(identity.state.device.device_name.clone()),
+        })
+    })
+    .transpose()?;
     let mut connection = SignalingConnection::connect(ws_url, &control.session_id).await?;
     let mut native_session = NativeWebRtcSession::new(NativeWebRtcConfig {
         session_id: control.session_id.clone(),
         local_device_id: control.local_device_id.clone(),
         role: control.role,
         turn_credentials: control.turn_credentials.clone(),
-        classic_initiator: (control.role == RuntimeSessionRole::Initiator
-            && pqc_initiator.is_none())
-        .then(|| -> Result<skybridge_core::ClassicInitiatorConfig> {
-            let signing_secret_key =
-                identity
-                    .signing_key
-                    .ed25519_secret_key_bytes()
-                    .ok_or_else(|| {
-                        anyhow!("classic initiator requires an Ed25519 protocol identity")
-                    })?;
-            Ok(skybridge_core::ClassicInitiatorConfig {
-                local_binding: local_binding.clone(),
-                signing_secret_key,
-                local_device_name: Some(identity.state.device.device_name.clone()),
-            })
-        })
-        .transpose()?,
+        classic_initiator,
         classic_responder,
         pqc_initiator,
-        pqc_initiator_template,
         pqc_responder,
     })
     .await?;
     native_session.start().await?;
-    let mut join_sent = false;
+    let session_handle = native_session.handle();
+    let mut transfer_runtime = SessionTransferRuntime::new();
+    let mut signaling_bound = false;
+    let mut last_join_sent_at: Option<Instant> = None;
     let mut signaling_stream_closed = false;
     let mut signaling_drop_injected = false;
 
     loop {
         tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(200)) => {
+                transfer_runtime
+                    .poll_outbound_requests(
+                        &paths,
+                        &control.session_id,
+                        session_handle.clone(),
+                        identity.clone(),
+                    )
+                    .await?;
+                resend_join_if_needed(
+                    &paths,
+                    &connection,
+                    &control.session_id,
+                    &control.local_device_id,
+                    signaling_bound,
+                    &mut last_join_sent_at,
+                )
+                .await?;
+            }
             _ = cancel.cancelled() => {
                 info!(
                     kind = "agent.session.worker_cancelled",
@@ -664,11 +696,17 @@ async fn run_managed_session(
                 match event {
                     SignalingRuntimeEvent::Lifecycle(lifecycle) => {
                         apply_signaling_runtime_event(&paths, &control.session_id, &lifecycle).await?;
-                        if lifecycle.phase == SignalingLifecyclePhase::Bound && !join_sent {
-                            connection
-                                .send(make_join_envelope(&control.session_id, &control.local_device_id))
-                                .await?;
-                            join_sent = true;
+                        if lifecycle.phase == SignalingLifecyclePhase::Bound {
+                            signaling_bound = true;
+                            resend_join_if_needed(
+                                &paths,
+                                &connection,
+                                &control.session_id,
+                                &control.local_device_id,
+                                signaling_bound,
+                                &mut last_join_sent_at,
+                            )
+                            .await?;
                         }
                         drain_native_runtime_events(
                             &paths,
@@ -708,6 +746,17 @@ async fn run_managed_session(
                 let Some(event) = event else {
                     continue;
                 };
+                if let NativeWebRtcEvent::ApplicationPayload { payload } = &event {
+                    let _ = transfer_runtime
+                        .handle_application_payload(
+                            &paths,
+                            &control.session_id,
+                            payload,
+                            &session_handle,
+                        )
+                        .await?;
+                    continue;
+                }
                 let should_inject_signaling_drop = matches!(
                     &event,
                     NativeWebRtcEvent::HandshakeComplete { .. }
@@ -736,6 +785,41 @@ async fn run_managed_session(
     }
 
     Ok(())
+}
+
+async fn resend_join_if_needed(
+    paths: &AgentPaths,
+    connection: &SignalingConnection,
+    session_id: &str,
+    local_device_id: &str,
+    signaling_bound: bool,
+    last_join_sent_at: &mut Option<Instant>,
+) -> Result<()> {
+    if !signaling_bound || !should_keep_announcing_join(paths, session_id).await? {
+        return Ok(());
+    }
+
+    let now = Instant::now();
+    if last_join_sent_at
+        .map(|sent_at| now.duration_since(sent_at) < JOIN_RESEND_INTERVAL)
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+
+    connection
+        .send(make_join_envelope(session_id, local_device_id))
+        .await?;
+    *last_join_sent_at = Some(now);
+    Ok(())
+}
+
+async fn should_keep_announcing_join(paths: &AgentPaths, session_id: &str) -> Result<bool> {
+    let registry = load_session_registry(paths).await?;
+    let Some(record) = registry.get(session_id) else {
+        return Ok(false);
+    };
+    Ok(!record.readiness.is_transport_established_for(session_id))
 }
 
 async fn drain_native_runtime_events(
@@ -823,7 +907,7 @@ async fn apply_native_runtime_event(
             );
             store_session_registry(paths, &registry).await?;
         }
-        NativeWebRtcEvent::AppPayload { .. } => {}
+        NativeWebRtcEvent::ApplicationPayload { .. } => {}
         NativeWebRtcEvent::Keepalive { kind, ping_id } => {
             info!(
                 kind = "agent.session.keepalive_applied",

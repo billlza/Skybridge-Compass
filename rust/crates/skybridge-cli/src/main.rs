@@ -1,40 +1,102 @@
-use std::collections::BTreeMap;
+mod nearby;
+mod transfer;
+
+use std::fs::File as StdFile;
 use std::path::PathBuf;
-use std::process::Stdio;
+use std::process::{Child, Command as ProcessCommand, Stdio};
 use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sha2::{Digest, Sha256};
 use skybridge_agent::{
-    clear_auth_session, ensure_device_identity, ensure_rust_pqc_identity, load_auth_session,
-    load_health_snapshot, load_session_registry, refresh_auth_session_if_needed,
-    remove_managed_session_control, remove_session_runtime, resolve_paths, run_agent,
-    signing_binding, signing_signature, store_auth_session, store_session_registry,
-    update_enrollment_status, upsert_managed_session_control, upsert_session_runtime,
+    AgentCryptoMode, LocalSessionTransferSmokeOptions, clear_auth_session, ensure_device_identity,
+    ensure_rust_pqc_identity, load_auth_session, load_auth_session_source, load_health_snapshot,
+    load_session_registry, refresh_auth_session_if_needed, remove_managed_session_control,
+    remove_session_runtime, resolve_paths, run_agent, run_local_session_transfer_smoke,
+    signing_binding, signing_signature, store_auth_session, store_auth_session_source,
+    store_session_registry, update_enrollment_status,
+    upsert_managed_session_control, upsert_session_runtime,
 };
 use skybridge_core::{
-    AgentRuntimeStatus, AuthState, ClassicResponderConfig, CryptoSuite, CurrentPathOriginPolicy,
-    DEFAULT_NEBULA_BASE_URL,
-    EnrollmentStatus, InboundMessage, ManagedSessionControl, NativeWebRtcConfig,
-    NativeWebRtcEvent, NativeWebRtcSession, NebulaOAuthClient, PqcInitiatorTemplate,
+    AgentRuntimeStatus, AuthState, ConnectionCodeLease, ConnectionCodeLookup, CryptoSuite,
+    CurrentPathOriginPolicy, EnrollmentStatus, InboundMessage, ManagedSessionControl,
+    NativeWebRtcConfig, NativeWebRtcEvent, NativeWebRtcSession, NebulaOAuthClient,
     PqcResponderConfig, ProtocolIdentityBinding, ProtocolSigningAlgorithm,
-    RuntimeSessionKeepaliveStatus, RuntimeSessionRecord, RuntimeSessionRole,
-    RuntimeSessionSource, RuntimeSessionState, RuntimeSessionTransportEvent, SessionReadiness,
-    SignalServerClient, SignalingConnection, SignalingLifecycleEvent, SignalingLifecyclePhase,
-    SignalingRuntimeEvent, derive_tenant_identifier, make_join_envelope, make_runtime_id,
+    RuntimeSessionKeepaliveStatus, RuntimeSessionRecord, RuntimeSessionRole, RuntimeSessionSource,
+    RuntimeSessionState, RuntimeSessionTransportEvent, SessionReadiness, SignalServerClient,
+    SignalingConnection, SignalingLifecycleEvent, SignalingLifecyclePhase, SignalingRuntimeEvent,
+    derive_tenant_identifier, generate_pkce_pair, make_join_envelope, make_runtime_id,
+    should_refresh_access_token,
 };
-use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader};
-use tokio::process::Command as TokioCommand;
-use tokio::sync::oneshot;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+use transfer::FileSendTransport;
+use url::Url;
 
 const ENV_PQC_BRIDGE_IDENTITY: &str = "SKYBRIDGE_PQC_BRIDGE_IDENTITY";
+const GUI_AUTH_KEYCHAIN_SERVICE: &str = "com.skybridge.compass.authsession";
+const GUI_AUTH_KEYCHAIN_ACCOUNT: &str = "primary";
+const GUI_SUPABASE_SERVICE: &str = "SkyBridge.Supabase";
+const CLI_LOGIN_CLIENT_ID: &str = "skybridge_compass_cli";
+const DEFAULT_LOGIN_WEB_BASE_URL: &str = "https://skybridge.com";
+const DEFAULT_LOGIN_API_BASE_URL: &str = "https://api.skybridge.com";
+const AUTH_SOURCE_GUI_SESSION_REUSE: &str = "gui_session_reuse";
+const AUTH_SOURCE_BROWSER_CLI_LOGIN: &str = "browser_cli_login";
+const AUTH_SOURCE_LEGACY_NEBULA_OAUTH: &str = "legacy_nebula_oauth";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum CliCryptoMode {
+    Auto,
+    Xwing,
+    Mlkem,
+    Classic,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum TestMode {
+    Local,
+    Code,
+}
+
+impl CliCryptoMode {
+    fn requested_pqc_suite(self) -> Option<CryptoSuite> {
+        match self {
+            Self::Xwing => Some(CryptoSuite::XWING_MLDSA),
+            Self::Mlkem => Some(CryptoSuite::MLKEM768_MLDSA65),
+            Self::Auto | Self::Classic => None,
+        }
+    }
+
+    fn supported_pqc_suites(self) -> Vec<CryptoSuite> {
+        match self {
+            Self::Auto => vec![CryptoSuite::XWING_MLDSA, CryptoSuite::MLKEM768_MLDSA65],
+            Self::Xwing => vec![CryptoSuite::XWING_MLDSA],
+            Self::Mlkem => vec![CryptoSuite::MLKEM768_MLDSA65],
+            Self::Classic => Vec::new(),
+        }
+    }
+
+    fn allows_classic(self) -> bool {
+        matches!(self, Self::Auto | Self::Classic)
+    }
+}
+
+impl From<CliCryptoMode> for AgentCryptoMode {
+    fn from(value: CliCryptoMode) -> Self {
+        match value {
+            CliCryptoMode::Auto => AgentCryptoMode::Auto,
+            CliCryptoMode::Xwing => AgentCryptoMode::Xwing,
+            CliCryptoMode::Mlkem => AgentCryptoMode::Mlkem,
+            CliCryptoMode::Classic => AgentCryptoMode::Classic,
+        }
+    }
+}
 
 #[derive(Debug, Parser)]
 #[command(name = "skybridge")]
@@ -68,6 +130,8 @@ enum Commands {
 
 #[derive(Debug, Args)]
 struct LoginCommand {
+    #[arg(long, help = "Force browser login instead of reusing the macOS GUI session")]
+    browser: bool,
     #[arg(long)]
     no_open: bool,
     #[arg(long)]
@@ -78,19 +142,6 @@ struct LoginCommand {
     callback_url: Option<String>,
     #[arg(long)]
     authorization_code: Option<String>,
-    #[arg(long, value_enum, default_value_t = LoginMode::Auto)]
-    mode: LoginMode,
-    #[arg(long, default_value_t = 8789)]
-    listen_port: u16,
-    #[arg(long)]
-    json: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-enum LoginMode {
-    Auto,
-    Browser,
-    Paste,
 }
 
 #[derive(Debug, Args)]
@@ -109,27 +160,31 @@ struct ConnectCommand {
     code: String,
     #[arg(long, default_value_t = 5)]
     hold_seconds: u64,
+    #[arg(long, value_enum, default_value = "auto")]
+    crypto: CliCryptoMode,
     #[arg(long)]
     json: bool,
 }
 
 #[derive(Debug, Args)]
 struct TestCommand {
-    #[arg(long, default_value_t = 180)]
-    timeout_seconds: u64,
-    #[arg(long, default_value_t = 4096)]
-    payload_bytes: usize,
+    #[arg(long, value_enum, default_value = "local")]
+    mode: TestMode,
+    #[arg(long, value_enum, default_value = "auto")]
+    crypto: CliCryptoMode,
     #[arg(long)]
-    keep_artifacts: bool,
+    auth_state_dir: Option<PathBuf>,
     #[arg(long)]
-    allow_classic: bool,
+    auth_session_file: Option<PathBuf>,
+    #[arg(long)]
+    keep_temp_dir: bool,
     #[arg(long)]
     json: bool,
 }
 
 #[derive(Debug, Subcommand)]
 enum AgentSubcommand {
-    Run,
+    Run(AgentRunArgs),
 }
 
 #[derive(Debug, Args)]
@@ -138,11 +193,18 @@ struct AgentCommand {
     command: AgentSubcommand,
 }
 
+#[derive(Debug, Args)]
+struct AgentRunArgs {
+    #[arg(long, value_enum, default_value = "auto")]
+    crypto: CliCryptoMode,
+}
+
 #[derive(Debug, Subcommand)]
 enum DeviceSubcommand {
     Status(OutputOptions),
     Enroll(DeviceEnrollArgs),
     Approve(DeviceApproveArgs),
+    Discover(DeviceDiscoverArgs),
 }
 
 #[derive(Debug, Args)]
@@ -165,6 +227,14 @@ struct DeviceApproveArgs {
     pending_fingerprint: String,
     #[arg(long)]
     device_name: Option<String>,
+    #[command(flatten)]
+    output: OutputOptions,
+}
+
+#[derive(Debug, Args)]
+struct DeviceDiscoverArgs {
+    #[arg(long, default_value_t = 3)]
+    timeout_seconds: u64,
     #[command(flatten)]
     output: OutputOptions,
 }
@@ -227,8 +297,12 @@ struct FileSendArgs {
     path: PathBuf,
     #[arg(long)]
     to: String,
-    #[arg(long, default_value_t = 300)]
-    timeout_seconds: u64,
+    #[arg(long, value_enum, default_value = "auto")]
+    transport: FileSendTransport,
+    #[arg(long, default_value_t = 3)]
+    discovery_timeout_seconds: u64,
+    #[arg(long)]
+    compress: bool,
     #[arg(long)]
     json: bool,
 }
@@ -237,10 +311,10 @@ struct FileSendArgs {
 struct FileReceiveArgs {
     #[arg(long)]
     output_dir: Option<PathBuf>,
-    #[arg(long, default_value_t = 300)]
-    timeout_seconds: u64,
+    #[arg(long, default_value_t = skybridge_core::DEFAULT_FILE_TRANSFER_PORT)]
+    port: u16,
     #[arg(long)]
-    json: bool,
+    once: bool,
 }
 
 #[derive(Debug, Args)]
@@ -296,10 +370,11 @@ async fn main() -> Result<()> {
 async fn dispatch(cli: Cli) -> Result<()> {
     match cli.command {
         Commands::Agent(agent) => match agent.command {
-            AgentSubcommand::Run => {
+            AgentSubcommand::Run(args) => {
                 run_agent(skybridge_agent::AgentRuntimeOptions {
                     state_dir: cli.state_dir,
                     heartbeat_interval: Duration::from_secs(2),
+                    crypto_mode: args.crypto.into(),
                 })
                 .await
             }
@@ -310,21 +385,39 @@ async fn dispatch(cli: Cli) -> Result<()> {
             DeviceSubcommand::Status(output) => device_status(cli.state_dir, output.json).await,
             DeviceSubcommand::Enroll(args) => device_enroll(cli.state_dir, args).await,
             DeviceSubcommand::Approve(args) => device_approve(cli.state_dir, args).await,
+            DeviceSubcommand::Discover(args) => {
+                nearby::device_discover(cli.state_dir, args.timeout_seconds, args.output.json).await
+            }
         },
         Commands::Code(code) => match code.command {
             CodeSubcommand::Create(args) => code_create(cli.state_dir, args).await,
         },
         Commands::Connect(args) => connect_code(cli.state_dir, args).await,
-        Commands::Test(args) => smoke_test(cli.state_dir, args).await,
+        Commands::Test(args) => test_smoke(cli.state_dir, args).await,
         Commands::Session(session) => match session.command {
             SessionSubcommand::Ls(output) => session_ls(cli.state_dir, output.json).await,
             SessionSubcommand::Inspect(args) => session_inspect(cli.state_dir, args).await,
         },
         Commands::Disconnect(args) => disconnect(cli.state_dir, &args.session_id).await,
         Commands::File(file) => match file.command {
-            FileSubcommand::Send(args) => file_send(cli.state_dir, args).await,
-            FileSubcommand::Receive(args) => file_receive(cli.state_dir, args).await,
-            FileSubcommand::History(output) => file_history(cli.state_dir, output.json).await,
+            FileSubcommand::Send(args) => {
+                transfer::file_send(
+                    cli.state_dir,
+                    args.path,
+                    args.to,
+                    args.transport,
+                    args.discovery_timeout_seconds,
+                    args.compress,
+                    args.json,
+                )
+                .await
+            }
+            FileSubcommand::Receive(args) => {
+                transfer::file_receive(cli.state_dir, args.output_dir, args.port, args.once).await
+            }
+            FileSubcommand::History(output) => {
+                transfer::file_history(cli.state_dir, output.json).await
+            }
         },
         Commands::Doctor(output) => doctor(cli.state_dir, output.json).await,
         Commands::Logs(logs) => match logs.command {
@@ -338,62 +431,1315 @@ async fn dispatch(cli: Cli) -> Result<()> {
     }
 }
 
-async fn login(state_dir: Option<PathBuf>, args: LoginCommand) -> Result<()> {
-    let paths = resolve_paths(state_dir)?;
+async fn test_smoke(state_dir: Option<PathBuf>, args: TestCommand) -> Result<()> {
+    match args.mode {
+        TestMode::Local => {
+            let result = run_local_session_transfer_smoke(LocalSessionTransferSmokeOptions {
+                crypto_mode: args.crypto.into(),
+                root_override: state_dir,
+                keep_temp_dir: args.keep_temp_dir,
+            })
+            .await?;
+
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+                return Ok(());
+            }
+
+            println!("Local session transfer smoke completed");
+            println!("Negotiated Suite: {}", result.negotiated_suite);
+            println!("Request ID: {}", result.request_id);
+            println!("Transfer ID: {}", result.transfer_id);
+            println!("Request State: {}", result.request_state);
+            println!("SHA-256: {}", result.file_hash);
+            if result.artifacts_retained {
+                println!("Source Path: {}", result.source_path);
+                println!("Received Path: {}", result.received_path);
+                println!("Smoke Root: {}", result.smoke_root);
+            } else {
+                println!("Artifacts: cleaned up temporary files");
+            }
+            Ok(())
+        }
+        TestMode::Code => {
+            let result = run_code_flow_smoke(
+                state_dir,
+                args.auth_state_dir,
+                args.auth_session_file,
+                args.crypto,
+                args.keep_temp_dir,
+            )
+            .await?;
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+                return Ok(());
+            }
+
+            println!("Code-flow session transfer smoke completed");
+            println!("Code: {}", result.code);
+            println!("Session ID: {}", result.session_id);
+            println!("Negotiated Suite: {}", result.negotiated_suite);
+            println!("Request ID: {}", result.request_id);
+            println!("Transfer ID: {}", result.transfer_id);
+            println!("Request State: {}", result.request_state);
+            println!("SHA-256: {}", result.file_hash);
+            println!("Auth Source Root: {}", result.auth_source_root);
+            if result.artifacts_retained {
+                println!("Received Path: {}", result.received_path);
+                println!("Smoke Root: {}", result.smoke_root);
+                println!("Initiator Agent Log: {}", result.initiator_agent_log);
+                println!("Responder Agent Log: {}", result.responder_agent_log);
+            } else {
+                println!("Artifacts: cleaned up temporary files");
+            }
+            Ok(())
+        }
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+struct CodeFlowSmokeResult {
+    smoke_root: String,
+    artifacts_retained: bool,
+    auth_source_root: String,
+    code: String,
+    session_id: String,
+    negotiated_suite: String,
+    transfer_id: String,
+    request_id: String,
+    request_state: String,
+    received_path: String,
+    file_hash: String,
+    initiator_agent_log: String,
+    responder_agent_log: String,
+}
+
+struct AgentChild {
+    child: Child,
+    log_path: PathBuf,
+}
+
+impl AgentChild {
+    fn terminate(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+impl Drop for AgentChild {
+    fn drop(&mut self) {
+        self.terminate();
+    }
+}
+
+async fn run_code_flow_smoke(
+    root_override: Option<PathBuf>,
+    auth_state_dir: Option<PathBuf>,
+    auth_session_file: Option<PathBuf>,
+    crypto: CliCryptoMode,
+    keep_temp_dir: bool,
+) -> Result<CodeFlowSmokeResult> {
+    let (auth_session, auth_source_root) =
+        resolve_auth_session_for_code_smoke(auth_state_dir, auth_session_file).await?;
+    let retain_artifacts = keep_temp_dir || root_override.is_some();
+
+    let smoke_root = root_override.clone().unwrap_or_else(|| {
+        std::env::temp_dir().join(format!("skybridge-code-smoke-{}", uuid::Uuid::now_v7()))
+    });
+    let initiator_root = smoke_root.join("initiator");
+    let responder_root = smoke_root.join("responder");
+    let receive_dir = smoke_root.join("downloads");
+    tokio::fs::create_dir_all(&initiator_root).await?;
+    tokio::fs::create_dir_all(&responder_root).await?;
+    tokio::fs::create_dir_all(&receive_dir).await?;
+
+    let result = async {
+        let initiator_paths = resolve_paths(Some(initiator_root.clone()))?;
+        let responder_paths = resolve_paths(Some(responder_root.clone()))?;
+        store_auth_session(&initiator_paths, &auth_session).await?;
+        store_auth_session(&responder_paths, &auth_session).await?;
+
+        let _initiator_identity = ensure_device_identity(&initiator_paths).await?;
+        let responder_identity = ensure_device_identity(&responder_paths).await?;
+        let initiator_pqc = ensure_rust_pqc_identity(&initiator_paths).await?;
+        let responder_pqc = ensure_rust_pqc_identity(&responder_paths).await?;
+
+        let lease = create_code_lease_for_smoke(&initiator_paths, &auth_session).await?;
+        let lookup =
+            prepare_code_lookup_for_smoke(&responder_paths, &lease.code, &auth_session).await?;
+        let exe_path = std::env::current_exe()?;
+
+        let mut initiator_agent = spawn_agent_process(
+            &exe_path,
+            &initiator_root,
+            &receive_dir,
+            crypto,
+            &responder_pqc,
+            "initiator",
+        )?;
+        let mut responder_agent = spawn_agent_process(
+            &exe_path,
+            &responder_root,
+            &receive_dir,
+            crypto,
+            &initiator_pqc,
+            "responder",
+        )?;
+
+        let negotiated_suite = wait_for_handshake_completion(
+            &initiator_paths,
+            &lease.session_id,
+            &mut initiator_agent,
+        )
+        .await?;
+        let responder_suite = wait_for_handshake_completion(
+            &responder_paths,
+            &lease.session_id,
+            &mut responder_agent,
+        )
+        .await?;
+        if negotiated_suite != responder_suite {
+            bail!(
+                "initiator/responder negotiated different suites: {} vs {}",
+                negotiated_suite,
+                responder_suite
+            );
+        }
+
+        let payload_path = smoke_root.join("payload.txt");
+        let payload = format!(
+            "skybridge-code-smoke:{}:{}\n",
+            describe_cli_crypto_mode(crypto),
+            uuid::Uuid::now_v7()
+        );
+        tokio::fs::write(&payload_path, payload.as_bytes()).await?;
+        let request = skybridge_core::SessionFileTransferRequest::new_outgoing(
+            lease.session_id.clone(),
+            payload_path.display().to_string(),
+            "payload.txt",
+            i64::try_from(payload.len()).map_err(|_| anyhow!("payload length overflow"))?,
+            Some(responder_identity.state.device.device_id.clone()),
+            Some(responder_identity.state.device.device_name.clone()),
+        );
+        skybridge_agent::save_session_transfer_request(&initiator_paths, &request).await?;
+        let completed =
+            skybridge_agent::wait_for_request_terminal_state(&initiator_paths, &request.request_id)
+                .await?;
+        if completed.state != skybridge_core::SessionTransferRequestState::Completed {
+            bail!(
+                "{}",
+                completed
+                    .error
+                    .unwrap_or_else(|| "code-flow session transfer failed".to_owned())
+            );
+        }
+
+        let received_path = receive_dir.join("payload.txt");
+        wait_for_received_file(
+            &received_path,
+            &payload,
+            &mut initiator_agent,
+            &mut responder_agent,
+        )
+        .await?;
+
+        let result = CodeFlowSmokeResult {
+            smoke_root: smoke_root.display().to_string(),
+            artifacts_retained: retain_artifacts,
+            auth_source_root,
+            code: lease.code,
+            session_id: lookup.session_id,
+            negotiated_suite,
+            transfer_id: completed
+                .transfer_id
+                .clone()
+                .unwrap_or_else(|| completed.request_id.clone()),
+            request_id: completed.request_id,
+            request_state: format!("{:?}", completed.state),
+            received_path: received_path.display().to_string(),
+            file_hash: completed.file_hash.unwrap_or_default(),
+            initiator_agent_log: initiator_agent.log_path.display().to_string(),
+            responder_agent_log: responder_agent.log_path.display().to_string(),
+        };
+
+        initiator_agent.terminate();
+        responder_agent.terminate();
+        Ok(result)
+    }
+    .await;
+
+    if !retain_artifacts {
+        let _ = tokio::fs::remove_dir_all(&smoke_root).await;
+    }
+
+    result
+}
+
+async fn resolve_auth_session_for_code_smoke(
+    explicit_root: Option<PathBuf>,
+    explicit_session_file: Option<PathBuf>,
+) -> Result<(skybridge_core::AuthSession, String)> {
+    if let Some(session_file) = explicit_session_file {
+        let session =
+            maybe_refresh_supabase_auth_session(load_auth_session_from_file(&session_file).await?)
+                .await?;
+        return Ok((session, session_file.display().to_string()));
+    }
+
+    let candidate_roots = auth_candidate_roots(explicit_root)?;
+    let mut searched = Vec::new();
+    for root in candidate_roots {
+        let paths = resolve_paths(Some(root.clone()))?;
+        searched.push(root.display().to_string());
+        if let Some(session) = load_auth_session(&paths).await? {
+            let session = maybe_refresh_supabase_auth_session(session).await?;
+            return Ok((session, root.display().to_string()));
+        }
+    }
+    match load_auth_session_from_gui_keychain().await {
+        Ok(Some(session)) => {
+            let session = maybe_refresh_supabase_auth_session(session).await?;
+            return Ok((
+                session,
+                format!(
+                    "keychain:{}:{}",
+                    GUI_AUTH_KEYCHAIN_SERVICE, GUI_AUTH_KEYCHAIN_ACCOUNT
+                ),
+            ));
+        }
+        Ok(None) => {}
+        Err(error) => {
+            searched.push(format!(
+                "keychain:{}:{} ({})",
+                GUI_AUTH_KEYCHAIN_SERVICE, GUI_AUTH_KEYCHAIN_ACCOUNT, error
+            ));
+        }
+    }
+    bail!(
+        "No auth session found for code-flow smoke. Searched roots: {}. Pass --auth-state-dir <dir> or run `skybridge login` first.",
+        searched.join(", ")
+    )
+}
+
+async fn maybe_refresh_supabase_auth_session(
+    session: skybridge_core::AuthSession,
+) -> Result<skybridge_core::AuthSession> {
+    if !should_refresh_access_token(&session.access_token, 300) {
+        return Ok(session);
+    }
+    let access_token_expired = should_refresh_access_token(&session.access_token, 0);
+    let Some(refresh_token) = session.refresh_token.as_deref() else {
+        if access_token_expired {
+            bail!("auth access token is expired and no refresh token is available");
+        }
+        return Ok(session);
+    };
+    match load_supabase_config_from_keychain().await {
+        Ok(Some(config)) => {
+            match refresh_supabase_auth_session(&config, refresh_token, &session).await {
+                Ok(refreshed) => Ok(refreshed),
+                Err(error) if access_token_expired => Err(anyhow!(
+                    "auth access token is expired and refresh failed: {error}"
+                )),
+                Err(error) => {
+                    eprintln!(
+                        "warning: failed to refresh access token; continuing with existing token: {error}"
+                    );
+                    Ok(session)
+                }
+            }
+        }
+        Ok(None) if access_token_expired => Err(anyhow!(
+            "auth access token is expired and Supabase refresh config is unavailable"
+        )),
+        Ok(None) => Ok(session),
+        Err(error) if access_token_expired => Err(anyhow!(
+            "auth access token is expired and Supabase refresh config could not be loaded: {error}"
+        )),
+        Err(error) => {
+            eprintln!(
+                "warning: failed to load Supabase refresh config; continuing with existing token: {error}"
+            );
+            Ok(session)
+        }
+    }
+}
+
+fn auth_candidate_roots(explicit_root: Option<PathBuf>) -> Result<Vec<PathBuf>> {
+    let mut roots = Vec::new();
+    let mut push_unique = |path: PathBuf| {
+        if !roots.iter().any(|existing| existing == &path) {
+            roots.push(path);
+        }
+    };
+
+    if let Some(explicit_root) = explicit_root {
+        push_unique(explicit_root);
+        return Ok(roots);
+    }
+
+    push_unique(resolve_paths(None)?.root);
+
+    if let Some(dirs) = ProjectDirs::from("com", "SkyBridge", "skybridge") {
+        push_unique(dirs.data_local_dir().to_path_buf());
+        push_unique(dirs.data_dir().to_path_buf());
+    }
+
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = PathBuf::from(home);
+        push_unique(
+            home.join("Library")
+                .join("Application Support")
+                .join("com.SkyBridge.skybridge"),
+        );
+        push_unique(
+            home.join("Library")
+                .join("Application Support")
+                .join("com.skybridge.compass.pro")
+                .join("SkyBridgeState"),
+        );
+        push_unique(
+            home.join("Library")
+                .join("Application Support")
+                .join("com.SkyBridge.Compass"),
+        );
+    }
+
+    Ok(roots)
+}
+
+async fn load_auth_session_from_gui_keychain() -> Result<Option<skybridge_core::AuthSession>> {
+    #[derive(Debug, serde::Deserialize)]
+    struct GuiAuthSession {
+        #[serde(rename = "accessToken")]
+        access_token: String,
+        #[serde(rename = "refreshToken")]
+        refresh_token: Option<String>,
+        #[serde(rename = "userIdentifier")]
+        user_identifier: String,
+        #[serde(rename = "displayName")]
+        display_name: String,
+        #[serde(rename = "issuedAt")]
+        issued_at: serde_json::Value,
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        return Ok(None);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let Some(raw) =
+            load_generic_keychain_string(GUI_AUTH_KEYCHAIN_SERVICE, GUI_AUTH_KEYCHAIN_ACCOUNT)
+                .await?
+        else {
+            return Ok(None);
+        };
+        let normalized = normalize_gui_auth_session_payload(raw.trim())?;
+        let session: GuiAuthSession = serde_json::from_str(&normalized)
+            .map_err(|error| anyhow!("failed to decode GUI auth session JSON: {error}"))?;
+        let issued_at = parse_gui_issued_at(&session.issued_at)?;
+        Ok(Some(skybridge_core::AuthSession {
+            access_token: session.access_token,
+            refresh_token: session.refresh_token,
+            user_identifier: session.user_identifier,
+            nebula_id: None,
+            display_name: session.display_name,
+            issued_at,
+        }))
+    }
+}
+
+async fn load_auth_session_from_file(path: &PathBuf) -> Result<skybridge_core::AuthSession> {
+    #[derive(Debug, serde::Deserialize)]
+    struct GuiAuthSession {
+        #[serde(rename = "accessToken")]
+        access_token: String,
+        #[serde(rename = "refreshToken")]
+        refresh_token: Option<String>,
+        #[serde(rename = "userIdentifier")]
+        user_identifier: String,
+        #[serde(rename = "displayName")]
+        display_name: String,
+        #[serde(rename = "issuedAt")]
+        issued_at: serde_json::Value,
+    }
+
+    let body = tokio::fs::read_to_string(path).await.map_err(|error| {
+        anyhow!(
+            "failed to read auth session file {}: {error}",
+            path.display()
+        )
+    })?;
+    if let Ok(session) = serde_json::from_str::<skybridge_core::AuthSession>(&body) {
+        return Ok(session);
+    }
+    let normalized = normalize_gui_auth_session_payload(body.trim())?;
+    let gui_session: GuiAuthSession = serde_json::from_str(&normalized).map_err(|error| {
+        anyhow!(
+            "failed to decode auth session file {} as Rust or GUI session JSON: {error}",
+            path.display()
+        )
+    })?;
+    let issued_at = parse_gui_issued_at(&gui_session.issued_at)?;
+    Ok(skybridge_core::AuthSession {
+        access_token: gui_session.access_token,
+        refresh_token: gui_session.refresh_token,
+        user_identifier: gui_session.user_identifier,
+        nebula_id: None,
+        display_name: gui_session.display_name,
+        issued_at,
+    })
+}
+
+fn normalize_gui_auth_session_payload(raw: &str) -> Result<String> {
+    let trimmed = raw.trim();
+    if trimmed.starts_with('{') {
+        return Ok(trimmed.to_owned());
+    }
+    if trimmed.len() % 2 != 0
+        || !trimmed
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        bail!("GUI auth session payload is neither JSON nor lowercase hex JSON");
+    }
+    let mut decoded = Vec::with_capacity(trimmed.len() / 2);
+    let bytes = trimmed.as_bytes();
+    for index in (0..bytes.len()).step_by(2) {
+        let high = hex_nibble(bytes[index])?;
+        let low = hex_nibble(bytes[index + 1])?;
+        decoded.push((high << 4) | low);
+    }
+    String::from_utf8(decoded)
+        .map_err(|error| anyhow!("decoded GUI auth session hex is not valid UTF-8: {error}"))
+}
+
+fn hex_nibble(byte: u8) -> Result<u8> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        _ => bail!("invalid hex nibble in GUI auth session payload"),
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SupabaseConfig {
+    url: String,
+    anon_key: String,
+}
+
+async fn load_supabase_config_from_keychain() -> Result<Option<SupabaseConfig>> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        return Ok(None);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let url = load_generic_keychain_string(GUI_SUPABASE_SERVICE, "URL").await?;
+        let anon_key = load_generic_keychain_string(GUI_SUPABASE_SERVICE, "AnonKey").await?;
+        match (url, anon_key) {
+            (Some(url), Some(anon_key)) => Ok(Some(SupabaseConfig { url, anon_key })),
+            _ => Ok(None),
+        }
+    }
+}
+
+async fn load_generic_keychain_string(
+    service: &'static str,
+    account: &'static str,
+) -> Result<Option<String>> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (service, account);
+        return Ok(None);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        match load_generic_keychain_string_native(service, account).await {
+            Ok(value) => Ok(value),
+            Err(native_error) => {
+                match load_generic_keychain_string_via_security_cli(service, account).await {
+                    Ok(value) => Ok(value),
+                    Err(cli_error) => Err(anyhow!(
+                        "failed to load keychain item {service}/{account}: native lookup failed: {native_error}; security CLI fallback failed: {cli_error}"
+                    )),
+                }
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn load_generic_keychain_string_native(
+    service: &'static str,
+    account: &'static str,
+) -> Result<Option<String>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result: Result<Option<String>> = (|| {
+            use security_framework::base::Error as SecurityError;
+            use security_framework::passwords::get_generic_password;
+
+            match get_generic_password(service, account) {
+                Ok(bytes) => {
+                    let text = String::from_utf8(bytes).map_err(|error| {
+                        anyhow!("invalid UTF-8 from keychain item {service}/{account}: {error}")
+                    })?;
+                    Ok(Some(text))
+                }
+                Err(error) if error.code() == -25300 => Ok(None),
+                Err(error) => Err(anyhow!(
+                    "Security.framework lookup failed for {service}/{account}: {} ({})",
+                    error.code(),
+                    SecurityError::from_code(error.code())
+                )),
+            }
+        })();
+        let _ = tx.send(result);
+    });
+
+    tokio::time::timeout(Duration::from_secs(5), async move {
+        loop {
+            match rx.try_recv() {
+                Ok(result) => return result,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    bail!("keychain worker disconnected for {service}/{account}");
+                }
+            }
+        }
+    })
+    .await
+    .map_err(|_| anyhow!("timed out waiting for keychain item {service}/{account}"))?
+}
+
+#[cfg(target_os = "macos")]
+async fn load_generic_keychain_string_via_security_cli(
+    service: &'static str,
+    account: &'static str,
+) -> Result<Option<String>> {
+    let service_name = service.to_owned();
+    let account_name = account.to_owned();
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        tokio::task::spawn_blocking(move || -> Result<Option<String>> {
+            let output = ProcessCommand::new("security")
+                .arg("find-generic-password")
+                .arg("-s")
+                .arg(&service_name)
+                .arg("-a")
+                .arg(&account_name)
+                .arg("-w")
+                .output()
+                .map_err(|error| {
+                    anyhow!(
+                        "failed to launch security CLI for {service_name}/{account_name}: {error}"
+                    )
+                })?;
+            if output.status.success() {
+                let value = String::from_utf8(output.stdout).map_err(|error| {
+                    anyhow!(
+                        "security CLI returned non-UTF-8 output for {service_name}/{account_name}: {error}"
+                    )
+                })?;
+                return Ok(Some(value.trim_end().to_owned()));
+            }
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let normalized = stderr.to_ascii_lowercase();
+            if normalized.contains("could not be found")
+                || normalized.contains("item could not be found")
+            {
+                return Ok(None);
+            }
+            bail!(
+                "security CLI lookup failed for {service_name}/{account_name}: status={:?} stderr={}",
+                output.status,
+                stderr.trim()
+            );
+        }),
+    )
+    .await
+    .map_err(|_| anyhow!("timed out waiting for security CLI keychain lookup for {service}/{account}"))?
+    .map_err(|error| anyhow!("security CLI worker failed for {service}/{account}: {error}"))?
+}
+
+async fn refresh_supabase_auth_session(
+    config: &SupabaseConfig,
+    refresh_token: &str,
+    previous: &skybridge_core::AuthSession,
+) -> Result<skybridge_core::AuthSession> {
+    #[derive(Debug, serde::Deserialize)]
+    struct SupabaseUser {
+        id: String,
+        email: Option<String>,
+    }
+
+    #[derive(Debug, serde::Deserialize)]
+    struct SupabaseRefreshResponse {
+        access_token: String,
+        refresh_token: Option<String>,
+        user: SupabaseUser,
+    }
+
+    let endpoint = format!(
+        "{}/auth/v1/token?grant_type=refresh_token",
+        config.url.trim_end_matches('/')
+    );
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()?;
+    let response = client
+        .post(&endpoint)
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {}", config.anon_key))
+        .header("apikey", &config.anon_key)
+        .json(&serde_json::json!({ "refresh_token": refresh_token }))
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        bail!(
+            "supabase refresh failed ({}): {}",
+            response.status(),
+            response.text().await.unwrap_or_default()
+        );
+    }
+    let refreshed: SupabaseRefreshResponse = response.json().await?;
+    Ok(skybridge_core::AuthSession {
+        access_token: refreshed.access_token,
+        refresh_token: refreshed
+            .refresh_token
+            .or_else(|| previous.refresh_token.clone()),
+        user_identifier: refreshed.user.id,
+        nebula_id: previous.nebula_id.clone(),
+        display_name: refreshed
+            .user
+            .email
+            .unwrap_or_else(|| previous.display_name.clone()),
+        issued_at: OffsetDateTime::now_utc(),
+    })
+}
+
+fn parse_gui_issued_at(value: &serde_json::Value) -> Result<OffsetDateTime> {
+    const APPLE_REFERENCE_UNIX_SECONDS: i64 = 978_307_200;
+    match value {
+        serde_json::Value::Number(number) => {
+            let seconds = number
+                .as_f64()
+                .ok_or_else(|| anyhow!("issuedAt numeric value is not representable"))?;
+            let unix_seconds = seconds + APPLE_REFERENCE_UNIX_SECONDS as f64;
+            OffsetDateTime::from_unix_timestamp_nanos((unix_seconds * 1_000_000_000.0) as i128)
+                .map_err(|error| anyhow!("invalid issuedAt timestamp: {error}"))
+        }
+        serde_json::Value::String(text) => {
+            OffsetDateTime::parse(text, &time::format_description::well_known::Rfc3339)
+                .map_err(|error| anyhow!("invalid issuedAt string: {error}"))
+        }
+        _ => bail!("unsupported issuedAt representation in GUI auth session"),
+    }
+}
+
+async fn create_code_lease_for_smoke(
+    paths: &skybridge_agent::AgentPaths,
+    auth_session: &skybridge_core::AuthSession,
+) -> Result<ConnectionCodeLease> {
+    let tenant_id = require_tenant_id(auth_session)?;
+    let identity = ensure_device_identity(paths).await?;
+    let signal_server = SignalServerClient::from_env()?;
+    let admission =
+        request_admission_lease(&signal_server, auth_session, &tenant_id, &identity).await?;
+    let lease = signal_server
+        .register_connection_code(&admission.token, &identity.state.device.device_name, 300)
+        .await?;
+    let turn_credentials = signal_server
+        .fetch_turn_credentials(&lease.turn_admission_lease.token)
+        .await?;
+    upsert_session_runtime(
+        paths,
+        RuntimeSessionRecord::new(
+            make_runtime_id(&lease.session_id),
+            lease.session_id.clone(),
+            RuntimeSessionRole::Initiator,
+            RuntimeSessionSource::Code,
+            lease.signaling_server_origin.clone(),
+            identity.state.device.device_id.clone(),
+            None,
+            None,
+            None,
+            RuntimeSessionState::Pending,
+        ),
+    )
+    .await?;
+    upsert_managed_session_control(
+        paths,
+        ManagedSessionControl::new(
+            lease.session_id.clone(),
+            RuntimeSessionRole::Initiator,
+            RuntimeSessionSource::Code,
+            identity.state.device.device_id.clone(),
+            lease.signaling_server_origin.clone(),
+            lease.session_token.clone(),
+            Some(turn_credentials),
+        ),
+    )
+    .await?;
+    Ok(lease)
+}
+
+async fn prepare_code_lookup_for_smoke(
+    paths: &skybridge_agent::AgentPaths,
+    code: &str,
+    auth_session: &skybridge_core::AuthSession,
+) -> Result<ConnectionCodeLookup> {
+    let tenant_id = require_tenant_id(auth_session)?;
+    let identity = ensure_device_identity(paths).await?;
+    let signal_server = SignalServerClient::from_env()?;
+    let admission =
+        request_admission_lease(&signal_server, auth_session, &tenant_id, &identity).await?;
+    let lookup = signal_server
+        .lookup_connection_code(&admission.token, code)
+        .await?;
+    let turn_credentials = signal_server
+        .fetch_turn_credentials(&lookup.turn_admission_lease.token)
+        .await?;
+    let canonical_origin =
+        CurrentPathOriginPolicy::canonical_origin(&lookup.signaling_server_origin)?;
+    let initial_record = RuntimeSessionRecord::new(
+        make_runtime_id(&lookup.session_id),
+        lookup.session_id.clone(),
+        RuntimeSessionRole::Responder,
+        RuntimeSessionSource::Code,
+        canonical_origin,
+        identity.state.device.device_id.clone(),
+        Some(lookup.initiator_device_id.clone()),
+        lookup.initiator_device_name.clone(),
+        Some(lookup.initiator_protocol_public_key_fingerprint.clone()),
+        RuntimeSessionState::Connecting,
+    );
+    upsert_session_runtime(paths, initial_record).await?;
+    upsert_managed_session_control(
+        paths,
+        ManagedSessionControl::new(
+            lookup.session_id.clone(),
+            RuntimeSessionRole::Responder,
+            RuntimeSessionSource::Code,
+            identity.state.device.device_id.clone(),
+            lookup.signaling_server_origin.clone(),
+            lookup.session_token.clone(),
+            Some(turn_credentials),
+        ),
+    )
+    .await?;
+    Ok(lookup)
+}
+
+fn spawn_agent_process(
+    exe_path: &PathBuf,
+    state_dir: &PathBuf,
+    receive_dir: &PathBuf,
+    crypto: CliCryptoMode,
+    peer_pqc: &skybridge_core::RustPqcIdentityMaterial,
+    label: &str,
+) -> Result<AgentChild> {
+    let log_path = state_dir
+        .parent()
+        .unwrap_or(state_dir)
+        .join(format!("{label}-agent.log"));
+    let log_file = StdFile::create(&log_path)?;
+    let log_file_err = log_file.try_clone()?;
+    let mut command = ProcessCommand::new(exe_path);
+    command
+        .arg("--state-dir")
+        .arg(state_dir)
+        .arg("agent")
+        .arg("run")
+        .arg("--crypto")
+        .arg(describe_cli_crypto_mode(crypto))
+        .env("SKYBRIDGE_FILE_RECEIVE_DIR", receive_dir)
+        .env(
+            "SKYBRIDGE_PQC_PEER_XWING_PUBLIC_KEY_BASE64",
+            STANDARD.encode(&peer_pqc.xwing_public_key),
+        )
+        .env(
+            "SKYBRIDGE_PQC_PEER_MLKEM768_PUBLIC_KEY_BASE64",
+            STANDARD.encode(&peer_pqc.mlkem768_public_key),
+        )
+        .stdout(Stdio::from(log_file))
+        .stderr(Stdio::from(log_file_err));
+    if let Some(preferred_suite) = crypto.requested_pqc_suite() {
+        command.env("SKYBRIDGE_PQC_PREFERRED_SUITE", preferred_suite.to_string());
+    }
+    let child = command.spawn()?;
+    Ok(AgentChild { child, log_path })
+}
+
+async fn wait_for_handshake_completion(
+    paths: &skybridge_agent::AgentPaths,
+    session_id: &str,
+    agent: &mut AgentChild,
+) -> Result<String> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        if let Some(status) = agent.child.try_wait()? {
+            bail!(
+                "agent exited before handshake completion with status {} (log: {})",
+                status,
+                agent.log_path.display()
+            );
+        }
+        let registry = load_session_registry(paths).await?;
+        if let Some(record) = registry.get(session_id) {
+            if let SessionReadiness::HandshakeComplete {
+                negotiated_suite, ..
+            } = &record.readiness
+            {
+                return Ok(negotiated_suite.clone());
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            bail!(
+                "timed out waiting for handshake completion (log: {})",
+                agent.log_path.display()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+async fn wait_for_received_file(
+    received_path: &PathBuf,
+    expected_body: &str,
+    initiator_agent: &mut AgentChild,
+    responder_agent: &mut AgentChild,
+) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        for agent in [&mut *initiator_agent, &mut *responder_agent] {
+            if let Some(status) = agent.child.try_wait()? {
+                bail!(
+                    "agent exited before transfer completion with status {} (log: {})",
+                    status,
+                    agent.log_path.display()
+                );
+            }
+        }
+        if tokio::fs::try_exists(received_path).await? {
+            let received = tokio::fs::read_to_string(received_path).await?;
+            if received == expected_body {
+                return Ok(());
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            bail!(
+                "timed out waiting for received file {}",
+                received_path.display()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+fn describe_cli_crypto_mode(mode: CliCryptoMode) -> &'static str {
+    match mode {
+        CliCryptoMode::Auto => "auto",
+        CliCryptoMode::Xwing => "xwing",
+        CliCryptoMode::Mlkem => "mlkem",
+        CliCryptoMode::Classic => "classic",
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct CreateCliLoginSessionRequestPayload {
+    client_id: String,
+    code_challenge: String,
+    redirect_uri: String,
+    state: String,
+    platform: String,
+    cli_version: String,
+    device_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateCliLoginSessionResponsePayload {
+    session_id: String,
+    browser_url: String,
+    #[serde(rename = "expires_at")]
+    _expires_at: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ExchangeCliLoginTokenRequestPayload {
+    session_id: String,
+    client_id: String,
+    code: String,
+    code_verifier: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExchangeCliLoginTokenResponsePayload {
+    access_token: String,
+    refresh_token: String,
+    user_identifier: String,
+    display_name: String,
+    nebula_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LoginApiErrorEnvelope {
+    error: LoginApiErrorDetail,
+}
+
+#[derive(Debug, Deserialize)]
+struct LoginApiErrorDetail {
+    message: String,
+}
+
+#[derive(Debug)]
+struct BrowserCallbackResult {
+    code: String,
+}
+
+fn current_cli_platform() -> &'static str {
+    match std::env::consts::OS {
+        "macos" => "macos",
+        "linux" => "linux",
+        "windows" => "windows",
+        other => other,
+    }
+}
+
+fn login_api_base_url() -> String {
+    std::env::var("SKYBRIDGE_LOGIN_API_BASE_URL")
+        .unwrap_or_else(|_| DEFAULT_LOGIN_API_BASE_URL.to_owned())
+        .trim()
+        .trim_end_matches('/')
+        .to_owned()
+}
+
+fn login_api_uses_loopback(base_url: &str) -> bool {
+    Url::parse(base_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned))
+        .map(|host| host == "127.0.0.1" || host.eq_ignore_ascii_case("localhost"))
+        .unwrap_or(false)
+}
+
+fn login_web_base_url_override() -> Option<String> {
+    std::env::var("SKYBRIDGE_LOGIN_WEB_BASE_URL")
+        .ok()
+        .map(|value| value.trim().trim_end_matches('/').to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+fn login_debug_enabled() -> bool {
+    std::env::var("SKYBRIDGE_LOGIN_DEBUG")
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn effective_browser_login_url(response: &CreateCliLoginSessionResponsePayload) -> String {
+    if let Some(configured) = login_web_base_url_override() {
+        if let Ok(mut url) = Url::parse(&configured) {
+            url.set_path("/auth/cli");
+            url.set_query(Some(&format!("session={}", response.session_id)));
+            return url.to_string();
+        }
+    }
+    if !response.browser_url.trim().is_empty() {
+        return response.browser_url.clone();
+    }
+    format!(
+        "{}/auth/cli?session={}",
+        DEFAULT_LOGIN_WEB_BASE_URL, response.session_id
+    )
+}
+
+async fn read_login_api_error(response: reqwest::Response, fallback: &str) -> Result<String> {
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    if let Ok(error) = serde_json::from_str::<LoginApiErrorEnvelope>(&body) {
+        return Ok(format!("{} ({}): {}", fallback, status, error.error.message));
+    }
+    if body.trim().is_empty() {
+        return Ok(format!("{} ({})", fallback, status));
+    }
+    Ok(format!("{} ({}): {}", fallback, status, body.trim()))
+}
+
+async fn wait_for_browser_cli_callback(
+    listener: TcpListener,
+    expected_state: &str,
+) -> Result<BrowserCallbackResult> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(600);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            bail!("timed out waiting for browser login callback");
+        }
+
+        let (mut stream, _) = tokio::time::timeout(remaining, listener.accept())
+            .await
+            .map_err(|_| anyhow!("timed out waiting for browser login callback"))??;
+        let mut request = vec![0_u8; 4096];
+        let read = stream.read(&mut request).await?;
+        let text = String::from_utf8_lossy(&request[..read]);
+        let request_line = text
+            .lines()
+            .next()
+            .ok_or_else(|| anyhow!("empty browser callback request"))?;
+        let target = request_line
+            .split_whitespace()
+            .nth(1)
+            .ok_or_else(|| anyhow!("invalid browser callback request line"))?;
+        let callback_url = format!("http://127.0.0.1{target}");
+        let url = Url::parse(&callback_url)?;
+        let query = url.query_pairs().collect::<std::collections::HashMap<_, _>>();
+
+        if let Some(error) = query
+            .get("error_description")
+            .or_else(|| query.get("error"))
+            .map(|value| value.to_string())
+        {
+            let body = format!("SkyBridge CLI login failed: {error}\n");
+            write_loopback_response(&mut stream, 400, &body).await?;
+            bail!("{error}");
+        }
+
+        let returned_state = query
+            .get("state")
+            .map(|value| value.as_ref())
+            .unwrap_or_default();
+        if returned_state != expected_state {
+            let body = "SkyBridge CLI login state mismatch. You can close this tab.\n";
+            write_loopback_response(&mut stream, 400, body).await?;
+            bail!("browser login state validation failed");
+        }
+
+        let Some(code) = query.get("code").map(|value| value.to_string()) else {
+            let body = "SkyBridge CLI login callback did not include an authorization code.\n";
+            write_loopback_response(&mut stream, 400, body).await?;
+            bail!("browser login callback did not include an authorization code");
+        };
+
+        let body = "SkyBridge CLI login complete. You can close this tab.\n";
+        write_loopback_response(&mut stream, 200, body).await?;
+        return Ok(BrowserCallbackResult { code });
+    }
+}
+
+async fn write_loopback_response(
+    stream: &mut tokio::net::TcpStream,
+    status_code: u16,
+    body: &str,
+) -> Result<()> {
+    let status_text = if status_code == 200 { "OK" } else { "Bad Request" };
+    let response = format!(
+        "HTTP/1.1 {} {}\r\ncontent-type: text/plain; charset=utf-8\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+        status_code,
+        status_text,
+        body.len(),
+        body
+    );
+    stream.write_all(response.as_bytes()).await?;
+    stream.shutdown().await?;
+    Ok(())
+}
+
+async fn complete_login(
+    paths: &skybridge_agent::AgentPaths,
+    session: &skybridge_core::AuthSession,
+    source: &str,
+) -> Result<()> {
+    store_auth_session(paths, session).await?;
+    store_auth_session_source(paths, source).await?;
+    let identity = ensure_device_identity(paths).await?;
+    let tenant_id = derive_tenant_identifier(&session.access_token).unwrap_or_default();
+    println!("Logged in as: {}", session.display_name);
+    println!("User ID: {}", session.user_identifier);
+    println!(
+        "Tenant ID: {}",
+        if tenant_id.is_empty() {
+            "<unresolved>"
+        } else {
+            &tenant_id
+        }
+    );
+    println!("Device ID: {}", identity.state.device.device_id);
+    println!("Login Source: {}", source);
+    Ok(())
+}
+
+async fn try_reuse_gui_auth_session() -> Result<Option<skybridge_core::AuthSession>> {
+    match load_auth_session_from_gui_keychain().await {
+        Ok(Some(session)) => Ok(Some(maybe_refresh_supabase_auth_session(session).await?)),
+        Ok(None) => Ok(None),
+        Err(error) => {
+            eprintln!(
+                "warning: failed to reuse GUI login session; falling back to browser login: {error}"
+            );
+            Ok(None)
+        }
+    }
+}
+
+fn should_use_legacy_login(args: &LoginCommand) -> bool {
+    args.redirect_uri.is_some() || args.callback_url.is_some() || args.authorization_code.is_some()
+}
+
+fn should_force_browser_login(args: &LoginCommand) -> bool {
+    if args.browser {
+        return true;
+    }
+
+    std::env::var("SKYBRIDGE_LOGIN_FORCE_BROWSER")
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+async fn login_via_legacy_nebula_oauth(
+    paths: &skybridge_agent::AgentPaths,
+    args: &LoginCommand,
+) -> Result<()> {
+    eprintln!(
+        "warning: legacy Nebula OAuth login flags are deprecated; prefer `skybridge login` without redirect/code overrides"
+    );
     let oauth = NebulaOAuthClient::from_env()?;
-    let redirect_uri = resolve_cli_login_redirect_uri(&args);
-    let authorization_request = oauth.make_authorization_request(
-        &redirect_uri,
-        &["openid", "profile", "email", "offline_access"],
-        &[],
-    )?;
+    let redirect_uri = args
+        .redirect_uri
+        .clone()
+        .or_else(|| std::env::var("SKYBRIDGE_OAUTH_REDIRECT_URI").ok())
+        .unwrap_or_else(|| "skybridge://auth/nebula".to_owned());
+    let authorization_request = oauth
+        .make_authorization_request(
+            &redirect_uri,
+            &["openid", "profile", "email", "offline_access"],
+            &[],
+        )
+        .await?;
 
     if args.print_only {
         println!("{}", authorization_request.authorization_url);
         return Ok(());
     }
 
-    validate_nebula_oauth_preflight(&oauth).await?;
-
     let session = oauth
         .complete_authorization_interactively(
             &authorization_request,
             !args.no_open,
-            args.callback_url,
-            args.authorization_code,
+            args.callback_url.clone(),
+            args.authorization_code.clone(),
         )
         .await?;
-    store_auth_session(&paths, &session).await?;
-    let identity = ensure_device_identity(&paths).await?;
-    let tenant_id = derive_tenant_identifier(&session.access_token).unwrap_or_default();
-    if args.json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&json!({
-                "logged_in": true,
-                "display_name": session.display_name,
-                "user_id": session.user_identifier,
-                "tenant_id": if tenant_id.is_empty() { None::<String> } else { Some(tenant_id.clone()) },
-                "device_id": identity.state.device.device_id,
-                "redirect_uri": redirect_uri,
-                "mode": describe_login_mode(args.mode, authorization_request.redirect_uri.as_str()),
-            }))?
-        );
-    } else {
-        println!("Logged in as: {}", session.display_name);
-        println!("User ID: {}", session.user_identifier);
-        println!(
-            "Tenant ID: {}",
-            if tenant_id.is_empty() {
-                "<unresolved>"
-            } else {
-                &tenant_id
-            }
-        );
-        println!("Device ID: {}", identity.state.device.device_id);
-        println!("Login Mode: {}", describe_login_mode(args.mode, authorization_request.redirect_uri.as_str()));
+    complete_login(paths, &session, AUTH_SOURCE_LEGACY_NEBULA_OAUTH).await
+}
+
+async fn login_via_browser_cli_login(
+    paths: &skybridge_agent::AgentPaths,
+    args: &LoginCommand,
+) -> Result<()> {
+    let api_base_url = login_api_base_url();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+    let local_addr = listener.local_addr()?;
+    let redirect_uri = format!("http://127.0.0.1:{}/callback", local_addr.port());
+    let (code_verifier, code_challenge) = generate_pkce_pair();
+    let state = uuid::Uuid::now_v7().to_string();
+    let mut client_builder = reqwest::Client::builder().timeout(Duration::from_secs(20));
+    if login_api_uses_loopback(&api_base_url) {
+        client_builder = client_builder.no_proxy();
     }
-    Ok(())
+    let client = client_builder.build()?;
+    let identity = ensure_device_identity(paths).await?;
+    let request = CreateCliLoginSessionRequestPayload {
+        client_id: CLI_LOGIN_CLIENT_ID.to_owned(),
+        code_challenge,
+        redirect_uri,
+        state: state.clone(),
+        platform: current_cli_platform().to_owned(),
+        cli_version: env!("CARGO_PKG_VERSION").to_owned(),
+        device_name: Some(identity.state.device.device_name.clone()),
+    };
+    let create_url = format!("{}/api/cli-login/sessions", api_base_url);
+    if login_debug_enabled() {
+        eprintln!("skybridge login debug: create session url = {create_url}");
+    }
+    let response = client.post(create_url).json(&request).send().await?;
+    if !response.status().is_success() {
+        bail!("{}", read_login_api_error(response, "failed to create browser login session").await?);
+    }
+    let session_response = response.json::<CreateCliLoginSessionResponsePayload>().await?;
+    let browser_url = effective_browser_login_url(&session_response);
+
+    println!("{}", browser_url);
+    if args.print_only {
+        return Ok(());
+    }
+
+    if !args.no_open {
+        let _ = webbrowser::open(&browser_url);
+    }
+
+    let callback = wait_for_browser_cli_callback(listener, &state).await?;
+    let exchange_url = format!("{}/api/cli-login/token", api_base_url);
+    if login_debug_enabled() {
+        eprintln!("skybridge login debug: exchange token url = {exchange_url}");
+    }
+    let response = client
+        .post(exchange_url)
+        .json(&ExchangeCliLoginTokenRequestPayload {
+            session_id: session_response.session_id,
+            client_id: CLI_LOGIN_CLIENT_ID.to_owned(),
+            code: callback.code,
+            code_verifier,
+        })
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        bail!("{}", read_login_api_error(response, "failed to exchange browser login code").await?);
+    }
+
+    let exchanged = response.json::<ExchangeCliLoginTokenResponsePayload>().await?;
+    let session = skybridge_core::AuthSession {
+        access_token: exchanged.access_token,
+        refresh_token: Some(exchanged.refresh_token),
+        user_identifier: exchanged.user_identifier,
+        nebula_id: exchanged.nebula_id,
+        display_name: exchanged.display_name,
+        issued_at: OffsetDateTime::now_utc(),
+    };
+    complete_login(paths, &session, AUTH_SOURCE_BROWSER_CLI_LOGIN).await
+}
+
+async fn login(state_dir: Option<PathBuf>, args: LoginCommand) -> Result<()> {
+    let paths = resolve_paths(state_dir)?;
+    if should_use_legacy_login(&args) {
+        return login_via_legacy_nebula_oauth(&paths, &args).await;
+    }
+
+    if !args.print_only && !should_force_browser_login(&args) {
+        if let Some(session) = try_reuse_gui_auth_session().await? {
+            return complete_login(&paths, &session, AUTH_SOURCE_GUI_SESSION_REUSE).await;
+        }
+    }
+
+    login_via_browser_cli_login(&paths, &args).await
 }
 
 async fn logout(state_dir: Option<PathBuf>) -> Result<()> {
@@ -401,56 +1747,6 @@ async fn logout(state_dir: Option<PathBuf>) -> Result<()> {
     clear_auth_session(&paths).await?;
     println!("Logged out");
     Ok(())
-}
-
-fn resolve_cli_login_redirect_uri(args: &LoginCommand) -> String {
-    if let Some(explicit) = args
-        .redirect_uri
-        .clone()
-        .or_else(|| std::env::var("SKYBRIDGE_OAUTH_REDIRECT_URI").ok())
-    {
-        return explicit;
-    }
-
-    match args.mode {
-        LoginMode::Auto if args.callback_url.is_none() && args.authorization_code.is_none() => {
-            format!("http://127.0.0.1:{}/auth/callback", args.listen_port)
-        }
-        LoginMode::Auto => "skybridge://auth/nebula".to_owned(),
-        LoginMode::Browser => format!("http://127.0.0.1:{}/auth/callback", args.listen_port),
-        LoginMode::Paste => "skybridge://auth/nebula".to_owned(),
-    }
-}
-
-async fn validate_nebula_oauth_preflight(oauth: &NebulaOAuthClient) -> Result<()> {
-    if let Err(error) = oauth.fetch_discovery_document().await {
-        let base_url = configured_nebula_base_url();
-        bail!(
-            "Nebula OAuth preflight failed for {base_url}/.well-known/openid-configuration: {error}\n\
-             The configured Nebula base URL is not serving a valid OAuth issuer right now.\n\
-             Fix the Nebula auth deployment or override NEBULA_BASE_URL / SKYBRIDGE_NEBULA_BASE_URL before running `skybridge login`."
-        );
-    }
-    Ok(())
-}
-
-fn configured_nebula_base_url() -> String {
-    std::env::var("NEBULA_BASE_URL")
-        .or_else(|_| std::env::var("SKYBRIDGE_NEBULA_BASE_URL"))
-        .unwrap_or_else(|_| DEFAULT_NEBULA_BASE_URL.to_owned())
-}
-
-fn describe_login_mode(mode: LoginMode, redirect_uri: &str) -> &'static str {
-    match mode {
-        LoginMode::Browser => "browser-loopback",
-        LoginMode::Paste => "manual-paste",
-        LoginMode::Auto if redirect_uri.starts_with("http://127.0.0.1:")
-            || redirect_uri.starts_with("http://localhost:") =>
-        {
-            "browser-loopback"
-        }
-        LoginMode::Auto => "manual-paste",
-    }
 }
 
 fn internal_verify_mldsa(args: VerifyMldsaArgs) -> Result<()> {
@@ -516,7 +1812,7 @@ fn pqc_bridge_identity_enabled() -> bool {
         .map(|value| {
             !matches!(
                 value.trim().to_ascii_lowercase().as_str(),
-                "0" | "false" | "no"
+                "0" | "false" | "no" | "off"
             )
         })
         .unwrap_or(true)
@@ -526,6 +1822,7 @@ async fn maybe_inline_pqc_responder_config(
     paths: &skybridge_agent::AgentPaths,
     identity: &skybridge_agent::DeviceIdentityMaterial,
     local_binding: &ProtocolIdentityBinding,
+    supported_suites: Vec<CryptoSuite>,
 ) -> Result<Option<PqcResponderConfig>> {
     if local_binding.protocol_signing_algorithm != ProtocolSigningAlgorithm::MlDsa65
         && !pqc_bridge_identity_enabled()
@@ -549,270 +1846,23 @@ async fn maybe_inline_pqc_responder_config(
         local_binding: pqc_binding,
         local_device_name: Some(identity.state.device.device_name.clone()),
         identity: pqc_identity,
-        supported_suites: vec![CryptoSuite::XWING_MLDSA, CryptoSuite::MLKEM768_MLDSA65],
+        supported_suites,
     }))
 }
 
-async fn maybe_inline_pqc_initiator_template(
-    paths: &skybridge_agent::AgentPaths,
+fn inline_classic_responder_config(
     identity: &skybridge_agent::DeviceIdentityMaterial,
     local_binding: &ProtocolIdentityBinding,
-) -> Result<Option<PqcInitiatorTemplate>> {
-    if local_binding.protocol_signing_algorithm != ProtocolSigningAlgorithm::MlDsa65
-        && !pqc_bridge_identity_enabled()
-    {
-        return Ok(None);
-    }
-
-    let (pqc_binding, signing_secret_key) = if local_binding.protocol_signing_algorithm
-        == ProtocolSigningAlgorithm::MlDsa65
-    {
-        let signing_secret_key = identity
-            .signing_key
-            .mldsa65_secret_key_bytes()
-            .ok_or_else(|| anyhow!("missing ML-DSA-65 signing secret key"))?;
-        (local_binding.clone(), signing_secret_key)
-    } else {
-        let pqc_identity = ensure_rust_pqc_identity(paths).await?;
-        (
-            ProtocolIdentityBinding::new(
-                local_binding.device_id.clone(),
-                pqc_identity.signing_algorithm,
-                pqc_identity.signing_public_key.clone(),
-                None,
-            )?,
-            pqc_identity.signing_secret_key,
-        )
-    };
-
-    Ok(Some(PqcInitiatorTemplate {
-        local_binding: pqc_binding,
-        signing_secret_key,
-        local_device_name: Some(identity.state.device.device_name.clone()),
-        preferred_suites: vec![CryptoSuite::XWING_MLDSA, CryptoSuite::MLKEM768_MLDSA65],
-    }))
-}
-
-fn maybe_inline_classic_responder_config(
-    identity: &skybridge_agent::DeviceIdentityMaterial,
-    local_binding: &ProtocolIdentityBinding,
-    role: RuntimeSessionRole,
-) -> Result<Option<ClassicResponderConfig>> {
-    if role != RuntimeSessionRole::Responder
-        || local_binding.protocol_signing_algorithm != ProtocolSigningAlgorithm::Ed25519
-    {
-        return Ok(None);
-    }
+) -> Result<skybridge_core::ClassicResponderConfig> {
     let signing_secret_key = identity
         .signing_key
         .ed25519_secret_key_bytes()
-        .ok_or_else(|| anyhow!("classic responder requires an Ed25519 protocol identity"))?;
-    Ok(Some(ClassicResponderConfig {
+        .ok_or_else(|| anyhow!("classic mode requires an Ed25519 protocol identity"))?;
+    Ok(skybridge_core::ClassicResponderConfig {
         local_binding: local_binding.clone(),
         signing_secret_key,
         local_device_name: Some(identity.state.device.device_name.clone()),
-    }))
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-enum CrossNetworkFileTransferOp {
-    Metadata,
-    MetadataAck,
-    Chunk,
-    ChunkAck,
-    Complete,
-    CompleteAck,
-    Cancel,
-    Error,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CrossNetworkFileTransferMessage {
-    version: i32,
-    op: CrossNetworkFileTransferOp,
-    transfer_id: String,
-    sender_device_id: Option<String>,
-    sender_device_name: Option<String>,
-    file_name: Option<String>,
-    file_size: Option<i64>,
-    chunk_size: Option<i32>,
-    total_chunks: Option<i32>,
-    mime_type: Option<String>,
-    chunk_index: Option<i32>,
-    #[serde(default, with = "opt_base64_bytes")]
-    chunk_data: Option<Vec<u8>>,
-    raw_size: Option<i32>,
-    received_bytes: Option<i64>,
-    message: Option<String>,
-}
-
-impl CrossNetworkFileTransferMessage {
-    fn new(op: CrossNetworkFileTransferOp, transfer_id: String) -> Self {
-        Self {
-            version: 1,
-            op,
-            transfer_id,
-            sender_device_id: None,
-            sender_device_name: None,
-            file_name: None,
-            file_size: None,
-            chunk_size: None,
-            total_chunks: None,
-            mime_type: None,
-            chunk_index: None,
-            chunk_data: None,
-            raw_size: None,
-            received_bytes: None,
-            message: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PairingKemPublicKeyInfo {
-    suite_wire_id: u16,
-    #[serde(with = "base64_bytes")]
-    public_key: Vec<u8>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PairingIdentityExchangePayload {
-    device_id: String,
-    kem_public_keys: Vec<PairingKemPublicKeyInfo>,
-    device_name: Option<String>,
-    platform: Option<String>,
-    remote_video_formats: Option<Vec<String>>,
-    sent_at: f64,
-}
-
-#[derive(Debug)]
-struct ReceiveState {
-    transfer_id: String,
-    file_name: String,
-    file_size: i64,
-    chunk_size: i32,
-    temp_path: PathBuf,
-    final_path: PathBuf,
-    file: tokio::fs::File,
-    received_bytes: i64,
-}
-
-#[derive(Debug, Default)]
-struct SessionTransferState {
-    pairing_sent: bool,
-    rekey_attempted: bool,
-    current_negotiated_suite: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-enum FileTransferDirection {
-    Send,
-    Receive,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct FileTransferHistoryEntry {
-    recorded_at: String,
-    direction: FileTransferDirection,
-    session_id: String,
-    transfer_id: String,
-    file_name: String,
-    path: String,
-    bytes: i64,
-    suite: Option<String>,
-    peer_device_id: Option<String>,
-    peer_device_name: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SmokeTestResult {
-    ok: bool,
-    session_id: String,
-    transfer_id: String,
-    code: String,
-    suite: Option<String>,
-    pqc: bool,
-    payload_bytes: usize,
-    payload_sha256: String,
-    received_sha256: String,
-    sender_device_id: String,
-    receiver_device_id: String,
-    receiver_output_path: String,
-    artifacts_dir: Option<String>,
-}
-
-#[derive(Debug)]
-struct ChildCommandResult {
-    status: std::process::ExitStatus,
-    stdout: String,
-    stderr: String,
-}
-
-mod base64_bytes {
-    use super::*;
-
-    pub fn serialize<S>(value: &[u8], serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_str(&STANDARD.encode(value))
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        STANDARD
-            .decode(value.as_bytes())
-            .map_err(serde::de::Error::custom)
-    }
-}
-
-mod opt_base64_bytes {
-    use super::*;
-
-    pub fn serialize<S>(value: &Option<Vec<u8>>, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        match value {
-            Some(value) => serializer.serialize_some(&STANDARD.encode(value)),
-            None => serializer.serialize_none(),
-        }
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Vec<u8>>, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let value = Option::<serde_json::Value>::deserialize(deserializer)?;
-        match value {
-            None => Ok(None),
-            Some(serde_json::Value::String(value)) => STANDARD
-                .decode(value.as_bytes())
-                .map(Some)
-                .map_err(serde::de::Error::custom),
-            Some(serde_json::Value::Array(values)) => values
-                .into_iter()
-                .map(|value| {
-                    value
-                        .as_u64()
-                        .and_then(|byte| u8::try_from(byte).ok())
-                        .ok_or_else(|| serde::de::Error::custom("invalid byte array"))
-                })
-                .collect::<Result<Vec<_>, _>>()
-                .map(Some),
-            Some(_) => Err(serde::de::Error::custom("invalid chunkData payload")),
-        }
-    }
+    })
 }
 
 async fn device_status(state_dir: Option<PathBuf>, as_json: bool) -> Result<()> {
@@ -1076,12 +2126,36 @@ async fn connect_code(state_dir: Option<PathBuf>, args: ConnectCommand) -> Resul
     let tenant_id = require_tenant_id(&auth_session)?;
     let identity = ensure_device_identity(&paths).await?;
     let local_binding = signing_binding(&identity)?;
-    let pqc_initiator_template =
-        maybe_inline_pqc_initiator_template(&paths, &identity, &local_binding).await?;
-    let pqc_responder =
-        maybe_inline_pqc_responder_config(&paths, &identity, &local_binding).await?;
-    let classic_responder =
-        maybe_inline_classic_responder_config(&identity, &local_binding, RuntimeSessionRole::Responder)?;
+    let pqc_responder = if args.crypto == CliCryptoMode::Classic {
+        None
+    } else {
+        maybe_inline_pqc_responder_config(
+            &paths,
+            &identity,
+            &local_binding,
+            args.crypto.supported_pqc_suites(),
+        )
+        .await?
+    };
+    if matches!(args.crypto, CliCryptoMode::Xwing | CliCryptoMode::Mlkem) && pqc_responder.is_none()
+    {
+        bail!(
+            "selected {} but no PQC responder identity is available; enable {} or use --crypto classic",
+            args.crypto
+                .requested_pqc_suite()
+                .unwrap_or(CryptoSuite::XWING_MLDSA),
+            ENV_PQC_BRIDGE_IDENTITY
+        );
+    }
+    let classic_responder = if args.crypto == CliCryptoMode::Classic
+        || (args.crypto == CliCryptoMode::Auto
+            && pqc_responder.is_none()
+            && args.crypto.allows_classic())
+    {
+        Some(inline_classic_responder_config(&identity, &local_binding)?)
+    } else {
+        None
+    };
     let signal_server = SignalServerClient::from_env()?;
     let admission =
         request_admission_lease(&signal_server, &auth_session, &tenant_id, &identity).await?;
@@ -1121,7 +2195,6 @@ async fn connect_code(state_dir: Option<PathBuf>, args: ConnectCommand) -> Resul
         classic_initiator: None,
         classic_responder,
         pqc_initiator: None,
-        pqc_initiator_template,
         pqc_responder,
     })
     .await?;
@@ -1278,1569 +2351,6 @@ async fn drain_inline_native_events(
     Ok(())
 }
 
-async fn drain_inline_native_events_collect_app(
-    paths: &skybridge_agent::AgentPaths,
-    connection: &SignalingConnection,
-    session_id: &str,
-    native_session: &mut NativeWebRtcSession,
-) -> Result<Vec<Vec<u8>>> {
-    let mut payloads = Vec::new();
-    while let Some(event) = native_session.try_next_event() {
-        match event {
-            NativeWebRtcEvent::AppPayload { data } => payloads.push(data),
-            other => apply_inline_native_event(paths, connection, session_id, other).await?,
-        }
-    }
-    Ok(payloads)
-}
-
-fn apple_reference_seconds_now_cli() -> f64 {
-    let now = OffsetDateTime::now_utc().unix_timestamp_nanos() as f64 / 1_000_000_000.0;
-    now - 978_307_200.0
-}
-
-fn current_suite_is_pqc(suite: Option<&str>) -> bool {
-    suite.and_then(CryptoSuite::from_name).is_some_and(|suite| suite.is_pqc())
-}
-
-fn canonical_pqc_rekey_election_device_id(raw: Option<&str>) -> Option<String> {
-    let raw = raw?;
-    let trimmed = raw.trim();
-    if trimmed.is_empty() || trimmed.to_ascii_lowercase().starts_with("webrtc-") {
-        return None;
-    }
-    Some(trimmed.to_ascii_lowercase())
-}
-
-fn should_initiate_pqc_rekey(local_device_id: Option<&str>, remote_device_id: Option<&str>) -> Option<bool> {
-    let local = canonical_pqc_rekey_election_device_id(local_device_id)?;
-    let remote = canonical_pqc_rekey_election_device_id(remote_device_id)?;
-    if local == remote {
-        return None;
-    }
-    Some(local < remote)
-}
-
-fn next_transfer_id() -> String {
-    format!(
-        "transfer-{}",
-        OffsetDateTime::now_utc().unix_timestamp_nanos()
-    )
-}
-
-fn output_dir_or_current_dir(value: Option<PathBuf>) -> Result<PathBuf> {
-    match value {
-        Some(path) => Ok(path),
-        None => Ok(std::env::current_dir()?),
-    }
-}
-
-fn file_transfer_history_path(paths: &skybridge_agent::AgentPaths) -> PathBuf {
-    paths.runtime_dir.join("file-transfers.json")
-}
-
-async fn load_file_transfer_history(
-    paths: &skybridge_agent::AgentPaths,
-) -> Result<Vec<FileTransferHistoryEntry>> {
-    let path = file_transfer_history_path(paths);
-    match tokio::fs::read_to_string(&path).await {
-        Ok(body) => Ok(serde_json::from_str(&body)?),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-        Err(error) => Err(error.into()),
-    }
-}
-
-async fn append_file_transfer_history(
-    paths: &skybridge_agent::AgentPaths,
-    entry: FileTransferHistoryEntry,
-) -> Result<()> {
-    tokio::fs::create_dir_all(&paths.runtime_dir).await?;
-    let mut history = load_file_transfer_history(paths).await?;
-    history.push(entry);
-    if history.len() > 200 {
-        let drain_until = history.len() - 200;
-        history.drain(0..drain_until);
-    }
-    tokio::fs::write(
-        file_transfer_history_path(paths),
-        serde_json::to_vec_pretty(&history)?,
-    )
-    .await?;
-    Ok(())
-}
-
-fn now_rfc3339() -> String {
-    OffsetDateTime::now_utc()
-        .format(&Rfc3339)
-        .unwrap_or_else(|_| OffsetDateTime::now_utc().unix_timestamp().to_string())
-}
-
-fn sanitize_filename(raw: &str) -> String {
-    let mut value = raw.trim().replace('/', "_").replace('\\', "_");
-    if value.is_empty() {
-        value = "received.bin".to_owned();
-    }
-    value
-}
-
-fn unique_destination(output_dir: &std::path::Path, file_name: &str) -> PathBuf {
-    let candidate = output_dir.join(file_name);
-    if !candidate.exists() {
-        return candidate;
-    }
-    let stem = candidate
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .unwrap_or("received");
-    let ext = candidate.extension().and_then(|value| value.to_str());
-    for index in 2..1000 {
-        let numbered = match ext {
-            Some(ext) if !ext.is_empty() => output_dir.join(format!("{stem}-{index}.{ext}")),
-            _ => output_dir.join(format!("{stem}-{index}")),
-        };
-        if !numbered.exists() {
-            return numbered;
-        }
-    }
-    output_dir.join(format!(
-        "{}-{}",
-        stem,
-        OffsetDateTime::now_utc().unix_timestamp_nanos()
-    ))
-}
-
-async fn build_pairing_identity_exchange_bytes(
-    paths: &skybridge_agent::AgentPaths,
-    identity: &skybridge_agent::DeviceIdentityMaterial,
-    local_binding: &ProtocolIdentityBinding,
-) -> Result<Option<Vec<u8>>> {
-    if local_binding.protocol_signing_algorithm != ProtocolSigningAlgorithm::MlDsa65
-        && !pqc_bridge_identity_enabled()
-    {
-        return Ok(None);
-    }
-    let pqc_identity = ensure_rust_pqc_identity(paths).await?;
-    let payload = PairingIdentityExchangePayload {
-        device_id: local_binding.device_id.clone(),
-        kem_public_keys: vec![
-            PairingKemPublicKeyInfo {
-                suite_wire_id: CryptoSuite::XWING_MLDSA.wire_id,
-                public_key: pqc_identity.xwing_public_key,
-            },
-            PairingKemPublicKeyInfo {
-                suite_wire_id: CryptoSuite::MLKEM768_MLDSA65.wire_id,
-                public_key: pqc_identity.mlkem768_public_key,
-            },
-        ],
-        device_name: Some(identity.state.device.device_name.clone()),
-        platform: Some(std::env::consts::OS.to_owned()),
-        remote_video_formats: Some(vec!["bgra".to_owned()]),
-        sent_at: apple_reference_seconds_now_cli(),
-    };
-    Ok(Some(serde_json::to_vec(&json!({
-        "pairingIdentityExchange": payload
-    }))?))
-}
-
-fn decode_pairing_identity_exchange(data: &[u8]) -> Result<Option<PairingIdentityExchangePayload>> {
-    let value: serde_json::Value = match serde_json::from_slice(data) {
-        Ok(value) => value,
-        Err(_) => return Ok(None),
-    };
-    let Some(payload) = value.get("pairingIdentityExchange") else {
-        return Ok(None);
-    };
-    Ok(Some(serde_json::from_value(payload.clone())?))
-}
-
-fn peer_kem_public_keys_from_payload(
-    payload: &PairingIdentityExchangePayload,
-) -> BTreeMap<CryptoSuite, Vec<u8>> {
-    payload
-        .kem_public_keys
-        .iter()
-        .filter_map(|value| match value.suite_wire_id {
-            0x0001 => Some((CryptoSuite::XWING_MLDSA, value.public_key.clone())),
-            0x0101 => Some((CryptoSuite::MLKEM768_MLDSA65, value.public_key.clone())),
-            _ => None,
-        })
-        .collect()
-}
-
-async fn maybe_send_pairing_exchange(
-    native_session: &NativeWebRtcSession,
-    session_state: &mut SessionTransferState,
-    pairing_bytes: &Option<Vec<u8>>,
-) -> Result<()> {
-    if session_state.pairing_sent {
-        return Ok(());
-    }
-    if let Some(bytes) = pairing_bytes {
-        native_session.send_app_payload(bytes.clone()).await?;
-        session_state.pairing_sent = true;
-    }
-    Ok(())
-}
-
-async fn maybe_start_pqc_rekey(
-    native_session: &NativeWebRtcSession,
-    session_state: &mut SessionTransferState,
-    local_device_id: &str,
-    payload: &PairingIdentityExchangePayload,
-) -> Result<()> {
-    if session_state.rekey_attempted
-        || current_suite_is_pqc(session_state.current_negotiated_suite.as_deref())
-    {
-        return Ok(());
-    }
-    let peer_kem_public_keys = peer_kem_public_keys_from_payload(payload);
-    if peer_kem_public_keys.is_empty() {
-        return Ok(());
-    }
-    if should_initiate_pqc_rekey(Some(local_device_id), Some(&payload.device_id)) == Some(true) {
-        if native_session
-            .start_outbound_pqc_rekey(Some(payload.device_id.clone()), peer_kem_public_keys)
-            .await?
-        {
-            session_state.rekey_attempted = true;
-        }
-    }
-    Ok(())
-}
-
-async fn file_receive(state_dir: Option<PathBuf>, args: FileReceiveArgs) -> Result<()> {
-    let paths = resolve_paths(state_dir)?;
-    let auth_session = require_auth_session(&paths).await?;
-    let tenant_id = require_tenant_id(&auth_session)?;
-    let identity = ensure_device_identity(&paths).await?;
-    let local_binding = signing_binding(&identity)?;
-    let pairing_bytes = build_pairing_identity_exchange_bytes(&paths, &identity, &local_binding)
-        .await?
-        .ok_or_else(|| anyhow!("failed to prepare local PQC identity for file receive"))?;
-    let pqc_initiator_template =
-        maybe_inline_pqc_initiator_template(&paths, &identity, &local_binding).await?;
-    let pqc_responder =
-        maybe_inline_pqc_responder_config(&paths, &identity, &local_binding).await?;
-    let signal_server = SignalServerClient::from_env()?;
-    let admission =
-        request_admission_lease(&signal_server, &auth_session, &tenant_id, &identity).await?;
-    let lease = signal_server
-        .register_connection_code(
-            &admission.token,
-            &identity.state.device.device_name,
-            args.timeout_seconds as i64,
-        )
-        .await?;
-    let turn_credentials = signal_server
-        .fetch_turn_credentials(&lease.turn_admission_lease.token)
-        .await?;
-    let output_dir = output_dir_or_current_dir(args.output_dir)?;
-    tokio::fs::create_dir_all(&output_dir).await?;
-
-    upsert_session_runtime(
-        &paths,
-        RuntimeSessionRecord::new(
-            make_runtime_id(&lease.session_id),
-            lease.session_id.clone(),
-            RuntimeSessionRole::Initiator,
-            RuntimeSessionSource::Code,
-            lease.signaling_server_origin.clone(),
-            identity.state.device.device_id.clone(),
-            None,
-            None,
-            None,
-            RuntimeSessionState::Connecting,
-        ),
-    )
-    .await?;
-
-    let ws_url = signal_server.websocket_url(
-        &lease.signaling_server_origin,
-        &lease.session_id,
-        &lease.session_token,
-    )?;
-    let mut connection = SignalingConnection::connect(ws_url, &lease.session_id).await?;
-    let classic_initiator = skybridge_core::ClassicInitiatorConfig {
-        local_binding: local_binding.clone(),
-        signing_secret_key: identity
-            .signing_key
-            .ed25519_secret_key_bytes()
-            .ok_or_else(|| anyhow!("classic initiator requires an Ed25519 protocol identity"))?,
-        local_device_name: Some(identity.state.device.device_name.clone()),
-    };
-    let mut native_session = NativeWebRtcSession::new(NativeWebRtcConfig {
-        session_id: lease.session_id.clone(),
-        local_device_id: identity.state.device.device_id.clone(),
-        role: RuntimeSessionRole::Initiator,
-        turn_credentials: Some(turn_credentials),
-        classic_initiator: Some(classic_initiator),
-        classic_responder: None,
-        pqc_initiator: None,
-        pqc_initiator_template,
-        pqc_responder,
-    })
-    .await?;
-    native_session.start().await?;
-
-    if args.json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&json!({
-                "code": lease.code,
-                "session_id": lease.session_id,
-                "output_dir": output_dir.display().to_string(),
-            }))?
-        );
-    } else {
-        println!("Receive Code: {}", lease.code);
-        println!("Session ID: {}", lease.session_id);
-        println!("Output Dir: {}", output_dir.display());
-    }
-
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(args.timeout_seconds);
-    let mut signaling_bound = false;
-    let mut signaling_stream_closed = false;
-    let mut join_sent = false;
-    let mut session_state = SessionTransferState::default();
-    let mut inbound = BTreeMap::<String, ReceiveState>::new();
-
-    loop {
-        if tokio::time::Instant::now() >= deadline {
-            bail!("timed out waiting for inbound file transfer");
-        }
-
-        tokio::select! {
-            event = connection.next_runtime_event(), if !signaling_stream_closed => {
-                let Some(event) = event else {
-                    signaling_stream_closed = true;
-                    continue;
-                };
-                match event {
-                    SignalingRuntimeEvent::Lifecycle(lifecycle) => {
-                        apply_runtime_session_event(&paths, &lease.session_id, &lifecycle).await?;
-                        if lifecycle.phase == SignalingLifecyclePhase::Bound && !join_sent {
-                            signaling_bound = true;
-                            connection
-                                .send(make_join_envelope(&lease.session_id, &identity.state.device.device_id))
-                                .await?;
-                            join_sent = true;
-                        }
-                        for payload in drain_inline_native_events_collect_app(
-                            &paths,
-                            &connection,
-                            &lease.session_id,
-                            &mut native_session,
-                        ).await? {
-                            if let Some(pairing) = decode_pairing_identity_exchange(&payload)? {
-                                maybe_send_pairing_exchange(
-                                    &native_session,
-                                    &mut session_state,
-                                    &Some(pairing_bytes.clone()),
-                                )
-                                .await?;
-                                maybe_start_pqc_rekey(
-                                    &native_session,
-                                    &mut session_state,
-                                    &identity.state.device.device_id,
-                                    &pairing,
-                                ).await?;
-                                continue;
-                            }
-
-                            let msg: CrossNetworkFileTransferMessage = match serde_json::from_slice(&payload) {
-                                Ok(msg) => msg,
-                                Err(_) => continue,
-                            };
-                            match msg.op {
-                                CrossNetworkFileTransferOp::Metadata => {
-                                    let file_name = sanitize_filename(
-                                        msg.file_name
-                                            .as_deref()
-                                            .ok_or_else(|| anyhow!("missing file_name"))?,
-                                    );
-                                    let file_size = msg.file_size.ok_or_else(|| anyhow!("missing file_size"))?;
-                                    let chunk_size = msg.chunk_size.unwrap_or(64 * 1024);
-                                    let transfer_id = msg.transfer_id.clone();
-                                    let final_path = unique_destination(&output_dir, &file_name);
-                                    let temp_path = final_path.with_extension("part");
-                                    let file = tokio::fs::File::create(&temp_path).await?;
-                                    inbound.insert(
-                                        transfer_id.clone(),
-                                        ReceiveState {
-                                            transfer_id: transfer_id.clone(),
-                                            file_name,
-                                            file_size,
-                                            chunk_size,
-                                            temp_path,
-                                            final_path,
-                                            file,
-                                            received_bytes: 0,
-                                        },
-                                    );
-                                    native_session.send_app_payload(serde_json::to_vec(
-                                        &CrossNetworkFileTransferMessage::new(
-                                            CrossNetworkFileTransferOp::MetadataAck,
-                                            transfer_id,
-                                        )
-                                    )?).await?;
-                                }
-                                CrossNetworkFileTransferOp::Chunk => {
-                                    let idx = msg.chunk_index.ok_or_else(|| anyhow!("missing chunk_index"))?;
-                                    let data = msg.chunk_data.ok_or_else(|| anyhow!("missing chunk_data"))?;
-                                    let raw_size = msg.raw_size.unwrap_or(data.len() as i32).max(0) as i64;
-                                    let Some(state) = inbound.get_mut(&msg.transfer_id) else {
-                                        continue;
-                                    };
-                                    let offset = (idx as i64) * (state.chunk_size as i64);
-                                    state.file.seek(std::io::SeekFrom::Start(offset.max(0) as u64)).await?;
-                                    state.file.write_all(&data).await?;
-                                    state.received_bytes = state.received_bytes.max(offset + raw_size).min(state.file_size);
-                                    let mut ack = CrossNetworkFileTransferMessage::new(
-                                        CrossNetworkFileTransferOp::ChunkAck,
-                                        state.transfer_id.clone(),
-                                    );
-                                    ack.chunk_index = Some(idx);
-                                    ack.received_bytes = Some(state.received_bytes);
-                                    native_session.send_app_payload(serde_json::to_vec(&ack)?).await?;
-                                }
-                                CrossNetworkFileTransferOp::Complete => {
-                                    let Some(state) = inbound.remove(&msg.transfer_id) else {
-                                        continue;
-                                    };
-                                    state.file.sync_all().await?;
-                                    drop(state.file);
-                                    if tokio::fs::rename(&state.temp_path, &state.final_path).await.is_err() {
-                                        let bytes = tokio::fs::read(&state.temp_path).await?;
-                                        tokio::fs::write(&state.final_path, bytes).await?;
-                                        let _ = tokio::fs::remove_file(&state.temp_path).await;
-                                    }
-                                    native_session.send_app_payload(serde_json::to_vec(
-                                        &CrossNetworkFileTransferMessage::new(
-                                            CrossNetworkFileTransferOp::CompleteAck,
-                                            state.transfer_id.clone(),
-                                        )
-                                    )?).await?;
-                                    append_file_transfer_history(
-                                        &paths,
-                                        FileTransferHistoryEntry {
-                                            recorded_at: now_rfc3339(),
-                                            direction: FileTransferDirection::Receive,
-                                            session_id: lease.session_id.clone(),
-                                            transfer_id: state.transfer_id.clone(),
-                                            file_name: state.file_name.clone(),
-                                            path: state.final_path.display().to_string(),
-                                            bytes: state.received_bytes,
-                                            suite: session_state.current_negotiated_suite.clone(),
-                                            peer_device_id: None,
-                                            peer_device_name: None,
-                                        },
-                                    )
-                                    .await?;
-                                    if args.json {
-                                        println!(
-                                            "{}",
-                                            serde_json::to_string_pretty(&json!({
-                                                "received": true,
-                                                "session_id": lease.session_id,
-                                                "path": state.final_path.display().to_string(),
-                                                "bytes": state.received_bytes,
-                                                "suite": session_state.current_negotiated_suite,
-                                            }))?
-                                        );
-                                    } else {
-                                        println!(
-                                            "Received {} -> {} ({} bytes, suite={})",
-                                            state.file_name,
-                                            state.final_path.display(),
-                                            state.received_bytes,
-                                            session_state.current_negotiated_suite.as_deref().unwrap_or("unknown"),
-                                        );
-                                    }
-                                    return Ok(());
-                                }
-                                CrossNetworkFileTransferOp::Error => {
-                                    bail!(
-                                        "sender reported error transfer={} message={}",
-                                        msg.transfer_id,
-                                        msg.message.unwrap_or_else(|| "-".to_string())
-                                    );
-                                }
-                                CrossNetworkFileTransferOp::MetadataAck
-                                | CrossNetworkFileTransferOp::ChunkAck
-                                | CrossNetworkFileTransferOp::CompleteAck
-                                | CrossNetworkFileTransferOp::Cancel => {}
-                            }
-                        }
-                        if lifecycle.phase == SignalingLifecyclePhase::Failed && !signaling_bound {
-                            bail!("signaling failed before bound");
-                        }
-                        if matches!(lifecycle.phase, SignalingLifecyclePhase::Closed | SignalingLifecyclePhase::Failed) {
-                            signaling_stream_closed = true;
-                        }
-                    }
-                    SignalingRuntimeEvent::Inbound(inbound_message) => {
-                        apply_inline_inbound_runtime_event(
-                            &paths,
-                            &lease.session_id,
-                            inbound_message,
-                            &native_session,
-                        )
-                        .await?;
-                        for payload in drain_inline_native_events_collect_app(
-                            &paths,
-                            &connection,
-                            &lease.session_id,
-                            &mut native_session,
-                        ).await? {
-                            if let Some(pairing) = decode_pairing_identity_exchange(&payload)? {
-                                maybe_send_pairing_exchange(
-                                    &native_session,
-                                    &mut session_state,
-                                    &Some(pairing_bytes.clone()),
-                                )
-                                .await?;
-                                maybe_start_pqc_rekey(
-                                    &native_session,
-                                    &mut session_state,
-                                    &identity.state.device.device_id,
-                                    &pairing,
-                                ).await?;
-                                continue;
-                            }
-                            let msg: CrossNetworkFileTransferMessage = match serde_json::from_slice(&payload) {
-                                Ok(msg) => msg,
-                                Err(_) => continue,
-                            };
-                            match msg.op {
-                                CrossNetworkFileTransferOp::Metadata => {
-                                    let file_name = sanitize_filename(
-                                        msg.file_name
-                                            .as_deref()
-                                            .ok_or_else(|| anyhow!("missing file_name"))?,
-                                    );
-                                    let file_size = msg.file_size.ok_or_else(|| anyhow!("missing file_size"))?;
-                                    let chunk_size = msg.chunk_size.unwrap_or(64 * 1024);
-                                    let transfer_id = msg.transfer_id.clone();
-                                    let final_path = unique_destination(&output_dir, &file_name);
-                                    let temp_path = final_path.with_extension("part");
-                                    let file = tokio::fs::File::create(&temp_path).await?;
-                                    inbound.insert(
-                                        transfer_id.clone(),
-                                        ReceiveState {
-                                            transfer_id: transfer_id.clone(),
-                                            file_name,
-                                            file_size,
-                                            chunk_size,
-                                            temp_path,
-                                            final_path,
-                                            file,
-                                            received_bytes: 0,
-                                        },
-                                    );
-                                    native_session.send_app_payload(serde_json::to_vec(
-                                        &CrossNetworkFileTransferMessage::new(
-                                            CrossNetworkFileTransferOp::MetadataAck,
-                                            transfer_id,
-                                        )
-                                    )?).await?;
-                                }
-                                CrossNetworkFileTransferOp::Chunk => {
-                                    let idx = msg.chunk_index.ok_or_else(|| anyhow!("missing chunk_index"))?;
-                                    let data = msg.chunk_data.ok_or_else(|| anyhow!("missing chunk_data"))?;
-                                    let raw_size = msg.raw_size.unwrap_or(data.len() as i32).max(0) as i64;
-                                    let Some(state) = inbound.get_mut(&msg.transfer_id) else {
-                                        continue;
-                                    };
-                                    let offset = (idx as i64) * (state.chunk_size as i64);
-                                    state.file.seek(std::io::SeekFrom::Start(offset.max(0) as u64)).await?;
-                                    state.file.write_all(&data).await?;
-                                    state.received_bytes = state.received_bytes.max(offset + raw_size).min(state.file_size);
-                                    let mut ack = CrossNetworkFileTransferMessage::new(
-                                        CrossNetworkFileTransferOp::ChunkAck,
-                                        state.transfer_id.clone(),
-                                    );
-                                    ack.chunk_index = Some(idx);
-                                    ack.received_bytes = Some(state.received_bytes);
-                                    native_session.send_app_payload(serde_json::to_vec(&ack)?).await?;
-                                }
-                                CrossNetworkFileTransferOp::Complete => {
-                                    let Some(state) = inbound.remove(&msg.transfer_id) else {
-                                        continue;
-                                    };
-                                    state.file.sync_all().await?;
-                                    drop(state.file);
-                                    if tokio::fs::rename(&state.temp_path, &state.final_path).await.is_err() {
-                                        let bytes = tokio::fs::read(&state.temp_path).await?;
-                                        tokio::fs::write(&state.final_path, bytes).await?;
-                                        let _ = tokio::fs::remove_file(&state.temp_path).await;
-                                    }
-                                    native_session.send_app_payload(serde_json::to_vec(
-                                        &CrossNetworkFileTransferMessage::new(
-                                            CrossNetworkFileTransferOp::CompleteAck,
-                                            state.transfer_id.clone(),
-                                        )
-                                    )?).await?;
-                                    append_file_transfer_history(
-                                        &paths,
-                                        FileTransferHistoryEntry {
-                                            recorded_at: now_rfc3339(),
-                                            direction: FileTransferDirection::Receive,
-                                            session_id: lease.session_id.clone(),
-                                            transfer_id: state.transfer_id.clone(),
-                                            file_name: state.file_name.clone(),
-                                            path: state.final_path.display().to_string(),
-                                            bytes: state.received_bytes,
-                                            suite: session_state.current_negotiated_suite.clone(),
-                                            peer_device_id: None,
-                                            peer_device_name: None,
-                                        },
-                                    )
-                                    .await?;
-                                    if args.json {
-                                        println!(
-                                            "{}",
-                                            serde_json::to_string_pretty(&json!({
-                                                "received": true,
-                                                "session_id": lease.session_id,
-                                                "path": state.final_path.display().to_string(),
-                                                "bytes": state.received_bytes,
-                                                "suite": session_state.current_negotiated_suite,
-                                            }))?
-                                        );
-                                    } else {
-                                        println!(
-                                            "Received {} -> {} ({} bytes, suite={})",
-                                            state.file_name,
-                                            state.final_path.display(),
-                                            state.received_bytes,
-                                            session_state.current_negotiated_suite.as_deref().unwrap_or("unknown"),
-                                        );
-                                    }
-                                    return Ok(());
-                                }
-                                CrossNetworkFileTransferOp::Error => {
-                                    bail!(
-                                        "sender reported error transfer={} message={}",
-                                        msg.transfer_id,
-                                        msg.message.unwrap_or_else(|| "-".to_string())
-                                    );
-                                }
-                                CrossNetworkFileTransferOp::MetadataAck
-                                | CrossNetworkFileTransferOp::ChunkAck
-                                | CrossNetworkFileTransferOp::CompleteAck
-                                | CrossNetworkFileTransferOp::Cancel => {}
-                            }
-                        }
-                    }
-                }
-            }
-            event = native_session.next_event() => {
-                let Some(event) = event else {
-                    continue;
-                };
-                match event {
-                    NativeWebRtcEvent::AppPayload { data } => {
-                        if let Some(pairing) = decode_pairing_identity_exchange(&data)? {
-                            maybe_send_pairing_exchange(
-                                &native_session,
-                                &mut session_state,
-                                &Some(pairing_bytes.clone()),
-                            )
-                            .await?;
-                            maybe_start_pqc_rekey(
-                                &native_session,
-                                &mut session_state,
-                                &identity.state.device.device_id,
-                                &pairing,
-                            ).await?;
-                            continue;
-                        }
-                        let msg: CrossNetworkFileTransferMessage = match serde_json::from_slice(&data) {
-                            Ok(msg) => msg,
-                            Err(_) => continue,
-                        };
-                        match msg.op {
-                            CrossNetworkFileTransferOp::Metadata => {
-                                let file_name = sanitize_filename(
-                                    msg.file_name
-                                        .as_deref()
-                                        .ok_or_else(|| anyhow!("missing file_name"))?,
-                                );
-                                let file_size = msg.file_size.ok_or_else(|| anyhow!("missing file_size"))?;
-                                let chunk_size = msg.chunk_size.unwrap_or(64 * 1024);
-                                let transfer_id = msg.transfer_id.clone();
-                                let final_path = unique_destination(&output_dir, &file_name);
-                                let temp_path = final_path.with_extension("part");
-                                let file = tokio::fs::File::create(&temp_path).await?;
-                                inbound.insert(
-                                    transfer_id.clone(),
-                                    ReceiveState {
-                                        transfer_id: transfer_id.clone(),
-                                        file_name,
-                                        file_size,
-                                        chunk_size,
-                                        temp_path,
-                                        final_path,
-                                        file,
-                                        received_bytes: 0,
-                                    },
-                                );
-                                native_session.send_app_payload(serde_json::to_vec(
-                                    &CrossNetworkFileTransferMessage::new(
-                                        CrossNetworkFileTransferOp::MetadataAck,
-                                        transfer_id,
-                                    )
-                                )?).await?;
-                            }
-                            CrossNetworkFileTransferOp::Chunk => {
-                                let idx = msg.chunk_index.ok_or_else(|| anyhow!("missing chunk_index"))?;
-                                let data = msg.chunk_data.ok_or_else(|| anyhow!("missing chunk_data"))?;
-                                let raw_size = msg.raw_size.unwrap_or(data.len() as i32).max(0) as i64;
-                                let Some(state) = inbound.get_mut(&msg.transfer_id) else {
-                                    continue;
-                                };
-                                let offset = (idx as i64) * (state.chunk_size as i64);
-                                state.file.seek(std::io::SeekFrom::Start(offset.max(0) as u64)).await?;
-                                state.file.write_all(&data).await?;
-                                state.received_bytes = state.received_bytes.max(offset + raw_size).min(state.file_size);
-                                let mut ack = CrossNetworkFileTransferMessage::new(
-                                    CrossNetworkFileTransferOp::ChunkAck,
-                                    state.transfer_id.clone(),
-                                );
-                                ack.chunk_index = Some(idx);
-                                ack.received_bytes = Some(state.received_bytes);
-                                native_session.send_app_payload(serde_json::to_vec(&ack)?).await?;
-                            }
-                            CrossNetworkFileTransferOp::Complete => {
-                                let Some(state) = inbound.remove(&msg.transfer_id) else {
-                                    continue;
-                                };
-                                state.file.sync_all().await?;
-                                drop(state.file);
-                                if tokio::fs::rename(&state.temp_path, &state.final_path).await.is_err() {
-                                    let bytes = tokio::fs::read(&state.temp_path).await?;
-                                    tokio::fs::write(&state.final_path, bytes).await?;
-                                    let _ = tokio::fs::remove_file(&state.temp_path).await;
-                                }
-                                native_session.send_app_payload(serde_json::to_vec(
-                                    &CrossNetworkFileTransferMessage::new(
-                                        CrossNetworkFileTransferOp::CompleteAck,
-                                        state.transfer_id.clone(),
-                                    )
-                                )?).await?;
-                                append_file_transfer_history(
-                                    &paths,
-                                    FileTransferHistoryEntry {
-                                        recorded_at: now_rfc3339(),
-                                        direction: FileTransferDirection::Receive,
-                                        session_id: lease.session_id.clone(),
-                                        transfer_id: state.transfer_id.clone(),
-                                        file_name: state.file_name.clone(),
-                                        path: state.final_path.display().to_string(),
-                                        bytes: state.received_bytes,
-                                        suite: session_state.current_negotiated_suite.clone(),
-                                        peer_device_id: None,
-                                        peer_device_name: None,
-                                    },
-                                )
-                                .await?;
-                                if args.json {
-                                    println!(
-                                        "{}",
-                                        serde_json::to_string_pretty(&json!({
-                                            "received": true,
-                                            "session_id": lease.session_id,
-                                            "path": state.final_path.display().to_string(),
-                                            "bytes": state.received_bytes,
-                                            "suite": session_state.current_negotiated_suite,
-                                        }))?
-                                    );
-                                } else {
-                                    println!(
-                                        "Received {} -> {} ({} bytes, suite={})",
-                                        state.file_name,
-                                        state.final_path.display(),
-                                        state.received_bytes,
-                                        session_state.current_negotiated_suite.as_deref().unwrap_or("unknown"),
-                                    );
-                                }
-                                return Ok(());
-                            }
-                            CrossNetworkFileTransferOp::Error => {
-                                bail!(
-                                    "sender reported error transfer={} message={}",
-                                    msg.transfer_id,
-                                    msg.message.unwrap_or_else(|| "-".to_string())
-                                );
-                            }
-                            CrossNetworkFileTransferOp::MetadataAck
-                            | CrossNetworkFileTransferOp::ChunkAck
-                            | CrossNetworkFileTransferOp::CompleteAck
-                            | CrossNetworkFileTransferOp::Cancel => {}
-                        }
-                    }
-                    NativeWebRtcEvent::HandshakeComplete { negotiated_suite } => {
-                        session_state.current_negotiated_suite = Some(negotiated_suite.clone());
-                        apply_inline_native_event(
-                            &paths,
-                            &connection,
-                            &lease.session_id,
-                            NativeWebRtcEvent::HandshakeComplete { negotiated_suite },
-                        )
-                        .await?;
-                        maybe_send_pairing_exchange(
-                            &native_session,
-                            &mut session_state,
-                            &Some(pairing_bytes.clone()),
-                        )
-                        .await?;
-                    }
-                    other => {
-                        apply_inline_native_event(&paths, &connection, &lease.session_id, other).await?;
-                    }
-                }
-            }
-            _ = tokio::time::sleep(Duration::from_millis(100)) => {}
-        }
-    }
-}
-
-async fn file_send(state_dir: Option<PathBuf>, args: FileSendArgs) -> Result<()> {
-    let paths = resolve_paths(state_dir)?;
-    let auth_session = require_auth_session(&paths).await?;
-    let tenant_id = require_tenant_id(&auth_session)?;
-    let identity = ensure_device_identity(&paths).await?;
-    let local_binding = signing_binding(&identity)?;
-    let pairing_bytes = build_pairing_identity_exchange_bytes(&paths, &identity, &local_binding)
-        .await?
-        .ok_or_else(|| anyhow!("failed to prepare local PQC identity for file send"))?;
-    let pqc_initiator_template =
-        maybe_inline_pqc_initiator_template(&paths, &identity, &local_binding).await?;
-    let pqc_responder =
-        maybe_inline_pqc_responder_config(&paths, &identity, &local_binding).await?;
-    let classic_responder =
-        maybe_inline_classic_responder_config(&identity, &local_binding, RuntimeSessionRole::Responder)?;
-    let signal_server = SignalServerClient::from_env()?;
-    let admission =
-        request_admission_lease(&signal_server, &auth_session, &tenant_id, &identity).await?;
-    let lookup = signal_server
-        .lookup_connection_code(&admission.token, &args.to)
-        .await?;
-    let turn_credentials = signal_server
-        .fetch_turn_credentials(&lookup.turn_admission_lease.token)
-        .await?;
-    let ws_url = signal_server.websocket_url(
-        &lookup.signaling_server_origin,
-        &lookup.session_id,
-        &lookup.session_token,
-    )?;
-    let mut connection = SignalingConnection::connect(ws_url, &lookup.session_id).await?;
-
-    upsert_session_runtime(
-        &paths,
-        RuntimeSessionRecord::new(
-            make_runtime_id(&lookup.session_id),
-            lookup.session_id.clone(),
-            RuntimeSessionRole::Responder,
-            RuntimeSessionSource::Code,
-            lookup.signaling_server_origin.clone(),
-            identity.state.device.device_id.clone(),
-            Some(lookup.initiator_device_id.clone()),
-            lookup.initiator_device_name.clone(),
-            Some(lookup.initiator_protocol_public_key_fingerprint.clone()),
-            RuntimeSessionState::Connecting,
-        ),
-    )
-    .await?;
-
-    let mut native_session = NativeWebRtcSession::new(NativeWebRtcConfig {
-        session_id: lookup.session_id.clone(),
-        local_device_id: identity.state.device.device_id.clone(),
-        role: RuntimeSessionRole::Responder,
-        turn_credentials: Some(turn_credentials),
-        classic_initiator: None,
-        classic_responder,
-        pqc_initiator: None,
-        pqc_initiator_template,
-        pqc_responder,
-    })
-    .await?;
-    native_session.start().await?;
-
-    let file_bytes = tokio::fs::read(&args.path).await?;
-    let file_name = args
-        .path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .map(str::to_owned)
-        .ok_or_else(|| anyhow!("failed to determine file name"))?;
-    let chunk_size = 64 * 1024usize;
-    let total_chunks = if file_bytes.is_empty() {
-        0
-    } else {
-        ((file_bytes.len() - 1) / chunk_size) + 1
-    };
-    let transfer_id = next_transfer_id();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(args.timeout_seconds);
-    let mut signaling_bound = false;
-    let mut signaling_stream_closed = false;
-    let mut join_sent = false;
-    let mut session_state = SessionTransferState::default();
-    let mut metadata_sent = false;
-    let mut metadata_acked = false;
-    let mut next_chunk_index = 0usize;
-    let mut awaiting_chunk_ack = None::<i32>;
-    let mut complete_sent = false;
-
-    loop {
-        if tokio::time::Instant::now() >= deadline {
-            bail!("timed out sending file");
-        }
-
-        tokio::select! {
-            event = connection.next_runtime_event(), if !signaling_stream_closed => {
-                let Some(event) = event else {
-                    signaling_stream_closed = true;
-                    continue;
-                };
-                match event {
-                    SignalingRuntimeEvent::Lifecycle(lifecycle) => {
-                        apply_runtime_session_event(&paths, &lookup.session_id, &lifecycle).await?;
-                        if lifecycle.phase == SignalingLifecyclePhase::Bound && !join_sent {
-                            signaling_bound = true;
-                            connection
-                                .send(make_join_envelope(&lookup.session_id, &identity.state.device.device_id))
-                                .await?;
-                            join_sent = true;
-                        }
-                        for payload in drain_inline_native_events_collect_app(
-                            &paths,
-                            &connection,
-                            &lookup.session_id,
-                            &mut native_session,
-                        ).await? {
-                            if let Some(pairing) = decode_pairing_identity_exchange(&payload)? {
-                                maybe_send_pairing_exchange(
-                                    &native_session,
-                                    &mut session_state,
-                                    &Some(pairing_bytes.clone()),
-                                )
-                                .await?;
-                                maybe_start_pqc_rekey(
-                                    &native_session,
-                                    &mut session_state,
-                                    &identity.state.device.device_id,
-                                    &pairing,
-                                ).await?;
-                                continue;
-                            }
-                            let msg: CrossNetworkFileTransferMessage = match serde_json::from_slice(&payload) {
-                                Ok(msg) => msg,
-                                Err(_) => continue,
-                            };
-                            match msg.op {
-                                CrossNetworkFileTransferOp::MetadataAck if msg.transfer_id == transfer_id => {
-                                    metadata_acked = true;
-                                }
-                                CrossNetworkFileTransferOp::ChunkAck if msg.transfer_id == transfer_id => {
-                                    if awaiting_chunk_ack == msg.chunk_index {
-                                        awaiting_chunk_ack = None;
-                                        next_chunk_index = next_chunk_index.saturating_add(1);
-                                    }
-                                }
-                                CrossNetworkFileTransferOp::CompleteAck if msg.transfer_id == transfer_id => {
-                                    append_file_transfer_history(
-                                        &paths,
-                                        FileTransferHistoryEntry {
-                                            recorded_at: now_rfc3339(),
-                                            direction: FileTransferDirection::Send,
-                                            session_id: lookup.session_id.clone(),
-                                            transfer_id: transfer_id.clone(),
-                                            file_name: file_name.clone(),
-                                            path: args.path.display().to_string(),
-                                            bytes: file_bytes.len() as i64,
-                                            suite: session_state.current_negotiated_suite.clone(),
-                                            peer_device_id: Some(lookup.initiator_device_id.clone()),
-                                            peer_device_name: lookup.initiator_device_name.clone(),
-                                        },
-                                    )
-                                    .await?;
-                                    if args.json {
-                                        println!(
-                                            "{}",
-                                            serde_json::to_string_pretty(&json!({
-                                                "sent": true,
-                                                "session_id": lookup.session_id,
-                                                "transfer_id": transfer_id,
-                                                "bytes": file_bytes.len(),
-                                                "suite": session_state.current_negotiated_suite,
-                                            }))?
-                                        );
-                                    } else {
-                                        println!(
-                                            "Sent {} ({} bytes, suite={})",
-                                            file_name,
-                                            file_bytes.len(),
-                                            session_state.current_negotiated_suite.as_deref().unwrap_or("unknown"),
-                                        );
-                                    }
-                                    return Ok(());
-                                }
-                                CrossNetworkFileTransferOp::Error => {
-                                    bail!(
-                                        "receiver reported error transfer={} message={}",
-                                        msg.transfer_id,
-                                        msg.message.unwrap_or_else(|| "-".to_string())
-                                    );
-                                }
-                                _ => {}
-                            }
-                        }
-                        if lifecycle.phase == SignalingLifecyclePhase::Failed && !signaling_bound {
-                            bail!("signaling failed before bound");
-                        }
-                        if matches!(lifecycle.phase, SignalingLifecyclePhase::Closed | SignalingLifecyclePhase::Failed) {
-                            signaling_stream_closed = true;
-                        }
-                    }
-                    SignalingRuntimeEvent::Inbound(inbound_message) => {
-                        apply_inline_inbound_runtime_event(
-                            &paths,
-                            &lookup.session_id,
-                            inbound_message,
-                            &native_session,
-                        )
-                        .await?;
-                        for payload in drain_inline_native_events_collect_app(
-                            &paths,
-                            &connection,
-                            &lookup.session_id,
-                            &mut native_session,
-                        ).await? {
-                            if let Some(pairing) = decode_pairing_identity_exchange(&payload)? {
-                                maybe_send_pairing_exchange(
-                                    &native_session,
-                                    &mut session_state,
-                                    &Some(pairing_bytes.clone()),
-                                )
-                                .await?;
-                                maybe_start_pqc_rekey(
-                                    &native_session,
-                                    &mut session_state,
-                                    &identity.state.device.device_id,
-                                    &pairing,
-                                ).await?;
-                            }
-                        }
-                    }
-                }
-            }
-            event = native_session.next_event() => {
-                let Some(event) = event else {
-                    continue;
-                };
-                match event {
-                    NativeWebRtcEvent::AppPayload { data } => {
-                        if let Some(pairing) = decode_pairing_identity_exchange(&data)? {
-                            maybe_send_pairing_exchange(
-                                &native_session,
-                                &mut session_state,
-                                &Some(pairing_bytes.clone()),
-                            )
-                            .await?;
-                            maybe_start_pqc_rekey(
-                                &native_session,
-                                &mut session_state,
-                                &identity.state.device.device_id,
-                                &pairing,
-                            ).await?;
-                            continue;
-                        }
-                        if let Ok(msg) = serde_json::from_slice::<CrossNetworkFileTransferMessage>(&data) {
-                            match msg.op {
-                                CrossNetworkFileTransferOp::MetadataAck if msg.transfer_id == transfer_id => {
-                                    metadata_acked = true;
-                                }
-                                CrossNetworkFileTransferOp::ChunkAck if msg.transfer_id == transfer_id => {
-                                    if awaiting_chunk_ack == msg.chunk_index {
-                                        awaiting_chunk_ack = None;
-                                        next_chunk_index = next_chunk_index.saturating_add(1);
-                                    }
-                                }
-                                CrossNetworkFileTransferOp::CompleteAck if msg.transfer_id == transfer_id => {
-                                    append_file_transfer_history(
-                                        &paths,
-                                        FileTransferHistoryEntry {
-                                            recorded_at: now_rfc3339(),
-                                            direction: FileTransferDirection::Send,
-                                            session_id: lookup.session_id.clone(),
-                                            transfer_id: transfer_id.clone(),
-                                            file_name: file_name.clone(),
-                                            path: args.path.display().to_string(),
-                                            bytes: file_bytes.len() as i64,
-                                            suite: session_state.current_negotiated_suite.clone(),
-                                            peer_device_id: Some(lookup.initiator_device_id.clone()),
-                                            peer_device_name: lookup.initiator_device_name.clone(),
-                                        },
-                                    )
-                                    .await?;
-                                    if args.json {
-                                        println!(
-                                            "{}",
-                                            serde_json::to_string_pretty(&json!({
-                                                "sent": true,
-                                                "session_id": lookup.session_id,
-                                                "transfer_id": transfer_id,
-                                                "bytes": file_bytes.len(),
-                                                "suite": session_state.current_negotiated_suite,
-                                            }))?
-                                        );
-                                    } else {
-                                        println!(
-                                            "Sent {} ({} bytes, suite={})",
-                                            file_name,
-                                            file_bytes.len(),
-                                            session_state.current_negotiated_suite.as_deref().unwrap_or("unknown"),
-                                        );
-                                    }
-                                    return Ok(());
-                                }
-                                CrossNetworkFileTransferOp::Error => {
-                                    bail!(
-                                        "receiver reported error transfer={} message={}",
-                                        msg.transfer_id,
-                                        msg.message.unwrap_or_else(|| "-".to_string())
-                                    );
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                    NativeWebRtcEvent::HandshakeComplete { negotiated_suite } => {
-                        session_state.current_negotiated_suite = Some(negotiated_suite.clone());
-                        apply_inline_native_event(
-                            &paths,
-                            &connection,
-                            &lookup.session_id,
-                            NativeWebRtcEvent::HandshakeComplete { negotiated_suite },
-                        )
-                        .await?;
-                        maybe_send_pairing_exchange(
-                            &native_session,
-                            &mut session_state,
-                            &Some(pairing_bytes.clone()),
-                        )
-                        .await?;
-                    }
-                    other => {
-                        apply_inline_native_event(&paths, &connection, &lookup.session_id, other).await?;
-                    }
-                }
-            }
-            _ = tokio::time::sleep(Duration::from_millis(100)) => {}
-        }
-
-        if !current_suite_is_pqc(session_state.current_negotiated_suite.as_deref()) {
-            continue;
-        }
-
-        if !metadata_sent {
-            let mut metadata = CrossNetworkFileTransferMessage::new(
-                CrossNetworkFileTransferOp::Metadata,
-                transfer_id.clone(),
-            );
-            metadata.sender_device_id = Some(identity.state.device.device_id.clone());
-            metadata.sender_device_name = Some(identity.state.device.device_name.clone());
-            metadata.file_name = Some(file_name.clone());
-            metadata.file_size = Some(file_bytes.len() as i64);
-            metadata.chunk_size = Some(chunk_size as i32);
-            metadata.total_chunks = Some(total_chunks as i32);
-            metadata.mime_type = Some("application/octet-stream".to_owned());
-            native_session.send_app_payload(serde_json::to_vec(&metadata)?).await?;
-            metadata_sent = true;
-            continue;
-        }
-
-        if metadata_acked && awaiting_chunk_ack.is_none() && next_chunk_index < total_chunks {
-            let start = next_chunk_index * chunk_size;
-            let end = std::cmp::min(start + chunk_size, file_bytes.len());
-            let chunk = &file_bytes[start..end];
-            let mut message = CrossNetworkFileTransferMessage::new(
-                CrossNetworkFileTransferOp::Chunk,
-                transfer_id.clone(),
-            );
-            message.chunk_index = Some(next_chunk_index as i32);
-            message.chunk_data = Some(chunk.to_vec());
-            message.raw_size = Some(chunk.len() as i32);
-            native_session.send_app_payload(serde_json::to_vec(&message)?).await?;
-            awaiting_chunk_ack = Some(next_chunk_index as i32);
-            continue;
-        }
-
-        if metadata_acked
-            && next_chunk_index >= total_chunks
-            && awaiting_chunk_ack.is_none()
-            && !complete_sent
-        {
-            native_session.send_app_payload(serde_json::to_vec(
-                &CrossNetworkFileTransferMessage::new(
-                    CrossNetworkFileTransferOp::Complete,
-                    transfer_id.clone(),
-                )
-            )?).await?;
-            complete_sent = true;
-        }
-    }
-}
-
-async fn file_history(state_dir: Option<PathBuf>, as_json: bool) -> Result<()> {
-    let paths = resolve_paths(state_dir)?;
-    let history = load_file_transfer_history(&paths).await?;
-
-    if as_json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&json!({
-                "history": history,
-            }))?
-        );
-        return Ok(());
-    }
-
-    if history.is_empty() {
-        println!("No file transfer history yet.");
-        return Ok(());
-    }
-
-    for entry in history {
-        let direction = match entry.direction {
-            FileTransferDirection::Send => "send",
-            FileTransferDirection::Receive => "receive",
-        };
-        println!(
-            "{} {} {} bytes {} suite={} peer={} path={}",
-            entry.recorded_at,
-            direction,
-            entry.bytes,
-            entry.file_name,
-            entry.suite.as_deref().unwrap_or("unknown"),
-            entry
-                .peer_device_name
-                .as_deref()
-                .or(entry.peer_device_id.as_deref())
-                .unwrap_or("-"),
-            entry.path,
-        );
-    }
-
-    Ok(())
-}
-
-async fn smoke_test(state_dir: Option<PathBuf>, args: TestCommand) -> Result<()> {
-    if args.payload_bytes == 0 {
-        bail!("--payload-bytes must be greater than zero");
-    }
-    if args.timeout_seconds < 10 {
-        bail!("--timeout-seconds must be at least 10");
-    }
-
-    let sender_paths = resolve_paths(state_dir)?;
-    let auth_session = require_auth_session(&sender_paths).await?;
-    let sender_identity = ensure_device_identity(&sender_paths).await?;
-    let artifacts_root =
-        std::env::temp_dir().join(format!("skybridge-smoke-{}", unique_test_suffix()));
-    tokio::fs::create_dir_all(&artifacts_root).await?;
-    let peer_state_dir = artifacts_root.join("peer-state");
-    let peer_output_dir = artifacts_root.join("peer-output");
-    let payload_path = artifacts_root.join("smoke-payload.bin");
-    let artifacts_display = artifacts_root.display().to_string();
-
-    let outcome = async {
-        let peer_paths = resolve_paths(Some(peer_state_dir.clone()))?;
-        store_auth_session(&peer_paths, &auth_session).await?;
-        let receiver_identity = ensure_device_identity(&peer_paths).await?;
-        let payload = build_smoke_payload(
-            args.payload_bytes,
-            &sender_identity.state.device.device_id,
-            &receiver_identity.state.device.device_id,
-        );
-        let payload_sha256 = sha256_hex(&payload);
-        tokio::fs::create_dir_all(&peer_output_dir).await?;
-        tokio::fs::write(&payload_path, &payload).await?;
-
-        let cli_path = std::env::current_exe()
-            .map_err(|error| anyhow!("failed to resolve current executable: {error}"))?;
-        let mut receive_child = TokioCommand::new(&cli_path);
-        receive_child
-            .arg("--state-dir")
-            .arg(&peer_paths.root)
-            .arg("file")
-            .arg("receive")
-            .arg("--output-dir")
-            .arg(&peer_output_dir)
-            .arg("--timeout-seconds")
-            .arg(args.timeout_seconds.to_string())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let mut receive_child = receive_child.spawn()?;
-        let receive_stdout = receive_child
-            .stdout
-            .take()
-            .ok_or_else(|| anyhow!("failed to capture receiver stdout"))?;
-        let receive_stderr = receive_child
-            .stderr
-            .take()
-            .ok_or_else(|| anyhow!("failed to capture receiver stderr"))?;
-        let (code_tx, code_rx) = oneshot::channel();
-        let receive_stdout_task = tokio::spawn(read_lines_and_capture_code(receive_stdout, code_tx));
-        let receive_stderr_task = tokio::spawn(read_stream_to_string(receive_stderr));
-
-        let code = tokio::time::timeout(Duration::from_secs(30), code_rx)
-            .await
-            .map_err(|_| anyhow!("timed out waiting for receiver connection code"))?
-            .map_err(|_| anyhow!("receiver exited before emitting a connection code"))?;
-
-        let mut send_command = TokioCommand::new(&cli_path);
-        send_command
-            .arg("--state-dir")
-            .arg(&sender_paths.root)
-            .arg("file")
-            .arg("send")
-            .arg("--to")
-            .arg(&code)
-            .arg("--timeout-seconds")
-            .arg(args.timeout_seconds.to_string())
-            .arg("--json")
-            .arg(&payload_path);
-        let send_result = run_child_command(send_command).await?;
-
-        if !send_result.status.success() {
-            let _ = receive_child.kill().await;
-            let _ = receive_child.wait().await;
-            let receive_stdout = receive_stdout_task
-                .await
-                .map_err(|error| anyhow!("receiver stdout task join failed: {error}"))??;
-            let receive_stderr = receive_stderr_task
-                .await
-                .map_err(|error| anyhow!("receiver stderr task join failed: {error}"))??;
-            bail!(
-                "sender smoke command failed\nsender stdout:\n{}\n\nsender stderr:\n{}\n\nreceiver stdout:\n{}\n\nreceiver stderr:\n{}",
-                send_result.stdout.trim(),
-                send_result.stderr.trim(),
-                receive_stdout.trim(),
-                receive_stderr.trim()
-            );
-        }
-
-        let send_payload: serde_json::Value = serde_json::from_str(send_result.stdout.trim())
-            .map_err(|error| anyhow!("failed to parse sender JSON output: {error}"))?;
-        let suite = send_payload
-            .get("suite")
-            .and_then(|value| value.as_str())
-            .map(str::to_owned);
-        if !args.allow_classic && !current_suite_is_pqc(suite.as_deref()) {
-            let _ = receive_child.kill().await;
-            let _ = receive_child.wait().await;
-            bail!(
-                "smoke test connected, but negotiated suite was not post-quantum: {}",
-                suite.as_deref().unwrap_or("unknown")
-            );
-        }
-
-        let receive_status = tokio::time::timeout(
-            Duration::from_secs(args.timeout_seconds + 15),
-            receive_child.wait(),
-        )
-        .await
-        .map_err(|_| anyhow!("timed out waiting for receiver completion"))??;
-        let receive_stdout = receive_stdout_task
-            .await
-            .map_err(|error| anyhow!("receiver stdout task join failed: {error}"))??;
-        let receive_stderr = receive_stderr_task
-            .await
-            .map_err(|error| anyhow!("receiver stderr task join failed: {error}"))??;
-        if !receive_status.success() {
-            bail!(
-                "receiver smoke command failed\nreceiver stdout:\n{}\n\nreceiver stderr:\n{}",
-                receive_stdout.trim(),
-                receive_stderr.trim()
-            );
-        }
-
-        let expected_name = payload_path
-            .file_name()
-            .and_then(|value| value.to_str())
-            .ok_or_else(|| anyhow!("failed to determine smoke payload file name"))?;
-        let received_path = peer_output_dir.join(expected_name);
-        if !tokio::fs::try_exists(&received_path).await? {
-            bail!(
-                "receiver completed but expected payload was not found at {}",
-                received_path.display()
-            );
-        }
-        let received_bytes = tokio::fs::read(&received_path).await?;
-        let received_sha256 = sha256_hex(&received_bytes);
-        if received_bytes != payload {
-            bail!(
-                "smoke test payload mismatch between sender and receiver at {}",
-                received_path.display()
-            );
-        }
-
-        Ok(SmokeTestResult {
-            ok: true,
-            session_id: send_payload
-                .get("session_id")
-                .and_then(|value| value.as_str())
-                .unwrap_or_default()
-                .to_owned(),
-            transfer_id: send_payload
-                .get("transfer_id")
-                .and_then(|value| value.as_str())
-                .unwrap_or_default()
-                .to_owned(),
-            code,
-            suite: suite.clone(),
-            pqc: current_suite_is_pqc(suite.as_deref()),
-            payload_bytes: payload.len(),
-            payload_sha256,
-            received_sha256,
-            sender_device_id: sender_identity.state.device.device_id.clone(),
-            receiver_device_id: receiver_identity.state.device.device_id.clone(),
-            receiver_output_path: received_path.display().to_string(),
-            artifacts_dir: if args.keep_artifacts {
-                Some(artifacts_display.clone())
-            } else {
-                None
-            },
-        })
-    }
-    .await;
-
-    match outcome {
-        Ok(result) => {
-            if args.json {
-                println!("{}", serde_json::to_string_pretty(&result)?);
-            } else {
-                println!("Smoke Test: ok");
-                println!("Code: {}", result.code);
-                println!("Session ID: {}", result.session_id);
-                println!("Transfer ID: {}", result.transfer_id);
-                println!(
-                    "Suite: {}",
-                    result.suite.as_deref().unwrap_or("unknown")
-                );
-                println!("PQC: {}", if result.pqc { "yes" } else { "no" });
-                println!("Payload Bytes: {}", result.payload_bytes);
-                println!("Sender Device ID: {}", result.sender_device_id);
-                println!("Receiver Device ID: {}", result.receiver_device_id);
-                println!("Received Path: {}", result.receiver_output_path);
-                if let Some(artifacts_dir) = result.artifacts_dir.as_deref() {
-                    println!("Artifacts: {artifacts_dir}");
-                }
-            }
-            if !args.keep_artifacts {
-                let _ = tokio::fs::remove_dir_all(&artifacts_root).await;
-            }
-            Ok(())
-        }
-        Err(error) => {
-            Err(anyhow!(
-                "{error}\nSmoke test artifacts preserved at {}",
-                artifacts_root.display()
-            ))
-        }
-    }
-}
-
-fn build_smoke_payload(payload_bytes: usize, sender_device_id: &str, receiver_device_id: &str) -> Vec<u8> {
-    let mut payload = format!(
-        "skybridge-smoke\nsender={sender_device_id}\nreceiver={receiver_device_id}\nts={}\n",
-        OffsetDateTime::now_utc().format(&Rfc3339).unwrap_or_else(|_| "unknown".to_owned())
-    )
-    .into_bytes();
-    let mut fill = 0u8;
-    while payload.len() < payload_bytes {
-        payload.push(fill);
-        fill = fill.wrapping_add(1);
-    }
-    payload.truncate(payload_bytes);
-    payload
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    let mut digest = Sha256::new();
-    digest.update(bytes);
-    format!("{:x}", digest.finalize())
-}
-
-async fn run_child_command(mut command: TokioCommand) -> Result<ChildCommandResult> {
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = command.spawn()?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| anyhow!("failed to capture child stdout"))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| anyhow!("failed to capture child stderr"))?;
-    let stdout_task = tokio::spawn(read_stream_to_string(stdout));
-    let stderr_task = tokio::spawn(read_stream_to_string(stderr));
-    let status = child.wait().await?;
-    Ok(ChildCommandResult {
-        status,
-        stdout: stdout_task
-            .await
-            .map_err(|error| anyhow!("stdout task join failed: {error}"))??,
-        stderr: stderr_task
-            .await
-            .map_err(|error| anyhow!("stderr task join failed: {error}"))??,
-    })
-}
-
-async fn read_lines_and_capture_code<R>(
-    reader: R,
-    code_tx: oneshot::Sender<String>,
-) -> Result<String>
-where
-    R: tokio::io::AsyncRead + Unpin,
-{
-    let mut lines = BufReader::new(reader).lines();
-    let mut output = String::new();
-    let mut code_tx = Some(code_tx);
-    while let Some(line) = lines.next_line().await? {
-        if let Some(code) = parse_receive_code_line(&line) {
-            if let Some(tx) = code_tx.take() {
-                let _ = tx.send(code);
-            }
-        }
-        output.push_str(&line);
-        output.push('\n');
-    }
-    Ok(output)
-}
-
-async fn read_stream_to_string<R>(reader: R) -> Result<String>
-where
-    R: tokio::io::AsyncRead + Unpin,
-{
-    let mut output = String::new();
-    BufReader::new(reader).read_to_string(&mut output).await?;
-    Ok(output)
-}
-
-fn parse_receive_code_line(line: &str) -> Option<String> {
-    line.strip_prefix("Receive Code: ")
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-}
-
-fn unique_test_suffix() -> String {
-    format!("{}", OffsetDateTime::now_utc().unix_timestamp_nanos())
-}
-
 async fn session_ls(state_dir: Option<PathBuf>, as_json: bool) -> Result<()> {
     let paths = resolve_paths(state_dir)?;
     let registry = load_session_registry(&paths).await?;
@@ -2947,6 +2457,7 @@ async fn doctor(state_dir: Option<PathBuf>, as_json: bool) -> Result<()> {
     let identity = ensure_device_identity(&paths).await?;
     let health = load_health_snapshot(&paths).await?;
     let auth_session = load_auth_session(&paths).await?;
+    let auth_source = load_auth_session_source(&paths).await?;
     let signal_server = SignalServerClient::from_env()?;
     let now = OffsetDateTime::now_utc();
 
@@ -3001,10 +2512,14 @@ async fn doctor(state_dir: Option<PathBuf>, as_json: bool) -> Result<()> {
                 "name": "auth_session",
                 "ok": auth_ok,
                 "detail": if auth_ok {
-                    "auth session present and tenant derivation succeeded"
+                    format!(
+                        "auth session present and tenant derivation succeeded (source={})",
+                        auth_source.as_deref().unwrap_or("unknown")
+                    )
                 } else {
                     "auth session missing or tenant derivation failed; run `skybridge login`"
-                },
+                        .to_owned()
+                }
             },
             {
                 "name": "agent_health",
@@ -3114,7 +2629,12 @@ fn version() -> Result<()> {
         "cli_version": env!("CARGO_PKG_VERSION"),
         "workspace": "rust",
         "contracts_schema_version": 1u32,
-        "implemented_phases": ["phase_4_auth", "phase_5_signaling_plane", "phase_6_file_transfer"],
+        "implemented_phases": [
+            "phase_4_auth",
+            "phase_5_signaling_plane",
+            "phase_6_nearby_discovery",
+            "phase_6_file_transfer"
+        ],
     });
     println!("{}", serde_json::to_string_pretty(&payload)?);
     Ok(())
@@ -3203,7 +2723,7 @@ async fn apply_inline_native_event(
             );
             store_session_registry(paths, &registry).await?;
         }
-        NativeWebRtcEvent::AppPayload { .. } => {}
+        NativeWebRtcEvent::ApplicationPayload { .. } => {}
         NativeWebRtcEvent::Keepalive { kind, ping_id } => {
             let mut registry = load_session_registry(paths).await?;
             registry.apply_transport_event(
@@ -3339,68 +2859,4 @@ fn describe_keepalive_brief(keepalive: &RuntimeSessionKeepaliveStatus) -> String
         summary.push_str(&format!(" active={last_activity_at}"));
     }
     summary
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn pqc_bridge_identity_defaults_to_enabled() {
-        // SAFETY: test-scoped env mutation.
-        unsafe { std::env::remove_var(ENV_PQC_BRIDGE_IDENTITY) };
-        assert!(pqc_bridge_identity_enabled());
-        // SAFETY: test-scoped env mutation.
-        unsafe { std::env::set_var(ENV_PQC_BRIDGE_IDENTITY, "0") };
-        assert!(!pqc_bridge_identity_enabled());
-    }
-
-    #[tokio::test]
-    async fn file_transfer_history_round_trip() {
-        let root = std::env::temp_dir().join(format!(
-            "skybridge-cli-history-test-{}",
-            OffsetDateTime::now_utc().unix_timestamp_nanos()
-        ));
-        std::fs::create_dir_all(&root).expect("create temp root");
-        let paths = skybridge_agent::AgentPaths {
-            root: root.clone(),
-            identity_dir: root.join("identity"),
-            runtime_dir: root.join("runtime"),
-            logs_dir: root.join("logs"),
-            identity_file: root.join("identity").join("device.json"),
-            session_controls_file: root.join("runtime").join("session-controls.json"),
-            health_file: root.join("runtime").join("health.json"),
-            log_file: root.join("logs").join("agent.log"),
-        };
-        let entry = FileTransferHistoryEntry {
-            recorded_at: "2026-03-20T00:00:00Z".to_owned(),
-            direction: FileTransferDirection::Send,
-            session_id: "session-1".to_owned(),
-            transfer_id: "transfer-1".to_owned(),
-            file_name: "demo.txt".to_owned(),
-            path: "/tmp/demo.txt".to_owned(),
-            bytes: 42,
-            suite: Some("X-Wing + AES-256-GCM + ML-DSA-65".to_owned()),
-            peer_device_id: Some("peer-1".to_owned()),
-            peer_device_name: Some("Peer".to_owned()),
-        };
-
-        append_file_transfer_history(&paths, entry.clone())
-            .await
-            .expect("append");
-        let history = load_file_transfer_history(&paths).await.expect("load");
-        assert_eq!(history.len(), 1);
-        assert_eq!(history[0].transfer_id, entry.transfer_id);
-        assert_eq!(history[0].bytes, entry.bytes);
-        std::fs::remove_dir_all(root).expect("cleanup temp root");
-    }
-
-    #[test]
-    fn parse_receive_code_line_extracts_code() {
-        assert_eq!(
-            parse_receive_code_line("Receive Code: SKY-ABC-123").as_deref(),
-            Some("SKY-ABC-123")
-        );
-        assert!(parse_receive_code_line("Session ID: abc").is_none());
-    }
 }

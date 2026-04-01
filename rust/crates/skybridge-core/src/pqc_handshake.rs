@@ -316,10 +316,6 @@ impl PqcInitiatorHandshake {
         }
     }
 
-    pub fn is_waiting_for_message_b(&self) -> bool {
-        matches!(self.state, PqcInitiatorState::WaitingForMessageB(_))
-    }
-
     pub fn build_heartbeat_frame(&self) -> Result<Vec<u8>> {
         let session_keys = self
             .established_session_keys()
@@ -360,6 +356,13 @@ impl PqcInitiatorHandshake {
         )
     }
 
+    pub fn build_application_frame(&self, payload: &[u8]) -> Result<Vec<u8>> {
+        let session_keys = self
+            .established_session_keys()
+            .ok_or_else(|| anyhow!("PQC handshake is not established"))?;
+        build_encrypted_app_frame_bytes(session_keys, payload)
+    }
+
     pub fn established_session_keys(&self) -> Option<&ClassicSessionKeys> {
         match &self.state {
             PqcInitiatorState::WaitingForFinished(waiting) => Some(&waiting.session_keys),
@@ -394,6 +397,7 @@ impl PqcInitiatorHandshake {
                     pong_id: None,
                     observed_pong_id: None,
                     observed_heartbeat: false,
+                    app_payload: None,
                 })
             }
             PqcInitiatorState::Established(_) => Ok(ClassicHandleResult::default()),
@@ -503,6 +507,13 @@ impl PqcResponderHandshake {
                 ping: PingPayload { id },
             },
         )
+    }
+
+    pub fn build_application_frame(&self, payload: &[u8]) -> Result<Vec<u8>> {
+        let session_keys = self
+            .established_session_keys()
+            .ok_or_else(|| anyhow!("PQC responder handshake is not established"))?;
+        build_encrypted_app_frame_bytes(session_keys, payload)
     }
 
     pub fn established_session_keys(&self) -> Option<&ClassicSessionKeys> {
@@ -1085,12 +1096,19 @@ fn build_encrypted_app_frame<T: Serialize>(
     payload: &T,
 ) -> Result<Vec<u8>> {
     let plaintext = serde_json::to_vec(payload)?;
+    build_encrypted_app_frame_bytes(session_keys, &plaintext)
+}
+
+fn build_encrypted_app_frame_bytes(
+    session_keys: &ClassicSessionKeys,
+    plaintext: &[u8],
+) -> Result<Vec<u8>> {
     let cipher = Aes256Gcm::new_from_slice(&session_keys.send_key)
         .map_err(|error| anyhow!("invalid AES-256 key: {error}"))?;
     let mut nonce_bytes = [0u8; 12];
     fill_random(&mut nonce_bytes)?;
     let ciphertext_and_tag = cipher
-        .encrypt(Nonce::from_slice(&nonce_bytes), plaintext.as_ref())
+        .encrypt(Nonce::from_slice(&nonce_bytes), plaintext)
         .map_err(|error| anyhow!("failed to encrypt app payload: {error}"))?;
     let mut combined = nonce_bytes.to_vec();
     combined.extend_from_slice(&ciphertext_and_tag);
@@ -1112,7 +1130,12 @@ fn try_handle_encrypted_app_message(
     };
     let value: Value = match serde_json::from_slice(&plaintext) {
         Ok(value) => value,
-        Err(_) => return Ok(None),
+        Err(_) => {
+            return Ok(Some(ClassicHandleResult {
+                app_payload: Some(plaintext),
+                ..Default::default()
+            }));
+        }
     };
     let pong_id = value
         .get("ping")
@@ -1122,6 +1145,7 @@ fn try_handle_encrypted_app_message(
         .get("pong")
         .and_then(|pong| pong.get("id"))
         .and_then(Value::as_u64);
+    let is_keepalive = value.get("heartbeat").is_some() || pong_id.is_some() || observed_pong_id.is_some();
     Ok(Some(ClassicHandleResult {
         outbound_frames: Vec::new(),
         established: None,
@@ -1129,6 +1153,7 @@ fn try_handle_encrypted_app_message(
         pong_id,
         observed_pong_id,
         observed_heartbeat: value.get("heartbeat").is_some(),
+        app_payload: (!is_keepalive).then_some(plaintext),
     }))
 }
 

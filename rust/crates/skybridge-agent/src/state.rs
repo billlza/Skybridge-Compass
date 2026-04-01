@@ -10,8 +10,10 @@ use skybridge_core::{
     AuthSession, AuthState, EnrollmentStatus, LocalIdentityState, ManagedSessionControl,
     ManagedSessionControlRegistry, NebulaOAuthClient, ProtocolIdentityBinding,
     ProtocolSigningAlgorithm, RuntimeSessionRecord, RuntimeSessionTransportEvent,
-    RustPqcIdentityMaterial, SessionRegistry, mldsa65_generate_keypair, mldsa65_sign_detached,
-    should_refresh_access_token, xwing_generate_keypair,
+    RustPqcIdentityMaterial, SessionFileTransferRequest, SessionRegistry,
+    SessionTransferRequestState, TransferHistoryEntry, TransferHistoryRegistry,
+    mldsa65_generate_keypair, mldsa65_sign_detached, should_refresh_access_token,
+    xwing_generate_keypair,
 };
 use time::OffsetDateTime;
 use tokio::fs;
@@ -334,6 +336,107 @@ pub async fn update_session_remote_peer(
     Ok(registry)
 }
 
+pub async fn load_transfer_history(paths: &AgentPaths) -> Result<TransferHistoryRegistry> {
+    ensure_identity_layout(paths).await?;
+    let mut registry = load_json::<TransferHistoryRegistry>(&transfer_history_file(paths))
+        .await?
+        .unwrap_or_default();
+    registry.schema_version = TransferHistoryRegistry::SCHEMA_VERSION;
+    Ok(registry)
+}
+
+pub async fn store_transfer_history(
+    paths: &AgentPaths,
+    registry: &TransferHistoryRegistry,
+) -> Result<()> {
+    ensure_identity_layout(paths).await?;
+    write_json(&transfer_history_file(paths), registry).await
+}
+
+pub async fn append_transfer_history_entry(
+    paths: &AgentPaths,
+    entry: TransferHistoryEntry,
+) -> Result<TransferHistoryRegistry> {
+    let mut registry = load_transfer_history(paths).await?;
+    registry.push(entry);
+    store_transfer_history(paths, &registry).await?;
+    Ok(registry)
+}
+
+pub async fn save_session_transfer_request(
+    paths: &AgentPaths,
+    request: &SessionFileTransferRequest,
+) -> Result<()> {
+    ensure_identity_layout(paths).await?;
+    let request_dir = session_transfer_requests_dir(paths);
+    fs::create_dir_all(&request_dir)
+        .await
+        .with_context(|| format!("failed to create directory {}", request_dir.display()))?;
+    restrict_dir_permissions(&request_dir).await?;
+    write_json(&session_transfer_request_file(paths, &request.request_id), request).await
+}
+
+pub async fn load_session_transfer_request(
+    paths: &AgentPaths,
+    request_id: &str,
+) -> Result<Option<SessionFileTransferRequest>> {
+    ensure_identity_layout(paths).await?;
+    let request_dir = session_transfer_requests_dir(paths);
+    fs::create_dir_all(&request_dir)
+        .await
+        .with_context(|| format!("failed to create directory {}", request_dir.display()))?;
+    restrict_dir_permissions(&request_dir).await?;
+    load_json::<SessionFileTransferRequest>(&session_transfer_request_file(paths, request_id)).await
+}
+
+pub async fn load_session_transfer_requests(
+    paths: &AgentPaths,
+) -> Result<Vec<SessionFileTransferRequest>> {
+    ensure_identity_layout(paths).await?;
+    let mut requests = Vec::new();
+    let directory = session_transfer_requests_dir(paths);
+    fs::create_dir_all(&directory)
+        .await
+        .with_context(|| format!("failed to create directory {}", directory.display()))?;
+    restrict_dir_permissions(&directory).await?;
+    let mut entries = match fs::read_dir(&directory).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(requests),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to read directory {}", directory.display()));
+        }
+    };
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        let is_json = path
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.eq_ignore_ascii_case("json"));
+        if !is_json {
+            continue;
+        }
+        if let Some(request) = load_json::<SessionFileTransferRequest>(&path).await? {
+            requests.push(request);
+        }
+    }
+    requests.sort_by(|lhs, rhs| rhs.created_at.cmp(&lhs.created_at));
+    Ok(requests)
+}
+
+pub async fn load_pending_transfer_requests_for_session(
+    paths: &AgentPaths,
+    session_id: &str,
+) -> Result<Vec<SessionFileTransferRequest>> {
+    Ok(load_session_transfer_requests(paths)
+        .await?
+        .into_iter()
+        .filter(|request| {
+            request.session_id == session_id && request.state == SessionTransferRequestState::Pending
+        })
+        .collect())
+}
+
 async fn load_signing_key(paths: &AgentPaths) -> Result<Option<StoredSigningKey>> {
     load_json::<StoredSigningKey>(&signing_key_file(paths)).await
 }
@@ -526,6 +629,21 @@ fn session_registry_file(paths: &AgentPaths) -> std::path::PathBuf {
 
 fn session_controls_file(paths: &AgentPaths) -> std::path::PathBuf {
     paths.session_controls_file.clone()
+}
+
+fn transfer_history_file(paths: &AgentPaths) -> std::path::PathBuf {
+    paths.runtime_dir.join("file-transfers.json")
+}
+
+fn session_transfer_requests_dir(paths: &AgentPaths) -> std::path::PathBuf {
+    paths.runtime_dir.join("file-transfer-requests")
+}
+
+fn session_transfer_request_file(
+    paths: &AgentPaths,
+    request_id: &str,
+) -> std::path::PathBuf {
+    session_transfer_requests_dir(paths).join(format!("{request_id}.json"))
 }
 
 fn current_hostname() -> String {
