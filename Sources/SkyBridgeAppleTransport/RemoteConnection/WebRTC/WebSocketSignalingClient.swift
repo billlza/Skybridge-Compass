@@ -322,11 +322,9 @@ public actor WebSocketSignalingClient {
     private func performConnectSequence(timeout: Duration) async throws {
         let attempts = transportAttempts()
         var lastError: Error = SignalingError.connectTimedOut
-        let sequenceGeneration = nextSequenceGeneration
-        nextSequenceGeneration += 1
 
         for attempt in attempts {
-            let handleId = SignalingHandleID(sessionId: sessionId, backend: attempt.backend, generation: sequenceGeneration)
+            let handleId = reserveNextHandleId(for: attempt.backend)
             currentHandle = handleId
             isBound = false
             isSocketOpen = false
@@ -343,7 +341,7 @@ public actor WebSocketSignalingClient {
             )
 
             logger.info(
-                "🔌 signaling connect attempt: session=\(self.sessionId, privacy: .public) generation=\(sequenceGeneration, privacy: .public) backend=\(attempt.label, privacy: .public)"
+                "🔌 signaling connect attempt: session=\(self.sessionId, privacy: .public) generation=\(handleId.generation, privacy: .public) backend=\(attempt.label, privacy: .public)"
             )
 
             do {
@@ -355,7 +353,7 @@ public actor WebSocketSignalingClient {
                 }
 
                 logger.info(
-                    "✅ signaling backend pinned after bound: session=\(self.sessionId, privacy: .public) generation=\(sequenceGeneration, privacy: .public) backend=\(handleId.backend.rawValue, privacy: .public)"
+                    "✅ signaling backend pinned after bound: session=\(self.sessionId, privacy: .public) generation=\(handleId.generation, privacy: .public) backend=\(handleId.backend.rawValue, privacy: .public)"
                 )
                 lastBoundHandle = handleId
                 return
@@ -363,11 +361,11 @@ public actor WebSocketSignalingClient {
                 lastError = error
                 if error is CancellationError {
                     logger.debug(
-                        "ℹ️ signaling connect attempt cancelled: session=\(self.sessionId, privacy: .public) generation=\(sequenceGeneration, privacy: .public) backend=\(attempt.label, privacy: .public)"
+                        "ℹ️ signaling connect attempt cancelled: session=\(self.sessionId, privacy: .public) generation=\(handleId.generation, privacy: .public) backend=\(attempt.label, privacy: .public)"
                     )
                 } else {
                     logger.error(
-                        "❌ signaling connect attempt failed: session=\(self.sessionId, privacy: .public) generation=\(sequenceGeneration, privacy: .public) backend=\(attempt.label, privacy: .public) err=\(error.localizedDescription, privacy: .public)"
+                        "❌ signaling connect attempt failed: session=\(self.sessionId, privacy: .public) generation=\(handleId.generation, privacy: .public) backend=\(attempt.label, privacy: .public) err=\(error.localizedDescription, privacy: .public)"
                     )
                 }
                 await cleanupTransport(for: attempt.backend)
@@ -403,6 +401,12 @@ public actor WebSocketSignalingClient {
 #endif
             return attempts
         }
+    }
+
+    private func reserveNextHandleId(for backend: SignalingBackend) -> SignalingHandleID {
+        let generation = nextSequenceGeneration
+        nextSequenceGeneration += 1
+        return SignalingHandleID(sessionId: sessionId, backend: backend, generation: generation)
     }
 
     private func connectViaURLSession(
@@ -769,6 +773,14 @@ public actor WebSocketSignalingClient {
 private final class ActorBox<T: Actor>: @unchecked Sendable {
     weak var value: T?
     init(_ value: T) { self.value = value }
+}
+
+extension WebSocketSignalingClient {
+    internal func testOnlyReserveNextHandleId(
+        for backend: SignalingBackend
+    ) -> SignalingHandleID {
+        reserveNextHandleId(for: backend)
+    }
 }
 
 private final class URLSessionSignalingDelegate: NSObject, URLSessionWebSocketDelegate {

@@ -1,6 +1,6 @@
 import XCTest
 @testable import SkyBridgeCore
-import SkyBridgeAppleTransport
+@testable import SkyBridgeAppleTransport
 
 @MainActor
 final class SignalingLifecycleContractTests: XCTestCase {
@@ -61,5 +61,20 @@ final class SignalingLifecycleContractTests: XCTestCase {
         XCTAssertEqual(manager.signalingHealth, .degradedFatal)
         XCTAssertEqual(manager.readiness, .handshakeComplete(sessionId: "SESSION-B", negotiatedSuite: "X25519"))
         XCTAssertFalse(manager.testingCanPerformSignalingOperation(sessionID: "SESSION-B"))
+    }
+
+    func testTransportClientAllocatesDistinctHandleGenerationsPerAttempt() async {
+        let client = WebSocketSignalingClient(
+            url: URL(string: "wss://signal.example.com/ws")!,
+            sessionId: "SESSION-C",
+            generation: 7
+        )
+
+        let first = await client.testOnlyReserveNextHandleId(for: .urlSession)
+        let second = await client.testOnlyReserveNextHandleId(for: .urlSession)
+
+        XCTAssertEqual(first.generation, 7)
+        XCTAssertEqual(second.generation, 8)
+        XCTAssertNotEqual(first, second)
     }
 }

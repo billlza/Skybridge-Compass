@@ -166,6 +166,77 @@ final class WebRTCSignalingFaultInjectionTests: XCTestCase {
         }.value
     }
 
+    func testWebSocketSignalingClientAllocatesDistinctHandleGenerationsPerAttempt() async {
+        await Task { @MainActor in
+            let client = WebSocketSignalingClient(
+                url: URL(string: "wss://signal.example.com/ws")!,
+                sessionId: "ROOM1234",
+                generation: 41
+            )
+
+            let first = await client.testOnlyReserveNextHandleId(for: .urlSession)
+            let second = await client.testOnlyReserveNextHandleId(for: .urlSession)
+
+            XCTAssertEqual(first.generation, 41)
+            XCTAssertEqual(second.generation, 42)
+            XCTAssertNotEqual(first, second)
+        }.value
+    }
+
+    @MainActor
+    func testRedeemedQRSessionArtifactsReuseRequiresMatchingOriginAndAuthority() {
+        XCTAssertTrue(
+            CrossNetworkWebRTCManager.testOnlyShouldReuseRedeemedQRSessionArtifacts(
+                canonicalQRSignalingOrigin: "https://signal.example.com",
+                qrDeviceId: "device-a",
+                qrProtocolSigningAlgorithm: .ed25519,
+                qrProtocolPublicKeyFingerprint: "fingerprint-a",
+                qrProtocolPublicKeyBytes: Data([0xAA, 0xBB]),
+                signalingToken: " session-token ",
+                turnAdmissionToken: " turn-token ",
+                cachedSignalingOrigin: "https://signal.example.com",
+                cachedAuthorityDeviceId: "device-a",
+                cachedAuthorityProtocolSigningAlgorithm: .ed25519,
+                cachedAuthorityProtocolPublicKeyFingerprint: "fingerprint-a",
+                cachedAuthorityProtocolPublicKeyBytes: Data([0xAA, 0xBB])
+            )
+        )
+
+        XCTAssertFalse(
+            CrossNetworkWebRTCManager.testOnlyShouldReuseRedeemedQRSessionArtifacts(
+                canonicalQRSignalingOrigin: "https://signal.example.com",
+                qrDeviceId: "device-a",
+                qrProtocolSigningAlgorithm: .ed25519,
+                qrProtocolPublicKeyFingerprint: "fingerprint-a",
+                qrProtocolPublicKeyBytes: Data([0xAA, 0xBB]),
+                signalingToken: "session-token",
+                turnAdmissionToken: "turn-token",
+                cachedSignalingOrigin: "https://other.example.com",
+                cachedAuthorityDeviceId: "device-a",
+                cachedAuthorityProtocolSigningAlgorithm: .ed25519,
+                cachedAuthorityProtocolPublicKeyFingerprint: "fingerprint-a",
+                cachedAuthorityProtocolPublicKeyBytes: Data([0xAA, 0xBB])
+            )
+        )
+
+        XCTAssertFalse(
+            CrossNetworkWebRTCManager.testOnlyShouldReuseRedeemedQRSessionArtifacts(
+                canonicalQRSignalingOrigin: "https://signal.example.com",
+                qrDeviceId: "device-a",
+                qrProtocolSigningAlgorithm: .ed25519,
+                qrProtocolPublicKeyFingerprint: "fingerprint-a",
+                qrProtocolPublicKeyBytes: Data([0xAA, 0xBB]),
+                signalingToken: "session-token",
+                turnAdmissionToken: "turn-token",
+                cachedSignalingOrigin: "https://signal.example.com",
+                cachedAuthorityDeviceId: "device-a",
+                cachedAuthorityProtocolSigningAlgorithm: .ed25519,
+                cachedAuthorityProtocolPublicKeyFingerprint: "fingerprint-b",
+                cachedAuthorityProtocolPublicKeyBytes: Data([0xAA, 0xBB])
+            )
+        )
+    }
+
     @MainActor
     func testSessionScopedSignalingURLPrefersCurrentPathOrigin() {
         let resolved = CrossNetworkWebRTCManager.resolvedSignalingWebSocketURLString(

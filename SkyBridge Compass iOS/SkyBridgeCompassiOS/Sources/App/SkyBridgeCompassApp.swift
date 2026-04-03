@@ -3,6 +3,151 @@ import ActivityKit
 #if os(iOS)
 import UserNotifications
 import UIKit
+import Darwin
+#endif
+
+#if os(iOS)
+struct UnsupportedIOSDevice: Equatable {
+    let modelIdentifier: String
+    let displayName: String
+}
+
+enum IOSDeviceSupportGate {
+    // Keep the App Store plist gate broad (A12 floor), then explicitly block the
+    // last pre-2020 A12/A12X devices that still slip through.
+    private static let blockedModelIdentifiers: Set<String> = [
+        "iPhone11,2", // iPhone XS
+        "iPhone11,4", // iPhone XS Max (China)
+        "iPhone11,6", // iPhone XS Max
+        "iPhone11,8", // iPhone XR
+        "iPad8,1",    // iPad Pro 11-inch (2018) Wi-Fi
+        "iPad8,2",    // iPad Pro 11-inch (2018) Wi-Fi + Cellular
+        "iPad8,3",    // iPad Pro 11-inch (2018) Wi-Fi
+        "iPad8,4",    // iPad Pro 11-inch (2018) Wi-Fi + Cellular
+        "iPad8,5",    // iPad Pro 12.9-inch (3rd gen, 2018) Wi-Fi
+        "iPad8,6",    // iPad Pro 12.9-inch (3rd gen, 2018) Wi-Fi + Cellular
+        "iPad8,7",    // iPad Pro 12.9-inch (3rd gen, 2018) Wi-Fi
+        "iPad8,8",    // iPad Pro 12.9-inch (3rd gen, 2018) Wi-Fi + Cellular
+        "iPad11,1",   // iPad mini (5th gen, 2019) Wi-Fi
+        "iPad11,2",   // iPad mini (5th gen, 2019) Wi-Fi + Cellular
+        "iPad11,3",   // iPad Air (3rd gen, 2019) Wi-Fi
+        "iPad11,4"    // iPad Air (3rd gen, 2019) Wi-Fi + Cellular
+    ]
+
+    static func currentUnsupportedDevice(processInfo: ProcessInfo = .processInfo) -> UnsupportedIOSDevice? {
+        guard let modelIdentifier = currentModelIdentifier(processInfo: processInfo) else {
+            return nil
+        }
+        return unsupportedDevice(forModelIdentifier: modelIdentifier)
+    }
+
+    static func unsupportedDevice(forModelIdentifier modelIdentifier: String) -> UnsupportedIOSDevice? {
+        let normalized = modelIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard blockedModelIdentifiers.contains(normalized) else {
+            return nil
+        }
+        return UnsupportedIOSDevice(
+            modelIdentifier: normalized,
+            displayName: displayName(forModelIdentifier: normalized)
+        )
+    }
+
+    static func isSupported(modelIdentifier: String) -> Bool {
+        unsupportedDevice(forModelIdentifier: modelIdentifier) == nil
+    }
+
+    private static func currentModelIdentifier(processInfo: ProcessInfo) -> String? {
+        #if targetEnvironment(simulator)
+        if let simulatorModel = processInfo.environment["SIMULATOR_MODEL_IDENTIFIER"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !simulatorModel.isEmpty {
+            return simulatorModel
+        }
+        #endif
+
+        var systemInfo = utsname()
+        guard uname(&systemInfo) == 0 else {
+            return nil
+        }
+
+        let identifier = withUnsafePointer(to: &systemInfo.machine) { machinePtr in
+            machinePtr.withMemoryRebound(to: CChar.self, capacity: Int(_SYS_NAMELEN)) {
+                String(cString: $0)
+            }
+        }
+
+        return identifier.isEmpty ? nil : identifier
+    }
+
+    private static func displayName(forModelIdentifier modelIdentifier: String) -> String {
+        switch modelIdentifier {
+        case "iPhone11,2": return "iPhone XS"
+        case "iPhone11,4", "iPhone11,6": return "iPhone XS Max"
+        case "iPhone11,8": return "iPhone XR"
+        case "iPad8,1", "iPad8,2", "iPad8,3", "iPad8,4":
+            return "iPad Pro 11-inch (2018)"
+        case "iPad8,5", "iPad8,6", "iPad8,7", "iPad8,8":
+            return "iPad Pro 12.9-inch (3rd generation)"
+        case "iPad11,1", "iPad11,2":
+            return "iPad mini (5th generation)"
+        case "iPad11,3", "iPad11,4":
+            return "iPad Air (3rd generation)"
+        default:
+            return modelIdentifier
+        }
+    }
+}
+
+private struct UnsupportedIOSDeviceView: View {
+    let device: UnsupportedIOSDevice
+
+    var body: some View {
+        ZStack {
+            LinearGradient(
+                colors: [
+                    Color(red: 0.95, green: 0.97, blue: 1.0),
+                    Color(red: 0.90, green: 0.94, blue: 0.98)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            .ignoresSafeArea()
+
+            VStack(alignment: .leading, spacing: 18) {
+                Image(systemName: "iphone.gen3.slash")
+                    .font(.system(size: 34, weight: .semibold))
+                    .foregroundStyle(.blue)
+
+                Text("This device is no longer supported.")
+                    .font(.system(size: 30, weight: .bold))
+                    .foregroundStyle(.primary)
+
+                Text("SkyBridge Compass now requires 2020 or newer iPhone and iPad hardware.")
+                    .font(.system(size: 17, weight: .medium))
+                    .foregroundStyle(.secondary)
+
+                Text("当前版本不再支持这台设备。SkyBridge Compass 现要求使用 2020 年及之后发布的 iPhone / iPad 硬件。")
+                    .font(.system(size: 16))
+                    .foregroundStyle(.secondary)
+
+                Divider()
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Blocked model")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    Text("\(device.displayName) (\(device.modelIdentifier))")
+                        .font(.system(size: 16, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.primary)
+                }
+            }
+            .padding(28)
+            .frame(maxWidth: 560, alignment: .leading)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+            .padding(24)
+        }
+    }
+}
 #endif
 
 /// SkyBridge Compass iOS 主应用入口
@@ -35,6 +180,7 @@ struct SkyBridgeCompassApp: App {
     @State private var backgroundTeardownTask: Task<Void, Never>?
     @State private var didStartServices = false
     @State private var didInstallUITestFixtures = false
+    @State private var unsupportedDevice = IOSDeviceSupportGate.currentUnsupportedDevice()
 
     private var isUITesting: Bool {
         ProcessInfo.processInfo.arguments.contains("UITEST_MODE")
@@ -57,37 +203,47 @@ struct SkyBridgeCompassApp: App {
     
     var body: some Scene {
         WindowGroup {
-            ContentView()
-
-                .id(localizationManager.currentLanguage.rawValue)
-                .environmentObject(appState)
-                .environmentObject(discoveryManager)
-                .environmentObject(connectionManager)
-                .environmentObject(authManager)
-                .environmentObject(themeConfiguration)
-                .environmentObject(localizationManager)
-                .environment(\.locale, localizationManager.locale)
-                .preferredColorScheme(themeConfiguration.isDarkMode ? .dark : .light)
-                .onAppear {
-                    setupApplication()
-                    if !didStartServices {
-                        didStartServices = true
-                        SkyBridgeLogger.shared.info("🧭 启动流程：服务初始化任务已创建")
-                        Task(priority: .userInitiated) {
-                            SkyBridgeLogger.shared.info("🧭 启动流程：服务初始化任务开始执行")
-                            await initializeServices()
+            Group {
+                if let unsupportedDevice {
+                    UnsupportedIOSDeviceView(device: unsupportedDevice)
+                        .onAppear {
+                            SkyBridgeLogger.shared.warning(
+                                "⛔️ iOS startup blocked on unsupported device: \(unsupportedDevice.displayName) (\(unsupportedDevice.modelIdentifier))"
+                            )
                         }
-                    }
+                } else {
+                    ContentView()
+                        .id(localizationManager.currentLanguage.rawValue)
+                        .environmentObject(appState)
+                        .environmentObject(discoveryManager)
+                        .environmentObject(connectionManager)
+                        .environmentObject(authManager)
+                        .environmentObject(themeConfiguration)
+                        .environmentObject(localizationManager)
+                        .environment(\.locale, localizationManager.locale)
+                        .preferredColorScheme(themeConfiguration.isDarkMode ? .dark : .light)
+                        .onAppear {
+                            setupApplication()
+                            if !didStartServices {
+                                didStartServices = true
+                                SkyBridgeLogger.shared.info("🧭 启动流程：服务初始化任务已创建")
+                                Task(priority: .userInitiated) {
+                                    SkyBridgeLogger.shared.info("🧭 启动流程：服务初始化任务开始执行")
+                                    await initializeServices()
+                                }
+                            }
+                        }
+                        .onChange(of: scenePhase) { _, newPhase in
+                            Task { @MainActor in
+                                await handleScenePhaseChange(newPhase)
+                            }
+                        }
+                        .onChange(of: localizationManager.currentLanguage) { _, _ in
+                            guard !shouldSkipInteractiveStartup else { return }
+                            configureNotifications()
+                        }
                 }
-                .onChange(of: scenePhase) { _, newPhase in
-                    Task { @MainActor in
-                        await handleScenePhaseChange(newPhase)
-                    }
-                }
-                .onChange(of: localizationManager.currentLanguage) { _, _ in
-                    guard !shouldSkipInteractiveStartup else { return }
-                    configureNotifications()
-                }
+            }
         }
     }
     
@@ -115,7 +271,7 @@ struct SkyBridgeCompassApp: App {
         // 请求必要的权限
         if shouldSkipInteractiveStartup {
             SkyBridgeLogger.shared.info("🧪 Test host mode: 跳过交互式权限弹窗")
-        } else if LocalWebRTCSmokeHarness.shared.isEnabled {
+        } else if LocalWebRTCSmokeHarness.shared.isEnabled || LocalP2PSmokeHarness.shared.isEnabled {
             SkyBridgeLogger.shared.info("🧪 Local WebRTC smoke: 跳过交互式权限弹窗")
         } else {
             requestPermissions()
@@ -319,6 +475,7 @@ struct SkyBridgeCompassApp: App {
         let liveActivityElapsedMs = Int(Date().timeIntervalSince(liveActivityStartedAt) * 1000)
         SkyBridgeLogger.shared.info("✅ Live Activity 启动步骤完成 (\(liveActivityElapsedMs)ms)")
         SkyBridgeLogger.shared.info("✅ 启动服务初始化流程已完成")
+        await LocalP2PSmokeHarness.shared.startIfNeeded()
         await LocalWebRTCSmokeHarness.shared.startIfNeeded()
     }
 
@@ -687,6 +844,286 @@ class BiometricAuthManager {
 
 @available(iOS 17.0, *)
 @MainActor
+private final class LocalP2PSmokeHarness {
+    static let shared = LocalP2PSmokeHarness()
+    private static let xwingSuiteWireID: UInt16 = 0x0001
+    private static let mlkem768SuiteWireID: UInt16 = 0x0101
+    private static let mlkem768FSSuiteWireID: UInt16 = 0x0102
+
+    private var didStart = false
+
+    private init() {}
+
+    var isEnabled: Bool {
+        role == "ios-p2p-client"
+    }
+
+    private var role: String {
+        ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
+    private var targetDeviceID: String {
+        ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_TARGET_DEVICE_ID"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
+    private var targetDeviceName: String {
+        ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_TARGET_NAME"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
+    private var expectsPQCRekey: Bool {
+        ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_EXPECT_PQC_REKEY"] == "1"
+    }
+
+    private func environmentValue(_ name: String) -> String? {
+        guard let raw = ProcessInfo.processInfo.environment[name] else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    func startIfNeeded() async {
+        guard isEnabled, !didStart else { return }
+        didStart = true
+
+        let reporter = SmokeStatusReporter(statusURL: statusURL())
+        reporter.reset()
+        await preseedPeerKEMTrustIfNeeded(reporter: reporter)
+
+        guard !targetDeviceID.isEmpty else {
+            reporter.append("failed stage=bootstrap error=missing_target_device_id")
+            return
+        }
+
+        let discoveryManager = DeviceDiscoveryManager.instance
+        let connectionManager = P2PConnectionManager.instance
+        reporter.append(
+            "boot role=ios-p2p-client target=\(Self.sanitize(targetDeviceID)) name=\(Self.sanitize(targetDeviceName))"
+        )
+
+        do {
+            try await discoveryManager.startDiscovery(mode: .skybridgeOnly)
+            reporter.append("discovery started")
+        } catch {
+            reporter.append("failed stage=discovery error=\(Self.sanitize(error.localizedDescription))")
+            return
+        }
+
+        let timeoutSeconds = Double(ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_TIMEOUT_SECONDS"] ?? "") ?? 90
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+
+        var selectedDevice: DiscoveredDevice?
+        var connectAttempted = false
+        var connectFailure = ""
+        var lastHandshakeState = ""
+        var lastError = ""
+        var lastSuite = ""
+        var lastRekey = ""
+        var sawClassicHandshake = false
+        var sawRekey = false
+        var xwingStableSince: Date?
+
+        while Date() < deadline {
+            let handshakeState = connectionManager.currentHandshakeState
+            if handshakeState != lastHandshakeState {
+                lastHandshakeState = handshakeState
+                reporter.append("state \(Self.sanitize(handshakeState))")
+            }
+
+            let latestError = connectionManager.lastError?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !latestError.isEmpty, latestError != lastError {
+                lastError = latestError
+                reporter.append("error \(Self.sanitize(latestError))")
+            }
+
+            if selectedDevice == nil,
+               let target = resolveTargetDevice(from: discoveryManager.discoveredDevices) {
+                selectedDevice = target
+                reporter.append(
+                    "target id=\(Self.sanitize(target.id)) name=\(Self.sanitize(target.name))"
+                )
+            }
+
+            if !connectAttempted, let target = selectedDevice {
+                connectAttempted = true
+                reporter.append("connect \(Self.sanitize(target.id))")
+                Task { @MainActor in
+                    do {
+                        try await connectionManager.connect(
+                            to: target,
+                            allowUntrustedClassicBootstrapOnMissingPeerKEM: expectsPQCRekey
+                        )
+                    } catch {
+                        connectFailure = error.localizedDescription
+                    }
+                }
+            }
+
+            if !connectFailure.isEmpty {
+                reporter.append("failed stage=connect error=\(Self.sanitize(connectFailure))")
+                return
+            }
+
+            if let target = selectedDevice {
+                if let suite = connectionManager.getNegotiatedSuite(for: target.id)?.rawValue,
+                   suite != lastSuite {
+                    lastSuite = suite
+                    reporter.append("suite \(Self.sanitize(suite))")
+
+                    let normalizedSuite = suite.uppercased()
+                    if normalizedSuite.contains("X25519") {
+                        sawClassicHandshake = true
+                        xwingStableSince = nil
+                    } else if normalizedSuite == "X-WING" {
+                        xwingStableSince = xwingStableSince ?? Date()
+                    } else {
+                        xwingStableSince = nil
+                    }
+                }
+
+                if let rekey = connectionManager.resolvedRekeyStatus(for: target) {
+                    let description = "\(rekey.fromSuite)->\(rekey.toSuite)"
+                    if description != lastRekey {
+                        lastRekey = description
+                        sawRekey = true
+                        reporter.append(
+                            "rekey \(Self.sanitize(rekey.fromSuite)) -> \(Self.sanitize(rekey.toSuite))"
+                        )
+                    }
+                } else if !lastRekey.isEmpty {
+                    lastRekey = ""
+                    reporter.append("rekey cleared")
+                }
+
+                if let suite = connectionManager.getNegotiatedSuite(for: target.id)?.rawValue {
+                    let normalizedSuite = suite.uppercased()
+
+                    if expectsPQCRekey {
+                        if sawClassicHandshake && sawRekey && normalizedSuite == "X-WING" {
+                            reporter.append("success suite=X-Wing bootstrapRekey=1")
+                            return
+                        }
+                    } else if normalizedSuite == "X-WING",
+                              !sawRekey,
+                              let stableSince = xwingStableSince,
+                              Date().timeIntervalSince(stableSince) >= 1.0 {
+                        reporter.append("success suite=X-Wing handshakeOnly=1")
+                        return
+                    }
+                }
+            }
+
+            if connectAttempted,
+               (handshakeState.contains("握手失败") || handshakeState.contains("rekey失败")) {
+                reporter.append("failed stage=handshake error=\(Self.sanitize(handshakeState))")
+                return
+            }
+
+            try? await Task.sleep(for: .milliseconds(250))
+        }
+
+        reporter.append("failed stage=timeout error=ios_local_p2p_smoke_timeout")
+    }
+
+    private func statusURL() -> URL? {
+        let fileName = ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_STATUS_BASENAME"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "skybridge-smoke-status.log"
+        guard !fileName.isEmpty else { return nil }
+        return FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)
+            .first?
+            .appendingPathComponent(fileName)
+    }
+
+    private func resolveTargetDevice(from devices: [DiscoveredDevice]) -> DiscoveredDevice? {
+        let normalizedTarget = targetDeviceID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if !normalizedTarget.isEmpty {
+            for device in devices {
+                let aliases = Set(PeerIdentityAliasResolver.lookupCandidates(for: device.id))
+                    .union(PeerIdentityAliasResolver.aliasKeys(for: device))
+                    .union([device.id.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()])
+                if aliases.contains(normalizedTarget) || aliases.contains("id:\(normalizedTarget)") {
+                    return device
+                }
+            }
+        }
+
+        let normalizedName = targetDeviceName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalizedName.isEmpty else { return nil }
+
+        return devices.first { device in
+            let deviceName = device.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let bonjourName = device.bonjourServiceName?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased() ?? ""
+            return deviceName == normalizedName
+                || bonjourName == normalizedName
+                || deviceName.contains(normalizedName)
+                || bonjourName.contains(normalizedName)
+        }
+    }
+
+    private func decodeBase64Key(
+        _ name: String,
+        reporter: SmokeStatusReporter
+    ) -> Data? {
+        guard let raw = environmentValue(name) else { return nil }
+        guard let data = Data(base64Encoded: raw, options: [.ignoreUnknownCharacters]), !data.isEmpty else {
+            reporter.append("failed stage=pqc-preseed error=invalid_base64_\(name)")
+            return nil
+        }
+        return data
+    }
+
+    private func preseedPeerKEMTrustIfNeeded(reporter: SmokeStatusReporter) async {
+        guard let peerDeviceID = environmentValue("SKYBRIDGE_PQC_PEER_DEVICE_ID") else {
+            return
+        }
+
+        var keysBySuite: [UInt16: KEMPublicKeyInfo] = [:]
+        if let xwing = decodeBase64Key("SKYBRIDGE_PQC_PEER_XWING_PUBLIC_KEY_BASE64", reporter: reporter) {
+            keysBySuite[Self.xwingSuiteWireID] = KEMPublicKeyInfo(
+                suiteWireId: Self.xwingSuiteWireID,
+                publicKey: xwing
+            )
+        }
+        if let mlkem768 = decodeBase64Key("SKYBRIDGE_PQC_PEER_MLKEM768_PUBLIC_KEY_BASE64", reporter: reporter) {
+            keysBySuite[Self.mlkem768SuiteWireID] = KEMPublicKeyInfo(
+                suiteWireId: Self.mlkem768SuiteWireID,
+                publicKey: mlkem768
+            )
+            if environmentValue("SKYBRIDGE_PQC_PEER_MLKEM768FS_PUBLIC_KEY_BASE64") == nil {
+                keysBySuite[Self.mlkem768FSSuiteWireID] = KEMPublicKeyInfo(
+                    suiteWireId: Self.mlkem768FSSuiteWireID,
+                    publicKey: mlkem768
+                )
+            }
+        }
+        if let mlkem768fs = decodeBase64Key("SKYBRIDGE_PQC_PEER_MLKEM768FS_PUBLIC_KEY_BASE64", reporter: reporter) {
+            keysBySuite[Self.mlkem768FSSuiteWireID] = KEMPublicKeyInfo(
+                suiteWireId: Self.mlkem768FSSuiteWireID,
+                publicKey: mlkem768fs
+            )
+        }
+
+        let keys = keysBySuite.keys.sorted().compactMap { keysBySuite[$0] }
+        guard !keys.isEmpty else {
+            reporter.append("pqc-preseed skipped device=\(Self.sanitize(peerDeviceID)) reason=missing_keys")
+            return
+        }
+
+        await KEMTrustStore.shared.upsert(deviceId: peerDeviceID, kemPublicKeys: keys)
+        let suites = keys.map { String(format: "0x%04x", $0.suiteWireId) }.joined(separator: ",")
+        reporter.append("pqc-preseed device=\(Self.sanitize(peerDeviceID)) suites=\(suites)")
+    }
+
+    private static func sanitize(_ value: String) -> String {
+        value.replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\r", with: " ")
+    }
+}
+
+@available(iOS 17.0, *)
+@MainActor
 private final class LocalWebRTCSmokeHarness {
     static let shared = LocalWebRTCSmokeHarness()
     private static let xwingSuiteWireID: UInt16 = 0x0001
@@ -765,6 +1202,7 @@ private final class LocalWebRTCSmokeHarness {
         var lastReadiness = ""
         var lastRekeyEvent = ""
         var heartbeatStarted = false
+        var streamConfigurationSent = false
 
         while Date() < deadline {
             let stateDescription = String(describing: manager.state)
@@ -797,13 +1235,101 @@ private final class LocalWebRTCSmokeHarness {
                     "handshake session=\(sessionId) suite=\(Self.sanitize(negotiatedSuite))"
                 )
                 if role == "ios-client" {
+                    if !streamConfigurationSent {
+                        streamConfigurationSent = await sendSmokeViewerStreamConfiguration(
+                            manager: manager,
+                            reporter: reporter
+                        )
+                    }
                     manager.startRemoteDesktopHeartbeat()
                 }
             }
 
-            if role == "ios-client", let screenData = manager.lastScreenData {
+            if role == "ios-client" {
+                let successDescriptor: (width: Int, height: Int, bytes: Int, transport: String)? = {
+                    if let screenData = manager.lastScreenData {
+                        return (
+                            width: screenData.width,
+                            height: screenData.height,
+                            bytes: screenData.imageData.count,
+                            transport: "fallback-screen"
+                        )
+                    }
+
+                    let nativeFrameSize = manager.remoteVideoTrackFrameSize
+                    if manager.remoteVideoTrackHasRenderedFrame,
+                       nativeFrameSize.width > 0,
+                       nativeFrameSize.height > 0 {
+                        return (
+                            width: Int(nativeFrameSize.width),
+                            height: Int(nativeFrameSize.height),
+                            bytes: 0,
+                            transport: "webrtc-native"
+                        )
+                    }
+
+                    if manager.remoteVideoTrackReadyForPromotion,
+                       nativeFrameSize.width > 0,
+                       nativeFrameSize.height > 0 {
+                        return (
+                            width: Int(nativeFrameSize.width),
+                            height: Int(nativeFrameSize.height),
+                            bytes: 0,
+                            transport: "webrtc-native-ready"
+                        )
+                    }
+
+                    return nil
+                }()
+
+                if let successDescriptor,
+                   case .handshakeComplete(let sessionId, let negotiatedSuite) = manager.readiness {
+                    let suiteLabel = Self.sanitize(negotiatedSuite)
+                    let bootstrapSatisfied = !expectsPQCRekey
+                        || suiteLabel.uppercased().contains("X-WING")
+                    if bootstrapSatisfied {
+                        reporter.append(
+                            "success session=\(sessionId) suite=\(suiteLabel) bootstrapRekey=\(expectsPQCRekey ? 1 : 0) frame=\(successDescriptor.width)x\(successDescriptor.height) bytes=\(successDescriptor.bytes) transport=\(successDescriptor.transport)"
+                        )
+                        return
+                    }
+                }
+
+                if let screenData = manager.lastScreenData {
+                    reporter.append(
+                        "success frame=\(screenData.width)x\(screenData.height) bytes=\(screenData.imageData.count) transport=fallback-screen"
+                    )
+                    return
+                }
+
+                let nativeFrameSize = manager.remoteVideoTrackFrameSize
+                if manager.remoteVideoTrackHasRenderedFrame,
+                   nativeFrameSize.width > 0,
+                   nativeFrameSize.height > 0 {
+                    reporter.append(
+                        "success frame=\(Int(nativeFrameSize.width))x\(Int(nativeFrameSize.height)) bytes=0 transport=webrtc-native"
+                    )
+                    return
+                }
+
+                if manager.remoteVideoTrackReadyForPromotion,
+                   nativeFrameSize.width > 0,
+                   nativeFrameSize.height > 0 {
+                    reporter.append(
+                        "success frame=\(Int(nativeFrameSize.width))x\(Int(nativeFrameSize.height)) bytes=0 transport=webrtc-native-ready"
+                    )
+                    return
+                }
+            }
+
+            if role == "ios-client",
+               expectsPQCRekey,
+               case .handshakeComplete(let sessionId, let negotiatedSuite) = manager.readiness,
+               negotiatedSuite.caseInsensitiveCompare("X-Wing") == .orderedSame,
+               let rekeyDescription = manager.lastRekeyEvent,
+               rekeyDescription.caseInsensitiveCompare("complete suite=X-Wing") == .orderedSame {
                 reporter.append(
-                    "success frame=\(screenData.width)x\(screenData.height) bytes=\(screenData.imageData.count)"
+                    "success session=\(sessionId) suite=\(Self.sanitize(negotiatedSuite)) bootstrapRekey=1"
                 )
                 return
             }
@@ -972,6 +1498,54 @@ private final class LocalWebRTCSmokeHarness {
         }
     }
 
+    private func sendSmokeViewerStreamConfiguration(
+        manager: CrossNetworkWebRTCManager,
+        reporter: SmokeStatusReporter
+    ) async -> Bool {
+        let supportedFormats = RemoteDesktopManager.supportedRemoteVideoFormats()
+        let preferredCodec = supportedFormats.first {
+            $0.caseInsensitiveCompare("hevc") == .orderedSame
+                || $0.caseInsensitiveCompare("h264") == .orderedSame
+        } ?? supportedFormats.first ?? "jpeg"
+
+        let payload = RemoteDesktopStreamConfigurationPayload(
+            preferredCodec: preferredCodec,
+            supportedVideoFormats: supportedFormats,
+            qualityPreset: "fluid",
+            adaptiveResolutionEnabled: true,
+            targetFrameRate: 30,
+            keyFrameInterval: 30,
+            lowLatencyMode: false,
+            enableHardwareAcceleration: true,
+            enableAppleSiliconOptimization: true,
+            clipboardSyncEnabled: false,
+            damageTrackingEnabled: true,
+            separateCursorChannelEnabled: true,
+            interactionOverlayChannelEnabled: true,
+            jitterBufferFrames: 2,
+            screenFrameTransport: "webrtc-native-main+sbrf-fallback",
+            screenDataChannelEnabled: false,
+            nativeVideoTrackReady: false,
+            streamRefreshToken: UInt64(Date().timeIntervalSince1970 * 1_000)
+        )
+
+        do {
+            let encoded = try JSONEncoder().encode(payload)
+            try await manager.sendRemoteDesktopMessage(
+                RemoteMessage(type: .streamConfiguration, payload: encoded)
+            )
+            reporter.append(
+                "stream-config preferred=\(preferredCodec) formats=\(supportedFormats.joined(separator: ","))"
+            )
+            return true
+        } catch {
+            reporter.append(
+                "stream-config failed error=\(Self.sanitize(error.localizedDescription))"
+            )
+            return false
+        }
+    }
+
     private static func sanitize(_ value: String) -> String {
         value.replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\r", with: " ")
     }
@@ -990,6 +1564,9 @@ private struct SmokeStatusReporter {
         guard let statusURL else { return }
         let formatted = "[\(ISO8601DateFormatter().string(from: Date()))] \(line)\n"
         guard let data = formatted.data(using: .utf8) else { return }
+        if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
+            try? FileHandle.standardOutput.write(contentsOf: data)
+        }
         if FileManager.default.fileExists(atPath: statusURL.path),
            let handle = try? FileHandle(forWritingTo: statusURL) {
             defer { try? handle.close() }

@@ -22,12 +22,20 @@ class RegistryStore {
     this.timeoutMs = Number(options.timeoutMs || process.env.SUPABASE_TIMEOUT_MS || 8_000);
   }
 
+  get canVerifyAccessToken() {
+    return Boolean(this.supabaseUrl && this.supabaseAnonKey);
+  }
+
+  get canAccessRegistry() {
+    return Boolean(this.canVerifyAccessToken && this.supabaseServiceRoleKey);
+  }
+
   get configured() {
-    return Boolean(this.supabaseUrl && this.supabaseAnonKey && this.supabaseServiceRoleKey);
+    return this.canAccessRegistry;
   }
 
   async verifyAccessToken(accessToken) {
-    if (!this.configured) {
+    if (!this.canVerifyAccessToken) {
       throw new Error('registry_not_configured');
     }
     const response = await this.request({
@@ -54,7 +62,7 @@ class RegistryStore {
   }
 
   async getTenantPolicy(tenantId) {
-    if (!this.configured) {
+    if (!this.canAccessRegistry) {
       throw new Error('registry_not_configured');
     }
     let rows;
@@ -77,7 +85,7 @@ class RegistryStore {
   }
 
   async getRegisteredDevice({ tenantId, userId, deviceId, protocolSigningAlgorithm, protocolPublicKeyFingerprint }) {
-    if (!this.configured) {
+    if (!this.canAccessRegistry) {
       throw new Error('registry_not_configured');
     }
     const params = [

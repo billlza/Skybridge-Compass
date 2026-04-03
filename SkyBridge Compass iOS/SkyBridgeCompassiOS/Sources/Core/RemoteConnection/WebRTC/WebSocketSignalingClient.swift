@@ -301,15 +301,9 @@ public actor WebSocketSignalingClient {
     private func performConnectSequence(timeout: Duration) async throws {
         let attempts = transportAttempts()
         var lastError: Error = SignalingError.connectTimedOut
-        let sequenceGeneration = nextSequenceGeneration
-        nextSequenceGeneration += 1
 
         for attempt in attempts {
-            let handleId = SignalingHandleID(
-                sessionId: sessionId,
-                backend: attempt.backend,
-                generation: sequenceGeneration
-            )
+            let handleId = reserveNextHandleId(for: attempt.backend)
             currentHandle = handleId
             isBound = false
             isSocketOpen = false
@@ -365,6 +359,16 @@ public actor WebSocketSignalingClient {
         case .auto:
             return [.urlSession(proxyBypass: false), .urlSession(proxyBypass: true)]
         }
+    }
+
+    private func reserveNextHandleId(for backend: SignalingBackend) -> SignalingHandleID {
+        let generation = nextSequenceGeneration
+        nextSequenceGeneration += 1
+        return SignalingHandleID(
+            sessionId: sessionId,
+            backend: backend,
+            generation: generation
+        )
     }
 
     private func connectViaURLSession(
@@ -693,6 +697,15 @@ public actor WebSocketSignalingClient {
 private final class ActorBox<T: Actor>: @unchecked Sendable {
     weak var value: T?
     init(_ value: T) { self.value = value }
+}
+
+@available(iOS 17.0, *)
+extension WebSocketSignalingClient {
+    internal func testOnlyReserveNextHandleId(
+        for backend: SignalingBackend
+    ) -> SignalingHandleID {
+        reserveNextHandleId(for: backend)
+    }
 }
 
 private final class URLSessionSignalingDelegate: NSObject, URLSessionWebSocketDelegate {

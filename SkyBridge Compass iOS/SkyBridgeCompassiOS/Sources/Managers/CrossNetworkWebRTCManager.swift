@@ -1146,6 +1146,8 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     private let signalServer = SignalServerClientCompat()
     private let signalingRetryController = SignalingRetryController()
     private var signalingRecoveryTasksBySessionId: [String: Task<Void, Never>] = [:]
+    private var signalingGenerationBySessionId: [String: Int] = [:]
+    private var activeSignalingHandleBySessionId: [String: WebSocketSignalingClient.SignalingHandleID] = [:]
     private enum SignalingHealth {
         case healthy
         case degradedRecoverable
@@ -1554,14 +1556,14 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             let localBinding = try currentPathLocalBinding()
             let admission = try await requestAdmissionLease(for: localBinding)
             let lookup = try await signalServer.lookupConnectionCode(admissionToken: admission.token, code: code)
-            _ = try validateCurrentPathOrigin(lookup.signalingServerOrigin)
+            let canonicalOrigin = try validateCurrentPathOrigin(lookup.signalingServerOrigin)
             try enforceCurrentPathTrustBinding(
                 deviceId: lookup.initiatorDeviceId,
                 protocolPublicKeyFingerprint: lookup.initiatorProtocolPublicKeyFingerprint
             )
             webrtcSignalingAuthTokenBySessionId[lookup.sessionID] = lookup.sessionToken
             webrtcTurnAdmissionTokenBySessionId[lookup.sessionID] = lookup.turnAdmissionToken
-            currentPathSignalingOriginBySessionId[lookup.sessionID] = lookup.signalingServerOrigin
+            currentPathSignalingOriginBySessionId[lookup.sessionID] = canonicalOrigin
             currentPathExpectedRemoteAuthorityBySessionId[lookup.sessionID] = CurrentPathRemoteAuthorityCompat(
                 deviceId: lookup.initiatorDeviceId,
                 protocolSigningAlgorithm: lookup.initiatorProtocolSigningAlgorithm,
@@ -1621,9 +1623,10 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
                 deviceName: localDeviceName,
                 validDuration: requestedLeaseMode.validDuration
             )
+            let canonicalOrigin = try validateCurrentPathOrigin(lease.signalingServerOrigin)
             webrtcSignalingAuthTokenBySessionId[lease.sessionID] = lease.sessionToken
             webrtcTurnAdmissionTokenBySessionId[lease.sessionID] = lease.turnAdmissionToken
-            currentPathSignalingOriginBySessionId[lease.sessionID] = lease.signalingServerOrigin
+            currentPathSignalingOriginBySessionId[lease.sessionID] = canonicalOrigin
             localConnectionCode = lease.code
             localConnectionCodeExpiresAt = Date().addingTimeInterval(lease.expiresIn)
             activeConnectionCodeLeaseMode = requestedLeaseMode
@@ -1688,10 +1691,10 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
                 admissionToken: admission.token,
                 validDuration: validDuration
             )
-            _ = try validateCurrentPathOrigin(lease.signalingServerOrigin)
+            let canonicalOrigin = try validateCurrentPathOrigin(lease.signalingServerOrigin)
             webrtcSignalingAuthTokenBySessionId[lease.sessionID] = lease.sessionToken
             webrtcTurnAdmissionTokenBySessionId[lease.sessionID] = lease.turnAdmissionToken
-            currentPathSignalingOriginBySessionId[lease.sessionID] = lease.signalingServerOrigin
+            currentPathSignalingOriginBySessionId[lease.sessionID] = canonicalOrigin
 
             let signatureKeyTag = "CrossNetwork.CurrentPath.Authority.Ed25519"
             guard let privateKey = KeychainManager.shared.loadCurve25519SigningPrivateKey(tag: signatureKeyTag) else {
@@ -1788,6 +1791,8 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         signaling = nil
         signalingShardKey = nil
         signalingHealth = .healthy
+        signalingGenerationBySessionId.removeAll()
+        activeSignalingHandleBySessionId.removeAll()
         session?.close()
         session = nil
         currentSessionId = nil
@@ -2315,11 +2320,16 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         let normalizedShardKey = (effectiveShardKey?.isEmpty == false) ? effectiveShardKey : nil
 
         if let signaling, signalingShardKey != normalizedShardKey {
+            let previousShardKey = signalingShardKey
             appendSmokeTrace("signaling reset shard=\(signalingShardKey ?? "-")->\(normalizedShardKey ?? "-")")
             await signaling.close()
             self.signaling = nil
             signalingShardKey = nil
             signalingHealth = .healthy
+            if let previousShardKey {
+                signalingGenerationBySessionId.removeValue(forKey: previousShardKey)
+                activeSignalingHandleBySessionId.removeValue(forKey: previousShardKey)
+            }
         }
 
         if let signaling {
@@ -2358,78 +2368,100 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         await newSignaling.setOnLifecycleEvent { [weak self] (event: WebSocketSignalingClient.SignalingLifecycleEvent) in
             Task { @MainActor in
                 guard let self, self.signaling === newSignaling else { return }
-                let failureKind = event.failureClass.map { failure -> SignalingFailureKind in
-                    switch failure {
-                    case .authBindRejected:
-                        return .authBindRejected
-                    case .invalidShardOrSessionMismatch:
-                        return .invalidShardOrSessionMismatch
-                    case .tokenExpired:
-                        return .tokenExpired
-                    case .transientNetwork:
-                        return .transientNetwork
-                    case .transientServer:
-                        return .transientServer
-                    case .protocolViolation:
-                        return .protocolViolation
-                    }
-                } ?? .transientServer
-
-                switch event.phase {
-                case .bound:
-                    self.signalingHealth = .healthy
-                    SkyBridgeLogger.shared.info(
-                        "♻️ signaling health recovered: session=\(sessionId) phase=bound summary=\(self.remoteDesktopRecoveryDebugSummary())"
-                    )
-                case .closed:
-                    if self.shouldScheduleSignalingRecovery(for: sessionId) {
-                        self.signalingHealth = .degradedRecoverable
-                        SkyBridgeLogger.shared.warning(
-                            "⚠️ signaling health degraded: session=\(sessionId) phase=closed failure=transient_network recoveryScheduled=true summary=\(self.remoteDesktopRecoveryDebugSummary())"
-                        )
-                        self.scheduleSignalingRecovery(for: sessionId)
-                    }
-                case .failed:
-                    if self.suppressSignalingRecovery {
-                        break
-                    }
-                    if self.shouldScheduleSignalingRecovery(for: sessionId) {
-                        if failureKind == .tokenExpired {
-                            self.signalingHealth = .degradedRecoverable
-                            SkyBridgeLogger.shared.warning(
-                                "⚠️ signaling health degraded: session=\(sessionId) phase=failed failure=token_expired recoveryScheduled=true summary=\(self.remoteDesktopRecoveryDebugSummary())"
-                            )
-                            self.scheduleSignalingRecovery(for: sessionId, tokenExpired: true)
-                        } else if self.isFatalPostTransportFailure(failureKind) {
-                            self.signalingHealth = .degradedFatal
-                            SkyBridgeLogger.shared.error(
-                                "❌ signaling health fatal: session=\(sessionId) phase=failed recoveryScheduled=false summary=\(self.remoteDesktopRecoveryDebugSummary())"
-                            )
-                        } else {
-                            self.signalingHealth = .degradedRecoverable
-                            SkyBridgeLogger.shared.warning(
-                                "⚠️ signaling health degraded: session=\(sessionId) phase=failed recoveryScheduled=true summary=\(self.remoteDesktopRecoveryDebugSummary())"
-                            )
-                            self.scheduleSignalingRecovery(for: sessionId)
-                        }
-                    } else if self.isFatalPreTransportFailure(failureKind) {
-                        self.signalingHealth = .degradedFatal
-                        SkyBridgeLogger.shared.error(
-                            "❌ signaling health fatal: session=\(sessionId) phase=failed preTransport=true summary=\(self.remoteDesktopRecoveryDebugSummary())"
-                        )
-                    } else {
-                        self.signalingHealth = .degradedRecoverable
-                        SkyBridgeLogger.shared.warning(
-                            "⚠️ signaling health degraded: session=\(sessionId) phase=failed recoveryScheduled=false summary=\(self.remoteDesktopRecoveryDebugSummary())"
-                        )
-                    }
-                default:
-                    break
-                }
+                self.handleSignalingLifecycleEvent(event, sessionId: sessionId)
             }
         }
         appendSmokeTrace("signaling connect shard=\(sessionId) url=\(WebSocketSignalingClient.redactedURLString(wsURL))")
         try await newSignaling.connectOrThrow()
+    }
+
+    private func signalingGeneration(for sessionId: String) -> Int {
+        signalingGenerationBySessionId[sessionId] ?? 0
+    }
+
+    private func handleSignalingLifecycleEvent(
+        _ event: WebSocketSignalingClient.SignalingLifecycleEvent,
+        sessionId: String
+    ) {
+        guard event.handleId.sessionId == sessionId else { return }
+
+        if event.phase == .connecting || event.phase == .reconnecting {
+            guard event.handleId.generation >= signalingGeneration(for: sessionId) else { return }
+            signalingGenerationBySessionId[sessionId] = event.handleId.generation
+            activeSignalingHandleBySessionId[sessionId] = event.handleId
+        }
+
+        guard event.handleId.generation == signalingGeneration(for: sessionId) else { return }
+        guard activeSignalingHandleBySessionId[sessionId] == event.handleId else { return }
+
+        let failureKind = event.failureClass.map { failure -> SignalingFailureKind in
+            switch failure {
+            case .authBindRejected:
+                return .authBindRejected
+            case .invalidShardOrSessionMismatch:
+                return .invalidShardOrSessionMismatch
+            case .tokenExpired:
+                return .tokenExpired
+            case .transientNetwork:
+                return .transientNetwork
+            case .transientServer:
+                return .transientServer
+            case .protocolViolation:
+                return .protocolViolation
+            }
+        } ?? .transientServer
+
+        switch event.phase {
+        case .bound:
+            signalingHealth = .healthy
+            SkyBridgeLogger.shared.info(
+                "♻️ signaling health recovered: session=\(sessionId) phase=bound summary=\(remoteDesktopRecoveryDebugSummary())"
+            )
+        case .closed:
+            if shouldScheduleSignalingRecovery(for: sessionId) {
+                signalingHealth = .degradedRecoverable
+                SkyBridgeLogger.shared.warning(
+                    "⚠️ signaling health degraded: session=\(sessionId) phase=closed failure=transient_network recoveryScheduled=true summary=\(remoteDesktopRecoveryDebugSummary())"
+                )
+                scheduleSignalingRecovery(for: sessionId)
+            }
+        case .failed:
+            if suppressSignalingRecovery {
+                break
+            }
+            if shouldScheduleSignalingRecovery(for: sessionId) {
+                if failureKind == .tokenExpired {
+                    signalingHealth = .degradedRecoverable
+                    SkyBridgeLogger.shared.warning(
+                        "⚠️ signaling health degraded: session=\(sessionId) phase=failed failure=token_expired recoveryScheduled=true summary=\(remoteDesktopRecoveryDebugSummary())"
+                    )
+                    scheduleSignalingRecovery(for: sessionId, tokenExpired: true)
+                } else if isFatalPostTransportFailure(failureKind) {
+                    signalingHealth = .degradedFatal
+                    SkyBridgeLogger.shared.error(
+                        "❌ signaling health fatal: session=\(sessionId) phase=failed recoveryScheduled=false summary=\(remoteDesktopRecoveryDebugSummary())"
+                    )
+                } else {
+                    signalingHealth = .degradedRecoverable
+                    SkyBridgeLogger.shared.warning(
+                        "⚠️ signaling health degraded: session=\(sessionId) phase=failed recoveryScheduled=true summary=\(remoteDesktopRecoveryDebugSummary())"
+                    )
+                    scheduleSignalingRecovery(for: sessionId)
+                }
+            } else if isFatalPreTransportFailure(failureKind) {
+                signalingHealth = .degradedFatal
+                SkyBridgeLogger.shared.error(
+                    "❌ signaling health fatal: session=\(sessionId) phase=failed preTransport=true summary=\(remoteDesktopRecoveryDebugSummary())"
+                )
+            } else {
+                signalingHealth = .degradedRecoverable
+                SkyBridgeLogger.shared.warning(
+                    "⚠️ signaling health degraded: session=\(sessionId) phase=failed recoveryScheduled=false summary=\(remoteDesktopRecoveryDebugSummary())"
+                )
+            }
+        default:
+            break
+        }
     }
 
     private func authenticatedEnvelope(_ envelope: WebRTCSignalingEnvelope) -> WebRTCSignalingEnvelope? {
@@ -3234,7 +3266,50 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     public static func isConnectLinkString(_ raw: String) -> Bool {
         extractConnectPayloadString(from: raw.trimmingCharacters(in: .whitespacesAndNewlines)) != nil
     }
-    
+
+    private func reuseCachedRedeemedSessionArtifactsIfPossible(
+        for qr: DynamicQRCodeData,
+        canonicalOrigin: String
+    ) -> Bool {
+        let signalingToken = Self.normalizedNonEmptyToken(webrtcSignalingAuthTokenBySessionId[qr.sessionID])
+        let turnAdmissionToken = Self.normalizedNonEmptyToken(webrtcTurnAdmissionTokenBySessionId[qr.sessionID])
+        let cachedOrigin = currentPathSignalingOriginBySessionId[qr.sessionID]
+            .flatMap { try? validateCurrentPathOrigin($0) }
+        let cachedAuthority = currentPathExpectedRemoteAuthorityBySessionId[qr.sessionID]
+
+        guard Self.shouldReuseRedeemedQRSessionArtifacts(
+            canonicalQRSignalingOrigin: canonicalOrigin,
+            qrDeviceId: qr.deviceID,
+            qrProtocolSigningAlgorithm: qr.protocolSigningAlgorithm,
+            qrProtocolPublicKeyFingerprint: qr.protocolPublicKeyFingerprint,
+            qrProtocolPublicKeyBytes: qr.protocolPublicKeyBytes,
+            signalingToken: signalingToken,
+            turnAdmissionToken: turnAdmissionToken,
+            cachedSignalingOrigin: cachedOrigin,
+            cachedAuthority: cachedAuthority
+        ) else {
+            return false
+        }
+
+        let effectivePublicKeyBytes: Data? = {
+            if !qr.protocolPublicKeyBytes.isEmpty {
+                return qr.protocolPublicKeyBytes
+            }
+            return cachedAuthority?.protocolPublicKeyBytes
+        }()
+        webrtcSignalingAuthTokenBySessionId[qr.sessionID] = signalingToken
+        webrtcTurnAdmissionTokenBySessionId[qr.sessionID] = turnAdmissionToken
+        currentPathSignalingOriginBySessionId[qr.sessionID] = canonicalOrigin
+        currentPathExpectedRemoteAuthorityBySessionId[qr.sessionID] = CurrentPathRemoteAuthorityCompat(
+            deviceId: qr.deviceID,
+            protocolSigningAlgorithm: qr.protocolSigningAlgorithm,
+            protocolPublicKeyFingerprint: qr.protocolPublicKeyFingerprint,
+            protocolPublicKeyBytes: effectivePublicKeyBytes,
+            deviceName: qr.deviceName
+        )
+        return true
+    }
+
     private func parseSkybridgeConnectLink(_ string: String) async throws -> DynamicQRCodeData {
         let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let payload = Self.extractConnectPayloadString(from: trimmed) else {
@@ -3246,7 +3321,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         }
         let qr = try decodeDynamicQRCodePayload(from: jsonData)
         guard qr.expiresAt > Date() else { throw ConnectLinkError.expired }
-        _ = try validateCurrentPathOrigin(qr.signalingServerOrigin)
+        let canonicalOrigin = try validateCurrentPathOrigin(qr.signalingServerOrigin)
         let verifyResult = try await verifyDynamicQRCode(qr)
         guard verifyResult.ok else {
             let reason = verifyResult.reason ?? "二维码校验失败"
@@ -3261,6 +3336,13 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             deviceId: qr.deviceID,
             protocolPublicKeyFingerprint: qr.protocolPublicKeyFingerprint
         )
+        if reuseCachedRedeemedSessionArtifactsIfPossible(for: qr, canonicalOrigin: canonicalOrigin) {
+            SkyBridgeLogger.shared.info(
+                "♻️ 复用已兑换的 QR signaling artifacts: session=\(qr.sessionID) device=\(qr.deviceID)"
+            )
+            SkyBridgeLogger.shared.debug("ℹ️ iOS QR 仅完成内容完整性校验；设备来源认证仍依赖后续握手/pinning")
+            return qr
+        }
         let localBinding = try currentPathLocalBinding()
         let admission = try await requestAdmissionLease(for: localBinding)
         let redeemed = try await signalServer.redeemSession(
@@ -3268,7 +3350,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             sessionId: qr.sessionID,
             qrBootstrapToken: qr.qrBootstrapToken
         )
-        _ = try validateCurrentPathOrigin(redeemed.signalingServerOrigin)
+        let redeemedOrigin = try validateCurrentPathOrigin(redeemed.signalingServerOrigin)
         guard redeemed.initiatorDeviceId == qr.deviceID,
               redeemed.initiatorProtocolSigningAlgorithm == qr.protocolSigningAlgorithm,
               redeemed.initiatorProtocolPublicKeyFingerprint == qr.protocolPublicKeyFingerprint else {
@@ -3276,7 +3358,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         }
         webrtcSignalingAuthTokenBySessionId[qr.sessionID] = redeemed.sessionToken
         webrtcTurnAdmissionTokenBySessionId[qr.sessionID] = redeemed.turnAdmissionToken
-        currentPathSignalingOriginBySessionId[qr.sessionID] = redeemed.signalingServerOrigin
+        currentPathSignalingOriginBySessionId[qr.sessionID] = redeemedOrigin
         currentPathExpectedRemoteAuthorityBySessionId[qr.sessionID] = CurrentPathRemoteAuthorityCompat(
             deviceId: qr.deviceID,
             protocolSigningAlgorithm: qr.protocolSigningAlgorithm,
@@ -3286,6 +3368,45 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         )
         SkyBridgeLogger.shared.debug("ℹ️ iOS QR 仅完成内容完整性校验；设备来源认证仍依赖后续握手/pinning")
         return qr
+    }
+
+    private static func normalizedNonEmptyToken(_ raw: String?) -> String? {
+        guard let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty else {
+            return nil
+        }
+        return trimmed
+    }
+
+    private static func shouldReuseRedeemedQRSessionArtifacts(
+        canonicalQRSignalingOrigin: String,
+        qrDeviceId: String,
+        qrProtocolSigningAlgorithm: ProtocolSigningAlgorithm,
+        qrProtocolPublicKeyFingerprint: String,
+        qrProtocolPublicKeyBytes: Data,
+        signalingToken: String?,
+        turnAdmissionToken: String?,
+        cachedSignalingOrigin: String?,
+        cachedAuthority: CurrentPathRemoteAuthorityCompat?
+    ) -> Bool {
+        guard signalingToken != nil,
+              turnAdmissionToken != nil,
+              cachedSignalingOrigin == canonicalQRSignalingOrigin,
+              let cachedAuthority else {
+            return false
+        }
+        guard cachedAuthority.deviceId == qrDeviceId,
+              cachedAuthority.protocolSigningAlgorithm == qrProtocolSigningAlgorithm,
+              cachedAuthority.protocolPublicKeyFingerprint == qrProtocolPublicKeyFingerprint else {
+            return false
+        }
+        if let cachedKeyBytes = cachedAuthority.protocolPublicKeyBytes,
+           !qrProtocolPublicKeyBytes.isEmpty,
+           !cachedKeyBytes.isEmpty,
+           cachedKeyBytes != qrProtocolPublicKeyBytes {
+            return false
+        }
+        return true
     }
 
     private func decodeDynamicQRCodePayload(from jsonData: Data) throws -> DynamicQRCodeData {
@@ -4897,6 +5018,7 @@ private extension CrossNetworkWebRTCManager {
             )
             let driver = try SkyBridgeiOSCore.shared.createHandshakeDriver(
                 transport: makeHandshakeTransport(over: session),
+                peerSupportedSuites: messageA.supportedSuites,
                 trustProvider: hasPQCGroup ? nil : trustProvider
             )
             handshakeDriver = driver
@@ -5532,7 +5654,7 @@ private extension CrossNetworkWebRTCManager {
         return handleDecodedScreenPlaintext(plaintext)
     }
 
-    static func decryptDirectControlProbePayload(
+    private static func decryptDirectControlProbePayload(
         _ payload: Data,
         keys: SessionKeys
     ) -> Data? {
@@ -5839,5 +5961,58 @@ private extension CrossNetworkWebRTCManager {
         }
 
         return "media=\(mediaSections) hasVideo=\(hasVideo) videoDir=\(videoDirection) candidates total=\(total) host=\(host) srflx=\(srflx) relay=\(relay) prflx=\(prflx)"
+    }
+}
+
+@available(iOS 17.0, *)
+extension CrossNetworkWebRTCManager {
+    @MainActor
+    internal static func testOnlyDecryptDirectControlProbePayload(
+        _ payload: Data,
+        keys: SessionKeys
+    ) -> Data? {
+        decryptDirectControlProbePayload(payload, keys: keys)
+    }
+
+    internal static func testOnlyShouldReuseRedeemedQRSessionArtifacts(
+        canonicalQRSignalingOrigin: String,
+        qrDeviceId: String,
+        qrProtocolSigningAlgorithm: ProtocolSigningAlgorithm,
+        qrProtocolPublicKeyFingerprint: String,
+        qrProtocolPublicKeyBytes: Data,
+        signalingToken: String?,
+        turnAdmissionToken: String?,
+        cachedSignalingOrigin: String?,
+        cachedAuthorityDeviceId: String?,
+        cachedAuthorityProtocolSigningAlgorithm: ProtocolSigningAlgorithm?,
+        cachedAuthorityProtocolPublicKeyFingerprint: String?,
+        cachedAuthorityProtocolPublicKeyBytes: Data = Data()
+    ) -> Bool {
+        let cachedAuthority: CurrentPathRemoteAuthorityCompat?
+        if let cachedAuthorityDeviceId,
+           let cachedAuthorityProtocolSigningAlgorithm,
+           let cachedAuthorityProtocolPublicKeyFingerprint {
+            cachedAuthority = CurrentPathRemoteAuthorityCompat(
+                deviceId: cachedAuthorityDeviceId,
+                protocolSigningAlgorithm: cachedAuthorityProtocolSigningAlgorithm,
+                protocolPublicKeyFingerprint: cachedAuthorityProtocolPublicKeyFingerprint,
+                protocolPublicKeyBytes: cachedAuthorityProtocolPublicKeyBytes,
+                deviceName: nil
+            )
+        } else {
+            cachedAuthority = nil
+        }
+
+        return shouldReuseRedeemedQRSessionArtifacts(
+            canonicalQRSignalingOrigin: canonicalQRSignalingOrigin,
+            qrDeviceId: qrDeviceId,
+            qrProtocolSigningAlgorithm: qrProtocolSigningAlgorithm,
+            qrProtocolPublicKeyFingerprint: qrProtocolPublicKeyFingerprint,
+            qrProtocolPublicKeyBytes: qrProtocolPublicKeyBytes,
+            signalingToken: normalizedNonEmptyToken(signalingToken),
+            turnAdmissionToken: normalizedNonEmptyToken(turnAdmissionToken),
+            cachedSignalingOrigin: cachedSignalingOrigin,
+            cachedAuthority: cachedAuthority
+        )
     }
 }

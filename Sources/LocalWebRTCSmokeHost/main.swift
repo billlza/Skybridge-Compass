@@ -16,6 +16,7 @@ struct LocalWebRTCSmokeHost {
             reporter.append("auth-configured")
             await SelfIdentityProvider.shared.loadOrCreate()
             reporter.append("self-identity-ready")
+            try await exportLocalPQCIdentityIfRequested(reporter: reporter)
         } catch {
             reporter.append("failed stage=auth error=\(sanitize(error.localizedDescription))")
             exit(EXIT_FAILURE)
@@ -126,6 +127,15 @@ struct LocalWebRTCSmokeHost {
         return URL(fileURLWithPath: raw)
     }
 
+    private static func pqcReportURL() -> URL? {
+        guard let raw = ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_PQC_REPORT_FILE"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else {
+            return nil
+        }
+        return URL(fileURLWithPath: raw)
+    }
+
     private static func smokeFileURL() -> URL? {
         guard let raw = ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_SEND_FILE"]?
             .trimmingCharacters(in: .whitespacesAndNewlines),
@@ -179,15 +189,19 @@ struct LocalWebRTCSmokeHost {
         reporter.append("auth-session-load-start")
         let session = try await currentAuthSession(reporter: reporter)
         reporter.append("auth-session-loaded")
-        if let config = loadSupabaseConfig(),
-           let url = URL(string: config.url) {
-            reporter.append("auth-supabase-enable-start")
-            await MainActor.run {
-                AuthenticationService.shared.enableSupabaseMode(
-                    supabaseConfig: SupabaseService.Configuration(url: url, anonKey: config.anonKey)
-                )
+        if shouldConfigureSupabaseForSmokeAuth() {
+            if let config = loadSupabaseConfig(),
+               let url = URL(string: config.url) {
+                reporter.append("auth-supabase-enable-start")
+                await MainActor.run {
+                    AuthenticationService.shared.enableSupabaseMode(
+                        supabaseConfig: SupabaseService.Configuration(url: url, anonKey: config.anonKey)
+                    )
+                }
+                reporter.append("auth-supabase-enable-done")
             }
-            reporter.append("auth-supabase-enable-done")
+        } else {
+            reporter.append("auth-supabase-skip-smoke")
         }
         reporter.append("auth-update-session-start")
         try await MainActor.run {
@@ -213,8 +227,16 @@ struct LocalWebRTCSmokeHost {
             )
         }
         reporter.append("auth-session-keychain-present")
+        if shouldSkipStoredSessionRefreshForSmoke() {
+            reporter.append("auth-refresh-skipped-smoke")
+            return stored
+        }
         if let refreshToken = stored.refreshToken,
-           !refreshToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+           !refreshToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           shouldRefreshAccessToken(
+            stored.accessToken,
+            forceRefresh: ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_FORCE_AUTH_REFRESH"] == "1"
+           ) {
             reporter.append("auth-refresh-start")
             do {
                 if let refreshed = try await refreshSupabaseSession(refreshToken: refreshToken, previous: stored) {
@@ -230,11 +252,39 @@ struct LocalWebRTCSmokeHost {
         return stored
     }
 
-    private static func injectedAuthSession() -> AuthSession? {
+    private static func shouldConfigureSupabaseForSmokeAuth() -> Bool {
         let env = ProcessInfo.processInfo.environment
-        guard let accessToken = env["SKYBRIDGE_BEARER_TOKEN"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-              !accessToken.isEmpty else {
+        let explicit = env["SKYBRIDGE_SMOKE_SKIP_SUPABASE_AUTH"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() ?? ""
+        if ["1", "true", "yes"].contains(explicit) {
+            return false
+        }
+        return true
+    }
+
+    private static func shouldSkipStoredSessionRefreshForSmoke() -> Bool {
+        let env = ProcessInfo.processInfo.environment
+        let explicit = env["SKYBRIDGE_SMOKE_SKIP_AUTH_REFRESH"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() ?? ""
+        if ["1", "true", "yes"].contains(explicit) {
+            return true
+        }
+        return false
+    }
+
+    private static func injectedAuthSession() -> AuthSession? {
+        if let session = injectedAuthSessionFromJSON() {
+            return session
+        }
+        let env = ProcessInfo.processInfo.environment
+        let accessToken = (
+            env["SKYBRIDGE_BEARER_TOKEN"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+            ?? env["SKYBRIDGE_ACCESS_TOKEN"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+            ?? ""
+        )
+        guard !accessToken.isEmpty else {
             return nil
         }
 
@@ -261,7 +311,36 @@ struct LocalWebRTCSmokeHost {
         )
     }
 
+    private static func injectedAuthSessionFromJSON() -> AuthSession? {
+        let env = ProcessInfo.processInfo.environment
+        if let raw = env["SKYBRIDGE_AUTH_SESSION_JSON"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !raw.isEmpty,
+           let data = raw.data(using: .utf8),
+           let session = try? JSONDecoder().decode(AuthSession.self, from: data) {
+            return session
+        }
+
+        guard let rawPath = env["SKYBRIDGE_AUTH_SESSION_FILE"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !rawPath.isEmpty else {
+            return nil
+        }
+        let url = URL(fileURLWithPath: rawPath)
+        guard let data = try? Data(contentsOf: url) else {
+            return nil
+        }
+        return try? JSONDecoder().decode(AuthSession.self, from: data)
+    }
+
     private static func loadStoredAuthSession() -> AuthSession? {
+        if let data = loadKeychainDataViaSecurityCLI(
+            service: "com.skybridge.compass.authsession",
+            account: "primary"
+        ) {
+            return try? JSONDecoder().decode(AuthSession.self, from: data)
+        }
+
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: "com.skybridge.compass.authsession",
@@ -275,12 +354,6 @@ struct LocalWebRTCSmokeHost {
             return try? JSONDecoder().decode(AuthSession.self, from: data)
         }
 
-        if let data = loadKeychainDataViaSecurityCLI(
-            service: "com.skybridge.compass.authsession",
-            account: "primary"
-        ) {
-            return try? JSONDecoder().decode(AuthSession.self, from: data)
-        }
         return nil
     }
 
@@ -440,6 +513,36 @@ struct LocalWebRTCSmokeHost {
         )
     }
 
+    private static func shouldRefreshAccessToken(
+        _ token: String,
+        forceRefresh: Bool,
+        skewSeconds: TimeInterval = 300
+    ) -> Bool {
+        if forceRefresh {
+            return true
+        }
+        guard let claims = decodeJWTClaims(token),
+              let exp = claims["exp"] as? TimeInterval else {
+            return false
+        }
+        let expiryDate = Date(timeIntervalSince1970: exp)
+        return expiryDate.timeIntervalSinceNow <= skewSeconds
+    }
+
+    private static func decodeJWTClaims(_ token: String) -> [String: Any]? {
+        let parts = token.split(separator: ".")
+        guard parts.count >= 2 else { return nil }
+        var base64 = String(parts[1])
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        let remainder = base64.count % 4
+        if remainder != 0 {
+            base64.append(String(repeating: "=", count: 4 - remainder))
+        }
+        guard let data = Data(base64Encoded: base64) else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    }
+
     private static func deriveTenantIdentifier(accessToken: String) -> String? {
         guard !accessToken.isEmpty else { return nil }
         guard let payload = accessToken.split(separator: ".").dropFirst().first else {
@@ -496,6 +599,45 @@ struct LocalWebRTCSmokeHost {
         }
         return (object["sub"] as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private struct LocalPQCReport: Encodable {
+        struct PublicKeyEntry: Encodable {
+            let suiteWireId: UInt16
+            let publicKeyBase64: String
+        }
+
+        let deviceId: String
+        let keys: [PublicKeyEntry]
+    }
+
+    private static func exportLocalPQCIdentityIfRequested(
+        reporter: SmokeStatusReporter
+    ) async throws {
+        guard let reportURL = pqcReportURL() else { return }
+
+        let provider = CryptoProviderFactory.make(policy: .preferPQC)
+        let deviceId = await DeviceIdentityKeyManager.shared.getDeviceId()
+        let keys = try await DeviceIdentityKeyManager.shared.pairingIdentityKEMPublicKeys(
+            using: provider
+        )
+        let report = LocalPQCReport(
+            deviceId: deviceId,
+            keys: keys.map { key in
+                LocalPQCReport.PublicKeyEntry(
+                    suiteWireId: key.suiteWireId,
+                    publicKeyBase64: key.publicKey.base64EncodedString()
+                )
+            }
+        )
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(report)
+        try writePrivateData(data, to: reportURL)
+        reporter.append(
+            "pqc-report device=\(sanitize(deviceId)) keys=\(report.keys.count) file=\(sanitize(reportURL.lastPathComponent))"
+        )
     }
 
     private static func writeText(_ text: String, to url: URL) throws {

@@ -667,6 +667,49 @@ function deriveTenantIdFromUser(user) {
   return '';
 }
 
+function decodeUnverifiedJWTClaims(token) {
+  const parts = String(token || '').trim().split('.');
+  if (parts.length < 2) return null;
+  const payload = base64urlToBuffer(parts[1]);
+  if (!payload) return null;
+  try {
+    return JSON.parse(payload.toString('utf8'));
+  } catch (_) {
+    return null;
+  }
+}
+
+function syntheticUserFromAccessToken(accessToken) {
+  const claims = decodeUnverifiedJWTClaims(accessToken);
+  if (!claims || typeof claims !== 'object') {
+    return null;
+  }
+  const appMetadata = claims.app_metadata && typeof claims.app_metadata === 'object'
+    ? claims.app_metadata
+    : {};
+  const userMetadata = claims.user_metadata && typeof claims.user_metadata === 'object'
+    ? claims.user_metadata
+    : {};
+  const id = String(claims.sub || '').trim();
+  if (!id) {
+    return null;
+  }
+  return {
+    id,
+    email: typeof claims.email === 'string' ? claims.email : null,
+    appMetadata,
+    userMetadata,
+    isGuest: Boolean(
+      claims.is_anonymous
+      || userMetadata.is_guest
+      || appMetadata.is_guest
+      || appMetadata.provider === 'anonymous'
+      || userMetadata.role === 'guest'
+    ),
+    synthetic: true
+  };
+}
+
 function syntheticTenantPolicy(tenantId) {
   return {
     tenant_id: tenantId,
@@ -691,9 +734,6 @@ function syntheticDeviceRecord(ctx) {
 }
 
 async function loadAuthenticatedDeviceContext(req, { requireRegisteredDevice = true } = {}) {
-  if (!registryStore.configured) {
-    throw makeError('registry_not_configured', 503);
-  }
   const accessToken = getBearerToken(req);
   if (!accessToken) {
     throw makeError('missing_bearer_token', 401);
@@ -705,7 +745,15 @@ async function loadAuthenticatedDeviceContext(req, { requireRegisteredDevice = t
   const clientVersion = normalizeVersion(req.body?.clientVersion || req.query?.clientVersion || req.get('X-SkyBridge-Client-Version') || '0.0.0');
   const protocolVersion = normalizeVersion(req.body?.protocolVersion || req.query?.protocolVersion || req.get('X-SkyBridge-Protocol-Version') || '0');
 
-  const user = await registryStore.verifyAccessToken(accessToken);
+  const canVerifyAccessToken = registryStore.canVerifyAccessToken;
+  const user = canVerifyAccessToken
+    ? await registryStore.verifyAccessToken(accessToken)
+    : ((SIGNALING_ALLOW_BOOTSTRAP_TENANT_POLICY && currentAllowBootstrapDeviceAuth)
+      ? syntheticUserFromAccessToken(accessToken)
+      : null);
+  if (!user && !canVerifyAccessToken) {
+    throw makeError('registry_not_configured', 503);
+  }
   if (!user.id) {
     throw makeError('invalid_user_session', 401);
   }
@@ -716,7 +764,9 @@ async function loadAuthenticatedDeviceContext(req, { requireRegisteredDevice = t
   if (!tenantId) {
     throw makeError('missing_tenant_id', 400);
   }
-  const tenantPolicy = await registryStore.getTenantPolicy(tenantId);
+  const tenantPolicy = registryStore.canAccessRegistry
+    ? await registryStore.getTenantPolicy(tenantId)
+    : null;
   const effectiveTenantPolicy = (!tenantPolicy && SIGNALING_ALLOW_BOOTSTRAP_TENANT_POLICY)
     ? syntheticTenantPolicy(tenantId)
     : tenantPolicy;
@@ -726,19 +776,24 @@ async function loadAuthenticatedDeviceContext(req, { requireRegisteredDevice = t
   assertVersionGates(clientVersion, protocolVersion, effectiveTenantPolicy);
   let deviceRecord = null;
   if (requireRegisteredDevice) {
-    deviceRecord = await registryStore.getRegisteredDevice({
-      tenantId,
-      userId: user.id,
-      deviceId: binding.deviceId,
-      protocolSigningAlgorithm: binding.protocolSigningAlgorithm,
-      protocolPublicKeyFingerprint: binding.protocolPublicKeyFingerprint
-    });
+    if (registryStore.canAccessRegistry) {
+      deviceRecord = await registryStore.getRegisteredDevice({
+        tenantId,
+        userId: user.id,
+        deviceId: binding.deviceId,
+        protocolSigningAlgorithm: binding.protocolSigningAlgorithm,
+        protocolPublicKeyFingerprint: binding.protocolPublicKeyFingerprint
+      });
+    }
     if (!deviceRecord && currentAllowBootstrapDeviceAuth) {
       deviceRecord = syntheticDeviceRecord({
         tenantId,
         user,
         binding
       });
+    }
+    if (!deviceRecord && !registryStore.canAccessRegistry) {
+      throw makeError('registry_not_configured', 503);
     }
     if (!deviceRecord) {
       throw makeError('device_not_registered', 403);
@@ -1653,13 +1708,16 @@ app.get('/api/turn/credentials', rlTurn, asyncRoute(async (req, res) => {
   if (!TURN_SHARED_SECRET || !TURN_URIS.length) {
     throw makeError('turn_credentials_not_configured', 503);
   }
-  let deviceRecord = await registryStore.getRegisteredDevice({
-    tenantId: turnToken.tenantId,
-    userId: turnToken.userId,
-    deviceId: turnToken.deviceId,
-    protocolSigningAlgorithm: turnToken.protocolSigningAlgorithm,
-    protocolPublicKeyFingerprint: turnToken.protocolPublicKeyFingerprint
-  });
+  let deviceRecord = null;
+  if (registryStore.canAccessRegistry) {
+    deviceRecord = await registryStore.getRegisteredDevice({
+      tenantId: turnToken.tenantId,
+      userId: turnToken.userId,
+      deviceId: turnToken.deviceId,
+      protocolSigningAlgorithm: turnToken.protocolSigningAlgorithm,
+      protocolPublicKeyFingerprint: turnToken.protocolPublicKeyFingerprint
+    });
+  }
   if (!deviceRecord && turnToken.deviceSynthetic) {
     deviceRecord = syntheticDeviceRecord({
       tenantId: turnToken.tenantId,
@@ -1670,6 +1728,9 @@ app.get('/api/turn/credentials', rlTurn, asyncRoute(async (req, res) => {
         protocolPublicKeyFingerprint: turnToken.protocolPublicKeyFingerprint
       }
     });
+  }
+  if (!deviceRecord && !registryStore.canAccessRegistry) {
+    throw makeError('registry_not_configured', 503);
   }
   if (!deviceRecord || deviceRecord.status !== 'active') {
     throw makeError('device_not_active', 403);
@@ -1805,7 +1866,9 @@ wss.on('connection', (ws, req) => {
       ws.close(1008, 'session_token_expired');
       return;
     }
-    const tenantPolicy = await registryStore.getTenantPolicy(tokenPreview.tenantId);
+    const tenantPolicy = registryStore.canAccessRegistry
+      ? await registryStore.getTenantPolicy(tokenPreview.tenantId)
+      : null;
     assertVersionGates(
       clientVersion,
       protocolVersion,
