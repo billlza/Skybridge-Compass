@@ -238,6 +238,33 @@ final class WebRTCSignalingFaultInjectionTests: XCTestCase {
     }
 
     @MainActor
+    func testPromotionReadyBackfillsPacketConfirmationWhenFirstPacketAlreadyArrived() {
+        XCTAssertTrue(
+            CrossNetworkWebRTCManager.testOnlyShouldBackfillPacketConfirmationAfterPromotionReady(
+                size: CGSize(width: 2056, height: 1329),
+                hasReceivedFirstPacket: true,
+                hasRenderedFrame: false
+            )
+        )
+
+        XCTAssertFalse(
+            CrossNetworkWebRTCManager.testOnlyShouldBackfillPacketConfirmationAfterPromotionReady(
+                size: CGSize(width: 2056, height: 1329),
+                hasReceivedFirstPacket: false,
+                hasRenderedFrame: false
+            )
+        )
+
+        XCTAssertFalse(
+            CrossNetworkWebRTCManager.testOnlyShouldBackfillPacketConfirmationAfterPromotionReady(
+                size: CGSize(width: 2056, height: 1329),
+                hasReceivedFirstPacket: true,
+                hasRenderedFrame: true
+            )
+        )
+    }
+
+    @MainActor
     func testSessionScopedSignalingURLPrefersCurrentPathOrigin() {
         let resolved = CrossNetworkWebRTCManager.resolvedSignalingWebSocketURLString(
             signalingOrigin: "https://signal.example.com:8443",

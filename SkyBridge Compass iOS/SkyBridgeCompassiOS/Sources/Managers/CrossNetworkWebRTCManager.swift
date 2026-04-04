@@ -2064,6 +2064,14 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             )
             RemoteDesktopManager.instance.handleCrossNetworkNativeVideoTrackPromotionReady()
         }
+        guard Self.shouldBackfillPacketConfirmationAfterPromotionReady(
+            size: size,
+            hasReceivedFirstPacket: remoteVideoTrackHasReceivedFirstPacket,
+            hasRenderedFrame: remoteVideoTrackHasRenderedFrame
+        ) else {
+            return
+        }
+        scheduleRemoteVideoTrackPacketConfirmationIfNeeded(size: size, source: source)
     }
 
     @MainActor
@@ -2103,6 +2111,16 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         default:
             return false
         }
+    }
+
+    internal static func shouldBackfillPacketConfirmationAfterPromotionReady(
+        size: CGSize,
+        hasReceivedFirstPacket: Bool,
+        hasRenderedFrame: Bool
+    ) -> Bool {
+        guard size.width > 0, size.height > 0 else { return false }
+        guard hasReceivedFirstPacket else { return false }
+        return !hasRenderedFrame
     }
 #endif
 
@@ -6013,6 +6031,18 @@ extension CrossNetworkWebRTCManager {
             turnAdmissionToken: normalizedNonEmptyToken(turnAdmissionToken),
             cachedSignalingOrigin: cachedSignalingOrigin,
             cachedAuthority: cachedAuthority
+        )
+    }
+
+    internal static func testOnlyShouldBackfillPacketConfirmationAfterPromotionReady(
+        size: CGSize,
+        hasReceivedFirstPacket: Bool,
+        hasRenderedFrame: Bool
+    ) -> Bool {
+        shouldBackfillPacketConfirmationAfterPromotionReady(
+            size: size,
+            hasReceivedFirstPacket: hasReceivedFirstPacket,
+            hasRenderedFrame: hasRenderedFrame
         )
     }
 }
