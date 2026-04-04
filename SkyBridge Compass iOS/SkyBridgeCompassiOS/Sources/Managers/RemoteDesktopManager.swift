@@ -3056,12 +3056,6 @@ public class RemoteDesktopManager: ObservableObject {
     }
 
     private func preferredDecodedVideoRenderer() -> DecodedVideoRendererPreference {
-        // Prefer the paced sample-buffer renderer for cross-network fallback
-        // H.264/HEVC until the custom Metal path proves it can sustain
-        // continuous present callbacks under real device load.
-        if activeTransportMode == .crossNetwork {
-            return .sampleBuffer
-        }
         return .metal
     }
 

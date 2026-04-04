@@ -41,6 +41,8 @@ public struct EnhancedDeviceDiscoveryView: View {
  // 控制二维码扫描弹窗显示与错误提示。
     @State private var showingScanner: Bool = false
     @State private var scannerErrorMessage: String?
+    @State private var lastScannerErrorFingerprint: String?
+    @State private var lastScannerErrorAt: Date = .distantPast
     @State private var connectionCodeErrorMessage: String?
     @State private var extendedSearchCountdown: Int = 0
     @State private var showManualConnectSheet: Bool = false
@@ -816,13 +818,13 @@ public struct EnhancedDeviceDiscoveryView: View {
                             Task { await connectScannedQRCodeFromUI(scannedContent, trigger: "qr_scanner_sheet") }
                         } else {
  // 不识别的二维码内容
-                            scannerErrorMessage = LocalizationManager.shared.localizedString("discovery.qrCode.error.unrecognized")
+                            presentScannerError(LocalizationManager.shared.localizedString("discovery.qrCode.error.unrecognized"))
                             showingScanner = false
                         }
                     },
                     onError: { message in
- // 扫描器错误回调
-                        scannerErrorMessage = message
+                        // 扫描器错误回调
+                        presentScannerError(message)
                         showingScanner = false
                     }
                 )
@@ -1890,6 +1892,7 @@ public struct EnhancedDeviceDiscoveryView: View {
     }
 
     private func generateDynamicQRCodeFromUI(trigger: String) async {
+        guard !isGeneratingQRCode else { return }
         do {
             scannerErrorMessage = nil
             logger.info("📷 QR action started: \(trigger, privacy: .public)")
@@ -1897,10 +1900,10 @@ public struct EnhancedDeviceDiscoveryView: View {
             logger.info("✅ QR action succeeded: \(trigger, privacy: .public)")
         } catch {
             logger.error("❌ QR action failed: \(trigger, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
-            scannerErrorMessage = String(
+            presentScannerError(String(
                 format: LocalizationManager.shared.localizedString("discovery.qrCode.error.connectFailed"),
                 error.localizedDescription
-            )
+            ))
         }
     }
 
@@ -1913,11 +1916,31 @@ public struct EnhancedDeviceDiscoveryView: View {
             logger.info("✅ QR scan connect succeeded: \(trigger, privacy: .public)")
         } catch {
             logger.error("❌ QR scan connect failed: \(trigger, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
-            scannerErrorMessage = String(
+            presentScannerError(String(
                 format: LocalizationManager.shared.localizedString("discovery.qrCode.error.connectFailed"),
                 error.localizedDescription
-            )
+            ))
         }
+    }
+
+    private var isGeneratingQRCode: Bool {
+        if case .generating = crossNetworkManager.connectionStatus {
+            return true
+        }
+        return false
+    }
+
+    private func presentScannerError(_ message: String, dedupeWindow: TimeInterval = 12) {
+        let normalized = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return }
+        let now = Date()
+        if lastScannerErrorFingerprint == normalized,
+           now.timeIntervalSince(lastScannerErrorAt) < dedupeWindow {
+            return
+        }
+        lastScannerErrorFingerprint = normalized
+        lastScannerErrorAt = now
+        scannerErrorMessage = normalized
     }
 
     private func connectToLocalDevice(_ device: DiscoveredDevice) {

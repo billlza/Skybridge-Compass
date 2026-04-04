@@ -298,6 +298,38 @@ final class WebRTCSignalingFaultInjectionTests: XCTestCase {
             )
         )
     }
+
+    @MainActor
+    func testPostTransportICEFailuresDeferToSharedRecovery() {
+        XCTAssertTrue(
+            CrossNetworkWebRTCManager.shouldDeferSignalingSendRecovery(
+                isTransportEstablished: true,
+                suppressRecovery: false,
+                messageType: .iceCandidate
+            )
+        )
+        XCTAssertFalse(
+            CrossNetworkWebRTCManager.shouldDeferSignalingSendRecovery(
+                isTransportEstablished: true,
+                suppressRecovery: false,
+                messageType: .offer
+            )
+        )
+        XCTAssertFalse(
+            CrossNetworkWebRTCManager.shouldDeferSignalingSendRecovery(
+                isTransportEstablished: true,
+                suppressRecovery: true,
+                messageType: .iceCandidate
+            )
+        )
+        XCTAssertFalse(
+            CrossNetworkWebRTCManager.shouldDeferSignalingSendRecovery(
+                isTransportEstablished: false,
+                suppressRecovery: false,
+                messageType: .iceCandidate
+            )
+        )
+    }
 }
 
 @available(iOS 17.0, *)

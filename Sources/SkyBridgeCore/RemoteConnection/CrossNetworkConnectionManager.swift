@@ -371,6 +371,34 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         }
     }
 
+    private func noteDetachedSignalingAfterTransportEstablished(
+        for sessionID: String,
+        source: String,
+        failure: String? = nil,
+        fatal: Bool = false
+    ) {
+        let previousHealth = signalingHealth
+        signalingHealth = fatal ? .degradedFatal : .degradedRecoverable
+
+        let failureSuffix: String
+        if let failure,
+           !failure.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            failureSuffix = " failure=\(failure)"
+        } else {
+            failureSuffix = ""
+        }
+
+        if previousHealth == .healthy {
+            logger.info(
+                "ℹ️ signaling detached after transport establishment: session=\(sessionID, privacy: .public) source=\(source, privacy: .public) fatal=\(fatal ? 1 : 0, privacy: .public)\(failureSuffix)"
+            )
+        } else {
+            logger.debug(
+                "ℹ️ signaling detached after transport establishment: session=\(sessionID, privacy: .public) source=\(source, privacy: .public) fatal=\(fatal ? 1 : 0, privacy: .public)\(failureSuffix)"
+            )
+        }
+    }
+
     private func resetSignalingState(to phase: WebSocketSignalingClient.SignalingLifecyclePhase = .idle) {
         signalingLifecyclePhase = phase
         signalingHealth = .healthy
@@ -427,8 +455,24 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         }
     }
 
+    internal static func shouldDeferSignalingSendRecovery(
+        isTransportEstablished: Bool,
+        messageType: WebRTCSignalingEnvelope.MessageType
+    ) -> Bool {
+        isTransportEstablished && messageType == .iceCandidate
+    }
+
+    internal static func shouldUseOnDemandSignalingAfterTransportFailure(
+        isTransportEstablished: Bool
+    ) -> Bool {
+        isTransportEstablished
+    }
+
     private func scheduleSignalingRecovery(for sessionID: String, tokenExpired: Bool = false) {
-        signalingRecoveryTasksBySessionId[sessionID]?.cancel()
+        if let existingTask = signalingRecoveryTasksBySessionId[sessionID],
+           !existingTask.isCancelled {
+            return
+        }
         signalingRecoveryTasksBySessionId[sessionID] = Task { @MainActor [weak self] in
             guard let self else { return }
             let maxAttempts = tokenExpired ? 1 : 3
@@ -481,23 +525,27 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         case .bound:
             signalingHealth = .healthy
         case .closed:
-            if isTransportEstablished(for: event.handleId.sessionId) {
-                signalingHealth = .degradedRecoverable
-                scheduleSignalingRecovery(for: event.handleId.sessionId)
+            if Self.shouldUseOnDemandSignalingAfterTransportFailure(
+                isTransportEstablished: isTransportEstablished(for: event.handleId.sessionId)
+            ) {
+                noteDetachedSignalingAfterTransportEstablished(
+                    for: event.handleId.sessionId,
+                    source: "lifecycle_closed",
+                    failure: "transient_network"
+                )
             }
         case .failed:
             let failureClass = event.failureClass ?? .transientServer
             let sessionID = event.handleId.sessionId
-            if isTransportEstablished(for: sessionID) {
-                if failureClass == .tokenExpired {
-                    signalingHealth = .degradedRecoverable
-                    scheduleSignalingRecovery(for: sessionID, tokenExpired: true)
-                } else if isFatalPostTransportFailure(failureClass) {
-                    signalingHealth = .degradedFatal
-                } else {
-                    signalingHealth = .degradedRecoverable
-                    scheduleSignalingRecovery(for: sessionID)
-                }
+            if Self.shouldUseOnDemandSignalingAfterTransportFailure(
+                isTransportEstablished: isTransportEstablished(for: sessionID)
+            ) {
+                noteDetachedSignalingAfterTransportEstablished(
+                    for: sessionID,
+                    source: "lifecycle_failed",
+                    failure: failureClass.rawValue,
+                    fatal: isFatalPostTransportFailure(failureClass)
+                )
             }
         default:
             break
@@ -2527,6 +2575,44 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             readiness = .idle
             return
         }
+        let transportEstablished = isTransportEstablished(for: authorizedEnvelope.sessionId)
+        let shouldDeferRecovery = Self.shouldDeferSignalingSendRecovery(
+            isTransportEstablished: transportEstablished,
+            messageType: authorizedEnvelope.type
+        )
+
+        if shouldDeferRecovery {
+            guard let signalingClient else {
+                signalingHealth = .degradedRecoverable
+                logger.debug(
+                    "ℹ️ suppress detached post-transport signaling send: session=\(authorizedEnvelope.sessionId, privacy: .public) type=\(authorizedEnvelope.type.rawValue, privacy: .public) phase=missing_client"
+                )
+                return
+            }
+
+            let lifecyclePhase = await signalingClient.currentLifecyclePhase()
+            guard lifecyclePhase == .bound else {
+                signalingHealth = .degradedRecoverable
+                logger.debug(
+                    "ℹ️ suppress detached post-transport signaling send: session=\(authorizedEnvelope.sessionId, privacy: .public) type=\(authorizedEnvelope.type.rawValue, privacy: .public) phase=\(lifecyclePhase.rawValue, privacy: .public)"
+                )
+                return
+            }
+
+            do {
+                try await signalingClient.send(authorizedEnvelope)
+                signalingHealth = .healthy
+                appendSmokeStatus(
+                    "signal-send session=\(authorizedEnvelope.sessionId) type=\(authorizedEnvelope.type.rawValue)"
+                )
+            } catch {
+                signalingHealth = .degradedRecoverable
+                logger.debug(
+                    "ℹ️ suppress detached post-transport signaling send: session=\(authorizedEnvelope.sessionId, privacy: .public) type=\(authorizedEnvelope.type.rawValue, privacy: .public) phase=\(lifecyclePhase.rawValue, privacy: .public) err=\(error.localizedDescription, privacy: .public)"
+                )
+            }
+            return
+        }
         var attemptsLeft = max(0, retries)
         while true {
             do {
@@ -2559,7 +2645,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                             try await ensureSignalingConnected(shardKey: authorizedEnvelope.sessionId)
                         }
                     } catch {
-                        signalingHealth = isTransportEstablished(for: authorizedEnvelope.sessionId) ? .degradedRecoverable : .healthy
+                        signalingHealth = transportEstablished ? .degradedRecoverable : .healthy
                     }
                 }
                 if attemptsLeft == 0 {
@@ -2567,6 +2653,13 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     appendSmokeStatus(
                         "signal-send-failed session=\(authorizedEnvelope.sessionId) type=\(authorizedEnvelope.type.rawValue) error=\(error.localizedDescription)"
                     )
+                    if transportEstablished {
+                        noteDetachedSignalingAfterTransportEstablished(
+                            for: authorizedEnvelope.sessionId,
+                            source: "signal_send_failed",
+                            failure: error.localizedDescription
+                        )
+                    }
                     return
                 }
                 attemptsLeft -= 1
@@ -2585,33 +2678,33 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         let sessionID = frame.sessionId?.trimmingCharacters(in: .whitespacesAndNewlines)
         let reason = frame.error ?? "unknown_signaling_error"
         let failureClass = classifySignalingFailure(from: frame)
-        logger.error("❌ signaling server rejected frame: session=\(sessionID ?? "-", privacy: .public) error=\(reason, privacy: .public)")
         appendSmokeStatus("signal-server-error session=\(sessionID ?? "-") error=\(reason)")
 
         guard let sessionID else {
             if reason == "server_error",
                webrtcSessionsBySessionId.keys.contains(where: isTransportEstablished(for:)) {
-                logger.warning("ℹ️ ignore unscoped signaling server_error after transport establishment")
+                logger.info("ℹ️ ignore unscoped signaling server_error after transport establishment")
                 return
             }
+            logger.error("❌ signaling server rejected frame: session=- error=\(reason, privacy: .public)")
             connectionStatus = .failed("Signaling error: \(reason)")
             readiness = .idle
             return
         }
 
-        if isTransportEstablished(for: sessionID) {
-            if failureClass == .tokenExpired {
-                signalingHealth = .degradedRecoverable
-                scheduleSignalingRecovery(for: sessionID, tokenExpired: true)
-            } else if isFatalPostTransportFailure(failureClass) {
-                signalingHealth = .degradedFatal
-            } else {
-                signalingHealth = .degradedRecoverable
-                scheduleSignalingRecovery(for: sessionID)
-            }
+        if Self.shouldUseOnDemandSignalingAfterTransportFailure(
+            isTransportEstablished: isTransportEstablished(for: sessionID)
+        ) {
+            noteDetachedSignalingAfterTransportEstablished(
+                for: sessionID,
+                source: "server_frame",
+                failure: reason,
+                fatal: isFatalPostTransportFailure(failureClass)
+            )
             return
         }
 
+        logger.error("❌ signaling server rejected frame: session=\(sessionID, privacy: .public) error=\(reason, privacy: .public)")
         if isFatalPreTransportFailure(failureClass) {
             if webrtcSessionsBySessionId[sessionID] != nil {
                 cleanupWebRTCSession(

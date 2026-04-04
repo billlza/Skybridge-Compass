@@ -1147,7 +1147,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     private var signalingRecoveryTasksBySessionId: [String: Task<Void, Never>] = [:]
     private var signalingGenerationBySessionId: [String: Int] = [:]
     private var activeSignalingHandleBySessionId: [String: WebSocketSignalingClient.SignalingHandleID] = [:]
-    private enum SignalingHealth {
+    private enum SignalingHealth: Equatable {
         case healthy
         case degradedRecoverable
         case degradedFatal
@@ -2209,6 +2209,21 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         isTransportEstablished && !suppressRecovery
     }
 
+    static func shouldDeferSignalingSendRecovery(
+        isTransportEstablished: Bool,
+        suppressRecovery: Bool,
+        messageType: WebRTCSignalingEnvelope.MessageType
+    ) -> Bool {
+        isTransportEstablished && !suppressRecovery && messageType == .iceCandidate
+    }
+
+    static func shouldUseOnDemandSignalingAfterTransportFailure(
+        isTransportEstablished: Bool,
+        suppressRecovery: Bool
+    ) -> Bool {
+        isTransportEstablished && !suppressRecovery
+    }
+
     private func shouldScheduleSignalingRecovery(for sessionId: String) -> Bool {
         Self.shouldScheduleSignalingRecovery(
             isTransportEstablished: isTransportEstablished(for: sessionId),
@@ -2366,36 +2381,30 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
                 "♻️ signaling health recovered: session=\(sessionId) phase=bound summary=\(remoteDesktopRecoveryDebugSummary())"
             )
         case .closed:
-            if shouldScheduleSignalingRecovery(for: sessionId) {
-                signalingHealth = .degradedRecoverable
-                SkyBridgeLogger.shared.warning(
-                    "⚠️ signaling health degraded: session=\(sessionId) phase=closed failure=transient_network recoveryScheduled=true summary=\(remoteDesktopRecoveryDebugSummary())"
+            if Self.shouldUseOnDemandSignalingAfterTransportFailure(
+                isTransportEstablished: isTransportEstablished(for: sessionId),
+                suppressRecovery: suppressSignalingRecovery
+            ) {
+                noteDetachedSignalingAfterTransportEstablished(
+                    sessionId: sessionId,
+                    source: "lifecycle_closed",
+                    failure: "transient_network"
                 )
-                scheduleSignalingRecovery(for: sessionId)
             }
         case .failed:
             if suppressSignalingRecovery {
                 break
             }
-            if shouldScheduleSignalingRecovery(for: sessionId) {
-                if failureKind == .tokenExpired {
-                    signalingHealth = .degradedRecoverable
-                    SkyBridgeLogger.shared.warning(
-                        "⚠️ signaling health degraded: session=\(sessionId) phase=failed failure=token_expired recoveryScheduled=true summary=\(remoteDesktopRecoveryDebugSummary())"
-                    )
-                    scheduleSignalingRecovery(for: sessionId, tokenExpired: true)
-                } else if isFatalPostTransportFailure(failureKind) {
-                    signalingHealth = .degradedFatal
-                    SkyBridgeLogger.shared.error(
-                        "❌ signaling health fatal: session=\(sessionId) phase=failed recoveryScheduled=false summary=\(remoteDesktopRecoveryDebugSummary())"
-                    )
-                } else {
-                    signalingHealth = .degradedRecoverable
-                    SkyBridgeLogger.shared.warning(
-                        "⚠️ signaling health degraded: session=\(sessionId) phase=failed recoveryScheduled=true summary=\(remoteDesktopRecoveryDebugSummary())"
-                    )
-                    scheduleSignalingRecovery(for: sessionId)
-                }
+            if Self.shouldUseOnDemandSignalingAfterTransportFailure(
+                isTransportEstablished: isTransportEstablished(for: sessionId),
+                suppressRecovery: suppressSignalingRecovery
+            ) {
+                noteDetachedSignalingAfterTransportEstablished(
+                    sessionId: sessionId,
+                    source: "lifecycle_failed",
+                    failure: String(describing: failureKind),
+                    fatal: isFatalPostTransportFailure(failureKind)
+                )
             } else if isFatalPreTransportFailure(failureKind) {
                 signalingHealth = .degradedFatal
                 SkyBridgeLogger.shared.error(
@@ -2454,7 +2463,52 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         }()
 
         guard let authorizedEnvelope = authenticatedEnvelope(directedEnvelope) else { return }
+        let transportEstablished = isTransportEstablished(for: authorizedEnvelope.sessionId)
+        let shouldDeferRecovery = Self.shouldDeferSignalingSendRecovery(
+            isTransportEstablished: transportEstablished,
+            suppressRecovery: suppressSignalingRecovery,
+            messageType: authorizedEnvelope.type
+        )
         appendSmokeTrace("tx \(describeEnvelope(authorizedEnvelope)) retries=\(retries)")
+        if shouldDeferRecovery {
+            guard let signaling else {
+                signalingHealth = .degradedRecoverable
+                appendSmokeTrace(
+                    "tx-suppressed-detached \(describeEnvelope(authorizedEnvelope)) phase=missing_client"
+                )
+                SkyBridgeLogger.shared.debug(
+                    "ℹ️ suppress detached post-transport signaling send: session=\(authorizedEnvelope.sessionId) type=\(authorizedEnvelope.type.rawValue) phase=missing_client"
+                )
+                return
+            }
+
+            let lifecyclePhase = await signaling.currentLifecyclePhase()
+            guard lifecyclePhase == .bound else {
+                signalingHealth = .degradedRecoverable
+                appendSmokeTrace(
+                    "tx-suppressed-detached \(describeEnvelope(authorizedEnvelope)) phase=\(lifecyclePhase.rawValue)"
+                )
+                SkyBridgeLogger.shared.debug(
+                    "ℹ️ suppress detached post-transport signaling send: session=\(authorizedEnvelope.sessionId) type=\(authorizedEnvelope.type.rawValue) phase=\(lifecyclePhase.rawValue)"
+                )
+                return
+            }
+
+            do {
+                try await signaling.send(authorizedEnvelope)
+                appendSmokeTrace("tx-ok \(describeEnvelope(authorizedEnvelope))")
+                return
+            } catch {
+                signalingHealth = .degradedRecoverable
+                appendSmokeTrace(
+                    "tx-suppressed-detached \(describeEnvelope(authorizedEnvelope)) phase=\(lifecyclePhase.rawValue) error=\(error.localizedDescription)"
+                )
+                SkyBridgeLogger.shared.debug(
+                    "ℹ️ suppress detached post-transport signaling send: session=\(authorizedEnvelope.sessionId) type=\(authorizedEnvelope.type.rawValue) phase=\(lifecyclePhase.rawValue) error=\(error.localizedDescription)"
+                )
+                return
+            }
+        }
         do {
             try await signalingRetryController.sendWithRetry(
                 retries: retries,
@@ -2494,7 +2548,6 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         let sessionId = frame.sessionId?.trimmingCharacters(in: .whitespacesAndNewlines)
         let reason = frame.error ?? "unknown_signaling_error"
         let failureClass = classifySignalingFailureReason(reason)
-        SkyBridgeLogger.shared.error("❌ signaling server rejected frame: session=\(sessionId ?? "-") error=\(reason)")
 
         if sessionId == nil,
            reason == "server_error",
@@ -2504,6 +2557,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         }
 
         guard let sessionId else {
+            SkyBridgeLogger.shared.error("❌ signaling server rejected frame: session=- error=\(reason)")
             lastError = "Signaling error: \(reason)"
             state = .failed(lastError ?? "Signaling error")
             readiness = .idle
@@ -2513,19 +2567,20 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         guard currentSessionId == sessionId else { return }
         if suppressSignalingRecovery { return }
 
-        if shouldScheduleSignalingRecovery(for: sessionId) {
-            if failureClass == .tokenExpired {
-                signalingHealth = .degradedRecoverable
-                scheduleSignalingRecovery(for: sessionId, tokenExpired: true)
-            } else if isFatalPostTransportFailure(failureClass) {
-                signalingHealth = .degradedFatal
-            } else {
-                signalingHealth = .degradedRecoverable
-                scheduleSignalingRecovery(for: sessionId)
-            }
+        if Self.shouldUseOnDemandSignalingAfterTransportFailure(
+            isTransportEstablished: isTransportEstablished(for: sessionId),
+            suppressRecovery: suppressSignalingRecovery
+        ) {
+            noteDetachedSignalingAfterTransportEstablished(
+                sessionId: sessionId,
+                source: "server_frame",
+                failure: reason,
+                fatal: isFatalPostTransportFailure(failureClass)
+            )
             return
         }
 
+        SkyBridgeLogger.shared.error("❌ signaling server rejected frame: session=\(sessionId) error=\(reason)")
         if isFatalPreTransportFailure(failureClass) {
             applyActiveSessionDisconnect(sessionId: sessionId, kind: .transient)
             lastError = "Signaling error: \(reason)"
@@ -2558,6 +2613,32 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             return activeSessionId == sessionId
         default:
             return false
+        }
+    }
+
+    private func noteDetachedSignalingAfterTransportEstablished(
+        sessionId: String,
+        source: String,
+        failure: String? = nil,
+        fatal: Bool = false
+    ) {
+        let previousHealth = signalingHealth
+        signalingHealth = fatal ? .degradedFatal : .degradedRecoverable
+
+        let failureSuffix: String
+        if let failure,
+           !failure.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            failureSuffix = " failure=\(failure)"
+        } else {
+            failureSuffix = ""
+        }
+
+        let rendered =
+            "ℹ️ signaling detached after transport establishment: session=\(sessionId) source=\(source) fatal=\(fatal ? 1 : 0)\(failureSuffix) summary=\(remoteDesktopRecoveryDebugSummary())"
+        if previousHealth == .healthy {
+            SkyBridgeLogger.shared.info(rendered)
+        } else {
+            SkyBridgeLogger.shared.debug(rendered)
         }
     }
 
@@ -2621,9 +2702,13 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         }
     }
 
-    private func scheduleSignalingRecovery(for sessionId: String, tokenExpired: Bool = false) {
-        guard shouldScheduleSignalingRecovery(for: sessionId) else { return }
-        signalingRecoveryTasksBySessionId[sessionId]?.cancel()
+    @discardableResult
+    private func scheduleSignalingRecovery(for sessionId: String, tokenExpired: Bool = false) -> Bool {
+        guard shouldScheduleSignalingRecovery(for: sessionId) else { return false }
+        if let existingTask = signalingRecoveryTasksBySessionId[sessionId],
+           !existingTask.isCancelled {
+            return false
+        }
         signalingRecoveryTasksBySessionId[sessionId] = Task { @MainActor [weak self] in
             guard let self else { return }
             let maxAttempts = tokenExpired ? 1 : 3
@@ -2661,6 +2746,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             }
             self.signalingRecoveryTasksBySessionId.removeValue(forKey: sessionId)
         }
+        return true
     }
 
     private func stopJoinHeartbeat() {

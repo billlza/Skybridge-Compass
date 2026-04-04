@@ -13,6 +13,8 @@ struct CrossNetworkConnectionView: View {
     @State private var inputCode: String = ""
     @State private var showingScanner = false
     @State private var qrCodeErrorMessage: String?
+    @State private var lastQRCodeErrorFingerprint: String?
+    @State private var lastQRCodeErrorAt: Date = .distantPast
     @State private var hoveredMethod: ConnectionMethod? = nil
     @StateObject private var qrScannerManager = QRCodeScannerManager.shared
     private let logger = Logger(subsystem: "com.skybridge.SkyBridgeCompassApp", category: "CrossNetworkConnection")
@@ -58,12 +60,12 @@ struct CrossNetworkConnectionView: View {
                         showingScanner = false
                         Task { await connectScannedQRCodeFromUI(scannedContent, trigger: "cross_network_window_scanner") }
                     } else {
-                        qrCodeErrorMessage = LocalizationManager.shared.localizedString("discovery.qrCode.error.unrecognized")
+                        presentQRCodeError(LocalizationManager.shared.localizedString("discovery.qrCode.error.unrecognized"))
                         showingScanner = false
                     }
                 },
                 onError: { message in
-                    qrCodeErrorMessage = message
+                    presentQRCodeError(message)
                     showingScanner = false
                 }
             )
@@ -672,6 +674,7 @@ struct CrossNetworkConnectionView: View {
     }
 
     private func generateDynamicQRCodeFromUI(trigger: String) async {
+        guard !isGeneratingQRCode else { return }
         do {
             qrCodeErrorMessage = nil
             logger.info("📷 QR action started: \(trigger, privacy: .public)")
@@ -679,7 +682,7 @@ struct CrossNetworkConnectionView: View {
             logger.info("✅ QR action succeeded: \(trigger, privacy: .public)")
         } catch {
             logger.error("❌ QR action failed: \(trigger, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
-            qrCodeErrorMessage = error.localizedDescription
+            presentQRCodeError(error.localizedDescription)
         }
     }
 
@@ -692,8 +695,28 @@ struct CrossNetworkConnectionView: View {
             logger.info("✅ QR scan connect succeeded: \(trigger, privacy: .public)")
         } catch {
             logger.error("❌ QR scan connect failed: \(trigger, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
-            qrCodeErrorMessage = error.localizedDescription
+            presentQRCodeError(error.localizedDescription)
         }
+    }
+
+    private var isGeneratingQRCode: Bool {
+        if case .generating = connectionManager.connectionStatus {
+            return true
+        }
+        return false
+    }
+
+    private func presentQRCodeError(_ message: String, dedupeWindow: TimeInterval = 12) {
+        let normalized = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return }
+        let now = Date()
+        if lastQRCodeErrorFingerprint == normalized,
+           now.timeIntervalSince(lastQRCodeErrorAt) < dedupeWindow {
+            return
+        }
+        lastQRCodeErrorFingerprint = normalized
+        lastQRCodeErrorAt = now
+        qrCodeErrorMessage = normalized
     }
 }
 
