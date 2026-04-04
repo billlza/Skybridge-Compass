@@ -9,6 +9,48 @@ struct DefaultHandshakeTrustProvider: HandshakeTrustProvider, Sendable {
         return raw
     }
 
+    func authoritativeProtocolFingerprint(for record: TrustRecord) -> String? {
+        if let fingerprint = trimmedNonEmpty(record.currentPathAuthorityFingerprint) {
+            return fingerprint.lowercased()
+        }
+
+        guard let protocolPublicKey = record.protocolPublicKey,
+              !protocolPublicKey.isEmpty,
+              let algorithm = record.protocolSigningAlgorithm else {
+            return nil
+        }
+
+        let identityKeys = IdentityPublicKeys(
+            protocolPublicKey: protocolPublicKey,
+            protocolAlgorithm: algorithm.wire
+        )
+        return try? identityKeys.authoritativeProtocolFingerprint().lowercased()
+    }
+
+    func resolvedTrustedFingerprint(
+        directRecord: TrustRecord?,
+        matchingRecords: [TrustRecord]
+    ) -> String? {
+        if let directRecord,
+           let fingerprint = authoritativeProtocolFingerprint(for: directRecord) {
+            return fingerprint
+        }
+
+        let fingerprints = Set(matchingRecords.compactMap { record in
+            authoritativeProtocolFingerprint(for: record)
+        })
+
+        // Avoid accidental mis-pinning: only pin when the candidate set resolves to one
+        // authoritative protocol-signing fingerprint. Legacy discovery pubKeyFP is not a
+        // valid substitute here because it may refer to a different key family entirely.
+        guard fingerprints.count == 1, let fingerprint = fingerprints.first else {
+            return nil
+        }
+
+        return matchingRecords.compactMap { authoritativeProtocolFingerprint(for: $0) }
+            .first { $0.caseInsensitiveCompare(fingerprint) == .orderedSame }
+    }
+
     private func trustLookupCandidates(for deviceId: String) -> [String] {
         PeerTrustLookup.lookupCandidates(for: deviceId)
     }
@@ -53,23 +95,10 @@ struct DefaultHandshakeTrustProvider: HandshakeTrustProvider, Sendable {
 
     func trustedFingerprint(for deviceId: String) async -> String? {
         await MainActor.run {
-            if let direct = TrustSyncService.shared.getTrustRecord(deviceId: deviceId),
-               let fp = trimmedNonEmpty(direct.pubKeyFP) {
-                return fp
-            }
-
-            let matches = matchingTrustRecords(for: deviceId)
-            let fingerprints = Set(matches.compactMap { record in
-                trimmedNonEmpty(record.pubKeyFP)?.lowercased()
-            })
-
-            // Avoid accidental mis-pinning: only pin when the candidate set resolves to one fingerprint.
-            guard fingerprints.count == 1, let fingerprint = fingerprints.first else {
-                return nil
-            }
-
-            return matches.compactMap { trimmedNonEmpty($0.pubKeyFP) }
-                .first { $0.caseInsensitiveCompare(fingerprint) == .orderedSame }
+            resolvedTrustedFingerprint(
+                directRecord: TrustSyncService.shared.getTrustRecord(deviceId: deviceId),
+                matchingRecords: matchingTrustRecords(for: deviceId)
+            )
         }
     }
 

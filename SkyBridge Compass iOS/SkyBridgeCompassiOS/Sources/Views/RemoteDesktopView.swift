@@ -260,9 +260,7 @@ struct RemoteDesktopStreamView: View {
     @StateObject private var p2pConnectionManager = P2PConnectionManager.instance
     @StateObject private var remoteDesktopManager = RemoteDesktopManager.instance
     @StateObject private var crossNetworkManager = CrossNetworkWebRTCManager.instance
-    @State private var scale: CGFloat = 1.0
-    @State private var offset: CGSize = .zero
-    @State private var lastOffset: CGSize = .zero
+    @State private var zoomScale: CGFloat = 1.0
     
     // 触摸控制
     @State private var touchMode: TouchMode = .tap
@@ -369,8 +367,7 @@ struct RemoteDesktopStreamView: View {
             )
 #endif
         }
-        .scaleEffect(scale)
-        .offset(offset)
+        .scaleEffect(zoomScale)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
@@ -409,7 +406,6 @@ struct RemoteDesktopStreamView: View {
                 .position(x: remoteFrame.midX, y: remoteFrame.midY)
                 .contentShape(Rectangle())
                 .gesture(magnificationGesture)
-                .gesture(dragGesture)
                 .simultaneousGesture(pointerGesture(in: remoteFrame))
                 .gesture(tapGesture)
         }
@@ -512,31 +508,13 @@ struct RemoteDesktopStreamView: View {
     private var magnificationGesture: some Gesture {
         MagnificationGesture()
             .onChanged { value in
-                scale = value.magnitude
+                zoomScale = value.magnitude
                 resetControlsTimer()
             }
             .onEnded { _ in
                 withAnimation {
-                    if scale < 1.0 {
-                        scale = 1.0
-                    } else if scale > 3.0 {
-                        scale = 3.0
-                    }
+                    zoomScale = min(max(zoomScale, 1.0), 3.0)
                 }
-            }
-    }
-    
-    private var dragGesture: some Gesture {
-        DragGesture()
-            .onChanged { value in
-                offset = CGSize(
-                    width: lastOffset.width + value.translation.width,
-                    height: lastOffset.height + value.translation.height
-                )
-                resetControlsTimer()
-            }
-            .onEnded { _ in
-                lastOffset = offset
             }
     }
     
@@ -1767,6 +1745,8 @@ struct ConnectionCardView: View {
 // MARK: - Remote Stream Manager
 
 extension RemoteDesktopStreamView {
+    private static let tapMovementTolerance: CGFloat = 10
+
     /// 触摸/拖动映射为远端鼠标移动 + 点击（最小可用控制）
     private func pointerGesture(in frame: CGRect) -> some Gesture {
         DragGesture(minimumDistance: 0)
@@ -1817,14 +1797,32 @@ extension RemoteDesktopStreamView {
                 }
             }
             .onEnded { value in
+                let distance = hypot(value.translation.width, value.translation.height)
                 switch touchMode {
                 case .tap:
-                    // 轻触：down + up
-                    remoteDesktopManager.handleTouch(at: value.location, in: frame, type: .leftMouseDown)
-                    remoteDesktopManager.handleTouch(at: value.location, in: frame, type: .leftMouseUp)
+                    guard distance <= Self.tapMovementTolerance else { break }
+                    remoteDesktopManager.handleTouch(
+                        at: value.location,
+                        in: frame,
+                        type: .leftMouseDown
+                    )
+                    remoteDesktopManager.handleTouch(
+                        at: value.location,
+                        in: frame,
+                        type: .leftMouseUp
+                    )
                 case .secondaryClick:
-                    remoteDesktopManager.handleTouch(at: value.location, in: frame, type: .rightMouseDown)
-                    remoteDesktopManager.handleTouch(at: value.location, in: frame, type: .rightMouseUp)
+                    guard distance <= Self.tapMovementTolerance else { break }
+                    remoteDesktopManager.handleTouch(
+                        at: value.location,
+                        in: frame,
+                        type: .rightMouseDown
+                    )
+                    remoteDesktopManager.handleTouch(
+                        at: value.location,
+                        in: frame,
+                        type: .rightMouseUp
+                    )
                 case .drag:
                     if dragMouseDownSent {
                         remoteDesktopManager.handleTouch(
@@ -1846,12 +1844,12 @@ extension RemoteDesktopStreamView {
         let resolution = remoteDesktopManager.resolution
         guard resolution.width > 0, resolution.height > 0 else { return full }
 
-        let scale = min(
+        let aspectFitScale = min(
             full.width / resolution.width,
             full.height / resolution.height
         )
-        let renderWidth = resolution.width * scale
-        let renderHeight = resolution.height * scale
+        let renderWidth = resolution.width * aspectFitScale
+        let renderHeight = resolution.height * aspectFitScale
         let baseFrame = CGRect(
             x: full.minX + (full.width - renderWidth) / 2.0,
             y: full.minY + (full.height - renderHeight) / 2.0,
@@ -1859,11 +1857,11 @@ extension RemoteDesktopStreamView {
             height: renderHeight
         )
 
-        let scaledWidth = baseFrame.width * scale
-        let scaledHeight = baseFrame.height * scale
+        let scaledWidth = baseFrame.width * zoomScale
+        let scaledHeight = baseFrame.height * zoomScale
         return CGRect(
-            x: baseFrame.midX - (scaledWidth / 2) + offset.width,
-            y: baseFrame.midY - (scaledHeight / 2) + offset.height,
+            x: baseFrame.midX - (scaledWidth / 2),
+            y: baseFrame.midY - (scaledHeight / 2),
             width: scaledWidth,
             height: scaledHeight
         )

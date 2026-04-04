@@ -504,10 +504,21 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
     private let lastPairingIdentityExchangeSentAtLock = OSAllocatedUnfairLock<Date?>(initialState: nil)
     @available(macOS 14.0, iOS 17.0, *)
     private let soaPairKeyLock = OSAllocatedUnfairLock<Data?>(initialState: nil)
+    @available(macOS 14.0, iOS 17.0, *)
+    private let previousSessionKeysBeforeRekeyLock = OSAllocatedUnfairLock<SessionKeys?>(initialState: nil)
     private var metricsTask: Task<Void, Never>?
 
     private var receiveTask: Task<Void, Never>?
     private let maxFrameBytes: UInt32 = 2_000_000
+
+    @available(macOS 14.0, iOS 17.0, *)
+    private struct DirectHandshakeTransport: DiscoveryTransport {
+        let sendFramed: @Sendable (Data) async throws -> Void
+
+        func send(to peer: PeerIdentifier, data: Data) async throws {
+            try await sendFramed(data)
+        }
+    }
 
     public init(device: P2PDevice, connection: NWConnection) {
         self.device = device
@@ -579,6 +590,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         if #available(macOS 14.0, iOS 17.0, *) {
             handshakeDriverLock.withLock { $0 = nil }
             sessionKeysLock.withLock { $0 = nil }
+            previousSessionKeysBeforeRekeyLock.withLock { $0 = nil }
             lastPairingIdentityExchangeSentAtLock.withLock { $0 = nil }
             let stalePairKey = soaPairKeyLock.withLock { state -> Data? in
                 let current = state
@@ -683,24 +695,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
                 "🔐 Session assurance: \(assurance.rawValue, privacy: .public) suite=\(sessionKeys.negotiatedSuite.rawValue, privacy: .public) requirePQC=\(policy.requirePQC, privacy: .public) bootstrapAssisted=\(usedBootstrapAssistedPath, privacy: .public)"
             )
             
-            await MainActor.run {
-                let suite = sessionKeys.negotiatedSuite
-                let cryptoKind = ConnectionCryptoPresentation.modeLabel(
-                    kind: nil,
-                    suite: suite.rawValue
-                ) ?? suite.rawValue
-                
-                // Use explicit logging to confirm UI update
-                SkyBridgeLogger.p2p.info("✅ Handshake Success. Updating UI Presence: \(cryptoKind) / \(suite.rawValue)")
-                
-                ConnectionPresenceService.shared.markConnected(
-                    peerId: self.handshakePeer.deviceId,
-                    displayName: self.device.name,
-                    address: self.resolveCurrentRemoteIP() ?? self.device.address,
-                    cryptoKind: cryptoKind,
-                    suite: suite.rawValue
-                )
-            }
+            await publishAuthenticatedPresence(keys: sessionKeys)
 
             return sessionKeys
         } catch {
@@ -727,20 +722,14 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
     ) async throws -> SessionKeys {
         let baseProvider = CryptoProviderFactory.make(policy: selectionPolicy)
 
-        struct DirectHandshakeTransport: DiscoveryTransport {
-            let sendFramed: @Sendable (Data) async throws -> Void
-            func send(to peer: PeerIdentifier, data: Data) async throws {
-                try await sendFramed(data)
-            }
-        }
-
-        let transport = DirectHandshakeTransport { [weak self] data in
+        let transport = DirectHandshakeTransport(sendFramed: { [weak self] data in
             guard let self else { throw P2PConnectionError.disconnected }
             try await self.sendFramed(data)
-        }
+        })
 
         handshakeDriverLock.withLock { $0 = nil }
         let shouldAdvertiseSOA = allowSOA && shouldUseSOA()
+        let hadEstablishedSession = sessionKeysLock.withLock { $0 != nil }
         let localSOAPeerId: Data? = shouldAdvertiseSOA ? await localSOAPeerIdBytes() : nil
         let expectedRemoteSOAPeerId: Data?
         if shouldAdvertiseSOA {
@@ -748,57 +737,85 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         } else {
             expectedRemoteSOAPeerId = nil
         }
-
-        return try await TwoAttemptHandshakeManager.performHandshakeWithPreparation(
-            deviceId: handshakePeer.deviceId,
-            preferPQC: preferPQC,
-            policy: policy,
-            cryptoProvider: baseProvider
-        ) { [weak self] preparation in
-            guard let self else { throw P2PConnectionError.disconnected }
-
-            let cryptoProvider: any CryptoProvider = {
-                switch preparation.strategy {
-                case .pqcOnly:
-                    return CryptoProviderFactory.make(policy: selectionPolicy)
-                case .classicOnly:
-                    return CryptoProviderFactory.make(policy: .classicOnly)
-                }
-            }()
-
-            let identityProvider = DeviceIdentityHandshakeProvider(
-                sigAAlgorithm: preparation.sigAAlgorithm,
-                includeSecureEnclavePoP: policy.requireSecureEnclavePoP
-            )
-
-            let outboundSOA: HandshakeSOAMetadata? = {
-                guard shouldAdvertiseSOA,
-                      let localSOAPeerId,
-                      let expectedRemoteSOAPeerId else {
-                    return nil
-                }
-                return try? HandshakeSOAMetadata(
-                    initiatorPeerId: localSOAPeerId,
-                    targetPeerId: expectedRemoteSOAPeerId,
-                    attemptId: Self.randomAttemptIdBytes()
+        let rekeyPairKey: Data?
+        if shouldAdvertiseSOA, hadEstablishedSession {
+            if let existingPairKey = soaPairKeyLock.withLock({ $0 }) {
+                rekeyPairKey = existingPairKey
+            } else {
+                rekeyPairKey = await currentSOAPairKey()
+            }
+            if let rekeyPairKey {
+                SkyBridgeLogger.p2p.info(
+                    "🧩 outbound rekey: releasing SOA established guard. peer=\(self.handshakePeer.deviceId, privacy: .public)"
                 )
-            }()
+                await PeerSessionArbiter.shared.clearEstablished(pairKey: rekeyPairKey)
+                await PeerSessionArbiter.shared.clearOutgoing(pairKey: rekeyPairKey, attemptId: nil)
+            }
+        } else {
+            rekeyPairKey = nil
+        }
 
-            let driver = try HandshakeDriver(
-                transport: transport,
-                cryptoProvider: cryptoProvider,
-                protocolSignatureProvider: ProtocolSignatureProviderSelector.select(for: preparation.sigAAlgorithm),
-                identityProvider: identityProvider,
-                sigAAlgorithm: preparation.sigAAlgorithm,
-                offeredSuites: preparation.offeredSuites,
+        do {
+            return try await TwoAttemptHandshakeManager.performHandshakeWithPreparation(
+                deviceId: handshakePeer.deviceId,
+                preferPQC: preferPQC,
                 policy: policy,
-                cryptoPolicy: .default,
-                soaMetadata: outboundSOA,
-                localSOAPeerId: localSOAPeerId,
-                expectedRemoteSOAPeerId: expectedRemoteSOAPeerId
-            )
-            self.handshakeDriverLock.withLock { $0 = driver }
-            return try await driver.initiateHandshake(with: self.handshakePeer)
+                cryptoProvider: baseProvider
+            ) { [weak self] preparation in
+                guard let self else { throw P2PConnectionError.disconnected }
+
+                let cryptoProvider: any CryptoProvider = {
+                    switch preparation.strategy {
+                    case .pqcOnly:
+                        return CryptoProviderFactory.make(policy: selectionPolicy)
+                    case .classicOnly:
+                        return CryptoProviderFactory.make(policy: .classicOnly)
+                    }
+                }()
+
+                let identityProvider = DeviceIdentityHandshakeProvider(
+                    sigAAlgorithm: preparation.sigAAlgorithm,
+                    includeSecureEnclavePoP: policy.requireSecureEnclavePoP
+                )
+
+                let outboundSOA: HandshakeSOAMetadata? = {
+                    guard shouldAdvertiseSOA,
+                          let localSOAPeerId,
+                          let expectedRemoteSOAPeerId else {
+                        return nil
+                    }
+                    return try? HandshakeSOAMetadata(
+                        initiatorPeerId: localSOAPeerId,
+                        targetPeerId: expectedRemoteSOAPeerId,
+                        attemptId: Self.randomAttemptIdBytes()
+                    )
+                }()
+
+                let cryptoPolicy = HandshakeCryptoPolicyResolver.policy(for: preparation.offeredSuites)
+                let driver = try HandshakeDriver(
+                    transport: transport,
+                    cryptoProvider: cryptoProvider,
+                    protocolSignatureProvider: ProtocolSignatureProviderSelector.select(for: preparation.sigAAlgorithm),
+                    identityProvider: identityProvider,
+                    sigAAlgorithm: preparation.sigAAlgorithm,
+                    offeredSuites: preparation.offeredSuites,
+                    policy: policy,
+                    cryptoPolicy: cryptoPolicy,
+                    soaMetadata: outboundSOA,
+                    localSOAPeerId: localSOAPeerId,
+                    expectedRemoteSOAPeerId: expectedRemoteSOAPeerId
+                )
+                self.handshakeDriverLock.withLock { $0 = driver }
+                return try await driver.initiateHandshake(with: self.handshakePeer)
+            }
+        } catch {
+            if hadEstablishedSession, let rekeyPairKey {
+                SkyBridgeLogger.p2p.info(
+                    "🧩 outbound rekey: restoring SOA established guard after failed rekey. peer=\(self.handshakePeer.deviceId, privacy: .public)"
+                )
+                await PeerSessionArbiter.shared.markEstablished(pairKey: rekeyPairKey)
+            }
+            throw error
         }
     }
 
@@ -1896,18 +1913,23 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         }
 
         if #available(macOS 14.0, iOS 17.0, *), let driver = handshakeDriverLock.withLock({ $0 }) {
-            await driver.handleMessage(frame, from: handshakePeer)
-            let state = await driver.getCurrentState()
-            if case .established(let keys) = state {
-                sessionKeysLock.withLock { $0 = keys }
-                handshakeDriverLock.withLock { $0 = nil }
-                await MainActor.run {
-                    if self.status != .authenticated {
-                        self.status = .authenticated
-                    }
-                }
-                startMetricsIfNeeded()
+            let driverState = await driver.getCurrentState()
+            if Self.shouldRestartInboundHandshakeForRekey(state: driverState, frame: frame),
+               let inboundDriver = await restartInboundRekeyDriver(for: frame) {
+                await inboundDriver.handleMessage(frame, from: handshakePeer)
+                await syncHandshakeState(after: inboundDriver)
+                return
             }
+
+            await driver.handleMessage(frame, from: handshakePeer)
+            await syncHandshakeState(after: driver)
+            return
+        }
+
+        if #available(macOS 14.0, iOS 17.0, *),
+           let inboundDriver = await restartInboundRekeyDriver(for: frame) {
+            await inboundDriver.handleMessage(frame, from: handshakePeer)
+            await syncHandshakeState(after: inboundDriver)
             return
         }
 
@@ -1961,6 +1983,205 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         if (try? HandshakeMessageA.decode(from: data)) != nil { return true }
         if (try? HandshakeMessageB.decode(from: data)) != nil { return true }
         return false
+    }
+
+    @available(macOS 14.0, iOS 17.0, *)
+    static func shouldRestartInboundHandshakeForRekey(
+        state: HandshakeState,
+        frame: Data
+    ) -> Bool {
+        switch state {
+        case .waitingFinished, .established:
+            return (try? HandshakeMessageA.decode(from: frame)) != nil
+        default:
+            return false
+        }
+    }
+
+    @available(macOS 14.0, iOS 17.0, *)
+    private func restartInboundRekeyDriver(for frame: Data) async -> HandshakeDriver? {
+        guard handshakeDriverLock.withLock({ $0 }) == nil else { return nil }
+        guard let previousKeys = sessionKeysLock.withLock({ $0 }) else { return nil }
+        guard let messageA = try? HandshakeMessageA.decode(from: frame),
+              !messageA.supportedSuites.isEmpty else {
+            return nil
+        }
+
+        let compatibilityModeEnabled = UserDefaults.standard.bool(forKey: "Settings.EnableCompatibilityMode")
+        let requestedPolicy = HandshakePolicy.recommendedDefault(compatibilityModeEnabled: compatibilityModeEnabled)
+        let peerHasPQCGroup = messageA.supportedSuites.contains { $0.isPQCGroup }
+        let peerHasClassicGroup = messageA.supportedSuites.contains { !$0.isPQCGroup }
+        let effectivePolicy: HandshakePolicy = {
+            if peerHasPQCGroup { return requestedPolicy }
+            if requestedPolicy.requirePQC {
+                SkyBridgeLogger.p2p.info(
+                    "🧩 inbound rekey classic bootstrap: strictPQC enabled but peer offered classic-only suites. peer=\(self.handshakePeer.deviceId, privacy: .public)"
+                )
+            }
+            return HandshakePolicy(
+                requirePQC: false,
+                allowClassicFallback: false,
+                minimumTier: .classic,
+                requireSecureEnclavePoP: requestedPolicy.requireSecureEnclavePoP
+            )
+        }()
+
+        var selection: CryptoProviderFactory.SelectionPolicy = .classicOnly
+        var cryptoProvider: any CryptoProvider = CryptoProviderFactory.make(policy: .classicOnly)
+        var sigAAlgorithm: ProtocolSigningAlgorithm = .ed25519
+        var offeredSuites: [CryptoSuite] = cryptoProvider.supportedSuites.filter { !$0.isPQCGroup }
+
+        if peerHasPQCGroup {
+            selection = effectivePolicy.requirePQC ? .requirePQC : .preferPQC
+            cryptoProvider = CryptoProviderFactory.makeInboundPQCResponderProvider(
+                policy: selection,
+                peerSupportedSuites: messageA.supportedSuites
+            )
+            let localPQCSuites = CryptoProviderFactory.handshakeOfferedPQCSuites(using: cryptoProvider)
+            if localPQCSuites.isEmpty {
+                if effectivePolicy.requirePQC || !peerHasClassicGroup {
+                    SkyBridgeLogger.p2p.error(
+                        "❌ inbound rekey rejected: peer offered PQC suites but local PQC responder unavailable. peer=\(self.handshakePeer.deviceId, privacy: .public)"
+                    )
+                    return nil
+                }
+                selection = .classicOnly
+                cryptoProvider = CryptoProviderFactory.make(policy: selection)
+                sigAAlgorithm = .ed25519
+                offeredSuites = cryptoProvider.supportedSuites.filter { !$0.isPQCGroup }
+            } else {
+                sigAAlgorithm = .mlDSA65
+                offeredSuites = localPQCSuites
+            }
+        }
+
+        let localSOAPeerId = await localSOAPeerIdBytes()
+        let soaBinding = InboundHandshakeAdapter.bindSOAState(
+            from: messageA,
+            localPeerId: localSOAPeerId
+        )
+        let identityProvider = DeviceIdentityHandshakeProvider(
+            sigAAlgorithm: sigAAlgorithm,
+            includeSecureEnclavePoP: effectivePolicy.requireSecureEnclavePoP
+        )
+
+        do {
+            let cryptoPolicy = HandshakeCryptoPolicyResolver.policy(for: offeredSuites)
+            let driver = try HandshakeDriver(
+                transport: DirectHandshakeTransport(sendFramed: { [weak self] data in
+                    guard let self else { throw P2PConnectionError.disconnected }
+                    try await self.sendFramed(data)
+                }),
+                cryptoProvider: cryptoProvider,
+                protocolSignatureProvider: ProtocolSignatureProviderSelector.select(for: sigAAlgorithm),
+                identityProvider: identityProvider,
+                sigAAlgorithm: sigAAlgorithm,
+                offeredSuites: offeredSuites,
+                policy: effectivePolicy,
+                cryptoPolicy: cryptoPolicy,
+                localSOAPeerId: localSOAPeerId,
+                expectedRemoteSOAPeerId: soaBinding.expectedRemotePeerId
+            )
+            handshakeDriverLock.withLock { $0 = driver }
+            previousSessionKeysBeforeRekeyLock.withLock { $0 = previousKeys }
+            sessionKeysLock.withLock { $0 = nil }
+            rekeyInProgressLock.withLock { $0 = true }
+
+            let stalePairKey = soaPairKeyLock.withLock { state -> Data? in
+                let current = state
+                state = nil
+                return current
+            }
+            if let stalePairKey {
+                await PeerSessionArbiter.shared.clearEstablished(pairKey: stalePairKey)
+                await PeerSessionArbiter.shared.clearOutgoing(pairKey: stalePairKey, attemptId: nil)
+            }
+
+            let targetSuites = messageA.supportedSuites.map(\.rawValue).joined(separator: ",")
+            SkyBridgeLogger.p2p.info(
+                "🔁 inbound rekey start: peer=\(self.handshakePeer.deviceId, privacy: .public) current=\(previousKeys.negotiatedSuite.rawValue, privacy: .public) target=\(targetSuites, privacy: .public)"
+            )
+            return driver
+        } catch {
+            SkyBridgeLogger.p2p.error(
+                "❌ inbound rekey driver init failed: \(error.localizedDescription, privacy: .public)"
+            )
+            return nil
+        }
+    }
+
+    @available(macOS 14.0, iOS 17.0, *)
+    private func syncHandshakeState(after driver: HandshakeDriver) async {
+        let state = await driver.getCurrentState()
+        switch state {
+        case .established(let keys):
+            sessionKeysLock.withLock { $0 = keys }
+            previousSessionKeysBeforeRekeyLock.withLock { $0 = nil }
+            handshakeDriverLock.withLock { $0 = nil }
+            rekeyInProgressLock.withLock { $0 = false }
+            if shouldUseSOA(), let pairKey = await currentSOAPairKey() {
+                soaPairKeyLock.withLock { $0 = pairKey }
+            }
+            await publishAuthenticatedPresence(keys: keys)
+            await MainActor.run {
+                if self.status != .authenticated {
+                    self.status = .authenticated
+                }
+            }
+            startMetricsIfNeeded()
+
+        case .failed(let reason):
+            let previousKeys = previousSessionKeysBeforeRekeyLock.withLock { state -> SessionKeys? in
+                let current = state
+                state = nil
+                return current
+            }
+            handshakeDriverLock.withLock { $0 = nil }
+            if let previousKeys {
+                sessionKeysLock.withLock { $0 = previousKeys }
+                rekeyInProgressLock.withLock { $0 = false }
+                if shouldUseSOA(), let pairKey = await currentSOAPairKey() {
+                    soaPairKeyLock.withLock { $0 = pairKey }
+                    await PeerSessionArbiter.shared.markEstablished(pairKey: pairKey)
+                }
+                SkyBridgeLogger.p2p.warning(
+                    "⚠️ inbound rekey failed; restored previous session. peer=\(self.handshakePeer.deviceId, privacy: .public) reason=\(String(describing: reason), privacy: .public) suite=\(previousKeys.negotiatedSuite.rawValue, privacy: .public)"
+                )
+                await MainActor.run {
+                    if self.status != .authenticated {
+                        self.status = .authenticated
+                    }
+                }
+                return
+            }
+
+            rekeyInProgressLock.withLock { $0 = false }
+            await MainActor.run {
+                self.status = .failed
+            }
+
+        default:
+            break
+        }
+    }
+
+    @available(macOS 14.0, iOS 17.0, *)
+    private func publishAuthenticatedPresence(keys: SessionKeys) async {
+        let suite = keys.negotiatedSuite
+        let cryptoKind = ConnectionCryptoPresentation.modeLabel(
+            kind: nil,
+            suite: suite.rawValue
+        ) ?? suite.rawValue
+
+        await MainActor.run {
+            ConnectionPresenceService.shared.markConnected(
+                peerId: self.handshakePeer.deviceId,
+                displayName: self.device.name,
+                address: self.resolveCurrentRemoteIP() ?? self.device.address,
+                cryptoKind: cryptoKind,
+                suite: suite.rawValue
+            )
+        }
     }
 
     @available(macOS 14.0, iOS 17.0, *)

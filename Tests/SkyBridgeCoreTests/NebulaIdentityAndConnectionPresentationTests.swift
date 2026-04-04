@@ -361,4 +361,36 @@ final class NebulaIdentityAndConnectionPresentationTests: XCTestCase {
         XCTAssertNotEqual(presentation.displayState, .connectedDegradedSignaling)
         XCTAssertFalse(presentation.detailText?.contains("信令降级") == true)
     }
+
+    func testPeerPresentationDoesNotAdvertiseTargetSuiteWhileRekeying() {
+        let labels = ConnectionPresentationLabels(
+            connectedText: "已连接",
+            disconnectedText: "未连接",
+            connectingText: "连接中",
+            reconnectingText: "重连中",
+            defaultGuardStatus: "守护中",
+            crossNetworkGuardStatus: "跨网已连接"
+        )
+
+        let presentation = ConnectionPresentationContract.evaluate(
+            ConnectionPresentationInput(
+                labels: labels,
+                fileTransferActive: false,
+                latestPeerConnection: ConnectionPresentationPeer(
+                    displayName: "Peer",
+                    cryptoKind: "Classic·X25519 → X-Wing·X-Wing",
+                    suite: nil,
+                    guardStatus: "Rekey 中",
+                    isRekeying: true
+                ),
+                latestConnectedDevice: nil,
+                activeSessionSnapshot: nil,
+                defaultPQCModeLabel: "Apple PQC",
+                compatibilityModeEnabled: false
+            )
+        )
+
+        XCTAssertEqual(presentation.statusText, "已连接")
+        XCTAssertEqual(presentation.detailText, "Classic·X25519 → X-Wing·X-Wing · Rekey 中")
+    }
 }

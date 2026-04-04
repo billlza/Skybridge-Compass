@@ -125,6 +125,63 @@ final class SOABindingAliasRegressionTests: XCTestCase {
         }
     }
 
+    func testEstablishedGuardCanBeReleasedForRekeyAndRestoredOnFailure() async {
+        let arbiter = PeerSessionArbiter()
+        let localPeerId = Data(repeating: 0x11, count: 32)
+        let remotePeerId = Data(repeating: 0x22, count: 32)
+        let pairKey = PeerSessionArbiter.pairKey(localPeerId: localPeerId, remotePeerId: remotePeerId)
+
+        await arbiter.markEstablished(pairKey: pairKey)
+
+        let blocked = await arbiter.registerOutgoing(
+            PeerSessionArbiter.OutgoingAttempt(
+                pairKey: pairKey,
+                initiatorPeerId: localPeerId,
+                attemptId: Data(repeating: 0xA1, count: 16),
+                startedAt: Date(),
+                onSuperseded: { _, _ in }
+            )
+        )
+        guard case .alreadyConnected = blocked else {
+            XCTFail("Expected established guard to block duplicate rekey registration")
+            return
+        }
+
+        await arbiter.clearEstablished(pairKey: pairKey)
+        await arbiter.clearOutgoing(pairKey: pairKey, attemptId: nil)
+
+        let accepted = await arbiter.registerOutgoing(
+            PeerSessionArbiter.OutgoingAttempt(
+                pairKey: pairKey,
+                initiatorPeerId: localPeerId,
+                attemptId: Data(repeating: 0xA2, count: 16),
+                startedAt: Date(),
+                onSuperseded: { _, _ in }
+            )
+        )
+        guard case .accepted = accepted else {
+            XCTFail("Expected rekey registration to succeed after releasing established guard")
+            return
+        }
+
+        await arbiter.clearOutgoing(pairKey: pairKey, attemptId: nil)
+        await arbiter.markEstablished(pairKey: pairKey)
+
+        let blockedAgain = await arbiter.registerOutgoing(
+            PeerSessionArbiter.OutgoingAttempt(
+                pairKey: pairKey,
+                initiatorPeerId: localPeerId,
+                attemptId: Data(repeating: 0xA3, count: 16),
+                startedAt: Date(),
+                onSuperseded: { _, _ in }
+            )
+        )
+        guard case .alreadyConnected = blockedAgain else {
+            XCTFail("Expected established guard to be restorable after failed rekey")
+            return
+        }
+    }
+
     private func makeMessageA(
         initiatorPeerId: Data,
         targetPeerId: Data,

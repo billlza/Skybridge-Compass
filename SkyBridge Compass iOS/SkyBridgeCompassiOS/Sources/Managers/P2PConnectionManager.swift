@@ -116,6 +116,7 @@ public class P2PConnectionManager: ObservableObject {
     private var listener: NWListener?
     private var connections: [String: NWConnection] = [:]
     private var sessionKeys: [String: SessionKeys] = [:] // device.id -> SessionKeys
+    private var previousSessionKeysBeforeRekey: [String: SessionKeys] = [:]
     /// 握手驱动器缓存（用于响应方角色）
     private var handshakeDrivers: [String: HandshakeDriver] = [:]
     /// 兼容旧逻辑：握手过程中/早期阶段可能缓存 shared secret（最终以 sessionKeys 为准）
@@ -233,6 +234,13 @@ public class P2PConnectionManager: ObservableObject {
     
     private init() {
         pairingPolicyByPeerId = Self.pairingPolicyStore.load() ?? [:]
+
+        if let unsupported = IOSDeviceSupportGate.currentUnsupportedDevice() {
+            SkyBridgeLogger.shared.warning(
+                "⛔️ P2P stack bootstrap skipped on unsupported device: \(unsupported.displayName) (\(unsupported.modelIdentifier))"
+            )
+            return
+        }
         
         // 设置入站连接回调
         Task { @MainActor in
@@ -592,6 +600,7 @@ public class P2PConnectionManager: ObservableObject {
                     connection.cancel()
                     connections.removeValue(forKey: targetDevice.id)
                     sessionKeys.removeValue(forKey: targetDevice.id)
+                    previousSessionKeysBeforeRekey.removeValue(forKey: targetDevice.id)
                     handshakeDrivers.removeValue(forKey: targetDevice.id)
                     sharedSecrets.removeValue(forKey: targetDevice.id)
                     await transport?.removeConnection(for: targetDevice.id)
@@ -605,6 +614,7 @@ public class P2PConnectionManager: ObservableObject {
                 connection.cancel()
                 connections.removeValue(forKey: targetDevice.id)
                 sessionKeys.removeValue(forKey: targetDevice.id)
+                previousSessionKeysBeforeRekey.removeValue(forKey: targetDevice.id)
                 handshakeDrivers.removeValue(forKey: targetDevice.id)
                 sharedSecrets.removeValue(forKey: targetDevice.id)
                 await transport?.removeConnection(for: targetDevice.id)
@@ -645,6 +655,10 @@ public class P2PConnectionManager: ObservableObject {
         if pqcManager.enforcePQCHandshake,
            let negotiated = sessionKeys[targetDevice.id]?.negotiatedSuite,
            !negotiated.isPQCGroup {
+            guard bootstrapRekeyTasks[targetDevice.id] == nil else {
+                SkyBridgeLogger.shared.info("ℹ️ strictPQC bootstrap already pending; suppressing duplicate pairingIdentityExchange: peer=\(targetDevice.id)")
+                return
+            }
             do {
                 // In strictPQC mode, the bootstrap rekey target must follow the strict selection policy.
                 // Do NOT let a "prefer X-Wing" UI toggle accidentally force X-Wing as a strict dependency.
@@ -714,6 +728,7 @@ public class P2PConnectionManager: ObservableObject {
                 connections.removeValue(forKey: runtimePeerId)
                 sharedSecrets.removeValue(forKey: runtimePeerId)
                 sessionKeys.removeValue(forKey: runtimePeerId)
+                previousSessionKeysBeforeRekey.removeValue(forKey: runtimePeerId)
                 negotiatedSuiteByDeviceId.removeValue(forKey: runtimePeerId)
                 handshakeDrivers.removeValue(forKey: runtimePeerId)
                 inboundLegacyBootstrapPeers.remove(runtimePeerId)
@@ -905,6 +920,7 @@ public class P2PConnectionManager: ObservableObject {
         inboundLegacyBootstrapPeers.remove(peerId)
         sharedSecrets.removeValue(forKey: peerId)
         sessionKeys.removeValue(forKey: peerId)
+        previousSessionKeysBeforeRekey.removeValue(forKey: peerId)
         negotiatedSuiteByDeviceId.removeValue(forKey: peerId)
         heartbeatTasks[peerId]?.cancel()
         heartbeatTasks.removeValue(forKey: peerId)
@@ -990,6 +1006,7 @@ public class P2PConnectionManager: ObservableObject {
                 guard let transport else { throw P2PError.connectionFailed }
                 let driver = try skyBridgeCore.createHandshakeDriver(
                     transport: transport,
+                    peerSupportedSuites: messageA.supportedSuites,
                     localSOAPeerId: localSOAPeerIdBytes(),
                     expectedRemoteSOAPeerId: soaPeerIdBytes(for: peerId)
                 )
@@ -1024,6 +1041,7 @@ public class P2PConnectionManager: ObservableObject {
         switch state {
         case .established(let keys):
             setSessionKeys(keys, for: peerId)
+            previousSessionKeysBeforeRekey.removeValue(forKey: peerId)
             if let remotePeerId = soaPeerIdBytes(for: peerId) {
                 pairKeyByDeviceId[peerId] = PeerSessionArbiter.pairKey(
                     localPeerId: localSOAPeerIdBytes(),
@@ -1048,6 +1066,14 @@ public class P2PConnectionManager: ObservableObject {
             syncPresentationState(for: peerId)
 
         case .failed(let reason):
+            if let previousKeys = previousSessionKeysBeforeRekey.removeValue(forKey: peerId) {
+                await restoreActiveSessionAfterRekeyFailure(
+                    for: peerId,
+                    previousKeys: previousKeys,
+                    reason: reason
+                )
+                return
+            }
             handshakeDrivers.removeValue(forKey: peerId)
             rekeyInProgress.remove(peerId)
             clearRekeyPresentationStatus(for: peerId)
@@ -1081,6 +1107,7 @@ public class P2PConnectionManager: ObservableObject {
                 guard let transport else { throw P2PError.connectionFailed }
                 let driver = try skyBridgeCore.createHandshakeDriver(
                     transport: transport,
+                    peerSupportedSuites: messageA.supportedSuites,
                     localSOAPeerId: localSOAPeerIdBytes(),
                     expectedRemoteSOAPeerId: soaPeerIdBytes(for: peerId)
                 )
@@ -1095,6 +1122,10 @@ public class P2PConnectionManager: ObservableObject {
             ?? resolvedNegotiatedSuite(forAnyPeerId: peerId)?.rawValue
             ?? "Classic"
         let targetSuite = preferredRekeyTargetSuite(offeredSuites: messageA.supportedSuites) ?? currentSuite
+        if let existingKeys = sessionKeys[peerId] {
+            previousSessionKeysBeforeRekey[peerId] = existingKeys
+        }
+        await releaseArbiterState(for: peerId)
         sessionKeys.removeValue(forKey: peerId)
         setRekeyPresentationStatus(for: peerId, fromSuite: currentSuite, toSuite: targetSuite)
         rekeyInProgress.insert(peerId)
@@ -1528,6 +1559,7 @@ public class P2PConnectionManager: ObservableObject {
         let payload = try JSONEncoder().encode(message)
         let ciphertext = try encryptForDevice(payload, deviceId: deviceId)
         try await send(data: ciphertext, over: connection)
+        lastPairingIdentityExchangeSentAt[deviceId] = Date()
     }
 
     /// 发送剪贴板内容到指定设备（走已建立的会话密钥加密通道）
@@ -1587,6 +1619,7 @@ public class P2PConnectionManager: ObservableObject {
             connections.removeValue(forKey: runtimePeerId)
             selectedEndpointDescriptionByDeviceId.removeValue(forKey: runtimePeerId)
             sessionKeys.removeValue(forKey: runtimePeerId)
+            previousSessionKeysBeforeRekey.removeValue(forKey: runtimePeerId)
             handshakeDrivers.removeValue(forKey: runtimePeerId)
             sharedSecrets.removeValue(forKey: runtimePeerId)
             await transport?.removeConnection(for: runtimePeerId)
@@ -1603,6 +1636,7 @@ public class P2PConnectionManager: ObservableObject {
             connections.removeValue(forKey: runtimePeerId)
             selectedEndpointDescriptionByDeviceId.removeValue(forKey: runtimePeerId)
             sessionKeys.removeValue(forKey: runtimePeerId)
+            previousSessionKeysBeforeRekey.removeValue(forKey: runtimePeerId)
             handshakeDrivers.removeValue(forKey: runtimePeerId)
             sharedSecrets.removeValue(forKey: runtimePeerId)
             await transport?.removeConnection(for: runtimePeerId)
@@ -3069,6 +3103,37 @@ public class P2PConnectionManager: ObservableObject {
         }
     }
 
+    private func restoreActiveSessionAfterRekeyFailure(
+        for peerId: String,
+        previousKeys: SessionKeys,
+        reason: HandshakeFailureReason
+    ) async {
+        setSessionKeys(previousKeys, for: peerId)
+        handshakeDrivers.removeValue(forKey: peerId)
+        rekeyInProgress.remove(peerId)
+        clearRekeyPresentationStatus(for: peerId)
+        if let pairKey = activeSOAPairKey(for: peerId) {
+            pairKeyByDeviceId[peerId] = pairKey
+            await PeerSessionArbiter.shared.markEstablished(pairKey: pairKey)
+        }
+
+        currentHandshakeState = "rekey失败，保留原会话 (Suite: \(previousKeys.negotiatedSuite.rawValue))"
+        connectionStatusByDeviceId[peerId] = .connected
+        connectionErrorByDeviceId.removeValue(forKey: peerId)
+        startHeartbeatIfNeeded(deviceId: peerId)
+
+        let activeDevice = makeActiveConnectionDevice(
+            peerId: peerId,
+            connection: connections[peerId]
+        )
+        upsertActiveConnection(device: activeDevice, status: .connected)
+        syncPresentationState(for: peerId)
+
+        SkyBridgeLogger.shared.warning(
+            "⚠️ rekey失败，已恢复原会话: \(peerId) - \(reason)"
+        )
+    }
+
     private func shouldUseSOA(for device: DiscoveredDevice) -> Bool {
         device.capabilities.contains("hs_soa") || device.advertisedCapabilities.contains("hs_soa")
     }
@@ -3161,6 +3226,40 @@ public class P2PConnectionManager: ObservableObject {
         return Data(bytes)
     }
 
+    private func activeSOAPairKey(for deviceId: String) -> Data? {
+        if let pairKey = pairKeyByDeviceId[deviceId] {
+            return pairKey
+        }
+        guard let remotePeerId = soaPeerIdBytes(for: deviceId) else {
+            return nil
+        }
+        return PeerSessionArbiter.pairKey(
+            localPeerId: localSOAPeerIdBytes(),
+            remotePeerId: remotePeerId
+        )
+    }
+
+    private func clearArbiterEstablishedStateForRekey(for deviceId: String) async -> Data? {
+        guard let pairKey = activeSOAPairKey(for: deviceId) else {
+            return nil
+        }
+        SkyBridgeLogger.shared.info("🧩 rekey: releasing SOA established guard for \(deviceId)")
+        await PeerSessionArbiter.shared.clearEstablished(pairKey: pairKey)
+        await PeerSessionArbiter.shared.clearOutgoing(pairKey: pairKey, attemptId: nil)
+        return pairKey
+    }
+
+    private func restoreArbiterEstablishedStateAfterFailedRekey(
+        pairKey: Data?,
+        deviceId: String
+    ) async {
+        guard let pairKey, sessionKeys[deviceId] != nil else {
+            return
+        }
+        SkyBridgeLogger.shared.info("🧩 rekey: restoring SOA established guard after failed rekey for \(deviceId)")
+        await PeerSessionArbiter.shared.markEstablished(pairKey: pairKey)
+    }
+
     private func releaseArbiterState(for deviceId: String) async {
         guard let pairKey = pairKeyByDeviceId.removeValue(forKey: deviceId) else { return }
         await PeerSessionArbiter.shared.clearEstablished(pairKey: pairKey)
@@ -3249,10 +3348,11 @@ public class P2PConnectionManager: ObservableObject {
     }
 
     /// 强制用 preferPQC=true 重新握手（用于完成 KEM 公钥交换后的“立刻切换到 PQC suite”）
-    public func rekeyToPreferPQC(deviceId: String, allowSOA: Bool = true) async throws {
+    public func rekeyToPreferPQC(deviceId: String, allowSOA: Bool = false) async throws {
         let deviceId = canonicalPeerLookupKey(deviceId)
         let fromSuite = resolvedNegotiatedSuite(forAnyPeerId: deviceId)?.rawValue ?? "Classic"
         let targetSuite = preferredRekeyTargetSuite() ?? fromSuite
+        let rekeyPairKey = allowSOA ? await clearArbiterEstablishedStateForRekey(for: deviceId) : nil
         setRekeyPresentationStatus(for: deviceId, fromSuite: fromSuite, toSuite: targetSuite)
         rekeyInProgress.insert(deviceId)
         defer {
@@ -3262,12 +3362,17 @@ public class P2PConnectionManager: ObservableObject {
         guard let connection = connections[deviceId] else { throw P2PError.connectionFailed }
         let device = discoveryManager.discoveredDevices.first(where: { $0.id == deviceId })
             ?? DiscoveredDevice(id: deviceId, name: deviceId, modelName: "", platform: .unknown, osVersion: "Unknown")
-        try await performPQCHandshake(
-            connection: connection,
-            device: device,
-            preferPQC: true,
-            allowSOA: allowSOA
-        )
+        do {
+            try await performPQCHandshake(
+                connection: connection,
+                device: device,
+                preferPQC: true,
+                allowSOA: allowSOA
+            )
+        } catch {
+            await restoreArbiterEstablishedStateAfterFailedRekey(pairKey: rekeyPairKey, deviceId: deviceId)
+            throw error
+        }
     }
 
     // MARK: - Ready Gate (await connection.ready)
@@ -3503,6 +3608,18 @@ extension P2PConnectionManager {
         if presentationPeerId != runtimePeerId {
             negotiatedSuiteByDeviceId[presentationPeerId] = suite
         }
+    }
+
+    func testInstallRekeyStatus(
+        fromSuite: String,
+        toSuite: String,
+        for runtimePeerId: String
+    ) {
+        setRekeyPresentationStatus(
+            for: runtimePeerId,
+            fromSuite: fromSuite,
+            toSuite: toSuite
+        )
     }
 
     func testResolveRuntimePeerId(forAnyPeerId peerId: String) -> String {

@@ -808,6 +808,7 @@ public class DeviceDiscoveryManager: BaseManager {
         var driver: HandshakeDriver?
         var sessionKeys: SessionKeys?
         var declaredDeviceIdForVerification: String?
+        var lastPairingIdentityExchangeReplyAt: Date?
 
         func isLikelyHandshakeControlPacket(_ data: Data) -> Bool {
             // Finished: 固定长度 38 bytes（magic 4 + version 1 + direction 1 + mac 32）
@@ -893,6 +894,15 @@ public class DeviceDiscoveryManager: BaseManager {
                                     "🔑 已缓存对端 KEM 公钥（bootstrap）：declared=\(payload.deviceId, privacy: .public) peer=\(peerDeviceId, privacy: .public) keys=\(payload.kemPublicKeys.count, privacy: .public)"
                                 )
 
+                                let now = Date()
+                                guard P2PDiscoveryService.shouldSendPairingIdentityExchangeReply(
+                                    lastSentAt: lastPairingIdentityExchangeReplyAt,
+                                    now: now
+                                ) else {
+                                    logger.debug("ℹ️ pairingIdentityExchange reply rate-limited during bootstrap")
+                                    break
+                                }
+
                                 // Reply with our KEM identity public keys (bootstrap for iOS initiator).
                                 let provider = CryptoProviderFactory.make(policy: .preferPQC)
                                 let km = DeviceIdentityKeyManager.shared
@@ -941,6 +951,7 @@ public class DeviceDiscoveryManager: BaseManager {
                                 let outCipher = try encryptAppPayload(outPlain, with: keys)
                                 let outPadded = TrafficPadding.wrapIfEnabled(outCipher, label: "tx")
                                 try await sendFramed(outPadded)
+                                lastPairingIdentityExchangeReplyAt = now
                                 logger.info("🔑 已回传本机 KEM 公钥：count=\(kemKeys.count, privacy: .public) decision=\(decision.rawValue, privacy: .public)")
                             case .ping(let payload):
                                 // RTT probe: respond as fast as possible with an echoed pong.
@@ -1058,6 +1069,7 @@ public class DeviceDiscoveryManager: BaseManager {
                         )
 
                         do {
+                            let cryptoPolicy = HandshakeCryptoPolicyResolver.policy(for: offeredSuites)
                             driver = try HandshakeDriver(
                                 transport: transport,
                                 cryptoProvider: cryptoProvider,
@@ -1066,6 +1078,7 @@ public class DeviceDiscoveryManager: BaseManager {
                                 sigAAlgorithm: sigAAlgorithm,
                                 offeredSuites: offeredSuites,
                                 policy: effectivePolicy,
+                                cryptoPolicy: cryptoPolicy,
                                 localSOAPeerId: localSOAPeerId,
                                 expectedRemoteSOAPeerId: expectedRemoteSOAPeerId
                             )
@@ -1087,10 +1100,8 @@ public class DeviceDiscoveryManager: BaseManager {
                 let st = await driver.getCurrentState()
                 logger.info("🤝 HandshakeDriver state: \(String(describing: st), privacy: .public)")
 
-                // 一旦进入 waitingFinished / established，即可取到会话密钥用于后续业务消息
                 switch st {
                 case .waitingFinished(_, let keys, _):
-                    sessionKeys = keys
                     if let declaredDeviceIdForVerification {
                         await MainActor.run {
                             PairingTrustApprovalService.shared.updateVerificationCode(

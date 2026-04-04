@@ -223,6 +223,21 @@ struct CoordinateConversionIntegrationTests {
         #expect(x2 == Double(screenWidth))
         #expect(y2 == Double(screenHeight))
     }
+
+    @Test("RemoteControlManager 注入点不应再次翻转 Y 轴")
+    func testRemoteControlMouseInjectionPointDoesNotFlipYAxis() {
+        let event = RemoteMouseEvent(
+            type: .leftMouseDown,
+            x: 320,
+            y: 180,
+            timestamp: 1234567890
+        )
+
+        let point = RemoteControlManager.mouseInjectionPoint(for: event)
+
+        #expect(point.x == 320)
+        #expect(point.y == 180)
+    }
 }
 
 // MARK: - Permission Status Tests

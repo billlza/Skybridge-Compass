@@ -240,12 +240,56 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
             throw SkyBridgeError.keychainError(status: status)
         }
     }
+
+    private func supportsHandshakeSuite(
+        _ suite: CryptoSuite,
+        with provider: any CryptoProvider
+    ) -> Bool {
+        guard suite.isKnown else { return false }
+
+        if suite.isHybrid {
+            guard provider.tier == .nativePQC else { return false }
+            #if HAS_APPLE_PQC_SDK
+            if #available(iOS 26.0, macOS 26.0, *) {
+                return AppleXWingCryptoProvider.quickRuntimeProbe()
+            }
+            #endif
+            return false
+        }
+
+        if suite.isPQCGroup {
+            return provider.tier != .classic
+        }
+
+        return provider.supportsSuite(suite)
+    }
+
+    private func resolvedHandshakeSuites(
+        for provider: any CryptoProvider,
+        offeredSuites: [CryptoSuite]? = nil,
+        peerSupportedSuites: [CryptoSuite]? = nil
+    ) -> [CryptoSuite] {
+        if let offeredSuites, !offeredSuites.isEmpty {
+            return offeredSuites.filter { supportsHandshakeSuite($0, with: provider) }
+        }
+
+        if let peerSupportedSuites, !peerSupportedSuites.isEmpty {
+            let supported = peerSupportedSuites.filter { supportsHandshakeSuite($0, with: provider) }
+            if !supported.isEmpty {
+                return supported
+            }
+        }
+
+        return [provider.activeSuite].filter { supportsHandshakeSuite($0, with: provider) }
+    }
     
     // MARK: - Handshake API
     
     /// 创建握手驱动器
     public func createHandshakeDriver(
         transport: any DiscoveryTransport,
+        offeredSuites: [CryptoSuite]? = nil,
+        peerSupportedSuites: [CryptoSuite]? = nil,
         localSOAPeerId: Data? = nil,
         expectedRemoteSOAPeerId: Data? = nil,
         trustProvider: (any HandshakeTrustProvider)? = nil
@@ -257,7 +301,13 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
               let publicKey = identityPublicKey else {
             throw SkyBridgeError.notInitialized
         }
-        
+
+        let handshakeSuites = resolvedHandshakeSuites(
+            for: provider,
+            offeredSuites: offeredSuites,
+            peerSupportedSuites: peerSupportedSuites
+        )
+        let cryptoPolicy = HandshakeCryptoPolicyResolver.policy(for: handshakeSuites)
         return HandshakeDriver(
             transport: transport,
             cryptoProvider: provider,
@@ -266,6 +316,8 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
             sigAAlgorithm: sigProvider.signatureAlgorithm,
             identityPublicKey: publicKey,
             policy: handshakePolicy,
+            cryptoPolicy: cryptoPolicy,
+            offeredSuites: handshakeSuites,
             trustProvider: trustProvider,
             localSOAPeerId: localSOAPeerId,
             expectedRemoteSOAPeerId: expectedRemoteSOAPeerId
@@ -313,7 +365,7 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
                 "policyMinimumTier=\(self.handshakePolicy.minimumTier.rawValue), " +
                 "policyRequireSecureEnclavePoP=\(self.handshakePolicy.requireSecureEnclavePoP ? "1" : "0")"
             )
-            
+
             let driver = HandshakeDriver(
                 transport: transport,
                 cryptoProvider: preparation.cryptoProvider,
@@ -322,6 +374,8 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
                 sigAAlgorithm: preparation.sigAAlgorithm,
                 identityPublicKey: publicKey,
                 policy: self.handshakePolicy,
+                cryptoPolicy: preparation.cryptoPolicy,
+                offeredSuites: preparation.offeredSuites,
                 soaMetadata: soaMetadata,
                 localSOAPeerId: localSOAPeerId,
                 expectedRemoteSOAPeerId: expectedRemoteSOAPeerId

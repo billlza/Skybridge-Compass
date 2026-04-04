@@ -72,6 +72,10 @@ import Combine
         guard let currentSession = sessionSubject.value else {
             return nil
         }
+        if Self.shouldSkipAuthRefreshForSmoke(),
+           !currentSession.accessToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return currentSession.accessToken
+        }
         guard let refreshToken = currentSession.refreshToken?.trimmingCharacters(in: .whitespacesAndNewlines),
               !refreshToken.isEmpty else {
             if forceRefresh || shouldRefreshAccessToken(currentSession.accessToken) {
@@ -455,6 +459,13 @@ import Combine
             return "+86\(sanitized)"
         }
         return sanitized
+    }
+
+    private static func shouldSkipAuthRefreshForSmoke() -> Bool {
+        let raw = ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_SKIP_AUTH_REFRESH"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() ?? ""
+        return raw == "1" || raw == "true" || raw == "yes"
     }
 }
 

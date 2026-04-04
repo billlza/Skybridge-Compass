@@ -3696,9 +3696,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 
         func handleMouseEvent(_ event: MouseEventWire) {
             guard ensureAccessibilityPermission() else { return }
-            let displayID = CGMainDisplayID()
-            let screenH = Double(CGDisplayPixelsHigh(displayID))
-            let point = CGPoint(x: event.x, y: screenH - event.y)
+            let point = CGPoint(x: event.x, y: event.y)
             func post(_ e: CGEvent?) { e?.post(tap: .cghidEventTap) }
             switch event.type {
             case .mouseMoved:
@@ -5711,7 +5709,6 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 }
                 switch st {
                 case .waitingFinished(_, let keys, _):
-                    handshakeState.sessionKeys = keys
                     if handshakeState.previousSessionKeysBeforeRekey != nil,
                        !(self.lastRekeyEvent?.contains("raw=") ?? false) {
                         self.lastRekeyEvent = "messageB negotiated=\(keys.negotiatedSuite.rawValue)"

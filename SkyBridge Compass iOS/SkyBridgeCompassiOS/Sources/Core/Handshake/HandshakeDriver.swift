@@ -254,6 +254,14 @@ public actor HandshakeDriver {
     
     /// 握手策略
     private let policy: HandshakePolicy
+
+    /// 本地 crypto suite 准入策略（用于避免 iOS / macOS 在 hybrid/X-Wing 上分叉）
+    private let cryptoPolicy: CryptoPolicy
+
+    /// 发起方本次尝试准备好的 suites。
+    /// iOS 本地实现仍按 single-suite 发包，但这里必须以调用方准备结果为准，
+    /// 不能再偷偷退回 provider.activeSuite。
+    private let offeredSuites: [CryptoSuite]?
     
     /// 等待中的 continuation
     private var pendingContinuation: CheckedContinuation<SessionKeys, Error>?
@@ -308,6 +316,8 @@ public actor HandshakeDriver {
         sigAAlgorithm: ProtocolSigningAlgorithm,
         identityPublicKey: Data,
         policy: HandshakePolicy = .default,
+        cryptoPolicy: CryptoPolicy = .default,
+        offeredSuites: [CryptoSuite]? = nil,
         timeout: Duration = HandshakeConstants.defaultTimeout,
         trustProvider: (any HandshakeTrustProvider)? = nil,
         soaMetadata: HandshakeSOAMetadata? = nil,
@@ -322,6 +332,8 @@ public actor HandshakeDriver {
         self.sigAAlgorithm = sigAAlgorithm
         self.identityPublicKey = identityPublicKey
         self.policy = policy
+        self.cryptoPolicy = cryptoPolicy
+        self.offeredSuites = offeredSuites
         self.timeout = timeout
         self.trustProvider = trustProvider ?? DefaultHandshakeTrustProvider()
         self.soaMetadata = soaMetadata
@@ -381,6 +393,8 @@ public actor HandshakeDriver {
             identityKeyHandle: identityKeyHandle,
             identityPublicKey: identityPublicKey,
             policy: policy,
+            cryptoPolicy: cryptoPolicy,
+            offeredSuites: offeredSuites,
             peerKEMPublicKeys: peerKEMPublicKeys
         )
         context = ctx
@@ -540,7 +554,9 @@ public actor HandshakeDriver {
                 protocolSignatureProvider: protocolSignatureProvider,
                 identityKeyHandle: identityKeyHandle,
                 identityPublicKey: identityPublicKey,
-                policy: policy
+                policy: policy,
+                cryptoPolicy: cryptoPolicy,
+                offeredSuites: offeredSuites
             )
             context = ctx
             
@@ -977,6 +993,8 @@ public actor HandshakeContext {
     private let identityKeyHandle: SigningKeyHandle?
     private let identityPublicKey: Data
     private let policy: HandshakePolicy
+    private let cryptoPolicy: CryptoPolicy
+    private let offeredSuites: [CryptoSuite]?
     
     /// 临时密钥对
     private var ephemeralPrivateKey: SecureBytes?
@@ -1024,6 +1042,8 @@ public actor HandshakeContext {
         identityKeyHandle: SigningKeyHandle?,
         identityPublicKey: Data,
         policy: HandshakePolicy,
+        cryptoPolicy: CryptoPolicy = .default,
+        offeredSuites: [CryptoSuite]? = nil,
         peerKEMPublicKeys: [CryptoSuite: Data] = [:]
     ) {
         self.role = role
@@ -1044,6 +1064,8 @@ public actor HandshakeContext {
         self.identityKeyHandle = identityKeyHandle
         self.identityPublicKey = identityPublicKey
         self.policy = policy
+        self.cryptoPolicy = cryptoPolicy
+        self.offeredSuites = offeredSuites
         self.peerKEMPublicKeys = peerKEMPublicKeys
     }
 
@@ -1058,6 +1080,131 @@ public actor HandshakeContext {
             return cryptoProvider
         }
         return nil
+    }
+
+    nonisolated static func suiteMeetsHandshakePolicy(
+        _ suite: CryptoSuite,
+        policy: HandshakePolicy
+    ) -> Bool {
+        if policy.requirePQC && !suite.isPQCGroup {
+            return false
+        }
+        if policy.minimumTier != .classic && !suite.isPQCGroup {
+            return false
+        }
+        return true
+    }
+
+    nonisolated static func suiteMeetsLocalCryptoPolicy(
+        _ suite: CryptoSuite,
+        cryptoPolicy: CryptoPolicy,
+        forAdvertising: Bool = false
+    ) -> Bool {
+        if suite.isHybrid {
+            guard cryptoPolicy.allowExperimentalHybrid else {
+                return false
+            }
+            if forAdvertising && !cryptoPolicy.advertiseHybrid {
+                return false
+            }
+        }
+
+        switch cryptoPolicy.minimumSecurityTier {
+        case .classicOnly:
+            return !suite.isPQCGroup
+        case .pqcPreferred:
+            return true
+        case .hybridPreferred:
+            return true
+        case .pqcOnly:
+            return suite.isPQCGroup && !suite.isHybrid
+        }
+    }
+
+    private func localSupportsHybrid() -> Bool {
+        if let hybridProvider, hybridProvider.supportsSuite(.xwing) {
+            return true
+        }
+        if let pqcProvider, pqcProvider.supportsSuite(.xwing) {
+            return true
+        }
+        return cryptoProvider.supportsSuite(.xwing)
+    }
+
+    private func suiteIsLocallyNegotiable(
+        _ suite: CryptoSuite,
+        candidateSuites: [CryptoSuite],
+        peerPolicy: HandshakePolicy? = nil,
+        forAdvertising: Bool = false
+    ) -> Bool {
+        guard Self.suiteMeetsHandshakePolicy(suite, policy: policy),
+              Self.suiteMeetsLocalCryptoPolicy(
+                suite,
+                cryptoPolicy: cryptoPolicy,
+                forAdvertising: forAdvertising
+              ) else {
+            return false
+        }
+
+        if let peerPolicy,
+           !Self.suiteMeetsHandshakePolicy(suite, policy: peerPolicy) {
+            return false
+        }
+
+        if cryptoPolicy.requireHybridIfAvailable,
+           localSupportsHybrid(),
+           candidateSuites.contains(where: \.isHybrid),
+           !suite.isHybrid {
+            return false
+        }
+
+        return true
+    }
+
+    private func selectInitiatorSuite() throws -> CryptoSuite {
+        let candidates = (offeredSuites?.isEmpty == false ? offeredSuites : nil) ?? [cryptoProvider.activeSuite]
+
+        for suite in candidates {
+            guard suite.isKnown else {
+                emitUnknownSuiteRejected(wireId: suite.wireId, stage: "buildMessageA.activeSuite")
+                throw HandshakeError.failed(.unknownSuite(wireId: suite.wireId))
+            }
+            guard provider(for: suite) != nil else { continue }
+            guard suiteIsLocallyNegotiable(
+                suite,
+                candidateSuites: candidates,
+                forAdvertising: true
+            ) else { continue }
+            if suite.isPQC, peerKEMPublicKey(for: suite) == nil {
+                continue
+            }
+            return suite
+        }
+
+        if let missingPeerKEMSuite = candidates.first(where: { $0.isPQC && peerKEMPublicKey(for: $0) == nil }) {
+            throw HandshakeError.failed(.missingPeerKEMPublicKey(suite: missingPeerKEMSuite.rawValue))
+        }
+        throw HandshakeError.failed(.suiteNegotiationFailed)
+    }
+
+    internal func selectResponderSuite(for messageA: HandshakeMessageA) throws -> CryptoSuite {
+        let advertisedKeyShareSuites = Set(messageA.keyShares.map(\.suite))
+        for suite in messageA.supportedSuites {
+            guard provider(for: suite) != nil else { continue }
+            guard suiteIsLocallyNegotiable(
+                suite,
+                candidateSuites: messageA.supportedSuites,
+                peerPolicy: messageA.policy
+            ) else { continue }
+            guard advertisedKeyShareSuites.contains(suite) else { continue }
+            if suite.requiresV2EphemeralContribution,
+               messageA.initiatorContribution == nil {
+                continue
+            }
+            return suite
+        }
+
+        throw HandshakeError.failed(.suiteNegotiationFailed)
     }
 
     private func peerKEMPublicKey(for suite: CryptoSuite) -> Data? {
@@ -1091,12 +1238,8 @@ public actor HandshakeContext {
         let nonce = Data(nonceBytes)
         localNonce = nonce
         
-        // 确定支持的套件（v1: 先按当前 provider 的 activeSuite；TwoAttemptHandshakeManager 会控制优先级）
-        let suite = cryptoProvider.activeSuite
-        guard suite.isKnown else {
-            emitUnknownSuiteRejected(wireId: suite.wireId, stage: "buildMessageA.activeSuite")
-            throw HandshakeError.failed(.unknownSuite(wireId: suite.wireId))
-        }
+        // iOS 本地栈必须使用调用方为本次尝试准备好的 suite，而不是无条件回退到 activeSuite。
+        let suite = try selectInitiatorSuite()
         let supportedSuites = [suite]
         negotiatedSuite = suite
         
@@ -1225,16 +1368,7 @@ public actor HandshakeContext {
             emitUnknownSuiteRejected(wireId: unknownKeyShare.suite.wireId, stage: "processMessageA.keyShares")
             throw HandshakeError.failed(.unknownSuite(wireId: unknownKeyShare.suite.wireId))
         }
-        var selectedSuite: CryptoSuite?
-        for suite in messageA.supportedSuites {
-            if provider(for: suite) != nil {
-                selectedSuite = suite
-                break
-            }
-        }
-        guard let suite = selectedSuite else {
-            throw HandshakeError.failed(.suiteNegotiationFailed)
-        }
+        let suite = try selectResponderSuite(for: messageA)
         
         // Anti-Downgrade: selectedSuite 必须有对应 keyShare
         guard peerKeyShares[suite] != nil else {
@@ -1430,6 +1564,12 @@ public actor HandshakeContext {
             throw HandshakeError.failed(.unknownSuite(wireId: messageB.selectedSuite.wireId))
         }
         guard sentSupportedSuites.contains(where: { $0.wireId == messageB.selectedSuite.wireId }) else {
+            throw HandshakeError.failed(.suiteNegotiationFailed)
+        }
+        guard suiteIsLocallyNegotiable(
+            messageB.selectedSuite,
+            candidateSuites: sentSupportedSuites
+        ) else {
             throw HandshakeError.failed(.suiteNegotiationFailed)
         }
         // 并且必须有对应 keyShare（我们持有该 suite 的私钥）

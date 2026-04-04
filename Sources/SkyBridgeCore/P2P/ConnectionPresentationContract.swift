@@ -74,6 +74,7 @@ public struct ConnectionPresentationPeer: Sendable, Equatable {
     public let cryptoKind: String?
     public let suite: String?
     public let guardStatus: String?
+    public let isRekeying: Bool
     public let connectedAt: Date
 
     public init(
@@ -81,12 +82,14 @@ public struct ConnectionPresentationPeer: Sendable, Equatable {
         cryptoKind: String? = nil,
         suite: String? = nil,
         guardStatus: String? = nil,
+        isRekeying: Bool = false,
         connectedAt: Date = Date()
     ) {
         self.displayName = displayName
         self.cryptoKind = cryptoKind
         self.suite = suite
         self.guardStatus = guardStatus
+        self.isRekeying = isRekeying
         self.connectedAt = connectedAt
     }
 }
@@ -276,6 +279,7 @@ public enum ConnectionPresentationContract {
                 kind: peer.cryptoKind,
                 suite: peer.suite,
                 guardStatus: peer.guardStatus ?? input.labels.defaultGuardStatus,
+                isRekeying: peer.isRekeying,
                 input: input
             )
         }
@@ -294,6 +298,7 @@ public enum ConnectionPresentationContract {
                 kind: device.cryptoKind,
                 suite: device.suite,
                 guardStatus: device.guardStatus ?? input.labels.defaultGuardStatus,
+                isRekeying: device.isRekeying,
                 input: input
             )
         }
@@ -302,7 +307,7 @@ public enum ConnectionPresentationContract {
             return ConnectionPresentation(
                 phase: .connected,
                 isConnected: true,
-                statusText: connectedStatusText(kind: nil, suite: nil, input: input),
+                statusText: connectedStatusText(kind: nil, suite: nil, isRekeying: false, input: input),
                 detailText: nil
             )
         }
@@ -371,6 +376,7 @@ public enum ConnectionPresentationContract {
             statusText: connectedStatusText(
                 kind: nil,
                 suite: snapshot.negotiatedSuite,
+                isRekeying: false,
                 input: input
             ),
             detailText: effectiveDetail
@@ -399,6 +405,7 @@ public enum ConnectionPresentationContract {
         kind: String?,
         suite: String?,
         guardStatus: String?,
+        isRekeying: Bool,
         input: ConnectionPresentationInput
     ) -> ConnectionPresentation {
         ConnectionPresentation(
@@ -410,21 +417,27 @@ public enum ConnectionPresentationContract {
                 input: input,
                 signalingHealth: nil
             ),
-            statusText: connectedStatusText(kind: kind, suite: suite, input: input),
-            detailText: ConnectionCryptoPresentation.detailText(
-                kind: kind,
-                suite: suite,
-                guardStatus: guardStatus
-            ) ?? normalized(displayName)
+            statusText: connectedStatusText(kind: kind, suite: suite, isRekeying: isRekeying, input: input),
+            detailText: rekeyDetailText(kind: kind, suite: suite, guardStatus: guardStatus, isRekeying: isRekeying)
+                ?? ConnectionCryptoPresentation.detailText(
+                    kind: kind,
+                    suite: suite,
+                    guardStatus: guardStatus
+                )
+                ?? normalized(displayName)
         )
     }
 
     private static func connectedStatusText(
         kind: String?,
         suite: String?,
+        isRekeying: Bool,
         input: ConnectionPresentationInput
     ) -> String {
         let base = input.labels.connectedText
+        if isRekeying {
+            return base
+        }
         let explicit = ConnectionCryptoPresentation.connectedStatusText(
             kind: kind,
             suite: suite,
@@ -447,6 +460,28 @@ public enum ConnectionPresentationContract {
             baseConnectedText: base,
             compatibilityModeEnabled: input.compatibilityModeEnabled
         )
+    }
+
+    private static func rekeyDetailText(
+        kind: String?,
+        suite: String?,
+        guardStatus: String?,
+        isRekeying: Bool
+    ) -> String? {
+        guard isRekeying else {
+            return nil
+        }
+
+        var components: [String] = []
+        if let kind = normalized(kind) {
+            components.append(kind)
+        } else if let suite = normalized(suite) {
+            components.append(suite)
+        }
+        if let guardStatus = normalized(guardStatus) {
+            components.append(guardStatus)
+        }
+        return components.isEmpty ? nil : components.joined(separator: " · ")
     }
 
     private static func connectedDisplayState(

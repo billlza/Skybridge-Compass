@@ -194,22 +194,22 @@ public struct OnlineDeviceRow: View {
             return nil
         }
 
-        let normalizedName = normalizedToken(device.name)
-        if !normalizedName.isEmpty {
-            let byName = activeConnections.filter { normalizedToken($0.displayName) == normalizedName }
-            if let newestByName = byName.max(by: { $0.connectedAt < $1.connectedAt }) {
-                return newestByName
+        let deviceTokens = presenceMatchTokens(
+            identifier: device.uniqueIdentifier,
+            displayName: device.name,
+            addresses: [device.ipv4, device.ipv6]
+        )
+        if !deviceTokens.isEmpty {
+            let matches = activeConnections.filter { connection in
+                let connectionTokens = presenceMatchTokens(
+                    identifier: connection.id,
+                    displayName: connection.displayName,
+                    addresses: [connection.address]
+                )
+                return !deviceTokens.isDisjoint(with: connectionTokens)
             }
-        }
-
-        let normalizedAddresses = Set([device.ipv4, device.ipv6].compactMap { normalizedAddress($0) })
-        if !normalizedAddresses.isEmpty {
-            let byAddress = activeConnections.filter { connection in
-                guard let normalized = normalizedAddress(connection.address) else { return false }
-                return normalizedAddresses.contains(normalized)
-            }
-            if let newestByAddress = byAddress.max(by: { $0.connectedAt < $1.connectedAt }) {
-                return newestByAddress
+            if let newestMatch = matches.max(by: { $0.connectedAt < $1.connectedAt }) {
+                return newestMatch
             }
         }
 
@@ -233,6 +233,48 @@ public struct OnlineDeviceRow: View {
 
     private func normalizedToken(_ raw: String) -> String {
         raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    private func presenceMatchTokens(
+        identifier: String?,
+        displayName: String?,
+        addresses: [String?]
+    ) -> Set<String> {
+        var tokens = Set<String>()
+
+        func addToken(_ raw: String?) {
+            guard let raw else { return }
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return }
+            tokens.insert(trimmed.lowercased())
+        }
+
+        func addIdentifier(_ raw: String?) {
+            guard let raw else { return }
+            let normalized = normalizedToken(raw)
+            guard !normalized.isEmpty else { return }
+            addToken(normalized)
+
+            if normalized.hasPrefix("recent:") {
+                addIdentifier(String(normalized.dropFirst("recent:".count)))
+            }
+            if normalized.hasPrefix("id:") {
+                addToken(String(normalized.dropFirst("id:".count)))
+            }
+            if normalized.hasPrefix("bonjour:") {
+                let payload = String(normalized.dropFirst("bonjour:".count))
+                let parts = payload.split(separator: "@", maxSplits: 1).map(String.init)
+                addToken(parts.first)
+            }
+        }
+
+        addIdentifier(identifier)
+        addToken(displayName)
+        for address in addresses {
+            addToken(normalizedAddress(address))
+        }
+
+        return tokens
     }
     
     private func connectionTypeColor(for type: DeviceConnectionType) -> Color {

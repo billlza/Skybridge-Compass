@@ -35,6 +35,12 @@ public class AuthenticationManager: ObservableObject {
     }
     
     private init() {
+        if let unsupported = IOSDeviceSupportGate.currentUnsupportedDevice() {
+            SkyBridgeLogger.shared.warning(
+                "⛔️ Authentication bootstrap skipped on unsupported device: \(unsupported.displayName) (\(unsupported.modelIdentifier))"
+            )
+            return
+        }
         if Self.shouldResetStateForUITests {
             clearSession()
         }

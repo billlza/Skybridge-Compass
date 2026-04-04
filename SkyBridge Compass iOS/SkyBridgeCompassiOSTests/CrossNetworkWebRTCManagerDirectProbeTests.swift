@@ -4,12 +4,13 @@ import CryptoKit
 
 @available(iOS 17.0, *)
 final class CrossNetworkWebRTCManagerDirectProbeTests: XCTestCase {
+    @MainActor
     func testDirectProbeDecryptsRawCiphertextPayload() throws {
         let keys = makeSessionKeys()
         let plaintext = Data("hello-direct-probe".utf8)
         let ciphertext = try encryptForInboundProbe(plaintext, keys: keys)
 
-        let decrypted = CrossNetworkWebRTCManager.decryptDirectControlProbePayload(
+        let decrypted = CrossNetworkWebRTCManager.testOnlyDecryptDirectControlProbePayload(
             ciphertext,
             keys: keys
         )
@@ -17,6 +18,7 @@ final class CrossNetworkWebRTCManagerDirectProbeTests: XCTestCase {
         XCTAssertEqual(decrypted, plaintext)
     }
 
+    @MainActor
     func testDirectProbeReturnsNilForLengthPrefixedFrame() throws {
         let keys = makeSessionKeys()
         let plaintext = Data("hello-framed-payload".utf8)
@@ -26,7 +28,7 @@ final class CrossNetworkWebRTCManagerDirectProbeTests: XCTestCase {
         withUnsafeBytes(of: &length) { framed.append(contentsOf: $0) }
         framed.append(ciphertext)
 
-        let decrypted = CrossNetworkWebRTCManager.decryptDirectControlProbePayload(
+        let decrypted = CrossNetworkWebRTCManager.testOnlyDecryptDirectControlProbePayload(
             framed,
             keys: keys
         )
@@ -39,7 +41,7 @@ final class CrossNetworkWebRTCManagerDirectProbeTests: XCTestCase {
         return SessionKeys(
             sendKey: keyBytes,
             receiveKey: keyBytes,
-            negotiatedSuite: .mlKem768,
+            negotiatedSuite: .mlkem768,
             transcriptHash: Data(repeating: 0x24, count: 32)
         )
     }

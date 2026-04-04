@@ -1953,9 +1953,10 @@ public final class RemoteControlManager: BaseManager {
             return
         }
 
-        let displayID = CGMainDisplayID()
-        let screenH = Double(CGDisplayPixelsHigh(displayID))
-        let point = CGPoint(x: event.x, y: screenH - event.y) // iOS 触摸通常以左上为原点，macOS CGEvent 以左下为原点
+        // Viewer input and stream-side cursor/damage telemetry already share a top-left
+        // display coordinate space. Do not flip Y again on injection, or taps in the
+        // upper half land in the lower half (and vice versa).
+        let point = Self.mouseInjectionPoint(for: event)
 
         func post(_ cgEvent: CGEvent?) {
             guard let cgEvent else { return }
@@ -1978,6 +1979,10 @@ public final class RemoteControlManager: BaseManager {
         case .scrollDown:
             post(CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: -24, wheel2: 0, wheel3: 0))
         }
+    }
+
+    nonisolated static func mouseInjectionPoint(for event: RemoteMouseEvent) -> CGPoint {
+        CGPoint(x: event.x, y: event.y)
     }
 
     private func handleRemoteKeyboardEvent(_ event: RemoteKeyboardEvent) async {

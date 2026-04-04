@@ -468,6 +468,44 @@ final class RegressionHardeningTests: XCTestCase {
     }
 
     @MainActor
+    func testDashboardViewModelDoesNotPretendTargetSuiteIsConnectedDuringRekey() async {
+        let manager = P2PConnectionManager.instance
+        let viewModel = DashboardViewModel.shared
+        let runtimePeerId = "host:192.168.1.63"
+        let declaredDeviceId = UUID().uuidString.lowercased()
+        let connectedText = RuntimeLocalization.string("已连接")
+
+        manager.installTestPeerRuntimeState(
+            runtimePeerId: runtimePeerId,
+            status: .connected,
+            name: "Rekey Peer",
+            ipAddress: "192.168.1.63"
+        )
+        _ = manager.testPromotePeerPresentationIdentity(
+            runtimePeerId: runtimePeerId,
+            declaredDeviceId: declaredDeviceId,
+            deviceName: "Rekey Mac",
+            modelName: "MacBook Pro",
+            platform: "macOS",
+            osVersion: "15.0"
+        )
+        manager.testInstallNegotiatedSuite(.x25519Ed25519, for: runtimePeerId)
+        manager.testInstallRekeyStatus(
+            fromSuite: "Classic",
+            toSuite: "X-Wing",
+            for: runtimePeerId
+        )
+
+        await Task.yield()
+
+        XCTAssertEqual(viewModel.topConnectionPresentation.statusText, connectedText)
+        XCTAssertEqual(viewModel.topConnectionPresentation.detailText, "Classic → X-Wing · Rekey 中")
+        XCTAssertFalse(viewModel.topConnectionPresentation.statusText.contains("X-Wing"))
+
+        manager.testSimulateTerminalCleanup(runtimePeerId: runtimePeerId)
+    }
+
+    @MainActor
     func testP2PConnectionManagerResolvesPresentationPeerIdBackToRuntimePeerId() {
         let manager = P2PConnectionManager.instance
         let runtimePeerId = "host:192.168.1.62"
@@ -1353,6 +1391,35 @@ final class RegressionHardeningTests: XCTestCase {
         XCTAssertEqual(presentation.statusText, "Classic已连接")
     }
 
+    func testConnectionPresentationContractDoesNotClaimTargetSuiteWhileRekeying() {
+        let presentation = ConnectionPresentationContract.evaluate(
+            ConnectionPresentationInput(
+                labels: ConnectionPresentationLabels(
+                    connectedText: "已连接",
+                    disconnectedText: "离线",
+                    connectingText: "连接中",
+                    reconnectingText: "重连中",
+                    defaultGuardStatus: "守护中",
+                    crossNetworkGuardStatus: "跨网已连接"
+                ),
+                fileTransferActive: false,
+                latestPeerConnection: ConnectionPresentationPeer(
+                    displayName: "Peer",
+                    cryptoKind: "X25519 → X-Wing",
+                    suite: nil,
+                    guardStatus: "Rekey 中",
+                    isRekeying: true
+                ),
+                latestConnectedDevice: nil,
+                activeSessionSnapshot: nil,
+                defaultPQCModeLabel: "Apple PQC"
+            )
+        )
+
+        XCTAssertEqual(presentation.statusText, "已连接")
+        XCTAssertEqual(presentation.detailText, "X25519 → X-Wing · Rekey 中")
+    }
+
     func testLateCleanupTokenDoesNotClearNewSnapshot() {
         let originalToken = UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!
         let replacementToken = UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
@@ -1598,5 +1665,190 @@ final class RegressionHardeningTests: XCTestCase {
         ]
 
         XCTAssertNil(WebRTCSession.remoteInboundVideoStatsSnapshot(from: samples))
+    }
+
+    func testLocalHandshakeCryptoPolicyResolverEnablesHybridForXWingAttempt() async throws {
+        let provider = LocalHandshakeTestCryptoProvider(
+            tier: .liboqsPQC,
+            activeSuite: .xwing,
+            supportedSuites: [.xwing]
+        )
+        let signatureProvider = LocalHandshakeTestSignatureProvider()
+        let keyHandle = SigningKeyHandle.callback(FixedSignatureCallback(signature: Data([0xAA])))
+        let identityPublicKey = Data([0xBB, 0xCC, 0xDD])
+        let peerKEMKeys: [CryptoSuite: Data] = [.xwing: Data([0x01, 0x02, 0x03])]
+
+        let strictContext = HandshakeContext(
+            role: .initiator,
+            cryptoProvider: provider,
+            protocolSignatureProvider: signatureProvider,
+            identityKeyHandle: keyHandle,
+            identityPublicKey: identityPublicKey,
+            policy: .strictPQC,
+            cryptoPolicy: .default,
+            offeredSuites: [.xwing],
+            peerKEMPublicKeys: peerKEMKeys
+        )
+
+        await XCTAssertThrowsErrorAsync(try await strictContext.buildMessageA()) { error in
+            guard case HandshakeError.failed(.suiteNegotiationFailed) = error else {
+                XCTFail("Expected suiteNegotiationFailed, got \(error)")
+                return
+            }
+        }
+
+        let enabledContext = HandshakeContext(
+            role: .initiator,
+            cryptoProvider: provider,
+            protocolSignatureProvider: signatureProvider,
+            identityKeyHandle: keyHandle,
+            identityPublicKey: identityPublicKey,
+            policy: .strictPQC,
+            cryptoPolicy: HandshakeCryptoPolicyResolver.policy(for: [.xwing]),
+            offeredSuites: [.xwing],
+            peerKEMPublicKeys: peerKEMKeys
+        )
+
+        let messageA = try await enabledContext.buildMessageA()
+        XCTAssertEqual(messageA.supportedSuites, [.xwing])
+    }
+
+    func testLocalHandshakeContextUsesPreparedOfferedSuiteInsteadOfProviderActiveSuite() async throws {
+        let provider = LocalHandshakeTestCryptoProvider(
+            tier: .liboqsPQC,
+            activeSuite: .mlkem768,
+            supportedSuites: [.mlkem768fs, .mlkem768]
+        )
+        let signatureProvider = LocalHandshakeTestSignatureProvider()
+        let keyHandle = SigningKeyHandle.callback(FixedSignatureCallback(signature: Data([0xAB])))
+        let context = HandshakeContext(
+            role: .initiator,
+            cryptoProvider: provider,
+            protocolSignatureProvider: signatureProvider,
+            identityKeyHandle: keyHandle,
+            identityPublicKey: Data([0x10, 0x20, 0x30]),
+            policy: .strictPQC,
+            cryptoPolicy: .default,
+            offeredSuites: [.mlkem768fs],
+            peerKEMPublicKeys: [.mlkem768: Data([0x99])]
+        )
+
+        let messageA = try await context.buildMessageA()
+        XCTAssertEqual(messageA.supportedSuites, [.mlkem768fs])
+        XCTAssertNotNil(messageA.initiatorContribution)
+    }
+}
+
+private struct FixedSignatureCallback: SigningCallback {
+    let signature: Data
+
+    func sign(data: Data) async throws -> Data {
+        signature
+    }
+}
+
+private struct LocalHandshakeTestSignatureProvider: ProtocolSignatureProvider {
+    let signatureAlgorithm: ProtocolSigningAlgorithm = .mlDSA65
+
+    func sign(_ data: Data, key: SigningKeyHandle) async throws -> Data {
+        switch key {
+        case .callback(let callback):
+            return try await callback.sign(data: data)
+        case .softwareKey(let data):
+            return data
+        #if canImport(Security)
+        case .secureEnclaveRef:
+            return Data([0x01])
+        #endif
+        }
+    }
+
+    func verify(_ data: Data, signature: Data, publicKey: Data) async throws -> Bool {
+        true
+    }
+}
+
+private struct LocalHandshakeTestCryptoProvider: CryptoProvider {
+    let providerName = "LocalHandshakeTest"
+    let tier: CryptoTier
+    let activeSuite: CryptoSuite
+    let supportedSuites: [CryptoSuite]
+
+    func supportsSuite(_ suite: CryptoSuite) -> Bool {
+        supportedSuites.contains(suite)
+    }
+
+    func hpkeSeal(plaintext: Data, recipientPublicKey: Data, info: Data) async throws -> HPKESealedBox {
+        .init(encapsulatedKey: Data([0x01]), ciphertext: plaintext, tag: Data([0x02]), nonce: Data(repeating: 0x03, count: 12))
+    }
+
+    func kemDemSeal(plaintext: Data, recipientPublicKey: Data, info: Data) async throws -> HPKESealedBox {
+        try await hpkeSeal(plaintext: plaintext, recipientPublicKey: recipientPublicKey, info: info)
+    }
+
+    func kemDemSealWithSecret(
+        plaintext: Data,
+        recipientPublicKey: Data,
+        info: Data
+    ) async throws -> (sealedBox: HPKESealedBox, sharedSecret: SecureBytes) {
+        (
+            sealedBox: try await hpkeSeal(plaintext: plaintext, recipientPublicKey: recipientPublicKey, info: info),
+            sharedSecret: SecureBytes(data: Data(repeating: 0x11, count: 32))
+        )
+    }
+
+    func hpkeOpen(sealedBox: HPKESealedBox, privateKey: Data, info: Data) async throws -> Data {
+        sealedBox.ciphertext
+    }
+
+    func hpkeOpen(sealedBox: HPKESealedBox, privateKey: SecureBytes, info: Data) async throws -> Data {
+        sealedBox.ciphertext
+    }
+
+    func kemDemOpen(sealedBox: HPKESealedBox, privateKey: SecureBytes, info: Data) async throws -> Data {
+        sealedBox.ciphertext
+    }
+
+    func kemDemOpenWithSecret(
+        sealedBox: HPKESealedBox,
+        privateKey: SecureBytes,
+        info: Data
+    ) async throws -> (plaintext: Data, sharedSecret: SecureBytes) {
+        (
+            plaintext: sealedBox.ciphertext,
+            sharedSecret: SecureBytes(data: Data(repeating: 0x22, count: 32))
+        )
+    }
+
+    func kemEncapsulate(recipientPublicKey: Data) async throws -> (encapsulatedKey: Data, sharedSecret: SecureBytes) {
+        (Data([0x33, 0x44]), SecureBytes(data: Data(repeating: 0x55, count: 32)))
+    }
+
+    func kemDecapsulate(encapsulatedKey: Data, privateKey: SecureBytes) async throws -> SecureBytes {
+        SecureBytes(data: Data(repeating: 0x66, count: 32))
+    }
+
+    func sign(data: Data, using keyHandle: SigningKeyHandle) async throws -> Data {
+        Data([0x77])
+    }
+
+    func verify(data: Data, signature: Data, publicKey: Data) async throws -> Bool {
+        true
+    }
+
+    func generateKeyPair(for usage: KeyUsage) async throws -> KeyPair {
+        KeyPair(publicKey: Data([0x10, 0x11]), privateKey: Data([0x12, 0x13]))
+    }
+}
+
+private func XCTAssertThrowsErrorAsync<T>(
+    _ expression: @autoclosure () async throws -> T,
+    _ errorHandler: (Error) -> Void
+) async {
+    do {
+        _ = try await expression()
+        XCTFail("Expected error to be thrown")
+    } catch {
+        errorHandler(error)
     }
 }

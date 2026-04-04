@@ -62,4 +62,48 @@ final class PeerTrustLookupTests: XCTestCase {
 
         XCTAssertEqual(resolved[CryptoSuite(wireId: 257)], expectedKey)
     }
+
+    func testDefaultHandshakeTrustProviderUsesAuthoritativeProtocolFingerprint() async throws {
+        let protocolPublicKey = Data([0xDE, 0xAD, 0xBE, 0xEF])
+        let expectedFingerprint = try IdentityPublicKeys(
+            protocolPublicKey: protocolPublicKey,
+            protocolAlgorithm: .mlDSA65
+        ).authoritativeProtocolFingerprint()
+
+        let record = TrustRecord(
+            deviceId: "id:\(UUID().uuidString)",
+            pubKeyFP: String(repeating: "f", count: 64),
+            publicKey: Data([0x01]),
+            protocolPublicKey: protocolPublicKey,
+            protocolSigningAlgorithm: .mlDSA65,
+            protocolPublicKeyFingerprint: expectedFingerprint,
+            signature: Data()
+        )
+
+        let provider = DefaultHandshakeTrustProvider()
+        let resolved = provider.resolvedTrustedFingerprint(
+            directRecord: record,
+            matchingRecords: [record]
+        )
+
+        XCTAssertEqual(resolved, expectedFingerprint.lowercased())
+        XCTAssertNotEqual(resolved, record.pubKeyFP.lowercased())
+    }
+
+    func testDefaultHandshakeTrustProviderDoesNotMisuseLegacyPubKeyFingerprintForProtocolPinning() async throws {
+        let record = TrustRecord(
+            deviceId: "id:\(UUID().uuidString)",
+            pubKeyFP: String(repeating: "a", count: 64),
+            publicKey: Data([0x02]),
+            signature: Data()
+        )
+
+        let provider = DefaultHandshakeTrustProvider()
+        let resolved = provider.resolvedTrustedFingerprint(
+            directRecord: record,
+            matchingRecords: [record]
+        )
+
+        XCTAssertNil(resolved)
+    }
 }

@@ -25,6 +25,7 @@ public enum HandshakeAttemptStrategy: String, Sendable {
 public struct AttemptPreparation: Sendable {
     public let strategy: HandshakeAttemptStrategy
     public let offeredSuites: [CryptoSuite]
+    public let cryptoPolicy: CryptoPolicy
     /// Crypto provider for this attempt (PQC attempt may use ApplePQC/OQS; classic attempt uses Classic provider).
     /// iOS handshake context is single-suite; provider MUST match offeredSuites[0].
     public let cryptoProvider: any CryptoProvider
@@ -34,12 +35,14 @@ public struct AttemptPreparation: Sendable {
     public init(
         strategy: HandshakeAttemptStrategy,
         offeredSuites: [CryptoSuite],
+        cryptoPolicy: CryptoPolicy,
         cryptoProvider: any CryptoProvider,
         sigAAlgorithm: ProtocolSigningAlgorithm,
         signatureProvider: any ProtocolSignatureProvider
     ) {
         self.strategy = strategy
         self.offeredSuites = offeredSuites
+        self.cryptoPolicy = cryptoPolicy
         self.cryptoProvider = cryptoProvider
         self.sigAAlgorithm = sigAAlgorithm
         self.signatureProvider = signatureProvider
@@ -185,6 +188,7 @@ public struct TwoAttemptHandshakeManager: Sendable {
         return AttemptPreparation(
             strategy: strategy,
             offeredSuites: offeredSuites,
+            cryptoPolicy: HandshakeCryptoPolicyResolver.policy(for: offeredSuites),
             cryptoProvider: attemptProvider,
             sigAAlgorithm: sigAAlgorithm,
             signatureProvider: signatureProvider

@@ -289,9 +289,10 @@ public class DashboardViewModel: ObservableObject {
                 if let rekey = connectionManager.resolvedRekeyStatus(for: connection.device) {
                     return ConnectionPresentationPeer(
                         displayName: connection.device.name,
-                        cryptoKind: nil,
-                        suite: rekey.toSuite,
+                        cryptoKind: "\(rekey.fromSuite) → \(rekey.toSuite)",
+                        suite: nil,
                         guardStatus: RuntimeLocalization.string("Rekey 中"),
+                        isRekeying: true,
                         connectedAt: connection.connectedAt
                     )
                 }

@@ -19,4 +19,18 @@ final class ConnectionCodeFormatTests: XCTestCase {
         XCTAssertFalse(CrossNetworkWebRTCManager.canSubmitConnectionCode("ABCDE"))
         XCTAssertFalse(CrossNetworkWebRTCManager.canSubmitConnectionCode("ABCDEFG"))
     }
+
+    func testIOSDeviceSupportGateBlocksExplicit2018And2019A12FamilyDevices() {
+        XCTAssertFalse(IOSDeviceSupportGate.isSupported(modelIdentifier: "iPhone11,2"))
+        XCTAssertFalse(IOSDeviceSupportGate.isSupported(modelIdentifier: "iPhone11,8"))
+        XCTAssertFalse(IOSDeviceSupportGate.isSupported(modelIdentifier: "iPad8,1"))
+        XCTAssertFalse(IOSDeviceSupportGate.isSupported(modelIdentifier: "iPad11,3"))
+    }
+
+    func testIOSDeviceSupportGateAllows2020AndLaterDevices() {
+        XCTAssertTrue(IOSDeviceSupportGate.isSupported(modelIdentifier: "iPhone12,8"))
+        XCTAssertTrue(IOSDeviceSupportGate.isSupported(modelIdentifier: "iPhone13,2"))
+        XCTAssertTrue(IOSDeviceSupportGate.isSupported(modelIdentifier: "iPad11,6"))
+        XCTAssertTrue(IOSDeviceSupportGate.isSupported(modelIdentifier: "iPad13,1"))
+    }
 }

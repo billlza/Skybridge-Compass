@@ -471,6 +471,7 @@ final class DashboardViewModel: ObservableObject {
                             cryptoKind: "\(rekey.fromKind)·\(rekey.fromSuite) → \(rekey.toKind)·\(rekey.toSuite)",
                             suite: nil,
                             guardStatus: "Rekey 中",
+                            isRekeying: true,
                             connectedAt: newest.connectedAt
                         )
                     } else {

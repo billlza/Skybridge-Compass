@@ -44,6 +44,9 @@ targets:
         NSCameraUsageDescription: "SkyBridge 需要访问相机以扫描设备配对二维码。"
         LSSupportsOpeningDocumentsInPlace: true
         UIFileSharingEnabled: true
+        UIRequiredDeviceCapabilities:
+          - arm64
+          - iphone-ipad-minimum-performance-a12
         UILaunchStoryboardName: LaunchScreen
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait

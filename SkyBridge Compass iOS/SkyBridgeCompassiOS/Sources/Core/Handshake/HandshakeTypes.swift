@@ -39,7 +39,7 @@ public enum HandshakeState: Sendable {
 // MARK: - HandshakeFailureReason
 
 /// 握手失败原因
-public enum HandshakeFailureReason: Error, LocalizedError, Sendable {
+public enum HandshakeFailureReason: Error, LocalizedError, Sendable, Equatable {
     case timeout
     case cancelled
     case peerRejected(String)
@@ -258,6 +258,66 @@ public struct HandshakePolicy: Sendable, Codable {
         encoder.encodeString(minimumTier.rawValue)
         encoder.encodeBool(requireSecureEnclavePoP)
         return encoder.data
+    }
+}
+
+// MARK: - CryptoPolicy
+
+/// Local handshake crypto policy for suite admission.
+///
+/// This mirrors the mac/shared-core contract closely enough that the iOS-local
+/// handshake stack can make the same X-Wing / hybrid admission decisions,
+/// instead of silently diverging from macOS during suite negotiation.
+public struct CryptoPolicy: Sendable, Equatable {
+    public enum MinimumSecurityTier: String, Sendable {
+        case classicOnly
+        case pqcPreferred
+        case hybridPreferred
+        case pqcOnly
+    }
+
+    public let minimumSecurityTier: MinimumSecurityTier
+    public let allowExperimentalHybrid: Bool
+    public let advertiseHybrid: Bool
+    public let requireHybridIfAvailable: Bool
+
+    public init(
+        minimumSecurityTier: MinimumSecurityTier = .pqcPreferred,
+        allowExperimentalHybrid: Bool = false,
+        advertiseHybrid: Bool = false,
+        requireHybridIfAvailable: Bool = false
+    ) {
+        self.minimumSecurityTier = minimumSecurityTier
+        self.allowExperimentalHybrid = allowExperimentalHybrid
+        self.advertiseHybrid = advertiseHybrid
+        self.requireHybridIfAvailable = requireHybridIfAvailable
+    }
+
+    public static let `default` = CryptoPolicy()
+}
+
+// MARK: - HandshakeCryptoPolicyResolver
+
+/// Resolves the per-attempt local crypto policy from the suites we are about to
+/// advertise or accept. This prevents the iOS-local handshake stack from
+/// selecting an X-Wing-capable provider while still rejecting hybrid suites in
+/// the local admission layer.
+public enum HandshakeCryptoPolicyResolver {
+    public static func policy(for offeredSuites: [CryptoSuite]) -> CryptoPolicy {
+        let pqcSuites = offeredSuites.filter(\.isPQCGroup)
+        let hasHybridSuites = pqcSuites.contains(where: \.isHybrid)
+
+        guard hasHybridSuites else {
+            return .default
+        }
+
+        let onlyOffersHybrid = !pqcSuites.isEmpty && pqcSuites.allSatisfy(\.isHybrid)
+        return CryptoPolicy(
+            minimumSecurityTier: onlyOffersHybrid ? .hybridPreferred : .pqcPreferred,
+            allowExperimentalHybrid: true,
+            advertiseHybrid: true,
+            requireHybridIfAvailable: onlyOffersHybrid
+        )
     }
 }
 

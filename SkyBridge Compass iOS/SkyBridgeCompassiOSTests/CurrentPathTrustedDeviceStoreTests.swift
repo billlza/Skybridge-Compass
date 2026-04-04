@@ -3,14 +3,14 @@ import XCTest
 
 @MainActor
 final class CurrentPathTrustedDeviceStoreTests: XCTestCase {
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
+        try await super.setUp()
         TrustedDeviceStore.shared.clearAll()
     }
 
-    override func tearDown() {
+    override func tearDown() async throws {
         TrustedDeviceStore.shared.clearAll()
-        super.tearDown()
+        try await super.tearDown()
     }
 
     func testCurrentPathBindingRejectsIdentityConflict() {

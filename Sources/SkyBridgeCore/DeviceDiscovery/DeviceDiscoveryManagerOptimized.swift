@@ -1707,6 +1707,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         var driver: HandshakeDriver? = nil
         var sessionKeys: SessionKeys? = nil
         var declaredDeviceIdForVerification: String? = nil
+        var lastPairingIdentityExchangeReplyAt: Date? = nil
         var didMarkConnected = false
         
         // Heartbeat: avoid Swift concurrency Tasks here (StrictConcurrency) because they would capture
@@ -1877,6 +1878,11 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                     let st = await currentDriver.getCurrentState()
                     switch st {
                     case .waitingFinished, .established:
+                        if let inboundPairKey {
+                            logger.info("🧩 inbound rekey: releasing SOA established guard peer=\(peerIdForPresence, privacy: .public)")
+                            await PeerSessionArbiter.shared.clearEstablished(pairKey: inboundPairKey)
+                            await PeerSessionArbiter.shared.clearOutgoing(pairKey: inboundPairKey, attemptId: nil)
+                        }
                         let fromSuite = sessionKeys?.negotiatedSuite.rawValue ?? "?"
                         let fromKind = sessionKeys.map { cryptoKind(for: $0.negotiatedSuite) } ?? "?"
                         let toSuite = messageA.supportedSuites.first?.rawValue ?? "?"
@@ -2040,6 +2046,15 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                                     logger.warning("⚠️ 保存对端 KEM 公钥到 TrustSync 失败，已降级使用 bootstrap cache: \(error.localizedDescription, privacy: .public)")
                                 }
 
+                                let now = Date()
+                                guard P2PDiscoveryService.shouldSendPairingIdentityExchangeReply(
+                                    lastSentAt: lastPairingIdentityExchangeReplyAt,
+                                    now: now
+                                ) else {
+                                    logger.debug("ℹ️ pairingIdentityExchange reply rate-limited during bootstrap")
+                                    break
+                                }
+
                                 // Reply with our KEM identity public keys (bootstrap for iOS initiator).
                                 let provider = CryptoProviderFactory.make(policy: .preferPQC)
                                 let km = DeviceIdentityKeyManager.shared
@@ -2072,6 +2087,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                                 let outCipher = try encryptAppPayload(outPlain, with: keys)
                                 let outPadded = TrafficPadding.wrapIfEnabled(outCipher, label: "tx")
                                 try await transport.send(to: peer, data: outPadded)
+                                lastPairingIdentityExchangeReplyAt = now
                                 logger.info("🔑 已回传本机 KEM 公钥：count=\(kemKeys.count, privacy: .public) decision=\(decision.rawValue, privacy: .public)")
                             case .ping(let payload):
                                 // RTT probe: respond as fast as possible with an echoed pong.
@@ -2189,6 +2205,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                         )
 
         do {
+            let cryptoPolicy = HandshakeCryptoPolicyResolver.policy(for: offeredSuites)
             driver = try HandshakeDriver(
                 transport: transport,
                                 cryptoProvider: cryptoProvider,
@@ -2197,6 +2214,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                                 sigAAlgorithm: sigAAlgorithm,
                 offeredSuites: offeredSuites,
                                 policy: effectivePolicy,
+                                cryptoPolicy: cryptoPolicy,
                                 localSOAPeerId: localSOAPeerId,
                                 expectedRemoteSOAPeerId: expectedRemoteSOAPeerId
             )
@@ -2214,44 +2232,38 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                 }
 
                 if let driver {
-                await driver.handleMessage(frame, from: peer)
-                let st = await driver.getCurrentState()
-                logger.debug("🤝 HandshakeDriver state: \(String(describing: st), privacy: .public)")
+                    await driver.handleMessage(frame, from: peer)
+                    let st = await driver.getCurrentState()
+                    logger.debug("🤝 HandshakeDriver state: \(String(describing: st), privacy: .public)")
 
-                switch st {
-                case .waitingFinished(_, let keys, _):
-                    sessionKeys = keys
-                    postConnectedUX(keys: keys)
-                    if let declaredDeviceIdForVerification {
-                        await MainActor.run {
-                            PairingTrustApprovalService.shared.updateVerificationCode(
-                                declaredDeviceId: declaredDeviceIdForVerification,
-                                sessionKeys: keys
-                            )
+                    switch st {
+                    case .waitingFinished(_, let keys, _):
+                        if let declaredDeviceIdForVerification {
+                            await MainActor.run {
+                                PairingTrustApprovalService.shared.updateVerificationCode(
+                                    declaredDeviceId: declaredDeviceIdForVerification,
+                                    sessionKeys: keys
+                                )
+                            }
                         }
-                    }
-                    hbState.withLock {
-                        $0.sessionKeys = keys
-                        $0.pausedForRekey = false
-                    }
-                case .established(let keys):
-                    sessionKeys = keys
-                    postConnectedUX(keys: keys)
-                    if let declaredDeviceIdForVerification {
-                        await MainActor.run {
-                            PairingTrustApprovalService.shared.updateVerificationCode(
-                                declaredDeviceId: declaredDeviceIdForVerification,
-                                sessionKeys: keys
-                            )
+                    case .established(let keys):
+                        sessionKeys = keys
+                        postConnectedUX(keys: keys)
+                        if let declaredDeviceIdForVerification {
+                            await MainActor.run {
+                                PairingTrustApprovalService.shared.updateVerificationCode(
+                                    declaredDeviceId: declaredDeviceIdForVerification,
+                                    sessionKeys: keys
+                                )
+                            }
                         }
+                        hbState.withLock {
+                            $0.sessionKeys = keys
+                            $0.pausedForRekey = false
+                        }
+                    default:
+                        break
                     }
-                    hbState.withLock {
-                        $0.sessionKeys = keys
-                        $0.pausedForRekey = false
-                    }
-                default:
-                    break
-                }
                 }
 
                 // Start heartbeat once we have session keys (only once).

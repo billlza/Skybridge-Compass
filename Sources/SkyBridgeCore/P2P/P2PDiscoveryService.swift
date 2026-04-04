@@ -1918,6 +1918,8 @@ public class P2PDiscoveryService: BaseManager {
         // waitingFinished may derive candidate keys for verification UX, but must not
         // unlock app-message processing or shared connected state.
         var sessionKeys: SessionKeys?
+        var previousSessionKeysBeforeRekey: SessionKeys?
+        var lastPairingIdentityExchangeReplyAt: Date?
         var declaredDeviceIdForVerification: String?
         defer {
             if let pairKey = inboundPairKey {
@@ -2048,6 +2050,12 @@ public class P2PDiscoveryService: BaseManager {
                         let toKind = messageA.supportedSuites.first.map { cryptoKind(for: $0) } ?? "?"
                         let rekeyPeerId = peerIdForPresence
 
+                        if let inboundPairKey {
+                            logger.info("🧩 inbound rekey: releasing SOA established guard peer=\(peerIdForPresence, privacy: .public)")
+                            await PeerSessionArbiter.shared.clearEstablished(pairKey: inboundPairKey)
+                            await PeerSessionArbiter.shared.clearOutgoing(pairKey: inboundPairKey, attemptId: nil)
+                        }
+
                         Task { @MainActor in
                             ConnectionPresenceService.shared.markRekeying(.init(
                                 peerId: rekeyPeerId,
@@ -2058,6 +2066,7 @@ public class P2PDiscoveryService: BaseManager {
                             ))
                         }
                         logger.info("🔁 入站 rekey：\(fromKind)·\(fromSuite) -> \(toKind)·\(toSuite) peer=\(peerIdForPresence, privacy: .public)")
+                        previousSessionKeysBeforeRekey = sessionKeys
                         driver = nil
                         sessionKeys = nil
                     }
@@ -2129,10 +2138,19 @@ public class P2PDiscoveryService: BaseManager {
                                     remoteControlPort: endpoints.remoteControlPort
                                 ))
                                 let outPlain = try JSONEncoder().encode(reply)
-                                let outCipher = try encryptAppPayload(outPlain, with: keys)
-                                let outPadded = TrafficPadding.wrapIfEnabled(outCipher, label: "tx")
-                                try await sendFramed(outPadded)
-                                logger.info("🔑 已回传本机 KEM 公钥：count=\(kemKeys.count, privacy: .public) decision=\(decision.rawValue, privacy: .public)")
+                                let now = Date()
+                                if Self.shouldSendPairingIdentityExchangeReply(
+                                    lastSentAt: lastPairingIdentityExchangeReplyAt,
+                                    now: now
+                                ) {
+                                    let outCipher = try encryptAppPayload(outPlain, with: keys)
+                                    let outPadded = TrafficPadding.wrapIfEnabled(outCipher, label: "tx")
+                                    try await sendFramed(outPadded)
+                                    lastPairingIdentityExchangeReplyAt = now
+                                    logger.info("🔑 已回传本机 KEM 公钥：count=\(kemKeys.count, privacy: .public) decision=\(decision.rawValue, privacy: .public)")
+                                } else {
+                                    logger.debug("ℹ️ pairingIdentityExchange reply rate-limited during bootstrap")
+                                }
 
                             case .ping(let payload):
                                 let reply = AppMessage.pong(.init(id: payload.id))
@@ -2301,6 +2319,7 @@ public class P2PDiscoveryService: BaseManager {
                         )
 
                         do {
+                            let cryptoPolicy = HandshakeCryptoPolicyResolver.policy(for: offeredSuites)
                             driver = try HandshakeDriver(
                                 transport: transport,
                                 cryptoProvider: cryptoProvider,
@@ -2309,6 +2328,7 @@ public class P2PDiscoveryService: BaseManager {
                                 sigAAlgorithm: sigAAlgorithm,
                                 offeredSuites: offeredSuites,
                                 policy: effectivePolicy,
+                                cryptoPolicy: cryptoPolicy,
                                 localSOAPeerId: localSOAPeerId,
                                 expectedRemoteSOAPeerId: expectedRemoteSOAPeerId
                             )
@@ -2329,6 +2349,21 @@ public class P2PDiscoveryService: BaseManager {
                 logger.debug("🤝 HandshakeDriver state: \(String(describing: st), privacy: .public)")
 
                 if case .failed(let reason) = st {
+                    if let previousKeys = previousSessionKeysBeforeRekey {
+                        previousSessionKeysBeforeRekey = nil
+                        sessionKeys = previousKeys
+                        let restoredPeerId = peerIdForPresence
+                        Task { @MainActor in
+                            ConnectionPresenceService.shared.clearRekeying(peerId: restoredPeerId)
+                            self.connectionStatus = .connected
+                        }
+                        logger.warning(
+                            "⚠️ 入站 rekey 失败，已恢复旧会话: peer=\(peer.deviceId, privacy: .public) reason=\(String(describing: reason), privacy: .public) suite=\(previousKeys.negotiatedSuite.rawValue, privacy: .public)"
+                        )
+                        driver = nil
+                        continue
+                    }
+
                     logger.warning(
                         "⚠️ 入站握手失败，等待同连接重试: peer=\(peer.deviceId, privacy: .public) reason=\(String(describing: reason), privacy: .public)"
                     )
@@ -2348,6 +2383,7 @@ public class P2PDiscoveryService: BaseManager {
                     }
                 case .established(let keys):
                     sessionKeys = keys
+                    previousSessionKeysBeforeRekey = nil
                     if let declaredDeviceIdForVerification {
                         await MainActor.run {
                             PairingTrustApprovalService.shared.updateVerificationCode(
@@ -2426,6 +2462,15 @@ public class P2PDiscoveryService: BaseManager {
         default:
             return false
         }
+    }
+
+    nonisolated static func shouldSendPairingIdentityExchangeReply(
+        lastSentAt: Date?,
+        now: Date = Date(),
+        minimumInterval: TimeInterval = 10
+    ) -> Bool {
+        guard let lastSentAt else { return true }
+        return now.timeIntervalSince(lastSentAt) >= minimumInterval
     }
 
     nonisolated private static func normalizePeerHostToken(_ raw: String) -> String {
