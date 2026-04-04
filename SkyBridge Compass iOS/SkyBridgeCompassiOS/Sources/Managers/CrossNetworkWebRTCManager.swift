@@ -1119,7 +1119,6 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     @Published public private(set) var remoteVideoTrackFrameSize: CGSize = .zero
     private var remoteVideoTrackHasReceivedFirstPacket = false
     private var remoteVideoTrackConfirmationTask: Task<Void, Never>?
-    private var remoteVideoTrackPacketConfirmationTask: Task<Void, Never>?
     private var remoteVideoTrackDetectedAt: Date?
     private var lastScreenDataAt: Date?
 #endif
@@ -1893,8 +1892,6 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
 
         remoteVideoTrackConfirmationTask?.cancel()
         remoteVideoTrackConfirmationTask = nil
-        remoteVideoTrackPacketConfirmationTask?.cancel()
-        remoteVideoTrackPacketConfirmationTask = nil
         remoteVideoTrack = track
         let shouldPreservePromotionEvidence =
             track != nil && (isTrackRebind || preservedRenderedFrame || preservedFirstPacket)
@@ -1979,7 +1976,6 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         if remoteVideoTrackHasRenderedFrame { return }
         if let size = bestAvailableRemoteVideoEvidenceSize() {
             markRemoteVideoTrackReadyForPromotion(size: size, source: source)
-            scheduleRemoteVideoTrackPacketConfirmationIfNeeded(size: size, source: source)
             return
         }
         SkyBridgeLogger.shared.debug("ℹ️ WebRTC 原生视频轨已收到首个 RTP 包，等待分辨率证据后确认首帧 source=\(source)")
@@ -1994,7 +1990,6 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         }
         if remoteVideoTrackHasReceivedFirstPacket {
             markRemoteVideoTrackReadyForPromotion(size: size, source: source)
-            scheduleRemoteVideoTrackPacketConfirmationIfNeeded(size: size, source: source)
             return
         }
         if remoteVideoTrack != nil {
@@ -2017,23 +2012,6 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             return managerResolution
         }
         return nil
-    }
-
-    func inferredNativeVideoTrackReady(
-        now: Date = Date(),
-        minimumTrackAge: TimeInterval = 0.35,
-        maximumFallbackSilence: TimeInterval = 1.5
-    ) -> Bool {
-        guard currentSessionId != nil else { return false }
-        guard remoteVideoTrack != nil else { return false }
-        if remoteVideoTrackReadyForPromotion || remoteVideoTrackHasRenderedFrame {
-            return true
-        }
-        guard let remoteVideoTrackDetectedAt else { return false }
-        guard now.timeIntervalSince(remoteVideoTrackDetectedAt) >= minimumTrackAge else { return false }
-        guard let lastScreenDataAt else { return false }
-        guard now.timeIntervalSince(lastScreenDataAt) <= maximumFallbackSilence else { return false }
-        return bestAvailableRemoteVideoEvidenceSize() != nil
     }
 
     @MainActor
@@ -2060,42 +2038,9 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         if !remoteVideoTrackReadyForPromotion {
             remoteVideoTrackReadyForPromotion = true
             SkyBridgeLogger.shared.info(
-                "🎬 WebRTC 原生视频轨已确认可切主链: \(Int(size.width))x\(Int(size.height)) source=\(source)"
+                "🎬 WebRTC 原生视频轨已具备 promotion 条件，等待真实渲染证据: \(Int(size.width))x\(Int(size.height)) source=\(source)"
             )
             RemoteDesktopManager.instance.handleCrossNetworkNativeVideoTrackPromotionReady()
-        }
-        guard Self.shouldBackfillPacketConfirmationAfterPromotionReady(
-            size: size,
-            hasReceivedFirstPacket: remoteVideoTrackHasReceivedFirstPacket,
-            hasRenderedFrame: remoteVideoTrackHasRenderedFrame
-        ) else {
-            return
-        }
-        scheduleRemoteVideoTrackPacketConfirmationIfNeeded(size: size, source: source)
-    }
-
-    @MainActor
-    private func scheduleRemoteVideoTrackPacketConfirmationIfNeeded(size: CGSize, source: String) {
-        guard size.width > 0, size.height > 0 else { return }
-        guard remoteVideoTrackReadyForPromotion else { return }
-        guard remoteVideoTrackHasReceivedFirstPacket else { return }
-        guard !remoteVideoTrackHasRenderedFrame else { return }
-        remoteVideoTrackPacketConfirmationTask?.cancel()
-        remoteVideoTrackPacketConfirmationTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            do {
-                try await Task.sleep(for: .milliseconds(300))
-            } catch {
-                return
-            }
-            guard self.currentSessionId != nil, self.remoteVideoTrack != nil else { return }
-            guard self.remoteVideoTrackReadyForPromotion else { return }
-            guard self.remoteVideoTrackHasReceivedFirstPacket else { return }
-            guard !self.remoteVideoTrackHasRenderedFrame else { return }
-            self.noteRemoteVideoTrackRenderedFrame(
-                size,
-                source: "receiver-packet-confirmed:\(source)"
-            )
         }
     }
 
@@ -2103,24 +2048,9 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         switch source {
         case "heartbeat-renderer", "rtc-mtl-video-view", "receiver-stats":
             return true
-        case let value where value.hasPrefix("receiver-packet-confirmed:"):
-            return true
-        // fallback-screen-data-confirmed 证明 WebRTC 原生轨确实在收到帧（从 fallback 数据推断）
-        case "fallback-screen-data-confirmed":
-            return true
         default:
             return false
         }
-    }
-
-    internal static func shouldBackfillPacketConfirmationAfterPromotionReady(
-        size: CGSize,
-        hasReceivedFirstPacket: Bool,
-        hasRenderedFrame: Bool
-    ) -> Bool {
-        guard size.width > 0, size.height > 0 else { return false }
-        guard hasReceivedFirstPacket else { return false }
-        return !hasRenderedFrame
     }
 #endif
 
@@ -6034,15 +5964,7 @@ extension CrossNetworkWebRTCManager {
         )
     }
 
-    internal static func testOnlyShouldBackfillPacketConfirmationAfterPromotionReady(
-        size: CGSize,
-        hasReceivedFirstPacket: Bool,
-        hasRenderedFrame: Bool
-    ) -> Bool {
-        shouldBackfillPacketConfirmationAfterPromotionReady(
-            size: size,
-            hasReceivedFirstPacket: hasReceivedFirstPacket,
-            hasRenderedFrame: hasRenderedFrame
-        )
+    internal static func testOnlyIsActualNativeRenderEvidence(_ source: String) -> Bool {
+        isActualNativeRenderEvidence(source: source)
     }
 }

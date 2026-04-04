@@ -82,3 +82,76 @@ final class RemoteVideoFrameFeedTests: XCTestCase {
         )
     }
 }
+
+@available(iOS 17.0, *)
+@MainActor
+final class RemoteDesktopNativePromotionTests: XCTestCase {
+    func testShouldAnnounceCrossNetworkNativeVideoReadyRejectsMissingRenderedFrameEvenWhenForced() {
+        let shouldAnnounce = RemoteDesktopManager.shouldAnnounceCrossNetworkNativeVideoReady(
+            activeTransportModeIsCrossNetwork: true,
+            hasCurrentConnection: true,
+            hasRenderedNativeFrame: false,
+            lastSentNativeVideoTrackReady: false,
+            force: true,
+            lastAnnouncementAt: nil,
+            now: Date()
+        )
+
+        XCTAssertFalse(shouldAnnounce)
+    }
+
+    func testShouldAnnounceCrossNetworkNativeVideoReadyAcceptsRenderedFrameEvidence() {
+        let shouldAnnounce = RemoteDesktopManager.shouldAnnounceCrossNetworkNativeVideoReady(
+            activeTransportModeIsCrossNetwork: true,
+            hasCurrentConnection: true,
+            hasRenderedNativeFrame: true,
+            lastSentNativeVideoTrackReady: false,
+            force: false,
+            lastAnnouncementAt: nil,
+            now: Date()
+        )
+
+        XCTAssertTrue(shouldAnnounce)
+    }
+
+    func testAdvertisedCrossNetworkNativeVideoReadyFlagTracksRenderedFrameEvidenceOnly() {
+        XCTAssertNil(
+            RemoteDesktopManager.advertisedCrossNetworkNativeVideoReadyFlag(
+                activeTransportModeIsCrossNetwork: false,
+                hasRenderedNativeFrame: true
+            )
+        )
+        XCTAssertEqual(
+            RemoteDesktopManager.advertisedCrossNetworkNativeVideoReadyFlag(
+                activeTransportModeIsCrossNetwork: true,
+                hasRenderedNativeFrame: false
+            ),
+            false
+        )
+        XCTAssertEqual(
+            RemoteDesktopManager.advertisedCrossNetworkNativeVideoReadyFlag(
+                activeTransportModeIsCrossNetwork: true,
+                hasRenderedNativeFrame: true
+            ),
+            true
+        )
+    }
+
+    func testActualNativeRenderEvidenceRejectsPacketAndFallbackInference() {
+        XCTAssertTrue(CrossNetworkWebRTCManager.testOnlyIsActualNativeRenderEvidence("heartbeat-renderer"))
+        XCTAssertTrue(CrossNetworkWebRTCManager.testOnlyIsActualNativeRenderEvidence("rtc-mtl-video-view"))
+        XCTAssertTrue(CrossNetworkWebRTCManager.testOnlyIsActualNativeRenderEvidence("receiver-stats"))
+
+        XCTAssertFalse(
+            CrossNetworkWebRTCManager.testOnlyIsActualNativeRenderEvidence("fallback-screen-data-confirmed")
+        )
+        XCTAssertFalse(
+            CrossNetworkWebRTCManager.testOnlyIsActualNativeRenderEvidence("receiver-first-packet")
+        )
+        XCTAssertFalse(
+            CrossNetworkWebRTCManager.testOnlyIsActualNativeRenderEvidence(
+                "receiver-packet-confirmed:fallback-screen-data-confirmed"
+            )
+        )
+    }
+}

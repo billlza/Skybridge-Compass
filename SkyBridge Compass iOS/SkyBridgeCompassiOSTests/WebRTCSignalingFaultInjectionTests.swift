@@ -238,28 +238,22 @@ final class WebRTCSignalingFaultInjectionTests: XCTestCase {
     }
 
     @MainActor
-    func testPromotionReadyBackfillsPacketConfirmationWhenFirstPacketAlreadyArrived() {
+    func testActualNativeRenderEvidenceRequiresRendererOrReceiverStats() {
         XCTAssertTrue(
-            CrossNetworkWebRTCManager.testOnlyShouldBackfillPacketConfirmationAfterPromotionReady(
-                size: CGSize(width: 2056, height: 1329),
-                hasReceivedFirstPacket: true,
-                hasRenderedFrame: false
-            )
+            CrossNetworkWebRTCManager.testOnlyIsActualNativeRenderEvidence("heartbeat-renderer")
         )
-
-        XCTAssertFalse(
-            CrossNetworkWebRTCManager.testOnlyShouldBackfillPacketConfirmationAfterPromotionReady(
-                size: CGSize(width: 2056, height: 1329),
-                hasReceivedFirstPacket: false,
-                hasRenderedFrame: false
-            )
+        XCTAssertTrue(
+            CrossNetworkWebRTCManager.testOnlyIsActualNativeRenderEvidence("rtc-mtl-video-view")
         )
-
+        XCTAssertTrue(
+            CrossNetworkWebRTCManager.testOnlyIsActualNativeRenderEvidence("receiver-stats")
+        )
         XCTAssertFalse(
-            CrossNetworkWebRTCManager.testOnlyShouldBackfillPacketConfirmationAfterPromotionReady(
-                size: CGSize(width: 2056, height: 1329),
-                hasReceivedFirstPacket: true,
-                hasRenderedFrame: true
+            CrossNetworkWebRTCManager.testOnlyIsActualNativeRenderEvidence("fallback-screen-data-confirmed")
+        )
+        XCTAssertFalse(
+            CrossNetworkWebRTCManager.testOnlyIsActualNativeRenderEvidence(
+                "receiver-packet-confirmed:fallback-screen-data-confirmed"
             )
         )
     }

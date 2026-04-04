@@ -2210,8 +2210,6 @@ public class RemoteDesktopManager: ObservableObject {
     private var streamContinuityWatchdogTask: Task<Void, Never>?
     private var firstFrameContinuityTask: Task<Void, Never>?
     private var interactionContinuityTask: Task<Void, Never>?
-    private var crossNetworkNativePromotionWatchdogTask: Task<Void, Never>?
-    private var crossNetworkNativeReadySuppressed = false
     private var lastMetalFallbackAt: Date?
     private var stableSampleBufferFramesSinceMetalFallback: Int = 0
     
@@ -2243,9 +2241,6 @@ public class RemoteDesktopManager: ObservableObject {
         rendererEnqueuedFramesInStatsWindow = 0
         displayedFramesInStatsWindow = 0
         lastCrossNetworkNativeReadyAnnouncementAt = nil
-        crossNetworkNativePromotionWatchdogTask?.cancel()
-        crossNetworkNativePromotionWatchdogTask = nil
-        crossNetworkNativeReadySuppressed = false
         lastMetalFallbackAt = nil
         stableSampleBufferFramesSinceMetalFallback = 0
         decodedVideoRendererPreference = preferredDecodedVideoRenderer()
@@ -2537,13 +2532,10 @@ public class RemoteDesktopManager: ObservableObject {
         firstFrameContinuityTask?.cancel()
         interactionContinuityTask?.cancel()
         streamContinuityWatchdogTask?.cancel()
-        crossNetworkNativePromotionWatchdogTask?.cancel()
         firstFrameWatchdogTask = nil
         firstFrameContinuityTask = nil
         interactionContinuityTask = nil
         streamContinuityWatchdogTask = nil
-        crossNetworkNativePromotionWatchdogTask = nil
-        crossNetworkNativeReadySuppressed = false
         if state == .streaming {
             state = .connected
         }
@@ -2562,13 +2554,10 @@ public class RemoteDesktopManager: ObservableObject {
         firstFrameContinuityTask?.cancel()
         interactionContinuityTask?.cancel()
         streamContinuityWatchdogTask?.cancel()
-        crossNetworkNativePromotionWatchdogTask?.cancel()
         firstFrameWatchdogTask = nil
         firstFrameContinuityTask = nil
         interactionContinuityTask = nil
         streamContinuityWatchdogTask = nil
-        crossNetworkNativePromotionWatchdogTask = nil
-        crossNetworkNativeReadySuppressed = false
         
         // 关闭连接
         networkConnection?.stateUpdateHandler = nil
@@ -2676,9 +2665,6 @@ public class RemoteDesktopManager: ObservableObject {
     @MainActor
     func noteCrossNetworkNativeVideoFrame(_ size: CGSize) {
         guard activeTransportMode == .crossNetwork else { return }
-        crossNetworkNativePromotionWatchdogTask?.cancel()
-        crossNetworkNativePromotionWatchdogTask = nil
-        crossNetworkNativeReadySuppressed = false
         let now = Date()
         if size.width > 0, size.height > 0 {
             resolution = size
@@ -2715,54 +2701,30 @@ public class RemoteDesktopManager: ObservableObject {
         return true
     }
 
+    static func advertisedCrossNetworkNativeVideoReadyFlag(
+        activeTransportModeIsCrossNetwork: Bool,
+        hasRenderedNativeFrame: Bool
+    ) -> Bool? {
+        guard activeTransportModeIsCrossNetwork else { return nil }
+        return hasRenderedNativeFrame
+    }
+
     @MainActor
     private func announceCrossNetworkNativeVideoReadyIfNeeded(force: Bool, now: Date = Date()) {
-        let inferredNativeReady = !crossNetworkNativeReadySuppressed
-            && crossNetwork.inferredNativeVideoTrackReady(now: now)
+        let hasRenderedNativeFrame = crossNetwork.remoteVideoTrackHasRenderedFrame
         let shouldAnnounce = Self.shouldAnnounceCrossNetworkNativeVideoReady(
             activeTransportModeIsCrossNetwork: activeTransportMode == .crossNetwork,
             hasCurrentConnection: currentConnection != nil,
-            hasRenderedNativeFrame: crossNetwork.remoteVideoTrackHasRenderedFrame || inferredNativeReady,
+            hasRenderedNativeFrame: hasRenderedNativeFrame,
             lastSentNativeVideoTrackReady: lastSentStreamConfiguration?.nativeVideoTrackReady == true,
             force: force,
             lastAnnouncementAt: lastCrossNetworkNativeReadyAnnouncementAt,
             now: now
         )
         guard shouldAnnounce else { return }
-        if inferredNativeReady, !crossNetwork.remoteVideoTrackHasRenderedFrame {
-            SkyBridgeLogger.shared.info(
-                "🎬 基于原生轨存在与稳定 fallback 证据，保守确认 nativeReady=true"
-            )
-            scheduleCrossNetworkNativePromotionWatchdog()
-        } else if crossNetwork.remoteVideoTrackHasRenderedFrame {
-            crossNetworkNativePromotionWatchdogTask?.cancel()
-            crossNetworkNativePromotionWatchdogTask = nil
-        }
         lastCrossNetworkNativeReadyAnnouncementAt = now
         Task { @MainActor [weak self] in
             guard let self else { return }
-            await self.pushViewerStreamConfiguration(force: true)
-        }
-    }
-
-    @MainActor
-    private func scheduleCrossNetworkNativePromotionWatchdog(timeout: Duration = .milliseconds(2500)) {
-        crossNetworkNativePromotionWatchdogTask?.cancel()
-        crossNetworkNativePromotionWatchdogTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            do {
-                try await Task.sleep(for: timeout)
-            } catch {
-                return
-            }
-            guard self.activeTransportMode == .crossNetwork else { return }
-            guard self.currentConnection != nil else { return }
-            guard !self.crossNetwork.remoteVideoTrackHasRenderedFrame else { return }
-            guard self.lastSentStreamConfiguration?.nativeVideoTrackReady == true else { return }
-            self.crossNetworkNativeReadySuppressed = true
-            SkyBridgeLogger.shared.warning(
-                "⚠️ WebRTC 原生视频轨在 promotion 窗口内未确认首帧，已回退到持续 fallback"
-            )
             await self.pushViewerStreamConfiguration(force: true)
         }
     }
@@ -2832,13 +2794,10 @@ public class RemoteDesktopManager: ObservableObject {
         firstFrameContinuityTask?.cancel()
         interactionContinuityTask?.cancel()
         streamContinuityWatchdogTask?.cancel()
-        crossNetworkNativePromotionWatchdogTask?.cancel()
         firstFrameWatchdogTask = nil
         firstFrameContinuityTask = nil
         interactionContinuityTask = nil
         streamContinuityWatchdogTask = nil
-        crossNetworkNativePromotionWatchdogTask = nil
-        crossNetworkNativeReadySuppressed = false
         networkConnection?.stateUpdateHandler = nil
         networkConnection?.cancel()
         networkConnection = nil
@@ -3035,10 +2994,6 @@ public class RemoteDesktopManager: ObservableObject {
             supportedFormats: Self.supportedRemoteVideoFormats(),
             at: now
         )
-        let inferredNativeReady = activeTransportMode == .crossNetwork
-            && !crossNetworkNativeReadySuppressed
-            ? crossNetwork.inferredNativeVideoTrackReady(now: now)
-            : false
         let dimensions = viewerSettings.resolution.dimensions
         let transportTuning = viewerSettings.transportTuning
         return RemoteDesktopStreamConfigurationPayload(
@@ -3064,9 +3019,10 @@ public class RemoteDesktopManager: ObservableObject {
                 ? "webrtc-native-main+sbrf-fallback"
                 : "sbrf-v1",
             screenDataChannelEnabled: activeTransportMode != .crossNetwork ? true : false,
-            nativeVideoTrackReady: activeTransportMode == .crossNetwork
-                ? (crossNetwork.remoteVideoTrackHasRenderedFrame || inferredNativeReady)
-                : nil,
+            nativeVideoTrackReady: Self.advertisedCrossNetworkNativeVideoReadyFlag(
+                activeTransportModeIsCrossNetwork: activeTransportMode == .crossNetwork,
+                hasRenderedNativeFrame: crossNetwork.remoteVideoTrackHasRenderedFrame
+            ),
             streamRefreshToken: refreshStream ? nextStreamRefreshToken() : nil
         )
     }
