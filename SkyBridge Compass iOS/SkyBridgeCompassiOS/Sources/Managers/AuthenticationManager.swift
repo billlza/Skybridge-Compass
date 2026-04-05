@@ -97,14 +97,16 @@ public class AuthenticationManager: ObservableObject {
             issuedAt: session.issuedAt
         )
 
-        applySession(enrichedSession, emailFallback: email)
+        let hydratedSession = await hydrateSessionProfileIfPossible(enrichedSession)
+        applySession(hydratedSession, emailFallback: email)
         SkyBridgeLogger.shared.info("✅ 注册成功: \(email) (nebula_id=\(nebulaId))")
     }
     
     /// 登录
     public func signIn(email: String, password: String) async throws {
         let session = try await SupabaseService.shared.signInWithEmail(email: email, password: password)
-        applySession(session, emailFallback: email)
+        let hydratedSession = await hydrateSessionProfileIfPossible(session)
+        applySession(hydratedSession, emailFallback: email)
         SkyBridgeLogger.shared.info("✅ 登录成功: \(email)")
     }
 
@@ -117,7 +119,8 @@ public class AuthenticationManager: ObservableObject {
     /// 使用手机号 + 短信验证码登录；若手机号首次使用，Supabase 会按项目策略自动创建账号。
     public func signInWithPhone(phoneNumber: String, code: String) async throws {
         let session = try await SupabaseService.shared.signInWithPhone(phone: phoneNumber, token: code)
-        applySession(session, emailFallback: phoneNumber)
+        let hydratedSession = await hydrateSessionProfileIfPossible(session)
+        applySession(hydratedSession, emailFallback: phoneNumber)
         SkyBridgeLogger.shared.info("✅ 手机登录成功: ****\(phoneNumber.suffix(4))")
     }
 
@@ -220,7 +223,8 @@ public class AuthenticationManager: ObservableObject {
 
             // 启动后后台刷新一次（不阻塞 UI）
             Task { [weak self] in
-                await self?.refreshProfileIfPossible()
+                guard let self else { return }
+                await self.refreshProfileIfPossible()
             }
         }
     }
@@ -251,7 +255,7 @@ public class AuthenticationManager: ObservableObject {
         let avatarURL = session.avatarURL.flatMap(URL.init(string:))
         currentUser = User(
             id: session.userIdentifier,
-            email: emailFallback,
+            email: session.email ?? emailFallback,
             displayName: displayName,
             avatarURL: avatarURL,
             nebulaId: session.nebulaId
@@ -262,7 +266,36 @@ public class AuthenticationManager: ObservableObject {
 
         // 登录成功后自动刷新一次，确保 iOS 与 macOS 的 nebula_id/avatar 等一致并持久化
         Task { [weak self] in
-            await self?.refreshProfileIfPossible()
+            guard let self else { return }
+            await self.refreshProfileIfPossible()
+        }
+    }
+
+    private func hydrateSessionProfileIfPossible(_ session: AuthSession) async -> AuthSession {
+        guard Self.shouldAttemptSupabaseProfileHydration(
+            session: session,
+            isSupabaseConfigured: SupabaseService.shared.isConfigured
+        ) else {
+            return session
+        }
+
+        do {
+            let profile = try await SupabaseService.shared.fetchCurrentUserProfile(
+                accessToken: session.accessToken
+            )
+            return AuthSession(
+                accessToken: session.accessToken,
+                refreshToken: session.refreshToken,
+                userIdentifier: session.userIdentifier,
+                displayName: profile.displayName ?? session.displayName,
+                email: profile.email ?? session.email,
+                avatarURL: profile.avatarURL ?? session.avatarURL,
+                nebulaId: profile.nebulaId ?? session.nebulaId,
+                issuedAt: session.issuedAt
+            )
+        } catch {
+            SkyBridgeLogger.shared.debug("ℹ️ 登录态资料补水失败（忽略）：\(error.localizedDescription)")
+            return session
         }
     }
 
@@ -275,6 +308,12 @@ public class AuthenticationManager: ObservableObject {
                 didLogSupabaseConfigMissing = true
                 SkyBridgeLogger.shared.info("ℹ️ Supabase 配置缺失：跳过账号资料刷新（请在设置中配置或提供 SupabaseConfig.plist）")
             }
+            return
+        }
+        guard Self.shouldAttemptSupabaseProfileHydration(
+            session: session,
+            isSupabaseConfigured: true
+        ) else {
             return
         }
 
@@ -375,4 +414,20 @@ public class AuthenticationManager: ObservableObject {
             nebulaId: updatedSession.nebulaId
         )
     }
+
+    internal static func shouldAttemptSupabaseProfileHydration(
+        session: AuthSession,
+        isSupabaseConfigured: Bool
+    ) -> Bool {
+        guard isSupabaseConfigured, session.accessToken != "pending_verification" else {
+            return false
+        }
+
+        if SupabaseService.shared.isSupabaseAccessToken(session.accessToken) {
+            return true
+        }
+
+        return UUID(uuidString: session.userIdentifier) != nil
+    }
+
 }

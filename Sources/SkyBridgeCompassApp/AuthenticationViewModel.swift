@@ -350,6 +350,7 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
             userIdentifier: session.userIdentifier,
             nebulaId: nebulaId,
             displayName: session.displayName,
+            avatarURL: session.avatarURL,
             issuedAt: session.issuedAt
         )
 
@@ -566,6 +567,7 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
             refreshToken: tokenResponse.refreshToken,
             userIdentifier: userInfo.subject,
             displayName: displayName,
+            avatarURL: userInfo.picture,
             issuedAt: Date()
         )
         try authService.updateSession(session)
@@ -1437,21 +1439,27 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
         SkyBridgeLogger.ui.debugOnly("   用户ID: \(session.userIdentifier)")
 
         do {
-            guard SupabaseService.shared.isSupabaseAccessToken(session.accessToken) else {
-                SkyBridgeLogger.ui.debugOnly("ℹ️ [AuthenticationViewModel] 非Supabase会话，跳过云头像加载")
-                return
-            }
  // 首先检查本地缓存
             if AvatarCacheManager.shared.getAvatar(for: session.userIdentifier) != nil {
                 SkyBridgeLogger.ui.debugOnly("✅ [AuthenticationViewModel] 从本地缓存加载头像")
                 return
             }
 
- // 从Supabase获取头像URL
-            if let avatarUrl = try await SupabaseService.shared.getUserAvatarUrl(
-                userId: session.userIdentifier,
-                accessToken: session.accessToken
-            ) {
+            let avatarUrl: String?
+            if let sessionAvatarURL = session.avatarURL?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !sessionAvatarURL.isEmpty {
+                avatarUrl = sessionAvatarURL
+            } else if SupabaseService.shared.isSupabaseAccessToken(session.accessToken) {
+                avatarUrl = try await SupabaseService.shared.getUserAvatarUrl(
+                    userId: session.userIdentifier,
+                    accessToken: session.accessToken
+                )
+            } else {
+                SkyBridgeLogger.ui.debugOnly("ℹ️ [AuthenticationViewModel] 当前会话未提供云头像 URL")
+                avatarUrl = nil
+            }
+
+            if let avatarUrl {
                 SkyBridgeLogger.ui.debugOnly("🔍 [AuthenticationViewModel] 找到用户头像URL: \(avatarUrl)")
 
  // 下载并缓存头像
@@ -1673,7 +1681,9 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
                 accessToken: activeSession.accessToken,
                 refreshToken: activeSession.refreshToken,
                 userIdentifier: activeSession.userIdentifier,
+                nebulaId: activeSession.nebulaId,
                 displayName: displayName,
+                avatarURL: activeSession.avatarURL,
                 issuedAt: activeSession.issuedAt
             )
             currentSession = updatedSession
@@ -1697,7 +1707,9 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
             accessToken: session.accessToken,
             refreshToken: session.refreshToken,
             userIdentifier: session.userIdentifier,
+            nebulaId: session.nebulaId,
             displayName: updatedUserInfo.displayName,
+            avatarURL: updatedUserInfo.avatar ?? session.avatarURL,
             issuedAt: session.issuedAt
         )
 
@@ -1745,6 +1757,18 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
                 AvatarCacheManager.shared.cacheAvatar(image, for: activeSession.userIdentifier)
             }
 
+            let updatedSession = AuthSession(
+                accessToken: activeSession.accessToken,
+                refreshToken: activeSession.refreshToken,
+                userIdentifier: activeSession.userIdentifier,
+                nebulaId: activeSession.nebulaId,
+                displayName: activeSession.displayName,
+                avatarURL: avatarUrl,
+                issuedAt: activeSession.issuedAt
+            )
+            currentSession = updatedSession
+            try? AuthenticationService.shared.updateSession(updatedSession)
+
             SkyBridgeLogger.ui.debugOnly("✅ [AuthenticationViewModel] 头像上传成功(Supabase): \(avatarUrl)")
             return
         }
@@ -1760,6 +1784,18 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
         if let image = NSImage(data: imageData) {
             AvatarCacheManager.shared.cacheAvatar(image, for: session.userIdentifier)
         }
+
+        let updatedSession = AuthSession(
+            accessToken: session.accessToken,
+            refreshToken: session.refreshToken,
+            userIdentifier: session.userIdentifier,
+            nebulaId: session.nebulaId,
+            displayName: session.displayName,
+            avatarURL: avatarUrl,
+            issuedAt: session.issuedAt
+        )
+        currentSession = updatedSession
+        try? AuthenticationService.shared.updateSession(updatedSession)
 
         SkyBridgeLogger.ui.debugOnly("✅ [AuthenticationViewModel] 头像上传成功: \(avatarUrl)")
     }

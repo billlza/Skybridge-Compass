@@ -139,21 +139,23 @@ struct UserProfileOverlay: View {
                         Image(nsImage: cachedAvatar)
                             .resizable()
                             .aspectRatio(contentMode: .fill)
+                    } else if let avatarURLString = authModel.currentSession?.avatarURL,
+                              let avatarURL = URL(string: avatarURLString) {
+                        AsyncImage(url: avatarURL) { phase in
+                            switch phase {
+                            case .empty:
+                                ProgressView()
+                            case .success(let image):
+                                image
+                                    .resizable()
+                                    .aspectRatio(contentMode: .fill)
+                            default:
+                                defaultAvatarView
+                            }
+                        }
                     } else {
  // 显示默认头像 - 显示用户名首字母
-                        Circle()
-                            .fill(
-                                LinearGradient(
-                                    gradient: Gradient(colors: [.blue, .purple]),
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
-                                )
-                            )
-                            .overlay(
-                                Text(getInitials())
-                                    .font(.system(size: 36, weight: .medium))
-                                    .foregroundColor(.white)
-                            )
+                        defaultAvatarView
                     }
                 }
                 .frame(width: 120, height: 120)
@@ -190,6 +192,22 @@ struct UserProfileOverlay: View {
             }
         }
         .padding(.top, 8)
+    }
+
+    private var defaultAvatarView: some View {
+        Circle()
+            .fill(
+                LinearGradient(
+                    gradient: Gradient(colors: [.blue, .purple]),
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            )
+            .overlay(
+                Text(getInitials())
+                    .font(.system(size: 36, weight: .medium))
+                    .foregroundColor(.white)
+            )
     }
 
  // MARK: - 用户信息卡片
@@ -682,7 +700,9 @@ struct UserProfileOverlay: View {
                             accessToken: currentSession.accessToken,
                             refreshToken: currentSession.refreshToken,
                             userIdentifier: currentSession.userIdentifier,
+                            nebulaId: currentSession.nebulaId,
                             displayName: updatedUserInfo.displayName,
+                            avatarURL: updatedUserInfo.avatar ?? currentSession.avatarURL,
                             issuedAt: currentSession.issuedAt
                         )
 
@@ -814,6 +834,15 @@ struct UserProfileOverlay: View {
         }
 
         SkyBridgeLogger.ui.debugOnly("🔄 [UserProfileOverlay] 使用Supabase更新用户资料")
+        var resolvedAvatarURL = session.avatarURL
+        do {
+            resolvedAvatarURL = try await SupabaseService.shared.getUserAvatarUrl(
+                userId: session.userIdentifier,
+                accessToken: session.accessToken
+            ) ?? resolvedAvatarURL
+        } catch {
+            SkyBridgeLogger.ui.debugOnly("ℹ️ [UserProfileOverlay] 预取云端头像 URL 失败（忽略）: \(error.localizedDescription)")
+        }
 
  // 尝试刷新 Token 以确保有效性
         if let refreshToken = session.refreshToken {
@@ -821,6 +850,14 @@ struct UserProfileOverlay: View {
                 SkyBridgeLogger.ui.debugOnly("🔄 [UserProfileOverlay] 尝试刷新访问令牌")
                 let newSession = try await SupabaseService.shared.refreshAccessToken(refreshToken)
                 session = newSession
+                do {
+                    resolvedAvatarURL = try await SupabaseService.shared.getUserAvatarUrl(
+                        userId: newSession.userIdentifier,
+                        accessToken: newSession.accessToken
+                    ) ?? (resolvedAvatarURL ?? newSession.avatarURL)
+                } catch {
+                    SkyBridgeLogger.ui.debugOnly("ℹ️ [UserProfileOverlay] 刷新后预取云端头像 URL 失败（忽略）: \(error.localizedDescription)")
+                }
                 await MainActor.run {
                     authModel.currentSession = newSession
                     do {
@@ -839,13 +876,13 @@ struct UserProfileOverlay: View {
         if let imageData = imageData {
             do {
                 SkyBridgeLogger.ui.debugOnly("📸 [UserProfileOverlay] 开始上传头像到Supabase Storage")
-                let avatarUrl = try await SupabaseService.shared.uploadAvatarToStorage(
+                resolvedAvatarURL = try await SupabaseService.shared.uploadAvatarToStorage(
                     userId: session.userIdentifier,
                     imageData: imageData,
                     accessToken: session.accessToken
                 )
 
-                SkyBridgeLogger.ui.debugOnly("✅ [UserProfileOverlay] 头像上传成功: \(avatarUrl)")
+                SkyBridgeLogger.ui.debugOnly("✅ [UserProfileOverlay] 头像上传成功: \(resolvedAvatarURL ?? "-")")
 
  // 本地缓存头像
                 if let image = NSImage(data: imageData) {
@@ -943,13 +980,18 @@ struct UserProfileOverlay: View {
         }
 
         if success {
+            if imageData != nil, resolvedAvatarURL == nil {
+                throw NSError(domain: "AuthError", code: -2, userInfo: [NSLocalizedDescriptionKey: "头像上传后未能从云端资料回读 avatar_url"])
+            }
             await MainActor.run {
  // 更新本地会话信息
                 let updatedSession = AuthSession(
                     accessToken: session.accessToken,
                     refreshToken: session.refreshToken,
                     userIdentifier: session.userIdentifier,
+                    nebulaId: session.nebulaId,
                     displayName: displayName ?? session.displayName,
+                    avatarURL: resolvedAvatarURL ?? session.avatarURL,
                     issuedAt: session.issuedAt
                 )
 

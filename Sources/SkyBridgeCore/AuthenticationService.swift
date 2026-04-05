@@ -105,6 +105,7 @@ import Combine
             userIdentifier: refreshedSession.userIdentifier,
             nebulaId: refreshedSession.nebulaId,
             displayName: refreshedSession.displayName,
+            avatarURL: refreshedSession.avatarURL ?? currentSession.avatarURL,
             issuedAt: refreshedSession.issuedAt
         )
 
@@ -325,6 +326,7 @@ import Combine
             userIdentifier: userInfo.userId,
             nebulaId: NebulaIdentityContract.isCanonicalNebulaId(userInfo.userId) ? userInfo.userId : nil,
             displayName: userInfo.displayName,
+            avatarURL: userInfo.avatar,
             issuedAt: Date()
         )
     }

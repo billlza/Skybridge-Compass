@@ -33,4 +33,46 @@ final class ConnectionCodeFormatTests: XCTestCase {
         XCTAssertTrue(IOSDeviceSupportGate.isSupported(modelIdentifier: "iPad11,6"))
         XCTAssertTrue(IOSDeviceSupportGate.isSupported(modelIdentifier: "iPad13,1"))
     }
+
+    func testSupabaseServiceNormalizesRelativeAvatarURLs() {
+        let baseURL = URL(string: "https://demo.example.com")!
+
+        XCTAssertEqual(
+            SupabaseService.normalizedRemoteAssetURL(
+                "/storage/v1/object/public/avatars/user.jpg",
+                baseURL: baseURL
+            ),
+            "https://demo.example.com/storage/v1/object/public/avatars/user.jpg"
+        )
+        XCTAssertEqual(
+            SupabaseService.normalizedRemoteAssetURL(
+                "storage/v1/object/public/avatars/user.jpg",
+                baseURL: baseURL
+            ),
+            "https://demo.example.com/storage/v1/object/public/avatars/user.jpg"
+        )
+        XCTAssertEqual(
+            SupabaseService.normalizedRemoteAssetURL(
+                "https://cdn.example.com/avatar.jpg",
+                baseURL: baseURL
+            ),
+            "https://cdn.example.com/avatar.jpg"
+        )
+    }
+
+    func testRemoteUserProfileCarriesAvatarAndNebulaFields() {
+        let profile = SupabaseService.RemoteUserProfile(
+            userId: "user-1",
+            email: "person@example.com",
+            displayName: "Primary Name",
+            avatarURL: "https://demo.example.com/avatar.jpg",
+            nebulaId: "NEBULA-123"
+        )
+
+        XCTAssertEqual(profile.userId, "user-1")
+        XCTAssertEqual(profile.displayName, "Primary Name")
+        XCTAssertEqual(profile.avatarURL, "https://demo.example.com/avatar.jpg")
+        XCTAssertEqual(profile.nebulaId, "NEBULA-123")
+    }
+
 }

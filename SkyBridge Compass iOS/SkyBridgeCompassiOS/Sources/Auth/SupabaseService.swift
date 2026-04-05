@@ -159,6 +159,16 @@ public final class SupabaseService: ObservableObject {
         configuration != nil
     }
 
+    public func isSupabaseAccessToken(_ token: String) -> Bool {
+        guard let config = configuration else { return false }
+        guard let claims = decodeJWTClaims(token),
+              let issuer = claims["iss"] as? String else {
+            return false
+        }
+        let expectedIssuer = config.url.appendingPathComponent("auth/v1").absoluteString
+        return issuer == expectedIssuer || issuer.hasPrefix(expectedIssuer)
+    }
+
     // MARK: - Auth
 
     public func signInWithEmail(email: String, password: String) async throws -> AuthSession {
@@ -363,6 +373,101 @@ public final class SupabaseService: ObservableObject {
         }
     }
 
+    internal static func normalizedRemoteAssetURL(_ raw: String?, baseURL: URL) -> String? {
+        guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else {
+            return nil
+        }
+
+        if let absoluteURL = URL(string: raw), absoluteURL.scheme != nil {
+            return absoluteURL.absoluteString
+        }
+
+        return URL(string: raw, relativeTo: baseURL)?.absoluteURL.absoluteString
+    }
+
+    private func fetchProfilesFallback(
+        userId: String,
+        accessToken: String,
+        configuration config: Configuration
+    ) async -> RemoteUserProfile? {
+        let endpoint = config.url.appendingPathComponent("rest/v1/profiles")
+        guard var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false) else {
+            return nil
+        }
+        components.queryItems = [
+            URLQueryItem(name: "select", value: "id,display_name,avatar_url"),
+            URLQueryItem(name: "id", value: "eq.\(userId)"),
+            URLQueryItem(name: "limit", value: "1")
+        ]
+        guard let requestURL = components.url else {
+            return nil
+        }
+
+        var request = URLRequest(url: requestURL)
+        request.httpMethod = "GET"
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue(config.anonKey, forHTTPHeaderField: "apikey")
+
+        guard let (data, response) = try? await urlSession.data(for: request),
+              let http = response as? HTTPURLResponse,
+              http.statusCode == 200,
+              let rows = try? JSONDecoder().decode([SupabaseProfilesRow].self, from: data),
+              let row = rows.first else {
+            return nil
+        }
+
+        return RemoteUserProfile(
+            userId: row.id ?? userId,
+            email: nil,
+            displayName: row.displayName,
+            avatarURL: Self.normalizedRemoteAssetURL(row.avatarURL, baseURL: config.url),
+            nebulaId: nil
+        )
+    }
+
+    private func fetchUserProfilesFallback(
+        userId: String,
+        accessToken: String,
+        configuration config: Configuration
+    ) async -> RemoteUserProfile? {
+        let endpoint = config.url.appendingPathComponent("rest/v1/user_profiles")
+        guard var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false) else {
+            return nil
+        }
+        components.queryItems = [
+            URLQueryItem(name: "select", value: "id,email,nebula_id,avatar_url,full_name,custom_user_id"),
+            URLQueryItem(name: "id", value: "eq.\(userId)"),
+            URLQueryItem(name: "limit", value: "1")
+        ]
+        guard let requestURL = components.url else {
+            return nil
+        }
+
+        var request = URLRequest(url: requestURL)
+        request.httpMethod = "GET"
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue(config.anonKey, forHTTPHeaderField: "apikey")
+
+        guard let (data, response) = try? await urlSession.data(for: request),
+              let http = response as? HTTPURLResponse,
+              http.statusCode == 200,
+              let rows = try? JSONDecoder().decode([SupabaseUserProfilesRow].self, from: data),
+              let row = rows.first else {
+            return nil
+        }
+
+        return RemoteUserProfile(
+            userId: row.id ?? userId,
+            email: row.email,
+            displayName: row.fullName ?? row.customUserId,
+            avatarURL: Self.normalizedRemoteAssetURL(row.avatarURL, baseURL: config.url),
+            nebulaId: row.nebulaId
+        )
+    }
+
     /// 获取当前用户资料（优先走 Auth API，结构与 metadata 最一致）
     public func fetchCurrentUserProfile(accessToken: String) async throws -> RemoteUserProfile {
         let config = try requireConfiguration()
@@ -381,12 +486,34 @@ public final class SupabaseService: ObservableObject {
         }
 
         let user = try JSONDecoder().decode(SupabaseAuthUserResponse.self, from: data)
-        return RemoteUserProfile(
+        let authProfile = RemoteUserProfile(
             userId: user.id,
             email: user.email,
             displayName: user.userMetadata?.displayName,
-            avatarURL: user.userMetadata?.avatarURL,
+            avatarURL: Self.normalizedRemoteAssetURL(
+                user.userMetadata?.avatarURL,
+                baseURL: config.url
+            ),
             nebulaId: user.userMetadata?.nebulaId
+        )
+
+        let userProfiles = await fetchUserProfilesFallback(
+            userId: user.id,
+            accessToken: accessToken,
+            configuration: config
+        )
+        let legacyProfiles = await fetchProfilesFallback(
+            userId: user.id,
+            accessToken: accessToken,
+            configuration: config
+        )
+
+        return RemoteUserProfile(
+            userId: authProfile.userId,
+            email: authProfile.email ?? userProfiles?.email,
+            displayName: authProfile.displayName ?? userProfiles?.displayName ?? legacyProfiles?.displayName,
+            avatarURL: userProfiles?.avatarURL ?? authProfile.avatarURL ?? legacyProfiles?.avatarURL,
+            nebulaId: authProfile.nebulaId
         )
     }
 
@@ -412,6 +539,7 @@ public final class SupabaseService: ObservableObject {
     // MARK: - Helpers
 
     private func performAuthRequest(_ request: URLRequest) async throws -> AuthSession {
+        let config = try requireConfiguration()
         do {
             let (data, response) = try await urlSession.data(for: request)
             guard let http = response as? HTTPURLResponse else { throw SupabaseError.invalidResponse }
@@ -426,7 +554,10 @@ public final class SupabaseService: ObservableObject {
                 userIdentifier: authResponse.user.id,
                 displayName: authResponse.user.userMetadata?.displayName ?? (authResponse.user.phone ?? authResponse.user.email ?? "用户"),
                 email: authResponse.user.email,
-                avatarURL: authResponse.user.userMetadata?.avatarURL,
+                avatarURL: Self.normalizedRemoteAssetURL(
+                    authResponse.user.userMetadata?.avatarURL,
+                    baseURL: config.url
+                ),
                 nebulaId: authResponse.user.userMetadata?.nebulaId,
                 issuedAt: Date()
             )
@@ -510,5 +641,54 @@ private struct SupabaseAuthUserResponse: Codable {
         case email
         case userMetadata = "user_metadata"
     }
+}
+
+private struct SupabaseProfilesRow: Codable {
+    let id: String?
+    let displayName: String?
+    let avatarURL: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case displayName = "display_name"
+        case avatarURL = "avatar_url"
+    }
+}
+
+private struct SupabaseUserProfilesRow: Codable {
+    let id: String?
+    let email: String?
+    let nebulaId: String?
+    let avatarURL: String?
+    let fullName: String?
+    let customUserId: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case email
+        case nebulaId = "nebula_id"
+        case avatarURL = "avatar_url"
+        case fullName = "full_name"
+        case customUserId = "custom_user_id"
+    }
+}
+
+private func decodeJWTClaims(_ token: String) -> [String: Any]? {
+    let parts = token.split(separator: ".")
+    guard parts.count >= 2 else { return nil }
+    let payload = String(parts[1])
+    guard let data = base64URLDecode(payload) else { return nil }
+    return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+}
+
+private func base64URLDecode(_ input: String) -> Data? {
+    var base64 = input
+        .replacingOccurrences(of: "-", with: "+")
+        .replacingOccurrences(of: "_", with: "/")
+    let remainder = base64.count % 4
+    if remainder != 0 {
+        base64.append(String(repeating: "=", count: 4 - remainder))
+    }
+    return Data(base64Encoded: base64)
 }
 

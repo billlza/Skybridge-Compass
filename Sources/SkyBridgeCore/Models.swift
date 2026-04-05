@@ -11,11 +11,13 @@ public struct AuthSession: Codable, Hashable, Sendable {
     public let refreshToken: String?
  /// 唯一的用户标识。
     public let userIdentifier: String
- /// 规范化的 Nebula ID（若会话来源提供）。
+/// 规范化的 Nebula ID（若会话来源提供）。
     public let nebulaId: String?
- /// 当前登录用户的展示名称。
+/// 当前登录用户的展示名称。
     public let displayName: String
- /// 会话创建时间，便于判断过期策略。
+/// 已经由服务端确认并可回读的头像 URL。
+    public let avatarURL: String?
+/// 会话创建时间，便于判断过期策略。
     public let issuedAt: Date
 
     public init(accessToken: String,
@@ -23,12 +25,14 @@ public struct AuthSession: Codable, Hashable, Sendable {
                 userIdentifier: String,
                 nebulaId: String? = nil,
                 displayName: String,
+                avatarURL: String? = nil,
                 issuedAt: Date = Date()) {
         self.accessToken = accessToken
         self.refreshToken = refreshToken
         self.userIdentifier = userIdentifier
         self.nebulaId = nebulaId
         self.displayName = displayName
+        self.avatarURL = avatarURL
         self.issuedAt = issuedAt
     }
 }

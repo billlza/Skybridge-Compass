@@ -122,27 +122,56 @@ struct LiquidGlassUserArea: View {
                                 endPoint: .bottomTrailing
                             ), lineWidth: 2)
                     )
+            } else if let avatarURLString = authModel.currentSession?.avatarURL,
+                      let avatarURL = URL(string: avatarURLString) {
+                AsyncImage(url: avatarURL) { phase in
+                    switch phase {
+                    case .empty:
+                        ProgressView()
+                            .frame(width: 36, height: 36)
+                    case .success(let image):
+                        image
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                            .frame(width: 36, height: 36)
+                            .clipShape(Circle())
+                            .overlay(
+                                Circle()
+                                    .stroke(.linearGradient(
+                                        colors: [.blue.opacity(0.3), .purple.opacity(0.3)],
+                                        startPoint: .topLeading,
+                                        endPoint: .bottomTrailing
+                                    ), lineWidth: 2)
+                            )
+                    default:
+                        defaultAvatar
+                    }
+                }
             } else {
- // 默认头像 - Liquid Glass风格
-                Circle()
-                    .fill(.linearGradient(
-                        colors: [.blue, .purple],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ))
-                    .frame(width: 36, height: 36)
-                    .overlay(
-                        Text(getUserInitials())
-                            .font(.system(size: 16, weight: .semibold, design: .rounded))
-                            .foregroundStyle(.white)
-                    )
-                    .overlay(
-                        Circle()
-                            .stroke(.white.opacity(0.2), lineWidth: 1)
-                    )
+                defaultAvatar
             }
         }
         .shadow(color: .black.opacity(0.1), radius: 4, x: 0, y: 2)
+    }
+
+    private var defaultAvatar: some View {
+ // 默认头像 - Liquid Glass风格
+        Circle()
+            .fill(.linearGradient(
+                colors: [.blue, .purple],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            ))
+            .frame(width: 36, height: 36)
+            .overlay(
+                Text(getUserInitials())
+                    .font(.system(size: 16, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white)
+            )
+            .overlay(
+                Circle()
+                    .stroke(.white.opacity(0.2), lineWidth: 1)
+            )
     }
     
  // MARK: - 用户信息文本

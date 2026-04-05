@@ -101,15 +101,23 @@ struct UserProfileView: View {
                         Image(nsImage: cachedAvatar)
                             .resizable()
                             .aspectRatio(contentMode: .fill)
+                    } else if let avatarURLString = authModel.currentSession?.avatarURL,
+                              let avatarURL = URL(string: avatarURLString) {
+                        AsyncImage(url: avatarURL) { phase in
+                            switch phase {
+                            case .empty:
+                                ProgressView()
+                            case .success(let image):
+                                image
+                                    .resizable()
+                                    .aspectRatio(contentMode: .fill)
+                            default:
+                                defaultAvatarView
+                            }
+                        }
                     } else {
  // 显示默认头像 - 显示用户名首字母
-                        Circle()
-                            .fill(Color.blue.gradient)
-                            .overlay(
-                                Text(getInitials())
-                                    .font(.system(size: 32, weight: .medium))
-                                    .foregroundColor(.white)
-                            )
+                        defaultAvatarView
                     }
                 }
                 .frame(width: 100, height: 100)
@@ -142,6 +150,16 @@ struct UserProfileView: View {
                     .foregroundColor(.secondary)
             }
         }
+    }
+
+    private var defaultAvatarView: some View {
+        Circle()
+            .fill(Color.blue.gradient)
+            .overlay(
+                Text(getInitials())
+                    .font(.system(size: 32, weight: .medium))
+                    .foregroundColor(.white)
+            )
     }
 
  // MARK: - 用户信息区域
@@ -426,7 +444,9 @@ struct UserProfileView: View {
                         accessToken: currentSession.accessToken,
                         refreshToken: currentSession.refreshToken,
                         userIdentifier: currentSession.userIdentifier,
+                        nebulaId: currentSession.nebulaId,
                         displayName: updatedUserInfo.displayName,
+                        avatarURL: updatedUserInfo.avatar ?? currentSession.avatarURL,
                         issuedAt: currentSession.issuedAt
                     )
                 }
@@ -491,12 +511,29 @@ struct UserProfileView: View {
         imageData: Data?
     ) async throws -> AuthSession {
         var activeSession = session
+        var resolvedAvatarURL = session.avatarURL
+        do {
+            resolvedAvatarURL = try await SupabaseService.shared.getUserAvatarUrl(
+                userId: session.userIdentifier,
+                accessToken: session.accessToken
+            ) ?? resolvedAvatarURL
+        } catch {
+            SkyBridgeLogger.ui.debugOnly("ℹ️ [UserProfileView] 预取云端头像 URL 失败（忽略）: \(error.localizedDescription)")
+        }
 
         // Best-effort: refresh token if possible.
         if let refreshToken = session.refreshToken {
             do {
                 let refreshed = try await SupabaseService.shared.refreshAccessToken(refreshToken)
                 activeSession = refreshed
+                do {
+                    resolvedAvatarURL = try await SupabaseService.shared.getUserAvatarUrl(
+                        userId: refreshed.userIdentifier,
+                        accessToken: refreshed.accessToken
+                    ) ?? (resolvedAvatarURL ?? refreshed.avatarURL)
+                } catch {
+                    SkyBridgeLogger.ui.debugOnly("ℹ️ [UserProfileView] 刷新后预取云端头像 URL 失败（忽略）: \(error.localizedDescription)")
+                }
                 await MainActor.run {
                     authModel.currentSession = refreshed
                     do {
@@ -511,7 +548,7 @@ struct UserProfileView: View {
         }
 
         if let imageData {
-            _ = try await SupabaseService.shared.uploadAvatarToStorage(
+            resolvedAvatarURL = try await SupabaseService.shared.uploadAvatarToStorage(
                 userId: activeSession.userIdentifier,
                 imageData: imageData,
                 accessToken: activeSession.accessToken
@@ -529,12 +566,30 @@ struct UserProfileView: View {
                 accessToken: activeSession.accessToken,
                 refreshToken: activeSession.refreshToken,
                 userIdentifier: activeSession.userIdentifier,
+                nebulaId: activeSession.nebulaId,
                 displayName: displayName,
+                avatarURL: resolvedAvatarURL ?? activeSession.avatarURL,
                 issuedAt: activeSession.issuedAt
             )
         }
 
-        return activeSession
+        if imageData != nil, resolvedAvatarURL == nil {
+            throw NSError(
+                domain: "UserProfileView",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "头像上传后未能从云端资料回读 avatar_url"]
+            )
+        }
+
+        return AuthSession(
+            accessToken: activeSession.accessToken,
+            refreshToken: activeSession.refreshToken,
+            userIdentifier: activeSession.userIdentifier,
+            nebulaId: activeSession.nebulaId,
+            displayName: activeSession.displayName,
+            avatarURL: resolvedAvatarURL ?? activeSession.avatarURL,
+            issuedAt: activeSession.issuedAt
+        )
     }
 }
 
