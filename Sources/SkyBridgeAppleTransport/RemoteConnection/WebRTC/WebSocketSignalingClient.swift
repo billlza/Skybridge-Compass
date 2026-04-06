@@ -1,3 +1,4 @@
+import CFNetwork
 import Foundation
 import Network
 import OSLog
@@ -112,7 +113,7 @@ public actor WebSocketSignalingClient {
         }
     }
 
-    private enum BackendSelectionPolicy: String {
+    enum BackendSelectionPolicy: String {
         case auto
         case urlSession
         case native
@@ -127,7 +128,7 @@ public actor WebSocketSignalingClient {
 
     private enum TransportAttempt: Equatable {
         case urlSession(proxyBypass: Bool)
-        case native
+        case native(proxyBypass: Bool)
 
         var backend: SignalingBackend {
             switch self {
@@ -142,8 +143,8 @@ public actor WebSocketSignalingClient {
             switch self {
             case .urlSession(let proxyBypass):
                 return proxyBypass ? "urlsession-proxy-bypass" : "urlsession"
-            case .native:
-                return "native"
+            case .native(let proxyBypass):
+                return proxyBypass ? "native-proxy-bypass" : "native"
             }
         }
     }
@@ -180,11 +181,27 @@ public actor WebSocketSignalingClient {
     public var onLifecycleEvent: (@Sendable (SignalingLifecycleEvent) -> Void)?
 
     public init(url: URL, sessionId: String, generation: Int) {
+        self.init(
+            url: url,
+            sessionId: sessionId,
+            generation: generation,
+            selectionPolicy: BackendSelectionPolicy.current(),
+            nativeFallbackEnabled: ProcessInfo.processInfo.environment["SKYBRIDGE_SIGNALING_DISABLE_NATIVE_FALLBACK"] != "1"
+        )
+    }
+
+    init(
+        url: URL,
+        sessionId: String,
+        generation: Int,
+        selectionPolicy: BackendSelectionPolicy,
+        nativeFallbackEnabled: Bool
+    ) {
         self.url = url
         self.sessionId = sessionId
         self.nextSequenceGeneration = generation
-        self.selectionPolicy = BackendSelectionPolicy.current()
-        self.nativeFallbackEnabled = ProcessInfo.processInfo.environment["SKYBRIDGE_SIGNALING_DISABLE_NATIVE_FALLBACK"] != "1"
+        self.selectionPolicy = selectionPolicy
+        self.nativeFallbackEnabled = nativeFallbackEnabled
     }
 
     public func setOnEnvelope(_ handler: (@Sendable (WebRTCSignalingEnvelope) -> Void)?) {
@@ -348,8 +365,8 @@ public actor WebSocketSignalingClient {
                 switch attempt {
                 case .urlSession(let proxyBypass):
                     try await connectViaURLSession(handleId: handleId, proxyBypass: proxyBypass, timeout: timeout)
-                case .native:
-                    try await connectViaNative(handleId: handleId, timeout: timeout)
+                case .native(let proxyBypass):
+                    try await connectViaNative(handleId: handleId, proxyBypass: proxyBypass, timeout: timeout)
                 }
 
                 logger.info(
@@ -383,20 +400,24 @@ public actor WebSocketSignalingClient {
         case .urlSession:
             return [.urlSession(proxyBypass: false)]
         case .native:
-            return [.native]
+            return [.native(proxyBypass: false)]
         case .auto:
             var attempts: [TransportAttempt] = []
 #if os(macOS)
             if nativeFallbackEnabled {
-                attempts.append(.native)
+                attempts.append(.native(proxyBypass: false))
             }
             attempts.append(.urlSession(proxyBypass: false))
+            if nativeFallbackEnabled {
+                attempts.append(.native(proxyBypass: true))
+            }
             attempts.append(.urlSession(proxyBypass: true))
 #else
             attempts.append(.urlSession(proxyBypass: false))
             attempts.append(.urlSession(proxyBypass: true))
             if nativeFallbackEnabled {
-                attempts.append(.native)
+                attempts.append(.native(proxyBypass: false))
+                attempts.append(.native(proxyBypass: true))
             }
 #endif
             return attempts
@@ -427,11 +448,7 @@ public actor WebSocketSignalingClient {
         config.allowsConstrainedNetworkAccess = true
         config.allowsExpensiveNetworkAccess = true
         if proxyBypass {
-            config.connectionProxyDictionary = [
-                "HTTPEnable": false,
-                "HTTPSEnable": false,
-                "SOCKSEnable": false
-            ]
+            config.connectionProxyDictionary = Self.noProxyConnectionProxyDictionary()
         }
 
         let delegate = URLSessionSignalingDelegate(
@@ -462,6 +479,7 @@ public actor WebSocketSignalingClient {
 
     private func connectViaNative(
         handleId: SignalingHandleID,
+        proxyBypass: Bool,
         timeout: Duration
     ) async throws {
         let callbacks = NativeWebSocketCallbacks(
@@ -485,6 +503,7 @@ public actor WebSocketSignalingClient {
             url: url,
             tls: (url.scheme == "wss"),
             pingInterval: 30,
+            preferNoProxies: proxyBypass,
             callbacks: callbacks
         )
         nativeClient = client
@@ -768,6 +787,19 @@ public actor WebSocketSignalingClient {
         let components = duration.components
         return Double(components.seconds) + Double(components.attoseconds) / 1_000_000_000_000_000_000.0
     }
+
+    private static func noProxyConnectionProxyDictionary() -> [AnyHashable: Any] {
+        [
+            kCFProxyTypeKey as String: kCFProxyTypeNone as String,
+            kCFNetworkProxiesHTTPEnable as String: false,
+            kCFNetworkProxiesHTTPSEnable as String: false,
+            kCFNetworkProxiesSOCKSEnable as String: false,
+            kCFNetworkProxiesProxyAutoConfigEnable as String: false,
+            kCFNetworkProxiesProxyAutoDiscoveryEnable as String: false,
+            kCFNetworkProxiesExceptionsList as String: [],
+            kCFNetworkProxiesExcludeSimpleHostnames as String: false
+        ]
+    }
 }
 
 private final class ActorBox<T: Actor>: @unchecked Sendable {
@@ -780,6 +812,14 @@ extension WebSocketSignalingClient {
         for backend: SignalingBackend
     ) -> SignalingHandleID {
         reserveNextHandleId(for: backend)
+    }
+
+    internal func testOnlyTransportAttemptLabels() -> [String] {
+        transportAttempts().map(\.label)
+    }
+
+    internal static func testOnlyNoProxyConnectionProxyDictionary() -> [AnyHashable: Any] {
+        noProxyConnectionProxyDictionary()
     }
 }
 

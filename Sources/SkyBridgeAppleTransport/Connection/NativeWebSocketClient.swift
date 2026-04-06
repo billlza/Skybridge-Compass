@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import OSLog
 
 // MARK: - 原生高性能 WebSocket 客户端（基于 Network.framework）
 // 说明：
@@ -42,9 +43,11 @@ public struct NativeWebSocketCallbacks: Sendable {
 /// 原生 WebSocket 客户端（严格并发安全）
 public actor NativeWebSocketClient {
  // MARK: 配置与状态
+    private let logger = Logger(subsystem: "com.skybridge.signal", category: "NativeWebSocketClient")
     private let endpoint: NWEndpoint
     private let parameters: NWParameters
     private let callbacks: NativeWebSocketCallbacks
+    private let preferNoProxies: Bool
     private var connection: NWConnection?
     private var isReceiving: Bool = false
     private var reconnectPolicy: ReconnectPolicy?
@@ -73,19 +76,36 @@ public actor NativeWebSocketClient {
  /// - pingInterval: 保持连接的 Ping 周期（秒），为 nil 时不主动发送 Ping（系统会自动回复 Ping）
  /// - callbacks: 事件回调集合
  /// - reconnectPolicy: 可选的重连策略
-    public init(url: URL, tls: Bool = true, pingInterval: TimeInterval? = 30, callbacks: NativeWebSocketCallbacks = .init(), reconnectPolicy: ReconnectPolicy? = nil) {
+    public init(
+        url: URL,
+        tls: Bool = true,
+        pingInterval: TimeInterval? = 30,
+        preferNoProxies: Bool = false,
+        callbacks: NativeWebSocketCallbacks = .init(),
+        reconnectPolicy: ReconnectPolicy? = nil
+    ) {
         self.endpoint = NWEndpoint.url(url)
-        self.parameters = NativeWebSocketClient.buildParameters(tls: tls, pingInterval: pingInterval)
+        self.preferNoProxies = preferNoProxies
+        self.parameters = NativeWebSocketClient.buildParameters(
+            tls: tls,
+            pingInterval: pingInterval,
+            preferNoProxies: preferNoProxies
+        )
         self.callbacks = callbacks
         self.reconnectPolicy = reconnectPolicy
     }
 
  /// 构造 Network 参数，插入 WebSocket 协议选项
-    private static func buildParameters(tls: Bool, pingInterval: TimeInterval?) -> NWParameters {
+    private static func buildParameters(
+        tls: Bool,
+        pingInterval: TimeInterval?,
+        preferNoProxies: Bool
+    ) -> NWParameters {
  // 配置 TLS 与通用参数
         let params: NWParameters = tls ? .tls : NWParameters(tls: nil)
         params.allowLocalEndpointReuse = true
         params.includePeerToPeer = true
+        params.preferNoProxies = preferNoProxies
 
  // 配置 WebSocket 选项
         let wsOptions = NWProtocolWebSocket.Options()
@@ -240,6 +260,9 @@ public actor NativeWebSocketClient {
         switch state {
         case .ready:
             callbacks.onOpen?()
+            if let conn = connection {
+                requestEstablishmentReport(for: conn)
+            }
             await self.startReceiveLoopIfNeeded()
         case .failed(let error):
             callbacks.onError?(error)
@@ -266,6 +289,26 @@ public actor NativeWebSocketClient {
         receiveNext(on: conn)
     }
 
+    private func requestEstablishmentReport(for conn: NWConnection) {
+        conn.requestEstablishmentReport(queue: .global(qos: .utility)) { [weak self] report in
+            guard let report else { return }
+            Task { await self?.logEstablishmentReport(report) }
+        }
+    }
+
+    private func logEstablishmentReport(_ report: NWConnection.EstablishmentReport) {
+        let proxyEndpoint = report.proxyEndpoint.map { String(describing: $0) } ?? "direct"
+        if preferNoProxies && report.usedProxy {
+            logger.error(
+                "⚠️ native websocket bypass attempt still used proxy: used_proxy=\(report.usedProxy ? 1 : 0, privacy: .public) proxy_configured=\(report.proxyConfigured ? 1 : 0, privacy: .public) proxy_endpoint=\(proxyEndpoint, privacy: .public)"
+            )
+        } else {
+            logger.info(
+                "🌐 native websocket establishment report: prefer_no_proxies=\(self.preferNoProxies ? 1 : 0, privacy: .public) used_proxy=\(report.usedProxy ? 1 : 0, privacy: .public) proxy_configured=\(report.proxyConfigured ? 1 : 0, privacy: .public) proxy_endpoint=\(proxyEndpoint, privacy: .public)"
+            )
+        }
+    }
+
  // MARK: 重连逻辑（指数退避）
     private func scheduleReconnectIfNeeded() async {
         guard let policy = reconnectPolicy else { return }
@@ -281,5 +324,19 @@ public actor NativeWebSocketClient {
     public enum NativeWebSocketError: Error {
  /// 尚未建立连接
         case notConnected
+    }
+}
+
+extension NativeWebSocketClient {
+    internal static func testOnlyBuildParameters(
+        tls: Bool,
+        pingInterval: TimeInterval?,
+        preferNoProxies: Bool
+    ) -> NWParameters {
+        buildParameters(
+            tls: tls,
+            pingInterval: pingInterval,
+            preferNoProxies: preferNoProxies
+        )
     }
 }

@@ -1,4 +1,6 @@
 import XCTest
+import CFNetwork
+import Network
 @testable import SkyBridgeCore
 @testable import SkyBridgeAppleTransport
 
@@ -76,5 +78,60 @@ final class SignalingLifecycleContractTests: XCTestCase {
         XCTAssertEqual(first.generation, 7)
         XCTAssertEqual(second.generation, 8)
         XCTAssertNotEqual(first, second)
+    }
+
+    func testAutoPolicyIncludesNativeProxyBypassAttempt() async {
+        let client = WebSocketSignalingClient(
+            url: URL(string: "wss://signal.example.com/ws")!,
+            sessionId: "SESSION-D",
+            generation: 1,
+            selectionPolicy: .auto,
+            nativeFallbackEnabled: true
+        )
+
+        let labels = await client.testOnlyTransportAttemptLabels()
+
+        #if os(macOS)
+        XCTAssertEqual(labels, [
+            "native",
+            "urlsession",
+            "native-proxy-bypass",
+            "urlsession-proxy-bypass"
+        ])
+        #else
+        XCTAssertEqual(labels, [
+            "urlsession",
+            "urlsession-proxy-bypass",
+            "native",
+            "native-proxy-bypass"
+        ])
+        #endif
+    }
+
+    func testNativeWebSocketParametersHonorPreferNoProxies() {
+        let directParameters = NativeWebSocketClient.testOnlyBuildParameters(
+            tls: true,
+            pingInterval: 30,
+            preferNoProxies: true
+        )
+        XCTAssertTrue(directParameters.preferNoProxies)
+
+        let defaultParameters = NativeWebSocketClient.testOnlyBuildParameters(
+            tls: true,
+            pingInterval: 30,
+            preferNoProxies: false
+        )
+        XCTAssertFalse(defaultParameters.preferNoProxies)
+    }
+
+    func testNoProxyConfigurationDisablesSystemProxyMechanisms() {
+        let dictionary = WebSocketSignalingClient.testOnlyNoProxyConnectionProxyDictionary()
+
+        XCTAssertEqual(dictionary[kCFProxyTypeKey as String] as? String, kCFProxyTypeNone as String)
+        XCTAssertEqual(dictionary[kCFNetworkProxiesHTTPEnable as String] as? Bool, false)
+        XCTAssertEqual(dictionary[kCFNetworkProxiesHTTPSEnable as String] as? Bool, false)
+        XCTAssertEqual(dictionary[kCFNetworkProxiesSOCKSEnable as String] as? Bool, false)
+        XCTAssertEqual(dictionary[kCFNetworkProxiesProxyAutoConfigEnable as String] as? Bool, false)
+        XCTAssertEqual(dictionary[kCFNetworkProxiesProxyAutoDiscoveryEnable as String] as? Bool, false)
     }
 }
