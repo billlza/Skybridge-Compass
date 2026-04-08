@@ -517,6 +517,8 @@ public final class AgentConnectionService: ObservableObject {
                 return try limitedDecoder.decode(SBDevicesMessage.self, from: data)
             case "session-joined":
                 return try limitedDecoder.decode(SessionJoinedMessage.self, from: data)
+            case "error":
+                return try limitedDecoder.decode(ErrorMessage.self, from: data)
             case "sdp-offer":
                 return try limitedDecoder.decode(SDPOfferMessage.self, from: data)
             case "sdp-answer":
@@ -645,5 +647,4 @@ public final class AgentConnectionService: ObservableObject {
         onStateChange?(newState)
     }
 }
-
 
