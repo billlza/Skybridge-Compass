@@ -45,6 +45,14 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
     /// The last selection policy used to initialize the core.
     /// We must support re-initialization when the user toggles "enforce PQC" / compatibility settings.
     private var currentSelectionPolicy: CryptoProviderFactory.SelectionPolicy?
+
+    private static func randomAttemptIdBytes() -> Data {
+        var bytes = [UInt8](repeating: 0, count: HandshakeSOAExtension.attemptIdLength)
+        for index in bytes.indices {
+            bytes[index] = UInt8.random(in: UInt8.min...UInt8.max)
+        }
+        return Data(bytes)
+    }
     
     // MARK: - Initialization
     
@@ -332,6 +340,7 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
         soaMetadata: HandshakeSOAMetadata? = nil,
         localSOAPeerId: Data? = nil,
         expectedRemoteSOAPeerId: Data? = nil,
+        trustProvider: (any HandshakeTrustProvider)? = nil,
         onDriverCreated: (@Sendable (HandshakeDriver) async -> Void)? = nil
     ) async throws -> SessionKeys {
         guard isInitialized,
@@ -366,6 +375,17 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
                 "policyRequireSecureEnclavePoP=\(self.handshakePolicy.requireSecureEnclavePoP ? "1" : "0")"
             )
 
+            let attemptSOAMetadata: HandshakeSOAMetadata? = {
+                guard let localSOAPeerId, let expectedRemoteSOAPeerId else {
+                    return soaMetadata
+                }
+                return try? HandshakeSOAMetadata(
+                    initiatorPeerId: localSOAPeerId,
+                    targetPeerId: expectedRemoteSOAPeerId,
+                    attemptId: Self.randomAttemptIdBytes()
+                )
+            }()
+
             let driver = HandshakeDriver(
                 transport: transport,
                 cryptoProvider: preparation.cryptoProvider,
@@ -376,7 +396,8 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
                 policy: self.handshakePolicy,
                 cryptoPolicy: preparation.cryptoPolicy,
                 offeredSuites: preparation.offeredSuites,
-                soaMetadata: soaMetadata,
+                trustProvider: trustProvider,
+                soaMetadata: attemptSOAMetadata,
                 localSOAPeerId: localSOAPeerId,
                 expectedRemoteSOAPeerId: expectedRemoteSOAPeerId
             )

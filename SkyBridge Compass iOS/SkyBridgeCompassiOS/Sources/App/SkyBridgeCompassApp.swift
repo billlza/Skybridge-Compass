@@ -558,6 +558,7 @@ struct SkyBridgeCompassApp: App {
         case .active:
             backgroundTeardownTask?.cancel()
             backgroundTeardownTask = nil
+            discoveryManager.retryAuthorizationBlockedBrowsers()
             // 前台：确保按设置启动
             applyDiscoverySettings()
             if !connectionManager.isListening {

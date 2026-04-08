@@ -38,6 +38,13 @@ targets:
           - _skybridge._udp
           - _skybridge-transfer._tcp
           - _skybridge-remote._tcp
+          - _companion-link._tcp
+          - _airdrop._tcp
+          - _sftp-ssh._tcp
+          - _smb._tcp
+          - _http._tcp
+          - _rdlink._tcp
+          - _androidshare._tcp
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
         NSLocationWhenInUseUsageDescription: "SkyBridge 使用你的位置信息来获取本地天气并优化网络状态展示。"

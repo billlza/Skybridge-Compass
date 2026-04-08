@@ -99,6 +99,7 @@ public final class DevicePermissionManager: NSObject, ObservableObject, Sendable
     private let logger = Logger(subsystem: "com.skybridge.compass", category: "DevicePermissionManager")
     private var bluetoothManager: CBCentralManager?
     private let locationManager = CLLocationManager()
+    private var locationPermissionContinuations: [CheckedContinuation<Bool, Never>] = []
     
  // 并发安全队列
     private let permissionQueue = DispatchQueue(label: "com.skybridge.compass.permissions", qos: .userInitiated)
@@ -106,6 +107,7 @@ public final class DevicePermissionManager: NSObject, ObservableObject, Sendable
  // MARK: - 初始化
     public override init() {
         super.init()
+        locationManager.delegate = self
 
  // ⚡ 完全异步初始化 - 不阻塞任何主线程操作
         Task { @MainActor [weak self] in
@@ -228,7 +230,15 @@ public final class DevicePermissionManager: NSObject, ObservableObject, Sendable
     
  /// 检查WiFi权限
     private func checkWiFiPermission() async -> PermissionStatus {
- // 在macOS中，WiFi访问需要用户授权和位置权限
+ // 在 macOS 中，WiFi 扫描受位置权限约束；先看位置状态，再看接口能力。
+        let locationStatus = checkLocationPermission()
+        switch locationStatus {
+        case .authorized:
+            break
+        case .denied, .restricted, .notDetermined, .unavailable:
+            return locationStatus
+        }
+
         let client = CWWiFiClient.shared()
         let interface = client.interface()
         
@@ -266,7 +276,7 @@ public final class DevicePermissionManager: NSObject, ObservableObject, Sendable
         let authStatus = locationManager.authorizationStatus
         
         switch authStatus {
-        case .authorizedAlways:
+        case .authorizedAlways, .authorizedWhenInUse:
             return .authorized
         case .denied:
             return .denied
@@ -301,9 +311,17 @@ public final class DevicePermissionManager: NSObject, ObservableObject, Sendable
     
  /// 请求WiFi权限
     private func requestWiFiPermission() async -> Bool {
- // WiFi权限通常不需要特殊请求
         let status = await checkWiFiPermission()
-        return status.isAuthorized
+        switch status {
+        case .authorized:
+            return true
+        case .denied, .restricted, .unavailable:
+            return false
+        case .notDetermined:
+            let granted = await requestLocationPermission()
+            guard granted else { return false }
+            return (await checkWiFiPermission()).isAuthorized
+        }
     }
     
  /// 请求蓝牙权限
@@ -335,15 +353,18 @@ public final class DevicePermissionManager: NSObject, ObservableObject, Sendable
     
  /// 请求位置权限
     private func requestLocationPermission() async -> Bool {
- // macOS中位置权限请求
-        let manager = CLLocationManager()
-        manager.requestWhenInUseAuthorization()
-        
- // 等待权限结果
-        return await withCheckedContinuation { continuation in
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-                let status = self.checkLocationPermission()
-                continuation.resume(returning: status.isAuthorized)
+        let currentStatus = checkLocationPermission()
+        switch currentStatus {
+        case .authorized:
+            return true
+        case .denied, .restricted, .unavailable:
+            return false
+        case .notDetermined:
+            return await withCheckedContinuation { continuation in
+                self.locationPermissionContinuations.append(continuation)
+                if self.locationPermissionContinuations.count == 1 {
+                    self.locationManager.requestWhenInUseAuthorization()
+                }
             }
         }
     }
@@ -436,9 +457,34 @@ extension DevicePermissionManager: CBCentralManagerDelegate {
     }
 }
 
+// MARK: - CLLocationManagerDelegate
+extension DevicePermissionManager: CLLocationManagerDelegate {
+    nonisolated public func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+        _ = manager
+        Task { @MainActor [weak self] in
+            self?.handleLocationAuthorizationChange()
+        }
+    }
+
+    nonisolated public func locationManager(_ manager: CLLocationManager, didChangeAuthorization status: CLAuthorizationStatus) {
+        _ = manager
+        _ = status
+        Task { @MainActor [weak self] in
+            self?.handleLocationAuthorizationChange()
+        }
+    }
+}
+
 // MARK: - 权限帮助器
 extension DevicePermissionManager {
-    
+    private func handleLocationAuthorizationChange() {
+        let isAuthorized = checkLocationPermission().isAuthorized
+        let continuations = locationPermissionContinuations
+        locationPermissionContinuations.removeAll()
+        continuations.forEach { $0.resume(returning: isAuthorized) }
+        checkAllPermissions()
+    }
+
  /// 权限状态描述
     public func statusDescription(for type: PermissionType) -> String {
         guard let permission = permissions.first(where: { $0.type == type }) else {

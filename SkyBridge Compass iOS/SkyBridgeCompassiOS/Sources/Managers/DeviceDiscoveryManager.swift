@@ -55,6 +55,11 @@ public enum DiscoveryServiceType: String, CaseIterable, Sendable {
     
     /// 自定义 Android 服务（如果 Android 客户端使用）
     case androidShare = "_androidshare._tcp"
+
+    /// 运行时可能浏览的全部 Bonjour 服务；Info.plist 的 NSBonjourServices 需要覆盖这份清单。
+    public static var requiredBonjourPrivacyDeclarations: [String] {
+        allCases.map(\.rawValue)
+    }
     
     /// 服务的显示名称
     public var displayName: String {
@@ -338,6 +343,7 @@ enum PeerIdentityAliasResolver {
 @MainActor
 public class DeviceDiscoveryManager: ObservableObject {
     public static let instance = DeviceDiscoveryManager()
+    nonisolated static let bonjourAuthorizationDNSCode: Int32 = -65555
     
     // MARK: - Published Properties
     
@@ -392,6 +398,7 @@ public class DeviceDiscoveryManager: ObservableObject {
     private var periodicRefreshTimer: Timer?
     private var periodicRefreshIntervalSeconds: TimeInterval = 0
     private var lastAlreadyRunningLogAt: Date?
+    private var authorizationBlockedServiceTypes = Set<DiscoveryServiceType>()
     
     /// 设备超时时间（秒）
     private let deviceTimeout: TimeInterval = 60
@@ -452,6 +459,29 @@ public class DeviceDiscoveryManager: ObservableObject {
     }
     
     private init() {}
+
+    nonisolated static func declaredBonjourServices(in bundle: Bundle = .main) -> Set<String> {
+        let raw = bundle.object(forInfoDictionaryKey: "NSBonjourServices") as? [String] ?? []
+        return Set(raw.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty })
+    }
+
+    nonisolated static func hasLocalNetworkUsageDescription(in bundle: Bundle = .main) -> Bool {
+        guard let raw = bundle.object(forInfoDictionaryKey: "NSLocalNetworkUsageDescription") as? String else {
+            return false
+        }
+        return !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    nonisolated static func isBonjourAuthorizationError(_ error: NWError) -> Bool {
+        if case .dns(let dnsError) = error {
+            return dnsError == bonjourAuthorizationDNSCode
+        }
+        return false
+    }
+
+    nonisolated static func shouldAutoRecoverBrowser(after error: NWError) -> Bool {
+        !isBonjourAuthorizationError(error)
+    }
     
     // MARK: - Discovery Control
     
@@ -518,9 +548,18 @@ public class DeviceDiscoveryManager: ObservableObject {
         // 停止周期刷新
         periodicRefreshTimer?.invalidate()
         periodicRefreshTimer = nil
+        authorizationBlockedServiceTypes.removeAll()
         
         isDiscovering = false
         SkyBridgeLogger.shared.info("⏹️ 设备发现已停止")
+    }
+
+    func retryAuthorizationBlockedBrowsers() {
+        guard !authorizationBlockedServiceTypes.isEmpty else { return }
+        authorizationBlockedServiceTypes.removeAll()
+        if isDiscovering {
+            reconcileBrowsersForCurrentMode()
+        }
     }
     
     /// 刷新设备列表
@@ -646,6 +685,7 @@ public class DeviceDiscoveryManager: ObservableObject {
 
     private func reconcileBrowsersForCurrentMode() {
         let desiredTypes = Set(discoveryMode.serviceTypes)
+        authorizationBlockedServiceTypes.formIntersection(desiredTypes)
 
         let staleTypes = browsers.keys.filter { !desiredTypes.contains($0) }
         for stale in staleTypes {
@@ -656,6 +696,10 @@ public class DeviceDiscoveryManager: ObservableObject {
         }
 
         for serviceType in discoveryMode.serviceTypes where browsers[serviceType] == nil {
+            guard !authorizationBlockedServiceTypes.contains(serviceType) else {
+                SkyBridgeLogger.shared.debug("⏸️ 跳过被授权/隐私策略阻断的浏览器: \(serviceType.rawValue)")
+                continue
+            }
             startBrowser(for: serviceType)
         }
     }
@@ -709,18 +753,39 @@ public class DeviceDiscoveryManager: ObservableObject {
     private func handleBrowserStateChange(_ state: NWBrowser.State, for serviceType: DiscoveryServiceType) async {
         switch state {
         case .ready:
+            authorizationBlockedServiceTypes.remove(serviceType)
             SkyBridgeLogger.shared.debug("✅ 浏览器就绪: \(serviceType.rawValue)")
             
         case .failed(let error):
-            if case .dns(let dnsError) = error, dnsError == -65555 {
-                SkyBridgeLogger.shared.error("❌ 浏览器失败 (\(serviceType.rawValue)): NoAuth(-65555)。请确认已允许「本地网络」权限，且 Info.plist 包含 NSLocalNetworkUsageDescription + NSBonjourServices。")
-            } else {
-                SkyBridgeLogger.shared.error("❌ 浏览器失败 (\(serviceType.rawValue)): \(error.localizedDescription)")
-            }
             self.error = error
             browsers.removeValue(forKey: serviceType)
             liveBrowseEndpointKeysByServiceType.removeValue(forKey: serviceType)
-            scheduleBrowserRecovery(for: serviceType, reason: "failed")
+
+            if Self.isBonjourAuthorizationError(error) {
+                authorizationBlockedServiceTypes.insert(serviceType)
+                let declaredServices = Self.declaredBonjourServices()
+                let hasUsageDescription = Self.hasLocalNetworkUsageDescription()
+                if !declaredServices.contains(serviceType.rawValue) {
+                    SkyBridgeLogger.shared.error(
+                        "❌ 浏览器失败 (\(serviceType.rawValue)): NoAuth(-65555)。当前服务类型未声明到 Info.plist 的 NSBonjourServices；iOS 会直接拒绝 DNSServiceBrowse。"
+                    )
+                } else if !hasUsageDescription {
+                    SkyBridgeLogger.shared.error(
+                        "❌ 浏览器失败 (\(serviceType.rawValue)): NoAuth(-65555)。Info.plist 缺少 NSLocalNetworkUsageDescription，本地网络授权无法正常申请。"
+                    )
+                } else {
+                    SkyBridgeLogger.shared.error(
+                        "❌ 浏览器失败 (\(serviceType.rawValue)): NoAuth(-65555)。本地网络权限当前未授权或已被系统策略拒绝；暂停自动重建，待用户在系统设置授权后再重试。"
+                    )
+                }
+                return
+            }
+
+            authorizationBlockedServiceTypes.remove(serviceType)
+            SkyBridgeLogger.shared.error("❌ 浏览器失败 (\(serviceType.rawValue)): \(error.localizedDescription)")
+            if Self.shouldAutoRecoverBrowser(after: error) {
+                scheduleBrowserRecovery(for: serviceType, reason: "failed")
+            }
             
         case .cancelled:
             SkyBridgeLogger.shared.debug("⏹️ 浏览器已取消: \(serviceType.rawValue)")

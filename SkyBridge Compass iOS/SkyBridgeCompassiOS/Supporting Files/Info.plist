@@ -48,6 +48,13 @@
 		<string>_skybridge._udp</string>
 		<string>_skybridge-transfer._tcp</string>
 		<string>_skybridge-remote._tcp</string>
+		<string>_companion-link._tcp</string>
+		<string>_airdrop._tcp</string>
+		<string>_sftp-ssh._tcp</string>
+		<string>_smb._tcp</string>
+		<string>_http._tcp</string>
+		<string>_rdlink._tcp</string>
+		<string>_androidshare._tcp</string>
 	</array>
 	<key>NSCameraUsageDescription</key>
 	<string>SkyBridge 需要访问相机以扫描设备配对二维码。</string>

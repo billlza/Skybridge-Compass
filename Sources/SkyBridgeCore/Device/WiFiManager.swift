@@ -111,6 +111,20 @@ public enum WiFiInterfaceState {
 /// 使用 Swift 6.2 的 Actor 隔离和并发安全特性
 @MainActor
 public final class WiFiManager: BaseManager {
+    private final class LocationAuthorizationDelegateProxy: NSObject, CLLocationManagerDelegate {
+        private let notificationName = Notification.Name("WiFiManager.LocationAuthorizationChanged")
+
+        nonisolated func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+            _ = manager
+            NotificationCenter.default.post(name: notificationName, object: nil)
+        }
+
+        nonisolated func locationManager(_ manager: CLLocationManager, didChangeAuthorization status: CLAuthorizationStatus) {
+            _ = manager
+            _ = status
+            NotificationCenter.default.post(name: notificationName, object: nil)
+        }
+    }
     
  // MARK: - 发布属性
     @Published public var availableNetworks: [WiFiNetwork] = []
@@ -118,12 +132,16 @@ public final class WiFiManager: BaseManager {
     @Published public var interfaceState: WiFiInterfaceState = .unknown
     @Published public var isScanning = false
     @Published public var hasPermission = false
+
+    private static let locationAuthorizationChangedNotification = Notification.Name("WiFiManager.LocationAuthorizationChanged")
     
  // MARK: - 私有属性
     private let wifiClient: CWWiFiClient
     private var wifiInterface: CWInterface?
     private var scanTimer: Timer?
     private var wifiCancellables = Set<AnyCancellable>()
+    private let locationManager = CLLocationManager()
+    private let locationAuthorizationDelegate = LocationAuthorizationDelegateProxy()
     
  /// 使用 Swift 6.2 的并发安全队列进行 WiFi 操作
     private let wifiQueue = DispatchQueue(label: "com.skybridge.wifi-manager", qos: .userInitiated, attributes: .concurrent)
@@ -132,6 +150,14 @@ public final class WiFiManager: BaseManager {
     public init() {
         self.wifiClient = CWWiFiClient.shared()
         super.init(category: "WiFiManager")
+        locationManager.delegate = locationAuthorizationDelegate
+        NotificationCenter.default.publisher(for: Self.locationAuthorizationChangedNotification)
+            .sink { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.handleLocationAuthorizationChange()
+                }
+            }
+            .store(in: &wifiCancellables)
         logger.info("📶 WiFi管理器初始化完成")
     }
     
@@ -167,7 +193,6 @@ public final class WiFiManager: BaseManager {
     public func checkPermissions() {
  // 在macOS中，WiFi访问需要用户授权和位置权限
  // 首先检查位置权限
-        let locationManager = CLLocationManager()
         let locationStatus = locationManager.authorizationStatus
         
         if locationStatus == .denied || locationStatus == .restricted {
@@ -459,6 +484,19 @@ public final class WiFiManager: BaseManager {
                 startPeriodicScanning()
                 logger.info("WiFi扫描间隔已更新")
             }
+        }
+    }
+
+    private func handleLocationAuthorizationChange() {
+        checkPermissions()
+        guard status.isActive else { return }
+        if hasPermission {
+            Task { @MainActor [weak self] in
+                guard let self, !self.isScanning else { return }
+                await self.startScanning()
+            }
+        } else {
+            stopScanning()
         }
     }
 }
