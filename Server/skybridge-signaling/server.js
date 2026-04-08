@@ -117,18 +117,6 @@ function base64url(buf) {
     .replace(/=+$/g, '');
 }
 
-function base64urlToBuffer(raw) {
-  const value = String(raw || '').trim();
-  if (!value) return null;
-  const normalized = value.replace(/-/g, '+').replace(/_/g, '/');
-  const padded = normalized + '='.repeat((4 - (normalized.length % 4 || 4)) % 4);
-  try {
-    return Buffer.from(padded, 'base64');
-  } catch (_) {
-    return null;
-  }
-}
-
 function newOpaqueToken(bytes = 24) {
   return base64url(crypto.randomBytes(bytes));
 }
@@ -667,49 +655,6 @@ function deriveTenantIdFromUser(user) {
   return '';
 }
 
-function decodeUnverifiedJWTClaims(token) {
-  const parts = String(token || '').trim().split('.');
-  if (parts.length < 2) return null;
-  const payload = base64urlToBuffer(parts[1]);
-  if (!payload) return null;
-  try {
-    return JSON.parse(payload.toString('utf8'));
-  } catch (_) {
-    return null;
-  }
-}
-
-function syntheticUserFromAccessToken(accessToken) {
-  const claims = decodeUnverifiedJWTClaims(accessToken);
-  if (!claims || typeof claims !== 'object') {
-    return null;
-  }
-  const appMetadata = claims.app_metadata && typeof claims.app_metadata === 'object'
-    ? claims.app_metadata
-    : {};
-  const userMetadata = claims.user_metadata && typeof claims.user_metadata === 'object'
-    ? claims.user_metadata
-    : {};
-  const id = String(claims.sub || '').trim();
-  if (!id) {
-    return null;
-  }
-  return {
-    id,
-    email: typeof claims.email === 'string' ? claims.email : null,
-    appMetadata,
-    userMetadata,
-    isGuest: Boolean(
-      claims.is_anonymous
-      || userMetadata.is_guest
-      || appMetadata.is_guest
-      || appMetadata.provider === 'anonymous'
-      || userMetadata.role === 'guest'
-    ),
-    synthetic: true
-  };
-}
-
 function syntheticTenantPolicy(tenantId) {
   return {
     tenant_id: tenantId,
@@ -733,6 +678,46 @@ function syntheticDeviceRecord(ctx) {
   };
 }
 
+function registryAdvertisesCapability(flag) {
+  return typeof flag === 'boolean' ? flag : null;
+}
+
+function registrySupportsMethod(store, methodName) {
+  return Boolean(store && typeof store[methodName] === 'function');
+}
+
+function registryCanVerifyAccessTokens(store = registryStore) {
+  const advertised = registryAdvertisesCapability(store?.canVerifyAccessToken);
+  if (advertised != null) {
+    return advertised;
+  }
+  return registrySupportsMethod(store, 'verifyAccessToken');
+}
+
+function registryCanReadTenantPolicy(store = registryStore) {
+  const advertised = registryAdvertisesCapability(store?.canAccessRegistry);
+  if (advertised != null) {
+    return advertised;
+  }
+  return registrySupportsMethod(store, 'getTenantPolicy');
+}
+
+function registryCanReadRegisteredDevices(store = registryStore) {
+  const advertised = registryAdvertisesCapability(store?.canAccessRegistry);
+  if (advertised != null) {
+    return advertised;
+  }
+  return registrySupportsMethod(store, 'getRegisteredDevice');
+}
+
+function registryCanBootstrapRegisterDevices(store = registryStore) {
+  const advertised = registryAdvertisesCapability(store?.canAccessRegistry);
+  if (advertised != null) {
+    return advertised;
+  }
+  return registrySupportsMethod(store, 'bootstrapRegisterDevice');
+}
+
 async function loadAuthenticatedDeviceContext(req, { requireRegisteredDevice = true } = {}) {
   const accessToken = getBearerToken(req);
   if (!accessToken) {
@@ -745,12 +730,10 @@ async function loadAuthenticatedDeviceContext(req, { requireRegisteredDevice = t
   const clientVersion = normalizeVersion(req.body?.clientVersion || req.query?.clientVersion || req.get('X-SkyBridge-Client-Version') || '0.0.0');
   const protocolVersion = normalizeVersion(req.body?.protocolVersion || req.query?.protocolVersion || req.get('X-SkyBridge-Protocol-Version') || '0');
 
-  const canVerifyAccessToken = registryStore.canVerifyAccessToken;
+  const canVerifyAccessToken = registryCanVerifyAccessTokens();
   const user = canVerifyAccessToken
     ? await registryStore.verifyAccessToken(accessToken)
-    : ((SIGNALING_ALLOW_BOOTSTRAP_TENANT_POLICY && currentAllowBootstrapDeviceAuth)
-      ? syntheticUserFromAccessToken(accessToken)
-      : null);
+    : null;
   if (!user && !canVerifyAccessToken) {
     throw makeError('registry_not_configured', 503);
   }
@@ -764,7 +747,8 @@ async function loadAuthenticatedDeviceContext(req, { requireRegisteredDevice = t
   if (!tenantId) {
     throw makeError('missing_tenant_id', 400);
   }
-  const tenantPolicy = registryStore.canAccessRegistry
+  const canReadTenantPolicy = registryCanReadTenantPolicy();
+  const tenantPolicy = canReadTenantPolicy
     ? await registryStore.getTenantPolicy(tenantId)
     : null;
   const effectiveTenantPolicy = (!tenantPolicy && SIGNALING_ALLOW_BOOTSTRAP_TENANT_POLICY)
@@ -776,7 +760,8 @@ async function loadAuthenticatedDeviceContext(req, { requireRegisteredDevice = t
   assertVersionGates(clientVersion, protocolVersion, effectiveTenantPolicy);
   let deviceRecord = null;
   if (requireRegisteredDevice) {
-    if (registryStore.canAccessRegistry) {
+    const canReadRegisteredDevices = registryCanReadRegisteredDevices();
+    if (canReadRegisteredDevices) {
       deviceRecord = await registryStore.getRegisteredDevice({
         tenantId,
         userId: user.id,
@@ -792,7 +777,7 @@ async function loadAuthenticatedDeviceContext(req, { requireRegisteredDevice = t
         binding
       });
     }
-    if (!deviceRecord && !registryStore.canAccessRegistry) {
+    if (!deviceRecord && !canReadRegisteredDevices) {
       throw makeError('registry_not_configured', 503);
     }
     if (!deviceRecord) {
@@ -988,6 +973,16 @@ function assertUniqueSessionParticipant(item, binding) {
     return 'identity_conflict';
   }
   return null;
+}
+
+function admissionOwnsSession(item, admission) {
+  if (item.tenantId && item.tenantId !== admission.tenantId) {
+    return false;
+  }
+  if (item.userId && item.userId !== admission.userId) {
+    return false;
+  }
+  return true;
 }
 
 function wsSendRaw(ws, obj) {
@@ -1515,6 +1510,10 @@ app.get('/api/webrtc/lookup/:code', rlLookup, asyncRoute(async (req, res) => {
     incrementSecurityCounter('lookup_not_found');
     return res.status(404).json({ found: false });
   }
+  if (!admissionOwnsSession(item, admission)) {
+    incrementSecurityCounter('lookup_not_found');
+    return res.status(404).json({ found: false });
+  }
   const binding = {
     deviceId: admission.deviceId,
     protocolSigningAlgorithm: admission.protocolSigningAlgorithm,
@@ -1651,6 +1650,9 @@ app.post('/api/webrtc/redeem-session', rlControl, asyncRoute(async (req, res) =>
     if (!item || item.connectionKind !== 'webrtc_room_session') {
       throw makeError('session_expired', 404);
     }
+    if (!admissionOwnsSession(item, admission)) {
+      throw makeError('session_expired', 404);
+    }
     const binding = {
       deviceId: admission.deviceId,
       protocolSigningAlgorithm: admission.protocolSigningAlgorithm,
@@ -1709,7 +1711,8 @@ app.get('/api/turn/credentials', rlTurn, asyncRoute(async (req, res) => {
     throw makeError('turn_credentials_not_configured', 503);
   }
   let deviceRecord = null;
-  if (registryStore.canAccessRegistry) {
+  const canReadRegisteredDevices = registryCanReadRegisteredDevices();
+  if (canReadRegisteredDevices) {
     deviceRecord = await registryStore.getRegisteredDevice({
       tenantId: turnToken.tenantId,
       userId: turnToken.userId,
@@ -1729,7 +1732,7 @@ app.get('/api/turn/credentials', rlTurn, asyncRoute(async (req, res) => {
       }
     });
   }
-  if (!deviceRecord && !registryStore.canAccessRegistry) {
+  if (!deviceRecord && !canReadRegisteredDevices) {
     throw makeError('registry_not_configured', 503);
   }
   if (!deviceRecord || deviceRecord.status !== 'active') {
@@ -1778,15 +1781,21 @@ app.post('/api/devices/register-current', rlControl, asyncRoute(async (req, res)
   const context = await loadAuthenticatedDeviceContext(req, { requireRegisteredDevice: false });
   await assertPublicCapabilityAvailable('register_current_device', context.tenantId);
   const deviceName = typeof req.body?.deviceName === 'string' ? req.body.deviceName.slice(0, 128) : '';
-  const existing = await registryStore.getRegisteredDevice({
-    tenantId: context.tenantId,
-    userId: context.user.id,
-    deviceId: context.binding.deviceId,
-    protocolSigningAlgorithm: context.binding.protocolSigningAlgorithm,
-    protocolPublicKeyFingerprint: context.binding.protocolPublicKeyFingerprint
-  });
+  const canReadRegisteredDevices = registryCanReadRegisteredDevices();
+  const existing = canReadRegisteredDevices
+    ? await registryStore.getRegisteredDevice({
+      tenantId: context.tenantId,
+      userId: context.user.id,
+      deviceId: context.binding.deviceId,
+      protocolSigningAlgorithm: context.binding.protocolSigningAlgorithm,
+      protocolPublicKeyFingerprint: context.binding.protocolPublicKeyFingerprint
+    })
+    : null;
   if (!existing && !currentAllowBootstrapDeviceAuth) {
     throw makeError('device_not_registered', 403);
+  }
+  if (!registryCanBootstrapRegisterDevices()) {
+    throw makeError('registry_not_configured', 503);
   }
   const result = await registryStore.bootstrapRegisterDevice({
     p_tenant_id: context.tenantId,
@@ -1866,7 +1875,7 @@ wss.on('connection', (ws, req) => {
       ws.close(1008, 'session_token_expired');
       return;
     }
-    const tenantPolicy = registryStore.canAccessRegistry
+    const tenantPolicy = registryCanReadTenantPolicy()
       ? await registryStore.getTenantPolicy(tokenPreview.tenantId)
       : null;
     assertVersionGates(

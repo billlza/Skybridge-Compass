@@ -12,31 +12,43 @@ const { createSignalingStateBackend } = require('../lib/signaling_state_backend'
 const { createRuntime } = require('../server');
 
 const tenantId = 'tenant-live-test';
+const otherTenantId = 'tenant-other-test';
 const bearerToken = 'integration-bearer-token';
+const sameTenantOtherUserBearerToken = 'integration-bearer-token-user-2';
+const otherTenantBearerToken = 'integration-bearer-token-tenant-2';
 const userId = 'user-live-test';
+const sameTenantOtherUserId = 'user-live-test-2';
+const otherTenantUserId = 'user-other-tenant-test';
 
 class FakeRegistryStore {
   constructor() {
     this.configured = true;
     this.syntheticOnlyDeviceIds = new Set();
     this.bootstrapCalls = [];
+    this.sessionsByAccessToken = new Map([
+      [bearerToken, { userId, tenantId, email: 'integration@example.com' }],
+      [sameTenantOtherUserBearerToken, { userId: sameTenantOtherUserId, tenantId, email: 'integration-user-2@example.com' }],
+      [otherTenantBearerToken, { userId: otherTenantUserId, tenantId: otherTenantId, email: 'integration-other-tenant@example.com' }]
+    ]);
+    this.allowedTenantIds = new Set([tenantId, otherTenantId]);
   }
 
   async verifyAccessToken(accessToken) {
-    assert.equal(accessToken, bearerToken);
+    const session = this.sessionsByAccessToken.get(accessToken);
+    assert.ok(session, `unexpected access token: ${accessToken}`);
     return {
-      id: userId,
-      email: 'integration@example.com',
-      appMetadata: { tenant_id: tenantId },
+      id: session.userId,
+      email: session.email,
+      appMetadata: { tenant_id: session.tenantId },
       userMetadata: {},
       isGuest: false
     };
   }
 
   async getTenantPolicy(requestedTenantId) {
-    assert.equal(requestedTenantId, tenantId);
+    assert.ok(this.allowedTenantIds.has(requestedTenantId), `unexpected tenant policy lookup: ${requestedTenantId}`);
     return {
-      tenant_id: tenantId,
+      tenant_id: requestedTenantId,
       public_signaling_enabled: true,
       min_supported_client_version: '0.0.0',
       min_supported_protocol_version: '0'
@@ -44,8 +56,11 @@ class FakeRegistryStore {
   }
 
   async getRegisteredDevice({ tenantId: requestedTenantId, userId: requestedUserId, deviceId }) {
-    assert.equal(requestedTenantId, tenantId);
-    assert.equal(requestedUserId, userId);
+    assert.ok(this.allowedTenantIds.has(requestedTenantId), `unexpected device lookup tenant: ${requestedTenantId}`);
+    assert.ok(
+      [...this.sessionsByAccessToken.values()].some((session) => session.userId === requestedUserId),
+      `unexpected device lookup user: ${requestedUserId}`
+    );
     if (this.syntheticOnlyDeviceIds.has(deviceId)) {
       return null;
     }
@@ -173,6 +188,35 @@ test('live register-session route replays same request and rejects mismatched re
   assert.equal(mismatchToken.json.error, 'idempotency_key_reused');
 });
 
+test('lookup rejects responders from a different user in the same tenant', async () => {
+  const initiator = makeIdentityBinding('lookup-initiator');
+  const initiatorAdmission = await issueAdmissionLease(initiator);
+  const codeResponse = await postJSON('/api/webrtc/register-code', {
+    headers: {
+      'X-SkyBridge-Admission': initiatorAdmission.admissionToken
+    },
+    body: {
+      ttlSeconds: 120,
+      deviceName: 'Initiator Mac'
+    }
+  });
+
+  assert.equal(codeResponse.status, 200);
+
+  const responder = makeIdentityBinding('lookup-responder');
+  const responderAdmission = await issueAdmissionLease(responder, {
+    accessToken: sameTenantOtherUserBearerToken
+  });
+  const lookup = await getJSON(`/api/webrtc/lookup/${codeResponse.json.code}`, {
+    headers: {
+      'X-SkyBridge-Admission': responderAdmission.admissionToken
+    }
+  });
+
+  assert.equal(lookup.status, 404);
+  assert.deepEqual(lookup.json, { found: false });
+});
+
 test('live redeem-session route replays same request and rejects mismatched reuse', async () => {
   const initiator = makeIdentityBinding('initiator-redeem');
   const initiatorAdmission = await issueAdmissionLease(initiator);
@@ -233,6 +277,39 @@ test('live redeem-session route replays same request and rejects mismatched reus
 
   assert.equal(mismatchToken.status, 409);
   assert.equal(mismatchToken.json.error, 'idempotency_key_reused');
+});
+
+test('redeem-session rejects responders from a different tenant', async () => {
+  const initiator = makeIdentityBinding('initiator-cross-tenant');
+  const initiatorAdmission = await issueAdmissionLease(initiator);
+  const sessionResponse = await postJSON('/api/webrtc/register-session', {
+    headers: {
+      'X-SkyBridge-Admission': initiatorAdmission.admissionToken
+    },
+    body: {
+      ttlSeconds: 120
+    }
+  });
+
+  assert.equal(sessionResponse.status, 200);
+
+  const responder = makeIdentityBinding('responder-cross-tenant');
+  const responderAdmission = await issueAdmissionLease(responder, {
+    accessToken: otherTenantBearerToken,
+    requestTenantId: otherTenantId
+  });
+  const redeem = await postJSON('/api/webrtc/redeem-session', {
+    headers: {
+      'X-SkyBridge-Admission': responderAdmission.admissionToken
+    },
+    body: {
+      sessionId: sessionResponse.json.sessionId,
+      qrBootstrapToken: sessionResponse.json.qrBootstrapToken
+    }
+  });
+
+  assert.equal(redeem.status, 404);
+  assert.equal(redeem.json.error, 'session_expired');
 });
 
 test('turn credentials accept bootstrap-auth synthetic devices', async () => {
@@ -347,12 +424,13 @@ function makeIdentityBinding(prefix, algorithm = 'Ed25519') {
   };
 }
 
-async function issueAdmissionLease(binding) {
+async function issueAdmissionLease(binding, { accessToken = bearerToken, requestTenantId = tenantId } = {}) {
   const challenge = await postJSON('/api/webrtc/admission/challenge', {
     headers: {
-      'X-SkyBridge-Tenant-Id': tenantId
+      'X-SkyBridge-Tenant-Id': requestTenantId
     },
     requiresAuth: true,
+    accessToken,
     body: {
       deviceId: binding.deviceId,
       protocolSigningAlgorithm: binding.protocolSigningAlgorithm,
@@ -378,9 +456,10 @@ async function issueAdmissionLease(binding) {
   const signature = crypto.sign(null, payload, binding.privateKey).toString('base64');
   const admission = await postJSON('/api/webrtc/admission', {
     headers: {
-      'X-SkyBridge-Tenant-Id': tenantId
+      'X-SkyBridge-Tenant-Id': requestTenantId
     },
     requiresAuth: true,
+    accessToken,
     body: {
       challengeId: challenge.json.challengeId,
       signature,
@@ -404,13 +483,26 @@ test('admission accepts ML-DSA-65 challenge signatures', async () => {
   assert.ok(admissionLease.admissionToken.length > 0);
 });
 
-async function postJSON(path, { headers = {}, body, requiresAuth = false } = {}) {
+async function getJSON(path, { headers = {} } = {}) {
+  const response = await fetch(`${baseURL}${path}`, {
+    method: 'GET',
+    headers
+  });
+
+  const text = await response.text();
+  return {
+    status: response.status,
+    json: text ? JSON.parse(text) : {}
+  };
+}
+
+async function postJSON(path, { headers = {}, body, requiresAuth = false, accessToken = bearerToken } = {}) {
   const requestHeaders = {
     'Content-Type': 'application/json',
     ...headers
   };
   if (requiresAuth) {
-    requestHeaders.Authorization = `Bearer ${bearerToken}`;
+    requestHeaders.Authorization = `Bearer ${accessToken}`;
   }
 
   const response = await fetch(`${baseURL}${path}`, {
