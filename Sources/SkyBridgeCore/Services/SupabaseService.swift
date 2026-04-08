@@ -156,6 +156,7 @@ public final class SupabaseService: BaseManager {
     
     private let urlSession: URLSession
     private var configuration: Configuration?
+    private var inFlightAccessTokenRefresh: (token: String, id: UUID, task: Task<AuthSession, Error>)?
     
  // MARK: - 初始化
     
@@ -1496,13 +1497,49 @@ extension SupabaseService {
  /// - Parameter refreshToken: 刷新令牌
  /// - Returns: 新的认证会话
     public func refreshAccessToken(_ refreshToken: String) async throws -> AuthSession {
+        let normalizedRefreshToken = refreshToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedRefreshToken.isEmpty else {
+            throw SupabaseError.invalidResponse
+        }
+
+        if let current = inFlightAccessTokenRefresh,
+           current.token == normalizedRefreshToken {
+            return try await current.task.value
+        }
+
         guard let config = configuration else {
             throw SupabaseError.configurationMissing
         }
-        
+
+        let refreshID = UUID()
+        let task = Task<AuthSession, Error> { [self] in
+            try await performRefreshAccessTokenRequest(
+                config: config,
+                refreshToken: normalizedRefreshToken
+            )
+        }
+        inFlightAccessTokenRefresh = (token: normalizedRefreshToken, id: refreshID, task: task)
+
+        do {
+            let session = try await task.value
+            clearInFlightAccessTokenRefresh(ifMatches: refreshID)
+            return session
+        } catch {
+            clearInFlightAccessTokenRefresh(ifMatches: refreshID)
+            throw error
+        }
+    }
+
+    private func performRefreshAccessTokenRequest(
+        config: Configuration,
+        refreshToken: String
+    ) async throws -> AuthSession {
         SkyBridgeLogger.ui.debugOnly("🔄 [SupabaseService] 开始刷新访问令牌")
-        
-        guard var urlComponents = URLComponents(url: config.url.appendingPathComponent("auth/v1/token"), resolvingAgainstBaseURL: false) else {
+
+        guard var urlComponents = URLComponents(
+            url: config.url.appendingPathComponent("auth/v1/token"),
+            resolvingAgainstBaseURL: false
+        ) else {
             throw SupabaseError.invalidResponse
         }
         urlComponents.queryItems = [URLQueryItem(name: "grant_type", value: "refresh_token")]
@@ -1514,20 +1551,17 @@ extension SupabaseService {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(config.anonKey)", forHTTPHeaderField: "Authorization")
         request.setValue(config.anonKey, forHTTPHeaderField: "apikey")
-        
-        let payload = [
-            "refresh_token": refreshToken
-        ]
-        
+        request.httpBody = try JSONSerialization.data(
+            withJSONObject: ["refresh_token": refreshToken]
+        )
+
         do {
-            request.httpBody = try JSONSerialization.data(withJSONObject: payload)
-            
             let (data, response) = try await urlSession.data(for: request)
-            
+
             guard let httpResponse = response as? HTTPURLResponse else {
                 throw SupabaseError.networkError(URLError(.badServerResponse))
             }
-            
+
             if httpResponse.statusCode == 200 {
                 let authResponse = try JSONDecoder().decode(SupabaseAuthResponse.self, from: data)
                 SkyBridgeLogger.ui.debugOnly("✅ [SupabaseService] 令牌刷新成功")
@@ -1558,9 +1592,16 @@ extension SupabaseService {
                 let responseString = String(data: data, encoding: .utf8)
                 throw SupabaseError.httpStatus(code: httpResponse.statusCode, message: responseString)
             }
+        } catch let error as SupabaseError {
+            throw error
         } catch {
             SkyBridgeLogger.ui.error("❌ [SupabaseService] 令牌刷新网络错误: \(error.localizedDescription, privacy: .private)")
             throw SupabaseError.networkError(error)
         }
+    }
+
+    private func clearInFlightAccessTokenRefresh(ifMatches refreshID: UUID) {
+        guard inFlightAccessTokenRefresh?.id == refreshID else { return }
+        inFlightAccessTokenRefresh = nil
     }
 }

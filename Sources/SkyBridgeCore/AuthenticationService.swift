@@ -88,37 +88,55 @@ import Combine
             return currentSession.accessToken
         }
 
-        let refreshedSession: AuthSession
-        if isSupabaseMode || SupabaseService.shared.isSupabaseAccessToken(currentSession.accessToken) {
-            refreshedSession = try await SupabaseService.shared.refreshAccessToken(refreshToken)
-        } else {
-            let nebulaResult = try await NebulaService.shared.refreshAccessToken(refreshToken)
-            refreshedSession = try self.session(fromNebulaResult: nebulaResult)
+        if let existingRefreshTask = accessTokenRefreshTask {
+            let refreshedSession = try await existingRefreshTask.value
+            return refreshedSession.accessToken
         }
 
-        let mergedSession = AuthSession(
-            accessToken: refreshedSession.accessToken,
-            refreshToken: Self.mergedRefreshToken(
-                refreshedSession.refreshToken,
-                fallback: currentSession.refreshToken
-            ),
-            userIdentifier: refreshedSession.userIdentifier,
-            nebulaId: refreshedSession.nebulaId,
-            displayName: refreshedSession.displayName,
-            avatarURL: refreshedSession.avatarURL ?? currentSession.avatarURL,
-            issuedAt: refreshedSession.issuedAt
-        )
+        let refreshTask = Task<AuthSession, Error> { @MainActor [self, currentSession, refreshToken] in
+            let refreshedSession: AuthSession
+            if isSupabaseMode || SupabaseService.shared.isSupabaseAccessToken(currentSession.accessToken) {
+                refreshedSession = try await SupabaseService.shared.refreshAccessToken(refreshToken)
+            } else {
+                let nebulaResult = try await NebulaService.shared.refreshAccessToken(refreshToken)
+                refreshedSession = try self.session(fromNebulaResult: nebulaResult)
+            }
 
-        try store(session: mergedSession)
-        sessionSubject.send(mergedSession)
-        await TenantAccessController.shared.bindAuthentication(session: mergedSession)
-        return mergedSession.accessToken
+            let mergedSession = AuthSession(
+                accessToken: refreshedSession.accessToken,
+                refreshToken: Self.mergedRefreshToken(
+                    refreshedSession.refreshToken,
+                    fallback: currentSession.refreshToken
+                ),
+                userIdentifier: refreshedSession.userIdentifier,
+                nebulaId: refreshedSession.nebulaId,
+                displayName: refreshedSession.displayName,
+                avatarURL: refreshedSession.avatarURL ?? currentSession.avatarURL,
+                issuedAt: refreshedSession.issuedAt
+            )
+
+            try store(session: mergedSession)
+            sessionSubject.send(mergedSession)
+            await TenantAccessController.shared.bindAuthentication(session: mergedSession)
+            return mergedSession
+        }
+
+        accessTokenRefreshTask = refreshTask
+        defer {
+            if accessTokenRefreshTask == refreshTask {
+                accessTokenRefreshTask = nil
+            }
+        }
+
+        let refreshedSession = try await refreshTask.value
+        return refreshedSession.accessToken
     }
 
     private let sessionSubject = CurrentValueSubject<AuthSession?, Never>(nil)
     private let urlSession: URLSession
     private var configuration: Configuration?
     private var isSupabaseMode: Bool = false
+    private var accessTokenRefreshTask: Task<AuthSession, Error>?
 
     private init() {
         let config = URLSessionConfiguration.ephemeral

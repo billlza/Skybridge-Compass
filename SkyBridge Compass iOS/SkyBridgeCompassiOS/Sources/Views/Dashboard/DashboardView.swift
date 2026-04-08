@@ -8,6 +8,7 @@
 
 import SwiftUI
 import Foundation
+import Darwin
 
 // MARK: - Dashboard View
 
@@ -119,20 +120,16 @@ public struct DashboardView: View {
                 onScanConnectLink: { link in
                     Task {
                         await crossNetworkManager.connect(fromScannedString: link)
-                        if case .failed(let msg) = crossNetworkManager.state {
-                            crossNetworkAlertMessage = msg
-                        }
                     }
                 },
                 onConnectWithCode: { code in
                     Task {
                         await crossNetworkManager.connect(withCode: code)
-                        if case .failed(let msg) = crossNetworkManager.state {
-                            crossNetworkAlertMessage = msg
-                        }
                     }
                 }
             )
+            .presentationDetents([.large])
+            .presentationDragIndicator(.visible)
         }
         .alert("跨网连接", isPresented: Binding(
             get: { crossNetworkAlertMessage != nil },
@@ -152,6 +149,7 @@ public struct DashboardView: View {
             }
         }
         .onChange(of: crossNetworkManager.state) { _, newValue in
+            guard !showingQRScanner else { return }
             if case .failed(let msg) = newValue,
                !msg.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 crossNetworkAlertMessage = msg
@@ -425,6 +423,7 @@ private struct QuantumStarLayer: View {
                             .font(.system(size: 16, weight: .medium))
                             .foregroundStyle(.white.opacity(0.7))
                     }
+                    .accessibilityIdentifier("dashboard.qr.button")
                 }
             }
             .refreshable {
@@ -1049,8 +1048,7 @@ private struct UserAvatarButton: View {
 // MARK: - QR Hub Sheet (Scan / My QR)
 
 @available(iOS 17.0, *)
-private struct QRCodeHubSheet: View {
-    enum Mode: String, CaseIterable, Identifiable {
+enum QRCodeHubMode: String, CaseIterable, Identifiable {
         case scan
         case myQR
         case code
@@ -1065,15 +1063,71 @@ private struct QRCodeHubSheet: View {
         }
     }
 
+@available(iOS 17.0, *)
+struct QRCodeHubInteractionState: Equatable, Sendable {
+    var isConnecting = false
+    var isSubmittingCode = false
+    var sheetErrorMessage: String?
+
+    mutating func startConnectionCodeSubmission() {
+        sheetErrorMessage = nil
+        isSubmittingCode = true
+    }
+
+    mutating func startPairingConnection() {
+        isConnecting = true
+    }
+
+    mutating func cancelPairingConnection() {
+        isConnecting = false
+    }
+
+    mutating func resetForModeChange() {
+        isConnecting = false
+        isSubmittingCode = false
+        sheetErrorMessage = nil
+    }
+
+    mutating func handleCrossNetworkState(_ state: CrossNetworkWebRTCManager.State) {
+        switch state {
+        case .failed(let message):
+            let normalized = message.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !normalized.isEmpty {
+                sheetErrorMessage = normalized
+            }
+            isSubmittingCode = false
+            isConnecting = false
+        case .idle, .connecting, .connected:
+            break
+        }
+    }
+
+    mutating func handleReadiness(_ readiness: CrossNetworkWebRTCManager.Readiness) -> Bool {
+        switch readiness {
+        case .handshakeComplete:
+            return true
+        case .idle:
+            isSubmittingCode = false
+            return false
+        case .transportReady:
+            return false
+        }
+    }
+}
+
+@available(iOS 17.0, *)
+private struct QRCodeHubSheet: View {
+
     @Environment(\.dismiss) private var dismiss
     @StateObject private var crossNetworkManager = CrossNetworkWebRTCManager.instance
-    @State private var mode: Mode = .scan
+    @State private var mode: QRCodeHubMode = .scan
     @State private var pendingPairing: QRCodeData?
     @State private var scannerSessionID = UUID()
-    @State private var isConnecting = false
+    @State private var interactionState = QRCodeHubInteractionState()
     @State private var codeInput: String = ""
     @State private var generatedCode: String = ""
     @State private var isGeneratingCode = false
+    @FocusState private var isCodeInputFocused: Bool
 
     let onScanPairingData: (QRCodeData) -> Void
     let onScanConnectLink: (String) -> Void
@@ -1083,12 +1137,13 @@ private struct QRCodeHubSheet: View {
         NavigationStack {
             VStack(spacing: 16) {
                 Picker("mode", selection: $mode) {
-                    ForEach(Mode.allCases) { m in
+                    ForEach(QRCodeHubMode.allCases) { m in
                         Text(m.localizedTitle).tag(m)
                     }
                 }
                 .pickerStyle(.segmented)
                 .padding(.horizontal)
+                .accessibilityIdentifier("dashboard.qr.mode.picker")
 
                 Group {
                     switch mode {
@@ -1124,14 +1179,14 @@ private struct QRCodeHubSheet: View {
 
                                 QRCodePairingConfirmCard(
                                     data: pendingPairing,
-                                    isConnecting: isConnecting,
+                                    isConnecting: interactionState.isConnecting,
                                     onCancel: {
                                         self.pendingPairing = nil
-                                        self.isConnecting = false
+                                        self.interactionState.cancelPairingConnection()
                                         self.scannerSessionID = UUID() // 重新开始扫描
                                     },
                                     onConnect: {
-                                        isConnecting = true
+                                        interactionState.startPairingConnection()
                                         onScanPairingData(pendingPairing)
                                         dismiss()
                                     }
@@ -1140,14 +1195,14 @@ private struct QRCodeHubSheet: View {
                                 .transition(.move(edge: .bottom).combined(with: .opacity))
                             }
                         }
+                        .accessibilityIdentifier("dashboard.qr.scan.root")
 
                     case .myQR:
                         MyConnectionQRCodeView()
                         
                     case .code:
-                        VStack(spacing: 18) {
-                            Spacer()
-                            
+                        ScrollView(showsIndicators: false) {
+                            VStack(spacing: 18) {
                             VStack(spacing: 10) {
                                 Image(systemName: "number.square")
                                     .font(.system(size: 56))
@@ -1167,6 +1222,8 @@ private struct QRCodeHubSheet: View {
                             TextField("例如：AB12CD34", text: $codeInput)
                                 .textInputAutocapitalization(.characters)
                                 .autocorrectionDisabled()
+                                .focused($isCodeInputFocused)
+                                .accessibilityIdentifier("dashboard.qr.code.input")
                                 .font(.system(size: 30, weight: .semibold, design: .rounded))
                                 .multilineTextAlignment(.center)
                                 .padding(.vertical, 18)
@@ -1181,14 +1238,30 @@ private struct QRCodeHubSheet: View {
                                 .onChange(of: codeInput) { _, newValue in
                                     codeInput = CrossNetworkWebRTCManager.sanitizeConnectionCodeInput(newValue)
                                 }
+                                .submitLabel(.go)
+                                .onSubmit {
+                                    guard !interactionState.isSubmittingCode else { return }
+                                    guard CrossNetworkWebRTCManager.canSubmitConnectionCode(codeInput) else { return }
+                                    isCodeInputFocused = false
+                                    let code = codeInput
+                                    interactionState.startConnectionCodeSubmission()
+                                    onConnectWithCode(code)
+                                }
                             
                             Button {
                                 let code = codeInput
+                                isCodeInputFocused = false
+                                interactionState.startConnectionCodeSubmission()
                                 onConnectWithCode(code)
                             } label: {
                                 HStack(spacing: 10) {
-                                    Image(systemName: "arrow.right.circle.fill")
-                                    Text("连接")
+                                    if interactionState.isSubmittingCode {
+                                        ProgressView()
+                                            .controlSize(.small)
+                                    } else {
+                                        Image(systemName: "arrow.right.circle.fill")
+                                    }
+                                    Text(interactionState.isSubmittingCode ? "连接中..." : "连接")
                                         .fontWeight(.semibold)
                                 }
                                 .frame(maxWidth: .infinity)
@@ -1196,8 +1269,9 @@ private struct QRCodeHubSheet: View {
                             }
                             .buttonStyle(.borderedProminent)
                             .tint(.cyan)
-                            .disabled(!CrossNetworkWebRTCManager.canSubmitConnectionCode(codeInput))
+                            .disabled(interactionState.isSubmittingCode || !CrossNetworkWebRTCManager.canSubmitConnectionCode(codeInput))
                             .padding(.horizontal, 24)
+                            .accessibilityIdentifier("dashboard.qr.code.submit")
 
                             Divider()
                                 .overlay(Color.white.opacity(0.12))
@@ -1266,9 +1340,14 @@ private struct QRCodeHubSheet: View {
                             .buttonStyle(.bordered)
                             .disabled(isGeneratingCode)
                             .padding(.horizontal, 24)
-                            
-                            Spacer()
+
+                            }
+                            .frame(maxWidth: .infinity, alignment: .top)
+                            .padding(.top, 20)
+                            .padding(.bottom, 28)
                         }
+                        .scrollBounceBehavior(.basedOnSize)
+                        .accessibilityIdentifier("dashboard.qr.code.root")
                         .onAppear {
                             if generatedCode.isEmpty, let existing = crossNetworkManager.localConnectionCode {
                                 generatedCode = existing
@@ -1283,6 +1362,28 @@ private struct QRCodeHubSheet: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("关闭") { dismiss() }
+                }
+            }
+            .alert("跨网连接", isPresented: Binding(
+                get: { interactionState.sheetErrorMessage != nil },
+                set: { if !$0 { interactionState.sheetErrorMessage = nil } }
+            )) {
+                Button("确定", role: .cancel) {
+                    interactionState.sheetErrorMessage = nil
+                }
+            } message: {
+                Text(interactionState.sheetErrorMessage ?? "")
+            }
+            .onChange(of: mode) { _, _ in
+                interactionState.resetForModeChange()
+                isCodeInputFocused = false
+            }
+            .onChange(of: crossNetworkManager.state) { _, newValue in
+                interactionState.handleCrossNetworkState(newValue)
+            }
+            .onChange(of: crossNetworkManager.readiness) { _, newValue in
+                if interactionState.handleReadiness(newValue) {
+                    dismiss()
                 }
             }
         }
@@ -1366,13 +1467,72 @@ private struct QRCodePairingConfirmCard: View {
 
 @available(iOS 17.0, *)
 private struct MyConnectionQRCodeView: View {
+    private enum QRCodeGenerationError: LocalizedError {
+        case message(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .message(let message):
+                return message
+            }
+        }
+
+        var message: String {
+            errorDescription ?? RuntimeLocalization.string("生成二维码失败")
+        }
+    }
+
+    private enum TransportMode: String, CaseIterable, Identifiable {
+        case p2p
+        case webRTC
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .p2p:
+                return "P2P"
+            case .webRTC:
+                return "WebRTC"
+            }
+        }
+
+        var subtitle: String {
+            switch self {
+            case .p2p:
+                return "同一网络优先，直接局域网连接"
+            case .webRTC:
+                return "跨网络连接，依赖信令与登录态"
+            }
+        }
+    }
+
     @StateObject private var crossNetworkManager = CrossNetworkWebRTCManager.instance
+    @StateObject private var connectionManager = P2PConnectionManager.instance
+    @AppStorage("dashboard.myqr.transport.mode") private var transportModeRaw = TransportMode.p2p.rawValue
     @State private var qrImage: UIImage?
     @State private var errorText: String?
     @State private var isGenerating = false
+    @State private var generationRevision = 0
 
     var body: some View {
         VStack(spacing: 16) {
+            Picker("transport", selection: transportModeBinding) {
+                ForEach(TransportMode.allCases) { mode in
+                    Text(mode.title).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+            .accessibilityIdentifier("dashboard.qr.myqr.transport.picker")
+            .padding(.horizontal)
+
+            Text(selectedTransportMode.subtitle)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal)
+                .accessibilityIdentifier("dashboard.qr.myqr.transport.subtitle")
+
             Spacer()
 
             if let qrImage {
@@ -1383,6 +1543,7 @@ private struct MyConnectionQRCodeView: View {
                     .frame(width: 260, height: 260)
                     .background(Color.white)
                     .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .accessibilityIdentifier("dashboard.qr.myqr.image")
             } else if isGenerating {
                 ProgressView()
             } else if let errorText {
@@ -1394,12 +1555,14 @@ private struct MyConnectionQRCodeView: View {
                 ProgressView()
             }
 
-            Text("让 macOS / 其他设备扫描此二维码以跨网连接")
+            Text(descriptionText)
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
+                .accessibilityIdentifier("dashboard.qr.myqr.description")
 
-            if let connectLink = crossNetworkManager.currentConnectLink,
+            if selectedTransportMode == .webRTC,
+               let connectLink = crossNetworkManager.currentConnectLink,
                !connectLink.isEmpty {
                 Text("当前路径二维码已就绪，语义与 macOS 保持一致")
                     .font(.footnote)
@@ -1416,9 +1579,24 @@ private struct MyConnectionQRCodeView: View {
             Spacer()
         }
         .padding()
+        .accessibilityIdentifier("dashboard.qr.myqr.root")
         .task { await generateIfNeeded() }
+        .onChange(of: transportModeRaw) { _, _ in
+            Task { await generate() }
+        }
         .onChange(of: crossNetworkManager.currentConnectLink) { _, newValue in
-            renderQRCode(from: newValue)
+            guard selectedTransportMode == .webRTC else { return }
+            guard let newValue, !newValue.isEmpty else {
+                qrImage = nil
+                return
+            }
+            switch renderConnectLinkQRCode(from: newValue) {
+            case .success(let image):
+                qrImage = image
+                errorText = nil
+            case .failure(let error):
+                errorText = error.message
+            }
         }
     }
 
@@ -1427,23 +1605,96 @@ private struct MyConnectionQRCodeView: View {
     }
 
     private func generate() async {
+        generationRevision += 1
+        let revision = generationRevision
         isGenerating = true
         errorText = nil
         qrImage = nil
-        defer { isGenerating = false }
+        let mode = selectedTransportMode
 
-        guard let connectLink = await crossNetworkManager.generateConnectLink() else {
-            errorText = crossNetworkManager.lastError ?? RuntimeLocalization.string("生成二维码失败")
-            return
+        let result: Result<UIImage, QRCodeGenerationError>
+        switch mode {
+        case .p2p:
+            result = await generateP2PQRCode()
+        case .webRTC:
+            result = await generateWebRTCQRCode()
         }
 
-        renderQRCode(from: connectLink)
+        guard revision == generationRevision else { return }
+        isGenerating = false
+
+        switch result {
+        case .success(let image):
+            qrImage = image
+        case .failure(let error):
+            errorText = error.message
+        }
     }
 
-    private func renderQRCode(from connectLink: String?) {
+    private var selectedTransportMode: TransportMode {
+        TransportMode(rawValue: transportModeRaw) ?? .p2p
+    }
+
+    private var transportModeBinding: Binding<TransportMode> {
+        Binding(
+            get: { selectedTransportMode },
+            set: { transportModeRaw = $0.rawValue }
+        )
+    }
+
+    private var descriptionText: String {
+        switch selectedTransportMode {
+        case .p2p:
+            return "让同一网络下的 iPhone / iPad / Mac 扫描此二维码后直接连接"
+        case .webRTC:
+            return "让 macOS / 其他设备扫描此二维码以跨网连接"
+        }
+    }
+
+    private func generateWebRTCQRCode() async -> Result<UIImage, QRCodeGenerationError> {
+        guard let connectLink = await crossNetworkManager.generateConnectLink() else {
+            return .failure(.message(crossNetworkManager.lastError ?? RuntimeLocalization.string("生成二维码失败")))
+        }
+        return renderConnectLinkQRCode(from: connectLink)
+    }
+
+    private func generateP2PQRCode() async -> Result<UIImage, QRCodeGenerationError> {
+        do {
+            if !connectionManager.isListening {
+                try await connectionManager.startListening()
+            }
+        } catch {
+            return .failure(.message("P2P 监听启动失败：\(error.localizedDescription)"))
+        }
+
+        guard let localIPAddress = preferredLocalPairingIPAddress() else {
+            return .failure(.message("无法获取当前局域网地址。若已开启 VPN / TUN，请改用 WebRTC 二维码。"))
+        }
+
+        let qrData = QRCodeGenerator.shared.createPairingData(
+            deviceId: KeychainManager.shared.getOrGenerateDeviceId(),
+            deviceName: UIDevice.current.name,
+            ipAddress: localIPAddress,
+            port: 9527
+        )
+
+        let image = QRCodeGenerator.shared.generateQRCode(
+            from: qrData,
+            size: CGSize(width: 420, height: 420),
+            foregroundColor: .black,
+            backgroundColor: .white
+        )
+
+        guard let image else {
+            return .failure(.message(RuntimeLocalization.string("生成二维码失败")))
+        }
+
+        return .success(image)
+    }
+
+    private func renderConnectLinkQRCode(from connectLink: String?) -> Result<UIImage, QRCodeGenerationError> {
         guard let connectLink, !connectLink.isEmpty else {
-            qrImage = nil
-            return
+            return .failure(.message(RuntimeLocalization.string("生成二维码失败")))
         }
 
         let image = QRCodeGenerator.shared.generateQRCode(
@@ -1453,11 +1704,66 @@ private struct MyConnectionQRCodeView: View {
             backgroundColor: .white
         )
 
-        if let image {
-            qrImage = image
-        } else {
-            errorText = RuntimeLocalization.string("生成二维码失败")
+        guard let image else {
+            return .failure(.message(RuntimeLocalization.string("生成二维码失败")))
         }
+
+        return .success(image)
+    }
+
+    private func preferredLocalPairingIPAddress() -> String? {
+        var ifaddrPtr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddrPtr) == 0, let firstAddr = ifaddrPtr else {
+            return nil
+        }
+        defer { freeifaddrs(ifaddrPtr) }
+
+        var preferredIP: String?
+        var fallbackIP: String?
+        var cursor: UnsafeMutablePointer<ifaddrs>? = firstAddr
+
+        while let entry = cursor?.pointee {
+            defer { cursor = entry.ifa_next }
+            guard let addressPtr = entry.ifa_addr else { continue }
+            guard addressPtr.pointee.sa_family == sa_family_t(AF_INET) else { continue }
+
+            let flags = Int32(entry.ifa_flags)
+            if (flags & IFF_LOOPBACK) != 0 { continue }
+
+            var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            let result = getnameinfo(
+                addressPtr,
+                socklen_t(addressPtr.pointee.sa_len),
+                &hostname,
+                socklen_t(hostname.count),
+                nil,
+                0,
+                NI_NUMERICHOST
+            )
+            guard result == 0 else { continue }
+
+            let ip = hostname.withUnsafeBufferPointer { buffer in
+                String(
+                    decoding: buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) },
+                    as: UTF8.self
+                )
+            }
+            guard !ip.isEmpty else { continue }
+
+            let interfaceName = entry.ifa_name.map { String(cString: $0) } ?? ""
+            if interfaceName == "en0" || interfaceName == "en1" {
+                if preferredIP == nil {
+                    preferredIP = ip
+                }
+            } else if fallbackIP == nil,
+                      !interfaceName.hasPrefix("utun"),
+                      !interfaceName.hasPrefix("ipsec"),
+                      !interfaceName.hasPrefix("tun") {
+                fallbackIP = ip
+            }
+        }
+
+        return preferredIP ?? fallbackIP
     }
 }
 

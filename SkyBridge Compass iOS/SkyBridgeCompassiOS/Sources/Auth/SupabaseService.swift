@@ -119,6 +119,7 @@ public final class SupabaseService: ObservableObject {
 
     private let urlSession: URLSession
     private var configuration: Configuration?
+    private var inFlightRefreshSession: (token: String, id: UUID, task: Task<AuthSession, Error>)?
 
     private init() {
         let cfg = URLSessionConfiguration.default
@@ -234,22 +235,34 @@ public final class SupabaseService: ObservableObject {
 
     /// 刷新 access token（当 JWT 过期 / bad_jwt 时使用）
     public func refreshSession(refreshToken: String) async throws -> AuthSession {
-        let config = try requireConfiguration()
-
-        guard var comps = URLComponents(url: config.url.appendingPathComponent("auth/v1/token"), resolvingAgainstBaseURL: false) else {
+        let normalizedRefreshToken = refreshToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedRefreshToken.isEmpty else {
             throw SupabaseError.invalidResponse
         }
-        comps.queryItems = [URLQueryItem(name: "grant_type", value: "refresh_token")]
-        guard let endpoint = comps.url else { throw SupabaseError.invalidResponse }
 
-        var request = URLRequest(url: endpoint)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("Bearer \(config.anonKey)", forHTTPHeaderField: "Authorization")
-        request.setValue(config.anonKey, forHTTPHeaderField: "apikey")
-        request.httpBody = try JSONSerialization.data(withJSONObject: ["refresh_token": refreshToken])
+        if let current = inFlightRefreshSession,
+           current.token == normalizedRefreshToken {
+            return try await current.task.value
+        }
 
-        return try await performAuthRequest(request)
+        let config = try requireConfiguration()
+        let refreshID = UUID()
+        let task = Task<AuthSession, Error> { [self] in
+            try await performRefreshSessionRequest(
+                config: config,
+                refreshToken: normalizedRefreshToken
+            )
+        }
+        inFlightRefreshSession = (token: normalizedRefreshToken, id: refreshID, task: task)
+
+        do {
+            let session = try await task.value
+            clearInFlightRefreshSession(ifMatches: refreshID)
+            return session
+        } catch {
+            clearInFlightRefreshSession(ifMatches: refreshID)
+            throw error
+        }
     }
 
     /// 与 macOS 端一致：注册时把 nebula_id 写入 metadata（data）
@@ -314,6 +327,36 @@ public final class SupabaseService: ObservableObject {
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
             throw SupabaseError.invalidResponse
         }
+    }
+
+    private func performRefreshSessionRequest(
+        config: Configuration,
+        refreshToken: String
+    ) async throws -> AuthSession {
+        guard var comps = URLComponents(
+            url: config.url.appendingPathComponent("auth/v1/token"),
+            resolvingAgainstBaseURL: false
+        ) else {
+            throw SupabaseError.invalidResponse
+        }
+        comps.queryItems = [URLQueryItem(name: "grant_type", value: "refresh_token")]
+        guard let endpoint = comps.url else { throw SupabaseError.invalidResponse }
+
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(config.anonKey)", forHTTPHeaderField: "Authorization")
+        request.setValue(config.anonKey, forHTTPHeaderField: "apikey")
+        request.httpBody = try JSONSerialization.data(
+            withJSONObject: ["refresh_token": refreshToken]
+        )
+
+        return try await performAuthRequest(request)
+    }
+
+    private func clearInFlightRefreshSession(ifMatches refreshID: UUID) {
+        guard inFlightRefreshSession?.id == refreshID else { return }
+        inFlightRefreshSession = nil
     }
 
     // MARK: - Database (Nebula ID)

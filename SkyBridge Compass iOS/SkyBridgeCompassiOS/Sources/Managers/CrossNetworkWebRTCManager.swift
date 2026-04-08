@@ -695,6 +695,8 @@ private actor SignalServerClientCompat {
         )
     }
 
+    private var accessTokenRefreshTask: Task<AuthSession, Error>?
+
     private func performJSONRequest<Response: Decodable>(
         path: String,
         method: String = "GET",
@@ -814,19 +816,36 @@ private actor SignalServerClientCompat {
             return session.accessToken
         }
 
-        let refreshed = try await SupabaseService.shared.refreshSession(refreshToken: refreshToken)
-        let merged = AuthSession(
-            accessToken: refreshed.accessToken,
-            refreshToken: refreshed.refreshToken ?? session.refreshToken,
-            userIdentifier: session.userIdentifier,
-            displayName: session.displayName,
-            email: session.email,
-            avatarURL: session.avatarURL,
-            nebulaId: session.nebulaId,
-            issuedAt: Date()
-        )
-        try? KeychainManager.shared.storeAuthSession(merged)
-        return merged.accessToken
+        if let existingRefreshTask = accessTokenRefreshTask {
+            let refreshed = try await existingRefreshTask.value
+            return refreshed.accessToken
+        }
+
+        let refreshTask = Task<AuthSession, Error> { @MainActor [session, refreshToken] in
+            let refreshed = try await SupabaseService.shared.refreshSession(refreshToken: refreshToken)
+            let merged = AuthSession(
+                accessToken: refreshed.accessToken,
+                refreshToken: refreshed.refreshToken ?? session.refreshToken,
+                userIdentifier: session.userIdentifier,
+                displayName: session.displayName,
+                email: session.email,
+                avatarURL: session.avatarURL,
+                nebulaId: session.nebulaId,
+                issuedAt: Date()
+            )
+            try? KeychainManager.shared.storeAuthSession(merged)
+            return merged
+        }
+
+        accessTokenRefreshTask = refreshTask
+        defer {
+            if accessTokenRefreshTask == refreshTask {
+                accessTokenRefreshTask = nil
+            }
+        }
+
+        let refreshed = try await refreshTask.value
+        return refreshed.accessToken
     }
 
     private func shouldRefreshAccessToken(_ token: String, skewSeconds: TimeInterval = 300) -> Bool {
