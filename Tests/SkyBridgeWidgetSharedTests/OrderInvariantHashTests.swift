@@ -9,6 +9,7 @@ import CryptoKit
 
 @Suite("Order Invariant Hash Tests")
 struct OrderInvariantHashTests {
+    private let fixedLastUpdated = Date(timeIntervalSince1970: 1_704_067_200)
     
     private let encoder: JSONEncoder = {
         let e = JSONEncoder()
@@ -25,11 +26,17 @@ struct OrderInvariantHashTests {
         let devices = WidgetTestGenerators.devices(count: Int.random(in: 5...20))
         
  // Create data with original order
-        let data1 = WidgetDevicesData(devices: devices.sorted { $0.id < $1.id })
+        let data1 = WidgetDevicesData(
+            devices: devices.sorted { $0.id < $1.id },
+            lastUpdated: fixedLastUpdated
+        )
         
  // Shuffle and create data with different order
         let shuffled = devices.shuffled()
-        let data2 = WidgetDevicesData(devices: shuffled.sorted { $0.id < $1.id })
+        let data2 = WidgetDevicesData(
+            devices: shuffled.sorted { $0.id < $1.id },
+            lastUpdated: fixedLastUpdated
+        )
         
  // Encode both
         let json1 = try encoder.encode(data1)
@@ -50,9 +57,15 @@ struct OrderInvariantHashTests {
     func testTransfersOrderInvariant(iteration: Int) throws {
         let transfers = WidgetTestGenerators.transfers(count: Int.random(in: 3...10))
         
-        let data1 = WidgetTransfersData(transfers: transfers.sorted { $0.id < $1.id })
+        let data1 = WidgetTransfersData(
+            transfers: transfers.sorted { $0.id < $1.id },
+            lastUpdated: fixedLastUpdated
+        )
         let shuffled = transfers.shuffled()
-        let data2 = WidgetTransfersData(transfers: shuffled.sorted { $0.id < $1.id })
+        let data2 = WidgetTransfersData(
+            transfers: shuffled.sorted { $0.id < $1.id },
+            lastUpdated: fixedLastUpdated
+        )
         
         let json1 = try encoder.encode(data1)
         let json2 = try encoder.encode(data2)
@@ -83,12 +96,12 @@ struct OrderInvariantHashTests {
     @Test("Different data produces different hash")
     func testDifferentDataDifferentHash() throws {
         let data1 = WidgetDevicesData(devices: [
-            WidgetDeviceInfo(id: "1", name: "Device A", deviceType: .mac, isOnline: true, lastSeen: Date(), ipAddress: nil)
-        ])
+            WidgetDeviceInfo(id: "1", name: "Device A", deviceType: .mac, isOnline: true, lastSeen: fixedLastUpdated, ipAddress: nil)
+        ], lastUpdated: fixedLastUpdated)
         
         let data2 = WidgetDevicesData(devices: [
-            WidgetDeviceInfo(id: "1", name: "Device B", deviceType: .mac, isOnline: true, lastSeen: Date(), ipAddress: nil)
-        ])
+            WidgetDeviceInfo(id: "1", name: "Device B", deviceType: .mac, isOnline: true, lastSeen: fixedLastUpdated, ipAddress: nil)
+        ], lastUpdated: fixedLastUpdated)
         
         let json1 = try encoder.encode(data1)
         let json2 = try encoder.encode(data2)
@@ -101,16 +114,13 @@ struct OrderInvariantHashTests {
     
     @Test("Empty arrays produce consistent hash")
     func testEmptyArraysConsistentHash() throws {
-        let data1 = WidgetDevicesData.empty
-        let data2 = WidgetDevicesData(devices: [])
+        let data1 = WidgetDevicesData(devices: [], lastUpdated: fixedLastUpdated)
+        let data2 = WidgetDevicesData(devices: [], lastUpdated: fixedLastUpdated)
         
         let json1 = try encoder.encode(data1)
         let json2 = try encoder.encode(data2)
         
- // Note: lastUpdated will differ, so we compare structure
- // This test verifies empty arrays don't cause issues
-        #expect(json1.count > 0)
-        #expect(json2.count > 0)
+        #expect(json1 == json2, "Empty payloads with the same metadata should encode identically")
     }
     
  // MARK: - Sorted Keys Verification
