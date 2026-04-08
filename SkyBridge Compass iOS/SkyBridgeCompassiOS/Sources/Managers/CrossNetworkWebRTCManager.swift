@@ -909,29 +909,46 @@ private actor CrossNetworkTURNCredentialService {
     }
 
     func getCredentials(turnAdmissionToken: String?) async -> TURNCredentials {
-        let tokenKey = cacheKey(for: turnAdmissionToken)
-        if let cached = cachedByTokenKey[tokenKey],
-           cached.isValid(buffer: refreshBuffer(for: cached)) {
-            return cached
+        let normalizedToken = normalizedTurnAdmissionToken(turnAdmissionToken)
+        let tokenKey = cacheKey(for: normalizedToken)
+        if let cached = cachedByTokenKey[tokenKey] {
+            if cached.isValid(buffer: refreshBuffer(for: cached)) {
+                return cached
+            }
+            if normalizedToken != nil {
+                logger.info("ℹ️ TURN admission token is single-use; reusing cached credentials until expiry.")
+                if cached.isValid(buffer: 0) {
+                    return cached
+                }
+                logger.warning("⚠️ TURN admission token already consumed and cached credentials expired; falling back to STUN-only.")
+                return fallback(allowStaticTURN: false)
+            }
         }
         do {
-            let fresh = try await fetchFromServer(turnAdmissionToken: turnAdmissionToken)
+            let fresh = try await fetchFromServer(turnAdmissionToken: normalizedToken)
             cachedByTokenKey[tokenKey] = fresh
             return fresh
         } catch {
             if let cached = cachedByTokenKey[tokenKey],
-               cached.isValid(buffer: minimumRefreshBuffer) {
+               cached.isValid(buffer: 0) {
                 logger.info("ℹ️ TURN credentials fetch failed; reusing cached credentials. err=\(error.localizedDescription, privacy: .public)")
                 return cached
             }
-            logger.warning("⚠️ TURN credentials fetch failed; falling back. err=\(error.localizedDescription, privacy: .public)")
-            return fallback()
+            let allowStaticTURN = normalizedToken == nil
+            logger.warning(
+                "⚠️ TURN credentials fetch failed; falling back to \(allowStaticTURN ? "static-or-empty TURN" : "STUN-only"). err=\(error.localizedDescription, privacy: .public)"
+            )
+            return fallback(allowStaticTURN: allowStaticTURN)
         }
     }
 
+    private func normalizedTurnAdmissionToken(_ raw: String?) -> String? {
+        let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
     private func cacheKey(for turnAdmissionToken: String?) -> String {
-        let trimmed = turnAdmissionToken?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return trimmed.isEmpty ? "__anonymous__" : trimmed
+        turnAdmissionToken ?? "__anonymous__"
     }
 
     private func refreshBuffer(for credentials: TURNCredentials) -> TimeInterval {
@@ -986,7 +1003,17 @@ private actor CrossNetworkTURNCredentialService {
         )
     }
 
-    private func fallback() -> TURNCredentials {
+    private func fallback(allowStaticTURN: Bool = true) -> TURNCredentials {
+        guard allowStaticTURN else {
+            return TURNCredentials(
+                username: "",
+                password: "",
+                ttl: 3600,
+                uris: [],
+                expiresAt: Date().addingTimeInterval(3600)
+            )
+        }
+
         // Safe fallback: do not embed secrets in the app.
         let username = (ProcessInfo.processInfo.environment["SKYBRIDGE_TURN_USERNAME"] ?? "skybridge")
             .trimmingCharacters(in: .whitespacesAndNewlines)
