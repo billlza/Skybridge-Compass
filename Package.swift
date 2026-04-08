@@ -92,8 +92,8 @@ let package = Package(
             path: "Sources/OQSRAII",
             publicHeadersPath: "include",
             cxxSettings: [
-                // 中文注释：启用 C++17 支持，确保 RAII 与标准库特性可用
-                .unsafeFlags(["-std=c++20"])
+                // 中文注释：启用 C++23 支持，统一 Apple 端原生桥接目标的语言标准。
+                .unsafeFlags(["-std=c++23"])
             ]
         ),
         .target(

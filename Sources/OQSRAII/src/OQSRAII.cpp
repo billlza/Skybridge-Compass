@@ -1,255 +1,380 @@
-// 中文注释：OQSRAII.cpp 使用 C++ RAII 封装 liboqs，并提供 C 接口给 Swift 调用
+// 中文注释：OQSRAII.cpp 使用 C++23 RAII 封装 liboqs，并提供稳定的 C 接口给 Swift 调用
 
-#include <vector>
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <memory>
+#include <span>
 
 #include <oqs/oqs.h>
 
 #include "../include/OQSRAII.h"
 
+namespace {
+
 // ========================= 安全清零工具 =========================
 // 中文注释：在析构或敏感数据生命周期结束时，对内存进行安全清零，避免编译器优化导致清零无效
-static void secure_memzero(void* p, size_t n) {
-    if (p == nullptr || n == 0) return;
+void secure_memzero(void* pointer, size_t size) noexcept {
+    if (pointer == nullptr || size == 0) {
+        return;
+    }
 #if defined(__STDC_LIB_EXT1__)
- // 中文注释：优先使用 C11 的 memset_s
-    memset_s(p, n, 0, n);
+    memset_s(pointer, size, 0, size);
 #else
- // 中文注释：退化实现，使用 volatile 指针避免优化
-    volatile unsigned char* vp = reinterpret_cast<volatile unsigned char*>(p);
-    for (size_t i = 0; i < n; ++i) vp[i] = 0;
+    auto* volatile bytes = reinterpret_cast<volatile unsigned char*>(pointer);
+    for (size_t index = 0; index < size; ++index) {
+        bytes[index] = 0;
+    }
 #endif
 }
 
-static bool readonly_buffer_valid(const unsigned char* p, size_t n) {
-    return (p != nullptr) || (n == 0);
+void secure_memzero(std::span<unsigned char> buffer) noexcept {
+    secure_memzero(buffer.data(), buffer.size());
 }
 
-static bool writable_buffer_valid(unsigned char* p, size_t n) {
-    return (p != nullptr) || (n == 0);
+template <typename Byte>
+struct BufferView final {
+    Byte* data = nullptr;
+    size_t size = 0;
+
+    [[nodiscard]] constexpr bool is_present() const noexcept {
+        return data != nullptr || size == 0;
+    }
+
+    [[nodiscard]] constexpr bool has_at_least(size_t expected_size) const noexcept {
+        return is_present() && size >= expected_size;
+    }
+
+    [[nodiscard]] constexpr std::span<Byte> as_span() const noexcept {
+        return {data, size};
+    }
+};
+
+using ReadonlyBytes = BufferView<const unsigned char>;
+using WritableBytes = BufferView<unsigned char>;
+
+[[nodiscard]] constexpr ReadonlyBytes readonly_bytes(const unsigned char* data, size_t size) noexcept {
+    return {data, size};
 }
 
-static void secure_wipe_output(unsigned char* p, size_t n) {
-    secure_memzero(p, n);
+[[nodiscard]] constexpr WritableBytes writable_bytes(unsigned char* data, size_t size) noexcept {
+    return {data, size};
+}
+
+void secure_wipe_output(WritableBytes buffer, size_t size_to_wipe) noexcept {
+    if (!buffer.is_present()) {
+        return;
+    }
+    secure_memzero(buffer.data, std::min(buffer.size, size_to_wipe));
+}
+
+[[nodiscard]] constexpr int to_c_result(OQS_STATUS status) noexcept {
+    return status == OQS_SUCCESS ? OQSRAII_SUCCESS : OQSRAII_FAIL;
+}
+
+[[nodiscard]] constexpr int fail_with_zero_length(size_t* output_length) noexcept {
+    if (output_length != nullptr) {
+        *output_length = 0;
+    }
+    return OQSRAII_FAIL;
 }
 
 // ========================= OQS 初始化守卫 =========================
 // 中文注释：确保 OQS_init 只调用一次，避免重复初始化开销
-struct OQSInitGuard {
+struct OQSInitGuard final {
     OQSInitGuard() { OQS_init(); }
-    ~OQSInitGuard() {}
 };
 
-static OQSInitGuard& oqs_guard() {
-    static OQSInitGuard g;
-    return g;
+void ensure_oqs_initialized() noexcept {
+    static const OQSInitGuard guard{};
+    (void)guard;
 }
 
-// ========================= 安全缓冲区 =========================
-// 中文注释：RAII 安全缓冲区，析构自动清零
-class SecureBuffer {
-public:
-    explicit SecureBuffer(size_t n = 0) : buf_(n) {}
-    ~SecureBuffer() { secure_memzero(buf_.data(), buf_.size()); }
-    unsigned char* data() { return buf_.data(); }
-    const unsigned char* data() const { return buf_.data(); }
-    size_t size() const { return buf_.size(); }
-    void resize(size_t n) { buf_.resize(n); }
-private:
-    std::vector<unsigned char> buf_;
+template <auto FreeFn>
+struct OqsDeleter final {
+    template <typename T>
+    void operator()(T* value) const noexcept {
+        if (value != nullptr) {
+            FreeFn(value);
+        }
+    }
 };
 
+using SignatureHandle = std::unique_ptr<OQS_SIG, OqsDeleter<&OQS_SIG_free>>;
+using KEMHandle = std::unique_ptr<OQS_KEM, OqsDeleter<&OQS_KEM_free>>;
+
+[[nodiscard]] SignatureHandle make_signature(const char* algorithm_name) noexcept {
+    ensure_oqs_initialized();
+    return SignatureHandle{OQS_SIG_new(algorithm_name)};
+}
+
+[[nodiscard]] KEMHandle make_kem(const char* algorithm_name) noexcept {
+    ensure_oqs_initialized();
+    return KEMHandle{OQS_KEM_new(algorithm_name)};
+}
+
+template <typename Handle, typename Member>
+[[nodiscard]] size_t member_length(const Handle& handle, Member member) noexcept {
+    return handle ? handle.get()->*member : 0U;
+}
+
 // ========================= ML-DSA-65 RAII 封装 =========================
-class MlDsa65 {
+class MlDsa65 final {
 public:
-    MlDsa65() { oqs_guard(); sig_ = OQS_SIG_new(OQS_SIG_alg_ml_dsa_65); }
-    ~MlDsa65() { if (sig_) OQS_SIG_free(sig_); }
-    size_t public_key_length() const { return sig_ ? sig_->length_public_key : 0; }
-    size_t secret_key_length() const { return sig_ ? sig_->length_secret_key : 0; }
-    size_t signature_length() const { return sig_ ? sig_->length_signature : 0; }
-    int keypair(unsigned char* pk, size_t pk_len, unsigned char* sk, size_t sk_len) const {
-        if (!sig_) return OQSRAII_FAIL;
-        const size_t expected_pk_len = public_key_length();
-        const size_t expected_sk_len = secret_key_length();
-        if (!writable_buffer_valid(pk, pk_len) || !writable_buffer_valid(sk, sk_len)) return OQSRAII_FAIL;
-        if (pk_len < expected_pk_len || sk_len < expected_sk_len) return OQSRAII_FAIL;
-        OQS_STATUS rc = OQS_SIG_keypair(sig_, pk, sk);
-        if (rc != OQS_SUCCESS) {
-            secure_wipe_output(pk, pk_len);
-            secure_wipe_output(sk, sk_len);
-        }
-        return rc == OQS_SUCCESS ? OQSRAII_SUCCESS : OQSRAII_FAIL;
+    MlDsa65() noexcept : signature_(make_signature(OQS_SIG_alg_ml_dsa_65)) {}
+
+    [[nodiscard]] size_t public_key_length() const noexcept {
+        return member_length(signature_, &OQS_SIG::length_public_key);
     }
-    int sign(const unsigned char* msg, size_t msg_len,
-             const unsigned char* sk, size_t sk_len,
-             unsigned char* sig_out, size_t* sig_out_len) const {
-        if (!sig_) return OQSRAII_FAIL;
-        if (!sig_out_len) return OQSRAII_FAIL;
-        const size_t max_sig = signature_length();
-        if (max_sig == 0) return OQSRAII_FAIL;
-        if (!readonly_buffer_valid(msg, msg_len) || !readonly_buffer_valid(sk, sk_len)) {
-            *sig_out_len = 0;
+
+    [[nodiscard]] size_t secret_key_length() const noexcept {
+        return member_length(signature_, &OQS_SIG::length_secret_key);
+    }
+
+    [[nodiscard]] size_t signature_length() const noexcept {
+        return member_length(signature_, &OQS_SIG::length_signature);
+    }
+
+    [[nodiscard]] int keypair(WritableBytes public_key, WritableBytes secret_key) const noexcept {
+        if (!signature_ || !public_key.has_at_least(public_key_length()) || !secret_key.has_at_least(secret_key_length())) {
             return OQSRAII_FAIL;
         }
-        if (!writable_buffer_valid(sig_out, *sig_out_len)) {
-            *sig_out_len = 0;
-            return OQSRAII_FAIL;
+
+        const auto status = OQS_SIG_keypair(signature_.get(), public_key.data, secret_key.data);
+        if (status != OQS_SUCCESS) {
+            secure_wipe_output(public_key, public_key.size);
+            secure_wipe_output(secret_key, secret_key.size);
         }
-        if (sk_len < secret_key_length() || *sig_out_len < max_sig) {
-            *sig_out_len = 0;
-            return OQSRAII_FAIL;
-        }
-        OQS_STATUS rc = OQS_SIG_sign(sig_, sig_out, sig_out_len, msg, msg_len, sk);
-        if (rc != OQS_SUCCESS) {
-            secure_wipe_output(sig_out, max_sig);
-            *sig_out_len = 0;
-        }
-        return rc == OQS_SUCCESS ? OQSRAII_SUCCESS : OQSRAII_FAIL;
+        return to_c_result(status);
     }
-    bool verify(const unsigned char* msg, size_t msg_len,
-                const unsigned char* sig, size_t sig_len,
-                const unsigned char* pk, size_t pk_len) const {
-        if (!sig_) return false;
-        if (!readonly_buffer_valid(msg, msg_len) || !readonly_buffer_valid(sig, sig_len) || !readonly_buffer_valid(pk, pk_len)) return false;
-        if (pk_len < public_key_length()) return false;
-        OQS_STATUS rc = OQS_SIG_verify(sig_, msg, msg_len, sig, sig_len, pk);
-        return rc == OQS_SUCCESS;
+
+    [[nodiscard]] int sign(
+        ReadonlyBytes message,
+        ReadonlyBytes secret_key,
+        WritableBytes signature_output,
+        size_t* signature_output_length
+    ) const noexcept {
+        if (!signature_ || signature_output_length == nullptr) {
+            return fail_with_zero_length(signature_output_length);
+        }
+
+        const auto max_signature_length = signature_length();
+        if (max_signature_length == 0
+            || !message.is_present()
+            || !secret_key.has_at_least(secret_key_length())
+            || !signature_output.has_at_least(max_signature_length)) {
+            return fail_with_zero_length(signature_output_length);
+        }
+
+        size_t actual_signature_length = 0;
+        const auto status = OQS_SIG_sign(
+            signature_.get(),
+            signature_output.data,
+            &actual_signature_length,
+            message.data,
+            message.size,
+            secret_key.data
+        );
+
+        if (status != OQS_SUCCESS) {
+            secure_wipe_output(signature_output, max_signature_length);
+            return fail_with_zero_length(signature_output_length);
+        }
+
+        *signature_output_length = actual_signature_length;
+        return OQSRAII_SUCCESS;
     }
+
+    [[nodiscard]] bool verify(ReadonlyBytes message, ReadonlyBytes signature_bytes, ReadonlyBytes public_key) const noexcept {
+        if (!signature_
+            || !message.is_present()
+            || !signature_bytes.is_present()
+            || !public_key.has_at_least(public_key_length())) {
+            return false;
+        }
+
+        return OQS_SIG_verify(
+                   signature_.get(),
+                   message.data,
+                   message.size,
+                   signature_bytes.data,
+                   signature_bytes.size,
+                   public_key.data
+               ) == OQS_SUCCESS;
+    }
+
 private:
-    OQS_SIG* sig_ = nullptr;
+    SignatureHandle signature_;
 };
 
 // ========================= ML-KEM-768 RAII 封装 =========================
-class MlKem768 {
+class MlKem768 final {
 public:
-    MlKem768() { oqs_guard(); kem_ = OQS_KEM_new(OQS_KEM_alg_ml_kem_768); }
-    ~MlKem768() { if (kem_) OQS_KEM_free(kem_); }
-    size_t public_key_length() const { return kem_ ? kem_->length_public_key : 0; }
-    size_t secret_key_length() const { return kem_ ? kem_->length_secret_key : 0; }
-    size_t ciphertext_length() const { return kem_ ? kem_->length_ciphertext : 0; }
-    size_t shared_secret_length() const { return kem_ ? kem_->length_shared_secret : 0; }
-    int keypair(unsigned char* pk, size_t pk_len, unsigned char* sk, size_t sk_len) const {
-        if (!kem_) return OQSRAII_FAIL;
-        const size_t expected_pk_len = public_key_length();
-        const size_t expected_sk_len = secret_key_length();
-        if (!writable_buffer_valid(pk, pk_len) || !writable_buffer_valid(sk, sk_len)) return OQSRAII_FAIL;
-        if (pk_len < expected_pk_len || sk_len < expected_sk_len) return OQSRAII_FAIL;
-        OQS_STATUS rc = OQS_KEM_keypair(kem_, pk, sk);
-        if (rc != OQS_SUCCESS) {
-            secure_wipe_output(pk, pk_len);
-            secure_wipe_output(sk, sk_len);
-        }
-        return rc == OQS_SUCCESS ? OQSRAII_SUCCESS : OQSRAII_FAIL;
+    MlKem768() noexcept : kem_(make_kem(OQS_KEM_alg_ml_kem_768)) {}
+
+    [[nodiscard]] size_t public_key_length() const noexcept {
+        return member_length(kem_, &OQS_KEM::length_public_key);
     }
-    int encaps(const unsigned char* pk, size_t pk_len,
-               unsigned char* ct_out, size_t ct_len,
-               unsigned char* ss_out, size_t ss_len) const {
-        if (!kem_) return OQSRAII_FAIL;
-        if (!readonly_buffer_valid(pk, pk_len) || !writable_buffer_valid(ct_out, ct_len) || !writable_buffer_valid(ss_out, ss_len)) return OQSRAII_FAIL;
-        if (pk_len < public_key_length()) return OQSRAII_FAIL;
-        if (ct_len < ciphertext_length() || ss_len < shared_secret_length()) return OQSRAII_FAIL;
-        OQS_STATUS rc = OQS_KEM_encaps(kem_, ct_out, ss_out, pk);
-        if (rc != OQS_SUCCESS) {
-            secure_wipe_output(ct_out, ct_len);
-            secure_wipe_output(ss_out, ss_len);
-        }
-        return rc == OQS_SUCCESS ? OQSRAII_SUCCESS : OQSRAII_FAIL;
+
+    [[nodiscard]] size_t secret_key_length() const noexcept {
+        return member_length(kem_, &OQS_KEM::length_secret_key);
     }
-    int decaps(const unsigned char* ct, size_t ct_len,
-               const unsigned char* sk, size_t sk_len,
-               unsigned char* ss_out, size_t ss_len) const {
-        if (!kem_) return OQSRAII_FAIL;
-        if (!readonly_buffer_valid(ct, ct_len) || !readonly_buffer_valid(sk, sk_len) || !writable_buffer_valid(ss_out, ss_len)) return OQSRAII_FAIL;
-        if (ct_len < ciphertext_length() || sk_len < secret_key_length()) return OQSRAII_FAIL;
-        if (ss_len < shared_secret_length()) return OQSRAII_FAIL;
-        OQS_STATUS rc = OQS_KEM_decaps(kem_, ss_out, ct, sk);
-        if (rc != OQS_SUCCESS) {
-            secure_wipe_output(ss_out, ss_len);
-        }
-        return rc == OQS_SUCCESS ? OQSRAII_SUCCESS : OQSRAII_FAIL;
+
+    [[nodiscard]] size_t ciphertext_length() const noexcept {
+        return member_length(kem_, &OQS_KEM::length_ciphertext);
     }
+
+    [[nodiscard]] size_t shared_secret_length() const noexcept {
+        return member_length(kem_, &OQS_KEM::length_shared_secret);
+    }
+
+    [[nodiscard]] int keypair(WritableBytes public_key, WritableBytes secret_key) const noexcept {
+        if (!kem_ || !public_key.has_at_least(public_key_length()) || !secret_key.has_at_least(secret_key_length())) {
+            return OQSRAII_FAIL;
+        }
+
+        const auto status = OQS_KEM_keypair(kem_.get(), public_key.data, secret_key.data);
+        if (status != OQS_SUCCESS) {
+            secure_wipe_output(public_key, public_key.size);
+            secure_wipe_output(secret_key, secret_key.size);
+        }
+        return to_c_result(status);
+    }
+
+    [[nodiscard]] int encaps(ReadonlyBytes public_key, WritableBytes ciphertext, WritableBytes shared_secret) const noexcept {
+        if (!kem_
+            || !public_key.has_at_least(public_key_length())
+            || !ciphertext.has_at_least(ciphertext_length())
+            || !shared_secret.has_at_least(shared_secret_length())) {
+            return OQSRAII_FAIL;
+        }
+
+        const auto status = OQS_KEM_encaps(kem_.get(), ciphertext.data, shared_secret.data, public_key.data);
+        if (status != OQS_SUCCESS) {
+            secure_wipe_output(ciphertext, ciphertext_length());
+            secure_wipe_output(shared_secret, shared_secret_length());
+        }
+        return to_c_result(status);
+    }
+
+    [[nodiscard]] int decaps(ReadonlyBytes ciphertext, ReadonlyBytes secret_key, WritableBytes shared_secret) const noexcept {
+        if (!kem_
+            || !ciphertext.has_at_least(ciphertext_length())
+            || !secret_key.has_at_least(secret_key_length())
+            || !shared_secret.has_at_least(shared_secret_length())) {
+            return OQSRAII_FAIL;
+        }
+
+        const auto status = OQS_KEM_decaps(kem_.get(), shared_secret.data, ciphertext.data, secret_key.data);
+        if (status != OQS_SUCCESS) {
+            secure_wipe_output(shared_secret, shared_secret_length());
+        }
+        return to_c_result(status);
+    }
+
 private:
-    OQS_KEM* kem_ = nullptr;
+    KEMHandle kem_;
 };
+
+} // namespace
 
 // ========================= C 接口实现 =========================
 
-// ML-DSA-65 长度查询
 size_t oqs_raii_mldsa65_public_key_length(void) {
-    MlDsa65 dsa;
-    return dsa.public_key_length();
+    return MlDsa65{}.public_key_length();
 }
+
 size_t oqs_raii_mldsa65_secret_key_length(void) {
-    MlDsa65 dsa;
-    return dsa.secret_key_length();
+    return MlDsa65{}.secret_key_length();
 }
+
 size_t oqs_raii_mldsa65_signature_length(void) {
-    MlDsa65 dsa;
-    return dsa.signature_length();
+    return MlDsa65{}.signature_length();
 }
 
-// ML-DSA-65 密钥对
-int oqs_raii_mldsa65_keypair(unsigned char* pk_out, size_t pk_len,
-                             unsigned char* sk_out, size_t sk_len) {
-    MlDsa65 dsa;
-    return dsa.keypair(pk_out, pk_len, sk_out, sk_len);
+int oqs_raii_mldsa65_keypair(unsigned char* pk_out, size_t pk_len, unsigned char* sk_out, size_t sk_len) {
+    return MlDsa65{}.keypair(writable_bytes(pk_out, pk_len), writable_bytes(sk_out, sk_len));
 }
 
-// ML-DSA-65 签名
-int oqs_raii_mldsa65_sign(const unsigned char* msg, size_t msg_len,
-                          const unsigned char* sk, size_t sk_len,
-                          unsigned char* sig_out, size_t* sig_out_len) {
-    MlDsa65 dsa;
-    return dsa.sign(msg, msg_len, sk, sk_len, sig_out, sig_out_len);
+int oqs_raii_mldsa65_sign(
+    const unsigned char* msg,
+    size_t msg_len,
+    const unsigned char* sk,
+    size_t sk_len,
+    unsigned char* sig_out,
+    size_t* sig_out_len
+) {
+    const auto requested_signature_capacity = sig_out_len != nullptr ? *sig_out_len : 0U;
+    return MlDsa65{}.sign(
+        readonly_bytes(msg, msg_len),
+        readonly_bytes(sk, sk_len),
+        writable_bytes(sig_out, requested_signature_capacity),
+        sig_out_len
+    );
 }
 
-// ML-DSA-65 验签
-bool oqs_raii_mldsa65_verify(const unsigned char* msg, size_t msg_len,
-                             const unsigned char* sig, size_t sig_len,
-                             const unsigned char* pk, size_t pk_len) {
-    MlDsa65 dsa;
-    return dsa.verify(msg, msg_len, sig, sig_len, pk, pk_len);
+bool oqs_raii_mldsa65_verify(
+    const unsigned char* msg,
+    size_t msg_len,
+    const unsigned char* sig,
+    size_t sig_len,
+    const unsigned char* pk,
+    size_t pk_len
+) {
+    return MlDsa65{}.verify(
+        readonly_bytes(msg, msg_len),
+        readonly_bytes(sig, sig_len),
+        readonly_bytes(pk, pk_len)
+    );
 }
 
-// ML-KEM-768 长度查询
 size_t oqs_raii_mlkem768_public_key_length(void) {
-    MlKem768 kem;
-    return kem.public_key_length();
+    return MlKem768{}.public_key_length();
 }
+
 size_t oqs_raii_mlkem768_secret_key_length(void) {
-    MlKem768 kem;
-    return kem.secret_key_length();
+    return MlKem768{}.secret_key_length();
 }
+
 size_t oqs_raii_mlkem768_ciphertext_length(void) {
-    MlKem768 kem;
-    return kem.ciphertext_length();
+    return MlKem768{}.ciphertext_length();
 }
+
 size_t oqs_raii_mlkem768_shared_secret_length(void) {
-    MlKem768 kem;
-    return kem.shared_secret_length();
+    return MlKem768{}.shared_secret_length();
 }
 
-// ML-KEM-768 密钥对
-int oqs_raii_mlkem768_keypair(unsigned char* pk_out, size_t pk_len,
-                              unsigned char* sk_out, size_t sk_len) {
-    MlKem768 kem;
-    return kem.keypair(pk_out, pk_len, sk_out, sk_len);
+int oqs_raii_mlkem768_keypair(unsigned char* pk_out, size_t pk_len, unsigned char* sk_out, size_t sk_len) {
+    return MlKem768{}.keypair(writable_bytes(pk_out, pk_len), writable_bytes(sk_out, sk_len));
 }
 
-// ML-KEM-768 封装
-int oqs_raii_mlkem768_encaps(const unsigned char* pk, size_t pk_len,
-                             unsigned char* ct_out, size_t ct_len,
-                             unsigned char* ss_out, size_t ss_len) {
-    MlKem768 kem;
-    return kem.encaps(pk, pk_len, ct_out, ct_len, ss_out, ss_len);
+int oqs_raii_mlkem768_encaps(
+    const unsigned char* pk,
+    size_t pk_len,
+    unsigned char* ct_out,
+    size_t ct_len,
+    unsigned char* ss_out,
+    size_t ss_len
+) {
+    return MlKem768{}.encaps(
+        readonly_bytes(pk, pk_len),
+        writable_bytes(ct_out, ct_len),
+        writable_bytes(ss_out, ss_len)
+    );
 }
 
-// ML-KEM-768 解封装
-int oqs_raii_mlkem768_decaps(const unsigned char* ct, size_t ct_len,
-                             const unsigned char* sk, size_t sk_len,
-                             unsigned char* ss_out, size_t ss_len) {
-    MlKem768 kem;
-    return kem.decaps(ct, ct_len, sk, sk_len, ss_out, ss_len);
+int oqs_raii_mlkem768_decaps(
+    const unsigned char* ct,
+    size_t ct_len,
+    const unsigned char* sk,
+    size_t sk_len,
+    unsigned char* ss_out,
+    size_t ss_len
+) {
+    return MlKem768{}.decaps(
+        readonly_bytes(ct, ct_len),
+        readonly_bytes(sk, sk_len),
+        writable_bytes(ss_out, ss_len)
+    );
 }

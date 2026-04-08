@@ -20,7 +20,7 @@ let package = Package(
             path: "Sources/OQSRAII",
             publicHeadersPath: "include",
             cxxSettings: [
-                .unsafeFlags(["-std=c++20"])
+                .unsafeFlags(["-std=c++23"])
             ]
         )
     ]
