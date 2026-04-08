@@ -1921,6 +1921,7 @@ public class P2PDiscoveryService: BaseManager {
         var previousSessionKeysBeforeRekey: SessionKeys?
         var lastPairingIdentityExchangeReplyAt: Date?
         var declaredDeviceIdForVerification: String?
+        var authenticatedRemoteAuthority: AuthenticatedRemoteAuthority?
         defer {
             if let pairKey = inboundPairKey {
                 Task {
@@ -1950,6 +1951,58 @@ public class P2PDiscoveryService: BaseManager {
                 return String(peerId.dropFirst("peer:".count))
             }
             return peerId
+        }
+
+        func persistAuthenticatedRemoteAuthority(
+            from payload: AppMessage.PairingIdentityExchangePayload,
+            displayName: String
+        ) async {
+            guard let authority = authenticatedRemoteAuthority else {
+                logger.warning(
+                    "⚠️ inbound pairingIdentityExchange missing authenticated authority; skipping current-path trust bridge: peer=\(peer.deviceId, privacy: .public) declared=\(payload.deviceId, privacy: .public)"
+                )
+                return
+            }
+
+            var knownDeviceIds: [String] = []
+            var seenKnownDeviceIds = Set<String>()
+
+            func appendKnownDeviceId(_ raw: String?) {
+                guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !raw.isEmpty,
+                      seenKnownDeviceIds.insert(raw).inserted else {
+                    return
+                }
+                knownDeviceIds.append(raw)
+            }
+
+            appendKnownDeviceId(payload.deviceId)
+            appendKnownDeviceId(peer.deviceId)
+            appendKnownDeviceId(peerIdForPresence)
+
+            do {
+                let persisted = try await TrustSyncService.shared.recordAuthenticatedRemoteAuthority(
+                    deviceId: peer.deviceId,
+                    displayName: displayName,
+                    preferredCurrentDeviceId: payload.deviceId,
+                    knownDeviceIds: knownDeviceIds,
+                    protocolSigningAlgorithm: authority.protocolSigningAlgorithm,
+                    protocolPublicKeyFingerprint: authority.protocolPublicKeyFingerprint
+                )
+                guard persisted else {
+                    logger.warning(
+                        "⚠️ inbound current-path trust bridge skipped: peer=\(peer.deviceId, privacy: .public) declared=\(payload.deviceId, privacy: .public)"
+                    )
+                    return
+                }
+                logger.info(
+                    "🔐 inbound current-path trust bridge persisted: peer=\(peer.deviceId, privacy: .public) current=\(payload.deviceId, privacy: .public) alg=\(authority.protocolSigningAlgorithm.rawValue, privacy: .public) fp=\(authority.protocolPublicKeyFingerprint, privacy: .public)"
+                )
+            } catch {
+                logger.warning(
+                    "⚠️ inbound current-path trust bridge failed: \(error.localizedDescription, privacy: .public)"
+                )
+            }
         }
 
         func encryptAppPayload(_ plaintext: Data, with keys: SessionKeys) throws -> Data {
@@ -2111,6 +2164,10 @@ public class P2PDiscoveryService: BaseManager {
                                 )
                                 logger.info(
                                     "🔑 已缓存对端 KEM 公钥（bootstrap）：declared=\(payload.deviceId, privacy: .public) peer=\(peer.deviceId, privacy: .public) keys=\(payload.kemPublicKeys.count, privacy: .public)"
+                                )
+                                await persistAuthenticatedRemoteAuthority(
+                                    from: payload,
+                                    displayName: displayName
                                 )
 
                                 let provider = CryptoProviderFactory.make(policy: .preferPQC)
@@ -2367,6 +2424,7 @@ public class P2PDiscoveryService: BaseManager {
                     logger.warning(
                         "⚠️ 入站握手失败，等待同连接重试: peer=\(peer.deviceId, privacy: .public) reason=\(String(describing: reason), privacy: .public)"
                     )
+                    authenticatedRemoteAuthority = nil
                     driver = nil
                     continue
                 }
@@ -2382,6 +2440,7 @@ public class P2PDiscoveryService: BaseManager {
                         }
                     }
                 case .established(let keys):
+                    authenticatedRemoteAuthority = await activeDriver.getAuthenticatedRemoteAuthority()
                     sessionKeys = keys
                     previousSessionKeysBeforeRekey = nil
                     if let declaredDeviceIdForVerification {

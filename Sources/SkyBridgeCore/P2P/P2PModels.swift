@@ -506,6 +506,8 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
     private let soaPairKeyLock = OSAllocatedUnfairLock<Data?>(initialState: nil)
     @available(macOS 14.0, iOS 17.0, *)
     private let previousSessionKeysBeforeRekeyLock = OSAllocatedUnfairLock<SessionKeys?>(initialState: nil)
+    @available(macOS 14.0, iOS 17.0, *)
+    private let authenticatedRemoteAuthorityLock = OSAllocatedUnfairLock<AuthenticatedRemoteAuthority?>(initialState: nil)
     private var metricsTask: Task<Void, Never>?
 
     private var receiveTask: Task<Void, Never>?
@@ -591,6 +593,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             handshakeDriverLock.withLock { $0 = nil }
             sessionKeysLock.withLock { $0 = nil }
             previousSessionKeysBeforeRekeyLock.withLock { $0 = nil }
+            authenticatedRemoteAuthorityLock.withLock { $0 = nil }
             lastPairingIdentityExchangeSentAtLock.withLock { $0 = nil }
             let stalePairKey = soaPairKeyLock.withLock { state -> Data? in
                 let current = state
@@ -631,6 +634,8 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             throw P2PConnectionError.handshakeUnavailable
         }
 
+        authenticatedRemoteAuthorityLock.withLock { $0 = nil }
+
         handshakePeer = await resolveHandshakePeerIdentifier()
         if handshakePeer.deviceId != device.deviceId {
             SkyBridgeLogger.p2p.info(
@@ -660,6 +665,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             startMetricsIfNeeded()
         } catch {
             soaPairKeyLock.withLock { $0 = nil }
+            authenticatedRemoteAuthorityLock.withLock { $0 = nil }
             await MainActor.run { self.status = .failed }
             throw error
         }
@@ -806,7 +812,9 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
                     expectedRemoteSOAPeerId: expectedRemoteSOAPeerId
                 )
                 self.handshakeDriverLock.withLock { $0 = driver }
-                return try await driver.initiateHandshake(with: self.handshakePeer)
+                let sessionKeys = try await driver.initiateHandshake(with: self.handshakePeer)
+                await self.captureAuthenticatedRemoteAuthority(from: driver)
+                return sessionKeys
             }
         } catch {
             if hadEstablishedSession, let rekeyPairKey {
@@ -2115,6 +2123,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         let state = await driver.getCurrentState()
         switch state {
         case .established(let keys):
+            await captureAuthenticatedRemoteAuthority(from: driver)
             sessionKeysLock.withLock { $0 = keys }
             previousSessionKeysBeforeRekeyLock.withLock { $0 = nil }
             handshakeDriverLock.withLock { $0 = nil }
@@ -2156,6 +2165,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             }
 
             rekeyInProgressLock.withLock { $0 = false }
+            authenticatedRemoteAuthorityLock.withLock { $0 = nil }
             await MainActor.run {
                 self.status = .failed
             }
@@ -2225,6 +2235,14 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         }
 
         do {
+            try await persistAuthenticatedRemoteAuthority(from: payload)
+        } catch {
+            SkyBridgeLogger.p2p.warning(
+                "⚠️ pairingIdentityExchange current-path trust bridge degraded: \(error.localizedDescription, privacy: .public)"
+            )
+        }
+
+        do {
             try await sendPairingIdentityExchange(force: false)
         } catch {
             SkyBridgeLogger.p2p.warning(
@@ -2264,6 +2282,64 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             return nil
         }
         return raw
+    }
+
+    @available(macOS 14.0, iOS 17.0, *)
+    private func captureAuthenticatedRemoteAuthority(from driver: HandshakeDriver) async {
+        let authority = await driver.getAuthenticatedRemoteAuthority()
+        authenticatedRemoteAuthorityLock.withLock { $0 = authority }
+    }
+
+    @available(macOS 14.0, iOS 17.0, *)
+    private func persistAuthenticatedRemoteAuthority(
+        from payload: AppMessage.PairingIdentityExchangePayload
+    ) async throws {
+        guard let authority = authenticatedRemoteAuthorityLock.withLock({ $0 }) else {
+            SkyBridgeLogger.p2p.warning(
+                "⚠️ pairingIdentityExchange missing authenticated authority; skipping current-path trust bridge: peer=\(self.handshakePeer.deviceId, privacy: .public) declared=\(payload.deviceId, privacy: .public)"
+            )
+            return
+        }
+
+        let declaredDeviceId = normalizedNonEmptyString(payload.deviceId)
+        let displayName = normalizedNonEmptyString(payload.deviceName)
+            ?? normalizedNonEmptyString(device.name)
+            ?? normalizedNonEmptyString(handshakePeer.displayName)
+            ?? handshakePeer.deviceId
+
+        var knownDeviceIds: [String] = []
+        var seenKnownDeviceIds = Set<String>()
+
+        func appendKnownDeviceId(_ raw: String?) {
+            guard let value = normalizedNonEmptyString(raw) else { return }
+            guard seenKnownDeviceIds.insert(value).inserted else { return }
+            knownDeviceIds.append(value)
+        }
+
+        appendKnownDeviceId(declaredDeviceId)
+        appendKnownDeviceId(handshakePeer.deviceId)
+        appendKnownDeviceId(device.deviceId)
+        appendKnownDeviceId(device.persistentDeviceId)
+
+        let persisted = try await TrustSyncService.shared.recordAuthenticatedRemoteAuthority(
+            deviceId: handshakePeer.deviceId,
+            displayName: displayName,
+            preferredCurrentDeviceId: declaredDeviceId,
+            knownDeviceIds: knownDeviceIds,
+            protocolSigningAlgorithm: authority.protocolSigningAlgorithm,
+            protocolPublicKeyFingerprint: authority.protocolPublicKeyFingerprint
+        )
+
+        guard persisted else {
+            SkyBridgeLogger.p2p.warning(
+                "⚠️ current-path trust bridge skipped: peer=\(self.handshakePeer.deviceId, privacy: .public) declared=\(payload.deviceId, privacy: .public)"
+            )
+            return
+        }
+
+        SkyBridgeLogger.p2p.info(
+            "🔐 current-path trust bridge persisted: peer=\(self.handshakePeer.deviceId, privacy: .public) current=\(declaredDeviceId ?? self.handshakePeer.deviceId, privacy: .public) alg=\(authority.protocolSigningAlgorithm.rawValue, privacy: .public) fp=\(authority.protocolPublicKeyFingerprint, privacy: .public)"
+        )
     }
 
     private func mergedKEMPublicKeys(

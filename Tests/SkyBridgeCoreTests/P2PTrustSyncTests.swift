@@ -249,6 +249,94 @@ final class P2PTrustSyncTests: XCTestCase {
                        accuracy: 0.001,
                        "Conflict resolution must be consistent")
     }
+
+    func testRecordAuthenticatedRemoteAuthorityUpdatesAliasMatchedRecord() throws {
+        let suffix = UUID().uuidString.lowercased()
+        let aliasId = "bonjour:skybridge-\(suffix)@local."
+        let stableId = "id:\(suffix)"
+        let fingerprint = String(repeating: "d", count: 64)
+
+        let aliasRecord = TrustRecord(
+            deviceId: aliasId,
+            pubKeyFP: "",
+            publicKey: Data(),
+            protocolPublicKey: nil,
+            protocolSigningAlgorithm: nil,
+            protocolPublicKeyFingerprint: nil,
+            kemPublicKeys: [
+                KEMPublicKeyInfo(
+                    suiteWireId: CryptoSuite.mlkem768MLDSA65.wireId,
+                    publicKey: Data([0xAA, 0xBB])
+                )
+            ],
+            attestationLevel: .none,
+            signature: Data(),
+            deviceName: "SkyBridge Test \(suffix)",
+            currentDeviceId: stableId,
+            knownDeviceIds: [aliasId, stableId],
+            lifecycleState: .active
+        )
+
+        let updated = TrustSyncService.resolvedAuthenticatedRemoteAuthorityRecord(
+            existingRecords: [aliasRecord],
+            deviceId: aliasId,
+            displayName: "SkyBridge Test \(suffix)",
+            preferredCurrentDeviceId: stableId,
+            knownDeviceIds: [aliasId, stableId],
+            protocolSigningAlgorithm: .mlDSA65,
+            protocolPublicKeyFingerprint: fingerprint
+        )
+
+        XCTAssertNotNil(updated)
+        XCTAssertEqual(updated?.deviceId, aliasId)
+        XCTAssertEqual(updated?.protocolSigningAlgorithm, .mlDSA65)
+        XCTAssertEqual(updated?.protocolPublicKeyFingerprint, fingerprint)
+        XCTAssertEqual(updated?.currentDeviceIdMetadata, stableId)
+        XCTAssertTrue(
+            Set(updated?.knownDeviceIdsMetadata ?? []).isSuperset(of: Set([aliasId, stableId])),
+            "Known device ids should retain alias + stable identity while allowing normalized derivatives"
+        )
+        XCTAssertEqual(
+            updated?.kemPublicKeys,
+            [
+                KEMPublicKeyInfo(
+                    suiteWireId: CryptoSuite.mlkem768MLDSA65.wireId,
+                    publicKey: Data([0xAA, 0xBB])
+                )
+            ]
+        )
+    }
+
+    func testRecordAuthenticatedRemoteAuthorityCreatesStableCurrentPathRecord() throws {
+        let suffix = UUID().uuidString.lowercased()
+        let aliasId = "peer:fe80::\(suffix.prefix(4))%en0"
+        let bonjourId = "bonjour:skybridge-\(suffix)@local."
+        let stableId = "id:\(suffix)"
+        let fingerprint = String(repeating: "e", count: 64)
+
+        let created = TrustSyncService.resolvedAuthenticatedRemoteAuthorityRecord(
+            existingRecords: [],
+            deviceId: aliasId,
+            displayName: "Inbound iPhone \(suffix)",
+            preferredCurrentDeviceId: stableId,
+            knownDeviceIds: [aliasId, bonjourId, stableId],
+            protocolSigningAlgorithm: .mlDSA65,
+            protocolPublicKeyFingerprint: fingerprint
+        )
+
+        XCTAssertNotNil(created)
+        XCTAssertEqual(created?.deviceId, stableId)
+        XCTAssertEqual(created?.currentDeviceIdMetadata, stableId)
+        XCTAssertEqual(created?.protocolSigningAlgorithm, .mlDSA65)
+        XCTAssertEqual(created?.protocolPublicKeyFingerprint, fingerprint)
+        XCTAssertTrue(
+            Set(created?.knownDeviceIdsMetadata ?? []).isSuperset(
+                of: Set([aliasId, bonjourId, stableId])
+            ),
+            "Known device ids should include supplied identifiers while allowing normalized derivatives"
+        )
+        XCTAssertEqual(created?.lifecycleStateMetadata, .active)
+    }
     
  // MARK: - Property 12: Keychain Sync Attribute
     

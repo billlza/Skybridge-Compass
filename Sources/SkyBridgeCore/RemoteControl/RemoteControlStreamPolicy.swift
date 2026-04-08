@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import VideoToolbox
 
 struct RemoteControlStreamRequest: Sendable, Equatable {
     let preferredSize: CGSize
@@ -17,6 +18,44 @@ struct RemoteControlStreamPolicy: Sendable, Equatable {
     let keyFrameInterval: Int
     let preferredSize: CGSize
     let reason: String
+}
+
+enum RemoteControlCaptureCompatibility {
+    static func normalizedCaptureSize(_ requestedSize: CGSize, for codec: RemoteFrameType) -> CGSize {
+        let requiresEvenAlignment = codec != .bgra
+        return CGSize(
+            width: normalizedDimension(requestedSize.width, requiresEvenAlignment: requiresEvenAlignment),
+            height: normalizedDimension(requestedSize.height, requiresEvenAlignment: requiresEvenAlignment)
+        )
+    }
+
+    static func fallbackCodec(afterEncodeFailure status: OSStatus, activeCodec: RemoteFrameType) -> RemoteFrameType? {
+        switch (status, activeCodec) {
+        case (kVTInvalidSessionErr, .hevc),
+             (kVTVideoEncoderMalfunctionErr, .hevc),
+             (kVTVideoEncoderNotAvailableNowErr, .hevc):
+            return .h264
+        case (kVTInvalidSessionErr, .h264),
+             (kVTVideoEncoderMalfunctionErr, .h264),
+             (kVTVideoEncoderNotAvailableNowErr, .h264):
+            return .bgra
+        default:
+            return nil
+        }
+    }
+
+    private static func normalizedDimension(_ rawValue: CGFloat, requiresEvenAlignment: Bool) -> CGFloat {
+        let minimum = requiresEvenAlignment ? 2 : 1
+        let sanitized = rawValue.isFinite ? rawValue : CGFloat(minimum)
+        var dimension = max(minimum, Int(sanitized.rounded(.down)))
+        if requiresEvenAlignment, !dimension.isMultiple(of: 2) {
+            dimension -= 1
+            if dimension < minimum {
+                dimension = minimum
+            }
+        }
+        return CGFloat(dimension)
+    }
 }
 
 enum RemoteControlStreamPolicySelector {
@@ -124,11 +163,16 @@ enum RemoteControlStreamPolicySelector {
             : max(30, targetFrameRate * 2)
         let keyFrameInterval = max(10, min(request.keyFrameInterval, keyFrameCeiling))
 
+        let normalizedSize = RemoteControlCaptureCompatibility.normalizedCaptureSize(
+            request.preferredSize,
+            for: codec
+        )
+
         return RemoteControlStreamPolicy(
             codec: codec,
             targetFrameRate: targetFrameRate,
             keyFrameInterval: keyFrameInterval,
-            preferredSize: request.preferredSize,
+            preferredSize: normalizedSize,
             reason: reason
         )
     }

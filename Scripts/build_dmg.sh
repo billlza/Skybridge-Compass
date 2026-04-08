@@ -3,13 +3,18 @@
 # SkyBridge Compass DMG Builder
 #
 # 功能：
-# 1. 构建 Release 版本应用（Xcode + SwiftPM）
+# 1. 构建 Release 版本应用（发布 DMG 仅接受 Xcode Release 产物）
 # 2. 复用 package_app.sh 生成兼容 SMAppService 的 .app（含 PowerMetricsHelper）
 # 3. （可选）重新签名
 # 4. 创建 DMG 磁盘映像（带背景与 Applications 快捷方式）
 #
 # 使用方法：
 #   ./Scripts/build_dmg.sh [--skip-build] [--skip-sign] [--identity "Developer ID"] [--use-existing-app]
+#
+# 发布策略：
+# - build_dmg.sh 会强制 package_app.sh 进入 release_dmg 上下文
+# - release_dmg 上下文禁止 SwiftPM release fallback
+# - 复用已有 .app 时也必须是 xcode_release provenance
 #
 
 set -euo pipefail
@@ -98,6 +103,22 @@ log_step() {
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "📦 $1"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+}
+
+verify_app_bundle_build_source() {
+    local app_bundle="$1"
+    local info_plist="$app_bundle/Contents/Info.plist"
+    local build_source=""
+
+    if [[ -f "$info_plist" ]]; then
+        build_source=$(/usr/libexec/PlistBuddy -c 'Print :SkyBridgePackagingBuildSource' "$info_plist" 2>/dev/null || true)
+    fi
+
+    if [[ "$build_source" != "xcode_release" ]]; then
+        log_error "发布 DMG 仅允许使用 Xcode Release 产物打包。当前 App Bundle 构建来源: ${build_source:-missing}"
+        log_error "请重新执行 build_dmg.sh（不要复用 SwiftPM fallback 生成的 .app）。"
+        exit 1
+    fi
 }
 
 verify_app_runtime_layout() {
@@ -247,6 +268,7 @@ mkdir -p "$DIST_DIR"
 if [[ "$USE_EXISTING_APP" == true ]]; then
     if [[ -d "$APP_BUNDLE" && -f "$APP_BUNDLE/Contents/Info.plist" && -d "$APP_BUNDLE/Contents/MacOS" ]]; then
         assert_existing_app_bundle_is_fresh "$APP_BUNDLE"
+        verify_app_bundle_build_source "$APP_BUNDLE"
         log_info "复用已存在 App Bundle: $APP_BUNDLE"
     else
         log_error "指定了 --use-existing-app，但未找到可用 App Bundle: $APP_BUNDLE"
@@ -256,12 +278,12 @@ if [[ "$USE_EXISTING_APP" == true ]]; then
 else
     if [[ "$SKIP_SIGN" == true ]]; then
         log_info "按 --skip-sign 要求，以 ad-hoc 模式打包 App Bundle"
-        IDENTITY="-" "$PROJECT_ROOT/Scripts/package_app.sh"
+        SKYBRIDGE_PACKAGE_CONTEXT=release_dmg IDENTITY="-" "$PROJECT_ROOT/Scripts/package_app.sh"
     elif [[ -n "$SIGNING_IDENTITY" ]]; then
         log_info "使用指定签名身份执行 package_app.sh: $SIGNING_IDENTITY"
-        IDENTITY="$SIGNING_IDENTITY" "$PROJECT_ROOT/Scripts/package_app.sh"
+        SKYBRIDGE_PACKAGE_CONTEXT=release_dmg IDENTITY="$SIGNING_IDENTITY" "$PROJECT_ROOT/Scripts/package_app.sh"
     else
-        "$PROJECT_ROOT/Scripts/package_app.sh"
+        SKYBRIDGE_PACKAGE_CONTEXT=release_dmg "$PROJECT_ROOT/Scripts/package_app.sh"
     fi
 fi
 
@@ -269,6 +291,8 @@ if [[ ! -d "$APP_BUNDLE" ]]; then
     log_error "App Bundle 不存在：$APP_BUNDLE"
     exit 1
 fi
+
+verify_app_bundle_build_source "$APP_BUNDLE"
 
 HELPER_PLIST="$APP_BUNDLE/Contents/Library/LaunchDaemons/com.skybridge.PowerMetricsHelper.plist"
 HELPER_BIN="$APP_BUNDLE/Contents/Library/LaunchDaemons/com.skybridge.PowerMetricsHelper/com.skybridge.PowerMetricsHelper"

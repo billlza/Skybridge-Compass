@@ -321,11 +321,30 @@ ARTIFACT_DATE=2026-01-23 python3 Scripts/aggregate_kernel_emulation.py
 - 生成的 PDF：`Docs/TDSC-2026-01-0318_IEEE_Paper_SkyBridge_Compass_patched.pdf` 与 `Docs/TDSC-2026-01-0318_supplementary.pdf`
 - CSV 输出目录：`Artifacts/`
 
-## Release 校验
+## Release Packaging
 
-当前目录下 DMG 构建产物（本地）：
+发布 DMG 的推荐路径：
 
-- `dist/SkyBridgeCompassPro-1.0.2.dmg`：`SHA256=312a4ca61142afd8b6cf6e6f2d0993a40c51e3cc0ef7ecc12608e07a76c001de`
+```bash
+./Scripts/build_dmg.sh
+```
+
+当前发布约束：
+
+- 发布 DMG 只接受 `Xcode Release` 产物。
+- `package_app.sh` 在 `release_dmg` 上下文下会拒绝 `SwiftPM release fallback`。
+- `build_dmg.sh --use-existing-app` 也会校验现有 `.app` 的构建来源，非 `xcode_release` 会直接失败。
+- 正式发布建议使用 `Developer ID Application` 证书签名；`ad-hoc` 仅适合本地调试，不适合稳定复用 macOS TCC 授权。
+
+脚本自检：
+
+```bash
+./Scripts/test_package_build_policy.sh
+```
+
+当前目录下最近一次本地生成的 DMG 构建产物：
+
+- `dist/SkyBridgeCompassPro-1.0.0.dmg`
 
 ## 说明
 

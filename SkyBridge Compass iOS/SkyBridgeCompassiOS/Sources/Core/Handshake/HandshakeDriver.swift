@@ -34,6 +34,17 @@ public protocol HandshakeTrustProvider: Sendable {
 }
 
 @available(iOS 17.0, *)
+public struct AuthenticatedRemoteAuthority: Sendable, Equatable {
+    public let protocolSigningAlgorithm: String
+    public let protocolPublicKeyFingerprint: String
+
+    public init(protocolSigningAlgorithm: String, protocolPublicKeyFingerprint: String) {
+        self.protocolSigningAlgorithm = protocolSigningAlgorithm
+        self.protocolPublicKeyFingerprint = protocolPublicKeyFingerprint
+    }
+}
+
+@available(iOS 17.0, *)
 struct DefaultHandshakeTrustProvider: HandshakeTrustProvider, Sendable {
     func trustedFingerprint(for deviceId: String) async -> String? { nil }
     func trustedKEMPublicKeys(for deviceId: String) async -> [CryptoSuite: Data] {
@@ -304,6 +315,11 @@ public actor HandshakeDriver {
 
     /// 当前尝试 attempt id
     private var soaAttemptId: Data?
+
+    /// 已通过验签与 pinning 的远端协议身份快照。
+    /// 由 `HandshakeContext` 生成，但生命周期由 `HandshakeDriver` 持有，
+    /// 以便在 context zeroize 后仍可供上层持久化 trusted authority。
+    private var authenticatedRemoteAuthority: AuthenticatedRemoteAuthority?
     
     // MARK: - Initialization
     
@@ -341,6 +357,10 @@ public actor HandshakeDriver {
         self.expectedRemoteSOAPeerId = expectedRemoteSOAPeerId
         self.sessionArbiter = sessionArbiter
     }
+
+    public func getAuthenticatedRemoteAuthority() -> AuthenticatedRemoteAuthority? {
+        authenticatedRemoteAuthority
+    }
     
     // MARK: - Public API
     
@@ -349,7 +369,8 @@ public actor HandshakeDriver {
         guard case .idle = state else {
             throw HandshakeError.alreadyInProgress
         }
-        
+
+        clearAuthenticatedRemoteAuthority()
         currentPeer = peer
 
         let outboundSOA = resolveOutboundSOAMetadata(for: peer)
@@ -517,7 +538,8 @@ public actor HandshakeDriver {
                 await ctx.zeroize()
                 context = nil
             }
-            
+
+            clearAuthenticatedRemoteAuthority()
             // 取消超时任务
             timeoutTask?.cancel()
             timeoutTask = nil
@@ -543,6 +565,7 @@ public actor HandshakeDriver {
     /// 处理 MessageA（响应方）
     private func handleMessageA(_ data: Data, from peer: PeerIdentifier) async {
         currentPeer = peer
+        clearAuthenticatedRemoteAuthority()
         
         do {
             let messageA = try HandshakeMessageA.decode(from: data)
@@ -647,6 +670,8 @@ public actor HandshakeDriver {
                 await handleHandshakeError(error, context: ctx)
                 return
             }
+
+            captureAuthenticatedRemoteAuthority(await ctx.getAuthenticatedRemoteAuthority())
             
             // 清理敏感数据
             await ctx.zeroize()
@@ -712,7 +737,8 @@ public actor HandshakeDriver {
                 context = nil
                 return
             }
-            
+
+            captureAuthenticatedRemoteAuthority(await ctx.getAuthenticatedRemoteAuthority())
             await ctx.zeroize()
             context = nil
             
@@ -756,6 +782,16 @@ public actor HandshakeDriver {
         await transitionToFailed(.timeout, negotiatedSuite: suite)
     }
 
+    private func captureAuthenticatedRemoteAuthority(
+        _ authority: AuthenticatedRemoteAuthority?
+    ) {
+        authenticatedRemoteAuthority = authority
+    }
+
+    private func clearAuthenticatedRemoteAuthority() {
+        authenticatedRemoteAuthority = nil
+    }
+
     private func enforceIdentityPinning(deviceId: String, identityPublicKey: Data) async throws {
         guard let expectedFingerprint = await trustProvider.trustedFingerprint(for: deviceId)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -776,7 +812,7 @@ public actor HandshakeDriver {
         let identityKeys = try IdentityPublicKeys.decodeWithLegacyFallback(from: identityPublicKey)
         return try identityKeys.authoritativeProtocolFingerprint()
     }
-    
+
     private nonisolated func isFinishedMessage(_ data: Data) -> Bool {
         guard data.count >= 4 else { return false }
         return data.prefix(4).elementsEqual([0x46, 0x49, 0x4E, 0x31])
@@ -881,6 +917,7 @@ public actor HandshakeDriver {
         if let pairKey = soaPairKey {
             await sessionArbiter.clearOutgoing(pairKey: pairKey, attemptId: soaAttemptId)
         }
+        clearAuthenticatedRemoteAuthority()
         state = .failed(reason: reason)
         finishOnce(with: .failure(HandshakeError.failed(reason)))
     }
@@ -952,6 +989,7 @@ public actor HandshakeDriver {
             }
             timeoutTask?.cancel()
             timeoutTask = nil
+            clearAuthenticatedRemoteAuthority()
             let reason = HandshakeFailureReason.supersededByConcurrentAttempt(
                 winnerPeerId: hexString(winnerPeerId),
                 winnerAttemptId: hexString(winnerAttemptId)
@@ -1032,6 +1070,9 @@ public actor HandshakeContext {
     
     /// 是否已被清理
     public private(set) var isZeroized: Bool = false
+
+    /// 最近一次成功验签得到的远端协议身份 authority
+    private var authenticatedRemoteAuthority: AuthenticatedRemoteAuthority?
     
     // MARK: - Initialization
     
@@ -1067,6 +1108,10 @@ public actor HandshakeContext {
         self.cryptoPolicy = cryptoPolicy
         self.offeredSuites = offeredSuites
         self.peerKEMPublicKeys = peerKEMPublicKeys
+    }
+
+    public func getAuthenticatedRemoteAuthority() -> AuthenticatedRemoteAuthority? {
+        authenticatedRemoteAuthority
     }
 
     private func provider(for suite: CryptoSuite) -> (any CryptoProvider)? {
@@ -1129,6 +1174,15 @@ public actor HandshakeContext {
             return true
         }
         return cryptoProvider.supportsSuite(.xwing)
+    }
+
+    private func makeAuthenticatedRemoteAuthority(
+        from identityKeys: IdentityPublicKeys
+    ) throws -> AuthenticatedRemoteAuthority {
+        AuthenticatedRemoteAuthority(
+            protocolSigningAlgorithm: identityKeys.protocolAlgorithm.rawValue,
+            protocolPublicKeyFingerprint: try identityKeys.authoritativeProtocolFingerprint().lowercased()
+        )
     }
 
     private func suiteIsLocallyNegotiable(
@@ -1354,6 +1408,7 @@ public actor HandshakeContext {
         guard isValid else {
             throw HandshakeError.failed(.signatureVerificationFailed)
         }
+        authenticatedRemoteAuthority = try makeAuthenticatedRemoteAuthority(from: identityKeys)
         
         // 保存 nonce / keyShares
         peerNonce = messageA.clientNonce
@@ -1557,6 +1612,7 @@ public actor HandshakeContext {
         guard isValid else {
             throw HandshakeError.failed(.signatureVerificationFailed)
         }
+        authenticatedRemoteAuthority = try makeAuthenticatedRemoteAuthority(from: identityKeys)
         
         // Anti-Downgrade: 必须是我们在 MessageA 里发过的 suite
         guard messageB.selectedSuite.isKnown else {
@@ -1854,6 +1910,7 @@ public actor HandshakeContext {
         transcriptHashB = nil
         localNonce = nil
         peerNonce = nil
+        authenticatedRemoteAuthority = nil
         isZeroized = true
     }
 

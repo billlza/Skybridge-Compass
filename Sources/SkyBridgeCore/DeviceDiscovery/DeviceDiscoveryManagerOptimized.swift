@@ -1708,6 +1708,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         var sessionKeys: SessionKeys? = nil
         var declaredDeviceIdForVerification: String? = nil
         var lastPairingIdentityExchangeReplyAt: Date? = nil
+        var authenticatedRemoteAuthority: AuthenticatedRemoteAuthority? = nil
         var didMarkConnected = false
         
         // Heartbeat: avoid Swift concurrency Tasks here (StrictConcurrency) because they would capture
@@ -1740,6 +1741,58 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                 return rest.split(separator: "@", maxSplits: 1).first.map(String.init) ?? peerId
             }
             return peerId
+        }
+
+        func persistAuthenticatedRemoteAuthority(
+            from payload: AppMessage.PairingIdentityExchangePayload,
+            displayName: String
+        ) async {
+            guard let authority = authenticatedRemoteAuthority else {
+                logger.warning(
+                    "⚠️ inbound pairingIdentityExchange missing authenticated authority; skipping current-path trust bridge: peer=\(peer.deviceId, privacy: .public) declared=\(payload.deviceId, privacy: .public)"
+                )
+                return
+            }
+
+            var knownDeviceIds: [String] = []
+            var seenKnownDeviceIds = Set<String>()
+
+            func appendKnownDeviceId(_ raw: String?) {
+                guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !raw.isEmpty,
+                      seenKnownDeviceIds.insert(raw).inserted else {
+                    return
+                }
+                knownDeviceIds.append(raw)
+            }
+
+            appendKnownDeviceId(payload.deviceId)
+            appendKnownDeviceId(peer.deviceId)
+            appendKnownDeviceId(peerIdForPresence)
+
+            do {
+                let persisted = try await TrustSyncService.shared.recordAuthenticatedRemoteAuthority(
+                    deviceId: peer.deviceId,
+                    displayName: displayName,
+                    preferredCurrentDeviceId: payload.deviceId,
+                    knownDeviceIds: knownDeviceIds,
+                    protocolSigningAlgorithm: authority.protocolSigningAlgorithm,
+                    protocolPublicKeyFingerprint: authority.protocolPublicKeyFingerprint
+                )
+                guard persisted else {
+                    logger.warning(
+                        "⚠️ inbound current-path trust bridge skipped: peer=\(peer.deviceId, privacy: .public) declared=\(payload.deviceId, privacy: .public)"
+                    )
+                    return
+                }
+                logger.info(
+                    "🔐 inbound current-path trust bridge persisted: peer=\(peer.deviceId, privacy: .public) current=\(payload.deviceId, privacy: .public) alg=\(authority.protocolSigningAlgorithm.rawValue, privacy: .public) fp=\(authority.protocolPublicKeyFingerprint, privacy: .public)"
+                )
+            } catch {
+                logger.warning(
+                    "⚠️ inbound current-path trust bridge failed: \(error.localizedDescription, privacy: .public)"
+                )
+            }
         }
 
         func extractIPFromPeerId(_ peerId: String) -> (ipv4: String?, ipv6: String?) {
@@ -1898,6 +1951,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                         }
                         hbState.withLock { $0.pausedForRekey = true }
                         logger.info("🔁 入站 rekey：\(fromKind)·\(fromSuite) -> \(toKind)·\(toSuite) peer=\(peerIdForPresence, privacy: .public)")
+                        authenticatedRemoteAuthority = nil
                         driver = nil
                         sessionKeys = nil
                     default:
@@ -2045,6 +2099,10 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                                 } catch {
                                     logger.warning("⚠️ 保存对端 KEM 公钥到 TrustSync 失败，已降级使用 bootstrap cache: \(error.localizedDescription, privacy: .public)")
                                 }
+                                await persistAuthenticatedRemoteAuthority(
+                                    from: payload,
+                                    displayName: displayName
+                                )
 
                                 let now = Date()
                                 guard P2PDiscoveryService.shouldSendPairingIdentityExchangeReply(
@@ -2247,6 +2305,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                             }
                         }
                     case .established(let keys):
+                        authenticatedRemoteAuthority = await driver.getAuthenticatedRemoteAuthority()
                         sessionKeys = keys
                         postConnectedUX(keys: keys)
                         if let declaredDeviceIdForVerification {

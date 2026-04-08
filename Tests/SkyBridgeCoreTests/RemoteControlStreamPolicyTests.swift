@@ -76,4 +76,17 @@ final class RemoteControlStreamPolicyTests: XCTestCase {
         XCTAssertEqual(policy.codec, .hevc)
         XCTAssertEqual(policy.targetFrameRate, 45)
     }
+
+    func testSelectorNormalizesEncodedStreamDimensions() {
+        let policy = RemoteControlStreamPolicySelector.select(
+            request: makeRequest(size: CGSize(width: 2056, height: 1329), codec: .h264, fps: 60),
+            peerFormats: ["jpeg", "h264"],
+            thermalState: .nominal,
+            isAppleSilicon: true
+        )
+
+        XCTAssertEqual(policy.codec, .h264)
+        XCTAssertEqual(policy.preferredSize.width, 2056)
+        XCTAssertEqual(policy.preferredSize.height, 1328)
+    }
 }

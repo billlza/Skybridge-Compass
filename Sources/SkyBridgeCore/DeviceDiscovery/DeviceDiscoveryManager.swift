@@ -809,6 +809,7 @@ public class DeviceDiscoveryManager: BaseManager {
         var sessionKeys: SessionKeys?
         var declaredDeviceIdForVerification: String?
         var lastPairingIdentityExchangeReplyAt: Date?
+        var authenticatedRemoteAuthority: AuthenticatedRemoteAuthority?
 
         func isLikelyHandshakeControlPacket(_ data: Data) -> Bool {
             // Finished: 固定长度 38 bytes（magic 4 + version 1 + direction 1 + mac 32）
@@ -830,6 +831,58 @@ public class DeviceDiscoveryManager: BaseManager {
             let key = SymmetricKey(data: keys.receiveKey)
             let box = try AES.GCM.SealedBox(combined: ciphertext)
             return try AES.GCM.open(box, using: key)
+        }
+
+        func persistAuthenticatedRemoteAuthority(
+            from payload: AppMessage.PairingIdentityExchangePayload,
+            displayName: String
+        ) async {
+            guard let authority = authenticatedRemoteAuthority else {
+                logger.warning(
+                    "⚠️ inbound pairingIdentityExchange missing authenticated authority; skipping current-path trust bridge: peer=\(peer.deviceId, privacy: .public) declared=\(payload.deviceId, privacy: .public)"
+                )
+                return
+            }
+
+            var knownDeviceIds: [String] = []
+            var seenKnownDeviceIds = Set<String>()
+
+            func appendKnownDeviceId(_ raw: String?) {
+                guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !raw.isEmpty,
+                      seenKnownDeviceIds.insert(raw).inserted else {
+                    return
+                }
+                knownDeviceIds.append(raw)
+            }
+
+            appendKnownDeviceId(payload.deviceId)
+            appendKnownDeviceId(peerDeviceId)
+            appendKnownDeviceId(peer.deviceId)
+
+            do {
+                let persisted = try await TrustSyncService.shared.recordAuthenticatedRemoteAuthority(
+                    deviceId: peerDeviceId,
+                    displayName: displayName,
+                    preferredCurrentDeviceId: payload.deviceId,
+                    knownDeviceIds: knownDeviceIds,
+                    protocolSigningAlgorithm: authority.protocolSigningAlgorithm,
+                    protocolPublicKeyFingerprint: authority.protocolPublicKeyFingerprint
+                )
+                guard persisted else {
+                    logger.warning(
+                        "⚠️ inbound current-path trust bridge skipped: peer=\(peerDeviceId, privacy: .public) declared=\(payload.deviceId, privacy: .public)"
+                    )
+                    return
+                }
+                logger.info(
+                    "🔐 inbound current-path trust bridge persisted: peer=\(peerDeviceId, privacy: .public) current=\(payload.deviceId, privacy: .public) alg=\(authority.protocolSigningAlgorithm.rawValue, privacy: .public) fp=\(authority.protocolPublicKeyFingerprint, privacy: .public)"
+                )
+            } catch {
+                logger.warning(
+                    "⚠️ inbound current-path trust bridge failed: \(error.localizedDescription, privacy: .public)"
+                )
+            }
         }
 
         logger.info("🤝 入站连接：启用 HandshakeDriver 兼容通道（iOS 互通） endpoint=\(endpointDescription, privacy: .public) state=\(String(describing: connection.state), privacy: .public)")
@@ -892,6 +945,10 @@ public class DeviceDiscoveryManager: BaseManager {
                                 )
                                 logger.info(
                                     "🔑 已缓存对端 KEM 公钥（bootstrap）：declared=\(payload.deviceId, privacy: .public) peer=\(peerDeviceId, privacy: .public) keys=\(payload.kemPublicKeys.count, privacy: .public)"
+                                )
+                                await persistAuthenticatedRemoteAuthority(
+                                    from: payload,
+                                    displayName: displayName
                                 )
 
                                 let now = Date()
@@ -1111,6 +1168,7 @@ public class DeviceDiscoveryManager: BaseManager {
                         }
                     }
                 case .established(let keys):
+                    authenticatedRemoteAuthority = await driver.getAuthenticatedRemoteAuthority()
                     sessionKeys = keys
                     if let declaredDeviceIdForVerification {
                         await MainActor.run {

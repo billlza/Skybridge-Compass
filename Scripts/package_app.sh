@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # 中文注释：
-# 该脚本用于将 SwiftPM/Xcode 构建得到的可执行产物与资源封装为标准的 macOS 应用（.app）。
+# 该脚本用于将 Xcode/SwiftPM 构建得到的可执行产物与资源封装为标准的 macOS 应用（.app）。
 # 满足最低系统版本 macOS 14.0，针对 Apple Silicon（ARM64）进行优化，并使用最新 API。
 #
 # 使用方法：
@@ -15,8 +15,11 @@ set -euo pipefail
 #    Scripts/package_app.sh
 # 3) 生成的 .app 会位于 dist/SkyBridge\ Compass\ Pro.app
 #
-# 注意：脚本优先使用 Developer ID / Apple Development 证书签名；
-# 若本机无可用证书则回退 ad-hoc（此时特权 Helper 安装可能失败）。
+# 注意：
+# - 脚本优先使用 Developer ID / Apple Development 证书签名；
+# - 若本机无可用证书则回退 ad-hoc（此时特权 Helper 安装可能失败）；
+# - 当 SKYBRIDGE_PACKAGE_CONTEXT=release_dmg 时，脚本会拒绝 SwiftPM release fallback，
+#   以防将非 Xcode Release 产物封装进发布 DMG。
 
 function log() {
   echo "[package] $1"
@@ -200,6 +203,7 @@ function select_release_build_dir() {
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 source "${ROOT_DIR}/Scripts/apple_pqc_sdk_probe.sh"
+source "${ROOT_DIR}/Scripts/package_build_policy.sh"
 source "${ROOT_DIR}/Scripts/xcodebuild_helpers.sh"
 XCODE_BUILD_DIR="${ROOT_DIR}/.build/xcode/Build/Products/Release"
 SWIFTPM_RELEASE_BUILD_DIR="${ROOT_DIR}/.build/arm64-apple-macosx/release"
@@ -214,6 +218,7 @@ LEGACY_FW_LINK="${CONTENTS_DIR}/lib"
 SIGN_IDENTITY="${IDENTITY:-$(select_identity)}"
 APP_PACKAGING_ENTITLEMENTS="${ROOT_DIR}/Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.packaging.entitlements"
 SKIP_BUILD="${SKIP_BUILD:-0}"
+PACKAGE_CONTEXT="${SKYBRIDGE_PACKAGE_CONTEXT:-app}"
 BUILD_DESTINATION="${BUILD_DESTINATION:-$(skybridge_default_macos_destination)}"
 XCODE_WORKSPACE="${ROOT_DIR}/.swiftpm/xcode/package.xcworkspace"
 USE_XCODE_WORKSPACE=0
@@ -235,6 +240,8 @@ fi
 # 中文注释：可执行文件与资源 bundle 名称（来自 Xcode 构建输出）
 EXECUTABLE="SkyBridgeCompassApp"
 BUILD_DIR="$(select_release_build_dir)"
+BUILD_SOURCE="$(skybridge_package_build_source "${BUILD_DIR}" "${XCODE_BUILD_DIR}" "${SWIFTPM_RELEASE_BUILD_DIR}")"
+skybridge_assert_package_build_policy "${PACKAGE_CONTEXT}" "${BUILD_SOURCE}"
 
 if [[ "${SKIP_BUILD}" != "1" ]]; then
   log "执行 Release 构建，确保打包包含最新代码"
@@ -273,6 +280,8 @@ if [[ "${SKIP_BUILD}" != "1" ]]; then
                build
   fi
   BUILD_DIR="$(select_release_build_dir)"
+  BUILD_SOURCE="$(skybridge_package_build_source "${BUILD_DIR}" "${XCODE_BUILD_DIR}" "${SWIFTPM_RELEASE_BUILD_DIR}")"
+  skybridge_assert_package_build_policy "${PACKAGE_CONTEXT}" "${BUILD_SOURCE}"
 else
   log "按 SKIP_BUILD=1 跳过构建，直接复用已有产物"
   assert_release_product_is_fresh "${BUILD_DIR}/${EXECUTABLE}"
@@ -393,6 +402,8 @@ log "校验并修正 Info.plist 关键键值"
 plutil -replace CFBundleExecutable -string "${EXECUTABLE}" "${INFO_PLIST_DST}"
 plutil -replace CFBundlePackageType -string "APPL" "${INFO_PLIST_DST}"
 plutil -replace LSMinimumSystemVersion -string "14.0" "${INFO_PLIST_DST}"
+plutil -replace SkyBridgePackagingBuildSource -string "${BUILD_SOURCE}" "${INFO_PLIST_DST}"
+log "记录打包构建来源: ${BUILD_SOURCE}"
 if [[ -z "${SKYBRIDGE_PACKAGE_BUILD_ID:-}" ]]; then
   SKYBRIDGE_PACKAGE_BUILD_ID="$(date +%Y%m%d%H%M%S)"
 fi

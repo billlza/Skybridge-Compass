@@ -127,11 +127,27 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
             for: display.displayID,
             fallback: CGSize(width: display.width, height: display.height)
         )
-        width = Int(preferredSize?.width ?? CGFloat(display.width))
-        height = Int(preferredSize?.height ?? CGFloat(display.height))
+        let requestedSize = CGSize(
+            width: preferredSize?.width ?? CGFloat(display.width),
+            height: preferredSize?.height ?? CGFloat(display.height)
+        )
 
         // iOS 端为简化解码：允许用 BGRA 模式输出 JPEG（避免 H.264/HEVC NAL 兼容问题）
         jpegMode = (preferredCodec == .bgra)
+        let normalizedSize = RemoteControlCaptureCompatibility.normalizedCaptureSize(
+            requestedSize,
+            for: preferredCodec
+        )
+        width = Int(normalizedSize.width)
+        height = Int(normalizedSize.height)
+        if Int(requestedSize.width.rounded(.down)) != width || Int(requestedSize.height.rounded(.down)) != height {
+            logger.info(
+                """
+                🎚️ 已调整远控采集尺寸以匹配编码器约束: requested=\(Int(requestedSize.width.rounded(.down)))x\(Int(requestedSize.height.rounded(.down))) \
+                normalized=\(self.width)x\(self.height) codec=\(preferredCodec.rawValue, privacy: .public)
+                """
+            )
+        }
         if !jpegMode {
             // 映射编码类型
             codecType = (preferredCodec == .h264) ? kCMVideoCodecType_H264 : kCMVideoCodecType_HEVC

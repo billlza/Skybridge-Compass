@@ -179,18 +179,73 @@ public final class RemoteControlServer: ObservableObject {
         }
         return (error as NSError).code == 48
     }
+
+    private func resolveInboundPeerIdentifier(for endpoint: NWEndpoint) -> String {
+        let fallback = Self.fallbackPeerIdentifier(for: endpoint)
+
+        switch endpoint {
+        case .hostPort(let host, _):
+            let hostText = String(describing: host)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            let discovered = P2PDiscoveryService.shared.discoveredDevices
+            if let match = discovered.first(where: {
+                $0.ipv4?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == hostText
+                    || $0.ipv6?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == hostText
+            }) {
+                if let deviceId = match.deviceId?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   !deviceId.isEmpty {
+                    return deviceId
+                }
+                if let uniqueIdentifier = match.uniqueIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   !uniqueIdentifier.isEmpty {
+                    return PeerTrustLookup.persistentDeviceId(from: uniqueIdentifier) ?? uniqueIdentifier
+                }
+            }
+            return fallback
+        case .service(let name, _, let domain, _):
+            let normalizedName = name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let normalizedDomain = (domain.isEmpty ? "local." : domain)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            let discovered = P2PDiscoveryService.shared.discoveredDevices
+            if let match = discovered.first(where: {
+                $0.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == normalizedName
+            }) {
+                if let deviceId = match.deviceId?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   !deviceId.isEmpty {
+                    return deviceId
+                }
+                if let uniqueIdentifier = match.uniqueIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   !uniqueIdentifier.isEmpty {
+                    return PeerTrustLookup.persistentDeviceId(from: uniqueIdentifier) ?? uniqueIdentifier
+                }
+            }
+            return "bonjour:\(normalizedName)@\(normalizedDomain)"
+        default:
+            return fallback
+        }
+    }
+
+    private nonisolated static func fallbackPeerIdentifier(for endpoint: NWEndpoint) -> String {
+        switch endpoint {
+        case .hostPort(let host, _):
+            let value = String(describing: host).trimmingCharacters(in: .whitespacesAndNewlines)
+            return value.isEmpty ? UUID().uuidString : "peer:\(value.lowercased())"
+        case .service(let name, _, let domain, _):
+            let resolvedDomain = domain.isEmpty ? "local." : domain
+            return "bonjour:\(name)@\(resolvedDomain)"
+        default:
+            return endpoint.debugDescription
+        }
+    }
     
     private func handleIncoming(_ connection: NWConnection) {
         final class IncomingConnectionLifecycle: @unchecked Sendable {
             var didHandOffToManager = false
         }
 
-        let deviceId: String
-        if case let .hostPort(host, _) = connection.endpoint {
-            deviceId = "host:\(host)"
-        } else {
-            deviceId = UUID().uuidString
-        }
+        let deviceId = resolveInboundPeerIdentifier(for: connection.endpoint)
         let lifecycle = IncomingConnectionLifecycle()
 
         if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {

@@ -378,6 +378,10 @@ public final class TrustSyncService: ObservableObject {
     
  /// 本地缓存
     private var localCache: [String: TrustRecord] = [:]
+
+#if DEBUG
+    private var usesInMemoryPersistenceForTesting: Bool = false
+#endif
     
  // MARK: - Initialization
     
@@ -416,7 +420,15 @@ public final class TrustSyncService: ObservableObject {
         let signedRecord = try await signRecord(record)
         
  // 保存到本地
+#if DEBUG
+        if usesInMemoryPersistenceForTesting {
+            removeFallbackRecord(deviceId: signedRecord.deviceId)
+        } else {
+            try saveToKeychain(signedRecord, synchronizable: isSyncAvailable)
+        }
+#else
         try saveToKeychain(signedRecord, synchronizable: isSyncAvailable)
+#endif
         localCache[signedRecord.deviceId] = signedRecord
         
  // 更新 UI
@@ -439,7 +451,15 @@ public final class TrustSyncService: ObservableObject {
         let revokedRecord = existing.revoked(signature: signature)
         
  // 保存到本地
+#if DEBUG
+        if usesInMemoryPersistenceForTesting {
+            removeFallbackRecord(deviceId: revokedRecord.deviceId)
+        } else {
+            try saveToKeychain(revokedRecord, synchronizable: isSyncAvailable)
+        }
+#else
         try saveToKeychain(revokedRecord, synchronizable: isSyncAvailable)
+#endif
         localCache[deviceId] = revokedRecord
         
  // 更新 UI
@@ -529,6 +549,141 @@ public final class TrustSyncService: ObservableObject {
         }
 
         return nil
+    }
+
+    nonisolated static func resolvedAuthenticatedRemoteAuthorityRecord(
+        existingRecords: [TrustRecord],
+        deviceId: String,
+        displayName: String? = nil,
+        preferredCurrentDeviceId: String? = nil,
+        knownDeviceIds: [String] = [],
+        protocolSigningAlgorithm: ProtocolSigningAlgorithm,
+        protocolPublicKeyFingerprint: String
+    ) -> TrustRecord? {
+        let normalizedDeviceId = deviceId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedDeviceId.isEmpty else { return nil }
+
+        let normalizedFingerprint = protocolPublicKeyFingerprint
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard !normalizedFingerprint.isEmpty else { return nil }
+
+        let normalizedDisplayName = displayName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let stableCurrentDeviceId = PeerTrustLookup.persistentDeviceId(from: preferredCurrentDeviceId)
+            ?? preferredCurrentDeviceId?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        var lookupCandidates = PeerTrustLookup.lookupCandidates(
+            primary: normalizedDeviceId,
+            persistent: stableCurrentDeviceId
+        )
+        for knownDeviceId in knownDeviceIds {
+            for candidate in PeerTrustLookup.lookupCandidates(for: knownDeviceId) where !lookupCandidates.contains(candidate) {
+                lookupCandidates.append(candidate)
+            }
+        }
+        let candidateSet = Set(lookupCandidates)
+        let candidateLowerSet = Set(candidateSet.map { $0.lowercased() })
+        let candidateDisplayNamesLower = Set(
+            [normalizedDisplayName]
+                .compactMap { $0?.lowercased() }
+                .filter { !$0.isEmpty }
+        )
+
+        let matchingRecords = existingRecords.filter { record in
+            !record.isTombstone &&
+            !record.isExpired &&
+            PeerTrustLookup.recordMatches(
+                record,
+                candidates: candidateSet,
+                candidateLowercased: candidateLowerSet,
+                candidateDisplayNamesLower: candidateDisplayNamesLower
+            )
+        }
+
+        func mergeKnownDeviceIds(existing: [String]?) -> [String]? {
+            let merged = Set((existing ?? []) + lookupCandidates + [stableCurrentDeviceId].compactMap { $0 })
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            guard !merged.isEmpty else { return nil }
+            return Array(merged).sorted()
+        }
+
+        let targetRecord: TrustRecord?
+        if matchingRecords.count <= 1 {
+            targetRecord = matchingRecords.first
+        } else if let stableCurrentDeviceId {
+            let stableMatches = matchingRecords.filter { record in
+                record.currentDeviceId == stableCurrentDeviceId || record.deviceId == stableCurrentDeviceId
+            }
+            targetRecord = stableMatches.count == 1 ? stableMatches[0] : nil
+        } else {
+            targetRecord = nil
+        }
+
+        if let targetRecord {
+            return TrustRecord(
+                deviceId: targetRecord.deviceId,
+                pubKeyFP: targetRecord.pubKeyFP,
+                publicKey: targetRecord.publicKey,
+                secureEnclavePublicKey: targetRecord.secureEnclavePublicKey,
+                protocolPublicKey: targetRecord.protocolPublicKey,
+                protocolSigningAlgorithm: protocolSigningAlgorithm,
+                protocolPublicKeyFingerprint: normalizedFingerprint,
+                legacyP256PublicKey: targetRecord.legacyP256PublicKey,
+                signatureAlgorithm: targetRecord.signatureAlgorithm,
+                kemPublicKeys: targetRecord.kemPublicKeys,
+                attestationLevel: targetRecord.attestationLevel,
+                attestationData: targetRecord.attestationData,
+                capabilities: targetRecord.capabilities,
+                signature: Data(),
+                deviceName: normalizedDisplayName ?? targetRecord.deviceName,
+                currentDeviceId: stableCurrentDeviceId ?? targetRecord.currentDeviceIdMetadata,
+                knownDeviceIds: mergeKnownDeviceIds(existing: targetRecord.knownDeviceIdsMetadata),
+                lifecycleState: .active
+            )
+        }
+
+        guard let stableCurrentDeviceId, !stableCurrentDeviceId.isEmpty else {
+            return nil
+        }
+
+        return TrustRecord(
+            deviceId: stableCurrentDeviceId,
+            pubKeyFP: "",
+            publicKey: Data(),
+            protocolPublicKey: nil,
+            protocolSigningAlgorithm: protocolSigningAlgorithm,
+            protocolPublicKeyFingerprint: normalizedFingerprint,
+            signature: Data(),
+            deviceName: normalizedDisplayName ?? stableCurrentDeviceId,
+            currentDeviceId: stableCurrentDeviceId,
+            knownDeviceIds: mergeKnownDeviceIds(existing: nil),
+            lifecycleState: .active
+        )
+    }
+
+    @discardableResult
+    public func recordAuthenticatedRemoteAuthority(
+        deviceId: String,
+        displayName: String? = nil,
+        preferredCurrentDeviceId: String? = nil,
+        knownDeviceIds: [String] = [],
+        protocolSigningAlgorithm: ProtocolSigningAlgorithm,
+        protocolPublicKeyFingerprint: String
+    ) async throws -> Bool {
+        guard let record = Self.resolvedAuthenticatedRemoteAuthorityRecord(
+            existingRecords: Array(localCache.values),
+            deviceId: deviceId,
+            displayName: displayName,
+            preferredCurrentDeviceId: preferredCurrentDeviceId,
+            knownDeviceIds: knownDeviceIds,
+            protocolSigningAlgorithm: protocolSigningAlgorithm,
+            protocolPublicKeyFingerprint: protocolPublicKeyFingerprint
+        ) else {
+            return false
+        }
+        _ = try await addTrustRecord(record)
+        return true
     }
     
  /// 同步信任记录
@@ -687,6 +842,36 @@ public final class TrustSyncService: ObservableObject {
     
  /// 签名记录
     private func signRecord(_ record: TrustRecord) async throws -> TrustRecord {
+#if DEBUG
+        if usesInMemoryPersistenceForTesting {
+            return TrustRecord(
+                deviceId: record.deviceId,
+                pubKeyFP: record.pubKeyFP,
+                publicKey: record.publicKey,
+                secureEnclavePublicKey: record.secureEnclavePublicKey,
+                protocolPublicKey: record.protocolPublicKey,
+                protocolSigningAlgorithm: record.protocolSigningAlgorithm,
+                protocolPublicKeyFingerprint: record.protocolPublicKeyFingerprint,
+                legacyP256PublicKey: record.legacyP256PublicKey,
+                signatureAlgorithm: record.signatureAlgorithm,
+                kemPublicKeys: record.kemPublicKeys,
+                attestationLevel: record.attestationLevel,
+                attestationData: record.attestationData,
+                capabilities: record.capabilities,
+                createdAt: record.createdAt,
+                updatedAt: record.updatedAt,
+                version: record.version,
+                signature: record.signature.isEmpty ? Data(repeating: 0xAA, count: 64) : record.signature,
+                recordType: record.recordType,
+                revokedAt: record.revokedAt,
+                deviceName: record.deviceName,
+                currentDeviceId: record.currentDeviceIdMetadata,
+                knownDeviceIds: record.knownDeviceIdsMetadata,
+                lifecycleState: record.lifecycleStateMetadata
+            )
+        }
+#endif
+
         let dataToSign = try createDataToSign(for: record, revoked: false)
         let signature = try await keyManager.sign(data: dataToSign)
         
@@ -750,7 +935,15 @@ public final class TrustSyncService: ObservableObject {
         )
         
         let signedRecord = try await signRecord(updatedRecord)
+#if DEBUG
+        if usesInMemoryPersistenceForTesting {
+            removeFallbackRecord(deviceId: signedRecord.deviceId)
+        } else {
+            try saveToKeychain(signedRecord, synchronizable: isSyncAvailable)
+        }
+#else
         try saveToKeychain(signedRecord, synchronizable: isSyncAvailable)
+#endif
         localCache[signedRecord.deviceId] = signedRecord
         
         await updateActiveTrustRecords()
@@ -1039,6 +1232,29 @@ public final class TrustSyncService: ObservableObject {
         guard records.count != originalCount else { return }
         storeFallbackRecords(records)
     }
+
+#if DEBUG
+    func setInMemoryPersistenceForTesting(_ enabled: Bool) {
+        usesInMemoryPersistenceForTesting = enabled
+    }
+
+    func removeRecordsForTesting(deviceIds: [String]) async {
+        let normalizedDeviceIds = Set(
+            deviceIds
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+        )
+
+        guard !normalizedDeviceIds.isEmpty else { return }
+
+        for deviceId in normalizedDeviceIds {
+            deleteFromKeychain(deviceId: deviceId)
+            localCache.removeValue(forKey: deviceId)
+        }
+
+        await updateActiveTrustRecords()
+    }
+#endif
     
  /// 验证记录签名
     public func verifyRecordSignature(_ record: TrustRecord) async throws -> Bool {

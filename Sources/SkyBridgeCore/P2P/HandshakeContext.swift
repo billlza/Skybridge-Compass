@@ -98,6 +98,9 @@ public actor HandshakeContext {
  /// 是否已被清理
     public private(set) var isZeroized: Bool = false
 
+    /// 最近一次成功验签得到的远端协议身份 authority
+    private var authenticatedRemoteAuthority: AuthenticatedRemoteAuthority?
+
  /// 对端 KeyShare（收到后设置）
     public private(set) var peerKeyShares: [CryptoSuite: Data] = [:]
 
@@ -244,6 +247,25 @@ public actor HandshakeContext {
         }
 
         nonce = SecureBytes(data: Data(nonceBytes))
+    }
+
+    public func getAuthenticatedRemoteAuthority() -> AuthenticatedRemoteAuthority? {
+        authenticatedRemoteAuthority
+    }
+
+    private func makeAuthenticatedRemoteAuthority(
+        from identityKeys: IdentityPublicKeys
+    ) throws -> AuthenticatedRemoteAuthority {
+        guard let protocolSigningAlgorithm = ProtocolSigningAlgorithm(from: identityKeys.protocolAlgorithm) else {
+            throw HandshakeError.failed(
+                .invalidMessageFormat("Unsupported protocol signing algorithm: \(identityKeys.protocolAlgorithm.rawValue)")
+            )
+        }
+
+        return AuthenticatedRemoteAuthority(
+            protocolSigningAlgorithm: protocolSigningAlgorithm,
+            protocolPublicKeyFingerprint: try identityKeys.authoritativeProtocolFingerprint().lowercased()
+        )
     }
 
  // MARK: - Message Building
@@ -467,6 +489,8 @@ public actor HandshakeContext {
         guard isValid else {
             throw HandshakeError.failed(.signatureVerificationFailed)
         }
+
+        authenticatedRemoteAuthority = try makeAuthenticatedRemoteAuthority(from: identityKeys)
 
         if let postSignatureValidation {
             try await postSignatureValidation(identityKeys)
@@ -791,6 +815,8 @@ public actor HandshakeContext {
         guard isValid else {
             throw HandshakeError.failed(.signatureVerificationFailed)
         }
+
+        authenticatedRemoteAuthority = try makeAuthenticatedRemoteAuthority(from: identityKeys)
 
         if let postSignatureValidation {
             try await postSignatureValidation(identityKeys)
@@ -1154,6 +1180,7 @@ public actor HandshakeContext {
         peerKeyShares.removeAll()
         sentSupportedSuites.removeAll()
         sentKeyShares.removeAll()
+        authenticatedRemoteAuthority = nil
 
         isZeroized = true
     }

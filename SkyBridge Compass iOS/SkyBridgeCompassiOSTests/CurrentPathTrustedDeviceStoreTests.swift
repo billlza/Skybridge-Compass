@@ -84,4 +84,61 @@ final class CurrentPathTrustedDeviceStoreTests: XCTestCase {
             "device-mac-stable"
         )
     }
+
+    func testRecordAuthenticatedRemoteAuthorityUpdatesAliasMatchedTrustedRecord() {
+        let stableId = "id:peer-mac-stable"
+        let aliasDevice = DiscoveredDevice(
+            id: "bonjour:Lza的MacBook Pro@local.",
+            name: "Lza的MacBook Pro",
+            modelName: "MacBook Pro",
+            platform: .macOS,
+            osVersion: "15.0",
+            ipAddress: "192.168.1.20"
+        )
+
+        TrustedDeviceStore.shared.trustResolvedPeer(aliasDevice, declaredDeviceId: stableId)
+
+        let updated = TrustedDeviceStore.shared.recordAuthenticatedRemoteAuthority(
+            for: aliasDevice,
+            preferredCurrentDeviceId: stableId,
+            protocolSigningAlgorithm: "ML-DSA-65",
+            protocolPublicKeyFingerprint: String(repeating: "f", count: 64)
+        )
+
+        XCTAssertTrue(updated)
+        XCTAssertEqual(
+            TrustedDeviceStore.shared.canonicalTrustedDeviceId(for: aliasDevice),
+            stableId
+        )
+        let trusted = TrustedDeviceStore.shared.currentPathTrustRecord(
+            fingerprint: String(repeating: "f", count: 64)
+        )
+        XCTAssertEqual(trusted?.currentDeviceId, stableId)
+        XCTAssertEqual(trusted?.protocolSigningAlgorithm, "ML-DSA-65")
+    }
+
+    func testRecordAuthenticatedRemoteAuthorityRejectsEphemeralOnlyNewRecord() {
+        let aliasDevice = DiscoveredDevice(
+            id: "bonjour:Lza的MacBook Pro@local.",
+            name: "Lza的MacBook Pro",
+            modelName: "MacBook Pro",
+            platform: .macOS,
+            osVersion: "15.0",
+            ipAddress: nil
+        )
+
+        let updated = TrustedDeviceStore.shared.recordAuthenticatedRemoteAuthority(
+            for: aliasDevice,
+            preferredCurrentDeviceId: nil,
+            protocolSigningAlgorithm: "ML-DSA-65",
+            protocolPublicKeyFingerprint: String(repeating: "e", count: 64)
+        )
+
+        XCTAssertFalse(updated)
+        XCTAssertNil(
+            TrustedDeviceStore.shared.currentPathTrustRecord(
+                fingerprint: String(repeating: "e", count: 64)
+            )
+        )
+    }
 }

@@ -459,6 +459,136 @@ final class HandshakeDriverTests: XCTestCase {
         }
     }
 
+    func testAuthenticatedRemoteAuthorityRetainedAfterEstablishedHandshake() async throws {
+        let initiatorTransport = MockDiscoveryTransport()
+        let responderTransport = MockDiscoveryTransport()
+
+        let initiatorIdentity = try await provider.generateKeyPair(for: .signing)
+        let responderIdentity = try await provider.generateKeyPair(for: .signing)
+
+        let initiator = try HandshakeDriver(
+            transport: initiatorTransport,
+            cryptoProvider: ClassicCryptoProvider(),
+            protocolSignatureProvider: ClassicSignatureProvider(),
+            protocolSigningKeyHandle: .softwareKey(initiatorIdentity.privateKey.bytes),
+            sigAAlgorithm: .ed25519,
+            identityPublicKey: encodeIdentityPublicKey(initiatorIdentity.publicKey.bytes),
+            offeredSuites: [.x25519Ed25519],
+            timeout: .seconds(5)
+        )
+
+        let responder = try HandshakeDriver(
+            transport: responderTransport,
+            cryptoProvider: ClassicCryptoProvider(),
+            protocolSignatureProvider: ClassicSignatureProvider(),
+            protocolSigningKeyHandle: .softwareKey(responderIdentity.privateKey.bytes),
+            sigAAlgorithm: .ed25519,
+            identityPublicKey: encodeIdentityPublicKey(responderIdentity.publicKey.bytes),
+            offeredSuites: [.x25519Ed25519],
+            timeout: .seconds(5)
+        )
+
+        let peer = PeerIdentifier(deviceId: "authority-peer")
+        let handshakeTask = Task {
+            try await initiator.initiateHandshake(with: peer)
+        }
+
+        while await initiatorTransport.getSentMessageCount() == 0 {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+
+        let messageA = await initiatorTransport.getSentMessages()[0].1
+        await responder.handleMessage(messageA, from: peer)
+
+        while await responderTransport.getSentMessageCount() < 2 {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+
+        let responderMessages = await responderTransport.getSentMessages()
+        await initiator.handleMessage(responderMessages[0].1, from: peer)
+        await initiator.handleMessage(responderMessages[1].1, from: peer)
+
+        while await initiatorTransport.getSentMessageCount() < 2 {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+
+        let finishedI2R = await initiatorTransport.getSentMessages()[1].1
+        await responder.handleMessage(finishedI2R, from: peer)
+
+        _ = try await handshakeTask.value
+
+        let initiatorAuthority = await initiator.getAuthenticatedRemoteAuthority()
+        let responderAuthority = await responder.getAuthenticatedRemoteAuthority()
+
+        XCTAssertEqual(
+            initiatorAuthority,
+            AuthenticatedRemoteAuthority(
+                protocolSigningAlgorithm: .ed25519,
+                protocolPublicKeyFingerprint: authoritativeFingerprint(responderIdentity.publicKey.bytes)
+            )
+        )
+        XCTAssertEqual(
+            responderAuthority,
+            AuthenticatedRemoteAuthority(
+                protocolSigningAlgorithm: .ed25519,
+                protocolPublicKeyFingerprint: authoritativeFingerprint(initiatorIdentity.publicKey.bytes)
+            )
+        )
+    }
+
+    func testAuthenticatedRemoteAuthorityClearedAfterKeyConfirmationFailure() async throws {
+        let initiatorKeyPair = try await provider.generateKeyPair(for: .signing)
+        let initiatorContext = try await HandshakeContext.create(
+            role: .initiator,
+            cryptoProvider: provider
+        )
+        let messageA = try await initiatorContext.buildMessageA(
+            identityKeyHandle: .softwareKey(initiatorKeyPair.privateKey.bytes),
+            identityPublicKey: encodeIdentityPublicKey(initiatorKeyPair.publicKey.bytes)
+        )
+
+        let driver = try makeDriver()
+        let peer = PeerIdentifier(deviceId: "test-peer")
+
+        await driver.handleMessage(messageA.encoded, from: peer)
+        try await Task.sleep(for: .milliseconds(50))
+
+        let authorityBeforeFailure = await driver.getAuthenticatedRemoteAuthority()
+        XCTAssertEqual(
+            authorityBeforeFailure,
+            AuthenticatedRemoteAuthority(
+                protocolSigningAlgorithm: .ed25519,
+                protocolPublicKeyFingerprint: authoritativeFingerprint(initiatorKeyPair.publicKey.bytes)
+            )
+        )
+
+        let stateBeforeFinished = await driver.getCurrentState()
+        guard case .waitingFinished(_, let sessionKeys, _) = stateBeforeFinished else {
+            XCTFail("Expected waitingFinished after MessageA, got \(stateBeforeFinished)")
+            return
+        }
+
+        var invalidFinished = makePeerFinishedFromInitiator(sessionKeys: sessionKeys)
+        var tamperedMac = invalidFinished.mac
+        tamperedMac[0] ^= 0xFF
+        invalidFinished = HandshakeFinished(
+            direction: invalidFinished.direction,
+            mac: tamperedMac
+        )
+
+        await driver.handleMessage(invalidFinished.encoded, from: peer)
+        try await Task.sleep(for: .milliseconds(50))
+
+        let stateAfterFailure = await driver.getCurrentState()
+        guard case .failed(let reason) = stateAfterFailure else {
+            XCTFail("Expected failed state after invalid Finished, got \(stateAfterFailure)")
+            return
+        }
+        XCTAssertEqual(reason, .keyConfirmationFailed)
+        let authorityAfterFailure = await driver.getAuthenticatedRemoteAuthority()
+        XCTAssertNil(authorityAfterFailure)
+    }
+
     private func makePeerFinishedFromInitiator(sessionKeys: SessionKeys) -> HandshakeFinished {
         let macKey = HKDF<SHA256>.deriveKey(
             inputKeyMaterial: SymmetricKey(data: sessionKeys.receiveKey),

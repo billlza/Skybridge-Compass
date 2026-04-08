@@ -17,6 +17,7 @@ import AVFoundation
 import VideoToolbox
 import ImageIO
 import CoreImage
+import CryptoKit
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -47,6 +48,114 @@ private func RemoteDesktopReleasePixelBufferBytes(
 ) {
     guard let releaseRefCon else { return }
     Unmanaged<NSData>.fromOpaque(releaseRefCon).release()
+}
+
+enum LANRemoteControlTrustResolution: Equatable {
+    case missing
+    case ambiguous(deviceIds: [String], fingerprints: [String])
+    case resolved(record: TrustedDeviceStore.TrustedDevice, canonicalPeerId: String)
+}
+
+enum LANRemoteControlTrustResolver {
+    static func resolve(
+        device: DiscoveredDevice,
+        trustedPeerId: String? = nil,
+        trustedDevices: [TrustedDeviceStore.TrustedDevice]
+    ) -> LANRemoteControlTrustResolution {
+        let candidates = candidateAliases(for: device, trustedPeerId: trustedPeerId)
+        let matches = trustedDevices.filter { trustedRecord in
+            !recordAliases(for: trustedRecord).isDisjoint(with: candidates)
+        }
+
+        guard !matches.isEmpty else {
+            return .missing
+        }
+
+        let deviceIds = Array(
+            Set(
+                matches
+                    .map(resolvedCurrentDeviceId(for:))
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty }
+            )
+        ).sorted()
+        let fingerprints = Array(
+            Set(
+                matches
+                    .compactMap(\.protocolPublicKeyFingerprint)
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+                    .filter { !$0.isEmpty }
+            )
+        ).sorted()
+
+        guard deviceIds.count == 1 && fingerprints.count <= 1 else {
+            return .ambiguous(deviceIds: deviceIds, fingerprints: fingerprints)
+        }
+
+        let canonicalPeerId = deviceIds[0]
+        let preferredFingerprint = fingerprints.first
+        let chosenRecord = matches.sorted { lhs, rhs in
+            let lhsFingerprint = lhs.protocolPublicKeyFingerprint?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            let rhsFingerprint = rhs.protocolPublicKeyFingerprint?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+
+            let lhsHasPreferredFingerprint = preferredFingerprint != nil && lhsFingerprint == preferredFingerprint
+            let rhsHasPreferredFingerprint = preferredFingerprint != nil && rhsFingerprint == preferredFingerprint
+            if lhsHasPreferredFingerprint != rhsHasPreferredFingerprint {
+                return lhsHasPreferredFingerprint && !rhsHasPreferredFingerprint
+            }
+
+            let lhsHasAuthority = !(lhs.protocolSigningAlgorithm?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+            let rhsHasAuthority = !(rhs.protocolSigningAlgorithm?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+            if lhsHasAuthority != rhsHasAuthority {
+                return lhsHasAuthority && !rhsHasAuthority
+            }
+
+            if lhs.addedAt != rhs.addedAt {
+                return lhs.addedAt < rhs.addedAt
+            }
+            return lhs.id < rhs.id
+        }.first!
+        return .resolved(record: chosenRecord, canonicalPeerId: canonicalPeerId)
+    }
+
+    static func candidateAliases(
+        for device: DiscoveredDevice,
+        trustedPeerId: String? = nil
+    ) -> Set<String> {
+        var aliases = Set(PeerIdentityAliasResolver.lookupCandidates(for: device.id))
+        aliases.formUnion(PeerIdentityAliasResolver.aliasKeys(for: device))
+        aliases.formUnion(PeerIdentityAliasResolver.lookupCandidates(for: trustedPeerId))
+        if let ipAddress = device.ipAddress {
+            aliases.formUnion(PeerIdentityAliasResolver.lookupCandidates(for: ipAddress))
+        }
+        return Set(aliases.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
+    }
+
+    static func recordAliases(
+        for trustedRecord: TrustedDeviceStore.TrustedDevice
+    ) -> Set<String> {
+        var aliases = Set(PeerIdentityAliasResolver.lookupCandidates(for: trustedRecord.id))
+        if let currentDeviceId = trustedRecord.currentDeviceId {
+            aliases.formUnion(PeerIdentityAliasResolver.lookupCandidates(for: currentDeviceId))
+        }
+        for knownDeviceId in trustedRecord.knownDeviceIds ?? [] {
+            aliases.formUnion(PeerIdentityAliasResolver.lookupCandidates(for: knownDeviceId))
+        }
+        if let ipAddress = trustedRecord.ipAddress {
+            aliases.formUnion(PeerIdentityAliasResolver.lookupCandidates(for: ipAddress))
+        }
+        return aliases
+    }
+
+    static func resolvedCurrentDeviceId(
+        for trustedRecord: TrustedDeviceStore.TrustedDevice
+    ) -> String {
+        trustedRecord.currentDeviceId ?? trustedRecord.id
+    }
 }
 
 // MARK: - Remote Message Types
@@ -2088,6 +2197,32 @@ public class RemoteDesktopManager: ObservableObject {
         let width: Int
         let height: Int
     }
+
+    private struct CurrentPathRemoteAuthority: Sendable {
+        let deviceId: String
+        let protocolPublicKeyFingerprint: String
+    }
+
+    private struct LANHandshakeTrustProvider: HandshakeTrustProvider, Sendable {
+        let expectedRemoteAuthority: CurrentPathRemoteAuthority
+        let fallbackPeerIDs: [String]
+
+        func trustedFingerprint(for deviceId: String) async -> String? {
+            if deviceId == expectedRemoteAuthority.deviceId || fallbackPeerIDs.contains(deviceId) {
+                return expectedRemoteAuthority.protocolPublicKeyFingerprint
+            }
+            return nil
+        }
+
+        func trustedKEMPublicKeys(for deviceId: String) async -> [CryptoSuite : Data] {
+            await KEMTrustStore.shared.kemPublicKeys(for: deviceId)
+        }
+
+        func trustedSecureEnclavePublicKey(for deviceId: String) async -> Data? {
+            _ = deviceId
+            return nil
+        }
+    }
     
     // MARK: - Published Properties
     
@@ -2152,7 +2287,12 @@ public class RemoteDesktopManager: ObservableObject {
         case cgImage
     }
     
+    private let skyBridgeCore = SkyBridgeiOSCore.shared
     private var networkConnection: NWConnection?
+    private var lanHandshakeTransport: NWConnectionTransport?
+    private var lanHandshakeDriver: HandshakeDriver?
+    private var lanSessionKeys: SessionKeys?
+    private var lanHandshakePeerId: String?
     private var activeTransportMode: ActiveTransportMode = .none
     private let decoder = VideoDecoder()
     private let queue = DispatchQueue(label: "com.skybridge.remotedesktop", qos: .userInteractive)
@@ -2169,6 +2309,7 @@ public class RemoteDesktopManager: ObservableObject {
     private var hasReceivedFrameInCurrentStream: Bool = false
     
     private let maxMessageBytes: Int = 8_000_000
+    private let maxEncryptedLANMessageOverheadBytes: Int = 28
     private let maxConcurrentVideoDecodes: Int = 3
     private var inFlightDecodeCount: Int = 0
     private var decodeGeneration: UInt64 = 0
@@ -2252,6 +2393,10 @@ public class RemoteDesktopManager: ObservableObject {
         guard let image else { return }
         lastGoodFrozenFrame = image
     }
+
+    private var maxLANWireMessageBytes: Int {
+        maxMessageBytes + maxEncryptedLANMessageOverheadBytes
+    }
     
     // MARK: - Public Methods
     
@@ -2277,6 +2422,7 @@ public class RemoteDesktopManager: ObservableObject {
             // 仅当目标设备就是跨网会话对端时才走 DataChannel。
             // 避免“跨网已连接”误伤局域网远控（会导致画面/输入走错通道）。
             if shouldUseCrossNetworkTransport(for: resolvedDevice) {
+                await clearLANSecureChannelState()
                 networkConnection?.cancel()
                 networkConnection = nil
                 activeTransportMode = .crossNetwork
@@ -2313,6 +2459,8 @@ public class RemoteDesktopManager: ObservableObject {
             networkConnection?.stateUpdateHandler = nil
             networkConnection?.cancel()
             networkConnection = nil
+            await clearLANSecureChannelState()
+            try await ensureLANRemoteControlTrustBootstrap(for: resolvedDevice)
             // 建立连接：优先 Bonjour service（不依赖 IP/默认端口）
             let endpoint = try await makeRemoteDesktopEndpoint(for: resolvedDevice)
 
@@ -2349,6 +2497,9 @@ public class RemoteDesktopManager: ObservableObject {
             startReceiving()
             try ensureLANBootstrapStillActive(for: connection)
 
+            try await establishLANSecureChannel(for: resolvedDevice, over: connection)
+            try ensureLANBootstrapStillActive(for: connection)
+
             // 在进入 streaming 前先主动发送一次 viewer 能力，避免 Mac 端首个会话默认退回到 JPEG。
             await pushViewerStreamConfiguration(force: true)
             try ensureLANBootstrapStillActive(for: connection)
@@ -2360,6 +2511,11 @@ public class RemoteDesktopManager: ObservableObject {
             SkyBridgeLogger.shared.info("✅ 远程桌面连接成功")
             
         } catch {
+            networkConnection?.stateUpdateHandler = nil
+            networkConnection?.cancel()
+            networkConnection = nil
+            await clearLANSecureChannelState()
+            currentConnection = nil
             activeTransportMode = .none
             transportStatusText = currentTransportStatusText()
             state = .error(error.localizedDescription)
@@ -2563,6 +2719,7 @@ public class RemoteDesktopManager: ObservableObject {
         networkConnection?.stateUpdateHandler = nil
         networkConnection?.cancel()
         networkConnection = nil
+        await clearLANSecureChannelState()
         activeTransportMode = .none
         transportStatusText = currentTransportStatusText()
         lastSentStreamConfiguration = nil
@@ -2643,6 +2800,9 @@ public class RemoteDesktopManager: ObservableObject {
         case .none:
             return nil
         case .lan:
+            if let lanSessionKeys {
+                return "P2P / LAN · \(lanSessionKeys.negotiatedSuite.rawValue)"
+            }
             return "P2P / LAN"
         case .crossNetwork:
             if case .handshakeComplete(_, let negotiatedSuite) = crossNetwork.readiness {
@@ -2801,6 +2961,7 @@ public class RemoteDesktopManager: ObservableObject {
         networkConnection?.stateUpdateHandler = nil
         networkConnection?.cancel()
         networkConnection = nil
+        await clearLANSecureChannelState()
         activeTransportMode = .none
         transportStatusText = currentTransportStatusText()
         lastSentStreamConfiguration = nil
@@ -3751,6 +3912,275 @@ public class RemoteDesktopManager: ObservableObject {
     private func sanitizeAddress(_ raw: String?) -> String? {
         ConnectableAddressCanonicalizer.connectionTarget(raw)
     }
+
+    private func clearLANSecureChannelState() async {
+        if let lanHandshakeTransport, let lanHandshakePeerId {
+            await lanHandshakeTransport.removeConnection(for: lanHandshakePeerId)
+        }
+        lanHandshakeDriver = nil
+        lanSessionKeys = nil
+        lanHandshakePeerId = nil
+        lanHandshakeTransport = nil
+    }
+
+    private func ensureLANRemoteControlTrustBootstrap(
+        for device: DiscoveredDevice
+    ) async throws {
+        guard !shouldUseCrossNetworkTransport(for: device) else {
+            return
+        }
+
+        let bootstrapDevice = connectionManager.resolvedPeerDevice(for: device)
+        let bootstrapPeerId = bootstrapDevice.id
+        let bootstrapStatus = connectionManager.resolvedConnectionStatus(for: bootstrapDevice)
+
+        if bootstrapStatus != .connected {
+            SkyBridgeLogger.shared.info(
+                "🧩 LAN 远控前置 bootstrap：先建立通用 P2P 会话以同步 authority peer=\(bootstrapPeerId)"
+            )
+            try await connectionManager.connect(to: bootstrapDevice)
+        }
+
+        let resolvedBootstrapPeer = connectionManager.resolvedPeerDevice(for: bootstrapDevice)
+        let observedAt = Date()
+        try await connectionManager.sendPairingIdentityExchange(to: resolvedBootstrapPeer.id)
+
+        let observedReply = await connectionManager.waitForPairingIdentityExchangeActivity(
+            with: resolvedBootstrapPeer.id,
+            since: observedAt,
+            timeout: .seconds(3)
+        )
+        if observedReply {
+            SkyBridgeLogger.shared.info(
+                "🧩 LAN 远控前置 bootstrap 完成：已观察到 pairingIdentityExchange 往返 peer=\(resolvedBootstrapPeer.id)"
+            )
+        } else {
+            SkyBridgeLogger.shared.info(
+                "🧩 LAN 远控前置 bootstrap：未在超时内观察到 reply，继续远控握手 peer=\(resolvedBootstrapPeer.id)"
+            )
+            try? await Task.sleep(for: .milliseconds(600))
+        }
+    }
+
+    private func establishLANSecureChannel(
+        for device: DiscoveredDevice,
+        over connection: NWConnection
+    ) async throws {
+        let trustedPeerId = try resolveTrustedLANPeerIdentifier(for: device)
+        let trustedAuthority = try resolveTrustedRemoteAuthority(
+            for: device,
+            trustedPeerId: trustedPeerId
+        )
+        let trustProvider = LANHandshakeTrustProvider(
+            expectedRemoteAuthority: trustedAuthority,
+            fallbackPeerIDs: Array(
+                LANRemoteControlTrustResolver.candidateAliases(for: device, trustedPeerId: trustedPeerId)
+            )
+        )
+
+        try await skyBridgeCore.initialize(policy: .preferPQC)
+
+        let transport = NWConnectionTransport()
+        await transport.setConnection(connection, for: trustedPeerId)
+        lanHandshakeTransport = transport
+        lanHandshakePeerId = trustedPeerId
+        lanSessionKeys = nil
+        lanHandshakeDriver = nil
+
+        let localDeviceId = resolvedLocalRemoteControlDeviceId()
+        guard let localSOAPeerId = Self.remoteControlSOAPeerId(for: localDeviceId),
+              let expectedRemoteSOAPeerId = Self.remoteControlSOAPeerId(for: trustedPeerId),
+              let soaMetadata = try? HandshakeSOAMetadata(
+                initiatorPeerId: localSOAPeerId,
+                targetPeerId: expectedRemoteSOAPeerId,
+                attemptId: Self.randomRemoteControlAttemptId()
+              ) else {
+            throw RemoteDesktopError.connectionFailed("LAN 远控缺少稳定身份，无法建立安全通道")
+        }
+
+        let connectionID = ObjectIdentifier(connection)
+        let keys = try await skyBridgeCore.performHandshake(
+            deviceId: trustedPeerId,
+            transport: transport,
+            preferPQC: true,
+            soaMetadata: soaMetadata,
+            localSOAPeerId: localSOAPeerId,
+            expectedRemoteSOAPeerId: expectedRemoteSOAPeerId,
+            trustProvider: trustProvider,
+            onDriverCreated: { driver in
+                await MainActor.run {
+                    RemoteDesktopManager.instance.installLANHandshakeDriver(
+                        driver,
+                        forConnectionID: connectionID,
+                        peerId: trustedPeerId
+                    )
+                }
+            }
+        )
+
+        try ensureLANBootstrapStillActive(for: connection)
+        lanSessionKeys = keys
+        lanHandshakeDriver = nil
+        transportStatusText = currentTransportStatusText()
+        SkyBridgeLogger.shared.info(
+            "🔐 LAN 远控安全通道已建立: peer=\(trustedPeerId) suite=\(keys.negotiatedSuite.rawValue)"
+        )
+    }
+
+    private func installLANHandshakeDriver(
+        _ driver: HandshakeDriver,
+        forConnectionID connectionID: ObjectIdentifier,
+        peerId: String
+    ) {
+        guard let current = networkConnection,
+              ObjectIdentifier(current) == connectionID else {
+            return
+        }
+        lanHandshakeDriver = driver
+        lanHandshakePeerId = peerId
+    }
+
+    private func syncLANSecureChannelState(
+        after driver: HandshakeDriver,
+        forConnectionID connectionID: ObjectIdentifier
+    ) async throws {
+        guard let current = networkConnection,
+              ObjectIdentifier(current) == connectionID else {
+            return
+        }
+
+        switch await driver.getCurrentState() {
+        case .established(let keys):
+            lanSessionKeys = keys
+            lanHandshakeDriver = nil
+            transportStatusText = currentTransportStatusText()
+            SkyBridgeLogger.shared.info(
+                "🔐 LAN 远控握手完成: peer=\(lanHandshakePeerId ?? "-") suite=\(keys.negotiatedSuite.rawValue)"
+            )
+        case .failed(let reason):
+            throw RemoteDesktopError.connectionFailed("LAN 远控握手失败: \(String(describing: reason))")
+        default:
+            break
+        }
+    }
+
+    private func unwrapLANInboundPayload(
+        _ data: Data,
+        from connection: NWConnection
+    ) async throws -> Data? {
+        guard activeTransportMode == .lan else { return data }
+
+        if let lanSessionKeys {
+            return try decryptLANPayload(data, with: lanSessionKeys)
+        }
+
+        guard let lanHandshakeDriver, let lanHandshakePeerId else {
+            throw RemoteDesktopError.connectionFailed("收到未认证的 LAN 远控帧")
+        }
+
+        await lanHandshakeDriver.handleMessage(data, from: PeerIdentifier(deviceId: lanHandshakePeerId))
+        try await syncLANSecureChannelState(
+            after: lanHandshakeDriver,
+            forConnectionID: ObjectIdentifier(connection)
+        )
+        return nil
+    }
+
+    private func encryptLANPayload(_ plaintext: Data, with keys: SessionKeys) throws -> Data {
+        let key = SymmetricKey(data: keys.sendKey)
+        let sealed = try AES.GCM.seal(plaintext, using: key)
+        guard let combined = sealed.combined else {
+            throw RemoteDesktopError.streamingFailed("LAN 远控加密失败")
+        }
+        return combined
+    }
+
+    private func decryptLANPayload(_ ciphertext: Data, with keys: SessionKeys) throws -> Data {
+        let key = SymmetricKey(data: keys.receiveKey)
+        let sealedBox = try AES.GCM.SealedBox(combined: ciphertext)
+        return try AES.GCM.open(sealedBox, using: key)
+    }
+
+    private func resolveTrustedLANPeerIdentifier(for device: DiscoveredDevice) throws -> String {
+        switch LANRemoteControlTrustResolver.resolve(
+            device: device,
+            trustedPeerId: device.id,
+            trustedDevices: TrustedDeviceStore.shared.trustedDevices
+        ) {
+        case .resolved(_, let canonicalPeerId):
+            return PeerIdentityAliasResolver.persistentDeviceId(from: canonicalPeerId) ?? canonicalPeerId
+        case .missing:
+            throw RemoteDesktopError.connectionFailed("远控目标未建立受信任身份")
+        case .ambiguous(let deviceIds, let fingerprints):
+            let summary = [
+                "deviceIds=\(deviceIds.joined(separator: ","))",
+                "fingerprints=\(fingerprints.joined(separator: ","))"
+            ].joined(separator: " ")
+            throw RemoteDesktopError.connectionFailed("远控目标匹配到多条受信任身份记录: \(summary)")
+        }
+    }
+
+    private func resolveTrustedRemoteAuthority(
+        for device: DiscoveredDevice,
+        trustedPeerId: String
+    ) throws -> CurrentPathRemoteAuthority {
+        let record: TrustedDeviceStore.TrustedDevice
+        let deviceId: String
+        switch LANRemoteControlTrustResolver.resolve(
+            device: device,
+            trustedPeerId: trustedPeerId,
+            trustedDevices: TrustedDeviceStore.shared.trustedDevices
+        ) {
+        case .resolved(let matchedRecord, let canonicalPeerId):
+            record = matchedRecord
+            deviceId = canonicalPeerId
+        case .missing:
+            throw RemoteDesktopError.connectionFailed("远控目标缺少受信任指纹")
+        case .ambiguous(let deviceIds, let fingerprints):
+            let summary = [
+                "deviceIds=\(deviceIds.joined(separator: ","))",
+                "fingerprints=\(fingerprints.joined(separator: ","))"
+            ].joined(separator: " ")
+            throw RemoteDesktopError.connectionFailed("远控目标受信任指纹映射不唯一: \(summary)")
+        }
+
+        guard let fingerprint = record.protocolPublicKeyFingerprint?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !fingerprint.isEmpty else {
+            throw RemoteDesktopError.connectionFailed("远控目标缺少受信任指纹")
+        }
+
+        return CurrentPathRemoteAuthority(
+            deviceId: deviceId,
+            protocolPublicKeyFingerprint: fingerprint.lowercased()
+        )
+    }
+
+    private func resolvedLocalRemoteControlDeviceId() -> String {
+        let rawDeviceId = KeychainManager.shared.getOrGenerateDeviceId()
+        return PeerIdentityAliasResolver.persistentDeviceId(from: rawDeviceId) ?? rawDeviceId
+    }
+
+    private static func remoteControlSOAPeerId(for identifier: String?) -> Data? {
+        guard let identifier = identifier?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !identifier.isEmpty else {
+            return nil
+        }
+        let persistentIdentifier = PeerIdentityAliasResolver.persistentDeviceId(from: identifier) ?? identifier
+        var normalized = persistentIdentifier.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if normalized.hasPrefix("id:") {
+            normalized.removeFirst(3)
+        }
+        guard !normalized.isEmpty else { return nil }
+        return Data(SHA256.hash(data: Data(normalized.utf8)))
+    }
+
+    private static func randomRemoteControlAttemptId() -> Data {
+        var bytes = [UInt8](repeating: 0, count: HandshakeSOAExtension.attemptIdLength)
+        for index in bytes.indices {
+            bytes[index] = UInt8.random(in: UInt8.min...UInt8.max)
+        }
+        return Data(bytes)
+    }
     
     // MARK: - Private Methods - Connection
     
@@ -3824,11 +4254,22 @@ public class RemoteDesktopManager: ObservableObject {
             }
             throw RemoteDesktopError.disconnected
         }
-        let data = try JSONEncoder().encode(message)
-        if data.count > maxMessageBytes { throw RemoteDesktopError.streamingFailed("消息过大：\(data.count) bytes") }
-        var length = UInt32(data.count).bigEndian
+
+        let plaintext = try JSONEncoder().encode(message)
+        if plaintext.count > maxMessageBytes {
+            throw RemoteDesktopError.streamingFailed("消息过大：\(plaintext.count) bytes")
+        }
+        guard let lanSessionKeys else {
+            throw RemoteDesktopError.connectionFailed("LAN 远控安全通道尚未建立")
+        }
+        let payload = try encryptLANPayload(plaintext, with: lanSessionKeys)
+        if payload.count > maxLANWireMessageBytes {
+            throw RemoteDesktopError.streamingFailed("加密后的消息过大：\(payload.count) bytes")
+        }
+
+        var length = UInt32(payload.count).bigEndian
         var framedData = Data(bytes: &length, count: 4)
-        framedData.append(data)
+        framedData.append(payload)
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             connection.send(content: framedData, completion: .contentProcessed { error in
                 if let error = error {
@@ -3874,7 +4315,7 @@ public class RemoteDesktopManager: ObservableObject {
                 let length = Int(lengthData.withUnsafeBytes { raw -> UInt32 in
                     raw.loadUnaligned(fromByteOffset: 0, as: UInt32.self).bigEndian
                 })
-                if length <= 0 || length > maxMessageBytes {
+                if length <= 0 || length > self.maxLANWireMessageBytes {
                     await self.handleTransportFailure("消息长度异常：\(length) bytes")
                     return
                 }
@@ -3907,10 +4348,16 @@ public class RemoteDesktopManager: ObservableObject {
                 }
 
                 do {
-                    if let screenData = RemoteDesktopScreenFrameWire.decodeIfPresent(data) {
+                    let payload = try await self.unwrapLANInboundPayload(data, from: connection)
+                    guard let payload else {
+                        self.receiveNextMessage(from: connection)
+                        return
+                    }
+
+                    if let screenData = RemoteDesktopScreenFrameWire.decodeIfPresent(payload) {
                         await self.handleScreenData(screenData)
                     } else {
-                        let message = try JSONDecoder().decode(RemoteMessage.self, from: data)
+                        let message = try JSONDecoder().decode(RemoteMessage.self, from: payload)
                         switch message.type {
                         case .screenData:
                             let screenData = try JSONDecoder().decode(ScreenData.self, from: message.payload)
@@ -3935,6 +4382,9 @@ public class RemoteDesktopManager: ObservableObject {
                             break
                         }
                     }
+                } catch let error as RemoteDesktopError {
+                    await self.handleTransportFailure(error.localizedDescription)
+                    return
                 } catch {
                     SkyBridgeLogger.shared.error("❌ 解析消息失败: \(error.localizedDescription)")
                 }

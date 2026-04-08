@@ -17,6 +17,17 @@
 import Foundation
 import CryptoKit
 
+@available(macOS 14.0, iOS 17.0, *)
+public struct AuthenticatedRemoteAuthority: Sendable, Equatable {
+    public let protocolSigningAlgorithm: ProtocolSigningAlgorithm
+    public let protocolPublicKeyFingerprint: String
+
+    public init(protocolSigningAlgorithm: ProtocolSigningAlgorithm, protocolPublicKeyFingerprint: String) {
+        self.protocolSigningAlgorithm = protocolSigningAlgorithm
+        self.protocolPublicKeyFingerprint = protocolPublicKeyFingerprint
+    }
+}
+
 // MARK: - HandshakeDriver
 
 /// 握手驱动器 Actor
@@ -122,6 +133,7 @@ public actor HandshakeDriver {
     private let sessionArbiter: PeerSessionArbiter
     private var soaPairKey: Data?
     private var soaAttemptId: Data?
+    private var authenticatedRemoteAuthority: AuthenticatedRemoteAuthority?
 
  // MARK: - Initialization
 
@@ -438,6 +450,7 @@ public actor HandshakeDriver {
             throw HandshakeError.alreadyInProgress
         }
 
+        clearAuthenticatedRemoteAuthority()
         currentPeer = peer
 
         let outboundSOA = resolveOutboundSOAMetadata(for: peer)
@@ -654,6 +667,8 @@ public actor HandshakeDriver {
                 context = nil
             }
 
+            clearAuthenticatedRemoteAuthority()
+
  // 取消超时任务
             timeoutTask?.cancel()
             timeoutTask = nil
@@ -702,6 +717,20 @@ public actor HandshakeDriver {
         return state
     }
 
+    public func getAuthenticatedRemoteAuthority() -> AuthenticatedRemoteAuthority? {
+        authenticatedRemoteAuthority
+    }
+
+    private func captureAuthenticatedRemoteAuthority(
+        _ authority: AuthenticatedRemoteAuthority?
+    ) {
+        authenticatedRemoteAuthority = authority
+    }
+
+    private func clearAuthenticatedRemoteAuthority() {
+        authenticatedRemoteAuthority = nil
+    }
+
  /// 获取最近一次握手的指标 ( 13.2)
  /// Requirement 6.1, 6.2
     public func getLastMetrics() -> HandshakeMetrics? {
@@ -713,6 +742,7 @@ public actor HandshakeDriver {
  /// 处理 MessageA（响应方）
     private func handleMessageA(_ data: Data, from peer: PeerIdentifier) async {
         currentPeer = peer
+        clearAuthenticatedRemoteAuthority()
         metricsCollector.recordStart()
 
         do {
@@ -852,6 +882,8 @@ public actor HandshakeDriver {
                 return
             }
 
+            captureAuthenticatedRemoteAuthority(await ctx.getAuthenticatedRemoteAuthority())
+
  // 清理敏感数据
             await ctx.zeroize()
             context = nil
@@ -973,6 +1005,7 @@ public actor HandshakeDriver {
                 return
             }
 
+            captureAuthenticatedRemoteAuthority(await ctx.getAuthenticatedRemoteAuthority())
             await ctx.zeroize()
             context = nil
 
@@ -1188,6 +1221,7 @@ public actor HandshakeDriver {
         if let pairKey = soaPairKey {
             await sessionArbiter.clearOutgoing(pairKey: pairKey, attemptId: soaAttemptId)
         }
+        clearAuthenticatedRemoteAuthority()
         state = .failed(reason: reason)
 
  // 记录失败指标
@@ -1434,6 +1468,7 @@ public actor HandshakeDriver {
             }
             timeoutTask?.cancel()
             timeoutTask = nil
+            clearAuthenticatedRemoteAuthority()
             let reason = PeerSessionArbiter.supersededFailureReason(
                 winnerPeerId: winnerPeerId,
                 winnerAttemptId: winnerAttemptId

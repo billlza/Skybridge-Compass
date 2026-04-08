@@ -138,6 +138,7 @@ public class P2PConnectionManager: ObservableObject {
     
     /// Prevent pairing identity exchange ping-pong loops.
     private var lastPairingIdentityExchangeSentAt: [String: Date] = [:]
+    private var lastPairingIdentityExchangeReceivedAt: [String: Date] = [:]
     
     /// Bootstrap rekey tasks (Classic -> PQC) keyed by peerId.
     private var bootstrapRekeyTasks: [String: Task<Void, Never>] = [:]
@@ -1040,6 +1041,7 @@ public class P2PConnectionManager: ObservableObject {
         let state = await activeDriver.getCurrentState()
         switch state {
         case .established(let keys):
+            await persistAuthenticatedRemoteAuthority(from: activeDriver, for: peerId)
             setSessionKeys(keys, for: peerId)
             previousSessionKeysBeforeRekey.removeValue(forKey: peerId)
             if let remotePeerId = soaPeerIdBytes(for: peerId) {
@@ -1478,6 +1480,10 @@ public class P2PConnectionManager: ObservableObject {
             platform: payload.platform,
             osVersion: payload.osVersion
         )
+        let observedAt = Date()
+        lastPairingIdentityExchangeReceivedAt[peerId] = observedAt
+        let presentationPeerId = presentationPeerId(for: peerId)
+        lastPairingIdentityExchangeReceivedAt[presentationPeerId] = observedAt
         mergePeerServiceMetadata(
             runtimePeerId: peerId,
             declaredDeviceId: payload.deviceId,
@@ -1529,11 +1535,7 @@ public class P2PConnectionManager: ObservableObject {
         let kemKeys = try await P2PKEMIdentityKeyStore.shared.getOrCreateBootstrapPublicKeys()
 
         // 设备 ID：用于对端把我们写入 trust store 的 key（尽量与 discovery 的 deviceId 对齐）
-        #if canImport(UIKit)
-        let localId = UIDevice.current.identifierForVendor?.uuidString ?? "ios-unknown"
-        #else
-        let localId = "ios-unknown"
-        #endif
+        let localId = localStableDeviceIdentifier()
         #if canImport(UIKit)
         let deviceName = UIDevice.current.name
         let osVersion = UIDevice.current.systemVersion
@@ -1560,6 +1562,31 @@ public class P2PConnectionManager: ObservableObject {
         let ciphertext = try encryptForDevice(payload, deviceId: deviceId)
         try await send(data: ciphertext, over: connection)
         lastPairingIdentityExchangeSentAt[deviceId] = Date()
+    }
+
+    public func waitForPairingIdentityExchangeActivity(
+        with deviceId: String,
+        since: Date,
+        timeout: Duration = .seconds(3)
+    ) async -> Bool {
+        let canonicalPeerId = canonicalPeerLookupKey(deviceId)
+        let presentationPeerId = presentationPeerId(for: canonicalPeerId)
+        let clock = ContinuousClock()
+        let deadline = clock.now + timeout
+
+        while clock.now < deadline {
+            if let observedAt = lastPairingIdentityExchangeReceivedAt[canonicalPeerId],
+               observedAt >= since {
+                return true
+            }
+            if let observedAt = lastPairingIdentityExchangeReceivedAt[presentationPeerId],
+               observedAt >= since {
+                return true
+            }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+
+        return false
     }
 
     /// 发送剪贴板内容到指定设备（走已建立的会话密钥加密通道）
@@ -1688,12 +1715,12 @@ public class P2PConnectionManager: ObservableObject {
 
                 do {
                     #if canImport(UIKit)
-                    let localId = UIDevice.current.identifierForVendor?.uuidString ?? "ios-unknown"
+                    let localId = self.localStableDeviceIdentifier()
                     let deviceName = UIDevice.current.name
                     let osVersion = UIDevice.current.systemVersion
                     let platform = UIDevice.current.systemName
                     #else
-                    let localId = "ios-unknown"
+                    let localId = self.localStableDeviceIdentifier()
                     let deviceName: String? = nil
                     let osVersion: String? = nil
                     let platform: String? = nil
@@ -3066,14 +3093,12 @@ public class P2PConnectionManager: ObservableObject {
     }
 
     private func isSelfConnectionTarget(_ device: DiscoveredDevice) -> Bool {
-        #if canImport(UIKit)
-        if let localId = UIDevice.current.identifierForVendor?.uuidString.lowercased() {
-            let normalizedDeviceId = device.id.lowercased()
-            if normalizedDeviceId == localId || normalizedDeviceId == "id:\(localId)" {
-                return true
-            }
+        let localId = localStableDeviceIdentifier().lowercased()
+        let persistentLocalId = localStablePersistentDeviceIdentifier().lowercased()
+        let normalizedDeviceId = device.id.lowercased()
+        if normalizedDeviceId == localId || normalizedDeviceId == persistentLocalId {
+            return true
         }
-        #endif
 
         if let ipAddress = device.ipAddress,
            isLoopbackAddress(ipAddress) {
@@ -3100,6 +3125,54 @@ public class P2PConnectionManager: ObservableObject {
             ?? deviceId
         Task {
             await LiveActivityManager.shared.setConnected(deviceName: name, cryptoSuite: keys.negotiatedSuite.rawValue)
+        }
+    }
+
+    private func persistAuthenticatedRemoteAuthority(
+        from driver: HandshakeDriver,
+        for peerId: String,
+        deviceNameHint: String? = nil
+    ) async {
+        guard let authority = await driver.getAuthenticatedRemoteAuthority() else {
+            return
+        }
+
+        let presentationPeerId = presentationPeerId(for: peerId)
+        let provisionalDevice =
+            lastKnownDevices[presentationPeerId]
+            ?? lastKnownDevices[peerId]
+            ?? discoveryManager.discoveredDevices.first(where: { candidate in
+                let targetAliases = Set(PeerIdentityAliasResolver.lookupCandidates(for: peerId))
+                let candidateAliases = Set(PeerIdentityAliasResolver.aliasKeys(for: candidate))
+                return candidate.id == peerId || !targetAliases.isDisjoint(with: candidateAliases)
+            })
+            ?? DiscoveredDevice(
+                id: peerId,
+                name: deviceNameHint ?? peerId,
+                modelName: "",
+                platform: .unknown,
+                osVersion: "Unknown"
+            )
+        let resolvedDevice = resolvedPeerDevice(for: provisionalDevice)
+        let preferredCurrentDeviceId =
+            TrustedDeviceStore.shared.canonicalTrustedDeviceId(for: resolvedDevice)
+            ?? PeerIdentityAliasResolver.persistentDeviceId(from: resolvedDevice.id)
+
+        let persisted = TrustedDeviceStore.shared.recordAuthenticatedRemoteAuthority(
+            for: resolvedDevice,
+            preferredCurrentDeviceId: preferredCurrentDeviceId,
+            protocolSigningAlgorithm: authority.protocolSigningAlgorithm,
+            protocolPublicKeyFingerprint: authority.protocolPublicKeyFingerprint
+        )
+
+        if persisted {
+            SkyBridgeLogger.shared.info(
+                "🔐 已持久化对端协议身份 authority: peer=\(peerId) fingerprint=\(authority.protocolPublicKeyFingerprint)"
+            )
+        } else {
+            SkyBridgeLogger.shared.debug(
+                "ℹ️ 对端协议身份 authority 未持久化（缺少稳定 peer 映射）: peer=\(peerId)"
+            )
         }
     }
 
@@ -3138,20 +3211,23 @@ public class P2PConnectionManager: ObservableObject {
         device.capabilities.contains("hs_soa") || device.advertisedCapabilities.contains("hs_soa")
     }
 
+    private func localStableDeviceIdentifier() -> String {
+        KeychainManager.shared.getOrGenerateDeviceId()
+    }
+
+    private func localStablePersistentDeviceIdentifier() -> String {
+        let raw = localStableDeviceIdentifier()
+        return PeerIdentityAliasResolver.persistentDeviceId(from: raw) ?? raw
+    }
+
     private func localSOAPeerIdBytes() -> Data {
-        #if canImport(UIKit)
-        if let vendor = UIDevice.current.identifierForVendor?.uuidString {
-            return canonicalPeerIdBytes(from: vendor)
+        var persistent = localStablePersistentDeviceIdentifier()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        if persistent.hasPrefix("id:") {
+            persistent.removeFirst(3)
         }
-        #endif
-        let key = "p2p.local_peer_id_fallback.v1"
-        let existing = UserDefaults.standard.string(forKey: key) ?? ""
-        if !existing.isEmpty {
-            return canonicalPeerIdBytes(from: existing)
-        }
-        let generated = UUID().uuidString.lowercased()
-        UserDefaults.standard.set(generated, forKey: key)
-        return canonicalPeerIdBytes(from: generated)
+        return canonicalPeerIdBytes(from: persistent)
     }
 
     private func soaPeerIdBytes(for peerId: String) -> Data? {
@@ -3330,6 +3406,13 @@ public class P2PConnectionManager: ObservableObject {
                     }
                 }
             )
+            if let activeDriver = handshakeDrivers[peerId] {
+                await persistAuthenticatedRemoteAuthority(
+                    from: activeDriver,
+                    for: peerId,
+                    deviceNameHint: device.name
+                )
+            }
             
             // 保存会话密钥 + 清理握手 driver
             setSessionKeys(keys, for: device.id, deviceNameHint: device.name)

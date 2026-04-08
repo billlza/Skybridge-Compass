@@ -5,6 +5,178 @@ import Network
 
 @available(iOS 17.0, *)
 final class RegressionHardeningTests: XCTestCase {
+    func testLANRemoteControlTrustResolverCollapsesEquivalentDuplicateRecords() {
+        let device = DiscoveredDevice(
+            id: "bonjour:Lza的MacBook Pro@local.",
+            name: "Lza的MacBook Pro",
+            modelName: "MacBook Pro",
+            platform: .macOS,
+            osVersion: "15.0",
+            ipAddress: "192.168.1.20"
+        )
+
+        let trustedDevices = [
+            TrustedDeviceStore.TrustedDevice(
+                id: "legacy-peer-a",
+                name: "Lza的MacBook Pro",
+                platform: .macOS,
+                ipAddress: "192.168.1.20",
+                addedAt: Date(timeIntervalSince1970: 100),
+                protocolSigningAlgorithm: "ML-DSA-65",
+                protocolPublicKeyFingerprint: String(repeating: "a", count: 64),
+                currentDeviceId: "id:peer-mac",
+                knownDeviceIds: ["bonjour:lza的macbook pro@local.", "id:peer-mac"]
+            ),
+            TrustedDeviceStore.TrustedDevice(
+                id: "id:peer-mac",
+                name: "Lza的MacBook Pro",
+                platform: .macOS,
+                ipAddress: "192.168.1.20",
+                addedAt: Date(timeIntervalSince1970: 200),
+                protocolSigningAlgorithm: "ML-DSA-65",
+                protocolPublicKeyFingerprint: String(repeating: "a", count: 64),
+                currentDeviceId: "id:peer-mac",
+                knownDeviceIds: ["bonjour:lza的macbook pro@local.", "legacy-peer-a"]
+            )
+        ]
+
+        let resolution = LANRemoteControlTrustResolver.resolve(
+            device: device,
+            trustedPeerId: "id:peer-mac",
+            trustedDevices: trustedDevices
+        )
+
+        switch resolution {
+        case .resolved(let record, let canonicalPeerId):
+            XCTAssertEqual(canonicalPeerId, "id:peer-mac")
+            XCTAssertEqual(record.id, "legacy-peer-a")
+        default:
+            XCTFail("Expected a unique canonical trust resolution, got \(resolution)")
+        }
+    }
+
+    func testLANRemoteControlTrustResolverRejectsConflictingRecords() {
+        let device = DiscoveredDevice(
+            id: "bonjour:Lza的MacBook Pro@local.",
+            name: "Lza的MacBook Pro",
+            modelName: "MacBook Pro",
+            platform: .macOS,
+            osVersion: "15.0",
+            ipAddress: "192.168.1.20"
+        )
+
+        let trustedDevices = [
+            TrustedDeviceStore.TrustedDevice(
+                id: "legacy-peer-a",
+                name: "Lza的MacBook Pro",
+                platform: .macOS,
+                ipAddress: "192.168.1.20",
+                protocolSigningAlgorithm: "ML-DSA-65",
+                protocolPublicKeyFingerprint: String(repeating: "a", count: 64),
+                currentDeviceId: "id:peer-mac-a",
+                knownDeviceIds: ["bonjour:lza的macbook pro@local.", "id:shared-bonjour-peer"]
+            ),
+            TrustedDeviceStore.TrustedDevice(
+                id: "legacy-peer-b",
+                name: "Lza的MacBook Pro",
+                platform: .macOS,
+                ipAddress: "192.168.1.20",
+                protocolSigningAlgorithm: "ML-DSA-65",
+                protocolPublicKeyFingerprint: String(repeating: "b", count: 64),
+                currentDeviceId: "id:peer-mac-b",
+                knownDeviceIds: ["bonjour:lza的macbook pro@local.", "id:shared-bonjour-peer"]
+            )
+        ]
+
+        XCTAssertEqual(
+            LANRemoteControlTrustResolver.resolve(
+                device: device,
+                trustedPeerId: "id:shared-bonjour-peer",
+                trustedDevices: trustedDevices
+            ),
+            .ambiguous(
+                deviceIds: ["id:peer-mac-a", "id:peer-mac-b"],
+                fingerprints: [String(repeating: "a", count: 64), String(repeating: "b", count: 64)]
+            )
+        )
+    }
+
+    func testLANRemoteControlTrustResolverPrefersRecordWithAuthorityWhenDuplicatesAreEquivalent() {
+        let device = DiscoveredDevice(
+            id: "bonjour:Lza的MacBook Pro@local.",
+            name: "Lza的MacBook Pro",
+            modelName: "MacBook Pro",
+            platform: .macOS,
+            osVersion: "15.0",
+            ipAddress: "192.168.1.20"
+        )
+
+        let trustedDevices = [
+            TrustedDeviceStore.TrustedDevice(
+                id: "legacy-peer-a",
+                name: "Lza的MacBook Pro",
+                platform: .macOS,
+                ipAddress: "192.168.1.20",
+                addedAt: Date(timeIntervalSince1970: 100),
+                currentDeviceId: "id:peer-mac",
+                knownDeviceIds: ["bonjour:lza的macbook pro@local.", "id:peer-mac"]
+            ),
+            TrustedDeviceStore.TrustedDevice(
+                id: "id:peer-mac",
+                name: "Lza的MacBook Pro",
+                platform: .macOS,
+                ipAddress: "192.168.1.20",
+                addedAt: Date(timeIntervalSince1970: 200),
+                protocolSigningAlgorithm: "ML-DSA-65",
+                protocolPublicKeyFingerprint: String(repeating: "c", count: 64),
+                currentDeviceId: "id:peer-mac",
+                knownDeviceIds: ["bonjour:lza的macbook pro@local.", "legacy-peer-a"]
+            )
+        ]
+
+        let resolution = LANRemoteControlTrustResolver.resolve(
+            device: device,
+            trustedPeerId: "id:peer-mac",
+            trustedDevices: trustedDevices
+        )
+
+        switch resolution {
+        case .resolved(let record, let canonicalPeerId):
+            XCTAssertEqual(canonicalPeerId, "id:peer-mac")
+            XCTAssertEqual(record.id, "id:peer-mac")
+            XCTAssertEqual(record.protocolPublicKeyFingerprint, String(repeating: "c", count: 64))
+        default:
+            XCTFail("Expected fingerprint-bearing record to win equivalent duplicate resolution, got \(resolution)")
+        }
+    }
+
+    func testBonjourPrivacyManifestDeclaresAllBrowsedServiceTypes() {
+        XCTAssertTrue(DeviceDiscoveryManager.hasLocalNetworkUsageDescription())
+
+        let declared = DeviceDiscoveryManager.declaredBonjourServices()
+        let expected = Set(DiscoveryServiceType.requiredBonjourPrivacyDeclarations)
+
+        XCTAssertEqual(
+            declared,
+            expected,
+            "Info.plist 的 NSBonjourServices 必须覆盖代码实际可浏览的全部服务类型，避免 NoAuth(-65555) 配置漂移。"
+        )
+    }
+
+    func testNoAuthBrowseFailureDoesNotAutoRecover() {
+        let error = NWError.dns(DeviceDiscoveryManager.bonjourAuthorizationDNSCode)
+
+        XCTAssertTrue(DeviceDiscoveryManager.isBonjourAuthorizationError(error))
+        XCTAssertFalse(DeviceDiscoveryManager.shouldAutoRecoverBrowser(after: error))
+    }
+
+    func testTransientBrowserFailuresStillAutoRecover() {
+        let error = NWError.posix(.ENETDOWN)
+
+        XCTAssertFalse(DeviceDiscoveryManager.isBonjourAuthorizationError(error))
+        XCTAssertTrue(DeviceDiscoveryManager.shouldAutoRecoverBrowser(after: error))
+    }
+
     @MainActor
     func testOfflineQueueCleanupRemovesExpiredPendingAndFailedMessages() {
         let queue = OfflineMessageQueue.shared
@@ -1737,6 +1909,138 @@ final class RegressionHardeningTests: XCTestCase {
         XCTAssertEqual(messageA.supportedSuites, [.mlkem768fs])
         XCTAssertNotNil(messageA.initiatorContribution)
     }
+
+    func testHandshakeDriverRetainsAuthenticatedAuthorityAfterOutboundHandshakeEstablishes() async throws {
+        let signatureProvider = LocalHandshakeTestSignatureProvider()
+        let provider = LocalHandshakeTestCryptoProvider(
+            tier: .classic,
+            activeSuite: .x25519Ed25519,
+            supportedSuites: [.x25519Ed25519]
+        )
+        let initiatorIdentity = Data([0x10, 0x20, 0x30, 0x40])
+        let responderIdentity = Data([0x50, 0x60, 0x70, 0x80])
+        let transport = CaptureOnlyDiscoveryTransport()
+        let initiator = HandshakeDriver(
+            transport: transport,
+            cryptoProvider: provider,
+            protocolSignatureProvider: signatureProvider,
+            identityKeyHandle: SigningKeyHandle.callback(FixedSignatureCallback(signature: Data([0xAA]))),
+            sigAAlgorithm: .mlDSA65,
+            identityPublicKey: initiatorIdentity
+        )
+        let handshakeTask = Task {
+            try await initiator.initiateHandshake(with: PeerIdentifier(deviceId: "mac-peer"))
+        }
+        let messageAFrame = try await waitForLatestFrame(from: transport)
+        let messageA = try HandshakeMessageA.decode(
+            from: HandshakePadding.unwrapIfNeeded(messageAFrame, label: "test/messageA")
+        )
+
+        let responderContext = HandshakeContext(
+            role: .responder,
+            cryptoProvider: provider,
+            protocolSignatureProvider: signatureProvider,
+            identityKeyHandle: SigningKeyHandle.callback(FixedSignatureCallback(signature: Data([0xBB]))),
+            identityPublicKey: responderIdentity,
+            policy: .default,
+            cryptoPolicy: .default
+        )
+        try await responderContext.processMessageA(messageA)
+        let (messageB, _) = try await responderContext.buildMessageB()
+
+        await initiator.handleMessage(messageB.encoded, from: PeerIdentifier(deviceId: "mac-peer"))
+
+        guard case .waitingFinished(_, let sessionKeys, let expectingFrom) = await initiator.getCurrentState() else {
+            XCTFail("Expected initiator handshake to be waiting for Finished after MessageB")
+            return
+        }
+        XCTAssertEqual(expectingFrom, .responder)
+
+        let responderFinished = LocalHandshakeFinishedHelper.responderFinished(for: sessionKeys)
+        await initiator.handleMessage(responderFinished.encoded, from: PeerIdentifier(deviceId: "mac-peer"))
+
+        let establishedKeys = try await handshakeTask.value
+        XCTAssertEqual(establishedKeys.negotiatedSuite, .x25519Ed25519)
+
+        guard case .established = await initiator.getCurrentState() else {
+            XCTFail("Expected initiator handshake to establish")
+            return
+        }
+
+        let initiatorAuthority = await initiator.getAuthenticatedRemoteAuthority()
+        XCTAssertEqual(
+            initiatorAuthority,
+            try LocalHandshakeAuthorityHelper.authority(
+                identityPublicKey: responderIdentity,
+                signatureAlgorithm: signatureProvider.signatureAlgorithm
+            )
+        )
+    }
+
+    func testHandshakeDriverClearsAuthenticatedAuthorityAfterCancellation() async throws {
+        let provider = LocalHandshakeTestCryptoProvider(
+            tier: .classic,
+            activeSuite: .x25519Ed25519,
+            supportedSuites: [.x25519Ed25519]
+        )
+        let signatureProvider = LocalHandshakeTestSignatureProvider()
+        let initiatorIdentity = Data([0x01, 0x23, 0x45, 0x67])
+        let responderIdentity = Data([0x89, 0xAB, 0xCD, 0xEF])
+        let transport = CaptureOnlyDiscoveryTransport()
+        let initiator = HandshakeDriver(
+            transport: transport,
+            cryptoProvider: provider,
+            protocolSignatureProvider: signatureProvider,
+            identityKeyHandle: SigningKeyHandle.callback(FixedSignatureCallback(signature: Data([0xCC]))),
+            sigAAlgorithm: .mlDSA65,
+            identityPublicKey: initiatorIdentity
+        )
+        let handshakeTask = Task {
+            try await initiator.initiateHandshake(with: PeerIdentifier(deviceId: "mac-peer"))
+        }
+        let messageAFrame = try await waitForLatestFrame(from: transport)
+        let messageA = try HandshakeMessageA.decode(
+            from: HandshakePadding.unwrapIfNeeded(messageAFrame, label: "test/messageA")
+        )
+
+        let responderContext = HandshakeContext(
+            role: .responder,
+            cryptoProvider: provider,
+            protocolSignatureProvider: signatureProvider,
+            identityKeyHandle: SigningKeyHandle.callback(FixedSignatureCallback(signature: Data([0xDD]))),
+            identityPublicKey: responderIdentity,
+            policy: .default,
+            cryptoPolicy: .default
+        )
+        try await responderContext.processMessageA(messageA)
+        let (messageB, _) = try await responderContext.buildMessageB()
+
+        await initiator.handleMessage(messageB.encoded, from: PeerIdentifier(deviceId: "mac-peer"))
+
+        guard case .waitingFinished = await initiator.getCurrentState() else {
+            XCTFail("Expected initiator to be waiting for Finished after a valid MessageB")
+            return
+        }
+        let authorityBeforeCancel = await initiator.getAuthenticatedRemoteAuthority()
+        XCTAssertEqual(
+            authorityBeforeCancel,
+            try LocalHandshakeAuthorityHelper.authority(
+                identityPublicKey: responderIdentity,
+                signatureAlgorithm: signatureProvider.signatureAlgorithm
+            )
+        )
+
+        await initiator.cancel()
+        await XCTAssertThrowsErrorAsync(try await handshakeTask.value) { _ in }
+
+        guard case .failed(let reason) = await initiator.getCurrentState() else {
+            XCTFail("Expected initiator handshake to transition to failed after cancel")
+            return
+        }
+        XCTAssertEqual(reason, .cancelled)
+        let authorityAfterCancel = await initiator.getAuthenticatedRemoteAuthority()
+        XCTAssertNil(authorityAfterCancel)
+    }
 }
 
 private struct FixedSignatureCallback: SigningCallback {
@@ -1779,7 +2083,12 @@ private struct LocalHandshakeTestCryptoProvider: CryptoProvider {
     }
 
     func hpkeSeal(plaintext: Data, recipientPublicKey: Data, info: Data) async throws -> HPKESealedBox {
-        .init(encapsulatedKey: Data([0x01]), ciphertext: plaintext, tag: Data([0x02]), nonce: Data(repeating: 0x03, count: 12))
+        .init(
+            encapsulatedKey: Data(repeating: 0x01, count: 32),
+            ciphertext: plaintext,
+            tag: Data(repeating: 0x02, count: 16),
+            nonce: Data(repeating: 0x03, count: 12)
+        )
     }
 
     func kemDemSeal(plaintext: Data, recipientPublicKey: Data, info: Data) async throws -> HPKESealedBox {
@@ -1837,8 +2146,72 @@ private struct LocalHandshakeTestCryptoProvider: CryptoProvider {
     }
 
     func generateKeyPair(for usage: KeyUsage) async throws -> KeyPair {
-        KeyPair(publicKey: Data([0x10, 0x11]), privateKey: Data([0x12, 0x13]))
+        KeyPair(
+            publicKey: Data(repeating: usage == .ephemeral ? 0x10 : 0x11, count: 32),
+            privateKey: Data(repeating: usage == .ephemeral ? 0x12 : 0x13, count: 32)
+        )
     }
+}
+
+private enum LocalHandshakeAuthorityHelper {
+    static func authority(
+        identityPublicKey: Data,
+        signatureAlgorithm: ProtocolSigningAlgorithm
+    ) throws -> AuthenticatedRemoteAuthority {
+        let identityKeys = IdentityPublicKeys(
+            protocolPublicKey: identityPublicKey,
+            protocolAlgorithm: signatureAlgorithm.wire,
+            secureEnclavePublicKey: nil
+        )
+        return AuthenticatedRemoteAuthority(
+            protocolSigningAlgorithm: identityKeys.protocolAlgorithm.rawValue,
+            protocolPublicKeyFingerprint: try identityKeys.authoritativeProtocolFingerprint().lowercased()
+        )
+    }
+}
+
+private actor CaptureOnlyDiscoveryTransport: DiscoveryTransport {
+    private(set) var frames: [Data] = []
+
+    func send(to peer: PeerIdentifier, data: Data) async throws {
+        _ = peer
+        frames.append(data)
+    }
+
+    func latestFrame() -> Data? {
+        frames.last
+    }
+}
+
+private enum LocalHandshakeFinishedHelper {
+    static func responderFinished(for sessionKeys: SessionKeys) -> HandshakeFinished {
+        let macKey = HKDF<SHA256>.deriveKey(
+            inputKeyMaterial: SymmetricKey(data: sessionKeys.receiveKey),
+            salt: Data(),
+            info: Data("SkyBridge-FINISHED|R2I|".utf8) + sessionKeys.transcriptHash,
+            outputByteCount: 32
+        )
+        let mac = Data(HMAC<SHA256>.authenticationCode(for: sessionKeys.transcriptHash, using: macKey))
+        return HandshakeFinished(direction: .responderToInitiator, mac: mac)
+    }
+}
+
+private enum LocalHandshakeTestError: Error {
+    case timedOutWaitingForCapturedFrame
+}
+
+private func waitForLatestFrame(
+    from transport: CaptureOnlyDiscoveryTransport,
+    iterations: Int = 200,
+    sleepNanoseconds: UInt64 = 5_000_000
+) async throws -> Data {
+    for _ in 0..<iterations {
+        if let frame = await transport.latestFrame() {
+            return frame
+        }
+        try? await Task.sleep(nanoseconds: sleepNanoseconds)
+    }
+    throw LocalHandshakeTestError.timedOutWaitingForCapturedFrame
 }
 
 private func XCTAssertThrowsErrorAsync<T>(
