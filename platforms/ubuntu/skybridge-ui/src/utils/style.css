@@ -1,0 +1,1574 @@
+/* SkyBridge Compass Ubuntu - Mac parity design tokens and component styles */
+
+@define-color sb-surface alpha(@window_bg_color, 0.96);
+@define-color sb-surface-raised alpha(@card_bg_color, 0.88);
+@define-color sb-surface-overlay alpha(@view_bg_color, 0.72);
+@define-color sb-border alpha(@borders, 0.35);
+@define-color sb-border-strong alpha(@borders, 0.55);
+@define-color sb-accent @accent_bg_color;
+@define-color sb-accent-fg @accent_fg_color;
+@define-color sb-text-secondary alpha(@window_fg_color, 0.72);
+@define-color sb-text-caption alpha(@window_fg_color, 0.58);
+@define-color sb-success @success_color;
+@define-color sb-warning @warning_color;
+@define-color sb-danger @destructive_color;
+
+/* Shell / layout primitives */
+.main-window {
+    background-color: @sb-surface;
+}
+
+.page-root {
+    background-color: transparent;
+}
+
+.page-header {
+    background-color: rgba(124, 141, 181, 0.52);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.page-title {
+    font-weight: 700;
+    font-size: 1.06em;
+    letter-spacing: 0.015em;
+    color: #f4f7ff;
+}
+
+.page-subtitle,
+.page-status {
+    color: rgba(236, 241, 255, 0.74);
+}
+
+.page-brand-icon {
+    opacity: 0.98;
+}
+
+.page-status-capsule {
+    background-color: rgba(69, 86, 124, 0.54);
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    border-radius: 999px;
+    padding: 6px 12px;
+}
+
+.page-header-action {
+    color: rgba(244, 247, 255, 0.9);
+    background-color: rgba(69, 86, 124, 0.28);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.page-header-action:hover {
+    background-color: rgba(86, 104, 146, 0.38);
+    border-color: rgba(255, 255, 255, 0.14);
+}
+
+.page-header-decor {
+    opacity: 0.82;
+    margin-left: 4px;
+    margin-right: 2px;
+}
+
+.page-list {
+    margin-top: 8px;
+    margin-bottom: 12px;
+}
+
+/* Sidebar navigation */
+.sidebar {
+    background-color: alpha(@headerbar_bg_color, 0.92);
+    border-right: 1px solid @sb-border-strong;
+}
+
+.sidebar-header {
+    padding: 22px 18px 18px 18px;
+    border-bottom: 1px solid @sb-border;
+}
+
+.sidebar-brand-row {
+    min-height: 56px;
+}
+
+.sidebar-brand-icon {
+    margin-top: 2px;
+}
+
+.sidebar-brand-copy {
+    min-width: 0;
+}
+
+.sidebar-title {
+    font-weight: 700;
+    font-size: 1.08em;
+}
+
+.sidebar-subtitle {
+    font-size: 0.84em;
+    color: @sb-text-secondary;
+}
+
+.sidebar-device {
+    font-size: 0.8em;
+    color: @sb-text-caption;
+}
+
+.nav-item {
+    border-radius: 12px;
+    border: 1px solid transparent;
+    margin: 2px 12px;
+    padding: 11px 14px;
+    transition: all 160ms ease;
+}
+
+.nav-content {
+    min-height: 24px;
+}
+
+.nav-item:hover {
+    background-color: alpha(@sb-accent, 0.1);
+    border-color: alpha(@sb-accent, 0.28);
+}
+
+.nav-item.selected {
+    background-color: alpha(@sb-accent, 0.9);
+    color: @sb-accent-fg;
+    border-color: alpha(@sb-accent, 0.95);
+}
+
+.nav-dashboard.selected {
+    background-color: @blue_4;
+    border-color: @blue_4;
+}
+
+.nav-devices.selected {
+    background-color: @green_4;
+    border-color: @green_4;
+}
+
+.nav-usb.selected {
+    background-color: @purple_4;
+    border-color: @purple_4;
+}
+
+.nav-transfers.selected {
+    background-color: @orange_4;
+    border-color: @orange_4;
+}
+
+.nav-remote.selected {
+    background-color: @blue_3;
+    border-color: @blue_3;
+}
+
+.nav-monitoring.selected {
+    background-color: @yellow_4;
+    border-color: @yellow_4;
+}
+
+.nav-settings.selected {
+    background-color: alpha(@sb-text-secondary, 0.92);
+    border-color: alpha(@sb-text-secondary, 0.92);
+}
+
+.nav-icon {
+    margin-right: 2px;
+    opacity: 0.92;
+}
+
+.nav-label {
+    font-weight: 600;
+}
+
+.nav-item.selected .nav-icon,
+.nav-item.selected .nav-label {
+    color: #ffffff;
+}
+
+.nav-dashboard .nav-icon {
+    color: #6aa9ff;
+}
+
+.nav-devices .nav-icon {
+    color: #82d58c;
+}
+
+.nav-usb .nav-icon {
+    color: #8d8df6;
+}
+
+.nav-transfers .nav-icon {
+    color: #ffab57;
+}
+
+.nav-remote .nav-icon {
+    color: #57c7ff;
+}
+
+.nav-monitoring .nav-icon {
+    color: #f5c867;
+}
+
+.nav-settings .nav-icon {
+    color: rgba(244, 247, 255, 0.7);
+}
+
+.user-profile {
+    padding: 14px 16px 18px 16px;
+    border-top: 1px solid @sb-border;
+}
+
+.user-avatar {
+    border-radius: 9999px;
+}
+
+.user-name {
+    font-weight: 600;
+}
+
+.user-id {
+    font-size: 0.76em;
+    color: @sb-text-caption;
+    font-family: monospace;
+}
+
+/* Login */
+.login-root {
+    background-color: rgba(238, 242, 248, 0.98);
+}
+
+.login-box {
+    min-width: 320px;
+    background-color: rgba(255, 255, 255, 0.92);
+    border: 1px solid rgba(187, 197, 220, 0.72);
+    border-radius: 20px;
+    padding: 24px;
+    box-shadow: 0 16px 28px rgba(58, 74, 111, 0.10);
+}
+
+.login-content {
+    min-width: 360px;
+}
+
+.login-brand-icon {
+    margin-bottom: 2px;
+}
+
+.login-title {
+    font-size: 1.9em;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    color: #303545;
+}
+
+.login-subtitle {
+    color: rgba(48, 53, 69, 0.56);
+}
+
+.login-method-switcher {
+    margin-bottom: 2px;
+}
+
+.login-separator {
+    margin-top: 4px;
+    margin-bottom: 4px;
+}
+
+.login-status {
+    color: @sb-danger;
+}
+
+/* Dashboard */
+.dashboard {
+    background: linear-gradient(180deg, alpha(@sb-accent, 0.05) 0%, transparent 50%);
+}
+
+.card {
+    background-color: @sb-surface-raised;
+    border: 1px solid @sb-border;
+    border-radius: 16px;
+    min-height: 104px;
+    padding: 18px;
+}
+
+.card:hover {
+    border-color: alpha(@sb-accent, 0.45);
+    background-color: alpha(@card_bg_color, 0.96);
+}
+
+.card-icon {
+    margin-bottom: 4px;
+    opacity: 0.86;
+}
+
+.card-title {
+    font-size: 0.84em;
+    font-weight: 600;
+    color: @sb-text-secondary;
+}
+
+.card-value {
+    font-size: 1.95em;
+    font-weight: 700;
+}
+
+.card-devices .card-icon {
+    color: @blue_3;
+}
+
+.card-sessions .card-icon {
+    color: @green_3;
+}
+
+.card-transfers .card-icon {
+    color: @orange_3;
+}
+
+.card-status .card-icon {
+    color: @green_4;
+}
+
+.panel {
+    background-color: alpha(@sb-surface-raised, 0.92);
+    border: 1px solid @sb-border;
+    border-radius: 16px;
+    padding: 16px;
+}
+
+.panel-title {
+    font-size: 1.03em;
+    font-weight: 700;
+}
+
+.empty-state-title {
+    font-weight: 600;
+}
+
+.empty-state-subtitle {
+    font-size: 0.9em;
+}
+
+.panel-content {
+    background-color: @sb-surface-overlay;
+    border: 1px solid alpha(@sb-border, 0.8);
+    border-radius: 12px;
+    min-height: 200px;
+}
+
+.feature-panel {
+    min-height: 220px;
+}
+
+.status-pill {
+    background-color: alpha(@sb-accent, 0.1);
+    border: 1px solid alpha(@sb-accent, 0.22);
+    border-radius: 999px;
+    padding: 4px 10px;
+}
+
+.usb-card .card-icon {
+    color: @green_4;
+}
+
+.remote-card .card-icon {
+    color: @blue_4;
+}
+
+.monitor-card .card-icon {
+    color: @orange_4;
+}
+
+.remote-preview {
+    background-color: alpha(@sb-surface-overlay, 0.88);
+    border: 1px dashed @sb-border-strong;
+    border-radius: 18px;
+    padding: 24px 20px;
+}
+
+.cross-network-card {
+    background-color: alpha(@sb-surface-overlay, 0.92);
+    border: 1px solid alpha(@sb-border, 0.85);
+    border-radius: 14px;
+    padding: 16px;
+}
+
+.cross-network-code {
+    font-family: monospace;
+    font-size: 2.25em;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    color: @sb-accent;
+}
+
+.cross-network-mapping {
+    min-height: 2.4em;
+}
+
+.cross-network-entry {
+    font-family: monospace;
+    font-size: 1.6em;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    padding: 10px 12px;
+}
+
+/* Lists and rows */
+.device-list,
+.transfer-list,
+.usb-device-list,
+.remote-session-list {
+    margin-top: 6px;
+    background-color: transparent;
+}
+
+.device-list row,
+.transfer-list row,
+.usb-device-list row,
+.remote-session-list row,
+.device-list,
+.transfer-list,
+.usb-device-list,
+.remote-session-list,
+scrolledwindow {
+    background-color: transparent;
+}
+
+.device-card {
+    border-radius: 12px;
+    margin: 4px 0;
+    background-color: rgba(123, 138, 173, 0.30);
+    padding-top: 4px;
+    padding-bottom: 4px;
+}
+
+.device-card:hover {
+    background-color: rgba(133, 149, 186, 0.36);
+}
+
+.transfer-row {
+    border-radius: 12px;
+    background-color: rgba(123, 138, 173, 0.30);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    padding: 10px 12px;
+    margin: 4px 0;
+}
+
+.transfer-filename {
+    font-weight: 600;
+}
+
+.transfer-status {
+    color: @sb-text-secondary;
+}
+
+.transfer-row progress {
+    min-height: 8px;
+    border-radius: 99px;
+}
+
+.transfer-progress-active {
+    color: @blue_4;
+}
+
+.transfer-progress-complete {
+    color: @green_4;
+}
+
+.transfer-progress-failed {
+    color: @sb-danger;
+}
+
+/* Status and badges */
+.status-indicator {
+    font-size: 0.7em;
+}
+
+.status-connected,
+.status-online,
+.status-excellent {
+    color: @sb-success;
+}
+
+.status-discovering,
+.status-fair {
+    color: @sb-warning;
+}
+
+.status-disconnected,
+.status-poor,
+.status-offline {
+    color: @sb-danger;
+}
+
+.status-good {
+    color: @blue_4;
+}
+
+.status-online,
+.status-offline {
+    font-size: 0.8em;
+}
+
+.badge-pqc {
+    background-color: @success_bg_color;
+    color: @success_color;
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 0.8em;
+    font-weight: 700;
+}
+
+.badge-classic {
+    background-color: @warning_bg_color;
+    color: @warning_color;
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 0.8em;
+    font-weight: 700;
+}
+
+/* Settings */
+.settings-root {
+    background-color: transparent;
+}
+
+.settings-header {
+    border-bottom: 1px solid @sb-border;
+}
+
+.settings-page {
+    padding-top: 4px;
+}
+
+preferencesgroup {
+    margin-bottom: 12px;
+}
+
+.settings-panel {
+    background-color: rgba(172, 184, 213, 0.28);
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    border-radius: 22px;
+    padding: 8px 10px 10px 10px;
+}
+
+.settings-overview-panel {
+    margin-bottom: 16px;
+}
+
+.settings-summary-row {
+    background-color: rgba(123, 138, 173, 0.34);
+    border-radius: 16px;
+    margin-top: 6px;
+    margin-bottom: 6px;
+}
+
+.settings-summary-row box.header {
+    min-height: 42px;
+}
+
+.settings-destructive {
+    background-color: alpha(@destructive_bg_color, 0.1);
+}
+
+.settings-destructive:hover {
+    background-color: alpha(@destructive_bg_color, 0.2);
+}
+
+.settings-icon {
+    margin-right: 8px;
+    opacity: 0.72;
+}
+
+/* Utility */
+.caption {
+    font-size: 0.8em;
+}
+
+.title-3 {
+    font-size: 1.1em;
+    font-weight: 600;
+}
+
+/* macOS flagship shell overrides */
+.main-window {
+    background-image: linear-gradient(180deg, #4d6596 0%, #7085b1 42%, #c5d0e4 100%);
+}
+
+.app-shell {
+    background-color: rgba(222, 229, 243, 0.72);
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    border-radius: 28px;
+    box-shadow: 0 24px 54px rgba(14, 21, 38, 0.20);
+}
+
+.content-stack {
+    background-image: linear-gradient(180deg, rgba(198, 209, 234, 0.98) 0%, rgba(188, 201, 228, 0.94) 100%);
+}
+
+.sidebar {
+    background-color: rgba(39, 49, 78, 0.94);
+    border-right: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.sidebar-title,
+.sidebar .label,
+.user-name {
+    color: #eef3ff;
+}
+
+.sidebar-subtitle,
+.sidebar-device,
+.user-id {
+    color: rgba(234, 239, 255, 0.64);
+}
+
+.user-profile {
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.shell-topbar {
+    padding-left: 4px;
+    padding-right: 10px;
+}
+
+.page-root > headerbar,
+.shell-topbar {
+    min-height: 70px;
+}
+
+.page-root.dashboard {
+    background: transparent;
+}
+
+.dashboard .page-header {
+    background-color: rgba(66, 92, 140, 0.58);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.dashboard .page-title,
+.dashboard .card-value,
+.dashboard .empty-state-title,
+.dashboard .panel-title,
+.dashboard .cross-network-code,
+.dashboard .ambient-hero-location,
+.dashboard .ambient-hero-temperature {
+    color: #f4f7ff;
+}
+
+.dashboard .page-status,
+.dashboard .page-subtitle,
+.dashboard .caption,
+.dashboard .cross-network-mapping,
+.dashboard .transfer-status,
+.dashboard .empty-state-subtitle,
+.dashboard .card-title,
+.dashboard .dim-label,
+.dashboard .ambient-hero-condition,
+.dashboard .ambient-hero-updated,
+.dashboard .ambient-hero-metric {
+    color: rgba(236, 241, 255, 0.72);
+}
+
+.dashboard .card,
+.dashboard .panel,
+.dashboard .cross-network-card {
+    background-color: rgba(172, 184, 213, 0.38);
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    box-shadow: none;
+}
+
+.dashboard .card:hover {
+    background-color: rgba(181, 193, 220, 0.46);
+    border-color: rgba(255, 255, 255, 0.16);
+}
+
+.dashboard .panel-content,
+.dashboard .transfer-row,
+.dashboard .cross-network-card,
+.dashboard entry,
+.dashboard searchentry {
+    background-color: rgba(232, 237, 246, 0.34);
+    border-color: rgba(255, 255, 255, 0.10);
+    color: #f4f7ff;
+}
+
+.dashboard .discovery-panel-content {
+    background-color: rgba(139, 150, 183, 0.26);
+}
+
+.dashboard .remote-sessions-content {
+    background-color: rgba(18, 24, 41, 0.26);
+}
+
+.dashboard entry:focus,
+.dashboard searchentry:focus {
+    border-color: rgba(105, 178, 255, 0.55);
+}
+
+.dashboard .device-card:hover,
+.dashboard .transfer-row:hover {
+    background-color: rgba(213, 221, 237, 0.34);
+}
+
+.dashboard row.device-card {
+    background-color: rgba(18, 24, 41, 0.24);
+    border-radius: 16px;
+    margin: 6px 0;
+}
+
+.dashboard-discovery-panel {
+    min-width: 0;
+}
+
+.dashboard-sessions-panel {
+    min-width: 340px;
+}
+
+.devices-surface-panel,
+.transfers-surface-panel,
+.remote-surface-panel,
+.remote-preview-panel {
+    background-color: rgba(172, 184, 213, 0.30);
+}
+
+.devices-panel-content,
+.transfers-panel-content {
+    min-height: 300px;
+    background-color: rgba(123, 138, 173, 0.26);
+}
+
+.devices-panel-content statuspage,
+.transfers-panel-content statuspage {
+    color: #f4f7ff;
+}
+
+.devices-panel-content statuspage label,
+.transfers-panel-content statuspage label {
+    color: #f4f7ff;
+}
+
+.remote-summary-card {
+    min-height: 108px;
+    background-color: rgba(123, 138, 173, 0.34);
+}
+
+.remote-summary-value {
+    color: #1b78ff;
+    font-family: monospace;
+}
+
+.remote-summary-note {
+    color: rgba(236, 241, 255, 0.72);
+}
+
+.remote-preview-title {
+    font-size: 1.35em;
+}
+
+.usb-surface-panel,
+.monitor-surface-panel {
+    background-color: rgba(172, 184, 213, 0.30);
+}
+
+.usb-panel-content {
+    min-height: 120px;
+    background-color: rgba(123, 138, 173, 0.26);
+}
+
+.usb-device-row {
+    background-color: rgba(123, 138, 173, 0.30);
+    border-radius: 16px;
+    margin: 4px 0;
+}
+
+.monitor-line {
+    color: #f4f7ff;
+    font-weight: 600;
+}
+
+.monitor-progress {
+    min-height: 12px;
+    border-radius: 999px;
+}
+
+.monitor-progress-good {
+    color: @green_4;
+}
+
+.monitor-progress-accent {
+    color: @blue_4;
+}
+
+.monitor-progress-warn {
+    color: @orange_4;
+}
+
+.monitor-cpu .card-icon {
+    color: @orange_4;
+}
+
+.monitor-memory .card-icon {
+    color: @blue_4;
+}
+
+.monitor-bandwidth .card-icon {
+    color: @green_4;
+}
+
+.monitor-thermal .card-icon {
+    color: #ff4f8b;
+}
+
+.capture-dialog-scrim {
+    background-color: rgba(226, 233, 246, 0.24);
+}
+
+.capture-dialog-card {
+    background-color: rgba(255, 255, 255, 0.96);
+    border-radius: 24px;
+    padding: 24px;
+    box-shadow: 0 18px 42px rgba(47, 60, 92, 0.18);
+}
+
+.capture-dialog-title {
+    color: #2f3341;
+    font-size: 1.35em;
+    font-weight: 700;
+}
+
+.capture-dialog-body {
+    color: rgba(47, 51, 65, 0.78);
+    font-size: 1em;
+}
+
+.dashboard row.device-card:hover {
+    background-color: rgba(24, 32, 54, 0.28);
+}
+
+.dashboard row.device-card image,
+.dashboard row.device-card label.title,
+.dashboard row.device-card label.subtitle {
+    color: #f4f7ff;
+}
+
+.ambient-hero {
+    background-image: linear-gradient(90deg, rgba(187, 198, 224, 0.52) 0%, rgba(162, 176, 210, 0.46) 45%, rgba(144, 160, 194, 0.40) 100%);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 22px;
+    min-height: 144px;
+    padding: 20px 24px;
+}
+
+.ambient-hero-icon {
+    color: #ffd44a;
+    opacity: 0.96;
+}
+
+.ambient-hero-location {
+    font-size: 1.12em;
+    font-weight: 700;
+}
+
+.ambient-hero-condition,
+.ambient-hero-updated {
+    font-size: 0.92em;
+}
+
+.ambient-hero-temperature {
+    font-size: 3em;
+    font-weight: 300;
+    letter-spacing: -0.04em;
+}
+
+.ambient-hero-metric {
+    font-size: 0.92em;
+    font-weight: 600;
+}
+
+/* GTK baseline capture parity layer */
+.baseline-capture-root,
+.baseline-capture-root * {
+    font-family: ".SF NS", "System Font", "Helvetica Neue";
+}
+
+.baseline-capture-root label,
+.baseline-capture-root button,
+.baseline-capture-root entry,
+.baseline-capture-root text,
+.baseline-capture-root box {
+    font-family: ".SF NS", "System Font", "Helvetica Neue";
+}
+
+.baseline-capture-root {
+    background-repeat: no-repeat;
+    background-size: cover;
+}
+
+.baseline-capture-root.baseline-light,
+.baseline-login-root {
+    background-image: linear-gradient(180deg, rgb(255, 255, 255) 0%, rgb(240, 245, 252) 100%);
+}
+
+.baseline-capture-root.baseline-dark {
+    background-image: linear-gradient(180deg, rgb(44, 61, 97) 0%, rgb(93, 116, 159) 48%, rgb(186, 200, 227) 100%);
+}
+
+.baseline-capture-root.baseline-light {
+    background-image: linear-gradient(180deg, rgb(227, 235, 250) 0%, rgb(204, 217, 237) 52%, rgb(186, 201, 230) 100%);
+}
+
+.baseline-shell-frame {
+    padding: 34px;
+    background-color: rgba(255, 255, 255, 0.42);
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    border-radius: 28px;
+}
+
+.baseline-dark .baseline-shell-frame {
+    background-color: rgba(255, 255, 255, 0.12);
+    border-color: rgba(255, 255, 255, 0.12);
+}
+
+.baseline-login-stack {
+    margin-top: 0;
+}
+
+.baseline-brand-badge {
+    background-image: linear-gradient(135deg, rgba(255, 255, 255, 0.94) 0%, rgba(86, 141, 255, 0.24) 100%);
+    border: 1px solid rgba(70, 128, 255, 0.28);
+    border-radius: 20px;
+    padding: 6px;
+}
+
+.baseline-brand-badge-icon {
+    color: rgba(56, 124, 250, 0.92);
+    opacity: 0.98;
+}
+
+.baseline-login-title {
+    font-size: 32px;
+    font-weight: 700;
+    color: rgba(0, 0, 0, 0.78);
+}
+
+.baseline-login-subtitle {
+    font-size: 14px;
+    font-weight: 500;
+    color: rgba(0, 0, 0, 0.42);
+}
+
+.baseline-login-card {
+    padding: 22px;
+    background-color: rgba(255, 255, 255, 0.88);
+    border: 1px solid rgba(0, 0, 0, 0.06);
+    border-radius: 20px;
+    box-shadow: 0 12px 20px rgba(0, 0, 0, 0.08);
+}
+
+.baseline-segmented-row {
+    border-radius: 8px;
+}
+
+.baseline-segment {
+    background-color: rgba(0, 0, 0, 0.08);
+    border-radius: 8px;
+}
+
+.baseline-segment.selected {
+    background-color: rgba(0, 0, 0, 0.16);
+}
+
+.baseline-segment-label {
+    font-size: 14px;
+    font-weight: 600;
+    color: rgba(0, 0, 0, 0.78);
+}
+
+.baseline-field {
+    padding-left: 12px;
+    padding-right: 12px;
+    background-color: rgba(0, 0, 0, 0.08);
+    border-radius: 8px;
+}
+
+.baseline-field-placeholder {
+    font-size: 14px;
+    font-weight: 500;
+    color: rgba(0, 0, 0, 0.36);
+}
+
+.baseline-field-icon {
+    color: rgba(0, 0, 0, 0.46);
+}
+
+.baseline-primary-button,
+.baseline-prompt-button,
+.baseline-primary-badge {
+    background-color: rgba(36, 121, 255, 0.86);
+    border-radius: 8px;
+    padding-left: 16px;
+    padding-right: 16px;
+    padding-top: 8px;
+    padding-bottom: 8px;
+}
+
+.baseline-primary-button-label,
+.baseline-primary-badge .baseline-preview-badge-label,
+.baseline-prompt-button .baseline-preview-badge-label {
+    font-size: 15px;
+    font-weight: 700;
+    color: #ffffff;
+}
+
+.baseline-login-secondary {
+    font-size: 14px;
+    font-weight: 600;
+    color: rgba(0, 0, 0, 0.72);
+}
+
+.baseline-login-divider {
+    margin-top: 2px;
+    margin-bottom: 2px;
+    opacity: 0.4;
+}
+
+.baseline-login-error {
+    font-size: 12px;
+    font-weight: 500;
+    color: rgba(196, 42, 42, 0.82);
+}
+
+.baseline-sidebar {
+    padding: 18px;
+    background-color: rgba(34, 42, 66, 0.95);
+    border-radius: 24px;
+}
+
+.baseline-sidebar-title,
+.baseline-nav-label,
+.baseline-footer-name {
+    color: rgba(255, 255, 255, 0.98);
+}
+
+.baseline-sidebar-title {
+    font-size: 15px;
+    font-weight: 700;
+}
+
+.baseline-sidebar-subtitle {
+    font-size: 10px;
+    font-weight: 600;
+    color: rgba(255, 255, 255, 0.62);
+}
+
+.baseline-sidebar-device,
+.baseline-footer-id {
+    font-size: 10px;
+    font-weight: 500;
+    color: rgba(255, 255, 255, 0.46);
+}
+
+.baseline-nav-item {
+    padding-left: 14px;
+    padding-right: 14px;
+    border-radius: 12px;
+}
+
+.baseline-nav-item.selected {
+    background-color: rgba(36, 121, 255, 0.82);
+}
+
+.baseline-nav-item.unselected {
+    background-color: transparent;
+}
+
+.baseline-nav-icon {
+    color: rgba(255, 255, 255, 0.78);
+}
+
+.baseline-nav-item.selected .baseline-nav-icon,
+.baseline-nav-item.selected .baseline-nav-label {
+    color: rgba(255, 255, 255, 0.98);
+}
+
+.baseline-nav-label {
+    font-size: 14px;
+    font-weight: 600;
+}
+
+.baseline-sidebar-footer {
+    color: rgba(255, 255, 255, 0.98);
+}
+
+.baseline-avatar {
+    background-color: rgba(255, 153, 51, 0.95);
+    border-radius: 999px;
+}
+
+.baseline-account-avatar {
+    background-color: rgba(63, 198, 235, 0.88);
+    border-radius: 999px;
+}
+
+.baseline-account-avatar-label {
+    color: #ffffff;
+    font-size: 18px;
+    font-weight: 700;
+}
+
+.baseline-avatar-label {
+    color: #ffffff;
+    font-size: 0.96em;
+    font-weight: 700;
+}
+
+.baseline-footer-name {
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.baseline-footer-gear {
+    color: rgba(255, 255, 255, 0.70);
+}
+
+.baseline-topbar {
+    padding-left: 20px;
+    padding-right: 20px;
+    background-color: rgba(71, 97, 148, 0.58);
+    border-radius: 18px;
+}
+
+.baseline-topbar-title {
+    font-size: 15px;
+    font-weight: 700;
+    color: #ffffff;
+}
+
+.baseline-topbar-status {
+    font-size: 13px;
+    font-weight: 500;
+    color: rgba(255, 255, 255, 0.74);
+}
+
+.baseline-status-dot {
+    font-size: 11px;
+}
+
+.baseline-status-warning {
+    color: rgba(255, 140, 26, 0.96);
+}
+
+.baseline-status-connected {
+    color: rgba(38, 210, 93, 0.96);
+}
+
+.baseline-status-chip {
+    padding-left: 10px;
+    padding-right: 10px;
+    padding-top: 7px;
+    padding-bottom: 7px;
+    background-color: rgba(0, 0, 0, 0.16);
+    border-radius: 999px;
+}
+
+.baseline-status-chip-icon {
+    padding-left: 8px;
+    padding-right: 8px;
+}
+
+.baseline-status-chip-label,
+.baseline-status-chip-image {
+    color: rgba(255, 255, 255, 0.82);
+    font-size: 11px;
+    font-weight: 600;
+}
+
+.baseline-page-content {
+    background: transparent;
+}
+
+.baseline-metric-card {
+    min-height: 92px;
+    padding: 16px;
+    background-color: rgba(255, 255, 255, 0.26);
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    border-radius: 18px;
+}
+
+.baseline-dark .baseline-metric-card {
+    background-color: rgba(255, 255, 255, 0.12);
+}
+
+.baseline-metric-icon,
+.baseline-metric-chip-icon {
+    opacity: 0.95;
+}
+
+.baseline-card-title,
+.baseline-metric-chip-title,
+.baseline-panel-trailing,
+.baseline-hero-metric-title,
+.baseline-transfer-status,
+.baseline-row-subtitle,
+.baseline-settings-value,
+.baseline-compact-note,
+.baseline-preview-body,
+.baseline-preview-header-subtitle {
+    color: rgba(255, 255, 255, 0.58);
+}
+
+.baseline-card-title {
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.baseline-card-value {
+    color: #ffffff;
+    font-size: 24px;
+    font-weight: 700;
+}
+
+.baseline-card-value-emphasis {
+    font-size: 22px;
+}
+
+.baseline-glass-panel {
+    padding: 18px;
+    background-color: rgba(255, 255, 255, 0.24);
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    border-radius: 22px;
+}
+
+.baseline-dark .baseline-glass-panel {
+    background-color: rgba(255, 255, 255, 0.11);
+}
+
+.baseline-panel-title {
+    font-size: 16px;
+    font-weight: 700;
+    color: #ffffff;
+}
+
+.baseline-panel-trailing {
+    font-size: 12px;
+    font-weight: 500;
+}
+
+.baseline-ambient-hero {
+    padding: 24px;
+    background-color: rgba(255, 255, 255, 0.30);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 22px;
+}
+
+.baseline-dark .baseline-ambient-hero {
+    background-color: rgba(255, 255, 255, 0.14);
+}
+
+.baseline-ambient-icon {
+    color: rgba(255, 255, 255, 0.70);
+}
+
+.baseline-ambient-location {
+    color: #ffffff;
+    font-size: 20px;
+    font-weight: 700;
+}
+
+.baseline-ambient-condition,
+.baseline-hero-metric-title {
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.baseline-ambient-condition,
+.baseline-dashboard-controls-label,
+.baseline-dashboard-device-subtitle,
+.baseline-empty-subtitle {
+    color: rgba(255, 255, 255, 0.54);
+}
+
+.baseline-ambient-temperature {
+    color: #ffffff;
+    font-size: 52px;
+    font-weight: 300;
+    letter-spacing: -0.04em;
+}
+
+.baseline-hero-metric-value {
+    color: rgba(255, 255, 255, 0.86);
+    font-size: 15px;
+    font-weight: 700;
+}
+
+.baseline-dashboard-controls-label,
+.baseline-control-pill-label {
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.baseline-control-pill {
+    padding-left: 10px;
+    padding-right: 10px;
+    background-color: rgba(255, 255, 255, 0.08);
+    border-radius: 999px;
+}
+
+.baseline-control-pill-label,
+.baseline-control-pill-image {
+    color: rgba(255, 255, 255, 0.76);
+}
+
+.baseline-dashboard-device-row,
+.baseline-row-card,
+.baseline-transfer-row,
+.baseline-empty-placeholder,
+.baseline-compact-card,
+.baseline-dashboard-placeholder,
+.baseline-preview-box,
+.baseline-metric-chip {
+    background-color: rgba(0, 0, 0, 0.14);
+    border-radius: 18px;
+}
+
+.baseline-dashboard-device-row {
+    padding: 12px;
+    min-height: 48px;
+}
+
+.baseline-row-card,
+.baseline-transfer-row {
+    padding: 14px;
+    min-height: 54px;
+}
+
+.baseline-settings-row {
+    padding: 14px;
+    min-height: 44px;
+    background-color: rgba(0, 0, 0, 0.14);
+    border-radius: 16px;
+}
+
+.baseline-dashboard-device-title,
+.baseline-row-title,
+.baseline-preview-header-title,
+.baseline-preview-title,
+.baseline-empty-title,
+.baseline-monitor-title {
+    color: #ffffff;
+}
+
+.baseline-dashboard-device-title,
+.baseline-row-title,
+.baseline-settings-value,
+.baseline-preview-header-title {
+    font-size: 15px;
+    font-weight: 600;
+}
+
+.baseline-dashboard-device-subtitle,
+.baseline-row-subtitle,
+.baseline-transfer-status,
+.baseline-preview-header-subtitle {
+    font-size: 12px;
+    font-weight: 500;
+}
+
+.baseline-dashboard-device-dot {
+    background-color: rgba(255, 61, 61, 0.90);
+    border-radius: 999px;
+}
+
+.baseline-dashboard-device-arrow {
+    color: rgba(255, 255, 255, 0.76);
+}
+
+.baseline-preview-badge,
+.baseline-badge-online,
+.baseline-badge-secure {
+    padding-left: 10px;
+    padding-right: 10px;
+    padding-top: 6px;
+    padding-bottom: 6px;
+    border-radius: 999px;
+}
+
+.baseline-preview-badge {
+    background-color: rgba(0, 0, 0, 0.16);
+}
+
+.baseline-badge-online {
+    background-color: rgba(34, 179, 73, 0.18);
+}
+
+.baseline-badge-secure {
+    background-color: rgba(255, 179, 71, 0.18);
+}
+
+.baseline-preview-badge-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: rgba(255, 255, 255, 0.82);
+}
+
+.baseline-primary-badge {
+    border-radius: 999px;
+}
+
+.baseline-badge-online .baseline-preview-badge-label {
+    color: rgba(102, 255, 150, 0.95);
+}
+
+.baseline-badge-secure .baseline-preview-badge-label {
+    color: rgba(255, 214, 102, 0.95);
+}
+
+.baseline-empty-placeholder,
+.baseline-dashboard-placeholder,
+.baseline-preview-box {
+    min-height: 310px;
+    padding: 22px;
+}
+
+.baseline-empty-placeholder,
+.baseline-dashboard-placeholder {
+}
+
+.baseline-empty-icon,
+.baseline-dashboard-placeholder-icon {
+    color: rgba(255, 255, 255, 0.42);
+}
+
+.baseline-empty-title {
+    font-size: 22px;
+    font-weight: 600;
+}
+
+.baseline-empty-subtitle {
+    font-size: 14px;
+    font-weight: 500;
+}
+
+.baseline-compact-card {
+    min-height: 122px;
+}
+
+.baseline-compact-title {
+    color: rgba(255, 255, 255, 0.84);
+    font-size: 13px;
+    font-weight: 700;
+}
+
+.baseline-compact-headline {
+    color: rgba(27, 120, 255, 0.96);
+    font-family: monospace;
+    font-size: 18px;
+    font-weight: 700;
+}
+
+.baseline-compact-note {
+    font-size: 12px;
+    font-weight: 500;
+}
+
+.baseline-transfer-progress trough,
+.baseline-monitor-progress trough {
+    background-color: rgba(255, 255, 255, 0.08);
+    border-radius: 999px;
+    min-height: 8px;
+}
+
+.baseline-transfer-progress progress,
+.baseline-monitor-progress progress {
+    background-color: rgba(36, 121, 255, 0.85);
+    border-radius: 999px;
+    min-height: 8px;
+}
+
+.baseline-transfer-progress-complete progress {
+    background-color: rgba(55, 196, 92, 0.85);
+}
+
+.baseline-preview-box {
+    background-color: rgba(0, 0, 0, 0.22);
+}
+
+.baseline-preview-title {
+    font-size: 24px;
+    font-weight: 600;
+    color: rgba(255, 255, 255, 0.84);
+}
+
+.baseline-preview-body {
+    font-size: 13px;
+    font-weight: 500;
+}
+
+.baseline-metric-chip {
+    padding: 12px;
+}
+
+.baseline-metric-chip-title {
+    font-size: 11px;
+    font-weight: 600;
+}
+
+.baseline-metric-chip-value {
+    color: #ffffff;
+    font-size: 15px;
+    font-weight: 700;
+}
+
+.baseline-monitor-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: rgba(255, 255, 255, 0.84);
+}
+
+.baseline-metric-blue,
+.baseline-metric-blue image,
+.baseline-metric-blue .baseline-card-value {
+    color: rgba(74, 148, 255, 0.95);
+}
+
+.baseline-metric-green,
+.baseline-metric-green image,
+.baseline-metric-green .baseline-card-value {
+    color: rgba(70, 214, 106, 0.95);
+}
+
+.baseline-metric-orange,
+.baseline-metric-orange image,
+.baseline-metric-orange .baseline-card-value {
+    color: rgba(255, 168, 69, 0.95);
+}
+
+.baseline-metric-pink,
+.baseline-metric-pink image,
+.baseline-metric-pink .baseline-card-value {
+    color: rgba(255, 94, 156, 0.95);
+}
+
+.baseline-card-value-default {
+    color: #ffffff;
+}
+
+.baseline-prompt-scrim {
+    background-color: rgba(0, 0, 0, 0.16);
+}
+
+.baseline-prompt-card {
+    padding: 22px;
+    background-color: rgba(255, 255, 255, 0.94);
+    border-radius: 22px;
+    box-shadow: 0 12px 20px rgba(0, 0, 0, 0.12);
+}
+
+.baseline-prompt-title {
+    color: rgba(0, 0, 0, 0.84);
+    font-size: 20px;
+    font-weight: 700;
+}
+
+.baseline-prompt-body {
+    color: rgba(0, 0, 0, 0.62);
+    font-size: 14px;
+    font-weight: 500;
+}

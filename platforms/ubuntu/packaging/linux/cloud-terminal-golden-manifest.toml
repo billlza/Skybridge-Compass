@@ -1,0 +1,13 @@
+[kernel]
+release = "6.14.0-1018-aws"
+
+[packages]
+gdm3 = "46.2"
+gnome-shell = "46.2"
+pipewire = "1.0.5-1ubuntu3.2"
+xdg-desktop-portal = "1.18.4-1ubuntu2.24.04.1"
+ffmpeg = "7:6.1.1-3ubuntu5"
+
+[runtime]
+nvidia_driver = "550.163.01"
+

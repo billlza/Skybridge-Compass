@@ -1,0 +1,123 @@
+[package]
+name = "skybridge-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Core library for SkyBridge Compass - P2P file transfer and remote desktop"
+
+[[bin]]
+name = "skybridge-webrtc-file-receiver"
+path = "src/bin/skybridge_webrtc_file_receiver.rs"
+required-features = ["webrtc"]
+
+[[bin]]
+name = "skybridge-webrtc-screen-receiver"
+path = "src/bin/skybridge_webrtc_screen_receiver.rs"
+required-features = ["webrtc"]
+
+[dependencies]
+# Async
+tokio.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+bincode.workspace = true
+
+# Cryptography - Classic
+ring.workspace = true
+ed25519-dalek.workspace = true
+x25519-dalek.workspace = true
+p256.workspace = true
+elliptic-curve.workspace = true
+aes-gcm.workspace = true
+chacha20poly1305.workspace = true
+sha2.workspace = true
+sha3.workspace = true
+hkdf.workspace = true
+rand.workspace = true
+rand_core.workspace = true
+base64.workspace = true
+hex.workspace = true
+jpeg-encoder.workspace = true
+jpeg-decoder.workspace = true
+
+# Cryptography - Post-Quantum
+pqcrypto.workspace = true
+pqcrypto-kyber.workspace = true
+pqcrypto-dilithium.workspace = true
+pqcrypto-traits.workspace = true
+oqs.workspace = true
+
+# Networking
+quinn.workspace = true
+rustls.workspace = true
+webpki-roots.workspace = true
+rcgen.workspace = true
+
+# mDNS
+mdns-sd.workspace = true
+
+# HTTP
+reqwest.workspace = true
+
+# WebRTC (feature-gated)
+tokio-tungstenite = { workspace = true, optional = true }
+url = { workspace = true, optional = true }
+webrtc = { workspace = true, optional = true }
+
+# Remote desktop
+vnc.workspace = true
+
+# Utilities
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+parking_lot.workspace = true
+dashmap.workspace = true
+bytes.workspace = true
+zstd.workspace = true
+directories.workspace = true
+keyring.workspace = true
+secrecy.workspace = true
+hostname.workspace = true
+mime_guess.workspace = true
+
+# File transfer enhancements
+blake3 = "1.8"
+lz4_flex = "0.12"
+flate2 = "1.1"
+
+# Optional HEVC decode support (UltraStream)
+[features]
+default = []
+ffmpeg = ["ffmpeg-next"]
+webrtc = ["dep:tokio-tungstenite", "dep:url", "dep:webrtc"]
+
+# Linux native libraries for remote desktop
+[target.'cfg(target_os = "linux")'.dependencies]
+# D-Bus for portal access (Wayland screen capture/input)
+zbus = { version = "5.14", default-features = false, features = ["tokio"] }
+# PipeWire capture via portal-provided file descriptors
+lamco-pipewire = { version = "0.3.2" }
+# X11 support
+x11rb = { version = "0.13", features = ["shm", "xtest", "randr", "xfixes", "render", "allow-unsafe-code"] }
+# Unix system calls
+nix = { version = "0.31", features = ["fs", "mman", "ioctl"] }
+# C library bindings
+libc = "0.2"
+# Video encoding
+openh264 = "0.9"
+# HEVC decoding (optional)
+ffmpeg-next = { version = "8.0.0", default-features = false, features = ["codec", "format", "software-scaling"], optional = true }
+
+[dev-dependencies]
+tokio-test = "0.4"
+tempfile = "3.26"

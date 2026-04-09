@@ -1,0 +1,28 @@
+[package]
+name = "skybridge-ui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "GTK4 UI components for SkyBridge Compass"
+
+[dependencies]
+skybridge-core = { path = "../skybridge-core" }
+
+# GTK4 and Adwaita
+gtk4.workspace = true
+libadwaita.workspace = true
+
+# Async
+tokio.workspace = true
+futures.workspace = true
+
+# Utilities
+tracing.workspace = true
+hostname.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+toml = "0.8"
+directories = "6.0"
+dirs = "6.0"

@@ -1,0 +1,24 @@
+{
+  "canonical": {
+    "deviceId": "dev-1",
+    "name": "MacBook-Pro",
+    "platform": "macos",
+    "pubKeyFP": "ABCDEF123456",
+    "capabilities": "file,rdview,rdcontrol,clipboard",
+    "cryptoSuites": "1001,0001",
+    "version": "1.0",
+    "osVersion": "macOS 26.2",
+    "uniqueId": "uid-dev-1"
+  },
+  "aliases": {
+    "device_id": "dev-1",
+    "fn": "MacBook-Pro",
+    "os": "macos",
+    "pub_key_fp": "ABCDEF123456",
+    "cap": "file,remote_desktop,clipboard",
+    "suites": "1001,0001",
+    "ver": "1.0",
+    "os_version": "macOS 26.2",
+    "unique_id": "uid-dev-1"
+  }
+}

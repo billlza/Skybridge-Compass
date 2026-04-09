@@ -1,0 +1,76 @@
+[device]
+name = "skybridge-cloud-terminal"
+device_id = ""
+public_key_fingerprint = ""
+capabilities = ["filetransfer", "remotedesktopview"]
+start_on_login = true
+show_tray_icon = false
+minimize_to_tray = false
+
+[transfer]
+save_location = "~/Downloads"
+compression = "Adaptive"
+zstd_level = 10
+chunk_size_mb = 2
+max_concurrent = 4
+max_parallel_chunks = 4
+enable_resume = true
+verify_chunks = true
+auto_accept_trusted = false
+confirm_overwrite = true
+notify_on_complete = true
+
+[remote_desktop]
+codec = "Auto"
+hardware_encoder = "Auto"
+preset = "LowLatency"
+bitrate_mbps = 8
+framerate = 60
+quality = 23
+low_latency = true
+tune_screen = true
+show_cursor = true
+capture_audio = false
+allow_control = true
+require_confirmation = true
+
+[security]
+enable_pqc = true
+prefer_hybrid = true
+allow_classic_only = true
+require_verification = true
+trusted_devices = []
+block_unknown = false
+clear_keys_on_disconnect = true
+
+[network]
+quic_port = 51820
+enable_mdns = true
+enable_bluetooth = false
+enable_wifi_direct = false
+prefer_ipv6 = false
+connection_timeout_secs = 30
+discovery_timeout_secs = 10
+lan_latency_threshold_ms = 5
+enable_remote_control_server = false
+remote_control_port = 5901
+enable_vnc_server = false
+vnc_port = 5900
+enable_transfer_server = true
+transfer_port = 51821
+enable_webrtc = true
+webrtc_signaling_url = "wss://api.nebula-technologies.net/ws"
+webrtc_signaling_server_url = "https://api.nebula-technologies.net"
+webrtc_client_api_key = ""
+webrtc_stun_url = "stun:54.92.79.99:3478"
+webrtc_turn_url = ""
+webrtc_turn_username = ""
+webrtc_turn_password = ""
+
+[deployment]
+profile = "cloud_terminal"
+clipboard_policy = "disabled"
+relay_only_webrtc = true
+
+[developer]
+log_level = "Info"

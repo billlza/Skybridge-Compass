@@ -1,0 +1,100 @@
+[workspace]
+resolver = "2"
+members = [
+    "skybridge-core",
+    "skybridge-ui",
+    "skybridge-app",
+]
+
+[workspace.package]
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.92"
+authors = ["SkyBridge Team"]
+license = "MIT"
+repository = "https://github.com/skybridge/compass-ubuntu"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1.50", features = ["full"] }
+async-trait = "0.1"
+futures = "0.3"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+bincode = { package = "bincode-next", version = "3.0.0-rc.4" }
+
+# Cryptography
+ring = "0.17"
+ed25519-dalek = { version = "2.2", features = ["rand_core", "serde"] }
+x25519-dalek = { version = "2.0", features = ["static_secrets", "serde", "getrandom"] }
+p256 = { version = "0.13", features = ["ecdh", "ecdsa", "serde"] }
+aes-gcm = "0.10"
+chacha20poly1305 = "0.10"
+sha2 = "0.10"
+sha3 = "0.10"
+hkdf = "0.12"
+rand = "0.10"
+rand_core = "0.10"
+base64 = "0.22"
+hex = "0.4"
+elliptic-curve = { version = "0.13", features = ["sec1"] }
+
+# Post-quantum cryptography
+pqcrypto = "0.18"
+pqcrypto-kyber = "0.8"
+pqcrypto-dilithium = "0.5"
+pqcrypto-traits = "0.3"
+oqs = { version = "0.11", default-features = false, features = ["std", "kems", "ml_kem", "vendored"] }
+
+# Networking
+quinn = "0.11"             # QUIC implementation
+rustls = "0.23"
+webpki-roots = "1.0"
+rcgen = "0.14"
+
+# mDNS discovery
+mdns-sd = "0.18"
+
+# HTTP client
+reqwest = { version = "0.13", features = ["json", "rustls"] }
+
+# WebRTC / WebSocket (feature-gated in crates)
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
+url = "2.5"
+webrtc = "0.17"
+
+# Remote desktop
+vnc = "0.4"
+
+# GUI
+gtk4 = { version = "0.11", features = ["v4_14"] }
+libadwaita = { version = "0.9", features = ["v1_5"] }
+
+# Utilities
+thiserror = "2.0"
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.22", features = ["v4", "serde"] }
+parking_lot = "0.12"
+dashmap = "6.1"
+bytes = "1.11"
+zstd = "0.13"
+directories = "6.0"
+keyring = "3.6"
+secrecy = { version = "0.10", features = ["serde"] }
+hostname = "0.4"
+jpeg-decoder = "0.3"
+jpeg-encoder = "0.7"
+mime_guess = "2.0"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
+[patch.crates-io]
+bincode-next = { path = "vendor/bincode-next" }

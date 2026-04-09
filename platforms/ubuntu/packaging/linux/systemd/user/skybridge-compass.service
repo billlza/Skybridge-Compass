@@ -1,0 +1,26 @@
+[Unit]
+Description=SkyBridge Compass Ubuntu Cloud Terminal
+Documentation=%h/.config/compass/production.toml
+After=graphical-session.target
+Wants=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h
+Environment=SKYBRIDGE_SETTINGS_PATH=%h/.config/compass/production.toml
+Environment=RUST_LOG=info,skybridge_app=info,skybridge_core=info
+LoadCredential=portal_state_key:/etc/skybridge/credentials/portal_state_key
+ExecStartPre=/usr/bin/bash -lc 'test "$XDG_SESSION_TYPE" = "wayland"'
+ExecStart=/usr/bin/skybridge-compass
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=120
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.config/compass %h/.local/share/compass %h/.local/state/compass
+
+[Install]
+WantedBy=graphical-session.target

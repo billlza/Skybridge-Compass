@@ -1,0 +1,124 @@
+{
+  "captures": [
+    {
+      "id": "UI-CAP-001",
+      "page": "Login",
+      "state": "Idle",
+      "theme": "Light",
+      "locale": "en-US",
+      "critical": true
+    },
+    {
+      "id": "UI-CAP-002",
+      "page": "Login",
+      "state": "Error",
+      "theme": "Light",
+      "locale": "en-US",
+      "critical": true
+    },
+    {
+      "id": "UI-CAP-003",
+      "page": "Dashboard",
+      "state": "Discovering",
+      "theme": "Light",
+      "locale": "en-US",
+      "critical": true
+    },
+    {
+      "id": "UI-CAP-004",
+      "page": "Dashboard",
+      "state": "Connected + streaming",
+      "theme": "Dark",
+      "locale": "en-US",
+      "critical": true
+    },
+    {
+      "id": "UI-CAP-005",
+      "page": "Devices",
+      "state": "Empty",
+      "theme": "Light",
+      "locale": "en-US",
+      "critical": false
+    },
+    {
+      "id": "UI-CAP-006",
+      "page": "Devices",
+      "state": "Populated",
+      "theme": "Dark",
+      "locale": "en-US",
+      "critical": false
+    },
+    {
+      "id": "UI-CAP-007",
+      "page": "Transfers",
+      "state": "Empty",
+      "theme": "Light",
+      "locale": "en-US",
+      "critical": false
+    },
+    {
+      "id": "UI-CAP-008",
+      "page": "Transfers",
+      "state": "In-progress + completed",
+      "theme": "Dark",
+      "locale": "en-US",
+      "critical": true
+    },
+    {
+      "id": "UI-CAP-009",
+      "page": "Settings",
+      "state": "Default",
+      "theme": "Light",
+      "locale": "en-US",
+      "critical": true
+    },
+    {
+      "id": "UI-CAP-010",
+      "page": "Settings",
+      "state": "Security section",
+      "theme": "Dark",
+      "locale": "en-US",
+      "critical": true
+    },
+    {
+      "id": "UI-CAP-011",
+      "page": "Tray/Notifications",
+      "state": "Incoming transfer prompt",
+      "theme": "Light",
+      "locale": "en-US",
+      "critical": true
+    },
+    {
+      "id": "UI-CAP-012",
+      "page": "Tray/Notifications",
+      "state": "Remote control prompt",
+      "theme": "Dark",
+      "locale": "en-US",
+      "critical": true
+    },
+    {
+      "id": "UI-CAP-013",
+      "page": "USB",
+      "state": "Attached device inventory",
+      "theme": "Light",
+      "locale": "en-US",
+      "critical": true
+    },
+    {
+      "id": "UI-CAP-014",
+      "page": "Remote",
+      "state": "Trusted active sessions",
+      "theme": "Dark",
+      "locale": "en-US",
+      "critical": true
+    },
+    {
+      "id": "UI-CAP-015",
+      "page": "Monitor",
+      "state": "Live system snapshot",
+      "theme": "Light",
+      "locale": "en-US",
+      "critical": true
+    }
+  ]
+}

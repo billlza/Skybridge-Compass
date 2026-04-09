@@ -1,0 +1,46 @@
+[package]
+name = "skybridge-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "SkyBridge Compass for Ubuntu - P2P file transfer and remote desktop"
+
+[[bin]]
+name = "skybridge-compass"
+path = "src/main.rs"
+
+[dependencies]
+skybridge-core = { path = "../skybridge-core" }
+skybridge-ui = { path = "../skybridge-ui" }
+
+# GTK4 and Adwaita
+gtk4.workspace = true
+libadwaita.workspace = true
+
+# Async
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+futures.workspace = true
+rand.workspace = true
+
+# Utilities
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+directories.workspace = true
+uuid.workspace = true
+hostname.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+jpeg-decoder.workspace = true
+chrono.workspace = true
+ksni = "0.3.3"
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+# WebRTC (feature-gated)
+url = { workspace = true, optional = true }
+
+[features]
+default = []
+webrtc = ["skybridge-core/webrtc", "url"]

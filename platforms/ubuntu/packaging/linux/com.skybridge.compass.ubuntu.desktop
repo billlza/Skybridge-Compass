@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=SkyBridge Compass
+Comment=Cross-platform file transfer and remote desktop
+Exec=skybridge-compass
+Icon=com.skybridge.compass.ubuntu
+Terminal=false
+Categories=Network;Utility;
+StartupNotify=true

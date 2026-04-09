@@ -1,0 +1,9 @@
+Unattended-Upgrade::Package-Blacklist {
+        "linux-.*";
+        "nvidia-.*";
+        "pipewire.*";
+        "xdg-desktop-portal.*";
+        "gdm3";
+        "gnome-shell";
+        "ffmpeg.*";
+};
