@@ -1,7 +1,7 @@
 Ubuntu portability snapshot imported into `Bill/ubuntu-portability`.
 
 Source:
-- `/Users/bill/Desktop/SkyBridge Compass Ubuntu`
+- External Ubuntu workspace snapshot imported into the repository under `platforms/ubuntu`
 
 Included:
 - Rust workspace crates, docs, scripts, packaging assets, vendored dependencies

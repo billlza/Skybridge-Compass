@@ -1,5 +1,12 @@
 # SkyBridge Compass Ubuntu
 
+> Portability branch snapshot: `Bill/ubuntu-portability`
+>
+> Branch-specific references:
+> - [BUILD.md](BUILD.md)
+> - [STATUS.md](STATUS.md)
+> - [PORTABILITY_IMPORT.md](PORTABILITY_IMPORT.md)
+
 A cross-platform P2P file transfer and remote desktop application for Ubuntu Linux, compatible with SkyBridge Compass on macOS and Android.
 
 ## Features
@@ -147,9 +154,12 @@ Bit structure (64-bit):
 
 ## Protocol Compatibility
 
-This Ubuntu version is fully compatible with:
+This Ubuntu snapshot is designed for protocol compatibility with:
 - SkyBridge Compass Pro (macOS)
 - SkyBridge Compass (Android)
+
+Interop status is still evolving; see [STATUS.md](STATUS.md) for the current
+validation boundary between static checks, runtime interop, and UI parity.
 
 All platforms use:
 - Same handshake protocol
@@ -159,4 +169,5 @@ All platforms use:
 
 ## License
 
-MIT License - See LICENSE file for details.
+Repository licensing is inherited from the parent codebase. Add or align a
+top-level license file before treating this branch as a standalone distribution.

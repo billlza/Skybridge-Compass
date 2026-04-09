@@ -74,7 +74,7 @@ The Ubuntu build now exposes a fixture-based capture mode for every matrix row, 
 Generate the full Ubuntu screenshot set and diff it in one command:
 
 ```bash
-python3 scripts/capture_ui_baseline.py --allow-missing
+python3 scripts/capture_ui_baseline.py
 ```
 
 Useful flags:
