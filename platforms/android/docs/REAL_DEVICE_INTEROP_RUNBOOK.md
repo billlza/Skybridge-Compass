@@ -13,11 +13,11 @@ It focuses on the paths that are currently treated as production-ready in Androi
 
 ## Paths
 
-- Android repo root: `/Users/bill/Desktop/SkyBridge Compass - Android`
-- macOS release repo: `/Users/bill/Desktop/SkyBridge Compass Pro release`
-- iOS app project: `/Users/bill/Desktop/SkyBridge Compass Pro release/SkyBridge Compass iOS/SkyBridgeCompass-iOS.xcodeproj`
-- Android interop artifacts: `/Users/bill/Desktop/SkyBridge Compass - Android/build/interop`
-- macOS LAN inbound inbox: `/Users/bill/Desktop/SkyBridgeInteropInbox`
+- Android repo root: `<repo-root>/platforms/android`
+- macOS release repo: `<repo-root>`
+- iOS app project: `<repo-root>/SkyBridge Compass iOS/SkyBridgeCompass-iOS.xcodeproj`
+- Android interop artifacts: `<repo-root>/platforms/android/build/interop`
+- macOS LAN inbound inbox: choose a writable host directory appropriate for your machine
 
 ## Procedure 0: Android Packaging Audit
 
@@ -36,7 +36,7 @@ Optional custom output directory:
 
 ```bash
 bash scripts/check_android_packaged_placeholders.sh \
-  /Users/bill/Desktop/SkyBridge\ Compass\ -\ Android/build/interop/android-packaging-audit/manual-run
+  "<repo-root>/platforms/android/build/interop/android-packaging-audit/manual-run"
 ```
 
 ### Logs and artifacts
@@ -75,7 +75,7 @@ Preflight:
 
 - `adb` is installed and the target Android device appears in `adb devices`
 - `swift` is installed
-- the macOS repo at `/Users/bill/Desktop/SkyBridge Compass Pro release` builds `LocalWebRTCSmokeHost`
+- the macOS repo at `<repo-root>` builds `LocalWebRTCSmokeHost`
 - Android and Apple peers can both reach the same signaling WebSocket endpoint
 - Android security settings for the test run are known:
   - PQC run: `PQC enabled = true`, `Allow Classic Fallback = false`
@@ -83,7 +83,7 @@ Preflight:
 
 Optional parameters:
 
-- `--mac-package-path <path>`: defaults to `/Users/bill/Desktop/SkyBridge Compass Pro release`
+- `--mac-package-path <path>`: defaults to the repository root containing `Package.swift`
 - `--pqc true|false`: defaults to `true`
 - `--allow-static-ed25519-fallback true|false`: defaults to `false`
 - `--android-timeout-seconds <n>`: defaults to `120`
@@ -148,7 +148,7 @@ bash scripts/run_mac_lan_interop_host.sh
 This wraps:
 
 ```bash
-swift run --package-path "/Users/bill/Desktop/SkyBridge Compass Pro release" LocalLanInteropHost
+swift run --package-path "<repo-root>" LocalLanInteropHost
 ```
 
 ### Logs

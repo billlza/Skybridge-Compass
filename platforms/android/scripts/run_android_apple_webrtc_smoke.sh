@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT_DIR/scripts/lib/android_env.sh"
-DEFAULT_MAC_PACKAGE_PATH="/Users/bill/Desktop/SkyBridge Compass Pro release"
+DEFAULT_MAC_PACKAGE_PATH="$(cd "$ROOT_DIR/../.." && pwd)"
 DEFAULT_APP_CLASS="com.skybridge.compass.android.webrtc.AppleReleaseInteropAppInstrumentationTest"
 DEFAULT_RUNNER="com.skybridge.compass.debug.test/com.skybridge.compass.android.HiltTestRunner"
 

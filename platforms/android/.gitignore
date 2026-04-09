@@ -8,6 +8,7 @@ build/
 **/.cxx/
 .externalNativeBuild/
 captures/
+shared/scripts/build_liboqs/build-*/
 *.apk
 *.aab
 *.apks

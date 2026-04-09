@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-DEFAULT_MAC_PACKAGE_PATH="/Users/bill/Desktop/SkyBridge Compass Pro release"
+DEFAULT_MAC_PACKAGE_PATH="$(cd "$ROOT_DIR/../.." && pwd)"
 MAC_PACKAGE_PATH="$DEFAULT_MAC_PACKAGE_PATH"
 RUN_DIR=""
 

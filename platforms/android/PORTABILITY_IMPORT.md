@@ -1,7 +1,7 @@
 Android portability snapshot imported into `Bill/android-portability`.
 
 Source:
-- `/Users/bill/Desktop/SkyBridge Compass - Android`
+- External Android workspace snapshot imported into the repository under `platforms/android`
 
 Included:
 - app/client modules, shared/native support, docs, scripts, Gradle wrapper/config
@@ -17,3 +17,4 @@ Validated before import:
 
 Notes:
 - `gradle.properties` was sanitized to remove workstation-specific JDK paths.
+- generated `shared/scripts/build_liboqs/build-*` directories are intentionally excluded.

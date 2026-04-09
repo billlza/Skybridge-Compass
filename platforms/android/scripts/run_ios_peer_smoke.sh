@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-DEFAULT_IOS_PROJECT_DIR="/Users/bill/Desktop/SkyBridge Compass Pro release/SkyBridge Compass iOS"
+DEFAULT_IOS_PROJECT_DIR="$ROOT_DIR/../../SkyBridge Compass iOS"
 IOS_PROJECT_DIR="$DEFAULT_IOS_PROJECT_DIR"
 SCHEME="SkyBridgeCompass-iOS"
 DESTINATION="platform=iOS Simulator,name=iPhone 17,OS=26.2"

@@ -1,5 +1,12 @@
 # SkyBridge Compass - Android应用
 
+> Portability branch snapshot: `Bill/android-portability`
+>
+> Branch-specific references:
+> - [BUILD.md](BUILD.md)
+> - [STATUS.md](STATUS.md)
+> - [PORTABILITY_IMPORT.md](PORTABILITY_IMPORT.md)
+
 SkyBridge Compass是一个跨平台设备连接和控制应用的Android客户端，提供设备发现、屏幕镜像、远程控制和文件传输功能。
 
 ## 功能特性
@@ -76,49 +83,57 @@ app/
 └── build.gradle.kts                   # 构建配置
 ```
 
+## 当前可移植性快照
+
+- 分支用途：Android portability snapshot / cloud backup
+- 当前导入目录：`platforms/android`
+- 推荐构建入口：`./gradlew :app:assembleDebug --warning-mode all`
+- 当前 Android 配置：
+  - `compileSdk = 36`
+  - `targetSdk = 36`
+  - `minSdk = 33`
+  - Kotlin / AGP 基线见根 [build.gradle.kts](build.gradle.kts) 和 [app/build.gradle.kts](app/build.gradle.kts)
+- 当前原生依赖：
+  - `shared` 模块使用 `externalNativeBuild`
+  - 预编译 `liboqs` 头文件和静态库位于 `shared/libs/liboqs`
+
 ## 开发环境要求
 
 ### 必需软件
-- **Android Studio** Hedgehog | 2023.1.1 或更高版本
-- **JDK** 8 或更高版本
-- **Android SDK** API Level 24-34
-- **Kotlin** 1.9.0 或更高版本
+- Android Studio 或兼容的 Android Gradle 构建环境
+- JDK 21
+- Android SDK Platform 36
+- Android NDK 和 CMake 3.22.1（`shared` 原生构建需要）
 
-### 推荐配置
-- **内存**: 8GB RAM 或更多
-- **存储**: 至少 4GB 可用空间
-- **网络**: 稳定的互联网连接（用于依赖下载）
+### 本地配置
+- `local.properties` 不进入版本控制
+- `local.properties` 或环境变量可提供：
+  - `SUPABASE_URL`
+  - `SUPABASE_ANON_KEY`
+  - `GOOGLE_WEB_CLIENT_ID`
+- 构建也会使用开发机上的 Android SDK 路径信息，因此建议每台机器单独维护 `local.properties`
 
 ## 快速开始
 
-### 1. 克隆项目
+### 1. 打开 portability 快照
 ```bash
-git clone https://github.com/your-org/skybridge-compass.git
-cd skybridge-compass/SkyBridgeCompass-Android
+cd platforms/android
 ```
 
-### 2. 导入项目
-1. 打开Android Studio
-2. 选择 "Open an existing project"
-3. 选择项目根目录
-4. 等待Gradle同步完成
-
-### 3. 配置环境
-1. 确保Android SDK已正确安装
-2. 创建虚拟设备或连接真实设备
-3. 检查网络权限配置
-
-### 4. 运行应用
+### 2. 调试构建
 ```bash
-# 调试版本
-./gradlew assembleDebug
+./gradlew :app:assembleDebug --warning-mode all
+```
 
-# 安装到设备
-./gradlew installDebug
+### 3. 安装到设备
+```bash
+./gradlew :app:installDebug
+```
 
-# 运行测试
+### 4. 常用验证
+```bash
 ./gradlew test
-./gradlew connectedAndroidTest
+./gradlew connectedDebugAndroidTest
 ```
 
 ## 构建配置
@@ -150,16 +165,13 @@ export KEY_PASSWORD="your_key_password"
 
 ### 构建命令
 ```bash
-# 构建所有变体
-./gradlew build
+# 推荐的 portability 构建命令
+./gradlew :app:assembleDebug --warning-mode all
 
-# 构建特定变体
-./gradlew assembleDebug
-./gradlew assembleStaging
-./gradlew assembleRelease
-
-# 生成签名APK
-./gradlew assembleRelease
+# 其他常用构建
+./gradlew :app:installDebug
+./gradlew :app:assembleRelease
+./gradlew syncBaselineProfiles
 ```
 
 ## 测试
@@ -179,16 +191,11 @@ export KEY_PASSWORD="your_key_password"
 ### UI测试
 ```bash
 # 运行所有UI测试
-./gradlew connectedAndroidTest
+./gradlew connectedDebugAndroidTest
 
 # 运行特定测试
-./gradlew connectedAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=com.skybridge.compass.android.DashboardScreenTest
-```
-
-### 测试覆盖率
-```bash
-# 生成测试覆盖率报告
-./gradlew jacocoTestReport
+./gradlew connectedDebugAndroidTest \
+  -Pandroid.testInstrumentationRunnerArguments.class=com.skybridge.compass.android.DashboardScreenTest
 ```
 
 ## 代码质量
@@ -196,19 +203,7 @@ export KEY_PASSWORD="your_key_password"
 ### 静态分析
 ```bash
 # 运行Lint检查
-./gradlew lint
-
-# 运行Detekt检查
-./gradlew detekt
-```
-
-### 代码格式化
-```bash
-# 格式化代码
-./gradlew ktlintFormat
-
-# 检查代码格式
-./gradlew ktlintCheck
+./gradlew :app:lintDebug
 ```
 
 ## 性能优化
