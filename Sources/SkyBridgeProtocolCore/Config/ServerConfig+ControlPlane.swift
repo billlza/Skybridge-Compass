@@ -5,37 +5,6 @@ extension SkyBridgeServerConfig {
         raw.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private static func booleanValue(
-        for key: String,
-        environment: [String: String],
-        infoDictionary: [String: Any]?
-    ) -> Bool? {
-        func parse(_ raw: String) -> Bool? {
-            switch raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
-            case "1", "true", "yes", "on":
-                return true
-            case "0", "false", "no", "off":
-                return false
-            default:
-                return nil
-            }
-        }
-
-        if let raw = environment[key], let parsed = parse(raw) {
-            return parsed
-        }
-
-        if let raw = infoDictionary?[key] as? String, let parsed = parse(raw) {
-            return parsed
-        }
-
-        if let raw = infoDictionary?[key] as? NSNumber {
-            return raw.boolValue
-        }
-
-        return nil
-    }
-
     public static func normalizedTurnURIs(_ uris: [String]) -> [String] {
         var seen = Set<String>()
         return uris
@@ -89,20 +58,5 @@ extension SkyBridgeServerConfig {
             }
         }
         return "skybridge-client-v1"
-    }
-
-    public static func staticTURNFallbackAllowed(
-        environment: [String: String] = ProcessInfo.processInfo.environment,
-        infoDictionary: [String: Any]? = Bundle.main.infoDictionary
-    ) -> Bool {
-        booleanValue(
-            for: "SKYBRIDGE_ALLOW_STATIC_TURN_FALLBACK",
-            environment: environment,
-            infoDictionary: infoDictionary
-        ) ?? false
-    }
-
-    public static var allowStaticTURNFallback: Bool {
-        staticTURNFallbackAllowed()
     }
 }

@@ -22,7 +22,6 @@ public final class PairingTrustApprovalService: ObservableObject {
         public let id: UUID
         public let peerEndpoint: String
         public let declaredDeviceId: String
-        public let policyBindingKey: String?
         public let displayName: String
         public let model: String?
         public let platform: String?
@@ -34,7 +33,6 @@ public final class PairingTrustApprovalService: ObservableObject {
             id: UUID = UUID(),
             peerEndpoint: String,
             declaredDeviceId: String,
-            policyBindingKey: String? = nil,
             displayName: String,
             model: String? = nil,
             platform: String? = nil,
@@ -45,7 +43,6 @@ public final class PairingTrustApprovalService: ObservableObject {
             self.id = id
             self.peerEndpoint = peerEndpoint
             self.declaredDeviceId = declaredDeviceId
-            self.policyBindingKey = policyBindingKey
             self.displayName = displayName
             self.model = model
             self.platform = platform
@@ -87,24 +84,6 @@ public final class PairingTrustApprovalService: ObservableObject {
         policyByDeviceId = Self.loadPolicy()
         logger.info("🔐 PairingTrustApprovalService initialized")
     }
-
-    public nonisolated static func policyBindingKey(
-        declaredDeviceId: String,
-        algorithmRawValue: String,
-        protocolPublicKeyFingerprint: String
-    ) -> String? {
-        let normalizedDeviceId = declaredDeviceId.trimmingCharacters(in: .whitespacesAndNewlines)
-        let normalizedAlgorithm = algorithmRawValue.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
-        let normalizedFingerprint = protocolPublicKeyFingerprint
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-        guard !normalizedDeviceId.isEmpty,
-              !normalizedAlgorithm.isEmpty,
-              !normalizedFingerprint.isEmpty else {
-            return nil
-        }
-        return "\(normalizedDeviceId)|\(normalizedAlgorithm)|\(normalizedFingerprint)"
-    }
     
     private static func loadPolicy() -> [String: String] {
         Self.policyStore.load() ?? [:]
@@ -116,17 +95,10 @@ public final class PairingTrustApprovalService: ObservableObject {
     
     /// Clear persisted policy for a device (used when user removes trust).
     public func clearPolicy(for declaredDeviceId: String) {
-        let trimmedDeviceId = declaredDeviceId.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedDeviceId.isEmpty else { return }
-        let keysToRemove = policyByDeviceId.keys.filter {
-            $0 == trimmedDeviceId || $0.hasPrefix("\(trimmedDeviceId)|")
+        if policyByDeviceId.removeValue(forKey: declaredDeviceId) != nil {
+            savePolicy()
+            logger.info("🔓 Cleared pairing trust policy for deviceId=\(declaredDeviceId, privacy: .public)")
         }
-        guard !keysToRemove.isEmpty else { return }
-        for key in keysToRemove {
-            policyByDeviceId.removeValue(forKey: key)
-        }
-        savePolicy()
-        logger.info("🔓 Cleared pairing trust policy for deviceId=\(trimmedDeviceId, privacy: .public)")
     }
     
     /// Ask the user to approve a pairing/trust request, or return immediately if a policy exists.
@@ -137,9 +109,7 @@ public final class PairingTrustApprovalService: ObservableObject {
         }
 
         let deviceId = request.declaredDeviceId
-        if let bindingKey = request.policyBindingKey,
-           let raw = policyByDeviceId[bindingKey],
-           let policy = Decision(rawValue: raw) {
+        if let raw = policyByDeviceId[deviceId], let policy = Decision(rawValue: raw) {
             switch policy {
             case .alwaysAllow, .reject:
                 return policy
@@ -147,11 +117,7 @@ public final class PairingTrustApprovalService: ObservableObject {
                 break
             }
         }
-
-        if let raw = policyByDeviceId[deviceId], let policy = Decision(rawValue: raw), policy == .reject {
-            return .reject
-        }
-
+        
         // Only one prompt at a time (keep first to avoid UI spam).
         if pendingRequest != nil {
             logger.warning("Pairing request ignored because another prompt is pending. deviceId=\(deviceId, privacy: .public)")
@@ -196,14 +162,8 @@ public final class PairingTrustApprovalService: ObservableObject {
 
     /// Resolve a pending request from UI.
     public func resolve(_ request: Request, decision: Decision) {
-        if decision == .reject {
+        if decision == .alwaysAllow || decision == .reject {
             policyByDeviceId[request.declaredDeviceId] = decision.rawValue
-            if let bindingKey = request.policyBindingKey {
-                policyByDeviceId[bindingKey] = decision.rawValue
-            }
-            savePolicy()
-        } else if decision == .alwaysAllow, let bindingKey = request.policyBindingKey {
-            policyByDeviceId[bindingKey] = decision.rawValue
             savePolicy()
         }
         

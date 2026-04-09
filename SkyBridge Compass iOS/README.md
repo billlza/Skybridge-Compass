@@ -4,13 +4,13 @@ SkyBridge Compass 的 iOS 版本 - 跨平台设备管理与远程控制应用
 
 ## 项目概述
 
-这是 SkyBridge Compass Pro 的 iOS 版本，和 macOS 端共享核心协议契约；已验证能力与实验性能力会按路径分别标注，避免把所有链路都描述成同一安全/鲁棒性水位。当前支持：
+这是 SkyBridge Compass Pro 的 iOS 移植版本，与 macOS 版本完全兼容，支持：
 
 - **后量子密码学 (PQC)** 加密握手和通信
 - **跨平台 P2P 连接**：iOS ↔ macOS ↔ 其他设备
 - **设备发现与管理**
 - **远程桌面查看与控制**（触摸优化）
-- **安全文件传输**（适用于已认证的 P2P / WebRTC 路径；兼容链路需额外验证）
+- **安全文件传输**
 - **跨设备剪贴板同步**
 - **CloudKit 同步**
 - **iOS Widget 支持**
@@ -109,12 +109,7 @@ macOS 端已经有 `TrustSyncService/TrustRecord`；iOS 端目前还没有完整
 - 客户端通过 `/api/turn/credentials` 获取短期 TURN 凭据（带本机 `X-Device-Id` 标识）。
 - iOS 端会把服务端返回的 **多个 TURN URI** 全量注入 ICE（不再只取单个 URI）。
 - 生产模式默认要求服务端返回 `mode=shared_secret_hmac`。
-- 客户端默认 **fail-closed** 为 STUN-only；只有显式设置 `SKYBRIDGE_ALLOW_STATIC_TURN_FALLBACK=true` 才允许本地静态 TURN 应急回滚。
-
-### 局域网二维码策略
-
-- 新版局域网配对二维码会附带设备侧签名，扫码端仅在签名校验通过后才允许自动连接。
-- 旧版未签名二维码仍可被识别，但会被当作 **未认证引导** 并阻止自动连接；建议让对方升级后重新生成。
+- 若服务端不可用且本地未配置回退凭据，将自动降级 STUN-only（不在客户端硬编码长期密码）。
 
 ### 数据同步
 - CloudKit 同步设备列表和信任关系

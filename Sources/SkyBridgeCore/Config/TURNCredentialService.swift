@@ -80,7 +80,6 @@ public actor TURNCredentialService {
         sessionID: String,
         turnAdmissionLease: SignalServerClient.TurnAdmissionLease?
     ) async -> TURNCredentials {
-        let allowStaticTURNFallback = SkyBridgeServerConfig.allowStaticTURNFallback
         if let cached = cachedCredentialsBySessionID[sessionID],
            cached.credentials.isValid(buffer: expirationBuffer) {
             logger.debug("📦 使用缓存的 TURN 凭据 session=\(sessionID, privacy: .public)")
@@ -88,10 +87,8 @@ public actor TURNCredentialService {
         }
 
         guard let turnAdmissionLease else {
-            logger.warning(
-                "⚠️ 缺少 TURN admission lease，降级为\(allowStaticTURNFallback ? "显式允许的静态 TURN/空凭据" : "STUN-only")"
-            )
-            return fallbackCredentials(allowStaticTURN: allowStaticTURNFallback)
+            logger.warning("⚠️ 缺少 TURN admission lease，降级为静态/空凭据")
+            return fallbackCredentials()
         }
 
         let trimmedToken = turnAdmissionLease.token.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -103,7 +100,7 @@ public actor TURNCredentialService {
             if cached.credentials.isValid(buffer: 0) {
                 return cached.credentials
             }
-            return fallbackCredentials(allowStaticTURN: allowStaticTURNFallback)
+            return fallbackCredentials(allowStaticTURN: false)
         }
 
         do {
@@ -122,10 +119,8 @@ public actor TURNCredentialService {
                 )
                 return cached.credentials
             }
-            logger.warning(
-                "⚠️ 动态 TURN 凭据获取失败，降级为\(allowStaticTURNFallback ? "显式允许的静态 TURN/空凭据" : "STUN-only"): \(error.localizedDescription, privacy: .public)"
-            )
-            return fallbackCredentials(allowStaticTURN: allowStaticTURNFallback)
+            logger.warning("⚠️ 动态 TURN 凭据获取失败，降级为 STUN-only: \(error.localizedDescription, privacy: .public)")
+            return fallbackCredentials(allowStaticTURN: false)
         }
     }
 
@@ -231,28 +226,19 @@ public actor TURNCredentialService {
         }
     }
 
-    static func resolvedFallbackCredentials(
-        allowStaticTURN: Bool,
-        environment: [String: String] = ProcessInfo.processInfo.environment,
-        turnURLs: [String] = SkyBridgeServerConfig.turnURLs,
-        now: Date = Date()
-    ) -> TURNCredentials {
-        let expiresAt = now.addingTimeInterval(3600)
-
+    private func fallbackCredentials(allowStaticTURN: Bool = true) -> TURNCredentials {
         guard allowStaticTURN else {
             return TURNCredentials(
                 username: "",
                 password: "",
                 ttl: 3600,
                 uris: [],
-                expiresAt: expiresAt
+                expiresAt: Date().addingTimeInterval(3600)
             )
         }
 
-        let username = (environment["SKYBRIDGE_TURN_USERNAME"] ?? SkyBridgeServerConfig.turnUsername)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let password = (environment["SKYBRIDGE_TURN_PASSWORD"] ?? SkyBridgeServerConfig.turnPassword)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let username = SkyBridgeServerConfig.turnUsername.trimmingCharacters(in: .whitespacesAndNewlines)
+        let password = SkyBridgeServerConfig.turnPassword.trimmingCharacters(in: .whitespacesAndNewlines)
 
         guard !username.isEmpty, !password.isEmpty else {
             return TURNCredentials(
@@ -260,7 +246,7 @@ public actor TURNCredentialService {
                 password: "",
                 ttl: 3600,
                 uris: [],
-                expiresAt: expiresAt
+                expiresAt: Date().addingTimeInterval(3600)
             )
         }
 
@@ -268,13 +254,9 @@ public actor TURNCredentialService {
             username: username,
             password: password,
             ttl: 3600,
-            uris: turnURLs,
-            expiresAt: expiresAt
+            uris: SkyBridgeServerConfig.turnURLs,
+            expiresAt: Date().addingTimeInterval(3600)
         )
-    }
-
-    private func fallbackCredentials(allowStaticTURN: Bool) -> TURNCredentials {
-        Self.resolvedFallbackCredentials(allowStaticTURN: allowStaticTURN)
     }
 }
 

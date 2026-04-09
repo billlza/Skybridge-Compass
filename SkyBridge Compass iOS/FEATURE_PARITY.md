@@ -12,7 +12,7 @@
 | 设备发现（Bonjour/NWBrowser） | ✅ | ✅ | iOS 模拟器对本地网络发现限制更强，建议真机测试 |
 | PQC 握手 | ✅ | ✅ | iOS 使用 `CryptoProviderFactory`（Apple PQC 条件编译/Classic fallback） |
 | P2P 安全通道 | ✅ | ✅ | iOS 侧实现以 Network.framework 为主，细节与 macOS 可能有差异 |
-| 文件传输 | ✅ | ✅ | 安全语义以已认证的 P2P / WebRTC 路径为准；兼容链路必须与 macOS 端的 trust/security gate、恢复语义一起验证 |
+| 文件传输 | ✅ | ✅ | iOS 已实现分块发送/接收/校验；需确认与 macOS 端协议完全一致 |
 | 远程桌面 | ✅ | ⚠️ | macOS 端包含 VNC/或更完整的远控；iOS 端是 viewer/自定义流协议，互通需进一步验证 |
 | 剪贴板同步 | ✅ | ⚠️ | iOS 有 `ClipboardManager`/相关模块，但跨端互通策略需联调确认 |
 | CloudKit 同步 | ✅ | ⚠️ | iOS 默认关闭（避免未开 iCloud 能力时崩溃/卡死） |
@@ -22,7 +22,7 @@
 
 ## iOS 发行版建议的“功能开关”策略
 
-- **默认开启**：登录/游客、设备发现、PQC 握手、基础 P2P、文件传输（仅限已验证的安全链路）
+- **默认开启**：登录/游客、设备发现、PQC 握手、基础 P2P、文件传输（若已验证与 macOS 协议一致）
 - **默认 Beta（可在设置页标注）**：远程桌面、剪贴板同步、跨网络(STUN/Relay)、CloudKit
 
 ## 发行前必做清单（iOS）
@@ -34,3 +34,4 @@
 - **功能一致性**：对照 macOS 端做一次“互通冒烟测试”
   - 发现 → 连接 → PQC 验证 → 文件传输（双向）
   - 远程桌面（如承诺给用户）/否则 UI 标注 Beta
+

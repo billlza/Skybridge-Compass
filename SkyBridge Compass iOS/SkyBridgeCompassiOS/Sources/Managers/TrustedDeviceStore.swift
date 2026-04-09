@@ -255,7 +255,11 @@ public final class TrustedDeviceStore: ObservableObject {
             return false
         }
 
-        let stableCurrentDeviceId = normalizedTrustedDeviceIdentifier(preferredCurrentDeviceId)
+        let normalizedPreferredCurrentDeviceId = preferredCurrentDeviceId?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let stableCurrentDeviceId = normalizedPreferredCurrentDeviceId.flatMap {
+            PeerIdentityAliasResolver.persistentDeviceId(from: $0) ?? ($0.isEmpty ? nil : $0)
+        }
 
         var candidates = Set(PeerIdentityAliasResolver.lookupCandidates(for: device.id))
         candidates.formUnion(PeerIdentityAliasResolver.aliasKeys(for: device))
@@ -267,16 +271,41 @@ public final class TrustedDeviceStore: ObservableObject {
             return false
         }
 
-        return upsertAuthoritativeTrustedDevice(
-            preferredRecordId: device.id,
-            candidateAliases: candidates,
-            name: device.name,
-            platform: device.platform,
-            ipAddress: device.ipAddress,
-            protocolSigningAlgorithm: normalizedAlgorithm,
-            protocolPublicKeyFingerprint: normalizedFingerprint,
-            preferredCurrentDeviceId: stableCurrentDeviceId
+        if let idx = trustedDevices.firstIndex(where: { matches($0, candidates: candidates) }) {
+            trustedDevices[idx].name = device.name
+            trustedDevices[idx].platform = device.platform
+            trustedDevices[idx].ipAddress = device.ipAddress
+            trustedDevices[idx].protocolSigningAlgorithm = normalizedAlgorithm
+            trustedDevices[idx].protocolPublicKeyFingerprint = normalizedFingerprint
+            if let stableCurrentDeviceId {
+                trustedDevices[idx].currentDeviceId = stableCurrentDeviceId
+            }
+            trustedDevices[idx].knownDeviceIds = mergedKnownDeviceIds(
+                existing: trustedDevices[idx].knownDeviceIds,
+                adding: Array(candidates)
+            )
+            save()
+            return true
+        }
+
+        guard let stableCurrentDeviceId else {
+            return false
+        }
+
+        trustedDevices.append(
+            TrustedDevice(
+                id: device.id,
+                name: device.name,
+                platform: device.platform,
+                ipAddress: device.ipAddress,
+                protocolSigningAlgorithm: normalizedAlgorithm,
+                protocolPublicKeyFingerprint: normalizedFingerprint,
+                currentDeviceId: stableCurrentDeviceId,
+                knownDeviceIds: Array(candidates).sorted()
+            )
         )
+        save()
+        return true
     }
 
     public func upsertCurrentPathAuthority(
@@ -288,28 +317,35 @@ public final class TrustedDeviceStore: ObservableObject {
         protocolPublicKeyFingerprint: String
     ) {
         guard let normalizedFingerprint = normalizedFingerprint(protocolPublicKeyFingerprint) else { return }
-        let normalizedAlgorithm = protocolSigningAlgorithm.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalizedAlgorithm.isEmpty else { return }
-        guard let stableCurrentDeviceId = normalizedTrustedDeviceIdentifier(deviceId) else { return }
-
-        var candidates = Set(PeerIdentityAliasResolver.lookupCandidates(for: stableCurrentDeviceId))
-        if let ipAddress {
-            candidates.formUnion(PeerIdentityAliasResolver.lookupCandidates(for: ipAddress))
+        if let idx = trustedDevices.firstIndex(where: { $0.protocolPublicKeyFingerprint == normalizedFingerprint }) {
+            trustedDevices[idx].name = name.isEmpty ? trustedDevices[idx].name : name
+            if platform != .unknown {
+                trustedDevices[idx].platform = platform
+            }
+            if let ipAddress, !ipAddress.isEmpty {
+                trustedDevices[idx].ipAddress = ipAddress
+            }
+            trustedDevices[idx].protocolSigningAlgorithm = protocolSigningAlgorithm
+            trustedDevices[idx].protocolPublicKeyFingerprint = normalizedFingerprint
+            trustedDevices[idx].currentDeviceId = deviceId
+            trustedDevices[idx].knownDeviceIds = mergedKnownDeviceIds(existing: trustedDevices[idx].knownDeviceIds, adding: deviceId)
+            trustedDevices[idx].currentPathLifecycleState = .active
+        } else {
+            trustedDevices.append(
+                TrustedDevice(
+                    id: deviceId,
+                    name: name,
+                    platform: platform,
+                    ipAddress: ipAddress,
+                    protocolSigningAlgorithm: protocolSigningAlgorithm,
+                    protocolPublicKeyFingerprint: normalizedFingerprint,
+                    currentDeviceId: deviceId,
+                    knownDeviceIds: [deviceId],
+                    currentPathLifecycleState: .active
+                )
+            )
         }
-        if candidates.isEmpty {
-            candidates.insert(stableCurrentDeviceId.lowercased())
-        }
-
-        _ = upsertAuthoritativeTrustedDevice(
-            preferredRecordId: stableCurrentDeviceId,
-            candidateAliases: candidates,
-            name: name,
-            platform: platform,
-            ipAddress: ipAddress,
-            protocolSigningAlgorithm: normalizedAlgorithm,
-            protocolPublicKeyFingerprint: normalizedFingerprint,
-            preferredCurrentDeviceId: stableCurrentDeviceId
-        )
+        save()
     }
 
     /// 合并 CloudKit 同步的可信设备（并集策略：不自动删除本地设备）
@@ -413,190 +449,6 @@ public final class TrustedDeviceStore: ObservableObject {
             .replacingOccurrences(of: " ", with: "")
             .replacingOccurrences(of: "-", with: "")
             .replacingOccurrences(of: "_", with: "")
-    }
-
-    @discardableResult
-    private func upsertAuthoritativeTrustedDevice(
-        preferredRecordId: String,
-        candidateAliases: Set<String>,
-        name: String,
-        platform: DevicePlatform,
-        ipAddress: String?,
-        protocolSigningAlgorithm: String,
-        protocolPublicKeyFingerprint: String,
-        preferredCurrentDeviceId: String?
-    ) -> Bool {
-        let matchingIndices = trustedDevices.indices.filter { index in
-            let record = trustedDevices[index]
-            if matches(record, candidates: candidateAliases) {
-                return true
-            }
-            if let preferredCurrentDeviceId,
-               normalizedTrustedDeviceIdentifier(resolvedCurrentDeviceId(for: record)) == preferredCurrentDeviceId {
-                return true
-            }
-            return normalizedFingerprint(record.protocolPublicKeyFingerprint) == protocolPublicKeyFingerprint
-        }
-
-        let primaryIndex = preferredPrimaryAuthorityIndex(
-            matchingIndices: matchingIndices,
-            preferredCurrentDeviceId: preferredCurrentDeviceId,
-            preferredFingerprint: protocolPublicKeyFingerprint
-        )
-
-        let canonicalCurrentDeviceId =
-            preferredCurrentDeviceId
-            ?? primaryIndex.flatMap { normalizedTrustedDeviceIdentifier(resolvedCurrentDeviceId(for: trustedDevices[$0])) }
-            ?? normalizedTrustedDeviceIdentifier(preferredRecordId)
-
-        guard let canonicalCurrentDeviceId else {
-            return false
-        }
-
-        let knownDeviceIds = Array(candidateAliases.union([canonicalCurrentDeviceId])).sorted()
-
-        if let primaryIndex {
-            var mergedRecord = trustedDevices[primaryIndex]
-            for index in matchingIndices where index != primaryIndex {
-                mergedRecord = mergedTrustedDeviceRecord(mergedRecord, with: trustedDevices[index])
-            }
-            if !name.isEmpty {
-                mergedRecord.name = name
-            }
-            if platform != .unknown {
-                mergedRecord.platform = platform
-            }
-            if let ipAddress, !ipAddress.isEmpty {
-                mergedRecord.ipAddress = ipAddress
-            }
-            mergedRecord.protocolSigningAlgorithm = protocolSigningAlgorithm
-            mergedRecord.protocolPublicKeyFingerprint = protocolPublicKeyFingerprint
-            mergedRecord.currentDeviceId = canonicalCurrentDeviceId
-            mergedRecord.knownDeviceIds = mergedKnownDeviceIds(
-                existing: mergedRecord.knownDeviceIds,
-                adding: knownDeviceIds
-            )
-            mergedRecord.currentPathLifecycleState = CurrentPathLifecycleState.active
-            trustedDevices[primaryIndex] = mergedRecord
-
-            for index in matchingIndices.sorted(by: >) where index != primaryIndex {
-                trustedDevices.remove(at: index)
-            }
-        } else {
-            trustedDevices.append(
-                TrustedDevice(
-                    id: canonicalCurrentDeviceId,
-                    name: name,
-                    platform: platform,
-                    ipAddress: ipAddress,
-                    protocolSigningAlgorithm: protocolSigningAlgorithm,
-                    protocolPublicKeyFingerprint: protocolPublicKeyFingerprint,
-                    currentDeviceId: canonicalCurrentDeviceId,
-                    knownDeviceIds: knownDeviceIds,
-                    currentPathLifecycleState: CurrentPathLifecycleState.active
-                )
-            )
-        }
-
-        save()
-        return true
-    }
-
-    private func preferredPrimaryAuthorityIndex(
-        matchingIndices: [Int],
-        preferredCurrentDeviceId: String?,
-        preferredFingerprint: String
-    ) -> Int? {
-        matchingIndices.sorted { lhs, rhs in
-            let lhsRecord = trustedDevices[lhs]
-            let rhsRecord = trustedDevices[rhs]
-
-            let lhsIdMatchesPreferred = normalizedTrustedDeviceIdentifier(lhsRecord.id) == preferredCurrentDeviceId
-            let rhsIdMatchesPreferred = normalizedTrustedDeviceIdentifier(rhsRecord.id) == preferredCurrentDeviceId
-            if lhsIdMatchesPreferred != rhsIdMatchesPreferred {
-                return lhsIdMatchesPreferred && !rhsIdMatchesPreferred
-            }
-
-            let lhsCurrentMatchesPreferred =
-                normalizedTrustedDeviceIdentifier(resolvedCurrentDeviceId(for: lhsRecord)) == preferredCurrentDeviceId
-            let rhsCurrentMatchesPreferred =
-                normalizedTrustedDeviceIdentifier(resolvedCurrentDeviceId(for: rhsRecord)) == preferredCurrentDeviceId
-            if lhsCurrentMatchesPreferred != rhsCurrentMatchesPreferred {
-                return lhsCurrentMatchesPreferred && !rhsCurrentMatchesPreferred
-            }
-
-            let lhsFingerprintMatches = normalizedFingerprint(lhsRecord.protocolPublicKeyFingerprint) == preferredFingerprint
-            let rhsFingerprintMatches = normalizedFingerprint(rhsRecord.protocolPublicKeyFingerprint) == preferredFingerprint
-            if lhsFingerprintMatches != rhsFingerprintMatches {
-                return lhsFingerprintMatches && !rhsFingerprintMatches
-            }
-
-            let lhsHasAuthority = !(lhsRecord.protocolSigningAlgorithm?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .isEmpty ?? true)
-            let rhsHasAuthority = !(rhsRecord.protocolSigningAlgorithm?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .isEmpty ?? true)
-            if lhsHasAuthority != rhsHasAuthority {
-                return lhsHasAuthority && !rhsHasAuthority
-            }
-
-            if lhsRecord.addedAt != rhsRecord.addedAt {
-                return lhsRecord.addedAt < rhsRecord.addedAt
-            }
-            return lhsRecord.id < rhsRecord.id
-        }.first
-    }
-
-    private func mergedTrustedDeviceRecord(
-        _ primary: TrustedDevice,
-        with duplicate: TrustedDevice
-    ) -> TrustedDevice {
-        var merged = primary
-
-        if merged.name.isEmpty, !duplicate.name.isEmpty {
-            merged.name = duplicate.name
-        }
-        if merged.platform == .unknown, duplicate.platform != .unknown {
-            merged.platform = duplicate.platform
-        }
-        if (merged.ipAddress?.isEmpty ?? true), let duplicateIPAddress = duplicate.ipAddress, !duplicateIPAddress.isEmpty {
-            merged.ipAddress = duplicateIPAddress
-        }
-        if merged.protocolSigningAlgorithm?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true,
-           let duplicateAlgorithm = duplicate.protocolSigningAlgorithm?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !duplicateAlgorithm.isEmpty {
-            merged.protocolSigningAlgorithm = duplicateAlgorithm
-        }
-        if merged.protocolPublicKeyFingerprint == nil,
-           let duplicateFingerprint = normalizedFingerprint(duplicate.protocolPublicKeyFingerprint) {
-            merged.protocolPublicKeyFingerprint = duplicateFingerprint
-        }
-        if merged.currentDeviceId?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true,
-           let duplicateCurrentDeviceId = normalizedTrustedDeviceIdentifier(resolvedCurrentDeviceId(for: duplicate)) {
-            merged.currentDeviceId = duplicateCurrentDeviceId
-        }
-        if duplicate.addedAt < merged.addedAt {
-            merged.addedAt = duplicate.addedAt
-        }
-
-        var combinedKnownDeviceIds = mergedKnownDeviceIds(existing: merged.knownDeviceIds, adding: duplicate.id)
-        if let duplicateCurrentDeviceId = duplicate.currentDeviceId {
-            combinedKnownDeviceIds = mergedKnownDeviceIds(existing: combinedKnownDeviceIds, adding: duplicateCurrentDeviceId)
-        }
-        if let duplicateKnownDeviceIds = duplicate.knownDeviceIds {
-            combinedKnownDeviceIds = mergedKnownDeviceIds(existing: combinedKnownDeviceIds, adding: duplicateKnownDeviceIds)
-        }
-        merged.knownDeviceIds = combinedKnownDeviceIds
-
-        return merged
-    }
-
-    private func normalizedTrustedDeviceIdentifier(_ raw: String?) -> String? {
-        guard let raw else { return nil }
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        return PeerIdentityAliasResolver.persistentDeviceId(from: trimmed) ?? trimmed
     }
 
     private func mergedKnownDeviceIds(existing: [String]?, adding newValue: String) -> [String] {

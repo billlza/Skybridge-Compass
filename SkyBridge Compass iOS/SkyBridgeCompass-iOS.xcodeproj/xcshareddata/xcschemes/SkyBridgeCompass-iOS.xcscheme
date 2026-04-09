@@ -59,28 +59,21 @@
       <MacroExpansion>
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "225DF6CFF206BFB832FBB9A7"
-            BuildableName = "SkyBridgeCompass-Widgets.appex"
-            BlueprintName = "SkyBridgeCompass-Widgets"
+            BlueprintIdentifier = "537E084BA6452ABCF8886C45"
+            BuildableName = "SkyBridgeCompass-iOS.app"
+            BlueprintName = "SkyBridgeCompass-iOS"
             ReferencedContainer = "container:SkyBridgeCompass-iOS.xcodeproj">
          </BuildableReference>
       </MacroExpansion>
-      <Testables>
-         <TestableReference
-            skipped = "NO"
-            parallelizable = "NO">
-            <BuildableReference
-               BuildableIdentifier = "primary"
-               BlueprintIdentifier = "C67CFB04F930238C86B4F49F"
-               BuildableName = "SkyBridgeCompassiOSTests.xctest"
-               BlueprintName = "SkyBridgeCompassiOSTests"
-               ReferencedContainer = "container:SkyBridgeCompass-iOS.xcodeproj">
-            </BuildableReference>
-         </TestableReference>
-      </Testables>
+      <TestPlans>
+         <TestPlanReference
+            reference = "container:SkyBridgeCompass-iOS.xcodeproj/xcshareddata/xctestplans/SkyBridgeCompass-iOS-Shared.xctestplan"
+            default = "YES">
+         </TestPlanReference>
+      </TestPlans>
    </TestAction>
    <LaunchAction
-      buildConfiguration = "Release"
+      buildConfiguration = "Debug"
       selectedDebuggerIdentifier = ""
       selectedLauncherIdentifier = "Xcode.IDEFoundation.Launcher.PosixSpawn"
       launchStyle = "0"
@@ -102,6 +95,15 @@
             ReferencedContainer = "container:SkyBridgeCompass-iOS.xcodeproj">
          </BuildableReference>
       </RemoteRunnable>
+      <MacroExpansion>
+         <BuildableReference
+            BuildableIdentifier = "primary"
+            BlueprintIdentifier = "537E084BA6452ABCF8886C45"
+            BuildableName = "SkyBridgeCompass-iOS.app"
+            BlueprintName = "SkyBridgeCompass-iOS"
+            ReferencedContainer = "container:SkyBridgeCompass-iOS.xcodeproj">
+         </BuildableReference>
+      </MacroExpansion>
    </LaunchAction>
    <ProfileAction
       buildConfiguration = "Release"
@@ -113,9 +115,9 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "225DF6CFF206BFB832FBB9A7"
-            BuildableName = "SkyBridgeCompass-Widgets.appex"
-            BlueprintName = "SkyBridgeCompass-Widgets"
+            BlueprintIdentifier = "537E084BA6452ABCF8886C45"
+            BuildableName = "SkyBridgeCompass-iOS.app"
+            BlueprintName = "SkyBridgeCompass-iOS"
             ReferencedContainer = "container:SkyBridgeCompass-iOS.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>

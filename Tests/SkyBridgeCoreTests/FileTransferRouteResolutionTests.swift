@@ -40,22 +40,4 @@ final class FileTransferRouteResolutionTests: XCTestCase {
         XCTAssertEqual(selected.port, 9443)
         XCTAssertEqual(selected.routeSource, "presence:inbound")
     }
-
-    func testResolveActivePeerRoutesFailsClosedWithoutExplicitTransferPort() async throws {
-        let manager = FileTransferManager()
-        let peerId = "route-missing-\(UUID().uuidString)"
-        defer { ConnectionPresenceService.shared.markDisconnected(peerId: peerId) }
-        ServiceEndpointRegistry.shared.setFileTransferPort(nil)
-
-        ConnectionPresenceService.shared.markConnected(
-            peerId: peerId,
-            displayName: "Compatibility Peer",
-            address: "10.0.0.9",
-            cryptoKind: "Classic",
-            suite: "X25519"
-        )
-
-        let routes = await manager.resolveActivePeerRoutes()
-        XCTAssertFalse(routes.contains(where: { $0.deviceId == peerId }))
-    }
 }

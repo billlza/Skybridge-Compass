@@ -1155,11 +1155,6 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
     }
 
     @MainActor
-    static func dismantleUIView(_ uiView: MetalVideoContainerView, coordinator: Coordinator) {
-        coordinator.teardown(view: uiView)
-    }
-
-    @MainActor
     func updateUIView(_ uiView: MetalVideoContainerView, context: Context) {
         // 诊断日志：追踪 updateUIView 调用
         if context.coordinator.updateCallCount % 50 == 0 {
@@ -1225,13 +1220,6 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
             attach(to: view)
             renderer.flush(removeDisplayedImage: removeDisplayedImage, in: view.metalView)
         }
-
-        func teardown(view: MetalVideoContainerView) {
-            if attachedView === view {
-                attachedView = nil
-            }
-            renderer.teardown(view: view.metalView)
-        }
     }
 
     final class MetalVideoContainerView: UIView {
@@ -1261,11 +1249,10 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
             metalView.device = renderer.device
             metalView.delegate = renderer
             metalView.framebufferOnly = false
-            // Remote desktop frames arrive event-by-event rather than from a game loop.
-            // Drive MTKView explicitly so we only acquire drawables when a new frame or
-            // a clear is actually needed, which avoids stale drawable reuse after fallback.
+            // Use VSync-driven continuous draws so later frames can't be lost
+            // when multiple setNeedsDisplay calls get coalesced during decode.
             metalView.enableSetNeedsDisplay = false
-            metalView.isPaused = true
+            metalView.isPaused = false
             metalView.preferredFramesPerSecond = 60
             metalView.isOpaque = true
             metalView.backgroundColor = .black
@@ -1281,8 +1268,6 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
         private var currentFrame: DecodedPixelBufferFrame?
         private var currentFrameVersion: UInt64 = 0
         private var lastDisplayedFrameVersion: UInt64 = 0
-        private var lastSubmittedFrameVersion: UInt64 = 0
-        private var renderEpoch: UInt64 = 0
         private var needsClear = true
         private let inFlightSemaphore = DispatchSemaphore(value: 2)
         var onFrameDisplayed: (@Sendable (CMTime) -> Void)?
@@ -1323,8 +1308,10 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
                 height: max(view.bounds.height * drawableScale, 1)
             )
 
-            // 显式绘制模式：新帧到达时立即触发一次 draw(in:)，避免持续 60fps 轮询。
-            view.draw()
+            // 修复：显式触发 draw(in:) 调用，确保新帧被立即渲染
+            // MTKView 在 isPaused=false 时会定期调用 draw(in:)，但可能错过最新帧
+            // 通过设置 needsDisplay，确保新帧到达时立即触发渲染
+            view.setNeedsDisplay()
         }
 
         @MainActor
@@ -1334,22 +1321,9 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
                 currentFrame = nil
                 currentFrameVersion = 0
                 lastDisplayedFrameVersion = 0
-                lastSubmittedFrameVersion = 0
-                renderEpoch &+= 1
                 needsClear = true
                 stateLock.unlock()
-
-                guard view.bounds.width > 0, view.bounds.height > 0 else { return }
-                view.draw()
             }
-        }
-
-        @MainActor
-        func teardown(view: MTKView) {
-            flush(removeDisplayedImage: true, in: view)
-            view.isPaused = true
-            view.delegate = nil
-            view.releaseDrawables()
         }
 
         func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
@@ -1366,16 +1340,12 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
             let frame: DecodedPixelBufferFrame?
             let frameVersion: UInt64
             let lastDisplayedVersion: UInt64
-            let lastSubmittedVersion: UInt64
             let shouldClear: Bool
-            let renderEpoch: UInt64
             stateLock.lock()
             frame = currentFrame
             frameVersion = currentFrameVersion
             lastDisplayedVersion = lastDisplayedFrameVersion
-            lastSubmittedVersion = lastSubmittedFrameVersion
             shouldClear = needsClear
-            renderEpoch = self.renderEpoch
             stateLock.unlock()
 
             // 调试日志：降低日志频率
@@ -1386,15 +1356,6 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
             guard shouldClear || frame != nil else {
                 return
             }
-
-            if frame != nil {
-                guard frameVersion != 0,
-                      frameVersion != lastDisplayedVersion,
-                      frameVersion != lastSubmittedVersion else {
-                    return
-                }
-            }
-
             guard inFlightSemaphore.wait(timeout: .now() + .milliseconds(50)) == .success else {
                 return
             }
@@ -1404,13 +1365,13 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
                     inFlightSemaphore.signal()
                 }
             }
-            guard let commandQueue,
+            guard let drawable = view.currentDrawable,
+                  let commandQueue,
                   let commandBuffer = commandQueue.makeCommandBuffer() else {
                 return
             }
 
             guard let frame, let ciContext else {
-                guard let drawable = view.currentDrawable else { return }
                 guard shouldClear else { return }
                 if let passDescriptor = view.currentRenderPassDescriptor,
                    let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: passDescriptor) {
@@ -1428,19 +1389,12 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
                 return
             }
 
-            guard let drawable = view.currentDrawable else {
+            // 如果帧版本与已显示的版本相同，跳过渲染（正常情况，避免重复渲染）
+            guard frameVersion != 0, frameVersion != lastDisplayedVersion else {
                 return
             }
 
             print("[Metal] ✅ rendering frame version=\(frameVersion)")  // 保留关键渲染日志
-
-            stateLock.lock()
-            if self.renderEpoch != renderEpoch {
-                stateLock.unlock()
-                return
-            }
-            lastSubmittedFrameVersion = frameVersion
-            stateLock.unlock()
 
             let image = CIImage(cvPixelBuffer: frame.pixelBuffer)
             let drawableBounds = CGRect(
@@ -1466,19 +1420,10 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
             let presentationTimeStamp = frame.presentationTimeStamp
             commandBuffer.addCompletedHandler { [weak self, onFrameDisplayed, inFlightSemaphore] _ in
                 inFlightSemaphore.signal()
-                guard let self else { return }
-
-                var shouldNotifyDisplay = false
-                self.stateLock.lock()
-                if self.renderEpoch == renderEpoch {
-                    self.lastDisplayedFrameVersion = max(self.lastDisplayedFrameVersion, frameVersion)
-                    shouldNotifyDisplay = true
-                }
-                self.stateLock.unlock()
-
-                if shouldNotifyDisplay {
-                    onFrameDisplayed?(presentationTimeStamp)
-                }
+                self?.stateLock.lock()
+                self?.lastDisplayedFrameVersion = frameVersion
+                self?.stateLock.unlock()
+                onFrameDisplayed?(presentationTimeStamp)
             }
             shouldSignalSemaphoreOnExit = false
             commandBuffer.present(drawable)

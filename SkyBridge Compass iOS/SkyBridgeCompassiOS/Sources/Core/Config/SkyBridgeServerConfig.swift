@@ -8,8 +8,6 @@ import OSLog
 /// - We keep iOS network endpoints here to avoid cross-target build issues.
 @available(iOS 17.0, *)
 public enum SkyBridgeServerConfig {
-    private static let truthyConfigValues: Set<String> = ["1", "true", "yes", "on"]
-
     private static func environmentValue(_ name: String) -> String? {
         guard let raw = ProcessInfo.processInfo.environment[name] else { return nil }
         return raw.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -78,21 +76,6 @@ public enum SkyBridgeServerConfig {
     /// This is NOT a secret; it's only used to tag legitimate client traffic.
     public static var clientAPIKey: String {
         ProcessInfo.processInfo.environment["SKYBRIDGE_CLIENT_API_KEY"] ?? "skybridge-client-v1"
-    }
-
-    /// Static TURN credentials are an emergency rollback path only.
-    /// Production defaults must stay fail-closed unless this is explicitly enabled.
-    public static var allowStaticTurnFallback: Bool {
-        if let value = environmentValue("SKYBRIDGE_ALLOW_STATIC_TURN_FALLBACK") {
-            return truthyConfigValues.contains(value.lowercased())
-        }
-        if let value = Bundle.main.object(forInfoDictionaryKey: "SKYBRIDGE_ALLOW_STATIC_TURN_FALLBACK") as? Bool {
-            return value
-        }
-        if let value = Bundle.main.object(forInfoDictionaryKey: "SKYBRIDGE_ALLOW_STATIC_TURN_FALLBACK") as? String {
-            return truthyConfigValues.contains(value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
-        }
-        return false
     }
 
     /// Fetch short-lived TURN credentials (with safe fallback).
@@ -296,11 +279,8 @@ public actor TURNCredentialService {
             cachedCredentials = fresh
             return fresh
         } catch {
-            let allowStaticTURN = SkyBridgeServerConfig.allowStaticTurnFallback
-            logger.warning(
-                "⚠️ TURN credentials fetch failed, falling back to \(allowStaticTURN ? "static-or-empty TURN" : "STUN-only"). err=\(error.localizedDescription, privacy: .public)"
-            )
-            return fallbackCredentials(allowStaticTURN: allowStaticTURN)
+            logger.warning("⚠️ TURN credentials fetch failed, falling back. err=\(error.localizedDescription, privacy: .public)")
+            return fallbackCredentials()
         }
     }
 
@@ -345,19 +325,9 @@ public actor TURNCredentialService {
         )
     }
 
-    private func fallbackCredentials(allowStaticTURN: Bool) -> TURNCredentials {
-        guard allowStaticTURN else {
-            logger.warning("⚠️ Static TURN fallback is disabled; using STUN-only.")
-            return TURNCredentials(
-                username: "",
-                password: "",
-                ttl: 3600,
-                uris: [],
-                expiresAt: Date().addingTimeInterval(3600)
-            )
-        }
-
-        // Static TURN is an explicit rollback path only.
+    private func fallbackCredentials() -> TURNCredentials {
+        // Safe fallback: keep connectivity without embedding secrets.
+        // NOTE: turn password comes from env (should be empty in production builds).
         let username = (ProcessInfo.processInfo.environment["SKYBRIDGE_TURN_USERNAME"] ?? "skybridge")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let password = (ProcessInfo.processInfo.environment["SKYBRIDGE_TURN_PASSWORD"] ?? "")

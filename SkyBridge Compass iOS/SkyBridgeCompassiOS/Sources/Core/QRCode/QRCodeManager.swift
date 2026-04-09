@@ -10,7 +10,6 @@ import Foundation
 import CoreImage
 import CoreImage.CIFilterBuiltins
 import AVFoundation
-import CryptoKit
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -36,7 +35,6 @@ public struct QRCodeData: Codable, Sendable {
     public let timestamp: TimeInterval
     public let expiresAt: TimeInterval?
     public let signature: String?
-    public let signatureVersion: Int?
     public let payload: [String: String]?
     
     public init(
@@ -49,7 +47,6 @@ public struct QRCodeData: Codable, Sendable {
         timestamp: TimeInterval = Date().timeIntervalSince1970,
         expiresAt: TimeInterval? = nil,
         signature: String? = nil,
-        signatureVersion: Int? = nil,
         payload: [String: String]? = nil
     ) {
         self.type = type
@@ -61,7 +58,6 @@ public struct QRCodeData: Codable, Sendable {
         self.timestamp = timestamp
         self.expiresAt = expiresAt
         self.signature = signature
-        self.signatureVersion = signatureVersion
         self.payload = payload
     }
     
@@ -88,89 +84,6 @@ public struct QRCodeData: Codable, Sendable {
         }
         return qrData
     }
-
-    public func validateDevicePairingSecurity() -> QRCodeDevicePairingSecurity {
-        guard type == .devicePairing else {
-            return .verified
-        }
-
-        let trimmedPublicKey = publicKey?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let trimmedSignature = signature?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-
-        if trimmedPublicKey.isEmpty && trimmedSignature.isEmpty && signatureVersion == nil {
-            return .unsignedLegacy
-        }
-
-        guard signatureVersion == 1 else {
-            return .invalid("局域网二维码签名版本无效")
-        }
-        guard !trimmedPublicKey.isEmpty else {
-            return .invalid("局域网二维码缺少签名公钥")
-        }
-        guard !trimmedSignature.isEmpty else {
-            return .invalid("局域网二维码缺少签名")
-        }
-        guard let publicKeyData = Data(base64Encoded: trimmedPublicKey) else {
-            return .invalid("局域网二维码签名公钥编码无效")
-        }
-        guard let signatureData = Data(base64Encoded: trimmedSignature) else {
-            return .invalid("局域网二维码签名编码无效")
-        }
-        guard let signingPublicKey = try? Curve25519.Signing.PublicKey(rawRepresentation: publicKeyData) else {
-            return .invalid("局域网二维码签名公钥长度无效")
-        }
-        guard let canonicalPayload = try? canonicalPairingSignaturePayload() else {
-            return .invalid("局域网二维码签名载荷编码失败")
-        }
-        guard signingPublicKey.isValidSignature(signatureData, for: canonicalPayload) else {
-            return .invalid("局域网二维码签名验证失败")
-        }
-        return .verified
-    }
-
-    fileprivate func canonicalPairingSignaturePayload() throws -> Data {
-        let payload = PairingSignaturePayload(data: self)
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys]
-        return try encoder.encode(payload)
-    }
-
-    private struct PairingSignaturePayload: Encodable {
-        let type: String
-        let deviceId: String
-        let deviceName: String
-        let ipAddress: String?
-        let port: UInt16?
-        let publicKey: String
-        let timestampMs: Int64
-        let expiresAtMs: Int64?
-        let signatureVersion: Int
-        let payload: [String: String]?
-
-        init(data: QRCodeData) {
-            self.type = data.type.rawValue
-            self.deviceId = data.deviceId.precomposedStringWithCanonicalMapping
-            self.deviceName = data.deviceName.precomposedStringWithCanonicalMapping
-            self.ipAddress = data.ipAddress?.precomposedStringWithCanonicalMapping
-            self.port = data.port
-            self.publicKey = data.publicKey?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            self.timestampMs = Int64((data.timestamp * 1000).rounded())
-            if let expiresAt = data.expiresAt {
-                self.expiresAtMs = Int64((expiresAt * 1000).rounded())
-            } else {
-                self.expiresAtMs = nil
-            }
-            self.signatureVersion = data.signatureVersion ?? 1
-            self.payload = data.payload?
-                .mapValues { $0.precomposedStringWithCanonicalMapping }
-        }
-    }
-}
-
-public enum QRCodeDevicePairingSecurity: Equatable, Sendable {
-    case verified
-    case unsignedLegacy
-    case invalid(String)
 }
 
 // MARK: - QR Code Generator
@@ -179,12 +92,11 @@ public enum QRCodeDevicePairingSecurity: Equatable, Sendable {
 @available(iOS 17.0, *)
 @MainActor
 public final class QRCodeGenerator {
-
+    
     public static let shared = QRCodeGenerator()
-
-    private static let authenticatedPairingKeyTag = "CrossNetwork.CurrentPath.Authority.Ed25519"
+    
     private let context = CIContext()
-
+    
     private init() {}
     
     /// 生成二维码图像
@@ -315,71 +227,6 @@ public final class QRCodeGenerator {
             timestamp: now,
             expiresAt: now + expiresInSeconds
         )
-    }
-
-    public func createAuthenticatedPairingData(
-        deviceId: String,
-        deviceName: String,
-        ipAddress: String,
-        port: UInt16,
-        expiresInSeconds: TimeInterval = 300
-    ) throws -> QRCodeData {
-        let keychain = KeychainManager.shared
-        let signingPrivateKey: Curve25519.Signing.PrivateKey
-        let signingPublicKey: Curve25519.Signing.PublicKey
-
-        if let existingPrivateKey = keychain.loadCurve25519SigningPrivateKey(tag: Self.authenticatedPairingKeyTag),
-           let existingPublicKey = keychain.loadCurve25519SigningPublicKey(tag: Self.authenticatedPairingKeyTag) {
-            signingPrivateKey = existingPrivateKey
-            signingPublicKey = existingPublicKey
-        } else if let generated = keychain.generateCurve25519SigningKeypair(tag: Self.authenticatedPairingKeyTag) {
-            signingPrivateKey = generated.private
-            signingPublicKey = generated.public
-        } else {
-            throw QRCodePairingError.signingKeyUnavailable
-        }
-
-        let now = Date().timeIntervalSince1970
-        let publicKey = signingPublicKey.rawRepresentation.base64EncodedString()
-        let unsigned = QRCodeData(
-            type: .devicePairing,
-            deviceId: deviceId,
-            deviceName: deviceName,
-            ipAddress: ipAddress,
-            port: port,
-            publicKey: publicKey,
-            timestamp: now,
-            expiresAt: now + expiresInSeconds,
-            signature: nil,
-            signatureVersion: 1
-        )
-        let signaturePayload = try unsigned.canonicalPairingSignaturePayload()
-        let signature = try signingPrivateKey.signature(for: signaturePayload)
-
-        return QRCodeData(
-            type: unsigned.type,
-            deviceId: unsigned.deviceId,
-            deviceName: unsigned.deviceName,
-            ipAddress: unsigned.ipAddress,
-            port: unsigned.port,
-            publicKey: unsigned.publicKey,
-            timestamp: unsigned.timestamp,
-            expiresAt: unsigned.expiresAt,
-            signature: signature.base64EncodedString(),
-            signatureVersion: unsigned.signatureVersion,
-            payload: unsigned.payload
-        )
-    }
-}
-
-public enum QRCodePairingError: LocalizedError {
-    case signingKeyUnavailable
-
-    public var errorDescription: String? {
-        switch self {
-        case .signingKeyUnavailable:
-            return "无法生成局域网二维码签名密钥"
-        }
     }
 }
 
@@ -568,9 +415,7 @@ public extension QRCodeData {
             port: port,
             publicKey: item("pk"),
             timestamp: ts,
-            expiresAt: expiresAt,
-            signature: item("sig"),
-            signatureVersion: Int(item("sv") ?? "")
+            expiresAt: expiresAt
         )
     }
 }
