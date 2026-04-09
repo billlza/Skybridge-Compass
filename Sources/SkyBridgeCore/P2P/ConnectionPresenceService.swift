@@ -337,13 +337,17 @@ public final class ConnectionPresenceService: ObservableObject {
               !trimmedAddress.isEmpty else {
             return nil
         }
+        guard let transferPort = ServiceEndpointRegistry.shared.snapshot().fileTransferPort,
+              (1...65535).contains(Int(transferPort)) else {
+            return nil
+        }
 
         return PresenceRouteDescriptor(
             peerId: peerId,
             deviceName: displayName,
             displayAddress: trimmedAddress,
             transferAddress: trimmedAddress,
-            transferPort: Int(ServiceEndpointRegistry.shared.snapshot().fileTransferPort ?? 8080),
+            transferPort: Int(transferPort),
             routeSource: .compatibility,
             connectedAt: connectedAt
         )

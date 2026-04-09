@@ -91,6 +91,7 @@ Nebula 原生客户端现统一使用以下配置键：
 
 > 生产环境默认强制 **短期 TURN 凭据**（`mode=shared_secret_hmac`）。
 > 除非手动开启 `TURN_ALLOW_STATIC_FALLBACK=true`，否则服务端不会回退静态长期凭据。
+> 客户端默认也会 **fail-closed** 到 STUN-only；只有显式设置 `SKYBRIDGE_ALLOW_STATIC_TURN_FALLBACK=true` 才允许本地静态 TURN 应急回滚。
 
 ### 信令服务部署（推荐生产流程）
 
