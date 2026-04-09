@@ -951,10 +951,8 @@ private final class LocalP2PSmokeHarness {
                 reporter.append("connect \(Self.sanitize(target.id))")
                 Task { @MainActor in
                     do {
-                        try await connectionManager.connect(
-                            to: target,
-                            allowUntrustedClassicBootstrapOnMissingPeerKEM: expectsPQCRekey
-                        )
+                        _ = expectsPQCRekey
+                        try await connectionManager.connect(to: target)
                     } catch {
                         connectFailure = error.localizedDescription
                     }

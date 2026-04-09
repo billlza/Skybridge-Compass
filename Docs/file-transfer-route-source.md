@@ -33,6 +33,8 @@ Compatibility fallback is allowed only when:
 
 - there is an active peer connection
 - no primary route is available
+- the transfer is still bound to an authenticated secure session
+- no trust state is synthesized from self-reported file metadata
 - a warning event is emitted
 - fallback usage is counted for diagnostics
 

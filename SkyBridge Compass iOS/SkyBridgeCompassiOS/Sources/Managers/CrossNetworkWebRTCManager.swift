@@ -98,6 +98,8 @@ private struct CurrentPathWebRTCHandshakeTransportCompat: DiscoveryTransport {
 
 @available(iOS 17.0, *)
 private enum CrossNetworkServerConfig {
+    private static let truthyConfigValues: Set<String> = ["1", "true", "yes", "on"]
+
     private static func environmentValue(_ name: String) -> String? {
         guard let raw = ProcessInfo.processInfo.environment[name] else { return nil }
         return raw.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -144,6 +146,19 @@ private enum CrossNetworkServerConfig {
 
     static var clientAPIKey: String {
         ProcessInfo.processInfo.environment["SKYBRIDGE_CLIENT_API_KEY"] ?? "skybridge-client-v1"
+    }
+
+    static var allowStaticTurnFallback: Bool {
+        if let value = environmentValue("SKYBRIDGE_ALLOW_STATIC_TURN_FALLBACK") {
+            return truthyConfigValues.contains(value.lowercased())
+        }
+        if let value = Bundle.main.object(forInfoDictionaryKey: "SKYBRIDGE_ALLOW_STATIC_TURN_FALLBACK") as? Bool {
+            return value
+        }
+        if let value = Bundle.main.object(forInfoDictionaryKey: "SKYBRIDGE_ALLOW_STATIC_TURN_FALLBACK") as? String {
+            return truthyConfigValues.contains(value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
+        }
+        return false
     }
 
     static func dynamicICEConfig(turnAdmissionToken: String?) async -> WebRTCSession.ICEConfig {
@@ -953,7 +968,7 @@ private actor CrossNetworkTURNCredentialService {
                 logger.info("ℹ️ TURN credentials fetch failed; reusing cached credentials. err=\(error.localizedDescription, privacy: .public)")
                 return cached
             }
-            let allowStaticTURN = normalizedToken == nil
+            let allowStaticTURN = normalizedToken == nil && CrossNetworkServerConfig.allowStaticTurnFallback
             logger.warning(
                 "⚠️ TURN credentials fetch failed; falling back to \(allowStaticTURN ? "static-or-empty TURN" : "STUN-only"). err=\(error.localizedDescription, privacy: .public)"
             )
@@ -4767,21 +4782,30 @@ private extension CrossNetworkWebRTCManager {
             let hasTrustedPeerKEMKey = !trustedPeerKEMKeys.isEmpty
             let selection: CryptoProviderFactory.SelectionPolicy
             if !hasTrustedPeerKEMKey {
-                selection = .classicOnly
                 if strictPQCRequested {
-                    SkyBridgeLogger.shared.warning(
-                        "⚠️ WebRTC strictPQC requested but peer KEM trust key missing; " +
-                        "fallback to classic bootstrap. peer=\(peerDeviceId)"
+                    let message =
+                        "严格 PQC 已启用，但跨网对端缺少已信任的 KEM 公钥；当前已拒绝 classic bootstrap。peer=\(peerDeviceId)"
+                    SkyBridgeLogger.shared.error("⛔️ \(message)")
+                    throw NSError(
+                        domain: "CrossNetworkWebRTCManager",
+                        code: 41,
+                        userInfo: [NSLocalizedDescriptionKey: message]
                     )
                 }
+                selection = .classicOnly
             } else if strictPQCRequested {
                 if capability.hasApplePQC || capability.hasLiboqs {
                     selection = .requirePQC
                 } else {
-                    selection = .preferPQC
-                    SkyBridgeLogger.shared.warning(
-                        "⚠️ WebRTC strictPQC requested but local PQC provider unavailable; fallback to preferPQC. " +
-                        "hasApplePQC=\(capability.hasApplePQC), hasLiboqs=\(capability.hasLiboqs)"
+                    let message =
+                        "严格 PQC 已启用，但当前设备没有可用的 PQC Provider；跨网路径不会再降级到 Classic/PreferPQC。"
+                    SkyBridgeLogger.shared.error(
+                        "⛔️ \(message) hasApplePQC=\(capability.hasApplePQC), hasLiboqs=\(capability.hasLiboqs)"
+                    )
+                    throw NSError(
+                        domain: "CrossNetworkWebRTCManager",
+                        code: 42,
+                        userInfo: [NSLocalizedDescriptionKey: message]
                     )
                 }
             } else {
@@ -4835,7 +4859,8 @@ private extension CrossNetworkWebRTCManager {
                 )
             } catch {
                 self.handshakeDriver = nil
-                if hasTrustedPeerKEMKey,
+                if !strictPQCRequested,
+                   hasTrustedPeerKEMKey,
                    selection != .classicOnly,
                    Self.shouldRetryClassicBootstrap(after: error) {
                     for candidate in peerIdCandidates {
@@ -5068,12 +5093,27 @@ private extension CrossNetworkWebRTCManager {
         }
 
         let hasPQCGroup = messageA.supportedSuites.contains { $0.isPQCGroup }
-        let selection: CryptoProviderFactory.SelectionPolicy = {
-            if hasPQCGroup {
-                return strictPQCRequested ? .requirePQC : .preferPQC
+        let localCapability = CryptoProviderFactory.detectCapability()
+        let localPQCAvailable = localCapability.hasApplePQC || localCapability.hasLiboqs
+        guard let selection = Self.inboundPQCRekeySelectionPolicy(
+            supportedSuites: messageA.supportedSuites,
+            strictPQCRequested: strictPQCRequested,
+            localPQCAvailable: localPQCAvailable
+        ) else {
+            let message: String
+            if strictPQCRequested && !hasPQCGroup {
+                message =
+                    "严格 PQC 已启用，但 WebRTC 入站 rekey 对端只提供 Classic suites；当前已拒绝降级。peer=\(peer.deviceId)"
+            } else {
+                message =
+                    "严格 PQC 已启用，但当前设备没有可用的 PQC Provider；当前已拒绝入站 rekey。peer=\(peer.deviceId)"
             }
-            return .classicOnly
-        }()
+            lastRekeyEvent = "rejected inbound strict peer=\(peer.deviceId)"
+            SkyBridgeLogger.shared.error(
+                "⛔️ \(message) hasApplePQC=\(localCapability.hasApplePQC), hasLiboqs=\(localCapability.hasLiboqs)"
+            )
+            return nil
+        }
 
         var fallbackPeerIDs: [String] = []
         for raw in [
@@ -5118,7 +5158,10 @@ private extension CrossNetworkWebRTCManager {
         return handshakeDriver
     }
 
-    private func syncInboundPQCRekeyState(sessionId: String) async {
+    private func syncInboundPQCRekeyState(
+        sessionId: String,
+        strictPQCRequested: Bool
+    ) async {
         guard inboundRekeyResponderSessionIds.contains(sessionId),
               let driver = handshakeDriver else {
             return
@@ -5127,6 +5170,21 @@ private extension CrossNetworkWebRTCManager {
         let currentState = await driver.getCurrentState()
         switch currentState {
         case .established(let keys):
+            if strictPQCRequested,
+               !Self.inboundPQCRekeyNegotiatedSuiteAllowed(
+                    keys.negotiatedSuite,
+                    strictPQCRequested: strictPQCRequested
+               ) {
+                handshakeDriver = nil
+                inboundRekeyResponderSessionIds.remove(sessionId)
+                rekeyInProgressSessionIds.remove(sessionId)
+                lastRekeyEvent = "rejected classic suite=\(keys.negotiatedSuite.rawValue)"
+                SkyBridgeLogger.shared.error(
+                    "⛔️ strictPQC WebRTC 入站 rekey 协商到了 Classic suite=\(keys.negotiatedSuite.rawValue)；" +
+                    "当前已拒绝覆盖现有会话。session=\(sessionId)"
+                )
+                return
+            }
             sessionKeys = keys
             handshakeDriver = nil
             inboundRekeyResponderSessionIds.remove(sessionId)
@@ -5697,7 +5755,10 @@ private extension CrossNetworkWebRTCManager {
                 }
             }
             await inboundDriver.handleMessage(frame, from: peer)
-            await syncInboundPQCRekeyState(sessionId: sessionId)
+            await syncInboundPQCRekeyState(
+                sessionId: sessionId,
+                strictPQCRequested: strictPQCRequested
+            )
             return true
         }
 
@@ -5716,7 +5777,10 @@ private extension CrossNetworkWebRTCManager {
                 }
             }
             await driver.handleMessage(frame, from: peer)
-            await syncInboundPQCRekeyState(sessionId: sessionId)
+            await syncInboundPQCRekeyState(
+                sessionId: sessionId,
+                strictPQCRequested: strictPQCRequested
+            )
             return true
         }
 
@@ -6046,6 +6110,24 @@ private extension CrossNetworkWebRTCManager {
 
 @available(iOS 17.0, *)
 extension CrossNetworkWebRTCManager {
+    private static func inboundPQCRekeySelectionPolicy(
+        supportedSuites: [CryptoSuite],
+        strictPQCRequested: Bool,
+        localPQCAvailable: Bool
+    ) -> CryptoProviderFactory.SelectionPolicy? {
+        let hasPQCGroup = supportedSuites.contains { $0.isPQCGroup }
+        guard !strictPQCRequested || hasPQCGroup else { return nil }
+        guard !strictPQCRequested || localPQCAvailable else { return nil }
+        return hasPQCGroup ? (strictPQCRequested ? .requirePQC : .preferPQC) : .classicOnly
+    }
+
+    private static func inboundPQCRekeyNegotiatedSuiteAllowed(
+        _ suite: CryptoSuite,
+        strictPQCRequested: Bool
+    ) -> Bool {
+        !strictPQCRequested || suite.isPQCGroup
+    }
+
     @MainActor
     internal static func testOnlyDecryptDirectControlProbePayload(
         _ payload: Data,
@@ -6098,5 +6180,27 @@ extension CrossNetworkWebRTCManager {
 
     internal static func testOnlyIsActualNativeRenderEvidence(_ source: String) -> Bool {
         isActualNativeRenderEvidence(source: source)
+    }
+
+    internal static func testOnlyInboundPQCRekeySelectionPolicy(
+        supportedSuites: [CryptoSuite],
+        strictPQCRequested: Bool,
+        localPQCAvailable: Bool
+    ) -> CryptoProviderFactory.SelectionPolicy? {
+        inboundPQCRekeySelectionPolicy(
+            supportedSuites: supportedSuites,
+            strictPQCRequested: strictPQCRequested,
+            localPQCAvailable: localPQCAvailable
+        )
+    }
+
+    internal static func testOnlyInboundPQCRekeyNegotiatedSuiteAllowed(
+        _ suite: CryptoSuite,
+        strictPQCRequested: Bool
+    ) -> Bool {
+        inboundPQCRekeyNegotiatedSuiteAllowed(
+            suite,
+            strictPQCRequested: strictPQCRequested
+        )
     }
 }

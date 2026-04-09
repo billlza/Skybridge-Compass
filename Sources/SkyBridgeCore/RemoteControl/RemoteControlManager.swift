@@ -2149,6 +2149,11 @@ public final class RemoteControlManager: BaseManager {
             let localPQCSuites = DeviceIdentityKeyManager.pairingIdentityAdvertisedPQCSuites(using: cryptoProvider)
 
             if localPQCSuites.isEmpty {
+                if requestedPolicy.requirePQC {
+                    throw RemoteControlError.handshakeInitializationFailed(
+                        "strictPQC enabled but local PQC provider is unavailable"
+                    )
+                }
                 guard peerHasClassicGroup else {
                     throw RemoteControlError.handshakeInitializationFailed(
                         "peer offered PQC-only suites but local PQC provider is unavailable"
@@ -2170,7 +2175,9 @@ public final class RemoteControlManager: BaseManager {
             }
         } else {
             if requestedPolicy.requirePQC {
-                logger.info("🧩 RemoteControl inbound classic bootstrap allowed for \(peer.id, privacy: .public)")
+                throw RemoteControlError.handshakeInitializationFailed(
+                    "strictPQC enabled but peer offered classic-only suites"
+                )
             }
             cryptoProvider = CryptoProviderFactory.make(policy: .classicOnly)
             sigAAlgorithm = .ed25519

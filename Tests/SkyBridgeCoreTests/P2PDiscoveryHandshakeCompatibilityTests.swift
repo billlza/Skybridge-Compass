@@ -59,15 +59,45 @@ final class P2PDiscoveryHandshakeCompatibilityTests: XCTestCase {
         )
     }
 
-    private func makeHandshakeMessageA() -> HandshakeMessageA {
+    func testStrictPQCDiscoveryRejectsClassicOnlyMessageA() {
+        let messageA = makeHandshakeMessageA(supportedSuites: [.x25519Ed25519])
+
+        let rejection = StrictPQCAdmissionGate.inboundRejection(
+            policy: .strictPQC,
+            peerSupportedSuites: messageA.supportedSuites,
+            localPQCSuitesAvailable: false
+        )
+
+        XCTAssertEqual(rejection, .peerOfferedClassicOnly)
+    }
+
+    func testStrictPQCDiscoveryRejectsClassicFallbackWhenLocalPQCUnavailable() {
+        let messageA = makeHandshakeMessageA(
+            supportedSuites: [.mlkem768MLDSA65, .x25519Ed25519],
+            providerType: .cryptoKitPQC
+        )
+
+        let rejection = StrictPQCAdmissionGate.inboundRejection(
+            policy: .strictPQC,
+            peerSupportedSuites: messageA.supportedSuites,
+            localPQCSuitesAvailable: false
+        )
+
+        XCTAssertEqual(rejection, StrictPQCAdmissionRejection.localPQCUnavailable)
+    }
+
+    private func makeHandshakeMessageA(
+        supportedSuites: [CryptoSuite] = [.x25519Ed25519],
+        providerType: CryptoProviderType = .classic
+    ) -> HandshakeMessageA {
         HandshakeMessageA(
-            supportedSuites: [.x25519Ed25519],
-            keyShares: [
+            supportedSuites: supportedSuites,
+            keyShares: supportedSuites.map { suite in
                 HandshakeKeyShare(
-                    suite: .x25519Ed25519,
+                    suite: suite,
                     shareBytes: Data(repeating: 0x11, count: 32)
                 )
-            ],
+            },
             clientNonce: Data(repeating: 0x22, count: 32),
             policy: .default,
             capabilities: CryptoCapabilities(
@@ -75,9 +105,9 @@ final class P2PDiscoveryHandshakeCompatibilityTests: XCTestCase {
                 supportedSignature: ["Ed25519"],
                 supportedAuthProfiles: ["default"],
                 supportedAEAD: ["AES.GCM"],
-                pqcAvailable: false,
+                pqcAvailable: supportedSuites.contains { $0.isPQCGroup },
                 platformVersion: "test",
-                providerType: .classic
+                providerType: providerType
             ),
             signature: Data(repeating: 0x33, count: 64),
             identityPublicKeys: IdentityPublicKeys(

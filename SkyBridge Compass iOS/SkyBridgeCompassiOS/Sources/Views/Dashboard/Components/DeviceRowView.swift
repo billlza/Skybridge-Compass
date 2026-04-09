@@ -530,12 +530,9 @@ struct DeviceDetailSheet: View {
         isConnecting = true
         Task {
             do {
-                try await P2PConnectionManager.instance.connect(
-                    to: device,
-                    allowUntrustedClassicBootstrapOnMissingPeerKEM: true
-                )
-            isConnecting = false
-            dismiss()
+                try await P2PConnectionManager.instance.connect(to: device)
+                isConnecting = false
+                dismiss()
             } catch {
                 isConnecting = false
                 connectError = error.localizedDescription

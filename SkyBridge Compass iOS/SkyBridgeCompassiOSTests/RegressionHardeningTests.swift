@@ -1910,6 +1910,73 @@ final class RegressionHardeningTests: XCTestCase {
         XCTAssertNotNil(messageA.initiatorContribution)
     }
 
+    @MainActor
+    func testP2PConnectionManagerStrictInboundRejectsClassicOnlyPeer() {
+        let manager = P2PConnectionManager.instance
+        let original = PQCCryptoManager.instance.enforcePQCHandshake
+        defer { PQCCryptoManager.instance.enforcePQCHandshake = original }
+        PQCCryptoManager.instance.enforcePQCHandshake = true
+
+        XCTAssertTrue(
+            manager.testOnlyStrictPQCRejectsInboundHandshake(
+                supportedSuites: [.x25519Ed25519]
+            )
+        )
+    }
+
+    @MainActor
+    func testP2PConnectionManagerStrictInboundRejectsWhenLocalPQCUnavailable() {
+        let manager = P2PConnectionManager.instance
+        let original = PQCCryptoManager.instance.enforcePQCHandshake
+        defer { PQCCryptoManager.instance.enforcePQCHandshake = original }
+        PQCCryptoManager.instance.enforcePQCHandshake = true
+
+        XCTAssertTrue(
+            manager.testOnlyStrictPQCRejectsInboundHandshake(
+                supportedSuites: [.mlkem768MLDSA65, .x25519Ed25519],
+                localPQCAvailable: false
+            )
+        )
+    }
+
+    @MainActor
+    func testCrossNetworkWebRTCStrictInboundRekeyRejectsClassicOnlyMessageA() {
+        XCTAssertNil(
+            CrossNetworkWebRTCManager.testOnlyInboundPQCRekeySelectionPolicy(
+                supportedSuites: [.x25519Ed25519],
+                strictPQCRequested: true,
+                localPQCAvailable: true
+            )
+        )
+    }
+
+    @MainActor
+    func testCrossNetworkWebRTCStrictInboundRekeyRejectsWhenLocalPQCUnavailable() {
+        XCTAssertNil(
+            CrossNetworkWebRTCManager.testOnlyInboundPQCRekeySelectionPolicy(
+                supportedSuites: [.mlkem768MLDSA65, .x25519Ed25519],
+                strictPQCRequested: true,
+                localPQCAvailable: false
+            )
+        )
+    }
+
+    @MainActor
+    func testCrossNetworkWebRTCStrictInboundRekeyRejectsEstablishedClassicSuite() {
+        XCTAssertFalse(
+            CrossNetworkWebRTCManager.testOnlyInboundPQCRekeyNegotiatedSuiteAllowed(
+                .x25519Ed25519,
+                strictPQCRequested: true
+            )
+        )
+        XCTAssertTrue(
+            CrossNetworkWebRTCManager.testOnlyInboundPQCRekeyNegotiatedSuiteAllowed(
+                .mlkem768MLDSA65,
+                strictPQCRequested: true
+            )
+        )
+    }
+
     func testHandshakeDriverRetainsAuthenticatedAuthorityAfterOutboundHandshakeEstablishes() async throws {
         let signatureProvider = LocalHandshakeTestSignatureProvider()
         let provider = LocalHandshakeTestCryptoProvider(

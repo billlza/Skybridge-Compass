@@ -923,9 +923,18 @@ public class DeviceDiscoveryManager: BaseManager {
                                     )
                                 }
 
+                                let policyBindingKey = authenticatedRemoteAuthority.flatMap { authority in
+                                    PairingTrustApprovalService.policyBindingKey(
+                                        declaredDeviceId: payload.deviceId,
+                                        algorithmRawValue: authority.protocolSigningAlgorithm.rawValue,
+                                        protocolPublicKeyFingerprint: authority.protocolPublicKeyFingerprint
+                                    )
+                                }
+
                                 let request = PairingTrustApprovalService.Request(
                                     peerEndpoint: endpoint,
                                     declaredDeviceId: payload.deviceId,
+                                    policyBindingKey: policyBindingKey,
                                     displayName: displayName,
                                     model: info?.model ?? info?.type,
                                     platform: info?.platform,
@@ -1045,19 +1054,18 @@ public class DeviceDiscoveryManager: BaseManager {
                         let peerHasClassicGroup = messageA.supportedSuites.contains { !$0.isPQCGroup }
                         let compatibilityModeEnabled = UserDefaults.standard.bool(forKey: "Settings.EnableCompatibilityMode")
                         let requestedPolicy = HandshakePolicy.recommendedDefault(compatibilityModeEnabled: compatibilityModeEnabled)
+                        if let rejection = StrictPQCAdmissionGate.inboundRejection(
+                            policy: requestedPolicy,
+                            peerSupportedSuites: messageA.supportedSuites,
+                            localPQCSuitesAvailable: peerHasPQCGroup
+                        ), rejection == .peerOfferedClassicOnly {
+                            logger.error(
+                                "❌ \(rejection.diagnosticMessage, privacy: .public). peer=\(peer.deviceId, privacy: .public)"
+                            )
+                            return
+                        }
 
-                        // IMPORTANT (paper-aligned legacy gating):
-                        // On macOS 26+ default is strictPQC, which would reject classic-only MessageA.
-                        // But iOS strictPQC onboarding requires a one-time classic bootstrap channel to provision KEM identity keys
-                        // when `missingPeerKEMPublicKey` happens. Therefore, if the peer offered *only classic suites*, we MUST
-                        // run the responder with a classic policy (minimumTier=classic) even when strictPQC is enabled.
-                        let effectivePolicy: HandshakePolicy = {
-                            if peerHasPQCGroup { return requestedPolicy }
-                            if requestedPolicy.requirePQC {
-                                logger.info("🧩 legacyBootstrap(inbound): strictPQC enabled but peer offered classic-only. Allowing classic bootstrap channel for KEM provisioning. peer=\(peer.deviceId, privacy: .public)")
-                            }
-                            return HandshakePolicy(requirePQC: false, allowClassicFallback: false, minimumTier: .classic, requireSecureEnclavePoP: false)
-                        }()
+                        let effectivePolicy = requestedPolicy
 
                         // Choose provider first, then derive sigA/offeredSuites from local capability.
                         var selection: CryptoProviderFactory.SelectionPolicy = .classicOnly
@@ -1073,42 +1081,48 @@ public class DeviceDiscoveryManager: BaseManager {
                             )
                             let localPQCSuites = CryptoProviderFactory.handshakeOfferedPQCSuites(using: cryptoProvider)
 
+                            if let rejection = StrictPQCAdmissionGate.inboundRejection(
+                                policy: effectivePolicy,
+                                peerSupportedSuites: messageA.supportedSuites,
+                                localPQCSuitesAvailable: !localPQCSuites.isEmpty
+                            ) {
+                                logger.error(
+                                    "❌ \(rejection.diagnosticMessage, privacy: .public). peer=\(peer.deviceId, privacy: .public)"
+                                )
+                                return
+                            }
+
                             if localPQCSuites.isEmpty {
-                                if effectivePolicy.requirePQC {
-                                    logger.error("❌ PQC required by policy but no PQC provider available on this device. peer=\(peer.deviceId, privacy: .public)")
+                                if peerHasClassicGroup {
+                                    selection = .classicOnly
+                                    cryptoProvider = CryptoProviderFactory.make(policy: selection)
+                                    sigAAlgorithm = .ed25519
+                                    offeredSuites = cryptoProvider.supportedSuites.filter { !$0.isPQCGroup }
+                                    SecurityEventEmitter.emitDetached(SecurityEvent(
+                                        type: .cryptoDowngrade,
+                                        severity: .warning,
+                                        message: "Inbound handshake: peer advertises PQC but local PQC unavailable; falling back to Classic",
+                                        context: [
+                                            "reason": "pqcProviderUnavailable",
+                                            "direction": "responder_inbound",
+                                            "deviceId": peer.deviceId,
+                                            "policyInTranscript": "1",
+                                            "transcriptBinding": "1",
+                                            "downgradeResistance": "policy_gate+no_timeout_fallback+rate_limited",
+                                            "policyRequirePQC": effectivePolicy.requirePQC ? "1" : "0",
+                                            "policyAllowClassicFallback": effectivePolicy.allowClassicFallback ? "1" : "0",
+                                            "policyMinimumTier": effectivePolicy.minimumTier.rawValue,
+                                            "policyRequireSecureEnclavePoP": effectivePolicy.requireSecureEnclavePoP ? "1" : "0",
+                                            "fromStrategy": HandshakeAttemptStrategy.pqcOnly.rawValue,
+                                            "toStrategy": HandshakeAttemptStrategy.classicOnly.rawValue,
+                                            "strategy": HandshakeAttemptStrategy.classicOnly.rawValue
+                                        ]
+                                    ))
+                                    logger.info("🧩 inboundFallback(classic): peer advertises PQC but local PQC unavailable; falling back to classic handshake. peer=\(peer.deviceId, privacy: .public)")
+                                } else {
+                                    logger.error("❌ Peer offered PQC-only suites but local PQC unavailable; cannot continue. peer=\(peer.deviceId, privacy: .public)")
                                     return
                                 }
-	                                if peerHasClassicGroup {
-	                                    selection = .classicOnly
-	                                    cryptoProvider = CryptoProviderFactory.make(policy: selection)
-	                                    sigAAlgorithm = .ed25519
-	                                    offeredSuites = cryptoProvider.supportedSuites.filter { !$0.isPQCGroup }
-	                                    // Make responder-side capability fallback auditable (no silent downgrade in telemetry).
-	                                    SecurityEventEmitter.emitDetached(SecurityEvent(
-	                                        type: .cryptoDowngrade,
-	                                        severity: .warning,
-	                                        message: "Inbound handshake: peer advertises PQC but local PQC unavailable; falling back to Classic",
-	                                        context: [
-	                                            "reason": "pqcProviderUnavailable",
-	                                            "direction": "responder_inbound",
-	                                            "deviceId": peer.deviceId,
-	                                            "policyInTranscript": "1",
-	                                            "transcriptBinding": "1",
-	                                            "downgradeResistance": "policy_gate+no_timeout_fallback+rate_limited",
-	                                            "policyRequirePQC": effectivePolicy.requirePQC ? "1" : "0",
-	                                            "policyAllowClassicFallback": effectivePolicy.allowClassicFallback ? "1" : "0",
-	                                            "policyMinimumTier": effectivePolicy.minimumTier.rawValue,
-	                                            "policyRequireSecureEnclavePoP": effectivePolicy.requireSecureEnclavePoP ? "1" : "0",
-	                                            "fromStrategy": HandshakeAttemptStrategy.pqcOnly.rawValue,
-	                                            "toStrategy": HandshakeAttemptStrategy.classicOnly.rawValue,
-	                                            "strategy": HandshakeAttemptStrategy.classicOnly.rawValue
-	                                        ]
-	                                    ))
-	                                    logger.info("🧩 inboundFallback(classic): peer advertises PQC but local PQC unavailable; falling back to classic handshake. peer=\(peer.deviceId, privacy: .public)")
-	                                } else {
-	                                    logger.error("❌ Peer offered PQC-only suites but local PQC unavailable; cannot continue. peer=\(peer.deviceId, privacy: .public)")
-	                                    return
-	                                }
                             } else {
                                 sigAAlgorithm = .mlDSA65
                                 offeredSuites = localPQCSuites

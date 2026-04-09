@@ -2039,7 +2039,8 @@ public class P2PDiscoveryService: BaseManager {
 
                 guard let displayAddress = resolved.displayAddress?
                     .trimmingCharacters(in: .whitespacesAndNewlines),
-                    !displayAddress.isEmpty else {
+                    !displayAddress.isEmpty,
+                    (1...65535).contains(resolved.transferPort) else {
                     logger.error(
                         "❌ inbound establish route missing: peer=\(peerId, privacy: .public) endpoint=\(endpointDescriptionForPresence, privacy: .public)"
                     )
@@ -2142,9 +2143,18 @@ public class P2PDiscoveryService: BaseManager {
                                     )
                                 }
 
+                                let policyBindingKey = authenticatedRemoteAuthority.flatMap { authority in
+                                    PairingTrustApprovalService.policyBindingKey(
+                                        declaredDeviceId: payload.deviceId,
+                                        algorithmRawValue: authority.protocolSigningAlgorithm.rawValue,
+                                        protocolPublicKeyFingerprint: authority.protocolPublicKeyFingerprint
+                                    )
+                                }
+
                                 let request = PairingTrustApprovalService.Request(
                                     peerEndpoint: endpointDescriptionForPresence,
                                     declaredDeviceId: payload.deviceId,
+                                    policyBindingKey: policyBindingKey,
                                     displayName: displayName,
                                     model: payload.modelName,
                                     platform: payload.platform,
@@ -2293,6 +2303,18 @@ public class P2PDiscoveryService: BaseManager {
                         let peerHasClassicGroup = messageA.supportedSuites.contains { !$0.isPQCGroup }
                         let compatibilityModeEnabled = UserDefaults.standard.bool(forKey: "Settings.EnableCompatibilityMode")
                         let policy = HandshakePolicy.recommendedDefault(compatibilityModeEnabled: compatibilityModeEnabled)
+                        let capability = CryptoProviderFactory.detectCapability()
+                        let localPQCAvailable = capability.hasApplePQC || capability.hasLiboqs
+                        if let rejection = StrictPQCAdmissionGate.inboundRejection(
+                            policy: policy,
+                            peerSupportedSuites: messageA.supportedSuites,
+                            localPQCSuitesAvailable: localPQCAvailable
+                        ), rejection == .peerOfferedClassicOnly {
+                            logger.error(
+                                "❌ \(rejection.diagnosticMessage, privacy: .public). peer=\(peer.deviceId, privacy: .public)"
+                            )
+                            return
+                        }
 
                         // Pick provider first, then derive sigA/offeredSuites from what we can actually support.
                         var selection: CryptoProviderFactory.SelectionPolicy = .classicOnly
@@ -2308,12 +2330,18 @@ public class P2PDiscoveryService: BaseManager {
                                 peerSupportedSuites: messageA.supportedSuites
                             )
                             let localPQCSuites = CryptoProviderFactory.handshakeOfferedPQCSuites(using: cryptoProvider)
+                            if let rejection = StrictPQCAdmissionGate.inboundRejection(
+                                policy: policy,
+                                peerSupportedSuites: messageA.supportedSuites,
+                                localPQCSuitesAvailable: !localPQCSuites.isEmpty
+                            ) {
+                                logger.error(
+                                    "❌ \(rejection.diagnosticMessage, privacy: .public). peer=\(peer.deviceId, privacy: .public)"
+                                )
+                                return
+                            }
 
                             if localPQCSuites.isEmpty {
-                                if policy.requirePQC {
-                                    logger.error("❌ PQC required by policy but no PQC provider available on this device. peer=\(peer.deviceId, privacy: .public)")
-                                    return
-                                }
                                 // Best-effort classic fallback only if peer also advertises classic suites.
 	                                if peerHasClassicGroup {
 	                                    selection = .classicOnly
@@ -2362,12 +2390,6 @@ public class P2PDiscoveryService: BaseManager {
                             cryptoProvider = CryptoProviderFactory.make(policy: selection)
                             sigAAlgorithm = .ed25519
                             offeredSuites = cryptoProvider.supportedSuites.filter { !$0.isPQCGroup }
-                            effectivePolicy = HandshakePolicy(
-                                requirePQC: false,
-                                allowClassicFallback: false,
-                                minimumTier: .classic,
-                                requireSecureEnclavePoP: policy.requireSecureEnclavePoP
-                            )
                         }
 
                         let identityProvider = DeviceIdentityHandshakeProvider(
@@ -2615,8 +2637,11 @@ public class P2PDiscoveryService: BaseManager {
         }
 
         func transferPort(from portMap: [String: Int]) -> Int {
-            let candidate = portMap["_skybridge-transfer._tcp"] ?? 8080
-            return (1...65535).contains(candidate) ? candidate : 8080
+            guard let candidate = portMap["_skybridge-transfer._tcp"],
+                  (1...65535).contains(candidate) else {
+                return -1
+            }
+            return candidate
         }
 
         let normalizedPeerId = normalizedIdentifier(peerId)
@@ -2728,7 +2753,7 @@ public class P2PDiscoveryService: BaseManager {
         return InboundPresenceResolution(
             name: fallbackName.isEmpty ? "P2P Peer" : fallbackName,
             displayAddress: fallbackAddress,
-            transferPort: Int(ServiceEndpointRegistry.shared.snapshot().fileTransferPort ?? 8080)
+            transferPort: Int(ServiceEndpointRegistry.shared.snapshot().fileTransferPort ?? 0)
         )
     }
 

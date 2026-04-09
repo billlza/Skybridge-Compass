@@ -489,7 +489,10 @@ public class FileTransferEngine: ObservableObject {
         
  // 确定目标目录
         let targetDirectory = destinationDirectory ?? getDefaultDownloadDirectory()
-        let destinationURL = targetDirectory.appendingPathComponent(metadata.fileName)
+        let destinationURL = FileTransferPathPolicy.uniqueDestinationURL(
+            baseDirectory: targetDirectory,
+            fileName: metadata.fileName
+        )
         
  // 创建传输会话
         let session = FileTransferSession(

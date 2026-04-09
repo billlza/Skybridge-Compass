@@ -706,14 +706,6 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             return sessionKeys
         } catch {
             bootstrapAssistedHandshakeLock.withLock { $0 = false }
-            if let bootstrapped = try await performStrictPQCBootstrapIfNeeded(
-                for: error,
-                strictPolicy: policy,
-                strictSelection: selection,
-                strictProvider: strictProvider
-            ) {
-                return bootstrapped
-            }
             await logSuiteNegotiationDiagnosticsIfNeeded(error, policy: policy, cryptoProvider: strictProvider)
             throw error
         }
@@ -834,196 +826,13 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         strictSelection: CryptoProviderFactory.SelectionPolicy,
         strictProvider: any CryptoProvider
     ) async throws -> SessionKeys? {
+        _ = error
+        _ = strictSelection
+        _ = strictProvider
         guard strictPolicy.requirePQC else { return nil }
-        guard let handshakeError = error as? HandshakeError,
-              case .failed(let failureReason) = handshakeError else {
-            return nil
-        }
-
-        enum BootstrapTrigger {
-            case missingKEM
-            case staleKEMRecovery
-        }
-        let trigger: BootstrapTrigger
-        switch failureReason {
-        case .suiteNegotiationFailed:
-            trigger = .missingKEM
-        case .timeout:
-            trigger = .staleKEMRecovery
-        default:
-            return nil
-        }
-
-        let requiredPQCSuites = strictProvider.supportedSuites.filter { $0.isPQCGroup }
-        guard !requiredPQCSuites.isEmpty else { return nil }
-
-        let diag = await resolveSuiteNegotiationTrustDiagnostic()
-        let requiredCanonicalWireIds = Set(requiredPQCSuites.map { $0.canonicalKEMSuite.wireId })
-        let knownCanonicalWireIds = canonicalizedSuiteWireIds(diag.kemSuiteWireIds)
-        let missingWireIds = requiredCanonicalWireIds
-            .subtracting(knownCanonicalWireIds)
-            .sorted()
-
-        switch trigger {
-        case .missingKEM:
-            guard !missingWireIds.isEmpty || !diag.hasTrust else { return nil }
-            SkyBridgeLogger.p2p.warning(
-                "🧩 strictPQC bootstrap: missing peer KEM identity keys. Establishing one-time Classic channel to provision KEM keys, then rekey to PQC. peer=\(self.handshakePeer.deviceId, privacy: .public)"
-            )
-        case .staleKEMRecovery:
-            guard diag.hasTrust, !diag.kemSuiteWireIds.isEmpty else { return nil }
-            let knownKEMSummary = diag.kemSuiteWireIds.map(String.init).joined(separator: ",")
-            SkyBridgeLogger.p2p.warning(
-                "🧩 strictPQC recovery: handshake timed out with existing KEM records (possible stale/rotated KEM identity keys). Attempting one-time Classic bootstrap to refresh keys, then rekey to PQC. peer=\(self.handshakePeer.deviceId, privacy: .public) knownKEM=\(knownKEMSummary, privacy: .public)"
-            )
-        }
-        await SecurityEventEmitter.shared.emit(SecurityEvent(
-            type: .handshakeFallback,
-            severity: .warning,
-            message: "Entering bootstrap-assisted mode before strict PQC rekey",
-            context: [
-                "deviceId": handshakePeer.deviceId,
-                "mode": "bootstrap_assisted",
-                "strictPolicy": "1",
-                "trigger": trigger == .missingKEM ? "missing_kem_identity_key" : "stale_kem_recovery"
-            ]
-        ))
-
-        let bootstrapPolicy = HandshakePolicy(
-            requirePQC: false,
-            allowClassicFallback: false,
-            minimumTier: .classic,
-            requireSecureEnclavePoP: strictPolicy.requireSecureEnclavePoP
-        )
-        let classicKeys: SessionKeys = try await {
-            let maxAttempts = 2
-            var lastError: Error?
-            for attempt in 1...maxAttempts {
-                do {
-                    // Bootstrap channel is intentionally classic-only and SOA-disabled.
-                    // This avoids SOA identity alias mismatches (host:/bonjour:/id:) during recovery retries.
-                    return try await performHandshakeAttempt(
-                        policy: bootstrapPolicy,
-                        selectionPolicy: .classicOnly,
-                        preferPQC: false,
-                        allowSOA: false
-                    )
-                } catch {
-                    lastError = error
-                    let shouldRetry: Bool = {
-                        guard let hs = error as? HandshakeError,
-                              case .failed(let reason) = hs else {
-                            return false
-                        }
-                        switch reason {
-                        case .keyConfirmationFailed, .timeout:
-                            return true
-                        default:
-                            return false
-                        }
-                    }()
-
-                    guard shouldRetry, attempt < maxAttempts else {
-                        throw error
-                    }
-
-                    SkyBridgeLogger.p2p.warning(
-                        "⚠️ strictPQC bootstrap classic attempt failed; retrying once on same channel. peer=\(self.handshakePeer.deviceId, privacy: .public) attempt=\(attempt, privacy: .public) reason=\(error.localizedDescription, privacy: .public)"
-                    )
-                    try? await Task.sleep(for: .milliseconds(250))
-                }
-            }
-            throw lastError ?? P2PConnectionError.disconnected
-        }()
-
-        sessionKeysLock.withLock { $0 = classicKeys }
-        handshakeDriverLock.withLock { $0 = nil }
-
-        rekeyInProgressLock.withLock { $0 = true }
-        defer { rekeyInProgressLock.withLock { $0 = false } }
-
-        try await sendPairingIdentityExchange(force: true)
-        let kemReady = await waitForPeerKEMPublicKeys(
-            requiredSuites: requiredPQCSuites,
-            timeoutSeconds: 30
-        )
-        guard kemReady else {
-            throw P2PConnectionError.bootstrapKEMKeyTimeout
-        }
-
-        SkyBridgeLogger.p2p.info(
-            "🔁 strictPQC bootstrap: peer KEM keys received, rekeying to PQC. peer=\(self.handshakePeer.deviceId, privacy: .public)"
-        )
-        let rekeyed: SessionKeys = try await {
-            let maxAttempts = 2
-            var lastError: Error?
-            for attempt in 1...maxAttempts {
-                do {
-                    // Keep bootstrap rekey SOA-disabled to avoid identity alias drift
-                    // across host:/bonjour:/id: forms after classic bootstrap.
-                    return try await performHandshakeAttempt(
-                        policy: strictPolicy,
-                        selectionPolicy: strictSelection,
-                        preferPQC: true,
-                        allowSOA: false
-                    )
-                } catch {
-                    lastError = error
-                    let shouldRetry: Bool = {
-                        guard let hs = error as? HandshakeError,
-                              case .failed(let reason) = hs else {
-                            return false
-                        }
-                        switch reason {
-                        case .keyConfirmationFailed, .timeout:
-                            return true
-                        default:
-                            return false
-                        }
-                    }()
-
-                    guard shouldRetry, attempt < maxAttempts else {
-                        throw error
-                    }
-
-                    SkyBridgeLogger.p2p.warning(
-                        "⚠️ strictPQC bootstrap rekey attempt failed; retrying once. peer=\(self.handshakePeer.deviceId, privacy: .public) attempt=\(attempt, privacy: .public) reason=\(error.localizedDescription, privacy: .public)"
-                    )
-                    try? await Task.sleep(for: .milliseconds(250))
-                }
-            }
-            throw lastError ?? P2PConnectionError.disconnected
-        }()
-        handshakeDriverLock.withLock { $0 = nil }
-        
-        let suite = rekeyed.negotiatedSuite
-        let cryptoKind = ConnectionCryptoPresentation.modeLabel(
-            kind: nil,
-            suite: suite.rawValue
-        ) ?? suite.rawValue
-        await MainActor.run {
-            ConnectionPresenceService.shared.markConnected(
-                peerId: self.handshakePeer.deviceId,
-                displayName: self.device.name,
-                address: self.resolveCurrentRemoteIP() ?? self.device.address,
-                cryptoKind: cryptoKind,
-                suite: suite.rawValue
-            )
-        }
-        bootstrapAssistedHandshakeLock.withLock { $0 = true }
-        await SecurityEventEmitter.shared.emit(SecurityEvent(
-            type: .handshakeFallback,
-            severity: .info,
-            message: "Bootstrap-assisted mode completed; session rekeyed to PQC",
-            context: [
-                "deviceId": handshakePeer.deviceId,
-                "mode": "bootstrap_assisted",
-                "strictPolicy": "1",
-                "resultSuite": rekeyed.negotiatedSuite.rawValue
-            ]
-        ))
-        
-        return rekeyed
+        // strictPQC is now pure fail-closed. Discovery/bootstrap must not silently
+        // establish a Classic control channel and then rekey back to PQC.
+        return nil
     }
 
     @available(macOS 14.0, iOS 17.0, *)
@@ -1591,6 +1400,27 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
     }
 
     @available(macOS 14.0, iOS 17.0, *)
+    public func deriveClassicFileTransferKey(transferId: String) throws -> SymmetricKey {
+        guard let keys = sessionKeysLock.withLock({ $0 }) else {
+            throw P2PConnectionError.noSessionKeys
+        }
+
+        let orderedKeys = [keys.sendKey, keys.receiveKey].sorted { lhs, rhs in
+            lhs.lexicographicallyPrecedes(rhs)
+        }
+        let combinedMaterial = orderedKeys.reduce(into: Data()) { partial, key in
+            partial.append(key)
+        }
+
+        return HKDF<SHA256>.deriveKey(
+            inputKeyMaterial: SymmetricKey(data: combinedMaterial),
+            salt: Data("skybridge-classic-file-transfer-v1".utf8),
+            info: Data(transferId.utf8),
+            outputByteCount: 32
+        )
+    }
+
+    @available(macOS 14.0, iOS 17.0, *)
     private func sendEncryptedAppMessage(_ message: AppMessage) async throws {
         let allowDuringBootstrap = Self.isBootstrapControlMessage(message)
         if rekeyInProgressLock.withLock({ $0 }), !allowDuringBootstrap {
@@ -2017,22 +1847,21 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
 
         let compatibilityModeEnabled = UserDefaults.standard.bool(forKey: "Settings.EnableCompatibilityMode")
         let requestedPolicy = HandshakePolicy.recommendedDefault(compatibilityModeEnabled: compatibilityModeEnabled)
+        let capability = CryptoProviderFactory.detectCapability()
+        let localPQCAvailable = capability.hasApplePQC || capability.hasLiboqs
         let peerHasPQCGroup = messageA.supportedSuites.contains { $0.isPQCGroup }
         let peerHasClassicGroup = messageA.supportedSuites.contains { !$0.isPQCGroup }
-        let effectivePolicy: HandshakePolicy = {
-            if peerHasPQCGroup { return requestedPolicy }
-            if requestedPolicy.requirePQC {
-                SkyBridgeLogger.p2p.info(
-                    "🧩 inbound rekey classic bootstrap: strictPQC enabled but peer offered classic-only suites. peer=\(self.handshakePeer.deviceId, privacy: .public)"
-                )
-            }
-            return HandshakePolicy(
-                requirePQC: false,
-                allowClassicFallback: false,
-                minimumTier: .classic,
-                requireSecureEnclavePoP: requestedPolicy.requireSecureEnclavePoP
+        if let rejection = StrictPQCAdmissionGate.inboundRejection(
+            policy: requestedPolicy,
+            peerSupportedSuites: messageA.supportedSuites,
+            localPQCSuitesAvailable: localPQCAvailable
+        ), rejection == .peerOfferedClassicOnly {
+            SkyBridgeLogger.p2p.error(
+                "❌ \(rejection.diagnosticMessage, privacy: .public). peer=\(self.handshakePeer.deviceId, privacy: .public)"
             )
-        }()
+            return nil
+        }
+        let effectivePolicy = requestedPolicy
 
         var selection: CryptoProviderFactory.SelectionPolicy = .classicOnly
         var cryptoProvider: any CryptoProvider = CryptoProviderFactory.make(policy: .classicOnly)
@@ -2046,8 +1875,18 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
                 peerSupportedSuites: messageA.supportedSuites
             )
             let localPQCSuites = CryptoProviderFactory.handshakeOfferedPQCSuites(using: cryptoProvider)
+            if let rejection = StrictPQCAdmissionGate.inboundRejection(
+                policy: effectivePolicy,
+                peerSupportedSuites: messageA.supportedSuites,
+                localPQCSuitesAvailable: !localPQCSuites.isEmpty
+            ) {
+                SkyBridgeLogger.p2p.error(
+                    "❌ \(rejection.diagnosticMessage, privacy: .public). peer=\(self.handshakePeer.deviceId, privacy: .public)"
+                )
+                return nil
+            }
             if localPQCSuites.isEmpty {
-                if effectivePolicy.requirePQC || !peerHasClassicGroup {
+                if !peerHasClassicGroup {
                     SkyBridgeLogger.p2p.error(
                         "❌ inbound rekey rejected: peer offered PQC suites but local PQC responder unavailable. peer=\(self.handshakePeer.deviceId, privacy: .public)"
                     )

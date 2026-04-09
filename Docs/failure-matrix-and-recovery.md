@@ -106,6 +106,20 @@ The CLI must explain failures in stable categories that automation and humans ca
 - recovery
   - stop transfer, mark failed, require retry
 
+### Secure session missing
+
+- class
+  - fail closed
+- recovery
+  - re-establish an authenticated peer session before starting transfer
+
+### Resume state unavailable
+
+- class
+  - terminal transfer failure
+- recovery
+  - restart the transfer from the beginning
+
 ## Install and Runtime Failures
 
 ### Missing state directory

@@ -77,7 +77,7 @@ open SkyBridgeCompass-iOS.xcodeproj
 
 - 你使用的 Xcode 必须包含 **iOS 26.x SDK**（否则编译会报找不到 `MLKEM768/MLDSA65`）
 - 运行时必须满足 `#available(iOS 26.0, *)`
-- 并且需要完成一次配对/信任同步，让双方保存对端 **KEM 身份公钥（Trust Store）**；否则会触发 classic bootstrap 或降级
+- 并且需要完成一次配对/信任同步，让双方保存对端 **KEM 身份公钥（Trust Store）**；若缺失，则 `strictPQC` 会直接 fail-closed，不会再自动 classic bootstrap 或降级
 
 ## 🔧 故障排除
 

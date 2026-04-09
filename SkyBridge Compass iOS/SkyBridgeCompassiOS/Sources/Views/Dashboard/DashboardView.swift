@@ -880,27 +880,44 @@ private struct QuantumStarLayer: View {
     
     private func handleQRCodeScan(_ data: QRCodeData) {
         showingQRScanner = false
-        
-        if data.type == .devicePairing {
-            if let ip = data.ipAddress, let _ = data.port {
-                Task {
-                    let skybridgeTCP = DiscoveryServiceType.skybridge.rawValue
-                    let portMap: [String: UInt16] = data.port.map { [skybridgeTCP: $0] } ?? [:]
-                    let device = DiscoveredDevice(
-                        id: data.deviceId,
-                        name: data.deviceName,
-                        modelName: "Unknown",
-                        platform: .unknown,
-                        osVersion: "Unknown",
-                        ipAddress: ip,
-                        services: [skybridgeTCP],
-                        portMap: portMap,
-                        signalStrength: -50,
-                        lastSeen: Date()
-                    )
-                    try? await viewModel.quickConnect(to: device)
+
+        guard data.type == .devicePairing else {
+            return
+        }
+
+        switch data.validateDevicePairingSecurity() {
+        case .verified:
+            guard let ip = data.ipAddress, let _ = data.port else {
+                crossNetworkAlertMessage = "局域网二维码缺少可连接的地址信息"
+                return
+            }
+
+            Task { @MainActor in
+                let skybridgeTCP = DiscoveryServiceType.skybridge.rawValue
+                let portMap: [String: UInt16] = data.port.map { [skybridgeTCP: $0] } ?? [:]
+                let device = DiscoveredDevice(
+                    id: data.deviceId,
+                    name: data.deviceName,
+                    modelName: "Unknown",
+                    platform: .unknown,
+                    osVersion: "Unknown",
+                    ipAddress: ip,
+                    services: [skybridgeTCP],
+                    portMap: portMap,
+                    signalStrength: -50,
+                    lastSeen: Date()
+                )
+
+                do {
+                    try await viewModel.quickConnect(to: device)
+                } catch {
+                    crossNetworkAlertMessage = error.localizedDescription
                 }
             }
+        case .unsignedLegacy:
+            crossNetworkAlertMessage = "已拦截未认证的局域网二维码。请让对方升级到新版 App 后重新生成，或改用跨网二维码。"
+        case .invalid(let reason):
+            crossNetworkAlertMessage = reason
         }
     }
 }
@@ -1671,12 +1688,17 @@ private struct MyConnectionQRCodeView: View {
             return .failure(.message("无法获取当前局域网地址。若已开启 VPN / TUN，请改用 WebRTC 二维码。"))
         }
 
-        let qrData = QRCodeGenerator.shared.createPairingData(
-            deviceId: KeychainManager.shared.getOrGenerateDeviceId(),
-            deviceName: UIDevice.current.name,
-            ipAddress: localIPAddress,
-            port: 9527
-        )
+        let qrData: QRCodeData
+        do {
+            qrData = try QRCodeGenerator.shared.createAuthenticatedPairingData(
+                deviceId: KeychainManager.shared.getOrGenerateDeviceId(),
+                deviceName: UIDevice.current.name,
+                ipAddress: localIPAddress,
+                port: 9527
+            )
+        } catch {
+            return .failure(.message(error.localizedDescription))
+        }
 
         let image = QRCodeGenerator.shared.generateQRCode(
             from: qrData,

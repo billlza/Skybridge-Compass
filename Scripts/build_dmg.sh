@@ -416,7 +416,24 @@ if [[ ! -f "$TEMP_DMG" ]]; then
     ls -lah "$DIST_DIR" || true
     exit 1
 fi
-hdiutil convert "$TEMP_DMG" -format UDZO -imagekey zlib-level=9 -o "$DMG_PATH"
+
+# hdiutil 会在 -o 参数上自动处理扩展名；显式传入 .dmg 时，个别环境下可能在成功写出产物后仍返回
+# “无此文件或目录”。统一改用不带扩展名的输出基名，并在完成后归一化到目标路径。
+DMG_OUTPUT_BASE="${DMG_PATH%.dmg}"
+DMG_OUTPUT_CANDIDATE="${DMG_OUTPUT_BASE}.dmg"
+rm -f "$DMG_OUTPUT_BASE" "$DMG_OUTPUT_CANDIDATE"
+hdiutil convert "$TEMP_DMG" -format UDZO -imagekey zlib-level=9 -o "$DMG_OUTPUT_BASE"
+
+if [[ -f "$DMG_OUTPUT_CANDIDATE" && "$DMG_OUTPUT_CANDIDATE" != "$DMG_PATH" ]]; then
+    rm -f "$DMG_PATH"
+    mv "$DMG_OUTPUT_CANDIDATE" "$DMG_PATH"
+fi
+
+if [[ ! -f "$DMG_PATH" ]]; then
+    log_error "压缩 DMG 后未找到目标文件: $DMG_PATH"
+    ls -lah "$DIST_DIR" || true
+    exit 1
+fi
 
 rm -f "$TEMP_DMG"
 

@@ -77,6 +77,7 @@
 		9405569D2DE3BD4B5A1924F5 /* PQCCryptoManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = F74330957D1E789BDA527E99 /* PQCCryptoManager.swift */; };
 		959456034AC8CD9FAF2E5A08 /* ThemeConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 54AD8F4C687F9B90B67B4329 /* ThemeConfiguration.swift */; };
 		9B1311542C3BB9B1E34608F0 /* NebulaIDGenerator.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD6CE3E346837A1B1449284F /* NebulaIDGenerator.swift */; };
+		A1E1F6B0C2D34E5F60718293 /* QRCodePairingSecurityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1E1F6B1C2D34E5F60718293 /* QRCodePairingSecurityTests.swift */; };
 		A30B6ADBE722CB3EDFFBF5A0 /* PolicyDecisionTestVectors.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D702D54FA811F70FC96D595 /* PolicyDecisionTestVectors.swift */; };
 		A3A0C50292CB73B7B9B2C9DF /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = 1A6B4413FB32FD653E7C976B /* Localizable.strings */; };
 		A5DF44B0F65FD8FBCAD30855 /* StatCardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74C91A71B2D7745DA114BC0D /* StatCardView.swift */; };
@@ -216,6 +217,7 @@
 		96686BD469796B5833E0C8E5 /* LiquidGlass.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiquidGlass.swift; sourceTree = "<group>"; };
 		9BE5FEA7CC6B032C4D623243 /* CloudKitSyncManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudKitSyncManager.swift; sourceTree = "<group>"; };
 		9E5263289EA47395D52657D8 /* RemoteDesktopManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteDesktopManager.swift; sourceTree = "<group>"; };
+		A1E1F6B1C2D34E5F60718293 /* QRCodePairingSecurityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRCodePairingSecurityTests.swift; sourceTree = "<group>"; };
 		A36B559F342929CA0C046D28 /* LogStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LogStore.swift; sourceTree = "<group>"; };
 		A3AEF34FAD525B93EAF2F1A9 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		A8BA9484E500F84365476521 /* BackgroundTaskManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundTaskManager.swift; sourceTree = "<group>"; };
@@ -366,6 +368,7 @@
 				5D702D54FA811F70FC96D595 /* PolicyDecisionTestVectors.swift */,
 				DA492E325F7E54E1EEEE4A95 /* PQCRekeyElectionTests.swift */,
 				7A0E9CD4D962C76E1D1377C2 /* QRCodeHubInteractionStateTests.swift */,
+				A1E1F6B1C2D34E5F60718293 /* QRCodePairingSecurityTests.swift */,
 				0EAD1A5FAF905D530CC04BEA /* RegressionHardeningTests.swift */,
 				61CE938D6222EAEDF491F6CC /* RemoteVideoFrameFeedTests.swift */,
 				E43049DEB4E29371EFB1B375 /* WebRTCSignalingFaultInjectionTests.swift */,
@@ -842,6 +845,7 @@
 				1AB2680B9B6A4DB64E3080B0 /* PolicyDecisionParityTests.swift in Sources */,
 				A30B6ADBE722CB3EDFFBF5A0 /* PolicyDecisionTestVectors.swift in Sources */,
 				065BBA12A9B6F4C9D20F4A11 /* QRCodeHubInteractionStateTests.swift in Sources */,
+				A1E1F6B0C2D34E5F60718293 /* QRCodePairingSecurityTests.swift in Sources */,
 				EFCDCE64CE9B9D05C8643818 /* RegressionHardeningTests.swift in Sources */,
 				B927E56A771624F1BD9C8454 /* RemoteVideoFrameFeedTests.swift in Sources */,
 				34275B3455303BC36565A6E0 /* WebRTCSignalingFaultInjectionTests.swift in Sources */,

@@ -5630,17 +5630,19 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                         let hasHybridGroup = messageA.supportedSuites.contains { $0.isHybrid }
                         let peerOnlyOffersHybrid = hasHybridGroup && messageA.supportedSuites.allSatisfy { $0.isHybrid }
                         let compatibilityModeEnabled = UserDefaults.standard.bool(forKey: "Settings.EnableCompatibilityMode")
-                        let handshakePolicy: HandshakePolicy = {
-                            if hasPQCGroup {
-                                return HandshakePolicy.recommendedDefault(compatibilityModeEnabled: compatibilityModeEnabled)
-                            }
-                            // 首次跨网建链（尚未完成 KEM bootstrap）允许 classic 握手落地，避免 strictPQC 直接阻断通道建立。
-                            return HandshakePolicy(
-                                requirePQC: false,
-                                allowClassicFallback: false,
-                                minimumTier: .classic
+                        let handshakePolicy = HandshakePolicy.recommendedDefault(compatibilityModeEnabled: compatibilityModeEnabled)
+                        if let rejection = StrictPQCAdmissionGate.inboundRejection(
+                            policy: handshakePolicy,
+                            peerSupportedSuites: messageA.supportedSuites,
+                            localPQCSuitesAvailable: hasPQCGroup
+                        ), rejection == .peerOfferedClassicOnly {
+                            logger.error(
+                                "❌ \(rejection.diagnosticMessage, privacy: .public). session=\(sessionID, privacy: .public) peer=\(peerDeviceId, privacy: .public)"
                             )
-                        }()
+                            self.connectionStatus = .failed(rejection.diagnosticMessage)
+                            self.readiness = .idle
+                            return
+                        }
                         let sigAAlgorithm: ProtocolSigningAlgorithm = hasPQCGroup ? .mlDSA65 : .ed25519
                         let capability = CryptoProviderFactory.detectCapability()
                         let remotePrefersLiboqs = messageA.capabilities.providerType == .liboqs
@@ -5657,6 +5659,18 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                         let offeredSuites: [CryptoSuite] = hasPQCGroup
                         ? DeviceIdentityKeyManager.pairingIdentityAdvertisedPQCSuites(using: cryptoProvider)
                         : cryptoProvider.supportedSuites.filter { !$0.isPQCGroup }
+                        if let rejection = StrictPQCAdmissionGate.inboundRejection(
+                            policy: handshakePolicy,
+                            peerSupportedSuites: messageA.supportedSuites,
+                            localPQCSuitesAvailable: hasPQCGroup ? !offeredSuites.isEmpty : true
+                        ) {
+                            logger.error(
+                                "❌ \(rejection.diagnosticMessage, privacy: .public). session=\(sessionID, privacy: .public) peer=\(peerDeviceId, privacy: .public)"
+                            )
+                            self.connectionStatus = .failed(rejection.diagnosticMessage)
+                            self.readiness = .idle
+                            return
+                        }
                         let cryptoPolicy: CryptoPolicy = hasHybridGroup
                             ? CryptoPolicy(
                                 minimumSecurityTier: peerOnlyOffersHybrid ? .hybridPreferred : .pqcPreferred,

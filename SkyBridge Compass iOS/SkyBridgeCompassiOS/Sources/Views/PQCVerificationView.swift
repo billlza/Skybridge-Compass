@@ -320,11 +320,7 @@ struct PQCVerificationView: View {
         Task { @MainActor in
             do {
                 // 1) 建立连接 + 完成一次握手。
-                // 对“首次验证/未受信任但缺少 peer KEM key”的场景，允许一次性 classic bootstrap。
-                try await P2PConnectionManager.instance.connect(
-                    to: device,
-                    allowUntrustedClassicBootstrapOnMissingPeerKEM: true
-                )
+                try await P2PConnectionManager.instance.connect(to: device)
                 
                 // 2) 通过已建立的会话加密通道交换 KEM identity 公钥（bootstrap trust store）
                 try await P2PConnectionManager.instance.sendPairingIdentityExchange(to: device.id)

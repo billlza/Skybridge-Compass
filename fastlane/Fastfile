@@ -4,6 +4,10 @@
 default_platform(:mac)
 
 platform :mac do
+
+  def current_signing_identity
+    sh("security find-identity -v -p codesigning | grep 'Developer ID Application' | head -1 | awk -F'\"' '{print $2}'").strip
+  end
   
   desc "获取或创建 Developer ID 证书"
   lane :setup_certificates do
@@ -24,7 +28,7 @@ platform :mac do
     setup_certificates
     
     # 获取签名身份
-    signing_identity = sh("security find-identity -v -p codesigning | grep 'Developer ID Application' | head -1 | awk -F'\"' '{print $2}'").strip
+    signing_identity = current_signing_identity
     
     if signing_identity.empty?
       UI.user_error!("未找到 Developer ID Application 证书")
@@ -32,11 +36,9 @@ platform :mac do
     
     UI.message("使用签名身份: #{signing_identity}")
     
-    # 运行构建脚本（脚本内部会自动检测 macOS SDK 26+ 并启用 Apple PQC 编译条件）
-    sh("cd .. && ./Scripts/build_with_widgets.sh")
-    
-    # 重新签名应用
-    sh("cd .. && codesign --force --deep --sign '#{signing_identity}' --options runtime --entitlements Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.entitlements 'dist/SkyBridge Compass.app'")
+    # 运行当前权威打包脚本，生成可用于 notarization 的 .app
+    sh("cd .. && IDENTITY='#{signing_identity}' ./Scripts/package_app.sh")
+    sh("cd .. && APP_PATH='dist/SkyBridge Compass Pro.app' IDENTITY='#{signing_identity}' ./Scripts/sign_app.sh")
     
     UI.success("✅ 应用构建并签名完成！")
   end
@@ -44,8 +46,8 @@ platform :mac do
   desc "公证应用（用于分发）"
   lane :notarize_app do
     notarize(
-      package: "dist/SkyBridge Compass.app",
-      bundle_id: "com.skybridge.compass",
+      package: "dist/SkyBridge Compass Pro.app",
+      bundle_id: "com.skybridge.compass.pro",
       print_log: true,
       verbose: true
     )
@@ -57,9 +59,14 @@ platform :mac do
   lane :release do
     build_signed
     notarize_app
-    
-    # 复制到桌面
-    sh("cp '../dist/SkyBridgeCompass-'$(date +%Y.%m.%d)'.dmg' ~/Desktop/")
+
+    signing_identity = current_signing_identity
+    if signing_identity.empty?
+      UI.user_error!("未找到 Developer ID Application 证书")
+    end
+
+    # 复用已签名/已公证的现有 .app 生成当前命名规范的 DMG，并自动复制到桌面
+    sh("cd .. && ./Scripts/build_dmg.sh --skip-build --skip-sign --use-existing-app --identity '#{signing_identity}'")
     
     UI.success("✅ 发布版本已准备好，DMG 已复制到桌面！")
   end
