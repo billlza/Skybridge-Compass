@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- Baseline: disable cleartext globally; enable CT on Android 16+ -->
+    <base-config cleartextTrafficPermitted="false">
+        <certificateTransparency enabled="true"/>
+    </base-config>
+
+    <!-- Debug: allow user-added CAs and bypass pinning for testing -->
+    <debug-overrides>
+        <trust-anchors>
+            <certificates src="user" overridePins="true"/>
+        </trust-anchors>
+    </debug-overrides>
+
+    <!-- Static pinning: add your domains and SPKI pins here
+         Example:
+         <domain-config>
+             <domain includeSubdomains="true">api.example.com</domain>
+             <pin-set expiration="2026-01-01">
+                 <pin digest="SHA-256" value="sha256/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="/>
+                 <pin digest="SHA-256" value="sha256/BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB="/>
+             </pin-set>
+         </domain-config>
+    -->
+</network-security-config>

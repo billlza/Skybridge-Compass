@@ -1,0 +1,78 @@
+src/sig/cross/CMakeFiles/cross_rsdpg_128_balanced_clean.dir/upcross_cross-rsdpg-128-balanced_clean/CROSS.c.o: \
+  /Users/bill/Desktop/SkyBridge\ Compass\ -\ Android/shared/scripts/build_liboqs/liboqs/src/sig/cross/upcross_cross-rsdpg-128-balanced_clean/CROSS.c \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/include/assert.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/include/sys/cdefs.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/include/android/versioning.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/include/android/api-level.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/include/bits/get_device_api_level_inlines.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/include/android/ndk-version.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/lib/clang/19/include/stdalign.h \
+  /Users/bill/Desktop/SkyBridge\ Compass\ -\ Android/shared/scripts/build_liboqs/liboqs/src/sig/cross/upcross_cross-rsdpg-128-balanced_clean/CROSS.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/lib/clang/19/include/stdint.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/include/stdint.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/include/bits/wchar_limits.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/lib/clang/19/include/stddef.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/lib/clang/19/include/__stddef_ptrdiff_t.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/lib/clang/19/include/__stddef_size_t.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/lib/clang/19/include/__stddef_wchar_t.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/lib/clang/19/include/__stddef_null.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/lib/clang/19/include/__stddef_max_align_t.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/lib/clang/19/include/__stddef_offsetof.h \
+  /Users/bill/Desktop/SkyBridge\ Compass\ -\ Android/shared/scripts/build_liboqs/liboqs/src/sig/cross/upcross_cross-rsdpg-128-balanced_clean/namespace.h \
+  /Users/bill/Desktop/SkyBridge\ Compass\ -\ Android/shared/scripts/build_liboqs/liboqs/src/sig/cross/upcross_cross-rsdpg-128-balanced_clean/pack_unpack.h \
+  /Users/bill/Desktop/SkyBridge\ Compass\ -\ Android/shared/scripts/build_liboqs/liboqs/src/sig/cross/upcross_cross-rsdpg-128-balanced_clean/parameters.h \
+  /Users/bill/Desktop/SkyBridge\ Compass\ -\ Android/shared/scripts/build_liboqs/liboqs/src/sig/cross/upcross_cross-rsdpg-128-balanced_clean/set.h \
+  /Users/bill/Desktop/SkyBridge\ Compass\ -\ Android/shared/scripts/build_liboqs/liboqs/src/sig/cross/upcross_cross-rsdpg-128-balanced_clean/csprng_hash.h \
+  /Users/bill/Desktop/SkyBridge\ Compass\ -\ Android/shared/scripts/build_liboqs/liboqs/src/sig/cross/upcross_cross-rsdpg-128-balanced_clean/sha3.h \
+  /Users/bill/Desktop/SkyBridge\ Compass\ -\ Android/shared/scripts/build_liboqs/liboqs/src/common/pqclean_shims/fips202.h \
+  /Users/bill/Desktop/SkyBridge\ Compass\ -\ Android/shared/scripts/build_liboqs/build-arm64-v8a/include/oqs/sha3.h \
+  /Users/bill/Desktop/SkyBridge\ Compass\ -\ Android/shared/scripts/build_liboqs/build-arm64-v8a/include/oqs/sha3_ops.h \
+  /Users/bill/Desktop/SkyBridge\ Compass\ -\ Android/shared/scripts/build_liboqs/build-arm64-v8a/include/oqs/common.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/lib/clang/19/include/limits.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/include/limits.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/lib/clang/19/include/float.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/include/linux/limits.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/include/bits/posix_limits.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/include/stdio.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/include/sys/types.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/include/linux/types.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/include/aarch64-linux-android/asm/types.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/include/asm-generic/types.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/include/asm-generic/int-ll64.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/include/aarch64-linux-android/asm/bitsperlong.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/include/asm-generic/bitsperlong.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/include/linux/posix_types.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/include/linux/stddef.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/include/linux/compiler_types.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/include/linux/compiler.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/include/aarch64-linux-android/asm/posix_types.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/include/asm-generic/posix_types.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/include/bits/pthread_types.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/lib/clang/19/include/stdarg.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/lib/clang/19/include/__stdarg___gnuc_va_list.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/lib/clang/19/include/__stdarg_va_list.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/lib/clang/19/include/__stdarg_va_arg.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/lib/clang/19/include/__stdarg___va_copy.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/lib/clang/19/include/__stdarg_va_copy.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/include/bits/seek_constants.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/include/bits/fortify/stdio.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/include/stdlib.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/include/alloca.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/include/bits/wait.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/include/linux/wait.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/include/malloc.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/include/xlocale.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/include/bits/fortify/stdlib.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/include/android/legacy_stdlib_inlines.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/include/bits/stdlib_inlines.h \
+  /Users/bill/Desktop/SkyBridge\ Compass\ -\ Android/shared/scripts/build_liboqs/build-arm64-v8a/include/oqs/oqsconfig.h \
+  /Users/bill/Desktop/SkyBridge\ Compass\ -\ Android/shared/scripts/build_liboqs/liboqs/src/sig/cross/upcross_cross-rsdpg-128-balanced_clean/fp_arith.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/include/string.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/include/bits/strcasecmp.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/include/bits/fortify/string.h \
+  /Users/bill/Desktop/SkyBridge\ Compass\ -\ Android/shared/scripts/build_liboqs/liboqs/src/sig/cross/upcross_cross-rsdpg-128-balanced_clean/restr_arith.h \
+  /Users/bill/Desktop/SkyBridge\ Compass\ -\ Android/shared/scripts/build_liboqs/liboqs/src/sig/cross/upcross_cross-rsdpg-128-balanced_clean/merkle_tree.h \
+  /Users/bill/Desktop/SkyBridge\ Compass\ -\ Android/shared/scripts/build_liboqs/liboqs/src/common/pqclean_shims/randombytes.h \
+  /Users/bill/Desktop/SkyBridge\ Compass\ -\ Android/shared/scripts/build_liboqs/build-arm64-v8a/include/oqs/rand.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/lib/clang/19/include/stdbool.h \
+  /Users/bill/Desktop/SkyBridge\ Compass\ -\ Android/shared/scripts/build_liboqs/liboqs/src/sig/cross/upcross_cross-rsdpg-128-balanced_clean/seedtree.h

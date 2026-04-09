@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    
+    <!-- Monochrome version for themed icons (Android 13+) -->
+    <!-- Main gear/cloud frame -->
+    <path
+        android:fillColor="#FF000000"
+        android:pathData="M54,20 C60,20 65,22 69,26 C73,30 75,35 75,41 C75,42 75,43 74.8,44 L80,46 C82,47 83,49 83,51 C83,53 82,55 80,56 L74.8,58 C75,59 75,60 75,61 C75,67 73,72 69,76 C65,80 60,82 54,82 C48,82 43,80 39,76 C35,72 33,67 33,61 C33,60 33,59 33.2,58 L28,56 C26,55 25,53 25,51 C25,49 26,47 28,46 L33.2,44 C33,43 33,42 33,41 C33,35 35,30 39,26 C43,22 48,20 54,20 Z" />
+    
+    <!-- Clock face -->
+    <path
+        android:fillColor="#FF000000"
+        android:pathData="M54,30 C62,30 68,36 68,44 L68,58 C68,66 62,72 54,72 C46,72 40,66 40,58 L40,44 C40,36 46,30 54,30 Z" />
+    
+    <!-- Hour markers -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M54,33 L54,37 M62,41 L58,41 M54,65 L54,61 M46,41 L50,41" />
+    
+    <!-- Clock hands -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:strokeWidth="2"
+        android:pathData="M54,51 L54,42 M54,51 L58,47" />
+    
+    <!-- Center dot -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M54,51 C55.1,51 56,50.1 56,49 C56,47.9 55.1,47 54,47 C52.9,47 52,47.9 52,49 C52,50.1 52.9,51 54,51 Z" />
+</vector>

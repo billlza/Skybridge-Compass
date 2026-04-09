@@ -1,0 +1,19 @@
+src/kem/ntruprime/CMakeFiles/ntruprime_sntrup761_clean.dir/pqclean_sntrup761_clean/crypto_encode_761x1531round.c.o: \
+  /Users/bill/Desktop/SkyBridge\ Compass\ -\ Android/shared/scripts/build_liboqs/liboqs/src/kem/ntruprime/pqclean_sntrup761_clean/crypto_encode_761x1531round.c \
+  /Users/bill/Desktop/SkyBridge\ Compass\ -\ Android/shared/scripts/build_liboqs/liboqs/src/kem/ntruprime/pqclean_sntrup761_clean/crypto_encode_761x1531.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/lib/clang/19/include/stdint.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/include/stdint.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/include/sys/cdefs.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/include/android/versioning.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/include/android/api-level.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/include/bits/get_device_api_level_inlines.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/include/android/ndk-version.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/include/bits/wchar_limits.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/lib/clang/19/include/stddef.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/lib/clang/19/include/__stddef_ptrdiff_t.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/lib/clang/19/include/__stddef_size_t.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/lib/clang/19/include/__stddef_wchar_t.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/lib/clang/19/include/__stddef_null.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/lib/clang/19/include/__stddef_max_align_t.h \
+  /Users/bill/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/lib/clang/19/include/__stddef_offsetof.h \
+  /Users/bill/Desktop/SkyBridge\ Compass\ -\ Android/shared/scripts/build_liboqs/liboqs/src/kem/ntruprime/pqclean_sntrup761_clean/crypto_encode_761x1531round.h
