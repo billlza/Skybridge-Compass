@@ -9,6 +9,15 @@ import UIKit
 import UserNotifications
 #endif
 
+extension Notification.Name {
+    static let crossNetworkScreenDataUpdated = Notification.Name("CrossNetworkScreenDataUpdated")
+}
+
+enum CrossNetworkNotificationUserInfoKey {
+    static let sessionId = "sessionId"
+    static let screenData = "screenData"
+}
+
 // MARK: - iOS-local server config (file-local, to avoid target membership issues)
 
 // MARK: - iOS-local crypto helpers (file-local, to avoid target membership issues)
@@ -1193,6 +1202,19 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     @Published public private(set) var currentConnectLink: String?
     @Published public private(set) var activeSessionSnapshot: ActiveSessionSnapshot?
     @Published public private(set) var idleConnectionPrompt: IdleConnectionPrompt?
+
+    public var activeRemoteDesktopSessionId: String? {
+        if let sessionId = activeSessionSnapshot?.sessionId {
+            return sessionId
+        }
+        switch state {
+        case .connecting(let sessionId), .connected(let sessionId):
+            return sessionId
+        case .idle, .failed:
+            return nil
+        }
+    }
+
     private static let shortCodeAlphabet = Array("ABCDEFGHJKLMNPQRSTUVWXYZ23456789")
     private static let shortCodeAllowedCharacters = Set(shortCodeAlphabet)
     public static let legacyConnectionCodeLength = 6
@@ -5637,10 +5659,7 @@ private extension CrossNetworkWebRTCManager {
             lastScreenDataAt = Date()
             maybeConfirmRemoteVideoTrackFromFallbackEvidence(now: lastScreenDataAt ?? Date())
 #endif
-            NotificationCenter.default.post(
-                name: Notification.Name("CrossNetworkScreenDataUpdated"),
-                object: nil
-            )
+            postScreenFrameNotification(screenData)
             return true
         }
 
@@ -5653,14 +5672,27 @@ private extension CrossNetworkWebRTCManager {
             lastScreenDataAt = Date()
             maybeConfirmRemoteVideoTrackFromFallbackEvidence(now: lastScreenDataAt ?? Date())
 #endif
-            NotificationCenter.default.post(
-                name: Notification.Name("CrossNetworkScreenDataUpdated"),
-                object: nil
-            )
+            postScreenFrameNotification(screenData)
             return true
         }
 
         return false
+    }
+
+    private func postScreenFrameNotification(_ screenData: ScreenData) {
+        guard let sessionId = activeRemoteDesktopSessionId?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !sessionId.isEmpty else {
+            return
+        }
+
+        NotificationCenter.default.post(
+            name: .crossNetworkScreenDataUpdated,
+            object: nil,
+            userInfo: [
+                CrossNetworkNotificationUserInfoKey.sessionId: sessionId,
+                CrossNetworkNotificationUserInfoKey.screenData: screenData
+            ]
+        )
     }
 
     @discardableResult
