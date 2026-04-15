@@ -311,7 +311,15 @@ public class FileTransferManager: ObservableObject {
     private let queue = DispatchQueue(label: "com.skybridge.filetransfer", qos: .userInitiated)
 
     private var inFlightTransferCount: Int = 0
-    private var transferWaiters: [CheckedContinuation<Void, Never>] = []
+    private struct TransferWaiter {
+        let id: UUID
+        let continuation: CheckedContinuation<Void, Error>
+    }
+    enum TransferSlotReleaseAction: Equatable {
+        case decrementTo(Int)
+        case resumeWaiter(nextInFlightCount: Int)
+    }
+    private var transferWaiters: [TransferWaiter] = []
     private var lastProgressEventAtByTransferId: [String: Date] = [:]
     private var lastProgressEventPercentByTransferId: [String: Int] = [:]
     private let progressEventMinInterval: TimeInterval = 0.25
@@ -348,7 +356,7 @@ public class FileTransferManager: ObservableObject {
     ///   - url: 文件 URL
     ///   - device: 目标设备
     public func sendFile(at url: URL, to device: DiscoveredDevice) async throws {
-        await acquireTransferSlot()
+        try await acquireTransferSlot()
         defer { releaseTransferSlot() }
 
         let didAccess = url.startAccessingSecurityScopedResource()
@@ -1094,7 +1102,7 @@ public class FileTransferManager: ObservableObject {
     ///   - metadata: 文件元数据
     ///   - connection: 网络连接
     public func receiveFile(metadata: FileMetadata, from connection: NWConnection, peer: String) async throws -> URL {
-        await acquireTransferSlot()
+        try await acquireTransferSlot()
         defer { releaseTransferSlot() }
 
         SkyBridgeLogger.shared.info("📥 开始接收文件: \(metadata.fileName) 从设备: \(peer)")
@@ -1682,25 +1690,71 @@ public class FileTransferManager: ObservableObject {
         return data
     }
 
-    private func acquireTransferSlot() async {
+    private func acquireTransferSlot() async throws {
         let limit = max(1, SettingsManager.instance.fileTransferMaxConcurrentTransfers)
         if inFlightTransferCount < limit {
             inFlightTransferCount += 1
             return
         }
 
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            transferWaiters.append(continuation)
+        let waiterId = UUID()
+        try await withTaskCancellationHandler(operation: {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                if Task.isCancelled {
+                    continuation.resume(throwing: CancellationError())
+                    return
+                }
+                transferWaiters.append(TransferWaiter(id: waiterId, continuation: continuation))
+            }
+        }, onCancel: {
+            Task { @MainActor [weak self] in
+                self?.cancelTransferWaiter(id: waiterId)
+            }
+        })
+
+        if Task.isCancelled {
+            releaseTransferSlot()
+            throw CancellationError()
         }
-        inFlightTransferCount += 1
     }
 
     private func releaseTransferSlot() {
-        inFlightTransferCount = max(0, inFlightTransferCount - 1)
-        if !transferWaiters.isEmpty, inFlightTransferCount < max(1, SettingsManager.instance.fileTransferMaxConcurrentTransfers) {
-            let c = transferWaiters.removeFirst()
-            c.resume()
+        let limit = max(1, SettingsManager.instance.fileTransferMaxConcurrentTransfers)
+        switch Self.transferSlotReleaseAction(
+            inFlightTransferCount: inFlightTransferCount,
+            waiterCount: transferWaiters.count,
+            limit: limit
+        ) {
+        case .resumeWaiter(let nextInFlightCount):
+            let waiter = transferWaiters.removeFirst()
+            inFlightTransferCount = nextInFlightCount
+            waiter.continuation.resume(returning: ())
+        case .decrementTo(let nextInFlightCount):
+            inFlightTransferCount = nextInFlightCount
         }
+    }
+
+    private func cancelTransferWaiter(id: UUID) {
+        guard let index = transferWaiters.firstIndex(where: { $0.id == id }) else {
+            return
+        }
+        let waiter = transferWaiters.remove(at: index)
+        waiter.continuation.resume(throwing: CancellationError())
+    }
+
+    nonisolated static func transferSlotReleaseAction(
+        inFlightTransferCount: Int,
+        waiterCount: Int,
+        limit: Int
+    ) -> TransferSlotReleaseAction {
+        let normalizedLimit = max(1, limit)
+        let decrementedCount = max(0, inFlightTransferCount - 1)
+
+        if waiterCount > 0, decrementedCount < normalizedLimit {
+            return .resumeWaiter(nextInFlightCount: decrementedCount + 1)
+        }
+
+        return .decrementTo(decrementedCount)
     }
     
     // MARK: - Private Methods - Utilities

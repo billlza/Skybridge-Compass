@@ -911,6 +911,36 @@ final class RegressionHardeningTests: XCTestCase {
         XCTAssertTrue(shouldPreferCrossNetwork)
     }
 
+    func testFileTransferReleaseSlotResumesWaitingTransferWithoutDroppingOccupancy() {
+        XCTAssertEqual(
+            FileTransferManager.transferSlotReleaseAction(
+                inFlightTransferCount: 2,
+                waiterCount: 1,
+                limit: 2
+            ),
+            .resumeWaiter(nextInFlightCount: 2)
+        )
+    }
+
+    func testFileTransferReleaseSlotDropsOccupancyWhenNoWaitersRemain() {
+        XCTAssertEqual(
+            FileTransferManager.transferSlotReleaseAction(
+                inFlightTransferCount: 2,
+                waiterCount: 0,
+                limit: 2
+            ),
+            .decrementTo(1)
+        )
+        XCTAssertEqual(
+            FileTransferManager.transferSlotReleaseAction(
+                inFlightTransferCount: 1,
+                waiterCount: 0,
+                limit: 0
+            ),
+            .decrementTo(0)
+        )
+    }
+
     func testRemoteDesktopStreamConfigurationPayloadEqualityIgnoresSentAtButTracksRefreshToken() {
         let base = RemoteDesktopStreamConfigurationPayload(
             width: 1920,
