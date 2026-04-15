@@ -57,6 +57,41 @@ create table if not exists public.device_enrollment_invites (
 create index if not exists device_enrollment_invites_target_idx
     on public.device_enrollment_invites (tenant_id, target_user_id, state);
 
+create or replace function public.assert_service_role_request_v5(
+    p_function_name text default null
+)
+returns void
+language plpgsql
+set search_path = pg_catalog, public
+as $$
+declare
+    v_request_role text;
+    v_request_claims text;
+begin
+    v_request_role := nullif(current_setting('request.jwt.claim.role', true), '');
+
+    if v_request_role is null then
+        v_request_claims := nullif(current_setting('request.jwt.claims', true), '');
+        if v_request_claims is not null then
+            v_request_role := nullif((v_request_claims::jsonb ->> 'role'), '');
+        end if;
+    end if;
+
+    if v_request_role = 'service_role' then
+        return;
+    end if;
+
+    if v_request_role is null and session_user in ('postgres', 'supabase_admin', 'supabase_auth_admin') then
+        return;
+    end if;
+
+    raise exception using
+        errcode = '42501',
+        message = 'service_role_required',
+        detail = coalesce(p_function_name, 'This function') || ' may only be invoked by service_role or trusted internal callers.';
+end;
+$$;
+
 create or replace function public.ensure_tenant_security_policy_v5(
     p_tenant_id uuid
 )
@@ -66,6 +101,8 @@ security definer
 set search_path = public
 as $$
 begin
+    perform public.assert_service_role_request_v5('ensure_tenant_security_policy_v5');
+
     insert into public.tenant_security_policy (
         tenant_id,
         public_signaling_enabled,
@@ -146,6 +183,8 @@ declare
     v_existing_count integer;
     v_result public.registered_devices%rowtype;
 begin
+    perform public.assert_service_role_request_v5('enroll_first_device_v5');
+
     select *
       into v_invite
       from public.device_enrollment_invites
@@ -239,6 +278,8 @@ declare
     v_approver public.registered_devices%rowtype;
     v_pending public.registered_devices%rowtype;
 begin
+    perform public.assert_service_role_request_v5('confirm_device_enrollment_v5');
+
     select *
       into v_approver
       from public.registered_devices
@@ -329,6 +370,8 @@ declare
     v_existing public.registered_devices%rowtype;
     v_existing_count integer;
 begin
+    perform public.assert_service_role_request_v5('bootstrap_register_device_v5');
+
     select *
       into v_existing
       from public.registered_devices
@@ -404,3 +447,13 @@ begin
     return to_jsonb(v_existing);
 end;
 $$;
+
+revoke execute on function public.assert_service_role_request_v5(text) from public, anon, authenticated;
+revoke execute on function public.ensure_tenant_security_policy_v5(uuid) from public, anon, authenticated;
+grant execute on function public.ensure_tenant_security_policy_v5(uuid) to service_role;
+revoke execute on function public.enroll_first_device_v5(text, uuid, uuid, text, text, text, text, uuid) from public, anon, authenticated;
+grant execute on function public.enroll_first_device_v5(text, uuid, uuid, text, text, text, text, uuid) to service_role;
+revoke execute on function public.confirm_device_enrollment_v5(uuid, uuid, text, text, text, text, text, text, text) from public, anon, authenticated;
+grant execute on function public.confirm_device_enrollment_v5(uuid, uuid, text, text, text, text, text, text, text) to service_role;
+revoke execute on function public.bootstrap_register_device_v5(uuid, uuid, text, text, text, text) from public, anon, authenticated;
+grant execute on function public.bootstrap_register_device_v5(uuid, uuid, text, text, text, text) to service_role;

@@ -8,6 +8,9 @@ It now includes two deployment tracks:
 - `deploy/nginx/skybridge-signaling.conf`: single-instance baseline
 - `deploy/nginx/skybridge-signaling-multi-instance-sticky.conf`: low-risk multi-instance sticky/session-shard rollout
 
+Auth email/SMS production runbook:
+- `Docs/ops/auth-email-and-sms-production.md`
+
 ## 1. Prepare the server
 
 1. Install Node.js 20+ and npm.
@@ -38,13 +41,30 @@ Common flags:
 bash Server/skybridge-signaling/deploy/scripts/smoke_local.sh http://127.0.0.1:8443
 ```
 
+For a real PNVS hook probe in staging:
+
+```bash
+SUPABASE_SEND_SMS_HOOK_SECRET='<staging hook secret>' \
+bash Server/skybridge-signaling/deploy/scripts/probe_supabase_send_sms_hook.sh \
+  https://<staging-host> \
+  <mainland-test-phone>
+```
+
 Expected behavior:
 - `GET /` returns JSON with advertised endpoints.
 - `GET /health` returns `200`.
+- `GET /health` includes an `sms` readiness block.
+- `GET /readyz` returns `200` only when the signaling backend and required SMS OTP dependencies are ready.
+- `probe_supabase_send_sms_hook.sh` returns `200`, then PNVS control panel shows a matching sending record.
 - `GET /api/turn/credentials` is not `404`.
 - `GET /api/turn/credentials` returns short-lived mode (`mode=shared_secret_hmac`) in production.
 - `POST /api/webrtc/register-code` returns a short-lived `code + initiatorToken`.
 - `POST /api/webrtc/register-session` returns a server-issued `sessionId + signalingToken`.
+
+If `REQUIRE_SMS_AUTH_READY=true`, production readiness now fails closed until:
+- `SUPABASE_SEND_SMS_HOOK_SECRET` is configured
+- the selected Aliyun provider is fully configured
+- `/readyz` reports `smsReady=true`
 
 Recommended pre-release regression:
 

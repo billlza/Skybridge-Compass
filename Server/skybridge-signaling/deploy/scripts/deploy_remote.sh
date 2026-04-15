@@ -15,8 +15,8 @@ Options:
   --port <port>            SSH port (default: 22)
   --app-dir <path>         Remote app root (default: /opt/skybridge-signaling)
   --service <name>         systemd service name (default: skybridge-signaling)
-  --health-url <url>       Health endpoint checked on remote host
-                           (default: http://127.0.0.1:8443/health)
+  --health-url <url>       Readiness endpoint checked on remote host
+                           (default: http://127.0.0.1:8443/readyz)
   --skip-systemd           Do not install/reload/restart systemd service
   -h, --help               Show this help
 USAGE
@@ -28,7 +28,7 @@ IDENTITY_FILE=""
 PORT="22"
 APP_DIR="/opt/skybridge-signaling"
 SERVICE_NAME="skybridge-signaling"
-HEALTH_URL="http://127.0.0.1:8443/health"
+HEALTH_URL="http://127.0.0.1:8443/readyz"
 SKIP_SYSTEMD="false"
 
 while [[ $# -gt 0 ]]; do
@@ -150,7 +150,7 @@ echo "[deploy] Uploading archive to $REMOTE_TARGET"
 
 echo "[deploy] Provisioning release directory and dependencies"
 "${SSH_CMD[@]}" "$REMOTE_TARGET" \
-  "APP_DIR='$APP_DIR' REMOTE_ARCHIVE='$REMOTE_ARCHIVE' REMOTE_RELEASE_DIR='$REMOTE_RELEASE_DIR' REMOTE_ENV='$REMOTE_ENV' REMOTE_CURRENT='$REMOTE_CURRENT' bash -s" <<'REMOTE_PREP'
+  "APP_DIR='$APP_DIR' REMOTE_ARCHIVE='$REMOTE_ARCHIVE' REMOTE_RELEASE_DIR='$REMOTE_RELEASE_DIR' REMOTE_ENV='$REMOTE_ENV' REMOTE_CURRENT='$REMOTE_CURRENT' HEALTH_URL='$HEALTH_URL' bash -s" <<'REMOTE_PREP'
 set -euo pipefail
 
 if ! command -v node >/dev/null 2>&1; then
@@ -159,6 +159,10 @@ if ! command -v node >/dev/null 2>&1; then
 fi
 if ! command -v npm >/dev/null 2>&1; then
   echo "npm is not installed on remote host" >&2
+  exit 1
+fi
+if ! command -v curl >/dev/null 2>&1; then
+  echo "curl is not installed on remote host" >&2
   exit 1
 fi
 
@@ -182,7 +186,59 @@ pushd "$REMOTE_RELEASE_DIR" >/dev/null
 sudo npm ci --omit=dev --no-audit --no-fund
 popd >/dev/null
 
-sudo ln -sfn "$REMOTE_RELEASE_DIR" "$REMOTE_CURRENT"
+PREVIOUS_CURRENT_TARGET=""
+if [[ -L "$REMOTE_CURRENT" || -e "$REMOTE_CURRENT" ]]; then
+  PREVIOUS_CURRENT_TARGET="$(readlink -f "$REMOTE_CURRENT" || true)"
+fi
+printf '%s\n' "$PREVIOUS_CURRENT_TARGET" | sudo tee "$REMOTE_RELEASE_DIR/.previous-current-target" >/dev/null
+
+sudo chown -R skybridge:skybridge "$REMOTE_RELEASE_DIR" "$APP_DIR/shared"
+
+CANDIDATE_PORT="$(node -e "const net = require('node:net'); const server = net.createServer(); server.listen(0, '127.0.0.1', () => { console.log(server.address().port); server.close(); });")"
+CANDIDATE_READY_URL="$(HEALTH_URL="$HEALTH_URL" CANDIDATE_PORT="$CANDIDATE_PORT" node -e "const url = new URL(process.env.HEALTH_URL); url.hostname = '127.0.0.1'; url.port = process.env.CANDIDATE_PORT; console.log(url.toString());")"
+
+echo "[deploy] Preflight booting candidate release on $CANDIDATE_READY_URL"
+sudo -u skybridge env \
+  REMOTE_ENV="$REMOTE_ENV" \
+  REMOTE_RELEASE_DIR="$REMOTE_RELEASE_DIR" \
+  CANDIDATE_PORT="$CANDIDATE_PORT" \
+  CANDIDATE_READY_URL="$CANDIDATE_READY_URL" \
+  bash -s <<'REMOTE_CANDIDATE'
+set -euo pipefail
+
+CANDIDATE_LOG="$REMOTE_RELEASE_DIR/.candidate-boot.log"
+set -a
+source "$REMOTE_ENV"
+set +a
+
+HOST=127.0.0.1 PORT="$CANDIDATE_PORT" NODE_ENV=production node "$REMOTE_RELEASE_DIR/server.js" >"$CANDIDATE_LOG" 2>&1 &
+candidate_pid=$!
+
+cleanup() {
+  if kill -0 "$candidate_pid" >/dev/null 2>&1; then
+    kill "$candidate_pid" >/dev/null 2>&1 || true
+    wait "$candidate_pid" >/dev/null 2>&1 || true
+  fi
+  rm -f "$CANDIDATE_LOG"
+}
+trap cleanup EXIT
+
+for attempt in $(seq 1 30); do
+  if curl -kfsS "$CANDIDATE_READY_URL" >/dev/null; then
+    exit 0
+  fi
+  if ! kill -0 "$candidate_pid" >/dev/null 2>&1; then
+    wait "$candidate_pid" || true
+    break
+  fi
+  sleep 1
+done
+
+echo "Candidate release failed readiness: $CANDIDATE_READY_URL" >&2
+tail -n 50 "$CANDIDATE_LOG" >&2 || true
+exit 1
+REMOTE_CANDIDATE
+
 sudo chown -R skybridge:skybridge "$APP_DIR"
 REMOTE_PREP
 
@@ -196,20 +252,53 @@ if [[ "$SKIP_SYSTEMD" != "true" ]]; then
     "${SCP_CMD[@]}" "$SERVICE_TEMPLATE" "$REMOTE_TARGET:/tmp/${SERVICE_NAME}.service"
 
     "${SSH_CMD[@]}" "$REMOTE_TARGET" \
-      "SERVICE_NAME='$SERVICE_NAME' HEALTH_URL='$HEALTH_URL' bash -s" <<'REMOTE_SYSTEMD'
+      "SERVICE_NAME='$SERVICE_NAME' APP_DIR='$APP_DIR' REMOTE_CURRENT='$REMOTE_CURRENT' REMOTE_RELEASE_DIR='$REMOTE_RELEASE_DIR' HEALTH_URL='$HEALTH_URL' bash -s" <<'REMOTE_SYSTEMD'
 set -euo pipefail
 
 sudo install -m 0644 "/tmp/${SERVICE_NAME}.service" "/etc/systemd/system/${SERVICE_NAME}.service"
 sudo rm -f "/tmp/${SERVICE_NAME}.service"
 
+PREVIOUS_CURRENT_TARGET=""
+if [[ -f "$REMOTE_RELEASE_DIR/.previous-current-target" ]]; then
+  PREVIOUS_CURRENT_TARGET="$(cat "$REMOTE_RELEASE_DIR/.previous-current-target")"
+fi
+
+rollback_current() {
+  if [[ -z "$PREVIOUS_CURRENT_TARGET" || ! -d "$PREVIOUS_CURRENT_TARGET" ]]; then
+    return 1
+  fi
+  echo "[deploy] Rolling back current symlink to $PREVIOUS_CURRENT_TARGET" >&2
+  sudo ln -sfn "$PREVIOUS_CURRENT_TARGET" "$REMOTE_CURRENT"
+  sudo chown -h skybridge:skybridge "$REMOTE_CURRENT" || true
+  sudo systemctl restart "$SERVICE_NAME" || true
+}
+
 sudo systemctl daemon-reload
 sudo systemctl enable "$SERVICE_NAME" >/dev/null 2>&1 || true
-sudo systemctl restart "$SERVICE_NAME"
+sudo ln -sfn "$REMOTE_RELEASE_DIR" "$REMOTE_CURRENT"
+sudo chown -h skybridge:skybridge "$REMOTE_CURRENT" || true
+
+if ! sudo systemctl restart "$SERVICE_NAME"; then
+  rollback_current || true
+  exit 1
+fi
 sleep 2
 
-curl -fsS "$HEALTH_URL" >/dev/null
+if ! curl -kfsS "$HEALTH_URL" >/dev/null; then
+  rollback_current || true
+  exit 1
+fi
+
 sudo systemctl --no-pager --full status "$SERVICE_NAME" | sed -n '1,25p'
 REMOTE_SYSTEMD
+else
+    echo "[deploy] Candidate readiness passed; updating current symlink without restarting systemd"
+    "${SSH_CMD[@]}" "$REMOTE_TARGET" \
+      "REMOTE_CURRENT='$REMOTE_CURRENT' REMOTE_RELEASE_DIR='$REMOTE_RELEASE_DIR' bash -s" <<'REMOTE_PROMOTE'
+set -euo pipefail
+sudo ln -sfn "$REMOTE_RELEASE_DIR" "$REMOTE_CURRENT"
+sudo chown -h skybridge:skybridge "$REMOTE_CURRENT" || true
+REMOTE_PROMOTE
 fi
 
 echo "[deploy] Release $RELEASE_NAME deployed successfully"

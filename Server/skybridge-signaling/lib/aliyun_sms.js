@@ -13,6 +13,7 @@ const DEFAULT_PNVS_TEMPLATE_CODE = '100001';
 const DEFAULT_VERSION = '2017-05-25';
 const DEFAULT_ACTION = 'SendSms';
 const DEFAULT_SIGNATURE_ALGORITHM = 'ACS3-HMAC-SHA256';
+const SUPPORTED_PROVIDERS = new Set(['pnvs', 'dysms']);
 const SIGNED_HEADERS = [
   'content-type',
   'host',
@@ -50,6 +51,51 @@ function normalizeMainlandChinaPhone(raw) {
 function requiredString(raw) {
   const value = String(raw || '').trim();
   return value || null;
+}
+
+function parsePositiveInteger(raw) {
+  if (raw === null || raw === undefined || raw === '') {
+    return null;
+  }
+  const value = Number.parseInt(String(raw).trim(), 10);
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
+
+function sanitizeTemplateParams(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return {};
+  }
+  const sanitized = {};
+  for (const [key, value] of Object.entries(raw)) {
+    const normalizedKey = String(key || '').trim();
+    if (!normalizedKey || value === null || value === undefined) {
+      continue;
+    }
+    const normalizedValue = String(value).trim();
+    if (!normalizedValue) {
+      continue;
+    }
+    sanitized[normalizedKey] = normalizedValue;
+  }
+  return sanitized;
+}
+
+function parseTemplateParams(raw) {
+  if (raw === null || raw === undefined || raw === '') {
+    return { value: {}, error: null };
+  }
+  if (typeof raw === 'object' && !Array.isArray(raw)) {
+    return { value: sanitizeTemplateParams(raw), error: null };
+  }
+  try {
+    const parsed = JSON.parse(String(raw));
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return { value: {}, error: 'template_params_must_be_json_object' };
+    }
+    return { value: sanitizeTemplateParams(parsed), error: null };
+  } catch (_) {
+    return { value: {}, error: 'template_params_invalid_json' };
+  }
 }
 
 function createPnvsClient({ accessKeyId, accessKeySecret, endpoint, regionId }) {
@@ -105,6 +151,15 @@ class AliyunSMSClient {
       || process.env.ALIYUN_REGION_ID
       || (this.provider === 'pnvs' ? DEFAULT_PNVS_REGION_ID : '')
     );
+    this.otpExpirySeconds = parsePositiveInteger(
+      options.otpExpirySeconds
+      || process.env.SUPABASE_SMS_OTP_EXP_SECONDS
+      || process.env.ALIYUN_SMS_OTP_EXP_SECONDS
+    );
+    const templateParamsSource = options.templateParams ?? process.env.ALIYUN_SMS_TEMPLATE_PARAMS_JSON;
+    const parsedTemplateParams = parseTemplateParams(templateParamsSource);
+    this.templateParams = parsedTemplateParams.value;
+    this.templateParamsError = parsedTemplateParams.error;
     this.version = requiredString(options.version || process.env.ALIYUN_SMS_API_VERSION) || DEFAULT_VERSION;
     this.fetchImpl = options.fetchImpl || global.fetch;
     this.pnvsClient = options.pnvsClient || (
@@ -124,30 +179,95 @@ class AliyunSMSClient {
   }
 
   get configured() {
-    if (this.provider === 'pnvs') {
-      return Boolean(
-        this.accessKeyId
-        && this.accessKeySecret
-        && this.signName
-        && this.templateCode
-        && this.endpoint
-        && this.regionId
-        && this.pnvsClient
-      );
+    if (!this.providerSupported) {
+      return false;
     }
-    return Boolean(
-      this.accessKeyId
-      && this.accessKeySecret
-      && this.signName
-      && this.templateCode
-      && this.endpoint
-      && typeof this.fetchImpl === 'function'
-    );
+    return this.missingConfiguration.length === 0;
+  }
+
+  get providerSupported() {
+    return SUPPORTED_PROVIDERS.has(this.provider);
+  }
+
+  get usesDefaultPNVSVerificationTemplate() {
+    return this.provider === 'pnvs' && this.templateCode === DEFAULT_PNVS_TEMPLATE_CODE;
+  }
+
+  get derivedTemplateMin() {
+    if (!Number.isFinite(this.otpExpirySeconds) || this.otpExpirySeconds <= 0) {
+      return null;
+    }
+    return Math.max(1, Math.ceil(this.otpExpirySeconds / 60));
+  }
+
+  get configuredTemplateMin() {
+    return parsePositiveInteger(this.templateParams.min);
+  }
+
+  hasRequiredTemplateMin() {
+    return Number.isFinite(this.configuredTemplateMin) || Number.isFinite(this.derivedTemplateMin);
+  }
+
+  buildTemplateParams({ otp }) {
+    const params = {
+      ...this.templateParams,
+      code: String(otp || '').trim()
+    };
+    if (this.usesDefaultPNVSVerificationTemplate) {
+      const minValue = this.configuredTemplateMin || this.derivedTemplateMin;
+      if (Number.isFinite(minValue)) {
+        params.min = String(minValue);
+      }
+    }
+    return params;
+  }
+
+  get missingConfiguration() {
+    const missing = [];
+    if (!this.providerSupported) {
+      missing.push('provider');
+      return missing;
+    }
+    if (this.templateParamsError) {
+      missing.push('templateParams');
+    }
+    if (this.provider === 'pnvs') {
+      if (!this.accessKeyId) missing.push('accessKeyId');
+      if (!this.accessKeySecret) missing.push('accessKeySecret');
+      if (!this.signName) missing.push('signName');
+      if (!this.templateCode) missing.push('templateCode');
+      if (!this.endpoint) missing.push('endpoint');
+      if (!this.regionId) missing.push('regionId');
+      if (this.usesDefaultPNVSVerificationTemplate && !this.hasRequiredTemplateMin()) {
+        missing.push('templateParam.min');
+      }
+      if (!this.pnvsClient) missing.push('pnvsClient');
+      return missing;
+    }
+    if (!this.accessKeyId) missing.push('accessKeyId');
+    if (!this.accessKeySecret) missing.push('accessKeySecret');
+    if (!this.signName) missing.push('signName');
+    if (!this.templateCode) missing.push('templateCode');
+    if (!this.endpoint) missing.push('endpoint');
+    if (typeof this.fetchImpl !== 'function') missing.push('fetchImpl');
+    return missing;
+  }
+
+  get configurationStatus() {
+    const missingConfiguration = this.missingConfiguration;
+    return {
+      provider: this.provider,
+      providerSupported: this.providerSupported,
+      configured: this.providerSupported && missingConfiguration.length === 0,
+      missingConfiguration
+    };
   }
 
   assertConfigured() {
     if (this.configured) return;
-    throw new Error('aliyun_sms_not_configured');
+    const error = new Error(this.providerSupported ? 'aliyun_sms_not_configured' : 'aliyun_sms_provider_unsupported');
+    error.configurationStatus = this.configurationStatus;
+    throw error;
   }
 
   async sendVerificationCode({ phoneNumber, otp }) {
@@ -176,7 +296,7 @@ class AliyunSMSClient {
       countryCode: '86',
       signName: this.signName,
       templateCode: this.templateCode,
-      templateParam: JSON.stringify({ code }),
+      templateParam: JSON.stringify(this.buildTemplateParams({ otp: code })),
       outId: 'skybridge_supabase_hook'
     });
     const response = await this.pnvsClient.sendSmsVerifyCode(request);
@@ -211,7 +331,7 @@ class AliyunSMSClient {
       PhoneNumbers: normalizedPhone,
       SignName: this.signName,
       TemplateCode: this.templateCode,
-      TemplateParam: JSON.stringify({ code })
+      TemplateParam: JSON.stringify(this.buildTemplateParams({ otp: code }))
     });
 
     const bodyHash = sha256Hex(requestBody);

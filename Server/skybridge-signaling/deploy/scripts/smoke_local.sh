@@ -44,8 +44,27 @@ if [[ "$health_status" != "200" ]]; then
     cat /tmp/skybridge-smoke-last.$$ >&2
     exit 1
 fi
+if ! grep -q '"sms"' /tmp/skybridge-smoke-last.$$; then
+    echo "[smoke] FAIL: GET /health missing sms readiness block" >&2
+    cat /tmp/skybridge-smoke-last.$$ >&2
+    exit 1
+fi
 
 echo "[smoke] PASS: GET /health"
+
+ready_status="$(check_status "$BASE_URL/readyz")"
+if [[ "$ready_status" != "200" ]]; then
+    echo "[smoke] FAIL: GET /readyz status=$ready_status" >&2
+    cat /tmp/skybridge-smoke-last.$$ >&2
+    exit 1
+fi
+if ! grep -q '"status":"ready"' /tmp/skybridge-smoke-last.$$; then
+    echo "[smoke] FAIL: GET /readyz did not report ready status" >&2
+    cat /tmp/skybridge-smoke-last.$$ >&2
+    exit 1
+fi
+
+echo "[smoke] PASS: GET /readyz"
 
 turn_no_key_status="$(curl -sS -o /tmp/skybridge-smoke-last.$$ -w '%{http_code}' "$BASE_URL/api/turn/credentials" || true)"
 if [[ "$turn_no_key_status" == "404" ]]; then

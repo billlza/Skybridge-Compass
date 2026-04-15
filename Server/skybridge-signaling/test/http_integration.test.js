@@ -1,15 +1,30 @@
 'use strict';
 
 const test = require('node:test');
-const { before, after } = require('node:test');
+const { before, after, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
+const { Webhook } = require('standardwebhooks');
+const { WebSocket } = require('ws');
 
 process.env.TURN_SHARED_SECRET = process.env.TURN_SHARED_SECRET || 'integration-turn-secret';
 process.env.TURN_URIS = process.env.TURN_URIS || 'turns:turn.example.test:5349?transport=tcp,turn:turn.example.test:3478?transport=udp';
+process.env.WS_HEARTBEAT_INTERVAL_MS = process.env.WS_HEARTBEAT_INTERVAL_MS || '50';
+process.env.ROOM_MEMBERSHIP_TTL_MS = process.env.ROOM_MEMBERSHIP_TTL_MS || '180';
+process.env.REQUIRE_SMS_AUTH_READY = process.env.REQUIRE_SMS_AUTH_READY || 'true';
+process.env.SUPABASE_SEND_SMS_HOOK_SECRET = process.env.SUPABASE_SEND_SMS_HOOK_SECRET || `whsec_${Buffer.from('integration-hook-secret').toString('base64')}`;
 
 const { createSignalingStateBackend } = require('../lib/signaling_state_backend');
-const { createRuntime } = require('../server');
+const {
+  createRuntime,
+  __test: {
+    classifySMSDeliveryFailure,
+    collectSMSServiceSnapshot,
+    evaluateServiceHealth,
+    wsSendRaw,
+    WS_MAX_BUFFERED_BYTES
+  }
+} = require('../server');
 
 const tenantId = 'tenant-live-test';
 const otherTenantId = 'tenant-other-test';
@@ -19,6 +34,7 @@ const otherTenantBearerToken = 'integration-bearer-token-tenant-2';
 const userId = 'user-live-test';
 const sameTenantOtherUserId = 'user-live-test-2';
 const otherTenantUserId = 'user-other-tenant-test';
+const smsHookSigner = new Webhook(process.env.SUPABASE_SEND_SMS_HOOK_SECRET);
 
 class FakeRegistryStore {
   constructor() {
@@ -90,18 +106,73 @@ class FakeRegistryStore {
   }
 }
 
+class FakeSMSClient {
+  constructor() {
+    this.reset();
+  }
+
+  reset() {
+    this.provider = 'pnvs';
+    this.calls = [];
+    this.nextError = null;
+    this._configurationStatus = {
+      provider: 'pnvs',
+      providerSupported: true,
+      configured: true,
+      missingConfiguration: []
+    };
+  }
+
+  get configured() {
+    return this._configurationStatus.configured;
+  }
+
+  get configurationStatus() {
+    return {
+      ...this._configurationStatus,
+      missingConfiguration: [...this._configurationStatus.missingConfiguration]
+    };
+  }
+
+  setConfigurationStatus(overrides = {}) {
+    this._configurationStatus = {
+      ...this._configurationStatus,
+      ...overrides,
+      missingConfiguration: [...(overrides.missingConfiguration ?? this._configurationStatus.missingConfiguration)]
+    };
+    this.provider = this._configurationStatus.provider;
+  }
+
+  async sendVerificationCode(payload) {
+    this.calls.push(payload);
+    if (this.nextError) {
+      const error = this.nextError;
+      this.nextError = null;
+      throw error;
+    }
+    return {
+      success: true,
+      requestId: 'req-hook',
+      bizId: 'biz-hook',
+      code: 'OK'
+    };
+  }
+}
+
 let runtime;
 let baseURL;
 let registryStore;
+let signalingState;
+const fakeSMSClient = new FakeSMSClient();
 
 before(async () => {
-  const signalingState = createSignalingStateBackend({
+  signalingState = createSignalingStateBackend({
     backendName: 'memory',
     instanceId: 'http-integration-tests',
     codeTtlMs: 300_000,
     iceTtlMs: 300_000,
     iceMaxPerSession: 40,
-    roomMembershipTtlMs: 120_000,
+    roomMembershipTtlMs: Number(process.env.ROOM_MEMBERSHIP_TTL_MS),
     legacyBindingTtlMs: 300_000,
     log: console
   });
@@ -110,6 +181,7 @@ before(async () => {
   runtime = createRuntime({
     signalingStateOverride: signalingState,
     registryStoreOverride: registryStore,
+    smsClientOverride: fakeSMSClient,
     trustProxy: false,
     requireSharedStateForPublicCapabilities: false,
     allowBootstrapDeviceAuth: true,
@@ -119,6 +191,10 @@ before(async () => {
 
   const address = await runtime.start();
   baseURL = `http://127.0.0.1:${address.port}`;
+});
+
+beforeEach(() => {
+  fakeSMSClient.reset();
 });
 
 after(async () => {
@@ -397,6 +473,230 @@ test('register-current bootstraps the first current-path device when auth bootst
   }
 });
 
+test('evaluateServiceHealth fails closed when shared state is required but unavailable', () => {
+  const memorySnapshot = evaluateServiceHealth({
+    backendHealth: { ready: true, redisConnected: false },
+    stateBackend: 'memory',
+    requireSharedStateForPublicCapabilities: true
+  });
+  assert.equal(memorySnapshot.ready, false);
+  assert.deepEqual(memorySnapshot.reasons, ['shared_state_backend_required']);
+  assert.equal(memorySnapshot.httpStatus, 503);
+
+  const redisSnapshot = evaluateServiceHealth({
+    backendHealth: { ready: true, redisConnected: false },
+    stateBackend: 'redis',
+    requireSharedStateForPublicCapabilities: true
+  });
+  assert.equal(redisSnapshot.ready, false);
+  assert.deepEqual(redisSnapshot.reasons, ['shared_state_unavailable']);
+  assert.equal(redisSnapshot.httpStatus, 503);
+});
+
+test('wsSendRaw closes slow consumers before enqueueing more bytes', () => {
+  const closes = [];
+  const sends = [];
+  const ws = {
+    OPEN: 1,
+    readyState: 1,
+    bufferedAmount: WS_MAX_BUFFERED_BYTES + 1,
+    close(code, reason) {
+      closes.push({ code, reason });
+    },
+    send(payload) {
+      sends.push(payload);
+    }
+  };
+
+  assert.equal(wsSendRaw(ws, { type: 'offer', sessionId: 'session-1' }), false);
+  assert.deepEqual(closes, [{ code: 1013, reason: 'backpressure' }]);
+  assert.equal(sends.length, 0);
+});
+
+test('health endpoints expose liveness separately from readiness', async () => {
+  const ready = await getJSON('/readyz');
+  assert.equal(ready.status, 200);
+  assert.equal(ready.json.status, 'ready');
+  assert.equal(ready.json.smsReady, true);
+  assert.equal(ready.json.sms.provider, 'pnvs');
+
+  const live = await fetch(`${baseURL}/healthz`);
+  assert.equal(live.status, 200);
+  assert.equal(await live.text(), 'ok');
+
+  const originalGetHealth = signalingState.getHealth.bind(signalingState);
+  signalingState.getHealth = async () => ({
+    backend: 'memory',
+    ready: false,
+    redisConnected: false
+  });
+
+  try {
+    const health = await getJSON('/health');
+    assert.equal(health.status, 503);
+    assert.equal(health.json.status, 'degraded');
+    assert.deepEqual(health.json.reasons, ['state_backend_unready']);
+
+    const degradedReady = await getJSON('/readyz');
+    assert.equal(degradedReady.status, 503);
+    assert.equal(degradedReady.json.status, 'not_ready');
+
+    const stillLive = await fetch(`${baseURL}/healthz`);
+    assert.equal(stillLive.status, 200);
+    assert.equal(await stillLive.text(), 'ok');
+  } finally {
+    signalingState.getHealth = originalGetHealth;
+  }
+});
+
+test('sms readiness fails closed when provider configuration is missing', async () => {
+  fakeSMSClient.setConfigurationStatus({
+    configured: false,
+    missingConfiguration: ['accessKeyId', 'accessKeySecret']
+  });
+
+  const snapshot = collectSMSServiceSnapshot({ client: fakeSMSClient });
+  assert.equal(snapshot.ready, false);
+  assert.deepEqual(snapshot.reasons, ['aliyun_sms_provider_not_configured']);
+
+  const ready = await getJSON('/readyz');
+  assert.equal(ready.status, 503);
+  assert.equal(ready.json.status, 'not_ready');
+  assert.equal(ready.json.smsReady, false);
+  assert.deepEqual(ready.json.sms.missingConfiguration, ['accessKeyId', 'accessKeySecret']);
+  assert.ok(ready.json.reasons.includes('aliyun_sms_provider_not_configured'));
+});
+
+test('sms readiness reports missing hook secret when startup secret is absent', () => {
+  const snapshot = collectSMSServiceSnapshot({
+    client: fakeSMSClient,
+    hookSecret: ''
+  });
+
+  assert.equal(snapshot.ready, false);
+  assert.deepEqual(snapshot.reasons, ['supabase_send_sms_hook_secret_missing']);
+});
+
+test('send_sms hook accepts valid signatures and delivers through configured provider', async () => {
+  const response = await postSignedSendSMS({
+    user: { phone: '+8613800138000' },
+    sms: { otp: '123456' }
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(fakeSMSClient.calls.length, 1);
+  assert.deepEqual(fakeSMSClient.calls[0], {
+    phoneNumber: '+8613800138000',
+    otp: '123456'
+  });
+
+  const health = await getJSON('/health');
+  assert.equal(health.status, 200);
+  assert.equal(health.json.sms.counters.delivery_success, 1);
+  assert.equal(health.json.sms.lastEvent.event, 'supabase_send_sms_delivered');
+});
+
+test('send_sms hook rejects invalid signatures', async () => {
+  const response = await postRawJSON('/api/hooks/supabase/send-sms', {
+    headers: {
+      'webhook-id': 'msg_invalid',
+      'webhook-timestamp': String(Math.floor(Date.now() / 1000)),
+      'webhook-signature': 'v1,invalid'
+    },
+    body: {
+      user: { phone: '+8613800138000' },
+      sms: { otp: '123456' }
+    }
+  });
+
+  assert.equal(response.status, 401);
+  assert.equal(response.json.error, 'supabase_send_sms_hook_invalid');
+
+  const health = await getJSON('/health');
+  assert.equal(health.json.sms.counters.hook_verify_failed, 1);
+  assert.equal(health.json.sms.lastEvent.reason, 'invalid_signature');
+});
+
+test('send_sms hook classifies provider timeout as retryable delivery failure', async () => {
+  const timeoutError = new Error('upstream timed out');
+  timeoutError.code = 'ETIMEDOUT';
+  fakeSMSClient.nextError = timeoutError;
+
+  const classification = classifySMSDeliveryFailure(timeoutError);
+  assert.equal(classification.reason, 'provider_timeout');
+  assert.equal(classification.retryable, true);
+
+  const response = await postSignedSendSMS({
+    user: { phone: '+8613800138000' },
+    sms: { otp: '123456' }
+  });
+
+  assert.equal(response.status, 504);
+  assert.equal(response.json.error, 'sms_provider_timeout');
+
+  const health = await getJSON('/health');
+  assert.equal(health.json.sms.counters.delivery_failed_provider_timeout, 1);
+  assert.equal(health.json.sms.counters.delivery_failed_retryable, 1);
+  assert.equal(health.json.sms.lastEvent.reason, 'provider_timeout');
+  assert.equal(health.json.sms.lastEvent.retryable, true);
+});
+
+test('send_sms hook classifies PNVS template-variable rejection as non-retryable template failure', async () => {
+  const templateError = new Error('aliyun_pnvs_failed:模版变量min内容非法');
+  templateError.response = {
+    code: 'ISV.INVALID_PARAMETERS'
+  };
+  fakeSMSClient.nextError = templateError;
+
+  const classification = classifySMSDeliveryFailure(templateError);
+  assert.equal(classification.reason, 'template_rejected');
+  assert.equal(classification.retryable, false);
+
+  const response = await postSignedSendSMS({
+    user: { phone: '+8613800138000' },
+    sms: { otp: '123456' }
+  });
+
+  assert.equal(response.status, 502);
+  assert.equal(response.json.error, 'sms_template_rejected');
+
+  const health = await getJSON('/health');
+  assert.equal(health.json.sms.counters.delivery_failed_template_rejected, 1);
+  assert.equal(health.json.sms.counters.delivery_failed_non_retryable, 1);
+  assert.equal(health.json.sms.lastEvent.reason, 'template_rejected');
+  assert.equal(health.json.sms.lastEvent.retryable, false);
+});
+
+test('heartbeat pong renews idle room membership leases', async () => {
+  const binding = makeIdentityBinding('heartbeat-idle');
+  const admissionLease = await issueAdmissionLease(binding);
+  const sessionResponse = await postJSON('/api/webrtc/register-session', {
+    headers: {
+      'X-SkyBridge-Admission': admissionLease.admissionToken
+    },
+    body: {
+      ttlSeconds: 120
+    }
+  });
+
+  assert.equal(sessionResponse.status, 200);
+
+  const ws = new WebSocket(
+    `${baseURL.replace(/^http/, 'ws')}/ws?shard=${encodeURIComponent(sessionResponse.json.sessionId)}&st=${encodeURIComponent(sessionResponse.json.sessionToken)}`
+  );
+  try {
+    const bound = await waitForWebSocketMessage(ws, (message) => message.type === 'bound');
+    assert.equal(bound.sessionId, sessionResponse.json.sessionId);
+
+    await sleep(Number(process.env.ROOM_MEMBERSHIP_TTL_MS) * 2);
+    const members = await signalingState.listRoomMembers(sessionResponse.json.sessionId);
+    assert.equal(members.some((member) => member.deviceId === binding.deviceId), true);
+  } finally {
+    ws.close();
+    await waitForWebSocketClose(ws);
+  }
+});
+
 function makeIdentityBinding(prefix, algorithm = 'Ed25519') {
   let publicKey;
   let privateKey;
@@ -496,6 +796,97 @@ async function getJSON(path, { headers = {} } = {}) {
   };
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function signedHookHeaders(payload) {
+  const rawBody = JSON.stringify(payload);
+  const timestamp = new Date();
+  const messageId = `msg_${crypto.randomUUID()}`;
+  return {
+    rawBody,
+    headers: {
+      'webhook-id': messageId,
+      'webhook-timestamp': String(Math.floor(timestamp.getTime() / 1000)),
+      'webhook-signature': smsHookSigner.sign(messageId, timestamp, rawBody)
+    }
+  };
+}
+
+function waitForWebSocketMessage(ws, predicate, timeoutMs = 1_500) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error('timed out waiting for websocket message'));
+    }, timeoutMs);
+
+    function cleanup() {
+      clearTimeout(timer);
+      ws.off('message', onMessage);
+      ws.off('error', onError);
+      ws.off('close', onClose);
+    }
+
+    function onMessage(raw) {
+      try {
+        const message = JSON.parse(String(raw));
+        if (!predicate(message)) return;
+        cleanup();
+        resolve(message);
+      } catch (error) {
+        cleanup();
+        reject(error);
+      }
+    }
+
+    function onError(error) {
+      cleanup();
+      reject(error);
+    }
+
+    function onClose(code, reasonBuffer) {
+      cleanup();
+      reject(new Error(`websocket closed before expected message: ${code} ${String(reasonBuffer || '')}`));
+    }
+
+    ws.on('message', onMessage);
+    ws.on('error', onError);
+    ws.on('close', onClose);
+  });
+}
+
+function waitForWebSocketClose(ws, timeoutMs = 1_500) {
+  if (ws.readyState === WebSocket.CLOSED) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error('timed out waiting for websocket close'));
+    }, timeoutMs);
+
+    function cleanup() {
+      clearTimeout(timer);
+      ws.off('close', onClose);
+      ws.off('error', onError);
+    }
+
+    function onClose() {
+      cleanup();
+      resolve();
+    }
+
+    function onError(error) {
+      cleanup();
+      reject(error);
+    }
+
+    ws.on('close', onClose);
+    ws.on('error', onError);
+  });
+}
+
 async function postJSON(path, { headers = {}, body, requiresAuth = false, accessToken = bearerToken } = {}) {
   const requestHeaders = {
     'Content-Type': 'application/json',
@@ -516,4 +907,30 @@ async function postJSON(path, { headers = {}, body, requiresAuth = false, access
     status: response.status,
     json: text ? JSON.parse(text) : {}
   };
+}
+
+async function postRawJSON(path, { headers = {}, body } = {}) {
+  const rawBody = typeof body === 'string' ? body : JSON.stringify(body);
+  const response = await fetch(`${baseURL}${path}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...headers
+    },
+    body: rawBody
+  });
+
+  const text = await response.text();
+  return {
+    status: response.status,
+    json: text ? JSON.parse(text) : {}
+  };
+}
+
+async function postSignedSendSMS(body) {
+  const signed = signedHookHeaders(body);
+  return postRawJSON('/api/hooks/supabase/send-sms', {
+    headers: signed.headers,
+    body: signed.rawBody
+  });
 }

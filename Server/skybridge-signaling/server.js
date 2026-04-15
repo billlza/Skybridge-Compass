@@ -5,7 +5,7 @@ const https = require('https');
 const fs = require('fs');
 const crypto = require('crypto');
 const os = require('os');
-const { spawnSync } = require('child_process');
+const { spawn } = require('child_process');
 
 const express = require('express');
 const { Webhook } = require('standardwebhooks');
@@ -51,6 +51,8 @@ const WS_MAX_MSG_BYTES = Number(process.env.WS_MAX_MSG_BYTES || 16 * 1024);
 const WS_MAX_MSGS_PER_10S = Number(process.env.WS_MAX_MSGS_PER_10S || 60);
 const WS_MAX_BYTES_PER_10S = Number(process.env.WS_MAX_BYTES_PER_10S || 128 * 1024);
 const WS_MAX_CLIENTS_PER_ROOM = Number(process.env.WS_MAX_CLIENTS_PER_ROOM || 2);
+const WS_MAX_BUFFERED_BYTES = Number(process.env.WS_MAX_BUFFERED_BYTES || 512 * 1024);
+const WS_HEARTBEAT_INTERVAL_MS = Number(process.env.WS_HEARTBEAT_INTERVAL_MS || 30_000);
 
 const SDP_MAX_BYTES = Number(process.env.SDP_MAX_BYTES || 12 * 1024);
 const ICE_CANDIDATE_MAX_BYTES = Number(process.env.ICE_CANDIDATE_MAX_BYTES || 2048);
@@ -80,6 +82,7 @@ const SUPABASE_SEND_SMS_HOOK_SECRET = String(
   || process.env.SEND_SMS_HOOK_SECRET
   || ''
 ).trim();
+const REQUIRE_SMS_AUTH_READY = /^(1|true|yes)$/i.test(process.env.REQUIRE_SMS_AUTH_READY || 'false');
 const ALLOWLIST_TENANTS = new Set(
   String(process.env.ALLOWLIST_TENANTS || '')
     .split(',')
@@ -102,6 +105,7 @@ const MLDSA65_PUBLIC_KEY_BYTES = 1952;
 const MLDSA65_OID_DER = Buffer.from('608648016503040312', 'hex');
 const MLDSA_VERIFY_HELPER = String(process.env.SKYBRIDGE_MLDSA_VERIFY_HELPER || '').trim();
 const MLDSA_VERIFY_HELPER_TIMEOUT_MS = Number(process.env.SKYBRIDGE_MLDSA_VERIFY_HELPER_TIMEOUT_MS || 2000);
+const MLDSA_VERIFY_HELPER_MAX_CONCURRENT = Number(process.env.SKYBRIDGE_MLDSA_VERIFY_HELPER_MAX_CONCURRENT || 4);
 
 const TLS_CERT = process.env.TLS_CERT || '';
 const TLS_KEY = process.env.TLS_KEY || '';
@@ -290,6 +294,44 @@ function challengeSignaturePayload(challenge) {
   ].join('\n'), 'utf8');
 }
 
+class AsyncConcurrencyGate {
+  constructor(maxConcurrent) {
+    this.maxConcurrent = Math.max(1, Number(maxConcurrent) || 1);
+    this.inFlight = 0;
+    this.waiters = [];
+  }
+
+  async run(operation) {
+    await this.acquire();
+    try {
+      return await operation();
+    } finally {
+      this.release();
+    }
+  }
+
+  acquire() {
+    if (this.inFlight < this.maxConcurrent) {
+      this.inFlight += 1;
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => {
+      this.waiters.push(resolve);
+    });
+  }
+
+  release() {
+    if (this.waiters.length > 0) {
+      const next = this.waiters.shift();
+      next();
+      return;
+    }
+    this.inFlight = Math.max(0, this.inFlight - 1);
+  }
+}
+
+const mldsaVerifyHelperGate = new AsyncConcurrencyGate(MLDSA_VERIFY_HELPER_MAX_CONCURRENT);
+
 function ed25519RawPublicKeyToSpki(rawKey) {
   if (!Buffer.isBuffer(rawKey) || rawKey.length !== 32) {
     return null;
@@ -352,13 +394,90 @@ function mldsa65RawPublicKeyToSpki(rawKey) {
   return rawPublicKeyToSpki(rawKey, MLDSA65_OID_DER);
 }
 
-function verifyMldsa65ChallengeSignature(rawPublicKey, signature, challenge) {
+async function runMldsaVerifyHelper(rawPublicKey, signature, challengePayload) {
+  const helper = MLDSA_VERIFY_HELPER;
+  if (!helper) return false;
+
+  return mldsaVerifyHelperGate.run(() => new Promise((resolve) => {
+    const child = spawn(helper, [
+      'internal',
+      'verify-mldsa',
+      '--message-base64', challengePayload.toString('base64'),
+      '--signature-base64', signature.toString('base64'),
+      '--public-key-base64', rawPublicKey.toString('base64')
+    ], {
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+
+    let finished = false;
+    let stdoutSize = 0;
+    let stderrSize = 0;
+    let stderr = '';
+
+    const finish = (result) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timeoutHandle);
+      resolve(result);
+    };
+
+    const timeoutHandle = setTimeout(() => {
+      child.kill('SIGKILL');
+      console.warn('[ML-DSA verify helper] timed out');
+      finish(false);
+    }, MLDSA_VERIFY_HELPER_TIMEOUT_MS);
+
+    child.on('error', (error) => {
+      console.warn('[ML-DSA verify helper] execution failed:', error.message);
+      finish(false);
+    });
+
+    child.stdout.on('data', (chunk) => {
+      stdoutSize += chunk.length;
+      if (stdoutSize > 64 * 1024) {
+        console.warn('[ML-DSA verify helper] stdout exceeded max buffer');
+        child.kill('SIGKILL');
+        finish(false);
+      }
+    });
+
+    child.stderr.on('data', (chunk) => {
+      stderrSize += chunk.length;
+      if (stderrSize <= 64 * 1024) {
+        stderr += chunk.toString('utf8');
+      } else {
+        console.warn('[ML-DSA verify helper] stderr exceeded max buffer');
+        child.kill('SIGKILL');
+        finish(false);
+      }
+    });
+
+    child.on('close', (code, signal) => {
+      if (signal) {
+        console.warn('[ML-DSA verify helper] terminated by signal:', signal);
+        finish(false);
+        return;
+      }
+      if (code !== 0) {
+        if (stderr.trim()) {
+          console.warn('[ML-DSA verify helper] rejected signature:', stderr.trim());
+        }
+        finish(false);
+        return;
+      }
+      finish(true);
+    });
+  }));
+}
+
+async function verifyMldsa65ChallengeSignature(rawPublicKey, signature, challenge) {
   const spki = mldsa65RawPublicKeyToSpki(rawPublicKey);
   if (!spki) return false;
+  const payload = challengeSignaturePayload(challenge);
   try {
     return crypto.verify(
       null,
-      challengeSignaturePayload(challenge),
+      payload,
       { key: spki, format: 'der', type: 'spki' },
       signature
     );
@@ -366,38 +485,10 @@ function verifyMldsa65ChallengeSignature(rawPublicKey, signature, challenge) {
     if (!MLDSA_VERIFY_HELPER) return false;
   }
 
-  const helper = MLDSA_VERIFY_HELPER;
-  if (!helper) return false;
-  try {
-    const result = spawnSync(helper, [
-      'internal',
-      'verify-mldsa',
-      '--message-base64', challengeSignaturePayload(challenge).toString('base64'),
-      '--signature-base64', signature.toString('base64'),
-      '--public-key-base64', rawPublicKey.toString('base64')
-    ], {
-      encoding: 'utf8',
-      timeout: MLDSA_VERIFY_HELPER_TIMEOUT_MS,
-      maxBuffer: 64 * 1024
-    });
-    if (result.error) {
-      console.warn('[ML-DSA verify helper] execution failed:', result.error.message);
-      return false;
-    }
-    if (result.status !== 0) {
-      if (result.stderr) {
-        console.warn('[ML-DSA verify helper] rejected signature:', result.stderr.trim());
-      }
-      return false;
-    }
-    return true;
-  } catch (error) {
-    console.warn('[ML-DSA verify helper] unexpected failure:', error.message);
-    return false;
-  }
+  return runMldsaVerifyHelper(rawPublicKey, signature, payload);
 }
 
-function verifyChallengeSignature(binding, signatureBase64, challenge) {
+async function verifyChallengeSignature(binding, signatureBase64, challenge) {
   const signature = Buffer.from(String(signatureBase64 || '').trim(), 'base64');
   if (!signature.length || !binding.protocolPublicKeyBytes) {
     return false;
@@ -466,9 +557,31 @@ function asyncRoute(handler) {
 
 function rateLimit({ windowMs, max, keyFn }) {
   const hits = new Map();
+  const maxTrackedKeys = Math.max(max * 128, 4096);
+  let lastPruneAt = 0;
+
+  const pruneHits = (currentTime) => {
+    if (hits.size === 0) return;
+    if (currentTime - lastPruneAt < Math.min(windowMs, 30_000) && hits.size < maxTrackedKeys) {
+      return;
+    }
+    lastPruneAt = currentTime;
+    for (const [trackedKey, trackedEntry] of hits.entries()) {
+      if (!trackedEntry || currentTime > trackedEntry.resetAt) {
+        hits.delete(trackedKey);
+      }
+    }
+    while (hits.size > maxTrackedKeys) {
+      const oldestKey = hits.keys().next().value;
+      if (oldestKey === undefined) break;
+      hits.delete(oldestKey);
+    }
+  };
+
   return (req, res, next) => {
     const key = keyFn ? keyFn(req) : (clientIPForRequest(req, { trustProxy: currentTrustProxy }) || 'unknown');
     const t = now();
+    pruneHits(t);
     let entry = hits.get(key);
     if (!entry || t > entry.resetAt) {
       entry = { count: 0, resetAt: t + windowMs };
@@ -507,6 +620,8 @@ let currentAllowBootstrapDeviceAuth = SIGNALING_ALLOW_BOOTSTRAP_DEVICE_AUTH;
 const rooms = new Map();
 const wsMeta = new WeakMap();
 const securityCounters = new Map();
+const smsCounters = new Map();
+let lastSMSDeliveryEvent = null;
 const runtimeProtection = {
   redisAllowlistOnly: false,
   lastControlFlags: {
@@ -519,13 +634,59 @@ const runtimeProtection = {
   redisLatencySamples: []
 };
 
+function incrementCounter(counterMap, name) {
+  const current = counterMap.get(name) || 0;
+  counterMap.set(name, current + 1);
+}
+
+function currentCounters(counterMap) {
+  return Object.fromEntries([...counterMap.entries()].sort((left, right) => left[0].localeCompare(right[0])));
+}
+
 function incrementSecurityCounter(name) {
-  const current = securityCounters.get(name) || 0;
-  securityCounters.set(name, current + 1);
+  incrementCounter(securityCounters, name);
 }
 
 function currentSecurityCounters() {
-  return Object.fromEntries([...securityCounters.entries()].sort((left, right) => left[0].localeCompare(right[0])));
+  return currentCounters(securityCounters);
+}
+
+function incrementSMSCounter(name) {
+  incrementCounter(smsCounters, name);
+}
+
+function currentSMSCounters() {
+  return currentCounters(smsCounters);
+}
+
+function maskedPhoneSuffix(phoneNumber) {
+  const digits = String(phoneNumber || '').replace(/\D/g, '');
+  return digits.slice(-4) || '';
+}
+
+function recordSMSDeliveryEvent(level, fields) {
+  const event = {
+    timestamp: new Date().toISOString(),
+    subsystem: 'supabase_sms_auth',
+    ...fields
+  };
+  lastSMSDeliveryEvent = event;
+  const serialized = JSON.stringify(event);
+  switch (level) {
+    case 'error':
+      console.error(serialized);
+      break;
+    case 'warn':
+      console.warn(serialized);
+      break;
+    default:
+      console.log(serialized);
+      break;
+  }
+}
+
+function currentSMSDeliveryEvent() {
+  return lastSMSDeliveryEvent ? { ...lastSMSDeliveryEvent } : null;
 }
 
 function makeError(code, statusCode = 400) {
@@ -541,11 +702,139 @@ function normalizeSupabaseHookSecret(raw) {
   return value.replace(/^v1,whsec_/, '');
 }
 
-const supabaseSMSHookVerifier = (() => {
-  const normalized = normalizeSupabaseHookSecret(SUPABASE_SEND_SMS_HOOK_SECRET);
+function buildSupabaseSMSHookVerifier(hookSecret = SUPABASE_SEND_SMS_HOOK_SECRET) {
+  const normalized = normalizeSupabaseHookSecret(hookSecret);
   if (!normalized) return null;
   return new Webhook(normalized);
-})();
+}
+
+const supabaseSMSHookVerifier = buildSupabaseSMSHookVerifier();
+
+function collectSMSServiceSnapshot({
+  client = smsClient,
+  hookSecret = SUPABASE_SEND_SMS_HOOK_SECRET,
+  required = REQUIRE_SMS_AUTH_READY
+} = {}) {
+  const configurationStatus = client?.configurationStatus && typeof client.configurationStatus === 'object'
+    ? client.configurationStatus
+    : {
+      provider: String(client?.provider || 'unknown'),
+      providerSupported: false,
+      configured: Boolean(client?.configured),
+      missingConfiguration: []
+    };
+  const hookConfigured = Boolean(normalizeSupabaseHookSecret(hookSecret));
+  const reasons = [];
+  if (!hookConfigured) {
+    reasons.push('supabase_send_sms_hook_secret_missing');
+  }
+  if (!configurationStatus.providerSupported) {
+    reasons.push('aliyun_sms_provider_unsupported');
+  }
+  if (configurationStatus.providerSupported && !configurationStatus.configured) {
+    reasons.push('aliyun_sms_provider_not_configured');
+  }
+  const ready = hookConfigured && configurationStatus.providerSupported && configurationStatus.configured;
+  return {
+    required: Boolean(required),
+    provider: configurationStatus.provider || String(client?.provider || 'unknown'),
+    providerSupported: Boolean(configurationStatus.providerSupported),
+    hookConfigured,
+    providerConfigured: Boolean(configurationStatus.configured),
+    ready,
+    reasons,
+    missingConfiguration: Array.isArray(configurationStatus.missingConfiguration)
+      ? [...configurationStatus.missingConfiguration]
+      : [],
+    counters: currentSMSCounters(),
+    lastEvent: currentSMSDeliveryEvent()
+  };
+}
+
+function classifySMSDeliveryFailure(error) {
+  const message = String(error?.message || '').toLowerCase();
+  const providerCode = safeUpperCode(error?.response?.code || error?.response?.Code || '');
+  const looksLikeTemplateError = (
+    message.includes('template')
+    || message.includes('templateparam')
+    || message.includes('模板')
+    || message.includes('模版')
+    || providerCode.includes('TEMPLATE')
+  );
+  const looksLikeSignatureError = (
+    message.includes('signature')
+    || message.includes('sign')
+    || message.includes('签名')
+    || providerCode.includes('SIGN')
+  );
+
+  if (message.includes('provider_unsupported')) {
+    return { reason: 'provider_unsupported', retryable: false, statusCode: 503, errorCode: 'aliyun_sms_provider_unsupported' };
+  }
+  if (message.includes('not_configured')) {
+    return { reason: 'provider_not_configured', retryable: false, statusCode: 503, errorCode: 'aliyun_sms_not_configured' };
+  }
+  if (message.includes('unsupported_phone_number')) {
+    return { reason: 'unsupported_phone_number', retryable: false, statusCode: 400, errorCode: 'unsupported_phone_number' };
+  }
+  if (message.includes('invalid_otp_code')) {
+    return { reason: 'invalid_otp_code', retryable: false, statusCode: 400, errorCode: 'invalid_otp_code' };
+  }
+  if (
+    message.includes('timeout')
+    || message.includes('timed out')
+    || error?.code === 'ETIMEDOUT'
+    || error?.name === 'AbortError'
+  ) {
+    return { reason: 'provider_timeout', retryable: true, statusCode: 504, errorCode: 'sms_provider_timeout' };
+  }
+  if (looksLikeTemplateError) {
+    return { reason: 'template_rejected', retryable: false, statusCode: 502, errorCode: 'sms_template_rejected' };
+  }
+  if (looksLikeSignatureError) {
+    return { reason: 'signature_rejected', retryable: false, statusCode: 502, errorCode: 'sms_signature_rejected' };
+  }
+  if (
+    message.includes('network')
+    || error?.code === 'ECONNRESET'
+    || error?.code === 'ENOTFOUND'
+    || providerCode.startsWith('HTTP_')
+  ) {
+    return { reason: 'provider_transport_error', retryable: true, statusCode: 502, errorCode: 'sms_delivery_failed' };
+  }
+  if (
+    providerCode
+    || message.includes('rejected')
+    || message.includes('denied')
+    || message.includes('forbidden')
+    || message.includes('invalid')
+  ) {
+    return { reason: 'provider_rejected', retryable: false, statusCode: 502, errorCode: 'sms_delivery_rejected' };
+  }
+  return { reason: 'provider_unknown_error', retryable: false, statusCode: 502, errorCode: 'sms_delivery_failed' };
+}
+
+function assertSMSStartupReadiness() {
+  const sms = collectSMSServiceSnapshot();
+  if (sms.ready) {
+    console.log(`[startup] SMS auth ready provider=${sms.provider}`);
+    return sms;
+  }
+  console.warn('[startup] SMS auth not ready:', JSON.stringify({
+    required: sms.required,
+    provider: sms.provider,
+    reasons: sms.reasons,
+    missingConfiguration: sms.missingConfiguration
+  }));
+  if (sms.required) {
+    const error = new Error('sms_auth_not_ready');
+    error.code = 'sms_auth_not_ready';
+    error.statusCode = 503;
+    error.details = sms;
+    throw error;
+  }
+  return sms;
+}
 
 function hookHeaderMap(req) {
   return Object.fromEntries(
@@ -985,9 +1274,30 @@ function admissionOwnsSession(item, admission) {
   return true;
 }
 
+function closeSlowConsumer(ws, reason = 'backpressure') {
+  incrementSecurityCounter('ws_1013_backpressure');
+  try {
+    ws.close(1013, reason);
+  } catch (_) {}
+}
+
 function wsSendRaw(ws, obj) {
   if (!ws || ws.readyState !== ws.OPEN) return false;
-  ws.send(JSON.stringify(obj));
+  const bufferedAmount = Number(ws.bufferedAmount || 0);
+  if (bufferedAmount >= WS_MAX_BUFFERED_BYTES) {
+    closeSlowConsumer(ws);
+    return false;
+  }
+  const payload = JSON.stringify(obj);
+  if ((bufferedAmount + Buffer.byteLength(payload, 'utf8')) > WS_MAX_BUFFERED_BYTES) {
+    closeSlowConsumer(ws);
+    return false;
+  }
+  ws.send(payload, (error) => {
+    if (!error) return;
+    console.warn('[WS] send failed:', error.message);
+    try { ws.close(1011, 'send_failed'); } catch (_) {}
+  });
   return true;
 }
 
@@ -1072,6 +1382,22 @@ async function forwardEnvelopeToRemoteInstances(message) {
     kind: 'webrtc-envelope',
     envelope: message
   })));
+}
+
+async function renewRoomMembershipLease(ws, overrideMeta = null) {
+  const meta = overrideMeta || wsMeta.get(ws);
+  if (!meta?.sessionId || !meta?.deviceId) return false;
+  await signalingState.upsertRoomMember(meta.sessionId, {
+    deviceId: meta.deviceId,
+    role: meta.role,
+    protocolPublicKeyFingerprint: meta.protocolPublicKeyFingerprint,
+    sessionId: meta.sessionId,
+    instanceId: INSTANCE_ID,
+    clientId: meta.clientId,
+    updatedAt: now(),
+    expiresAt: now() + ROOM_MEMBERSHIP_TTL_MS
+  });
+  return true;
 }
 
 function deliverEnvelopeLocally(sourceWs, message) {
@@ -1267,16 +1593,80 @@ const rlLookup = rateLimit({ windowMs: 60_000, max: 30 });
 const rlTurn = rateLimit({ windowMs: 60_000, max: 60 });
 const rlAdmission = rateLimit({ windowMs: 60_000, max: 60 });
 
-app.get('/', asyncRoute(async (req, res) => {
+function evaluateServiceHealth({
+  backendHealth,
+  smsHealth = collectSMSServiceSnapshot(),
+  stateBackend = SIGNALING_STATE_BACKEND,
+  requireSharedStateForPublicCapabilities = currentRequireSharedStateForPublicCapabilities,
+  requireSMSAuthReady = REQUIRE_SMS_AUTH_READY
+} = {}) {
+  const normalizedBackendHealth = backendHealth && typeof backendHealth === 'object'
+    ? backendHealth
+    : { ready: false, redisConnected: false };
+  const backendReady = Boolean(normalizedBackendHealth.ready);
+  const redisConnected = Boolean(normalizedBackendHealth.redisConnected);
+  const sharedStateReady = stateBackend === 'redis' && backendReady && redisConnected;
+  const reasons = [];
+
+  if (!backendReady) {
+    reasons.push('state_backend_unready');
+  }
+  if (requireSharedStateForPublicCapabilities) {
+    if (stateBackend !== 'redis') {
+      reasons.push('shared_state_backend_required');
+    } else if (!redisConnected) {
+      reasons.push('shared_state_unavailable');
+    }
+  }
+  if (requireSMSAuthReady && !smsHealth.ready) {
+    reasons.push(...smsHealth.reasons);
+  }
+
+  const ready = unique(reasons).length === 0;
+  return {
+    status: ready ? 'ok' : 'degraded',
+    ready,
+    httpStatus: ready ? 200 : 503,
+    reasons: unique(reasons),
+    backendHealth: normalizedBackendHealth,
+    backendReady,
+    sharedStateReady,
+    stateBackend,
+    requiresSharedStateForPublicCapabilities: Boolean(requireSharedStateForPublicCapabilities),
+    requiresSMSAuthReady: Boolean(requireSMSAuthReady),
+    sms: smsHealth
+  };
+}
+
+async function collectServiceHealthSnapshot() {
   const backendHealth = await signalingState.getHealth();
+  const smsHealth = collectSMSServiceSnapshot();
+  return evaluateServiceHealth({ backendHealth, smsHealth });
+}
+
+app.get('/', asyncRoute(async (req, res) => {
+  const health = await collectServiceHealthSnapshot();
   res.status(200).json({
     ok: true,
     service: 'skybridge-signaling',
     time: new Date().toISOString(),
     instanceId: INSTANCE_ID,
     stateBackend: SIGNALING_STATE_BACKEND,
-    smsProvider: smsClient.provider,
-    backendHealth,
+    smsProvider: health.sms.provider,
+    smsHookConfigured: health.sms.hookConfigured,
+    smsProviderConfigured: health.sms.providerConfigured,
+    smsReady: health.sms.ready,
+    smsReadinessReasons: health.sms.reasons,
+    sms: health.sms,
+    backendHealth: health.backendHealth,
+    ready: health.ready,
+    readiness: {
+      status: health.status,
+      reasons: health.reasons,
+      requiresSharedStateForPublicCapabilities: health.requiresSharedStateForPublicCapabilities,
+      sharedStateReady: health.sharedStateReady,
+      requiresSMSAuthReady: health.requiresSMSAuthReady
+    },
     protection: {
       ...appControlFlags(),
       redisLatencySamples: runtimeProtection.redisLatencySamples
@@ -1284,6 +1674,7 @@ app.get('/', asyncRoute(async (req, res) => {
     endpoints: [
       '/health',
       '/healthz',
+      '/readyz',
       '/api/hooks/supabase/send-sms',
       '/api/webrtc/admission/challenge',
       '/api/webrtc/admission',
@@ -1300,13 +1691,23 @@ app.get('/', asyncRoute(async (req, res) => {
 }));
 
 app.get('/health', asyncRoute(async (req, res) => {
-  const backendHealth = await signalingState.getHealth();
-  res.json({
-    status: 'ok',
+  const health = await collectServiceHealthSnapshot();
+  res.status(health.httpStatus).json({
+    status: health.status,
+    ready: health.ready,
     instanceId: INSTANCE_ID,
     stateBackend: SIGNALING_STATE_BACKEND,
-    smsProvider: smsClient.provider,
-    backendHealth,
+    smsProvider: health.sms.provider,
+    smsHookConfigured: health.sms.hookConfigured,
+    smsProviderConfigured: health.sms.providerConfigured,
+    smsReady: health.sms.ready,
+    smsReadinessReasons: health.sms.reasons,
+    sms: health.sms,
+    backendHealth: health.backendHealth,
+    reasons: health.reasons,
+    requiresSharedStateForPublicCapabilities: health.requiresSharedStateForPublicCapabilities,
+    requiresSMSAuthReady: health.requiresSMSAuthReady,
+    sharedStateReady: health.sharedStateReady,
     protection: {
       ...appControlFlags(),
       redisLatencySamples: runtimeProtection.redisLatencySamples
@@ -1318,12 +1719,46 @@ app.get('/health', asyncRoute(async (req, res) => {
 
 app.get('/healthz', (req, res) => res.status(200).send('ok'));
 
+app.get('/readyz', asyncRoute(async (req, res) => {
+  const health = await collectServiceHealthSnapshot();
+  res.status(health.httpStatus).json({
+    status: health.ready ? 'ready' : 'not_ready',
+    instanceId: INSTANCE_ID,
+    stateBackend: SIGNALING_STATE_BACKEND,
+    reasons: health.reasons,
+    requiresSharedStateForPublicCapabilities: health.requiresSharedStateForPublicCapabilities,
+    requiresSMSAuthReady: health.requiresSMSAuthReady,
+    sharedStateReady: health.sharedStateReady,
+    smsProvider: health.sms.provider,
+    smsHookConfigured: health.sms.hookConfigured,
+    smsProviderConfigured: health.sms.providerConfigured,
+    smsReady: health.sms.ready,
+    smsReadinessReasons: health.sms.reasons,
+    sms: health.sms
+  });
+}));
+
 app.post('/api/hooks/supabase/send-sms', asyncRoute(async (req, res) => {
-  if (!supabaseSMSHookVerifier) {
+  incrementSMSCounter('hook_requests_total');
+  const smsHealth = collectSMSServiceSnapshot();
+  if (!supabaseSMSHookVerifier || !smsHealth.hookConfigured) {
+    incrementSMSCounter('hook_rejected_missing_secret');
+    recordSMSDeliveryEvent('error', {
+      event: 'supabase_send_sms_hook_rejected',
+      provider: smsHealth.provider,
+      reason: 'missing_hook_secret'
+    });
     throw makeError('supabase_send_sms_hook_not_configured', 503);
   }
-  if (!smsClient.configured) {
-    throw makeError('aliyun_sms_not_configured', 503);
+  if (!smsHealth.providerSupported || !smsHealth.providerConfigured) {
+    incrementSMSCounter('hook_rejected_provider_not_ready');
+    recordSMSDeliveryEvent('error', {
+      event: 'supabase_send_sms_hook_rejected',
+      provider: smsHealth.provider,
+      reason: smsHealth.providerSupported ? 'provider_not_configured' : 'provider_unsupported',
+      missingConfiguration: smsHealth.missingConfiguration
+    });
+    throw makeError(smsHealth.providerSupported ? 'aliyun_sms_not_configured' : 'aliyun_sms_provider_unsupported', 503);
   }
 
   const payload = typeof req.rawBody === 'string' && req.rawBody.length > 0
@@ -1335,24 +1770,60 @@ app.post('/api/hooks/supabase/send-sms', asyncRoute(async (req, res) => {
     hookPayload = supabaseSMSHookVerifier.verify(payload, hookHeaderMap(req));
   } catch (error) {
     incrementSecurityCounter('supabase_send_sms_hook_verify_failed');
-    console.error('[hook] Supabase send_sms verification failed:', error.message);
+    incrementSMSCounter('hook_verify_failed');
+    recordSMSDeliveryEvent('warn', {
+      event: 'supabase_send_sms_hook_verify_failed',
+      provider: smsHealth.provider,
+      reason: 'invalid_signature',
+      message: error.message
+    });
     throw makeError('supabase_send_sms_hook_invalid', 401);
   }
 
   const otp = String(hookPayload?.sms?.otp || '').trim();
   const phoneNumber = String(hookPayload?.user?.phone || '').trim();
   if (!otp || !phoneNumber) {
+    incrementSMSCounter('hook_bad_payload');
+    recordSMSDeliveryEvent('warn', {
+      event: 'supabase_send_sms_hook_bad_payload',
+      provider: smsHealth.provider,
+      reason: 'missing_phone_or_otp'
+    });
     throw makeError('bad_send_sms_payload', 400);
   }
 
   try {
     const result = await smsClient.sendVerificationCode({ phoneNumber, otp });
-    console.log(`[hook] send_sms delivered phone=${phoneNumber.slice(-4)} requestId=${result.requestId || 'n/a'} bizId=${result.bizId || 'n/a'}`);
+    incrementSMSCounter('delivery_success');
+    incrementSMSCounter(`delivery_success_${smsHealth.provider}`);
+    recordSMSDeliveryEvent('info', {
+      event: 'supabase_send_sms_delivered',
+      provider: smsHealth.provider,
+      phoneSuffix: maskedPhoneSuffix(phoneNumber),
+      requestId: result.requestId || null,
+      bizId: result.bizId || null
+    });
     res.status(200).json({});
   } catch (error) {
+    const classification = classifySMSDeliveryFailure(error);
     incrementSecurityCounter('supabase_send_sms_delivery_failed');
-    console.error('[hook] Aliyun SMS delivery failed:', error.message);
-    throw makeError('sms_delivery_failed', 502);
+    incrementSMSCounter('delivery_failed');
+    incrementSMSCounter(`delivery_failed_${classification.reason}`);
+    if (classification.retryable) {
+      incrementSMSCounter('delivery_failed_retryable');
+    } else {
+      incrementSMSCounter('delivery_failed_non_retryable');
+    }
+    recordSMSDeliveryEvent('error', {
+      event: 'supabase_send_sms_delivery_failed',
+      provider: smsHealth.provider,
+      phoneSuffix: maskedPhoneSuffix(phoneNumber),
+      reason: classification.reason,
+      retryable: classification.retryable,
+      message: error.message,
+      providerCode: safeUpperCode(error?.response?.code || error?.response?.Code || '')
+    });
+    throw makeError(classification.errorCode, classification.statusCode);
   }
 }));
 
@@ -1421,7 +1892,7 @@ app.post('/api/webrtc/admission', rlAdmission, asyncRoute(async (req, res) => {
   });
   if (!challenge) throw makeError('challenge_expired', 401);
   if (consumeError) throw makeError(consumeError, 409);
-  if (!verifyChallengeSignature(publicBinding, signature, challenge)) {
+  if (!await verifyChallengeSignature(publicBinding, signature, challenge)) {
     incrementSecurityCounter('admission_signature_rejected');
     throw makeError('admission_signature_invalid', 401);
   }
@@ -1963,15 +2434,12 @@ wss.on('connection', (ws, req) => {
     const room = getOrCreateRoom(sessionId);
     room.clients.add(ws);
     room.clientsByDeviceId.set(boundToken.deviceId, ws);
-    await signalingState.upsertRoomMember(sessionId, {
+    await renewRoomMembershipLease(ws, {
+      clientId,
+      sessionId,
       deviceId: boundToken.deviceId,
       role: boundToken.role,
-      protocolPublicKeyFingerprint: boundToken.protocolPublicKeyFingerprint,
-      sessionId,
-      instanceId: INSTANCE_ID,
-      clientId,
-      updatedAt: now(),
-      expiresAt: now() + ROOM_MEMBERSHIP_TTL_MS
+      protocolPublicKeyFingerprint: boundToken.protocolPublicKeyFingerprint
     });
     wsSendRaw(ws, { type: 'bound', sessionId, role: boundToken.role, clientId });
   })().catch((error) => {
@@ -1980,7 +2448,17 @@ wss.on('connection', (ws, req) => {
     try { ws.close(1008, 'handshake_failed'); } catch (_) {}
   });
 
-  ws.on('pong', () => { ws.isAlive = true; });
+  ws.on('pong', () => {
+    ws.isAlive = true;
+    void renewRoomMembershipLease(ws).catch((error) => {
+      const meta = wsMeta.get(ws);
+      console.warn('[WS] heartbeat lease refresh failed:', {
+        sessionId: meta?.sessionId || null,
+        deviceId: meta?.deviceId || null,
+        message: error?.message || String(error)
+      });
+    });
+  });
 
   ws.on('message', (raw) => {
     void (async () => {
@@ -2075,16 +2553,7 @@ wss.on('connection', (ws, req) => {
         room.clients.add(ws);
       }
       room.clientsByDeviceId.set(meta.deviceId, ws);
-      await signalingState.upsertRoomMember(meta.sessionId, {
-        deviceId: meta.deviceId,
-        role: meta.role,
-        protocolPublicKeyFingerprint: meta.protocolPublicKeyFingerprint,
-        sessionId: meta.sessionId,
-        instanceId: INSTANCE_ID,
-        clientId: meta.clientId,
-        updatedAt: now(),
-        expiresAt: now() + ROOM_MEMBERSHIP_TTL_MS
-      });
+      await renewRoomMembershipLease(ws, meta);
       const outbound = sanitizeEnvelopeForPeer(message, meta.deviceId);
       deliverEnvelopeLocally(ws, outbound);
       await forwardEnvelopeToRemoteInstances(outbound);
@@ -2111,7 +2580,14 @@ wss.on('connection', (ws, req) => {
     });
   });
 
-  ws.on('error', () => {});
+  ws.on('error', (error) => {
+    const meta = wsMeta.get(ws);
+    console.warn('[WS] transport error:', {
+      sessionId: meta?.sessionId || null,
+      deviceId: meta?.deviceId || null,
+      message: error?.message || String(error)
+    });
+  });
 });
 
 const heartbeatTimer = setInterval(() => {
@@ -2124,7 +2600,7 @@ const heartbeatTimer = setInterval(() => {
     ws.isAlive = false;
     try { ws.ping(); } catch (_) {}
   }
-}, 30_000);
+}, WS_HEARTBEAT_INTERVAL_MS);
 
 const sweepTimer = setInterval(() => {
   void signalingState.sweepExpired().catch((error) => {
@@ -2157,6 +2633,7 @@ async function shutdown({ exitProcess = false } = {}) {
 async function startRuntime({ port = PORT, host = HOST } = {}) {
   await signalingState.init(handleBackendInstanceMessage);
   await refreshRuntimeProtection();
+  const smsStartup = assertSMSStartupReadiness();
   return await new Promise((resolve, reject) => {
     const onError = (error) => {
       server.off('error', onError);
@@ -2171,9 +2648,12 @@ async function startRuntime({ port = PORT, host = HOST } = {}) {
       console.log(`Instance: ${INSTANCE_ID} stateBackend=${SIGNALING_STATE_BACKEND}`);
       if (SIGNALING_STATE_BACKEND === 'redis') {
         console.log(`Redis: ${SIGNALING_REDIS_URL} keyPrefix=${SIGNALING_REDIS_KEY_PREFIX}`);
+      } else {
+        console.warn('[startup] memory state backend is single-instance only; do not deploy behind a multi-instance load balancer');
       }
+      console.log(`SMS: provider=${smsStartup.provider} ready=${smsStartup.ready} hookConfigured=${smsStartup.hookConfigured} providerConfigured=${smsStartup.providerConfigured} required=${smsStartup.required}`);
       console.log(`WS: ${USE_NODE_HTTPS ? 'wss' : 'ws'}://<host>:${port}/ws?shard=<session_id>&st=<session_token>`);
-      console.log(`Security: maxPayload=${WS_MAX_MSG_BYTES} maxMsgs10s=${WS_MAX_MSGS_PER_10S} maxBytes10s=${WS_MAX_BYTES_PER_10S} perMessageDeflate=false`);
+      console.log(`Security: maxPayload=${WS_MAX_MSG_BYTES} maxMsgs10s=${WS_MAX_MSGS_PER_10S} maxBytes10s=${WS_MAX_BYTES_PER_10S} maxBufferedBytes=${WS_MAX_BUFFERED_BYTES} heartbeatMs=${WS_HEARTBEAT_INTERVAL_MS} perMessageDeflate=false`);
       console.log('========================================');
       resolve(server.address());
     });
@@ -2204,6 +2684,8 @@ function createRuntime(options = {}) {
   app.set('trust proxy', trustProxy ? 1 : false);
   rooms.clear();
   securityCounters.clear();
+  smsCounters.clear();
+  lastSMSDeliveryEvent = null;
   runtimeProtection.redisAllowlistOnly = false;
   runtimeProtection.lastControlFlags = {
     allowlistOnly: false,
@@ -2233,5 +2715,15 @@ if (require.main === module) {
 }
 
 module.exports = {
-  createRuntime
+  createRuntime,
+  __test: {
+    buildSupabaseSMSHookVerifier,
+    classifySMSDeliveryFailure,
+    closeSlowConsumer,
+    collectSMSServiceSnapshot,
+    evaluateServiceHealth,
+    renewRoomMembershipLease,
+    wsSendRaw,
+    WS_MAX_BUFFERED_BYTES
+  }
 };
