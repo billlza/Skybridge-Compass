@@ -183,7 +183,7 @@ public struct InteractionSettings: Codable, Sendable {
     public var enableClipboardSync: Bool = true
     
  /// 启用音频重定向
-    public var enableAudioRedirection: Bool = true
+    public var enableAudioRedirection: Bool = false
     
  /// 启用打印机重定向
     public var enablePrinterRedirection: Bool = false
@@ -313,6 +313,7 @@ public enum ConnectionType: String, CaseIterable, Codable, Sendable {
 @MainActor
 public final class RemoteDesktopSettingsManager: ObservableObject, Sendable {
     public static let shared = RemoteDesktopSettingsManager()
+    private nonisolated static let isPrinterRedirectionAvailable = false
     
     @Published public var settings = RemoteDesktopSettings()
     
@@ -599,12 +600,32 @@ public final class RemoteDesktopSettingsManager: ObservableObject, Sendable {
     
     private func saveInteractionSettings() {
         let prefix = "\(settingsKey).interaction."
+        let audioRedirectionKey = "\(prefix)enableAudioRedirection"
+        let printerRedirectionKey = "\(prefix)enablePrinterRedirection"
+        let enableAudioRedirection = sanitizeAudioRedirectionPreference(
+            settings.interactionSettings.enableAudioRedirection,
+            source: "本地设置保存",
+            persistedKey: audioRedirectionKey
+        )
+        let enablePrinterRedirection = sanitizePrinterRedirectionPreference(
+            settings.interactionSettings.enablePrinterRedirection,
+            source: "本地设置保存",
+            persistedKey: printerRedirectionKey
+        )
+
+        if settings.interactionSettings.enableAudioRedirection != enableAudioRedirection {
+            settings.interactionSettings.enableAudioRedirection = enableAudioRedirection
+        }
+        if settings.interactionSettings.enablePrinterRedirection != enablePrinterRedirection {
+            settings.interactionSettings.enablePrinterRedirection = enablePrinterRedirection
+        }
+
         userDefaults.set(settings.interactionSettings.mouseSensitivity, forKey: "\(prefix)mouseSensitivity")
         userDefaults.set(settings.interactionSettings.enableMouseAcceleration, forKey: "\(prefix)enableMouseAcceleration")
         userDefaults.set(settings.interactionSettings.keyboardMapping.rawValue, forKey: "\(prefix)keyboardMapping")
         userDefaults.set(settings.interactionSettings.enableClipboardSync, forKey: "\(prefix)enableClipboardSync")
-        userDefaults.set(settings.interactionSettings.enableAudioRedirection, forKey: "\(prefix)enableAudioRedirection")
-        userDefaults.set(settings.interactionSettings.enablePrinterRedirection, forKey: "\(prefix)enablePrinterRedirection")
+        userDefaults.set(enableAudioRedirection, forKey: audioRedirectionKey)
+        userDefaults.set(enablePrinterRedirection, forKey: printerRedirectionKey)
         userDefaults.set(settings.interactionSettings.enableFileTransfer, forKey: "\(prefix)enableFileTransfer")
         userDefaults.set(settings.interactionSettings.enableTrackpadGestures, forKey: "\(prefix)enableTrackpadGestures")
         userDefaults.set(settings.interactionSettings.scrollSensitivity, forKey: "\(prefix)scrollSensitivity")
@@ -614,6 +635,8 @@ public final class RemoteDesktopSettingsManager: ObservableObject, Sendable {
     
     private func loadInteractionSettings() {
         let prefix = "\(settingsKey).interaction."
+        let audioRedirectionKey = "\(prefix)enableAudioRedirection"
+        let printerRedirectionKey = "\(prefix)enablePrinterRedirection"
         
         if userDefaults.object(forKey: "\(prefix)mouseSensitivity") != nil {
             settings.interactionSettings.mouseSensitivity = userDefaults.double(forKey: "\(prefix)mouseSensitivity")
@@ -632,13 +655,23 @@ public final class RemoteDesktopSettingsManager: ObservableObject, Sendable {
             settings.interactionSettings.enableClipboardSync = userDefaults.bool(forKey: "\(prefix)enableClipboardSync")
         }
         
-        if userDefaults.object(forKey: "\(prefix)enableAudioRedirection") != nil {
-            settings.interactionSettings.enableAudioRedirection = userDefaults.bool(forKey: "\(prefix)enableAudioRedirection")
-        }
+        let persistedAudioRedirectionValue = userDefaults.object(forKey: audioRedirectionKey) != nil
+            ? userDefaults.bool(forKey: audioRedirectionKey)
+            : settings.interactionSettings.enableAudioRedirection
+        settings.interactionSettings.enableAudioRedirection = sanitizeAudioRedirectionPreference(
+            persistedAudioRedirectionValue,
+            source: "本地已保存设置",
+            persistedKey: audioRedirectionKey
+        )
         
-        if userDefaults.object(forKey: "\(prefix)enablePrinterRedirection") != nil {
-            settings.interactionSettings.enablePrinterRedirection = userDefaults.bool(forKey: "\(prefix)enablePrinterRedirection")
-        }
+        let persistedPrinterRedirectionValue = userDefaults.object(forKey: printerRedirectionKey) != nil
+            ? userDefaults.bool(forKey: printerRedirectionKey)
+            : settings.interactionSettings.enablePrinterRedirection
+        settings.interactionSettings.enablePrinterRedirection = sanitizePrinterRedirectionPreference(
+            persistedPrinterRedirectionValue,
+            source: "本地已保存设置",
+            persistedKey: printerRedirectionKey
+        )
         
         if userDefaults.object(forKey: "\(prefix)enableFileTransfer") != nil {
             settings.interactionSettings.enableFileTransfer = userDefaults.bool(forKey: "\(prefix)enableFileTransfer")
@@ -662,13 +695,29 @@ public final class RemoteDesktopSettingsManager: ObservableObject, Sendable {
     }
     
     private func interactionSettingsToDict() -> [String: Any] {
+        let enableAudioRedirection = sanitizeAudioRedirectionPreference(
+            settings.interactionSettings.enableAudioRedirection,
+            source: "设置导出"
+        )
+        let enablePrinterRedirection = sanitizePrinterRedirectionPreference(
+            settings.interactionSettings.enablePrinterRedirection,
+            source: "设置导出"
+        )
+
+        if settings.interactionSettings.enableAudioRedirection != enableAudioRedirection {
+            settings.interactionSettings.enableAudioRedirection = enableAudioRedirection
+        }
+        if settings.interactionSettings.enablePrinterRedirection != enablePrinterRedirection {
+            settings.interactionSettings.enablePrinterRedirection = enablePrinterRedirection
+        }
+
         return [
             "mouseSensitivity": settings.interactionSettings.mouseSensitivity,
             "enableMouseAcceleration": settings.interactionSettings.enableMouseAcceleration,
             "keyboardMapping": settings.interactionSettings.keyboardMapping.rawValue,
             "enableClipboardSync": settings.interactionSettings.enableClipboardSync,
-            "enableAudioRedirection": settings.interactionSettings.enableAudioRedirection,
-            "enablePrinterRedirection": settings.interactionSettings.enablePrinterRedirection,
+            "enableAudioRedirection": enableAudioRedirection,
+            "enablePrinterRedirection": enablePrinterRedirection,
             "enableFileTransfer": settings.interactionSettings.enableFileTransfer,
             "enableTrackpadGestures": settings.interactionSettings.enableTrackpadGestures,
             "scrollSensitivity": settings.interactionSettings.scrollSensitivity,
@@ -695,13 +744,15 @@ public final class RemoteDesktopSettingsManager: ObservableObject, Sendable {
             settings.interactionSettings.enableClipboardSync = enableClipboardSync
         }
         
-        if let enableAudioRedirection = dict["enableAudioRedirection"] as? Bool {
-            settings.interactionSettings.enableAudioRedirection = enableAudioRedirection
-        }
+        settings.interactionSettings.enableAudioRedirection = sanitizeAudioRedirectionPreference(
+            dict["enableAudioRedirection"] as? Bool ?? settings.interactionSettings.enableAudioRedirection,
+            source: "导入配置"
+        )
         
-        if let enablePrinterRedirection = dict["enablePrinterRedirection"] as? Bool {
-            settings.interactionSettings.enablePrinterRedirection = enablePrinterRedirection
-        }
+        settings.interactionSettings.enablePrinterRedirection = sanitizePrinterRedirectionPreference(
+            dict["enablePrinterRedirection"] as? Bool ?? settings.interactionSettings.enablePrinterRedirection,
+            source: "导入配置"
+        )
         
         if let enableFileTransfer = dict["enableFileTransfer"] as? Bool {
             settings.interactionSettings.enableFileTransfer = enableFileTransfer
@@ -863,6 +914,40 @@ public final class RemoteDesktopSettingsManager: ObservableObject, Sendable {
         if let maxReconnectAttempts = dict["maxReconnectAttempts"] as? Int {
             settings.networkSettings.maxReconnectAttempts = maxReconnectAttempts
         }
+    }
+
+    private func sanitizeAudioRedirectionPreference(
+        _ requestedValue: Bool,
+        source: String,
+        persistedKey: String? = nil
+    ) -> Bool {
+        guard !requestedValue || AudioRedirectionManager.isFeatureAvailable else {
+            if let persistedKey {
+                userDefaults.set(false, forKey: persistedKey)
+            }
+
+            SkyBridgeLogger.ui.debugOnly("⚠️ 音频重定向当前版本未开放，已将\(source)中的启用配置重置为关闭")
+            return false
+        }
+
+        return requestedValue
+    }
+
+    private func sanitizePrinterRedirectionPreference(
+        _ requestedValue: Bool,
+        source: String,
+        persistedKey: String? = nil
+    ) -> Bool {
+        guard !requestedValue || Self.isPrinterRedirectionAvailable else {
+            if let persistedKey {
+                userDefaults.set(false, forKey: persistedKey)
+            }
+
+            SkyBridgeLogger.ui.debugOnly("⚠️ 打印机重定向当前版本未开放，已将\(source)中的启用配置重置为关闭")
+            return false
+        }
+
+        return requestedValue
     }
 }
 /// 编码档位（ProfileLevel）

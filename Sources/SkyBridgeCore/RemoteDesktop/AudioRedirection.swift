@@ -19,6 +19,7 @@ import Combine
 public final class AudioRedirectionManager: ObservableObject, @unchecked Sendable {
     
     public static let shared = AudioRedirectionManager()
+    public nonisolated static let isFeatureAvailable = false
     
     private let log = Logger(subsystem: "com.skybridge.compass", category: "AudioRedirection")
     
@@ -46,10 +47,15 @@ public final class AudioRedirectionManager: ObservableObject, @unchecked Sendabl
  /// 远程音频数据接收回调
     public var onRemoteAudioDataReceived: ((Data) -> Void)?
     
- /// 音频队列（处理音频数据）
+    /// 音频队列（处理音频数据）
     private let audioQueue = DispatchQueue(label: "com.skybridge.audio", attributes: .concurrent)
     
     private init() {
+        guard Self.isFeatureAvailable else {
+            log.info("ℹ️ 音频重定向当前版本未开放，已跳过初始化和权限请求")
+            return
+        }
+
  // 请求音频权限
         requestAudioPermission()
     }
@@ -75,6 +81,12 @@ public final class AudioRedirectionManager: ObservableObject, @unchecked Sendabl
  /// 启用音频重定向
  /// - Parameter sessionId: 会话 ID
     public func enable(for sessionId: UUID) throws {
+        guard Self.isFeatureAvailable else {
+            teardownAudioPipeline()
+            log.error("🚫 已拒绝启用音频重定向，请求的 sessionId=\(sessionId.uuidString, privacy: .public)。该功能当前版本未开放。")
+            throw AudioRedirectionError.featureUnavailable
+        }
+
         guard !isEnabled || activeSessionId != sessionId else { return }
         
  // 停止现有引擎
@@ -114,22 +126,11 @@ public final class AudioRedirectionManager: ObservableObject, @unchecked Sendabl
     
  /// 禁用音频重定向
     public func disable() {
-        guard isEnabled else { return }
-        
- // 移除输入 tap
-        inputNode?.removeTap(onBus: 0)
-        
- // 停止播放节点
-        playerNode?.stop()
-        
- // 停止音频引擎
-        audioEngine?.stop()
-        audioEngine = nil
-        inputNode = nil
-        playerNode = nil
-        
-        isEnabled = false
-        activeSessionId = nil
+        guard isEnabled || audioEngine != nil || inputNode != nil || playerNode != nil || activeSessionId != nil else {
+            return
+        }
+
+        teardownAudioPipeline()
         
         log.info("🛑 音频重定向已禁用")
     }
@@ -159,6 +160,11 @@ public final class AudioRedirectionManager: ObservableObject, @unchecked Sendabl
  /// 播放远程音频数据
  /// - Parameter audioData: 音频数据（PCM Float32，48kHz，立体声）
     public func playRemoteAudio(_ audioData: Data) {
+        guard Self.isFeatureAvailable else {
+            log.debug("已忽略远程音频数据，音频重定向当前版本未开放")
+            return
+        }
+
         guard isEnabled, let engine = audioEngine, engine.isRunning else { return }
         
  // 将 Data 转换为 AVAudioPCMBuffer
@@ -190,6 +196,18 @@ public final class AudioRedirectionManager: ObservableObject, @unchecked Sendabl
             }
         }
     }
+
+    private func teardownAudioPipeline() {
+        inputNode?.removeTap(onBus: 0)
+        playerNode?.stop()
+        audioEngine?.stop()
+
+        audioEngine = nil
+        inputNode = nil
+        playerNode = nil
+        isEnabled = false
+        activeSessionId = nil
+    }
     
     deinit {
  // 在 deinit 中直接清理资源
@@ -202,6 +220,17 @@ public final class AudioRedirectionManager: ObservableObject, @unchecked Sendabl
         }
         if let engine = audioEngine {
             engine.stop()
+        }
+    }
+}
+
+public enum AudioRedirectionError: LocalizedError, Sendable {
+    case featureUnavailable
+
+    public var errorDescription: String? {
+        switch self {
+        case .featureUnavailable:
+            return "Audio redirection is unavailable in this build."
         }
     }
 }

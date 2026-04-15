@@ -563,6 +563,10 @@
 "settings.remote.interaction.title" = "Interaction Settings";
 "settings.remote.interaction.clipboardSync" = "Enable clipboard sync";
 "settings.remote.interaction.audioRedirection" = "Enable audio redirection";
+"settings.remote.interaction.audioUnavailable.title" = "Audio redirection is unavailable";
+"settings.remote.interaction.audioUnavailable.body" = "This capability is still being refined. It is disabled in this build and cannot be enabled manually.";
+"settings.remote.interaction.audioPrinterUnavailable.title" = "Audio and printer redirection are unavailable";
+"settings.remote.interaction.audioPrinterUnavailable.body" = "These capabilities are still being refined. They are disabled in this build and cannot be enabled manually.";
 "settings.remote.interaction.fileTransfer" = "Enable file transfer";
 "settings.remote.interaction.trackpadGestures" = "Enable trackpad gestures";
 "settings.remote.interaction.mouseSensitivity" = "Mouse sensitivity:";

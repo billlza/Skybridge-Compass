@@ -534,6 +534,10 @@
 "settings.remote.interaction.title" = "インタラクション設定";
 "settings.remote.interaction.clipboardSync" = "クリップボード同期を有効化";
 "settings.remote.interaction.audioRedirection" = "オーディオリダイレクトを有効化";
+"settings.remote.interaction.audioUnavailable.title" = "オーディオリダイレクトは現在利用できません";
+"settings.remote.interaction.audioUnavailable.body" = "この機能は現在も調整中です。このビルドでは無効化されており、手動で有効にできません。";
+"settings.remote.interaction.audioPrinterUnavailable.title" = "オーディオとプリンターのリダイレクトは現在利用できません";
+"settings.remote.interaction.audioPrinterUnavailable.body" = "これらの機能は現在も調整中です。このビルドでは無効化されており、手動で有効にできません。";
 "settings.remote.interaction.fileTransfer" = "ファイル転送を有効化";
 "settings.remote.interaction.trackpadGestures" = "トラックパッドジェスチャを有効化";
 "settings.remote.interaction.mouseSensitivity" = "マウス感度:";

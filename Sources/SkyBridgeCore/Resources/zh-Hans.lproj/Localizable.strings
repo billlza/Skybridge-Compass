@@ -590,6 +590,10 @@
 "settings.remote.interaction.title" = "交互设置";
 "settings.remote.interaction.clipboardSync" = "启用剪贴板同步";
 "settings.remote.interaction.audioRedirection" = "启用音频重定向";
+"settings.remote.interaction.audioUnavailable.title" = "音频重定向暂未开放";
+"settings.remote.interaction.audioUnavailable.body" = "该能力仍在完善中，本版本已默认停用，当前不可手动开启。";
+"settings.remote.interaction.audioPrinterUnavailable.title" = "音频重定向与打印机重定向暂未开放";
+"settings.remote.interaction.audioPrinterUnavailable.body" = "这两项能力仍在完善中，本版本已默认停用，当前不可手动开启。";
 "settings.remote.interaction.fileTransfer" = "启用文件传输";
 "settings.remote.interaction.trackpadGestures" = "启用触控板手势";
 "settings.remote.interaction.mouseSensitivity" = "鼠标灵敏度:";
