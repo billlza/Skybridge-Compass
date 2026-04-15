@@ -347,38 +347,109 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             }
         }
     }
+
+    enum StateAccessPlan: Equatable {
+        case executeInline
+        case syncOnStateQueue
+    }
+
+    enum CallbackDispatchPlan: Equatable {
+        case executeInline
+        case asyncOffStateQueue
+    }
+
+    enum PendingInboundFlushPlan: Equatable {
+        case keepBuffered
+        case dispatchBuffered(count: Int)
+    }
+
+    enum PendingInboundDeliveryPlan: Equatable {
+        case bufferIncoming(nextPendingCount: Int)
+        case dispatch(bufferedCount: Int)
+    }
+
+    enum PendingRemoteICEPlan: Equatable {
+        case ignoreDuplicate
+        case queueCandidate(nextPendingCount: Int)
+        case applyImmediately
+    }
     
     private let logger = Logger(subsystem: "com.skybridge.compass.ios", category: "WebRTCSession")
     private static let publicFallbackSTUNURL = "stun:stun.l.google.com:19302"
     private static let controlChannelLabel = "skybridge"
     private static let screenChannelLabel = "skybridge-screen"
+    private let stateQueue = DispatchQueue(label: "com.skybridge.compass.ios.webrtc.session.state.\(UUID().uuidString)")
+    private let stateQueueKey = DispatchSpecificKey<String>()
+    private let stateQueueID = UUID().uuidString
     
     public let sessionId: String
     public let localDeviceId: String
     public let role: Role
     public let ice: ICEConfig
     
-    public var onLocalOffer: (@Sendable (String) -> Void)?
-    public var onLocalAnswer: (@Sendable (String) -> Void)?
-    public var onLocalICECandidate: (@Sendable (WebRTCSignalingEnvelope.Payload) -> Void)?
+    private var _onLocalOffer: (@Sendable (String) -> Void)?
+    public var onLocalOffer: (@Sendable (String) -> Void)? {
+        get { withState { _onLocalOffer } }
+        set { withState { _onLocalOffer = newValue } }
+    }
+    private var _onLocalAnswer: (@Sendable (String) -> Void)?
+    public var onLocalAnswer: (@Sendable (String) -> Void)? {
+        get { withState { _onLocalAnswer } }
+        set { withState { _onLocalAnswer = newValue } }
+    }
+    private var _onLocalICECandidate: (@Sendable (WebRTCSignalingEnvelope.Payload) -> Void)?
+    public var onLocalICECandidate: (@Sendable (WebRTCSignalingEnvelope.Payload) -> Void)? {
+        get { withState { _onLocalICECandidate } }
+        set { withState { _onLocalICECandidate = newValue } }
+    }
+    private var _onData: (@Sendable (Data) -> Void)?
     public var onData: (@Sendable (Data) -> Void)? {
-        didSet {
+        get { withState { _onData } }
+        set {
+            withState { _onData = newValue }
             flushPendingInboundDataIfNeeded()
         }
     }
+    private var _onScreenData: (@Sendable (Data) -> Void)?
     public var onScreenData: (@Sendable (Data) -> Void)? {
-        didSet {
+        get { withState { _onScreenData } }
+        set {
+            withState { _onScreenData = newValue }
             flushPendingInboundScreenDataIfNeeded()
         }
     }
 #if canImport(WebRTC)
-    public var onRemoteVideoTrack: ((RTCVideoTrack?) -> Void)?
+    private var _onRemoteVideoTrack: ((RTCVideoTrack?) -> Void)?
+    public var onRemoteVideoTrack: ((RTCVideoTrack?) -> Void)? {
+        get { withState { _onRemoteVideoTrack } }
+        set { withState { _onRemoteVideoTrack = newValue } }
+    }
 #endif
-    public var onRemoteVideoFrameEvidence: (@Sendable (CGSize, String) -> Void)?
-    public var onRemoteVideoFirstPacket: (@Sendable () -> Void)?
-    public var onReady: (@Sendable () -> Void)?
-    public var onDisconnected: (@Sendable (String) -> Void)?
-    public var onTrace: (@Sendable (String) -> Void)?
+    private var _onRemoteVideoFrameEvidence: (@Sendable (CGSize, String) -> Void)?
+    public var onRemoteVideoFrameEvidence: (@Sendable (CGSize, String) -> Void)? {
+        get { withState { _onRemoteVideoFrameEvidence } }
+        set { withState { _onRemoteVideoFrameEvidence = newValue } }
+    }
+    private var _onRemoteVideoFirstPacket: (@Sendable () -> Void)?
+    public var onRemoteVideoFirstPacket: (@Sendable () -> Void)? {
+        get { withState { _onRemoteVideoFirstPacket } }
+        set { withState { _onRemoteVideoFirstPacket = newValue } }
+    }
+    private var _onReady: (@Sendable () -> Void)?
+    public var onReady: (@Sendable () -> Void)? {
+        get { withState { _onReady } }
+        set { withState { _onReady = newValue } }
+    }
+    private var _onDisconnected: (@Sendable (String) -> Void)?
+    public var onDisconnected: (@Sendable (String) -> Void)? {
+        get { withState { _onDisconnected } }
+        set { withState { _onDisconnected = newValue } }
+    }
+    private var _onTrace: (@Sendable (String) -> Void)?
+    public var onTrace: (@Sendable (String) -> Void)? {
+        get { withState { _onTrace } }
+        set { withState { _onTrace = newValue } }
+    }
     
 #if canImport(WebRTC)
     private var peerConnection: RTCPeerConnection?
@@ -401,6 +472,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     private var hasRemoteDescription = false
     private var isSettingRemoteDescription = false
     private var lastEmittedLocalSDP: String?
+    private var lifecycleToken: UInt64 = 0
     private let inboundDataLock = NSLock()
     private let inboundScreenDataLock = NSLock()
     private let outboundFrameLock = NSLock()
@@ -416,6 +488,84 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         self.role = role
         self.ice = ice
         super.init()
+        stateQueue.setSpecific(key: stateQueueKey, value: stateQueueID)
+    }
+
+    private var isOnStateQueue: Bool {
+        DispatchQueue.getSpecific(key: stateQueueKey) == stateQueueID
+    }
+
+    private func withState<T>(_ operation: () throws -> T) rethrows -> T {
+        switch Self.stateAccessPlan(isOnStateQueue: isOnStateQueue) {
+        case .executeInline:
+            return try operation()
+        case .syncOnStateQueue:
+            return try stateQueue.sync(execute: operation)
+        }
+    }
+
+    private func scheduleState(_ operation: @escaping () -> Void) {
+        stateQueue.async(execute: DispatchWorkItem(block: operation))
+    }
+
+    private func dispatchCallback(_ operation: @escaping () -> Void) {
+        switch Self.callbackDispatchPlan(isOnStateQueue: isOnStateQueue) {
+        case .asyncOffStateQueue:
+            DispatchQueue.global(qos: .userInitiated).async(execute: DispatchWorkItem(block: operation))
+        case .executeInline:
+            operation()
+        }
+    }
+
+    nonisolated static func stateAccessPlan(isOnStateQueue: Bool) -> StateAccessPlan {
+        isOnStateQueue ? .executeInline : .syncOnStateQueue
+    }
+
+    nonisolated static func callbackDispatchPlan(isOnStateQueue: Bool) -> CallbackDispatchPlan {
+        isOnStateQueue ? .asyncOffStateQueue : .executeInline
+    }
+
+    nonisolated static func lifecycleGuardAllowsCallback(
+        peerConnectionMatches: Bool,
+        isClosed: Bool,
+        currentLifecycleToken: UInt64,
+        expectedLifecycleToken: UInt64
+    ) -> Bool {
+        peerConnectionMatches && !isClosed && currentLifecycleToken == expectedLifecycleToken
+    }
+
+    nonisolated static func pendingInboundFlushPlan(
+        hasHandlerInstalled: Bool,
+        pendingCount: Int
+    ) -> PendingInboundFlushPlan {
+        guard hasHandlerInstalled, pendingCount > 0 else {
+            return .keepBuffered
+        }
+        return .dispatchBuffered(count: pendingCount)
+    }
+
+    nonisolated static func pendingInboundDeliveryPlan(
+        hasHandlerInstalled: Bool,
+        pendingCount: Int
+    ) -> PendingInboundDeliveryPlan {
+        guard hasHandlerInstalled else {
+            return .bufferIncoming(nextPendingCount: pendingCount + 1)
+        }
+        return .dispatch(bufferedCount: pendingCount)
+    }
+
+    nonisolated static func pendingRemoteICEPlan(
+        isDuplicate: Bool,
+        hasRemoteDescription: Bool,
+        pendingCount: Int
+    ) -> PendingRemoteICEPlan {
+        if isDuplicate {
+            return .ignoreDuplicate
+        }
+        if hasRemoteDescription {
+            return .applyImmediately
+        }
+        return .queueCandidate(nextPendingCount: pendingCount + 1)
     }
     
     /// 关闭 WebRTC 会话并释放所有资源（PeerConnection / DataChannel / SSL）。
@@ -425,54 +575,57 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     /// - 关闭 PeerConnection 终止 ICE / DTLS-SRTP 会话
     /// - 调用 RTCCleanupSSL() 释放 OpenSSL 上下文
     public func close() {
-        guard !isClosed else { return }
-        onTrace?("close session=\(sessionId)")
-        isClosed = true
+        withState {
+            guard !isClosed else { return }
+            onTrace?("close session=\(sessionId)")
+            isClosed = true
 	        didNotifyDisconnected = true
 	        didNotifyReady = false
 	        hasRemoteDescription = false
 	        isSettingRemoteDescription = false
-        lastEmittedLocalSDP = nil
+            lastEmittedLocalSDP = nil
+            lifecycleToken &+= 1
 	        onDisconnected = nil
 #if canImport(WebRTC)
-        pendingRemoteICECandidates.removeAll(keepingCapacity: false)
-        seenRemoteICECandidateKeys.removeAll(keepingCapacity: false)
-        dataChannel?.close()
-        dataChannel = nil
-        screenDataChannel?.close()
-        screenDataChannel = nil
-        remoteVideoTrack = nil
-        remoteVideoReceiver?.delegate = nil
-        remoteVideoReceiver = nil
-        videoTransceiver = nil
-        remoteVideoTrackInspectionTask?.cancel()
-        remoteVideoTrackInspectionTask = nil
-        remoteVideoFrameEvidenceTask?.cancel()
-        remoteVideoFrameEvidenceTask = nil
-        didEmitRemoteVideoFrameEvidence = false
-        peerConnection?.close()
-        peerConnection = nil
-        if sslHeld {
-            sslHeld = false
-            WebRTCSSL.release()
-        }
+            pendingRemoteICECandidates.removeAll(keepingCapacity: false)
+            seenRemoteICECandidateKeys.removeAll(keepingCapacity: false)
+            dataChannel?.close()
+            dataChannel = nil
+            screenDataChannel?.close()
+            screenDataChannel = nil
+            remoteVideoTrack = nil
+            remoteVideoReceiver?.delegate = nil
+            remoteVideoReceiver = nil
+            videoTransceiver = nil
+            remoteVideoTrackInspectionTask?.cancel()
+            remoteVideoTrackInspectionTask = nil
+            remoteVideoFrameEvidenceTask?.cancel()
+            remoteVideoFrameEvidenceTask = nil
+            didEmitRemoteVideoFrameEvidence = false
+            peerConnection?.close()
+            peerConnection = nil
+            if sslHeld {
+                sslHeld = false
+                WebRTCSSL.release()
+            }
 #endif
-        onLocalOffer = nil
-        onLocalAnswer = nil
-        onLocalICECandidate = nil
-        inboundDataLock.lock()
-        pendingInboundDataBuffers.removeAll(keepingCapacity: false)
-        inboundDataLock.unlock()
-        inboundScreenDataLock.lock()
-        pendingInboundScreenDataBuffers.removeAll(keepingCapacity: false)
-        inboundScreenDataLock.unlock()
-        onData = nil
-        onScreenData = nil
+            onLocalOffer = nil
+            onLocalAnswer = nil
+            onLocalICECandidate = nil
+            inboundDataLock.lock()
+            pendingInboundDataBuffers.removeAll(keepingCapacity: false)
+            inboundDataLock.unlock()
+            inboundScreenDataLock.lock()
+            pendingInboundScreenDataBuffers.removeAll(keepingCapacity: false)
+            inboundScreenDataLock.unlock()
+            onData = nil
+            onScreenData = nil
 #if canImport(WebRTC)
-        onRemoteVideoTrack = nil
+            onRemoteVideoTrack = nil
 #endif
-        onReady = nil
-        logger.info("⏹️ WebRTCSession closed sessionId=\(self.sessionId, privacy: .public)")
+            onReady = nil
+            logger.info("⏹️ WebRTCSession closed sessionId=\(self.sessionId, privacy: .public)")
+        }
     }
     
     deinit {
@@ -539,67 +692,82 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
 #endif
     
     public func start() throws {
-        guard !isClosed else { throw WebRTCError.alreadyClosed }
-        didNotifyDisconnected = false
-        didNotifyReady = false
-        hasRemoteDescription = false
-        lastEmittedLocalSDP = nil
+        try withState {
+            guard !isClosed else { throw WebRTCError.alreadyClosed }
+            didNotifyDisconnected = false
+            didNotifyReady = false
+            hasRemoteDescription = false
+            lastEmittedLocalSDP = nil
+            lifecycleToken &+= 1
 #if canImport(WebRTC)
-        pendingRemoteICECandidates.removeAll(keepingCapacity: false)
-        seenRemoteICECandidateKeys.removeAll(keepingCapacity: false)
-        WebRTCSSL.retain()
-        sslHeld = true
-        let factory = WebRTCPeerConnectionFactoryProvider.factory()
-        
-        let config = RTCConfiguration()
-        config.sdpSemantics = .unifiedPlan
-        if Self.shouldForceRelayOnlyForSmoke {
-            config.iceTransportPolicy = .relay
-            config.continualGatheringPolicy = .gatherOnce
-        } else {
-            config.continualGatheringPolicy = .gatherContinually
-        }
-        config.iceServers = buildIceServers()
-        
-        let constraints = RTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: ["DtlsSrtpKeyAgreement": "true"])
-        guard let pc = factory.peerConnection(with: config, constraints: constraints, delegate: self) else {
-            logger.error("❌ RTCPeerConnection creation failed: sessionId=\(self.sessionId, privacy: .public) iceServerCount=\(config.iceServers.count, privacy: .public)")
-            sslHeld = false
-            WebRTCSSL.release()
-            throw WebRTCError.peerConnectionCreationFailed
-        }
-        self.peerConnection = pc
-        configureIncomingScreenVideoIfNeeded(peerConnection: pc)
-        
-        if role == .offerer {
-            let dcConfig = RTCDataChannelConfiguration()
-            dcConfig.isOrdered = true
-            dcConfig.isNegotiated = false
-            let dc = pc.dataChannel(forLabel: Self.controlChannelLabel, configuration: dcConfig)
-            dc?.delegate = self
-            self.dataChannel = dc
-            onTrace?("start-offerer session=\(sessionId) iceServers=\(config.iceServers.count)")
-            createOffer()
-        } else {
-            onTrace?("start-answerer session=\(sessionId) iceServers=\(config.iceServers.count)")
-        }
-        
-        logger.info("✅ WebRTCSession started role=\(String(describing: self.role), privacy: .public) sessionId=\(self.sessionId, privacy: .public)")
+            pendingRemoteICECandidates.removeAll(keepingCapacity: false)
+            seenRemoteICECandidateKeys.removeAll(keepingCapacity: false)
+            WebRTCSSL.retain()
+            sslHeld = true
+            let factory = WebRTCPeerConnectionFactoryProvider.factory()
+            
+            let config = RTCConfiguration()
+            config.sdpSemantics = .unifiedPlan
+            if Self.shouldForceRelayOnlyForSmoke {
+                config.iceTransportPolicy = .relay
+                config.continualGatheringPolicy = .gatherOnce
+            } else {
+                config.continualGatheringPolicy = .gatherContinually
+            }
+            config.iceServers = buildIceServers()
+            
+            let constraints = RTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: ["DtlsSrtpKeyAgreement": "true"])
+            guard let pc = factory.peerConnection(with: config, constraints: constraints, delegate: self) else {
+                logger.error("❌ RTCPeerConnection creation failed: sessionId=\(self.sessionId, privacy: .public) iceServerCount=\(config.iceServers.count, privacy: .public)")
+                sslHeld = false
+                WebRTCSSL.release()
+                throw WebRTCError.peerConnectionCreationFailed
+            }
+            self.peerConnection = pc
+            configureIncomingScreenVideoIfNeeded(peerConnection: pc)
+            
+            if role == .offerer {
+                let dcConfig = RTCDataChannelConfiguration()
+                dcConfig.isOrdered = true
+                dcConfig.isNegotiated = false
+                let dc = pc.dataChannel(forLabel: Self.controlChannelLabel, configuration: dcConfig)
+                dc?.delegate = self
+                self.dataChannel = dc
+                onTrace?("start-offerer session=\(sessionId) iceServers=\(config.iceServers.count)")
+                createOffer()
+            } else {
+                onTrace?("start-answerer session=\(sessionId) iceServers=\(config.iceServers.count)")
+            }
+            
+            logger.info("✅ WebRTCSession started role=\(String(describing: self.role), privacy: .public) sessionId=\(self.sessionId, privacy: .public)")
 #else
-        throw WebRTCError.webRTCNotAvailable
+            throw WebRTCError.webRTCNotAvailable
 #endif
+        }
     }
 
     private func notifyDisconnectedIfNeeded(reason: String) {
-        guard !didNotifyDisconnected else { return }
-        didNotifyDisconnected = true
-        onDisconnected?(reason)
+        let handler: (@Sendable (String) -> Void)? = withState {
+            guard !didNotifyDisconnected else { return nil }
+            didNotifyDisconnected = true
+            return onDisconnected
+        }
+        guard let handler else { return }
+        dispatchCallback {
+            handler(reason)
+        }
     }
 
     private func notifyReadyIfNeeded() {
-        guard !didNotifyReady else { return }
-        didNotifyReady = true
-        onReady?()
+        let handler: (@Sendable () -> Void)? = withState {
+            guard !didNotifyReady else { return nil }
+            didNotifyReady = true
+            return onReady
+        }
+        guard let handler else { return }
+        dispatchCallback {
+            handler()
+        }
     }
 
     private func flushPendingInboundDataIfNeeded() {
@@ -607,14 +775,22 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         var buffered: [Data] = []
         inboundDataLock.lock()
         handler = onData
-        if handler != nil, !pendingInboundDataBuffers.isEmpty {
+        switch Self.pendingInboundFlushPlan(
+            hasHandlerInstalled: handler != nil,
+            pendingCount: pendingInboundDataBuffers.count
+        ) {
+        case .dispatchBuffered:
             buffered = pendingInboundDataBuffers
             pendingInboundDataBuffers.removeAll(keepingCapacity: false)
+        case .keepBuffered:
+            break
         }
         inboundDataLock.unlock()
 
         guard let handler else { return }
-        buffered.forEach(handler)
+        dispatchCallback {
+            buffered.forEach(handler)
+        }
     }
 
     private func flushPendingInboundScreenDataIfNeeded() {
@@ -622,56 +798,78 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         var buffered: [Data] = []
         inboundScreenDataLock.lock()
         handler = onScreenData
-        if handler != nil, !pendingInboundScreenDataBuffers.isEmpty {
+        switch Self.pendingInboundFlushPlan(
+            hasHandlerInstalled: handler != nil,
+            pendingCount: pendingInboundScreenDataBuffers.count
+        ) {
+        case .dispatchBuffered:
             buffered = pendingInboundScreenDataBuffers
             pendingInboundScreenDataBuffers.removeAll(keepingCapacity: false)
+        case .keepBuffered:
+            break
         }
         inboundScreenDataLock.unlock()
 
         guard let handler else { return }
-        buffered.forEach(handler)
+        dispatchCallback {
+            buffered.forEach(handler)
+        }
     }
 
     private func deliverInboundData(_ data: Data) {
         let handler: (@Sendable (Data) -> Void)?
         var buffered: [Data] = []
         inboundDataLock.lock()
-        if let activeHandler = onData {
+        let activeHandler = onData
+        switch Self.pendingInboundDeliveryPlan(
+            hasHandlerInstalled: activeHandler != nil,
+            pendingCount: pendingInboundDataBuffers.count
+        ) {
+        case .dispatch:
             handler = activeHandler
             if !pendingInboundDataBuffers.isEmpty {
                 buffered = pendingInboundDataBuffers
                 pendingInboundDataBuffers.removeAll(keepingCapacity: false)
             }
-        } else {
+        case .bufferIncoming:
             pendingInboundDataBuffers.append(data)
             handler = nil
         }
         inboundDataLock.unlock()
 
         guard let handler else { return }
-        buffered.forEach(handler)
-        handler(data)
+        dispatchCallback {
+            buffered.forEach(handler)
+            handler(data)
+        }
     }
 
     private func deliverInboundScreenData(_ data: Data) {
         let handler: (@Sendable (Data) -> Void)?
         var buffered: [Data] = []
         inboundScreenDataLock.lock()
-        if let activeHandler = onScreenData {
+        let activeHandler = onScreenData
+        switch Self.pendingInboundDeliveryPlan(
+            hasHandlerInstalled: activeHandler != nil,
+            pendingCount: pendingInboundScreenDataBuffers.count
+        ) {
+        case .dispatch:
             handler = activeHandler
             if !pendingInboundScreenDataBuffers.isEmpty {
                 buffered = pendingInboundScreenDataBuffers
                 pendingInboundScreenDataBuffers.removeAll(keepingCapacity: false)
             }
-        } else {
+        case .bufferIncoming:
             pendingInboundScreenDataBuffers.append(data)
             handler = nil
         }
         inboundScreenDataLock.unlock()
 
         guard let handler else { return }
-        buffered.forEach(handler)
-        handler(data)
+        dispatchCallback {
+            buffered.forEach(handler)
+            handler(data)
+        }
     }
 
     private func isScreenChannel(_ dataChannel: RTCDataChannel) -> Bool {
@@ -692,108 +890,135 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     
     public func setRemoteOffer(_ sdp: String) {
 #if canImport(WebRTC)
-        onTrace?("set-remote-offer session=\(sessionId) bytes=\(sdp.utf8.count)")
-        let normalizedOffer = Self.normalizedRemoteSDP(sdp)
-        if hasRemoteDescription || isSettingRemoteDescription {
-            absorbRemoteICECandidatesFromSDP(normalizedOffer.sdp, traceLabel: "duplicate-offer")
-            logger.debug("ℹ️ ignore duplicate remote offer. sessionId=\(self.sessionId, privacy: .public)")
-            onTrace?("set-remote-offer ignored duplicate session=\(sessionId)")
-            return
-        }
-        guard let pc = peerConnection else { return }
-        if pc.remoteDescription != nil {
-            hasRemoteDescription = true
-            absorbRemoteICECandidatesFromSDP(normalizedOffer.sdp, traceLabel: "existing-offer")
-            flushPendingRemoteICECandidates()
-            logger.debug("ℹ️ remote offer already applied; ignore. sessionId=\(self.sessionId, privacy: .public)")
-            onTrace?("set-remote-offer ignored existing session=\(sessionId)")
-            return
-        }
-        if normalizedOffer.droppedSessionLevelCandidateLines > 0 || normalizedOffer.deduplicatedCandidateLines > 0 {
-            onTrace?(
-                "normalize-remote-offer session=\(sessionId) droppedSessionCandidates=\(normalizedOffer.droppedSessionLevelCandidateLines) dedupedCandidates=\(normalizedOffer.deduplicatedCandidateLines)"
-            )
-        }
-        let desc = RTCSessionDescription(type: .offer, sdp: normalizedOffer.sdp)
-        isSettingRemoteDescription = true
-        pc.setRemoteDescription(desc) { [weak self] error in
-            guard let self else { return }
-            self.isSettingRemoteDescription = false
-            if let error {
-                self.logger.error("❌ setRemoteOffer failed: \(error.localizedDescription, privacy: .public)")
-                self.onTrace?("set-remote-offer failed session=\(self.sessionId) error=\(error.localizedDescription)")
+        scheduleState { [weak self] in
+            guard let self, !self.isClosed else { return }
+            self.onTrace?("set-remote-offer session=\(self.sessionId) bytes=\(sdp.utf8.count)")
+            let normalizedOffer = Self.normalizedRemoteSDP(sdp)
+            if self.hasRemoteDescription || self.isSettingRemoteDescription {
+                self.absorbRemoteICECandidatesFromSDP(normalizedOffer.sdp, traceLabel: "duplicate-offer")
+                self.logger.debug("ℹ️ ignore duplicate remote offer. sessionId=\(self.sessionId, privacy: .public)")
+                self.onTrace?("set-remote-offer ignored duplicate session=\(self.sessionId)")
                 return
             }
-            self.hasRemoteDescription = true
-            self.flushPendingRemoteICECandidates()
-            self.inspectRemoteVideoTrackIfAvailable(peerConnection: pc)
-            self.scheduleRemoteVideoTrackInspection(peerConnection: pc, reason: "set-remote-offer")
-            self.onTrace?("set-remote-offer applied session=\(self.sessionId)")
-            self.createAnswer()
+            guard let pc = self.peerConnection else { return }
+            if pc.remoteDescription != nil {
+                self.hasRemoteDescription = true
+                self.absorbRemoteICECandidatesFromSDP(normalizedOffer.sdp, traceLabel: "existing-offer")
+                self.flushPendingRemoteICECandidates()
+                self.logger.debug("ℹ️ remote offer already applied; ignore. sessionId=\(self.sessionId, privacy: .public)")
+                self.onTrace?("set-remote-offer ignored existing session=\(self.sessionId)")
+                return
+            }
+            if normalizedOffer.droppedSessionLevelCandidateLines > 0 || normalizedOffer.deduplicatedCandidateLines > 0 {
+                self.onTrace?(
+                    "normalize-remote-offer session=\(self.sessionId) droppedSessionCandidates=\(normalizedOffer.droppedSessionLevelCandidateLines) dedupedCandidates=\(normalizedOffer.deduplicatedCandidateLines)"
+                )
+            }
+            let desc = RTCSessionDescription(type: .offer, sdp: normalizedOffer.sdp)
+            self.isSettingRemoteDescription = true
+            let expectedLifecycleToken = self.lifecycleToken
+            pc.setRemoteDescription(desc) { [weak self, weak pc] error in
+                guard let self else { return }
+                self.scheduleState {
+                    guard let pc,
+                          self.peerConnection === pc,
+                          !self.isClosed,
+                          self.lifecycleToken == expectedLifecycleToken else { return }
+                    self.isSettingRemoteDescription = false
+                    if let error {
+                        self.logger.error("❌ setRemoteOffer failed: \(error.localizedDescription, privacy: .public)")
+                        self.onTrace?("set-remote-offer failed session=\(self.sessionId) error=\(error.localizedDescription)")
+                        return
+                    }
+                    self.hasRemoteDescription = true
+                    self.flushPendingRemoteICECandidates()
+                    self.inspectRemoteVideoTrackIfAvailable(peerConnection: pc)
+                    self.scheduleRemoteVideoTrackInspection(peerConnection: pc, reason: "set-remote-offer")
+                    self.onTrace?("set-remote-offer applied session=\(self.sessionId)")
+                    self.createAnswer()
+                }
+            }
         }
 #endif
     }
     
     public func setRemoteAnswer(_ sdp: String) {
 #if canImport(WebRTC)
-        onTrace?("set-remote-answer session=\(sessionId) bytes=\(sdp.utf8.count)")
-        guard let pc = peerConnection else { return }
-        let normalizedAnswer = Self.normalizedRemoteSDP(sdp)
-        if hasRemoteDescription || isSettingRemoteDescription || pc.remoteDescription != nil {
-            hasRemoteDescription = true
-            absorbRemoteICECandidatesFromSDP(normalizedAnswer.sdp, traceLabel: "duplicate-answer")
-            flushPendingRemoteICECandidates()
-            logger.debug("ℹ️ ignore duplicate remote answer. sessionId=\(self.sessionId, privacy: .public)")
-            onTrace?("set-remote-answer ignored duplicate session=\(sessionId)")
-            return
-        }
-        if normalizedAnswer.droppedSessionLevelCandidateLines > 0 || normalizedAnswer.deduplicatedCandidateLines > 0 {
-            onTrace?(
-                "normalize-remote-answer session=\(sessionId) droppedSessionCandidates=\(normalizedAnswer.droppedSessionLevelCandidateLines) dedupedCandidates=\(normalizedAnswer.deduplicatedCandidateLines)"
-            )
-        }
-        let desc = RTCSessionDescription(type: .answer, sdp: normalizedAnswer.sdp)
-        isSettingRemoteDescription = true
-        pc.setRemoteDescription(desc) { [weak self] error in
-            guard let self else { return }
-            self.isSettingRemoteDescription = false
-            if let error {
-	                // When the peer resends the same answer before our first callback returns,
-	                // WebRTC may already be stable and reject the duplicate call.
-                if pc.signalingState == .stable || pc.remoteDescription != nil {
+        scheduleState { [weak self] in
+            guard let self, !self.isClosed else { return }
+            self.onTrace?("set-remote-answer session=\(self.sessionId) bytes=\(sdp.utf8.count)")
+            guard let pc = self.peerConnection else { return }
+            let normalizedAnswer = Self.normalizedRemoteSDP(sdp)
+            if self.hasRemoteDescription || self.isSettingRemoteDescription || pc.remoteDescription != nil {
+                self.hasRemoteDescription = true
+                self.absorbRemoteICECandidatesFromSDP(normalizedAnswer.sdp, traceLabel: "duplicate-answer")
+                self.flushPendingRemoteICECandidates()
+                self.logger.debug("ℹ️ ignore duplicate remote answer. sessionId=\(self.sessionId, privacy: .public)")
+                self.onTrace?("set-remote-answer ignored duplicate session=\(self.sessionId)")
+                return
+            }
+            if normalizedAnswer.droppedSessionLevelCandidateLines > 0 || normalizedAnswer.deduplicatedCandidateLines > 0 {
+                self.onTrace?(
+                    "normalize-remote-answer session=\(self.sessionId) droppedSessionCandidates=\(normalizedAnswer.droppedSessionLevelCandidateLines) dedupedCandidates=\(normalizedAnswer.deduplicatedCandidateLines)"
+                )
+            }
+            let desc = RTCSessionDescription(type: .answer, sdp: normalizedAnswer.sdp)
+            self.isSettingRemoteDescription = true
+            let expectedLifecycleToken = self.lifecycleToken
+            pc.setRemoteDescription(desc) { [weak self, weak pc] error in
+                guard let self else { return }
+                self.scheduleState {
+                    guard let pc,
+                          self.peerConnection === pc,
+                          !self.isClosed,
+                          self.lifecycleToken == expectedLifecycleToken else { return }
+                    self.isSettingRemoteDescription = false
+                    if let error {
+                        if pc.signalingState == .stable || pc.remoteDescription != nil {
+                            self.hasRemoteDescription = true
+                            self.flushPendingRemoteICECandidates()
+                            self.inspectRemoteVideoTrackIfAvailable(peerConnection: pc)
+                            self.scheduleRemoteVideoTrackInspection(peerConnection: pc, reason: "set-remote-answer-stable")
+                            self.logger.debug("ℹ️ remote answer already applied; ignore. sessionId=\(self.sessionId, privacy: .public)")
+                            self.onTrace?("set-remote-answer ignored stable session=\(self.sessionId)")
+                            return
+                        }
+                        self.logger.error("❌ setRemoteAnswer failed: \(error.localizedDescription, privacy: .public)")
+                        self.onTrace?("set-remote-answer failed session=\(self.sessionId) error=\(error.localizedDescription)")
+                        return
+                    }
                     self.hasRemoteDescription = true
                     self.flushPendingRemoteICECandidates()
                     self.inspectRemoteVideoTrackIfAvailable(peerConnection: pc)
-                    self.scheduleRemoteVideoTrackInspection(peerConnection: pc, reason: "set-remote-answer-stable")
-                    self.logger.debug("ℹ️ remote answer already applied; ignore. sessionId=\(self.sessionId, privacy: .public)")
-                    self.onTrace?("set-remote-answer ignored stable session=\(self.sessionId)")
-                    return
+                    self.scheduleRemoteVideoTrackInspection(peerConnection: pc, reason: "set-remote-answer")
+                    self.onTrace?("set-remote-answer applied session=\(self.sessionId)")
                 }
-                self.logger.error("❌ setRemoteAnswer failed: \(error.localizedDescription, privacy: .public)")
-                self.onTrace?("set-remote-answer failed session=\(self.sessionId) error=\(error.localizedDescription)")
-                return
             }
-            self.hasRemoteDescription = true
-            self.flushPendingRemoteICECandidates()
-            self.inspectRemoteVideoTrackIfAvailable(peerConnection: pc)
-            self.scheduleRemoteVideoTrackInspection(peerConnection: pc, reason: "set-remote-answer")
-            self.onTrace?("set-remote-answer applied session=\(self.sessionId)")
         }
 #endif
     }
     
     public func addRemoteICECandidate(candidate: String, sdpMid: String?, sdpMLineIndex: Int32?) {
 #if canImport(WebRTC)
-        let cand = RTCIceCandidate(sdp: candidate, sdpMLineIndex: sdpMLineIndex ?? 0, sdpMid: sdpMid)
-        guard trackRemoteICECandidateIfNeeded(cand) else { return }
-        guard hasRemoteDescription else {
-            pendingRemoteICECandidates.append(cand)
-            logger.debug("⏳ queue remote ICE candidate until remote description is set. sessionId=\(self.sessionId, privacy: .public) pending=\(self.pendingRemoteICECandidates.count, privacy: .public)")
-            onTrace?("queue-remote-ice session=\(sessionId) pending=\(pendingRemoteICECandidates.count)")
-            return
+        scheduleState { [weak self] in
+            guard let self, !self.isClosed else { return }
+            let cand = RTCIceCandidate(sdp: candidate, sdpMLineIndex: sdpMLineIndex ?? 0, sdpMid: sdpMid)
+            switch Self.pendingRemoteICEPlan(
+                isDuplicate: !self.trackRemoteICECandidateIfNeeded(cand),
+                hasRemoteDescription: self.hasRemoteDescription,
+                pendingCount: self.pendingRemoteICECandidates.count
+            ) {
+            case .ignoreDuplicate:
+                return
+            case .queueCandidate(let nextPendingCount):
+                self.pendingRemoteICECandidates.append(cand)
+                self.logger.debug("⏳ queue remote ICE candidate until remote description is set. sessionId=\(self.sessionId, privacy: .public) pending=\(nextPendingCount, privacy: .public)")
+                self.onTrace?("queue-remote-ice session=\(self.sessionId) pending=\(self.pendingRemoteICECandidates.count)")
+            case .applyImmediately:
+                self.onTrace?("apply-remote-ice session=\(self.sessionId)")
+                self.addRemoteICECandidateInternal(cand)
+            }
         }
-        onTrace?("apply-remote-ice session=\(sessionId)")
-        addRemoteICECandidateInternal(cand)
 #endif
     }
 
@@ -903,12 +1128,16 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             remoteVideoReceiver = nil
         }
         onTrace?("remote-video-track session=\(sessionId) ready=\(track != nil ? 1 : 0)")
-        onRemoteVideoTrack?(track)
+        let handler = onRemoteVideoTrack
+        dispatchCallback {
+            handler?(track)
+        }
     }
 
     private func startRemoteVideoFrameEvidenceObservation() {
         guard !didEmitRemoteVideoFrameEvidence else { return }
         remoteVideoFrameEvidenceTask?.cancel()
+        let expectedLifecycleToken = lifecycleToken
         remoteVideoFrameEvidenceTask = Task { [weak self] in
             guard let self else { return }
             var attempt = 0
@@ -921,9 +1150,19 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
                 }
                 attempt += 1
                 guard !Task.isCancelled else { return }
-                guard self.peerConnection != nil, self.remoteVideoTrack != nil else { return }
+                let shouldContinue = self.withState {
+                    !self.isClosed
+                        && self.lifecycleToken == expectedLifecycleToken
+                        && self.peerConnection != nil
+                        && self.remoteVideoTrack != nil
+                }
+                guard shouldContinue else { return }
                 let receiverSamples: [RemoteInboundVideoStatsSample]
-                if let receiver = self.resolveRemoteVideoReceiver() {
+                if let receiver = self.withState({ () -> RTCRtpReceiver? in
+                    guard !self.isClosed,
+                          self.lifecycleToken == expectedLifecycleToken else { return nil }
+                    return self.resolveRemoteVideoReceiver()
+                }) {
                     receiverSamples = await self.remoteInboundVideoStatsSamples(for: receiver)
                     guard !Task.isCancelled else { return }
                 } else {
@@ -961,22 +1200,34 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
 
                 if snapshot.hasPacketEvidence, !didEmitPacketEvidence {
                     didEmitPacketEvidence = true
-                    self.onRemoteVideoFirstPacket?()
+                    let handler = self.onRemoteVideoFirstPacket
+                    self.dispatchCallback {
+                        handler?()
+                    }
                 }
 
                 guard snapshot.hasFrameEvidence, let size = snapshot.size else {
                     continue
                 }
-                guard !self.didEmitRemoteVideoFrameEvidence else { return }
-                self.didEmitRemoteVideoFrameEvidence = true
-                self.remoteVideoFrameEvidenceTask = nil
+                let shouldEmit = self.withState {
+                    guard !self.isClosed,
+                          self.lifecycleToken == expectedLifecycleToken,
+                          !self.didEmitRemoteVideoFrameEvidence else { return false }
+                    self.didEmitRemoteVideoFrameEvidence = true
+                    self.remoteVideoFrameEvidenceTask = nil
+                    return true
+                }
+                guard shouldEmit else { return }
                 self.logger.info(
                     "🎬 remote native video receiver stats confirmed first frame. sessionId=\(self.sessionId, privacy: .public) \(snapshot.summary, privacy: .public)"
                 )
                 self.onTrace?(
                     "remote-video-frame-evidence session=\(self.sessionId) source=receiver-stats \(snapshot.summary)"
                 )
-                self.onRemoteVideoFrameEvidence?(size, "receiver-stats")
+                let handler = self.onRemoteVideoFrameEvidence
+                self.dispatchCallback {
+                    handler?(size, "receiver-stats")
+                }
                 return
             }
         }
@@ -986,7 +1237,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         for receiver: RTCRtpReceiver
     ) async -> [RemoteInboundVideoStatsSample] {
         await withCheckedContinuation { continuation in
-            guard let peerConnection else {
+            guard let peerConnection = withState({ self.peerConnection }) else {
                 continuation.resume(returning: [])
                 return
             }
@@ -1001,7 +1252,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
 
     private func allPeerConnectionVideoStatsSamples() async -> [RemoteInboundVideoStatsSample] {
         await withCheckedContinuation { continuation in
-            guard let peerConnection else {
+            guard let peerConnection = withState({ self.peerConnection }) else {
                 continuation.resume(returning: [])
                 return
             }
@@ -1053,17 +1304,32 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     ) {
         guard remoteVideoTrack == nil else { return }
         remoteVideoTrackInspectionTask?.cancel()
+        let expectedLifecycleToken = lifecycleToken
         remoteVideoTrackInspectionTask = Task { [weak self] in
             guard let self else { return }
             for attempt in 1...15 {
                 try? await Task.sleep(for: .milliseconds(200))
                 guard !Task.isCancelled else { return }
-                self.inspectRemoteVideoTrackIfAvailable(peerConnection: peerConnection)
-                if self.remoteVideoTrack != nil {
+                let didFindTrack: Bool? = self.withState {
+                    guard !self.isClosed,
+                          self.lifecycleToken == expectedLifecycleToken,
+                          self.peerConnection === peerConnection else { return nil }
+                    self.inspectRemoteVideoTrackIfAvailable(peerConnection: peerConnection)
+                    return self.remoteVideoTrack != nil
+                }
+                guard let didFindTrack else { return }
+                if didFindTrack {
                     self.onTrace?("remote-video-track inspection-success session=\(self.sessionId) reason=\(reason) attempt=\(attempt)")
                     return
                 }
             }
+            let shouldReportTimeout = self.withState {
+                !self.isClosed
+                    && self.lifecycleToken == expectedLifecycleToken
+                    && self.peerConnection === peerConnection
+                    && self.remoteVideoTrack == nil
+            }
+            guard shouldReportTimeout else { return }
             self.logger.debug("ℹ️ remote native video track still unavailable after inspection. sessionId=\(self.sessionId, privacy: .public) reason=\(reason, privacy: .public)")
             self.onTrace?("remote-video-track inspection-timeout session=\(self.sessionId) reason=\(reason)")
         }
@@ -1071,21 +1337,23 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
 #endif
     
     public func ensureScreenDataChannel() throws {
-        guard !isClosed else { throw WebRTCError.alreadyClosed }
+        guard !withState({ isClosed }) else { throw WebRTCError.alreadyClosed }
 #if canImport(WebRTC)
-        guard let pc = peerConnection else { throw WebRTCError.peerConnectionCreationFailed }
-        if let screenDataChannel {
-            screenDataChannel.delegate = self
-            return
+        try withState {
+            guard let pc = peerConnection else { throw WebRTCError.peerConnectionCreationFailed }
+            if let screenDataChannel {
+                screenDataChannel.delegate = self
+                return
+            }
+            let configuration = RTCDataChannelConfiguration()
+            configuration.isOrdered = true
+            configuration.isNegotiated = false
+            configuration.`protocol` = "screen-frame-v1"
+            let channel = pc.dataChannel(forLabel: Self.screenChannelLabel, configuration: configuration)
+            guard let channel else { throw WebRTCError.dataChannelNotReady }
+            channel.delegate = self
+            screenDataChannel = channel
         }
-        let configuration = RTCDataChannelConfiguration()
-        configuration.isOrdered = true
-        configuration.isNegotiated = false
-        configuration.`protocol` = "screen-frame-v1"
-        let channel = pc.dataChannel(forLabel: Self.screenChannelLabel, configuration: configuration)
-        guard let channel else { throw WebRTCError.dataChannelNotReady }
-        channel.delegate = self
-        screenDataChannel = channel
 #else
         throw WebRTCError.webRTCNotAvailable
 #endif
@@ -1104,7 +1372,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         preferScreenChannel: Bool,
         fallbackToControlChannel: Bool
     ) throws {
-        guard !isClosed else { throw WebRTCError.alreadyClosed }
+        guard !withState({ isClosed }) else { throw WebRTCError.alreadyClosed }
 #if canImport(WebRTC)
         let channel = try resolvedDataChannel(
             preferScreenChannel: preferScreenChannel,
@@ -1268,15 +1536,17 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         fallbackToControlChannel: Bool
     ) -> UInt64 {
 #if canImport(WebRTC)
-        if preferScreenChannel,
-           let screenDataChannel,
-           screenDataChannel.readyState == .open {
-            return screenDataChannel.bufferedAmount
+        withState {
+            if preferScreenChannel,
+               let screenDataChannel,
+               screenDataChannel.readyState == .open {
+                return screenDataChannel.bufferedAmount
+            }
+            if fallbackToControlChannel || !preferScreenChannel {
+                return dataChannel?.bufferedAmount ?? 0
+            }
+            return screenDataChannel?.bufferedAmount ?? 0
         }
-        if fallbackToControlChannel || !preferScreenChannel {
-            return dataChannel?.bufferedAmount ?? 0
-        }
-        return screenDataChannel?.bufferedAmount ?? 0
 #else
         return 0
 #endif
@@ -1292,8 +1562,10 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
 
     public func hasOpenScreenDataChannel() -> Bool {
 #if canImport(WebRTC)
-        guard let screenDataChannel else { return false }
-        return screenDataChannel.readyState == .open
+        withState {
+            guard let screenDataChannel else { return false }
+            return screenDataChannel.readyState == .open
+        }
 #else
         return false
 #endif
@@ -1320,19 +1592,21 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         fallbackToControlChannel: Bool
     ) throws -> RTCDataChannel {
 #if canImport(WebRTC)
-        let channel: RTCDataChannel?
-        if preferScreenChannel,
-           let screenDataChannel,
-           screenDataChannel.readyState == .open {
-            channel = screenDataChannel
-        } else if fallbackToControlChannel || !preferScreenChannel {
-            channel = dataChannel
-        } else {
-            channel = screenDataChannel
+        try withState {
+            let channel: RTCDataChannel?
+            if preferScreenChannel,
+               let screenDataChannel,
+               screenDataChannel.readyState == .open {
+                channel = screenDataChannel
+            } else if fallbackToControlChannel || !preferScreenChannel {
+                channel = dataChannel
+            } else {
+                channel = screenDataChannel
+            }
+            guard let channel else { throw WebRTCError.dataChannelNotReady }
+            guard channel.readyState == .open else { throw WebRTCError.dataChannelNotOpen }
+            return channel
         }
-        guard let channel else { throw WebRTCError.dataChannelNotReady }
-        guard channel.readyState == .open else { throw WebRTCError.dataChannelNotOpen }
-        return channel
 #else
         throw WebRTCError.webRTCNotAvailable
 #endif
@@ -1372,25 +1646,47 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             ],
             optionalConstraints: nil
         )
-        pc.offer(for: constraints) { [weak self] sdp, error in
+        let expectedLifecycleToken = lifecycleToken
+        pc.offer(for: constraints) { [weak self, weak pc] sdp, error in
             guard let self else { return }
-            if let error {
-                self.logger.error("❌ offer failed: \(error.localizedDescription, privacy: .public)")
-                self.onTrace?("create-offer failed session=\(self.sessionId) error=\(error.localizedDescription)")
-                return
-            }
-            guard let sdp else { return }
-            let sdpString = sdp.sdp
-            pc.setLocalDescription(sdp) { [weak self] err in
-                guard let self else { return }
-                if let err {
-                    self.logger.error("❌ setLocalDescription(offer) failed: \(err.localizedDescription, privacy: .public)")
-                    self.onTrace?("set-local-offer failed session=\(self.sessionId) error=\(err.localizedDescription)")
+            self.scheduleState {
+                guard let pc,
+                      Self.lifecycleGuardAllowsCallback(
+                        peerConnectionMatches: self.peerConnection === pc,
+                        isClosed: self.isClosed,
+                        currentLifecycleToken: self.lifecycleToken,
+                        expectedLifecycleToken: expectedLifecycleToken
+                      ) else { return }
+                if let error {
+                    self.logger.error("❌ offer failed: \(error.localizedDescription, privacy: .public)")
+                    self.onTrace?("create-offer failed session=\(self.sessionId) error=\(error.localizedDescription)")
                     return
                 }
-                self.lastEmittedLocalSDP = sdpString
-                self.onTrace?("local-offer-ready session=\(self.sessionId) bytes=\(sdpString.utf8.count)")
-                self.onLocalOffer?(sdpString)
+                guard let sdp else { return }
+                let sdpString = sdp.sdp
+                pc.setLocalDescription(sdp) { [weak self, weak pc] err in
+                    guard let self else { return }
+                    self.scheduleState {
+                        guard let pc,
+                              Self.lifecycleGuardAllowsCallback(
+                                peerConnectionMatches: self.peerConnection === pc,
+                                isClosed: self.isClosed,
+                                currentLifecycleToken: self.lifecycleToken,
+                                expectedLifecycleToken: expectedLifecycleToken
+                              ) else { return }
+                        if let err {
+                            self.logger.error("❌ setLocalDescription(offer) failed: \(err.localizedDescription, privacy: .public)")
+                            self.onTrace?("set-local-offer failed session=\(self.sessionId) error=\(err.localizedDescription)")
+                            return
+                        }
+                        self.lastEmittedLocalSDP = sdpString
+                        self.onTrace?("local-offer-ready session=\(self.sessionId) bytes=\(sdpString.utf8.count)")
+                        let handler = self.onLocalOffer
+                        self.dispatchCallback {
+                            handler?(sdpString)
+                        }
+                    }
+                }
             }
         }
     }
@@ -1405,25 +1701,47 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             ],
             optionalConstraints: nil
         )
-        pc.answer(for: constraints) { [weak self] sdp, error in
+        let expectedLifecycleToken = lifecycleToken
+        pc.answer(for: constraints) { [weak self, weak pc] sdp, error in
             guard let self else { return }
-            if let error {
-                self.logger.error("❌ answer failed: \(error.localizedDescription, privacy: .public)")
-                self.onTrace?("create-answer failed session=\(self.sessionId) error=\(error.localizedDescription)")
-                return
-            }
-            guard let sdp else { return }
-            let sdpString = sdp.sdp
-            pc.setLocalDescription(sdp) { [weak self] err in
-                guard let self else { return }
-                if let err {
-                    self.logger.error("❌ setLocalDescription(answer) failed: \(err.localizedDescription, privacy: .public)")
-                    self.onTrace?("set-local-answer failed session=\(self.sessionId) error=\(err.localizedDescription)")
+            self.scheduleState {
+                guard let pc,
+                      Self.lifecycleGuardAllowsCallback(
+                        peerConnectionMatches: self.peerConnection === pc,
+                        isClosed: self.isClosed,
+                        currentLifecycleToken: self.lifecycleToken,
+                        expectedLifecycleToken: expectedLifecycleToken
+                      ) else { return }
+                if let error {
+                    self.logger.error("❌ answer failed: \(error.localizedDescription, privacy: .public)")
+                    self.onTrace?("create-answer failed session=\(self.sessionId) error=\(error.localizedDescription)")
                     return
                 }
-                self.lastEmittedLocalSDP = sdpString
-                self.onTrace?("local-answer-ready session=\(self.sessionId) bytes=\(sdpString.utf8.count)")
-                self.onLocalAnswer?(sdpString)
+                guard let sdp else { return }
+                let sdpString = sdp.sdp
+                pc.setLocalDescription(sdp) { [weak self, weak pc] err in
+                    guard let self else { return }
+                    self.scheduleState {
+                        guard let pc,
+                              Self.lifecycleGuardAllowsCallback(
+                                peerConnectionMatches: self.peerConnection === pc,
+                                isClosed: self.isClosed,
+                                currentLifecycleToken: self.lifecycleToken,
+                                expectedLifecycleToken: expectedLifecycleToken
+                              ) else { return }
+                        if let err {
+                            self.logger.error("❌ setLocalDescription(answer) failed: \(err.localizedDescription, privacy: .public)")
+                            self.onTrace?("set-local-answer failed session=\(self.sessionId) error=\(err.localizedDescription)")
+                            return
+                        }
+                        self.lastEmittedLocalSDP = sdpString
+                        self.onTrace?("local-answer-ready session=\(self.sessionId) bytes=\(sdpString.utf8.count)")
+                        let handler = self.onLocalAnswer
+                        self.dispatchCallback {
+                            handler?(sdpString)
+                        }
+                    }
+                }
             }
         }
     }
@@ -1438,9 +1756,15 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         onTrace?("emit-complete-local-description session=\(sessionId) role=\(String(describing: role)) bytes=\(sdp.utf8.count)")
         switch role {
         case .offerer:
-            onLocalOffer?(sdp)
+            let handler = onLocalOffer
+            dispatchCallback {
+                handler?(sdp)
+            }
         case .answerer:
-            onLocalAnswer?(sdp)
+            let handler = onLocalAnswer
+            dispatchCallback {
+                handler?(sdp)
+            }
         }
 #endif
     }
@@ -1573,59 +1897,85 @@ extension WebRTCSession: RTCPeerConnectionDelegate {
     public func peerConnection(_ peerConnection: RTCPeerConnection, didRemove stream: RTCMediaStream) {}
     public func peerConnectionShouldNegotiate(_ peerConnection: RTCPeerConnection) {}
     public func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceConnectionState) {
-        logger.info("ICE connection state: \(String(describing: newState), privacy: .public)")
-        onTrace?("ice-connection-state session=\(sessionId) state=\(String(describing: newState))")
-        if newState == .connected || newState == .completed {
-            inspectRemoteVideoTrackIfAvailable(peerConnection: peerConnection)
-            scheduleRemoteVideoTrackInspection(peerConnection: peerConnection, reason: "ice-connected")
-        }
-        switch newState {
-        case .failed:
-            notifyDisconnectedIfNeeded(reason: "ice_failed")
-        case .closed:
-            notifyDisconnectedIfNeeded(reason: "ice_closed")
-        default:
-            break
+        scheduleState { [weak self] in
+            guard let self, self.peerConnection === peerConnection, !self.isClosed else { return }
+            self.logger.info("ICE connection state: \(String(describing: newState), privacy: .public)")
+            self.onTrace?("ice-connection-state session=\(self.sessionId) state=\(String(describing: newState))")
+            if newState == .connected || newState == .completed {
+                self.inspectRemoteVideoTrackIfAvailable(peerConnection: peerConnection)
+                self.scheduleRemoteVideoTrackInspection(peerConnection: peerConnection, reason: "ice-connected")
+            }
+            switch newState {
+            case .failed:
+                self.notifyDisconnectedIfNeeded(reason: "ice_failed")
+            case .closed:
+                self.notifyDisconnectedIfNeeded(reason: "ice_closed")
+            default:
+                break
+            }
         }
     }
     public func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceGatheringState) {
-        logger.info("ICE gathering state: \(String(describing: newState), privacy: .public)")
-        onTrace?("ice-gathering-state session=\(sessionId) state=\(String(describing: newState))")
-        if newState == .complete {
-            emitCompletedLocalDescriptionIfNeeded()
+        scheduleState { [weak self] in
+            guard let self, self.peerConnection === peerConnection, !self.isClosed else { return }
+            self.logger.info("ICE gathering state: \(String(describing: newState), privacy: .public)")
+            self.onTrace?("ice-gathering-state session=\(self.sessionId) state=\(String(describing: newState))")
+            if newState == .complete {
+                self.emitCompletedLocalDescriptionIfNeeded()
+            }
         }
     }
     public func peerConnection(_ peerConnection: RTCPeerConnection, didGenerate candidate: RTCIceCandidate) {
-        onTrace?("did-generate-local-ice session=\(sessionId)")
-        onLocalICECandidate?(.init(candidate: candidate.sdp, sdpMid: candidate.sdpMid, sdpMLineIndex: candidate.sdpMLineIndex))
+        scheduleState { [weak self] in
+            guard let self, self.peerConnection === peerConnection, !self.isClosed else { return }
+            self.onTrace?("did-generate-local-ice session=\(self.sessionId)")
+            let handler = self.onLocalICECandidate
+            let payload = WebRTCSignalingEnvelope.Payload(
+                candidate: candidate.sdp,
+                sdpMid: candidate.sdpMid,
+                sdpMLineIndex: candidate.sdpMLineIndex
+            )
+            self.dispatchCallback {
+                handler?(payload)
+            }
+        }
     }
     public func peerConnection(
         _ peerConnection: RTCPeerConnection,
         didStartReceivingOn transceiver: RTCRtpTransceiver
     ) {
         guard transceiver.mediaType == .video else { return }
-        captureRemoteVideoTrack(transceiver.receiver.track as? RTCVideoTrack, receiver: transceiver.receiver)
+        scheduleState { [weak self] in
+            guard let self, self.peerConnection === peerConnection, !self.isClosed else { return }
+            self.captureRemoteVideoTrack(transceiver.receiver.track as? RTCVideoTrack, receiver: transceiver.receiver)
+        }
     }
     public func peerConnection(
         _ peerConnection: RTCPeerConnection,
         didAdd rtpReceiver: RTCRtpReceiver,
         streams mediaStreams: [RTCMediaStream]
     ) {
-        captureRemoteVideoTrack(rtpReceiver.track as? RTCVideoTrack, receiver: rtpReceiver)
+        scheduleState { [weak self] in
+            guard let self, self.peerConnection === peerConnection, !self.isClosed else { return }
+            self.captureRemoteVideoTrack(rtpReceiver.track as? RTCVideoTrack, receiver: rtpReceiver)
+        }
     }
     public func peerConnection(_ peerConnection: RTCPeerConnection, didRemove candidates: [RTCIceCandidate]) {}
     public func peerConnection(_ peerConnection: RTCPeerConnection, didOpen dataChannel: RTCDataChannel) {
-        if isScreenChannel(dataChannel) {
-            self.screenDataChannel = dataChannel
-        } else {
-            self.dataChannel = dataChannel
-        }
-        dataChannel.delegate = self
-        inspectRemoteVideoTrackIfAvailable(peerConnection: peerConnection)
-        scheduleRemoteVideoTrackInspection(peerConnection: peerConnection, reason: "data-channel-open")
-        onTrace?("did-open-data-channel session=\(sessionId) label=\(dataChannel.label)")
-        if isControlChannel(dataChannel) {
-            notifyReadyIfNeeded()
+        scheduleState { [weak self] in
+            guard let self, self.peerConnection === peerConnection, !self.isClosed else { return }
+            if self.isScreenChannel(dataChannel) {
+                self.screenDataChannel = dataChannel
+            } else {
+                self.dataChannel = dataChannel
+            }
+            dataChannel.delegate = self
+            self.inspectRemoteVideoTrackIfAvailable(peerConnection: peerConnection)
+            self.scheduleRemoteVideoTrackInspection(peerConnection: peerConnection, reason: "data-channel-open")
+            self.onTrace?("did-open-data-channel session=\(self.sessionId) label=\(dataChannel.label)")
+            if self.isControlChannel(dataChannel) {
+                self.notifyReadyIfNeeded()
+            }
         }
     }
 }
@@ -1637,32 +1987,44 @@ extension WebRTCSession: RTCRtpReceiverDelegate {
         didReceiveFirstPacketFor mediaType: RTCRtpMediaType
     ) {
         guard mediaType == .video else { return }
-        logger.info("📡 remote native video receiver got first RTP packet. sessionId=\(self.sessionId, privacy: .public)")
-        onTrace?("remote-video-first-packet session=\(sessionId)")
-        onRemoteVideoFirstPacket?()
+        scheduleState { [weak self] in
+            guard let self, !self.isClosed else { return }
+            self.logger.info("📡 remote native video receiver got first RTP packet. sessionId=\(self.sessionId, privacy: .public)")
+            self.onTrace?("remote-video-first-packet session=\(self.sessionId)")
+            let handler = self.onRemoteVideoFirstPacket
+            self.dispatchCallback {
+                handler?()
+            }
+        }
     }
 }
 
 @available(iOS 17.0, *)
 extension WebRTCSession: RTCDataChannelDelegate {
     public func dataChannelDidChangeState(_ dataChannel: RTCDataChannel) {
-        logger.info("DataChannel state: \(String(describing: dataChannel.readyState), privacy: .public) label=\(dataChannel.label, privacy: .public)")
-        onTrace?("data-channel-state session=\(sessionId) label=\(dataChannel.label) state=\(String(describing: dataChannel.readyState))")
-        if dataChannel.readyState == .open, isControlChannel(dataChannel) {
-            notifyReadyIfNeeded()
-        } else if dataChannel.readyState == .closed, isControlChannel(dataChannel) {
-            notifyDisconnectedIfNeeded(reason: "data_channel_closed")
-        } else if dataChannel.readyState == .closed, isScreenChannel(dataChannel) {
-            if screenDataChannel === dataChannel {
-                screenDataChannel = nil
+        scheduleState { [weak self] in
+            guard let self, !self.isClosed else { return }
+            self.logger.info("DataChannel state: \(String(describing: dataChannel.readyState), privacy: .public) label=\(dataChannel.label, privacy: .public)")
+            self.onTrace?("data-channel-state session=\(self.sessionId) label=\(dataChannel.label) state=\(String(describing: dataChannel.readyState))")
+            if dataChannel.readyState == .open, self.isControlChannel(dataChannel) {
+                self.notifyReadyIfNeeded()
+            } else if dataChannel.readyState == .closed, self.isControlChannel(dataChannel) {
+                self.notifyDisconnectedIfNeeded(reason: "data_channel_closed")
+            } else if dataChannel.readyState == .closed, self.isScreenChannel(dataChannel) {
+                if self.screenDataChannel === dataChannel {
+                    self.screenDataChannel = nil
+                }
             }
         }
     }
     public func dataChannel(_ dataChannel: RTCDataChannel, didReceiveMessageWith buffer: RTCDataBuffer) {
-        if isScreenChannel(dataChannel) {
-            deliverInboundScreenData(buffer.data)
-        } else {
-            deliverInboundData(buffer.data)
+        scheduleState { [weak self] in
+            guard let self, !self.isClosed else { return }
+            if self.isScreenChannel(dataChannel) {
+                self.deliverInboundScreenData(buffer.data)
+            } else {
+                self.deliverInboundData(buffer.data)
+            }
         }
     }
 }

@@ -941,6 +941,106 @@ final class RegressionHardeningTests: XCTestCase {
         )
     }
 
+    func testIOSWebRTCSessionStateAndCallbackPlansReflectQueueAffinity() {
+        XCTAssertEqual(WebRTCSession.stateAccessPlan(isOnStateQueue: true), .executeInline)
+        XCTAssertEqual(WebRTCSession.stateAccessPlan(isOnStateQueue: false), .syncOnStateQueue)
+        XCTAssertEqual(WebRTCSession.callbackDispatchPlan(isOnStateQueue: true), .asyncOffStateQueue)
+        XCTAssertEqual(WebRTCSession.callbackDispatchPlan(isOnStateQueue: false), .executeInline)
+    }
+
+    func testIOSWebRTCSessionLifecycleGuardRejectsClosedOrStaleCallbacks() {
+        XCTAssertTrue(
+            WebRTCSession.lifecycleGuardAllowsCallback(
+                peerConnectionMatches: true,
+                isClosed: false,
+                currentLifecycleToken: 11,
+                expectedLifecycleToken: 11
+            )
+        )
+        XCTAssertFalse(
+            WebRTCSession.lifecycleGuardAllowsCallback(
+                peerConnectionMatches: false,
+                isClosed: false,
+                currentLifecycleToken: 11,
+                expectedLifecycleToken: 11
+            )
+        )
+        XCTAssertFalse(
+            WebRTCSession.lifecycleGuardAllowsCallback(
+                peerConnectionMatches: true,
+                isClosed: true,
+                currentLifecycleToken: 11,
+                expectedLifecycleToken: 11
+            )
+        )
+        XCTAssertFalse(
+            WebRTCSession.lifecycleGuardAllowsCallback(
+                peerConnectionMatches: true,
+                isClosed: false,
+                currentLifecycleToken: 12,
+                expectedLifecycleToken: 11
+            )
+        )
+    }
+
+    func testIOSWebRTCSessionPendingInboundBufferPlansRespectHandlerAvailability() {
+        XCTAssertEqual(
+            WebRTCSession.pendingInboundFlushPlan(
+                hasHandlerInstalled: false,
+                pendingCount: 2
+            ),
+            .keepBuffered
+        )
+        XCTAssertEqual(
+            WebRTCSession.pendingInboundFlushPlan(
+                hasHandlerInstalled: true,
+                pendingCount: 2
+            ),
+            .dispatchBuffered(count: 2)
+        )
+        XCTAssertEqual(
+            WebRTCSession.pendingInboundDeliveryPlan(
+                hasHandlerInstalled: false,
+                pendingCount: 2
+            ),
+            .bufferIncoming(nextPendingCount: 3)
+        )
+        XCTAssertEqual(
+            WebRTCSession.pendingInboundDeliveryPlan(
+                hasHandlerInstalled: true,
+                pendingCount: 2
+            ),
+            .dispatch(bufferedCount: 2)
+        )
+    }
+
+    func testIOSWebRTCSessionPendingRemoteICEPlanMatchesReadinessAndDedup() {
+        XCTAssertEqual(
+            WebRTCSession.pendingRemoteICEPlan(
+                isDuplicate: true,
+                hasRemoteDescription: false,
+                pendingCount: 1
+            ),
+            .ignoreDuplicate
+        )
+        XCTAssertEqual(
+            WebRTCSession.pendingRemoteICEPlan(
+                isDuplicate: false,
+                hasRemoteDescription: false,
+                pendingCount: 1
+            ),
+            .queueCandidate(nextPendingCount: 2)
+        )
+        XCTAssertEqual(
+            WebRTCSession.pendingRemoteICEPlan(
+                isDuplicate: false,
+                hasRemoteDescription: true,
+                pendingCount: 1
+            ),
+            .applyImmediately
+        )
+    }
+
     func testRemoteDesktopStreamConfigurationPayloadEqualityIgnoresSentAtButTracksRefreshToken() {
         let base = RemoteDesktopStreamConfigurationPayload(
             width: 1920,
