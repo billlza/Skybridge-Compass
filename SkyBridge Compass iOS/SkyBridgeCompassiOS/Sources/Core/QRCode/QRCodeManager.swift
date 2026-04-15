@@ -409,6 +409,7 @@ public final class QRCodeScanner: NSObject {
     
     private var captureSession: AVCaptureSession?
     private var previewLayer: AVCaptureVideoPreviewLayer?
+    private weak var previewContainerView: UIView?
     private var isScanning = false
     
     public override init() {
@@ -433,6 +434,21 @@ public final class QRCodeScanner: NSObject {
     /// - Parameter previewView: 预览视图
     @MainActor
     public func setup(in previewView: UIView) throws {
+        if let existingSession = captureSession,
+           let existingPreviewLayer = previewLayer,
+           previewContainerView === previewView {
+            existingPreviewLayer.frame = previewView.bounds
+            if existingPreviewLayer.superlayer !== previewView.layer {
+                existingPreviewLayer.removeFromSuperlayer()
+                previewView.layer.addSublayer(existingPreviewLayer)
+            }
+            if !existingSession.inputs.isEmpty || !existingSession.outputs.isEmpty {
+                return
+            }
+        }
+
+        teardown()
+
         guard let device = AVCaptureDevice.default(for: .video) else {
             throw QRCodeScannerError.cameraNotAvailable
         }
@@ -462,6 +478,7 @@ public final class QRCodeScanner: NSObject {
         
         self.captureSession = session
         self.previewLayer = previewLayer
+        self.previewContainerView = previewView
     }
     
     /// 开始扫描
@@ -485,6 +502,27 @@ public final class QRCodeScanner: NSObject {
         let box = CaptureSessionBox(session)
         DispatchQueue.global(qos: .userInitiated).async {
             box.session.stopRunning()
+        }
+    }
+
+    /// 释放扫描器占用的相机与预览资源
+    public func teardown() {
+        let session = captureSession
+        let layer = previewLayer
+
+        isScanning = false
+        captureSession = nil
+        previewLayer = nil
+        previewContainerView = nil
+
+        layer?.removeFromSuperlayer()
+
+        guard let session else { return }
+        let box = CaptureSessionBox(session)
+        DispatchQueue.global(qos: .userInitiated).async {
+            if box.session.isRunning {
+                box.session.stopRunning()
+            }
         }
     }
     
@@ -712,7 +750,7 @@ public class QRCodeScannerViewController: UIViewController {
         super.viewWillDisappear(animated)
         startTask?.cancel()
         startTask = nil
-        scanner.stopScanning()
+        scanner.teardown()
         didStart = false
     }
     

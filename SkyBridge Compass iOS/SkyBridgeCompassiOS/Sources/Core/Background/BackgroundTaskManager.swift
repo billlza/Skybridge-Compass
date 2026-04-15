@@ -45,6 +45,21 @@ public enum BackgroundTaskType: String, CaseIterable, Sendable {
 public class BackgroundTaskManager: ObservableObject {
     
     public static let shared = BackgroundTaskManager()
+
+    private final class TaskCompletionGate: @unchecked Sendable {
+        private let lock = NSLock()
+        private var didComplete = false
+
+        func complete(_ task: BGTask, success: Bool) -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+
+            guard !didComplete else { return false }
+            didComplete = true
+            task.setTaskCompleted(success: success)
+            return true
+        }
+    }
     
     // MARK: - Published Properties
     
@@ -169,28 +184,65 @@ public class BackgroundTaskManager: ObservableObject {
     
     private func handleBackgroundTask(_ task: BGTask, type: BackgroundTaskType) async {
         SkyBridgeLogger.shared.info("🔄 执行后台任务: \(type.identifier)")
-        
-        // 设置过期处理
-        task.expirationHandler = {
-            task.setTaskCompleted(success: false)
-            SkyBridgeLogger.shared.warning("⚠️ 后台任务超时: \(type.identifier)")
+
+        let completionGate = TaskCompletionGate()
+        let executionTask = Task { @MainActor [weak self] () -> Bool in
+            guard let self else { return false }
+            return await self.runBackgroundTaskWork(for: type)
         }
-        
-        // 执行任务
+
+        task.expirationHandler = { [weak self] in
+            executionTask.cancel()
+
+            Task { @MainActor [weak self] in
+                self?.cancelUnderlyingWork(for: type)
+                self?.finishBackgroundTask(
+                    task,
+                    type: type,
+                    success: false,
+                    gate: completionGate,
+                    logMessage: "⚠️ 后台任务超时: \(type.identifier)"
+                )
+            }
+        }
+
+        let success = await executionTask.value
+        finishBackgroundTask(
+            task,
+            type: type,
+            success: success,
+            gate: completionGate,
+            logMessage: success
+                ? "✅ 后台任务完成: \(type.identifier)"
+                : "⚠️ 后台任务提前结束: \(type.identifier)"
+        )
+    }
+
+    private func runBackgroundTaskWork(for type: BackgroundTaskType) async -> Bool {
         if let handler = taskHandlers[type.identifier] {
             await handler()
         } else {
             await executeDefaultTask(type)
         }
-        
-        // 标记完成
-        task.setTaskCompleted(success: true)
-        lastRefreshTime = Date()
-        
-        // 重新调度下次执行
+
+        return !Task.isCancelled
+    }
+
+    private func finishBackgroundTask(
+        _ task: BGTask,
+        type: BackgroundTaskType,
+        success: Bool,
+        gate: TaskCompletionGate,
+        logMessage: String
+    ) {
+        guard gate.complete(task, success: success) else { return }
+
+        if success {
+            lastRefreshTime = Date()
+        }
+
         scheduleTask(type)
-        
-        SkyBridgeLogger.shared.info("✅ 后台任务完成: \(type.identifier)")
+        SkyBridgeLogger.shared.info(logMessage)
     }
     
     private func executeDefaultTask(_ type: BackgroundTaskType) async {
@@ -216,12 +268,23 @@ public class BackgroundTaskManager: ObservableObject {
     private func refreshDeviceDiscovery() async {
         // 刷新设备发现
         let manager = DeviceDiscoveryManager.instance
+        var shouldStopDiscovery = false
+
+        defer {
+            if shouldStopDiscovery {
+                manager.stopDiscovery()
+            }
+        }
+
         try? await manager.startDiscovery()
+        shouldStopDiscovery = true
         
         // 等待一段时间
-        try? await Task.sleep(for: .seconds(10))
-        
-        manager.stopDiscovery()
+        do {
+            try await Task.sleep(for: .seconds(10))
+        } catch {
+            return
+        }
     }
     
     private func syncOfflineMessages() async {
@@ -246,6 +309,15 @@ public class BackgroundTaskManager: ObservableObject {
         // 清理过期的会话密钥
         let keychain = KeychainManager.shared
         keychain.cleanupExpiredSessionKeys()
+    }
+
+    private func cancelUnderlyingWork(for type: BackgroundTaskType) {
+        switch type {
+        case .deviceDiscoveryRefresh:
+            DeviceDiscoveryManager.instance.stopDiscovery()
+        case .messageSync, .fileTransfer, .connectionKeepAlive, .dataCleanup:
+            break
+        }
     }
     
     // MARK: - Notifications
