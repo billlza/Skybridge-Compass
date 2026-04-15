@@ -2353,6 +2353,9 @@ public class RemoteDesktopManager: ObservableObject {
     private var interactionContinuityTask: Task<Void, Never>?
     private var lastMetalFallbackAt: Date?
     private var stableSampleBufferFramesSinceMetalFallback: Int = 0
+    private var crossNetworkFrameSubscriptionTask: Task<Void, Never>?
+    private var crossNetworkFrameSubscriptionSessionId: String?
+    private var activePresentationOwnerTokens: Set<UUID> = []
     
     private init() {
         viewerSettings = Self.loadViewerSettings()
@@ -2435,15 +2438,11 @@ public class RemoteDesktopManager: ObservableObject {
                 state = .streaming
                 crossNetwork.startRemoteDesktopHeartbeat()
                 configureSessionClipboardSync()
-                
-                // 订阅跨网屏幕帧
-                Task { @MainActor [weak self] in
-                    guard let self else { return }
-                    for await _ in NotificationCenter.default.notifications(named: Notification.Name("CrossNetworkScreenDataUpdated")) {
-                        if let sd = self.crossNetwork.lastScreenData {
-                            await self.handleScreenData(sd)
-                        }
-                    }
+
+                if let sessionId = crossNetwork.activeRemoteDesktopSessionId {
+                    subscribeToCrossNetworkFrames(sessionId: sessionId)
+                } else {
+                    cancelCrossNetworkFrameSubscription()
                 }
                 
                 SkyBridgeLogger.shared.info("✅ 远程桌面已切换到 WebRTC 传输（控制走 DataChannel，视频优先原生轨）")
@@ -2453,6 +2452,7 @@ public class RemoteDesktopManager: ObservableObject {
             }
 
             crossNetwork.stopRemoteDesktopHeartbeat()
+            cancelCrossNetworkFrameSubscription()
             // Tear down any prior LAN socket before we install a new one.
             // Otherwise stale callbacks from the previous NWConnection can
             // race in later and incorrectly tear down the fresh session.
@@ -2582,6 +2582,11 @@ public class RemoteDesktopManager: ObservableObject {
         }
         startStreamContinuityWatchdog(for: streamEpoch)
         if activeTransportMode == .crossNetwork {
+            if let sessionId = crossNetwork.activeRemoteDesktopSessionId {
+                subscribeToCrossNetworkFrames(sessionId: sessionId)
+            } else {
+                cancelCrossNetworkFrameSubscription()
+            }
             lastRequestedStreamRefreshReason = "cross-network-startup"
         }
         await pushViewerStreamConfiguration(
@@ -2665,6 +2670,7 @@ public class RemoteDesktopManager: ObservableObject {
         
         isStreaming = false
         crossNetwork.stopRemoteDesktopHeartbeat()
+        cancelCrossNetworkFrameSubscription()
         configureSessionClipboardSync()
         lastSentStreamConfiguration = nil
         lastIncomingStreamSignature = nil
@@ -2706,6 +2712,7 @@ public class RemoteDesktopManager: ObservableObject {
         let wasCrossNetworkTransport = activeTransportMode == .crossNetwork
         let shouldDisconnectCrossNetworkSession = tearDownTransport && activeTransportMode == .crossNetwork
         crossNetwork.stopRemoteDesktopHeartbeat()
+        cancelCrossNetworkFrameSubscription()
         firstFrameWatchdogTask?.cancel()
         firstFrameContinuityTask?.cancel()
         interactionContinuityTask?.cancel()
@@ -2714,14 +2721,6 @@ public class RemoteDesktopManager: ObservableObject {
         firstFrameContinuityTask = nil
         interactionContinuityTask = nil
         streamContinuityWatchdogTask = nil
-        
-        // 关闭连接
-        networkConnection?.stateUpdateHandler = nil
-        networkConnection?.cancel()
-        networkConnection = nil
-        await clearLANSecureChannelState()
-        activeTransportMode = .none
-        transportStatusText = currentTransportStatusText()
         lastSentStreamConfiguration = nil
         lastIncomingStreamSignature = nil
         resetRefreshDiagnostics()
@@ -2761,6 +2760,14 @@ public class RemoteDesktopManager: ObservableObject {
             return
         }
 
+        // 关闭连接
+        networkConnection?.stateUpdateHandler = nil
+        networkConnection?.cancel()
+        networkConnection = nil
+        await clearLANSecureChannelState()
+        activeTransportMode = .none
+        transportStatusText = currentTransportStatusText()
+
         if shouldDisconnectCrossNetworkSession {
             await crossNetwork.disconnect(clearSnapshot: true)
         }
@@ -2793,6 +2800,68 @@ public class RemoteDesktopManager: ObservableObject {
         if wasCrossNetworkTransport && !shouldDisconnectCrossNetworkSession {
             crossNetwork.armIdleConnectionReminderIfNeeded()
         }
+    }
+
+    public func registerPresentationOwner(_ token: UUID) {
+        activePresentationOwnerTokens.insert(token)
+    }
+
+    @discardableResult
+    public func unregisterPresentationOwner(_ token: UUID) -> Bool {
+        activePresentationOwnerTokens.remove(token)
+        return activePresentationOwnerTokens.isEmpty
+    }
+
+    nonisolated static func shouldProcessCrossNetworkFrameNotification(
+        isStreaming: Bool,
+        subscribedSessionId: String?,
+        expectedSessionId: String,
+        updateSessionId: String
+    ) -> Bool {
+        guard isStreaming else { return false }
+        guard subscribedSessionId == expectedSessionId else { return false }
+        return updateSessionId == expectedSessionId
+    }
+
+    private func subscribeToCrossNetworkFrames(sessionId: String) {
+        let normalizedSessionId = sessionId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedSessionId.isEmpty else {
+            cancelCrossNetworkFrameSubscription()
+            return
+        }
+
+        if crossNetworkFrameSubscriptionSessionId == normalizedSessionId,
+           crossNetworkFrameSubscriptionTask != nil {
+            return
+        }
+
+        cancelCrossNetworkFrameSubscription()
+        crossNetworkFrameSubscriptionSessionId = normalizedSessionId
+        crossNetworkFrameSubscriptionTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            for await notification in NotificationCenter.default.notifications(named: .crossNetworkScreenDataUpdated) {
+                guard !Task.isCancelled else { return }
+                guard let updateSessionId = notification.userInfo?[CrossNetworkNotificationUserInfoKey.sessionId] as? String,
+                      let screenData = notification.userInfo?[CrossNetworkNotificationUserInfoKey.screenData] as? ScreenData else {
+                    continue
+                }
+                guard Self.shouldProcessCrossNetworkFrameNotification(
+                    isStreaming: self.isStreaming,
+                    subscribedSessionId: self.crossNetworkFrameSubscriptionSessionId,
+                    expectedSessionId: normalizedSessionId,
+                    updateSessionId: updateSessionId
+                ) else {
+                    continue
+                }
+                await self.handleScreenData(screenData)
+            }
+        }
+    }
+
+    private func cancelCrossNetworkFrameSubscription() {
+        crossNetworkFrameSubscriptionTask?.cancel()
+        crossNetworkFrameSubscriptionTask = nil
+        crossNetworkFrameSubscriptionSessionId = nil
     }
 
     private func currentTransportStatusText() -> String? {

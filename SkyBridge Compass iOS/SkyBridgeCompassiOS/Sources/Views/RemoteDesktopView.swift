@@ -22,6 +22,7 @@ struct RemoteDesktopView: View {
     @State private var showRemoteDesktopSettings = false
     @State private var didAutoConnectUITestFixture = false
     @State private var showUITestRemoteStream = false
+    @State private var presentationOwnerToken = UUID()
 
     private var shouldAutoConnectUITestFixture: Bool {
         ProcessInfo.processInfo.arguments.contains("UITEST_SCENARIO_REMOTE")
@@ -72,10 +73,13 @@ struct RemoteDesktopView: View {
             RemoteDesktopStreamSettingsSheet()
         }
         .onAppear {
+            remoteDesktopManager.registerPresentationOwner(presentationOwnerToken)
             attemptAutoConnectCrossNetworkSession()
             attemptAutoConnectUITestFixture()
         }
         .onDisappear {
+            let shouldDisconnect = remoteDesktopManager.unregisterPresentationOwner(presentationOwnerToken)
+            guard shouldDisconnect else { return }
             Task {
                 await remoteDesktopManager.disconnect()
                 await MainActor.run {
@@ -1156,16 +1160,9 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
 
     @MainActor
     func updateUIView(_ uiView: MetalVideoContainerView, context: Context) {
-        // 诊断日志：追踪 updateUIView 调用
-        if context.coordinator.updateCallCount % 50 == 0 {
-            print("[Metal] updateUIView called, frameVersion=\(frameVersion), flushVersion=\(flushVersion)")
-        }
-        context.coordinator.updateCallCount &+= 1
-
         context.coordinator.attach(to: uiView)
 
         if context.coordinator.lastFlushVersion != flushVersion {
-            print("[Metal] flush triggered, flushVersion=\(flushVersion)")
             context.coordinator.lastFlushVersion = flushVersion
             context.coordinator.flush(
                 view: uiView,
@@ -1180,7 +1177,6 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
 
         // takeLatestFrame 不再清空帧，所以 nil 只会在从未 enqueue 过帧时出现
         if let frame = feed.takeLatestFrame() {
-            print("[Metal] ✅ displaying frame version=\(frameVersion)")
             context.coordinator.display(
                 frame: frame,
                 version: context.coordinator.lastFrameVersion,
@@ -1198,7 +1194,6 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
         let renderer = MetalVideoRenderer()
         var lastFrameVersion: UInt64 = 0
         var lastFlushVersion: UInt64 = 0
-        var updateCallCount: UInt64 = 0
 
         init(onFrameDisplayed: @escaping @Sendable (CMTime) -> Void) {
             self.onFrameDisplayed = onFrameDisplayed
@@ -1271,7 +1266,6 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
         private var needsClear = true
         private let inFlightSemaphore = DispatchSemaphore(value: 2)
         var onFrameDisplayed: (@Sendable (CMTime) -> Void)?
-        var drawCallCount: UInt64 = 0
 
         override init() {
             if let device = device {
@@ -1329,11 +1323,6 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
         func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
 
         func draw(in view: MTKView) {
-            drawCallCount &+= 1
-            if drawCallCount % 30 == 1 {
-                print("[Metal] draw(in:) called, drawableSize=\(view.drawableSize), drawCount=\(drawCallCount)")
-            }
-
             guard view.drawableSize.width > 0, view.drawableSize.height > 0 else {
                 return
             }
@@ -1347,11 +1336,6 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
             lastDisplayedVersion = lastDisplayedFrameVersion
             shouldClear = needsClear
             stateLock.unlock()
-
-            // 调试日志：降低日志频率
-            if frameVersion != lastDisplayedVersion || shouldClear {
-                print("[Metal] draw: frameVersion=\(frameVersion), lastDisplayed=\(lastDisplayedVersion), hasFrame=\(frame != nil ? "yes" : "no"), shouldClear=\(shouldClear)")
-            }
 
             guard shouldClear || frame != nil else {
                 return
@@ -1393,8 +1377,6 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
             guard frameVersion != 0, frameVersion != lastDisplayedVersion else {
                 return
             }
-
-            print("[Metal] ✅ rendering frame version=\(frameVersion)")  // 保留关键渲染日志
 
             let image = CIImage(cvPixelBuffer: frame.pixelBuffer)
             let drawableBounds = CGRect(

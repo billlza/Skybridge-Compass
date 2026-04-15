@@ -416,6 +416,68 @@ final class RegressionHardeningTests: XCTestCase {
     }
 
     @MainActor
+    func testRemoteDesktopPresentationOwnersRequireLastOwnerToDisconnect() {
+        let manager = RemoteDesktopManager.instance
+        let firstOwner = UUID()
+        let secondOwner = UUID()
+
+        manager.registerPresentationOwner(firstOwner)
+        manager.registerPresentationOwner(secondOwner)
+
+        XCTAssertFalse(manager.unregisterPresentationOwner(firstOwner))
+        XCTAssertTrue(manager.unregisterPresentationOwner(secondOwner))
+    }
+
+    @MainActor
+    func testRemoteDesktopPresentationOwnerIgnoresUnknownTokenWhileActiveOwnerRemains() {
+        let manager = RemoteDesktopManager.instance
+        let activeOwner = UUID()
+
+        manager.registerPresentationOwner(activeOwner)
+
+        XCTAssertFalse(manager.unregisterPresentationOwner(UUID()))
+        XCTAssertTrue(manager.unregisterPresentationOwner(activeOwner))
+    }
+
+    func testCrossNetworkFrameNotificationRequiresActiveStreamingSession() {
+        XCTAssertFalse(
+            RemoteDesktopManager.shouldProcessCrossNetworkFrameNotification(
+                isStreaming: false,
+                subscribedSessionId: "session-1",
+                expectedSessionId: "session-1",
+                updateSessionId: "session-1"
+            )
+        )
+    }
+
+    func testCrossNetworkFrameNotificationRejectsStaleOrMismatchedSessions() {
+        XCTAssertFalse(
+            RemoteDesktopManager.shouldProcessCrossNetworkFrameNotification(
+                isStreaming: true,
+                subscribedSessionId: "session-2",
+                expectedSessionId: "session-1",
+                updateSessionId: "session-1"
+            )
+        )
+        XCTAssertFalse(
+            RemoteDesktopManager.shouldProcessCrossNetworkFrameNotification(
+                isStreaming: true,
+                subscribedSessionId: "session-1",
+                expectedSessionId: "session-1",
+                updateSessionId: "session-2"
+            )
+        )
+        XCTAssertTrue(
+            RemoteDesktopManager.shouldProcessCrossNetworkFrameNotification(
+                isStreaming: true,
+                subscribedSessionId: "session-1",
+                expectedSessionId: "session-1",
+                updateSessionId: "session-1"
+            )
+        )
+    }
+
+    @MainActor
     func testCrossNetworkNativeReadyAnnouncementAllowsForcedFirstFrameConfirmation() {
         let now = Date()
 
