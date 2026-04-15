@@ -330,6 +330,8 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         case dataChannelNotReady
         case dataChannelNotOpen
         case dataChannelSendFailed
+        case invalidChunkSize(Int)
+        case framedPayloadTooLarge(Int)
         case alreadyClosed
         
         public var errorDescription: String? {
@@ -339,6 +341,8 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             case .dataChannelNotReady: return "DataChannel 未就绪"
             case .dataChannelNotOpen: return "DataChannel 未打开"
             case .dataChannelSendFailed: return "DataChannel 发送失败"
+            case .invalidChunkSize(let value): return "分块大小无效：\(value)。必须大于 0"
+            case .framedPayloadTooLarge(let size): return "分帧负载过大：\(size) 字节，超过 4 GiB 上限"
             case .alreadyClosed: return "WebRTCSession 已关闭"
             }
         }
@@ -1139,13 +1143,16 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         fallbackToControlChannel: Bool,
         lock: NSLock
     ) throws {
-        precondition(maxChunkBytes > 0, "maxChunkBytes must be greater than zero")
+        let payloadLength = try Self.validateFramedPayloadParameters(
+            payloadByteCount: payload.count,
+            maxChunkBytes: maxChunkBytes
+        )
 
         lock.lock()
         defer { lock.unlock() }
 
         var framed = Data()
-        var length = UInt32(payload.count).bigEndian
+        var length = payloadLength.bigEndian
         framed.append(Data(bytes: &length, count: 4))
         framed.append(payload)
         let channel = try resolvedDataChannel(
@@ -1210,11 +1217,14 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         fallbackToControlChannel: Bool,
         gate: WebRTCOutboundFrameGate
     ) async throws {
-        precondition(maxChunkBytes > 0, "maxChunkBytes must be greater than zero")
+        let payloadLength = try Self.validateFramedPayloadParameters(
+            payloadByteCount: payload.count,
+            maxChunkBytes: maxChunkBytes
+        )
 
         try await gate.run {
             var framed = Data()
-            var length = UInt32(payload.count).bigEndian
+            var length = payloadLength.bigEndian
             framed.append(Data(bytes: &length, count: 4))
             framed.append(payload)
             let channel = try resolvedDataChannel(
@@ -1336,6 +1346,19 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
 #else
         throw WebRTCError.webRTCNotAvailable
 #endif
+    }
+
+    static func validateFramedPayloadParameters(
+        payloadByteCount: Int,
+        maxChunkBytes: Int
+    ) throws -> UInt32 {
+        guard maxChunkBytes > 0 else {
+            throw WebRTCError.invalidChunkSize(maxChunkBytes)
+        }
+        guard payloadByteCount >= 0, payloadByteCount <= Int(UInt32.max) else {
+            throw WebRTCError.framedPayloadTooLarge(payloadByteCount)
+        }
+        return UInt32(payloadByteCount)
     }
     
 #if canImport(WebRTC)
