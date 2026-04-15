@@ -1,21 +1,9 @@
 import AppKit
 import Foundation
 import SwiftUI
+import SkyBridgeVisualParity
 
-private let captureSize = CGSize(width: 1200, height: 800)
-
-struct CaptureManifest: Decodable {
-    let captures: [CaptureSpec]
-}
-
-struct CaptureSpec: Decodable, Hashable {
-    let id: String
-    let page: String
-    let state: String
-    let theme: String
-    let locale: String
-    let critical: Bool
-}
+private let captureSize = VisualParityTokenSet.Layout.captureSize
 
 @MainActor
 @main
@@ -104,6 +92,7 @@ private struct BaselineCaptureView: View {
     let capture: CaptureSpec
 
     private var darkMode: Bool { capture.theme.lowercased() == "dark" }
+    private var scene: ShellSceneState { MacBaselineSceneFactory.makeScene(for: capture) }
 
     var body: some View {
         Group {
@@ -121,17 +110,24 @@ private struct BaselineCaptureView: View {
         ZStack {
             LinearGradient(
                 colors: darkMode
-                    ? [Color(red: 0.23, green: 0.31, blue: 0.47), Color(red: 0.43, green: 0.53, blue: 0.70), Color(red: 0.77, green: 0.81, blue: 0.89)]
-                    : [Color(red: 0.89, green: 0.92, blue: 0.98), Color(red: 0.80, green: 0.85, blue: 0.93), Color(red: 0.73, green: 0.79, blue: 0.90)],
+                    ? VisualParityTokenSet.Palette.windowGradientDark
+                    : VisualParityTokenSet.Palette.windowGradientLight,
                 startPoint: .top,
                 endPoint: .bottom
             )
             .ignoresSafeArea()
 
-            RoundedRectangle(cornerRadius: 28, style: .continuous)
-                .fill(.white.opacity(darkMode ? 0.16 : 0.42))
-                .overlay(RoundedRectangle(cornerRadius: 28).stroke(.white.opacity(0.16), lineWidth: 1))
-                .padding(26)
+            RoundedRectangle(cornerRadius: VisualParityTokenSet.Layout.shellCornerRadius, style: .continuous)
+                .fill(
+                    darkMode
+                        ? VisualParityTokenSet.Palette.shellSurfaceFill.opacity(VisualParityTokenSet.Materials.shellSurfaceFillAlphaDark)
+                        : VisualParityTokenSet.Palette.shellSurfaceFill.opacity(VisualParityTokenSet.Materials.shellSurfaceFillAlphaLight)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: VisualParityTokenSet.Layout.shellCornerRadius)
+                        .stroke(VisualParityTokenSet.Palette.shellSurfaceStroke.opacity(VisualParityTokenSet.Materials.shellSurfaceStrokeAlpha), lineWidth: 1)
+                )
+                .padding(VisualParityTokenSet.Layout.shellOuterMargin)
 
             HStack(spacing: 0) {
                 sidebar
@@ -144,7 +140,7 @@ private struct BaselineCaptureView: View {
                     }
                 }
             }
-            .padding(34)
+            .padding(VisualParityTokenSet.Layout.sidebarPadding + 16)
         }
         .overlay(alignment: .center) {
             overlayPrompt
@@ -161,7 +157,7 @@ private struct BaselineCaptureView: View {
             .ignoresSafeArea()
 
             VStack(spacing: 24) {
-                logoHeader(subtitle: "Select sign-in method")
+                logoHeader(subtitle: scene.headerStatus)
                 VStack(spacing: 16) {
                     HStack(spacing: 0) {
                         segmented("Email", selected: true)
@@ -183,11 +179,14 @@ private struct BaselineCaptureView: View {
                     }
                 }
                 .padding(22)
-                .frame(width: 354)
+                .frame(width: VisualParityTokenSet.Layout.loginCardWidth)
                 .background(
-                    RoundedRectangle(cornerRadius: 20, style: .continuous)
-                        .fill(.white.opacity(0.88))
-                        .overlay(RoundedRectangle(cornerRadius: 20).stroke(.black.opacity(0.06), lineWidth: 1))
+                    RoundedRectangle(cornerRadius: VisualParityTokenSet.Layout.loginCardCornerRadius, style: .continuous)
+                        .fill(VisualParityTokenSet.Palette.loginCardFill)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: VisualParityTokenSet.Layout.loginCardCornerRadius)
+                                .stroke(VisualParityTokenSet.Palette.loginCardStroke, lineWidth: 1)
+                        )
                         .shadow(color: .black.opacity(0.08), radius: 20, x: 0, y: 12)
                 )
             }
@@ -250,23 +249,23 @@ private struct BaselineCaptureView: View {
             }
             .foregroundStyle(.white)
         }
-        .padding(18)
-        .frame(width: 246)
+        .padding(VisualParityTokenSet.Layout.sidebarPadding)
+        .frame(width: VisualParityTokenSet.Layout.sidebarWidth)
         .background(
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .fill(Color(red: 0.18, green: 0.22, blue: 0.34).opacity(0.94))
+            RoundedRectangle(cornerRadius: VisualParityTokenSet.Layout.sidebarCornerRadius, style: .continuous)
+                .fill(VisualParityTokenSet.Palette.sidebarBackground)
         )
     }
 
     private var topBar: some View {
         HStack(spacing: 12) {
             brandBadge(size: 22)
-            Text(headerTitle)
+            Text(scene.pageTitle)
                 .font(.system(size: 15, weight: .bold))
                 .foregroundStyle(.white)
             Spacer()
             Circle().fill(headerDotColor).frame(width: 7, height: 7)
-            Text(headerStatus)
+            Text(scene.headerStatus)
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(.white.opacity(0.74))
             Spacer().frame(width: 10)
@@ -275,10 +274,10 @@ private struct BaselineCaptureView: View {
             statusChip(systemName: "wifi")
         }
         .padding(.horizontal, 20)
-        .frame(height: 56)
+        .frame(height: VisualParityTokenSet.Layout.topBarHeight)
         .background(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(Color(red: 0.28, green: 0.38, blue: 0.58).opacity(0.55))
+            RoundedRectangle(cornerRadius: VisualParityTokenSet.Layout.topBarCornerRadius, style: .continuous)
+                .fill(VisualParityTokenSet.Palette.topBarFill)
         )
     }
 
@@ -588,12 +587,15 @@ private struct BaselineCaptureView: View {
     }
 
     private func segmented(_ title: String, selected: Bool) -> some View {
-        Text(title)
-            .font(.system(size: 14, weight: .semibold))
-            .foregroundStyle(.black.opacity(selected ? 0.78 : 0.55))
-            .frame(maxWidth: .infinity)
-            .frame(height: 34)
-            .background(RoundedRectangle(cornerRadius: 8).fill(Color.black.opacity(selected ? 0.16 : 0.08)))
+            Text(title)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.black.opacity(selected ? 0.78 : 0.55))
+                .frame(maxWidth: .infinity)
+            .frame(height: VisualParityTokenSet.Layout.loginSegmentHeight)
+            .background(
+                RoundedRectangle(cornerRadius: VisualParityTokenSet.Layout.loginSegmentHeight / 4)
+                    .fill(VisualParityTokenSet.Palette.inputFillLight.opacity(selected ? 1.0 : 0.55))
+            )
     }
 
     private func field(_ placeholder: String, icon: String? = nil) -> some View {
@@ -608,8 +610,11 @@ private struct BaselineCaptureView: View {
             }
         }
         .padding(.horizontal, 12)
-        .frame(height: 34)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Color.black.opacity(0.08)))
+        .frame(height: VisualParityTokenSet.Layout.loginSegmentHeight)
+        .background(
+            RoundedRectangle(cornerRadius: VisualParityTokenSet.Layout.loginSegmentHeight / 4)
+                .fill(VisualParityTokenSet.Palette.inputFillLight)
+        )
     }
 
     private func primaryButton(_ title: String) -> some View {
@@ -617,8 +622,11 @@ private struct BaselineCaptureView: View {
             .font(.system(size: 15, weight: .bold))
             .foregroundStyle(.white)
             .frame(maxWidth: .infinity)
-            .frame(height: 38)
-            .background(RoundedRectangle(cornerRadius: 8).fill(Color.blue.opacity(0.86)))
+            .frame(height: VisualParityTokenSet.Layout.buttonHeight)
+            .background(
+                RoundedRectangle(cornerRadius: VisualParityTokenSet.Layout.loginSegmentHeight / 4)
+                    .fill(VisualParityTokenSet.Palette.accent)
+            )
     }
 
     private func brandBadge(size: CGFloat) -> some View {
@@ -673,8 +681,14 @@ private struct BaselineCaptureView: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, minHeight: 92)
-        .background(RoundedRectangle(cornerRadius: 18).fill(.white.opacity(darkMode ? 0.14 : 0.26)))
-        .overlay(RoundedRectangle(cornerRadius: 18).stroke(.white.opacity(0.10), lineWidth: 1))
+        .background(
+            RoundedRectangle(cornerRadius: VisualParityTokenSet.Layout.metricCardCornerRadius)
+                .fill(darkMode ? VisualParityTokenSet.Palette.metricCardFillDark : VisualParityTokenSet.Palette.metricCardFillLight)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: VisualParityTokenSet.Layout.metricCardCornerRadius)
+                .stroke(.white.opacity(VisualParityTokenSet.Materials.cardStrokeAlpha), lineWidth: 1)
+        )
     }
 
     private func glassPanel<Content: View>(title: String, trailing: String?, @ViewBuilder content: () -> Content) -> some View {
@@ -692,9 +706,15 @@ private struct BaselineCaptureView: View {
             }
             content()
         }
-        .padding(18)
-        .background(RoundedRectangle(cornerRadius: 22).fill(.white.opacity(darkMode ? 0.13 : 0.24)))
-        .overlay(RoundedRectangle(cornerRadius: 22).stroke(.white.opacity(0.10), lineWidth: 1))
+        .padding(VisualParityTokenSet.Layout.cardInset)
+        .background(
+            RoundedRectangle(cornerRadius: VisualParityTokenSet.Layout.panelCornerRadius)
+                .fill(darkMode ? VisualParityTokenSet.Palette.panelFillDark : VisualParityTokenSet.Palette.panelFillLight)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: VisualParityTokenSet.Layout.panelCornerRadius)
+                .stroke(VisualParityTokenSet.Palette.panelStroke, lineWidth: 1)
+        )
     }
 
     private func compactCard(_ title: String, headline: String) -> some View {
@@ -733,19 +753,21 @@ private struct BaselineCaptureView: View {
         .background(Capsule().fill(Color.white.opacity(0.08)))
     }
 
-    private func rowCard(title: String, subtitle: String, badge: String) -> some View {
+    private func rowCard(title: String, subtitle: String, badge: String?) -> some View {
         HStack {
             VStack(alignment: .leading, spacing: 4) {
                 Text(title).font(.system(size: 15, weight: .semibold)).foregroundStyle(.white)
                 Text(subtitle).font(.system(size: 12, weight: .medium)).foregroundStyle(.white.opacity(0.54))
             }
             Spacer()
-            Text(badge)
-                .font(.system(size: 11, weight: .bold))
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(Capsule().fill(Color.green.opacity(0.18)))
-                .foregroundStyle(Color.green.opacity(0.95))
+            if let badge {
+                Text(badge)
+                    .font(.system(size: 11, weight: .bold))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(Capsule().fill(Color.green.opacity(0.18)))
+                    .foregroundStyle(Color.green.opacity(0.95))
+            }
         }
         .padding(14)
         .background(RoundedRectangle(cornerRadius: 16).fill(Color.black.opacity(0.14)))
@@ -890,47 +912,19 @@ private struct BaselineCaptureView: View {
     }
 
     private var sidebarItems: [(title: String, icon: String, selected: Bool)] {
-        let selectedPage = capture.page == "Tray/Notifications" ? "Dashboard" : capture.page
+        let selectedPage = scene.pageID
         return [
-            ("Main Console", "house.fill", selectedPage == "Dashboard"),
-            ("Device Discovery", "magnifyingglass", selectedPage == "Devices"),
-            ("USB Management", "cable.connector", selectedPage == "USB"),
-            ("File Transfer (Quantum Communication)", "folder", selectedPage == "Transfers"),
-            ("Remote Desktop (Quantum Communication)", "display", selectedPage == "Remote"),
-            ("System Monitor", "speedometer", selectedPage == "Monitor"),
-            ("Settings", "gearshape", selectedPage == "Settings")
+            ("Main Console", "house.fill", selectedPage == "dashboard"),
+            ("Device Discovery", "magnifyingglass", selectedPage == "devices"),
+            ("USB Management", "cable.connector", selectedPage == "usb"),
+            ("File Transfer (Quantum Communication)", "folder", selectedPage == "transfers"),
+            ("Remote Desktop (Quantum Communication)", "display", selectedPage == "remote"),
+            ("System Monitor", "speedometer", selectedPage == "monitor"),
+            ("Settings", "gearshape", selectedPage == "settings")
         ]
     }
 
-    private var headerTitle: String {
-        if capture.page == "Dashboard" || capture.page == "Tray/Notifications" {
-            return "Main Console"
-        }
-        return capture.page == "Monitor" ? "System Monitor" : capture.page
-    }
-
-    private var headerStatus: String {
-        switch capture.page {
-        case "Dashboard":
-            return capture.state.contains("Connected") ? "Connected to MacBook Pro • Streaming 2560×1600 @ 60 fps" : "Disconnected"
-        case "Devices":
-            return capture.state == "Empty" ? "No peers discovered" : "Trusted peers available"
-        case "Transfers":
-            return capture.state == "Empty" ? "Transfer queue idle" : "Quantum transfer in progress"
-        case "Settings":
-            return "Preferences synchronized"
-        case "USB":
-            return "USB bridge ready"
-        case "Remote":
-            return "Verified active sessions"
-        case "Monitor":
-            return "Telemetry stable"
-        default:
-            return "Disconnected"
-        }
-    }
-
     private var headerDotColor: Color {
-        capture.page == "Dashboard" && capture.state.contains("Connected") ? .green : .orange
+        scene.headerTone == "success" ? .green : .orange
     }
 }

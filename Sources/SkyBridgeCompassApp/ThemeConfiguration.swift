@@ -2,6 +2,7 @@ import SwiftUI
 import Foundation
 import Combine
 import SkyBridgeCore
+import SkyBridgeVisualParity
 
 // MARK: - 主题配置类
 // 遵循macOS最佳实践，使用@MainActor确保线程安全
@@ -14,8 +15,8 @@ class ThemeConfiguration: ObservableObject {
     @Published var currentTheme: AppTheme = .starryNight
     @Published var enableAnimations: Bool = true
     @Published var enableGlassEffect: Bool = true
-    @Published var backgroundIntensity: Double = 0.6
-    @Published var glassOpacity: Double = 0.8
+    @Published var backgroundIntensity: Double = VisualParityTokenSet.Materials.defaultBackgroundIntensity
+    @Published var glassOpacity: Double = VisualParityTokenSet.Materials.defaultGlassOpacity
     @Published var customBackgroundImagePath: String?
     @Published var accentColor: Color = .blue
 
@@ -114,12 +115,12 @@ class ThemeConfiguration: ObservableObject {
     
  /// 获取当前主题的卡片背景色
     var cardBackgroundColor: Color {
-        return Color.white.opacity(enableGlassEffect ? 0.04 : 0.08)
+        return Color.white.opacity(enableGlassEffect ? VisualParityTokenSet.Materials.cardFillAlphaDark : VisualParityTokenSet.Materials.cardFillAlphaLight)
     }
     
  /// 获取当前主题的边框颜色
     var borderColor: Color {
-        return Color.white.opacity(enableGlassEffect ? 0.08 : 0.15)
+        return Color.white.opacity(enableGlassEffect ? VisualParityTokenSet.Materials.cardStrokeAlpha : VisualParityTokenSet.Materials.shellSurfaceStrokeAlpha)
     }
     
  /// 主文本颜色
@@ -135,13 +136,16 @@ class ThemeConfiguration: ObservableObject {
  // MARK: - 动画配置
  /// 标准动画持续时间
     var standardAnimationDuration: Double {
-        return enableAnimations ? 0.3 : 0.0
+        return enableAnimations ? VisualParityTokenSet.Motion.easeDuration : 0.0
     }
     
  /// 弹簧动画
     var springAnimation: Animation {
         if enableAnimations {
-            return .spring(response: 0.6, dampingFraction: 0.8)
+            return .spring(
+                response: VisualParityTokenSet.Motion.springResponse,
+                dampingFraction: VisualParityTokenSet.Motion.springDampingFraction
+            )
         } else {
             return .linear(duration: 0)
         }
@@ -248,7 +252,7 @@ class ThemeConfiguration: ObservableObject {
 }
 
 struct GlassStyleModifier: ViewModifier {
-    var cornerRadius: CGFloat = 12
+    var cornerRadius: CGFloat = VisualParityTokenSet.Layout.navButtonCornerRadius
     func body(content: Content) -> some View {
         Group {
             if #available(macOS 26.0, *) {
@@ -277,10 +281,10 @@ extension View {
         self
             .padding()
             .background(.ultraThinMaterial)
-            .cornerRadius(12)
+            .cornerRadius(VisualParityTokenSet.Layout.navButtonCornerRadius)
             .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(Color.white.opacity(0.1), lineWidth: 1)
+                RoundedRectangle(cornerRadius: VisualParityTokenSet.Layout.navButtonCornerRadius)
+                    .stroke(Color.white.opacity(VisualParityTokenSet.Materials.cardStrokeAlpha), lineWidth: 1)
             )
     }
     
@@ -289,9 +293,10 @@ extension View {
         self
             .padding(.horizontal, 16)
             .padding(.vertical, 8)
-            .background(color ?? .blue)
+            .frame(minHeight: VisualParityTokenSet.Layout.buttonHeight)
+            .background(color ?? VisualParityTokenSet.Palette.accent)
             .foregroundColor(.white)
-            .cornerRadius(8)
+            .cornerRadius(VisualParityTokenSet.Layout.loginSegmentHeight / 4)
             .shadow(radius: 2)
     }
 }
