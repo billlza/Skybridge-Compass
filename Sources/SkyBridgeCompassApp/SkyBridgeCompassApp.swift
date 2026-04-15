@@ -72,10 +72,17 @@ struct SkyBridgeCompassApp: App {
             .preferredColorScheme(.dark)
             .onOpenURL { url in
                 if url.scheme == "skybridge", url.host == "auth" {
+                    Task { @MainActor in
+                        _ = await authModel.handleSupabaseAuthCallback(url)
+                    }
                     return
                 }
  // 处理 Widget Deep Link
                 DeepLinkRouter.shared.handleDeepLink(url)
+            }
+            .sheet(isPresented: $authModel.showPasswordResetSheet) {
+                SupabasePasswordResetSheet()
+                    .environmentObject(authModel)
             }
             .task {
                 if renderConfig == nil {
@@ -94,12 +101,10 @@ struct SkyBridgeCompassApp: App {
                     await startupCoordinator.startCoordinatedLaunch()
 
  // 启动完成后配置Supabase
-                    if supabaseConfiguration.isConfigured {
- // 启用AuthenticationService的Supabase模式
-                        if let config = SupabaseService.Configuration.fromEnvironment() {
-                            AuthenticationService.shared.enableSupabaseMode(supabaseConfig: config)
-                            SkyBridgeLogger.ui.debugOnly("✅ Supabase模式已启用")
-                        }
+                    if let config = supabaseConfiguration.resolvedConfiguration
+                        ?? SupabaseService.Configuration.fromEnvironment() {
+                        AuthenticationService.shared.enableSupabaseMode(supabaseConfig: config)
+                        SkyBridgeLogger.ui.debugOnly("✅ Supabase模式已启用")
                     }
 
                     localWebRTCSmokeHarness.startIfNeeded()
@@ -358,24 +363,13 @@ struct SkyBridgeCompassApp: App {
 
  // 配置受信公钥白名单提供者（Supabase）
  // 🔒 安全改进：从安全配置加载凭据，不再硬编码
-        if let supabaseURL = ProcessInfo.processInfo.environment["SUPABASE_URL"],
-           let supabaseAnon = ProcessInfo.processInfo.environment["SUPABASE_ANON_KEY"] {
+        if let config = SupabaseService.Configuration.fromEnvironment() {
             RemoteDesktopManager.shared.bootstrapTrustedKeysFromSupabase(
-                url: supabaseURL,
-                anonKey: supabaseAnon
+                url: config.url.absoluteString,
+                anonKey: config.anonKey
             )
         } else {
- // 从Keychain加载配置
-            Task { @MainActor in
-                if let config = try? KeychainManager.shared.retrieveSupabaseConfig() {
-                    RemoteDesktopManager.shared.bootstrapTrustedKeysFromSupabase(
-                        url: config.url,
-                        anonKey: config.anonKey
-                    )
-                } else {
-                    SkyBridgeLogger.ui.error("⚠️ Supabase配置未找到，请在设置中配置或通过环境变量提供")
-                }
-            }
+            SkyBridgeLogger.ui.error("⚠️ Supabase配置未找到，请在设置中配置、提供环境变量或检查包内配置")
         }
 
  // DEBUG 模式下：应用退出时打印 Deprecated API 使用报告
@@ -652,6 +646,7 @@ private struct RootContainerView: View {
                     }
             } else {
                 AuthenticationView()
+                    .environmentObject(authModel)
                     .onAppear {
                         SkyBridgeLogger.ui.debugOnly("🔐 [RootContainerView] AuthenticationView 出现")
  // 认证状态清除由onChange统一处理，避免重复调用
@@ -684,6 +679,49 @@ private struct RootContainerView: View {
                 }
             )
         }
+    }
+}
+
+@available(macOS 14.0, *)
+private struct SupabasePasswordResetSheet: View {
+    @EnvironmentObject private var authModel: AuthenticationViewModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("重置密码")
+                .font(.title2.weight(.semibold))
+
+            Text("请输入新的登录密码。完成后将继续使用当前恢复会话进入应用。")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+
+            SecureField("新密码", text: $authModel.resetPasswordValue)
+            SecureField("确认新密码", text: $authModel.resetPasswordConfirmation)
+
+            if let message = authModel.errorMessage, !message.isEmpty {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+
+            HStack {
+                Button("取消") {
+                    authModel.cancelPendingPasswordReset()
+                }
+                .keyboardShortcut(.cancelAction)
+
+                Spacer()
+
+                Button("更新密码") {
+                    Task { await authModel.submitPasswordReset() }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(authModel.isProcessing)
+            }
+        }
+        .padding(24)
+        .frame(width: 420)
+        .interactiveDismissDisabled(authModel.isProcessing)
     }
 }
 

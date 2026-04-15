@@ -2,8 +2,8 @@ import Foundation
 import CryptoKit
 import os.log
 
-/// 邮件服务 - 支持OAuth2和传统密码验证
-/// 遵循2025年安全最佳实践，优先使用OAuth2认证 <mcreference link="https://support.google.com/a/answer/9003945?hl=zh-Hans" index="3">3</mcreference>
+/// 旧客户端邮件服务。
+/// 1.0 认证邮件已收敛到 Supabase Auth + 服务端自定义 SMTP，本类型只保留格式校验等辅助能力，发送能力默认停用。
 @MainActor
 public final class EmailService: BaseManager {
     
@@ -78,6 +78,7 @@ public final class EmailService: BaseManager {
         case networkError(Error)
         case authenticationFailed
         case oauthNotSupported
+        case serviceDisabled(String)
         case serverError(String)
         
         public var errorDescription: String? {
@@ -94,6 +95,8 @@ public final class EmailService: BaseManager {
                 return "邮箱认证失败，请检查账号密码"
             case .oauthNotSupported:
                 return "该邮箱服务不支持OAuth2认证"
+            case .serviceDisabled(let message):
+                return message
             case .serverError(let message):
                 return "服务器错误：\(message)"
             }
@@ -197,37 +200,9 @@ public final class EmailService: BaseManager {
         guard isValidEmail(email) else {
             throw EmailError.invalidEmailAddress
         }
-        
-        guard let config = getConfiguration(for: email) else {
-            throw EmailError.configurationMissing
-        }
-        
-        logger.info("Authenticating email with password: \(email)")
-        
-        do {
- // 模拟SMTP/IMAP认证过程
-            let isAuthenticated = try await performSMTPAuthentication(
-                email: email,
-                password: password,
-                config: config
-            )
-            
-            if isAuthenticated {
-                let userInfo = EmailUserInfo(
-                    email: email,
-                    displayName: extractDisplayName(from: email)
-                )
-                
-                logger.info("Email authentication successful for: \(email)")
-                return EmailAuthResult(success: true, userInfo: userInfo)
-            } else {
-                throw EmailError.invalidCredentials
-            }
-            
-        } catch {
-            logger.error("Email authentication failed: \(error.localizedDescription)")
-            throw error
-        }
+
+        logger.warning("EmailService.authenticateWithPassword 已停用，认证邮件与邮箱登录主链不再走客户端直连邮箱服务")
+        throw EmailError.serviceDisabled("邮箱认证已迁移到 Supabase Auth，客户端邮件直连能力在 1.0 中停用")
     }
     
  // MARK: - OAuth2认证
@@ -239,17 +214,9 @@ public final class EmailService: BaseManager {
         guard isValidEmail(email) else {
             throw EmailError.invalidEmailAddress
         }
-        
-        guard let config = getConfiguration(for: email),
-              config.oauthClientId != nil else {
-            throw EmailError.oauthNotSupported
-        }
-        
-        logger.info("Starting OAuth2 authentication for: \(email)")
-        
- // 这里应该实现OAuth2流程
- // 由于OAuth2需要浏览器交互，这里提供框架结构
-        throw EmailError.oauthNotSupported
+
+        logger.warning("EmailService.authenticateWithOAuth2 已停用，认证邮件与邮箱登录主链不再走客户端直连邮箱服务")
+        throw EmailError.serviceDisabled("邮箱 OAuth 直连认证未纳入 1.0 主链，请使用 Supabase Auth")
     }
     
  // MARK: - 私有方法
@@ -260,53 +227,16 @@ public final class EmailService: BaseManager {
         password: String,
         config: Configuration
     ) async throws -> Bool {
- // 构建认证请求
-        let authRequest = EmailAuthRequest(
-            email: email,
-            password: password,
-            smtpHost: config.smtpHost,
-            smtpPort: config.smtpPort,
-            useTLS: config.useTLS
-        )
-        
- // 发送认证请求到后端服务
-        return try await sendAuthenticationRequest(authRequest)
+        _ = email
+        _ = password
+        _ = config
+        throw EmailError.serviceDisabled("客户端 SMTP/IMAP 直连认证未纳入 1.0 主链")
     }
     
  /// 发送认证请求到后端
     private func sendAuthenticationRequest(_ request: EmailAuthRequest) async throws -> Bool {
- // 构建请求URL（这里应该是你的后端API地址）
-        guard let url = URL(string: "https://api.skybridge.com/auth/email/verify") else {
-            throw EmailError.networkError(URLError(.badURL))
-        }
-        
- // 创建HTTP请求
-        var httpRequest = URLRequest(url: url)
-        httpRequest.httpMethod = "POST"
-        httpRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        
- // 编码请求体
-        let requestData = try JSONEncoder().encode(request)
-        httpRequest.httpBody = requestData
-        
-        do {
-            let (data, response) = try await urlSession.data(for: httpRequest)
-            
-            guard let httpResponse = response as? HTTPURLResponse else {
-                throw EmailError.networkError(URLError(.badServerResponse))
-            }
-            
-            if httpResponse.statusCode == 200 {
-                let authResponse = try JSONDecoder().decode(EmailAuthResponse.self, from: data)
-                return authResponse.success
-            } else {
-                let errorResponse = try? JSONDecoder().decode(EmailErrorResponse.self, from: data)
-                throw EmailError.serverError(errorResponse?.message ?? "认证失败")
-            }
-            
-        } catch {
-            throw EmailError.networkError(error)
-        }
+        _ = request
+        throw EmailError.serviceDisabled("客户端邮件认证占位请求已停用")
     }
     
  /// 从邮箱地址提取显示名称
@@ -327,71 +257,15 @@ public final class EmailService: BaseManager {
         guard isValidEmail(email) else {
             throw EmailError.invalidEmailAddress
         }
-        
-        logger.info("📧 发送注册成功邮件到: \(email.prefix(3))***")
-        
- // 构建邮件内容
-        let emailContent = RegistrationSuccessEmailContent(
-            recipientEmail: email,
-            username: username,
-            nebulaId: nebulaId,
-            registrationTime: Date(),
-            appName: "SkyBridge Compass Pro"
-        )
-        
-        do {
- // 发送邮件请求到后端
-            let result = try await sendRegistrationNotificationEmail(emailContent)
-            
-            if result {
-                logger.info("✅ 注册成功邮件已发送: \(email.prefix(3))***")
-            } else {
-                logger.warning("⚠️ 注册成功邮件发送失败: \(email.prefix(3))***")
-            }
-            
-            return result
-        } catch {
-            logger.error("❌ 发送注册成功邮件失败: \(error.localizedDescription)")
-            throw error
-        }
+
+        logger.warning("EmailService.sendRegistrationSuccessEmail 已停用，1.0 只保留 Supabase Auth 认证邮件")
+        throw EmailError.serviceDisabled("注册成功通知邮件未纳入 1.0 上线范围，当前构建不会从客户端发送占位通知邮件")
     }
     
  /// 发送注册通知邮件请求
     private func sendRegistrationNotificationEmail(_ content: RegistrationSuccessEmailContent) async throws -> Bool {
- // 构建请求URL
-        guard let url = URL(string: "https://api.skybridge.com/notifications/email/registration") else {
-            throw EmailError.networkError(URLError(.badURL))
-        }
-        
- // 创建HTTP请求
-        var httpRequest = URLRequest(url: url)
-        httpRequest.httpMethod = "POST"
-        httpRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        
- // 编码请求体
-        let requestData = try JSONEncoder().encode(content)
-        httpRequest.httpBody = requestData
-        
-        do {
-            let (data, response) = try await urlSession.data(for: httpRequest)
-            
-            guard let httpResponse = response as? HTTPURLResponse else {
-                throw EmailError.networkError(URLError(.badServerResponse))
-            }
-            
-            if httpResponse.statusCode == 200 {
-                let result = try JSONDecoder().decode(EmailNotificationResponse.self, from: data)
-                return result.success
-            } else {
-                let errorResponse = try? JSONDecoder().decode(EmailErrorResponse.self, from: data)
-                throw EmailError.serverError(errorResponse?.message ?? "发送失败")
-            }
-            
-        } catch {
- // 如果后端服务不可用，记录日志但不阻塞注册流程
-            logger.warning("邮件通知服务暂不可用: \(error.localizedDescription)")
-            return false
-        }
+        _ = content
+        throw EmailError.serviceDisabled("客户端注册通知邮件占位请求已停用")
     }
     
  /// 生成注册成功邮件HTML内容

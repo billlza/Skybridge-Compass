@@ -526,13 +526,30 @@ extension KeychainManager {
         return NebulaConfig(baseURL: baseURL, clientId: cid, clientSecret: clientSecret)
     }
 
-    public nonisolated func storeSMSConfig(accessKeyId: String, accessKeySecret: String) throws {
+    public nonisolated func hasLegacySMSConfig() -> Bool {
         let base = "SkyBridge.SMS"
-        let ok1 = storeKeyData(Data(accessKeyId.utf8), service: base, account: "AccessKeyId")
-        let ok2 = storeKeyData(Data(accessKeySecret.utf8), service: base, account: "AccessKeySecret")
-        if !ok1 || !ok2 { throw NSError(domain: "Keychain", code: -5) }
+        return loadKeyData(service: base, account: "AccessKeyId") != nil
+            || loadKeyData(service: base, account: "AccessKeySecret") != nil
     }
 
+    public nonisolated func clearLegacySMSConfig() throws {
+        let base = "SkyBridge.SMS"
+        try deleteAPIKey(service: base, account: "AccessKeyId")
+        try deleteAPIKey(service: base, account: "AccessKeySecret")
+    }
+
+    @available(*, deprecated, message: "Client-side SMS credentials are retired. Use server-side Supabase send_sms hook + Aliyun SMS.")
+    public nonisolated func storeSMSConfig(accessKeyId: String, accessKeySecret: String) throws {
+        _ = accessKeyId
+        _ = accessKeySecret
+        throw NSError(
+            domain: "Keychain",
+            code: -5,
+            userInfo: [NSLocalizedDescriptionKey: "客户端短信密钥已停用，不能再写入本地 Keychain"]
+        )
+    }
+
+    @available(*, deprecated, message: "Client-side SMS credentials are retained only for legacy cleanup.")
     public nonisolated func retrieveSMSConfig() throws -> SMSConfig {
         let base = "SkyBridge.SMS"
         guard let akid = loadKeyData(service: base, account: "AccessKeyId").flatMap({ String(data: $0, encoding: .utf8) }),

@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import CryptoKit
 import OSLog
 
 // 由于AuthSession定义在同一个模块中，不需要额外导入
@@ -32,25 +33,157 @@ public final class SupabaseService: BaseManager {
             nil
         }
         
- /// 从环境变量或Keychain加载配置
+        private static func candidateConfiguration(urlString: String?, anonKey: String?) -> Configuration? {
+            guard let rawURL = urlString?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  let rawAnonKey = anonKey?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !rawAnonKey.isEmpty,
+                  let url = URL(string: rawURL),
+                  let scheme = url.scheme?.lowercased(),
+                  let host = url.host,
+                  !host.isEmpty else {
+                return nil
+            }
+
+            if scheme != "https" {
+ #if DEBUG
+                let isLocalHost = host == "localhost" || host == "127.0.0.1"
+                guard scheme == "http", isLocalHost else {
+                    return nil
+                }
+ #else
+                return nil
+ #endif
+            }
+
+            return Configuration(url: url, anonKey: rawAnonKey)
+        }
+
+        private static func configurationFromBundle(_ bundle: Bundle) -> Configuration? {
+            if let infoDictionary = bundle.infoDictionary,
+               let infoConfiguration = candidateConfiguration(
+                urlString: infoDictionary["SUPABASE_URL"] as? String,
+                anonKey: infoDictionary["SUPABASE_ANON_KEY"] as? String
+               ) {
+                return infoConfiguration
+            }
+
+            if let resourceURL = bundle.url(forResource: "SupabaseConfig", withExtension: "plist"),
+               let dictionary = NSDictionary(contentsOf: resourceURL) as? [String: Any],
+               let resourceConfiguration = candidateConfiguration(
+                urlString: dictionary["SUPABASE_URL"] as? String,
+                anonKey: dictionary["SUPABASE_ANON_KEY"] as? String
+               ) {
+                return resourceConfiguration
+            }
+
+            return nil
+        }
+
+ /// 从环境变量、Info.plist、资源文件或Keychain加载配置
         @MainActor
         public static func fromEnvironment() -> Configuration? {
  // 首先尝试从Keychain获取配置
             do {
                 let keychainConfig = try KeychainManager.shared.retrieveSupabaseConfig()
-                guard let url = URL(string: keychainConfig.url) else { return nil }
-                return Configuration(url: url, anonKey: keychainConfig.anonKey)
-            } catch {
- // 如果Keychain中没有配置，尝试从环境变量获取
-                guard let urlString = ProcessInfo.processInfo.environment["SUPABASE_URL"],
-                      let url = URL(string: urlString),
-                      let anonKey = ProcessInfo.processInfo.environment["SUPABASE_ANON_KEY"] else {
-                    return nil
+                if let keychainConfiguration = candidateConfiguration(
+                    urlString: keychainConfig.url,
+                    anonKey: keychainConfig.anonKey
+                ) {
+                    return keychainConfiguration
                 }
-                
-                return Configuration(url: url, anonKey: anonKey)
+            } catch {
+                // Ignore and continue with the remaining configuration chain.
             }
+
+ // 如果Keychain中没有配置，尝试从环境变量获取
+            if let environmentConfiguration = candidateConfiguration(
+                urlString: ProcessInfo.processInfo.environment["SUPABASE_URL"],
+                anonKey: ProcessInfo.processInfo.environment["SUPABASE_ANON_KEY"]
+            ) {
+                return environmentConfiguration
+            }
+
+ // 发布包默认读取 Info.plist / SupabaseConfig.plist，避免首次安装误落到 legacy auth 链
+            if let bundleConfiguration = configurationFromBundle(.main) {
+                return bundleConfiguration
+            }
+
+ #if SWIFT_PACKAGE
+            if let packageConfiguration = configurationFromBundle(.module) {
+                return packageConfiguration
+            }
+ #endif
+
+            return nil
         }
+    }
+
+    public enum RegistrationIdentifierType: String, Sendable {
+        case email
+        case phone
+        case username
+    }
+
+    public enum RegistrationAttemptType: String, Sendable {
+        case register = "register"
+        case verifyCode = "verify_code"
+        case login = "login"
+    }
+
+    public struct RegistrationGuardDecision: Sendable, Equatable {
+        public let allowed: Bool
+        public let requiresCaptcha: Bool
+        public let reason: String?
+        public let retryAfter: Int?
+        public let auditTicket: String?
+
+        public init(
+            allowed: Bool,
+            requiresCaptcha: Bool,
+            reason: String?,
+            retryAfter: Int?,
+            auditTicket: String? = nil
+        ) {
+            self.allowed = allowed
+            self.requiresCaptcha = requiresCaptcha
+            self.reason = reason
+            self.retryAfter = retryAfter
+            self.auditTicket = auditTicket
+        }
+    }
+
+    public struct CurrentUserProfile: Sendable, Equatable {
+        public let userId: String
+        public let email: String?
+        public let phone: String?
+        public let displayName: String?
+        public let phoneNumber: String?
+        public let nebulaId: String?
+
+        public init(
+            userId: String,
+            email: String?,
+            phone: String?,
+            displayName: String?,
+            phoneNumber: String?,
+            nebulaId: String?
+        ) {
+            self.userId = userId
+            self.email = email
+            self.phone = phone
+            self.displayName = displayName
+            self.phoneNumber = phoneNumber
+            self.nebulaId = nebulaId
+        }
+    }
+
+    public enum EmailAuthCallbackType: String, Sendable {
+        case signup
+        case recovery
+        case magiclink
+        case invite
+        case email
+        case emailChange = "email_change"
     }
     
  // MARK: - 错误类型
@@ -66,7 +199,7 @@ public final class SupabaseService: BaseManager {
         public var errorDescription: String? {
             switch self {
             case .configurationMissing:
-                return "Supabase配置缺失，请设置SUPABASE_URL和SUPABASE_ANON_KEY环境变量"
+                return "Supabase 配置缺失，请在设置中配置、提供环境变量或检查包内配置"
             case .invalidResponse:
                 return "服务器返回无效响应"
             case .authenticationFailed(let message):
@@ -86,7 +219,7 @@ public final class SupabaseService: BaseManager {
         public var userFacingMessage: String {
             switch self {
             case .configurationMissing:
-                return "Supabase 配置缺失，请在设置中配置"
+                return "Supabase 配置缺失，请在设置中配置或检查包内配置"
             case .invalidResponse:
                 return "服务器返回无效响应"
             case .authenticationFailed(let message):
@@ -109,7 +242,7 @@ public final class SupabaseService: BaseManager {
                     return "服务器返回 HTTP \(code)"
                 }
             case .schemaMismatch(let message):
-                return "Supabase 配置缺失或数据表结构不完整：\(message)"
+                return "Supabase 认证风控或数据结构未就绪：\(message)"
             case .networkError(let error):
                 return "网络错误：\(error.localizedDescription)"
             }
@@ -170,6 +303,17 @@ public final class SupabaseService: BaseManager {
 
         let useInMemoryKeychain = ProcessInfo.processInfo.environment["SKYBRIDGE_KEYCHAIN_IN_MEMORY"] == "1"
         self.configuration = useInMemoryKeychain ? nil : Configuration.fromEnvironment()
+    }
+
+    private func resolvedConfiguration() throws -> Configuration {
+        if let configuration {
+            return configuration
+        }
+        if let loaded = Configuration.fromEnvironment() {
+            configuration = loaded
+            return loaded
+        }
+        throw SupabaseError.configurationMissing
     }
     
  // MARK: - BaseManager重写
@@ -246,6 +390,66 @@ public final class SupabaseService: BaseManager {
             )
         }
         return httpResponse
+    }
+
+    private func makeAnonymousJSONRequest(
+        url: URL,
+        method: String,
+        configuration config: Configuration
+    ) -> URLRequest {
+        var request = URLRequest(url: url)
+        request.httpMethod = method
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("Bearer \(config.anonKey)", forHTTPHeaderField: "Authorization")
+        request.setValue(config.anonKey, forHTTPHeaderField: "apikey")
+        return request
+    }
+
+    nonisolated static func normalizedRegistrationIdentifier(
+        _ identifier: String,
+        type: RegistrationIdentifierType
+    ) -> String {
+        let trimmed = identifier.trimmingCharacters(in: .whitespacesAndNewlines)
+        switch type {
+        case .email, .username:
+            return trimmed.lowercased()
+        case .phone:
+            return trimmed.filter { $0.isNumber || $0 == "+" }
+        }
+    }
+
+    nonisolated static func normalizedRegistrationIdentifierHash(
+        _ identifier: String,
+        type: RegistrationIdentifierType
+    ) -> String {
+        let normalized = normalizedRegistrationIdentifier(identifier, type: type)
+        let digest = SHA256.hash(data: Data(normalized.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func isMissingRPCError(statusCode: Int, body: String?, rpcName: String) -> Bool {
+        guard statusCode == 404 || statusCode == 400 else { return false }
+        let normalizedBody = (body ?? "").lowercased()
+        return normalizedBody.contains("pgrst202")
+            || normalizedBody.contains("42883")
+            || normalizedBody.contains("could not find the function")
+            || normalizedBody.contains(rpcName.lowercased())
+    }
+
+    private static func maskedResponseSummary(_ data: Data) -> String {
+        let byteCount = data.count
+        guard let body = String(data: data, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !body.isEmpty else {
+            return "body_bytes=\(byteCount)"
+        }
+
+        if let errorPayload = try? JSONDecoder().decode(SupabaseErrorResponse.self, from: data) {
+            return "body_bytes=\(byteCount) message=\(errorPayload.message)"
+        }
+
+        return "body_bytes=\(byteCount)"
     }
 
     private func fetchFirstStringField(
@@ -394,14 +598,37 @@ public final class SupabaseService: BaseManager {
 
         _ = try? await urlSession.data(for: request)
     }
+
+    private func authSession(from authResponse: SupabaseAuthResponse, baseURL: URL) -> AuthSession {
+        let preferredDisplayName =
+            authResponse.user.preferredDisplayName
+            ?? authResponse.user.email
+            ?? authResponse.user.phone
+            ?? "用户"
+
+        return AuthSession(
+            accessToken: authResponse.accessToken,
+            refreshToken: authResponse.refreshToken,
+            userIdentifier: authResponse.user.id,
+            nebulaId: authResponse.user.preferredNebulaId,
+            displayName: preferredDisplayName,
+            avatarURL: Self.normalizedRemoteAssetURL(
+                authResponse.user.preferredAvatarURLRaw,
+                baseURL: baseURL
+            ),
+            issuedAt: Date()
+        )
+    }
     
  // MARK: - 认证方法
     
  /// Apple登录
-    public func signInWithApple(identityToken: String, nonce: String? = nil) async throws -> AuthSession {
-        guard let config = configuration else {
-            throw SupabaseError.configurationMissing
-        }
+    public func signInWithApple(
+        identityToken: String,
+        nonce: String? = nil,
+        captchaToken: String? = nil
+    ) async throws -> AuthSession {
+        let config = try resolvedConfiguration()
         
         let endpoint = config.url.appendingPathComponent("auth/v1/token")
         var request = URLRequest(url: endpoint)
@@ -410,22 +637,81 @@ public final class SupabaseService: BaseManager {
         request.setValue("Bearer \(config.anonKey)", forHTTPHeaderField: "Authorization")
         request.setValue(config.anonKey, forHTTPHeaderField: "apikey")  // 添加 apikey 头
         
-        let payload = [
+        var payload: [String: Any] = [
             "provider": "apple",
-            "id_token": identityToken,
-            "nonce": nonce ?? ""
+            "id_token": identityToken
         ]
-        
+        if let nonce = nonce?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !nonce.isEmpty {
+            payload["nonce"] = nonce
+        }
+        Self.attachCaptchaToken(captchaToken, to: &payload)
+
         request.httpBody = try JSONSerialization.data(withJSONObject: payload)
         
         return try await performAuthRequest(request)
     }
+
+    public func makeOAuthAuthorizationURL(
+        provider: String,
+        redirectTo: URL,
+        scopes: String? = nil,
+        queryParameters: [String: String] = [:],
+        captchaToken: String? = nil
+    ) throws -> URL {
+        let config = try resolvedConfiguration()
+
+        guard var components = URLComponents(
+            url: config.url.appendingPathComponent("auth/v1/authorize"),
+            resolvingAgainstBaseURL: false
+        ) else {
+            throw SupabaseError.invalidResponse
+        }
+
+        var queryItems = [
+            URLQueryItem(name: "provider", value: provider),
+            URLQueryItem(name: "redirect_to", value: redirectTo.absoluteString)
+        ]
+
+        if let scopes = scopes?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !scopes.isEmpty {
+            queryItems.append(URLQueryItem(name: "scopes", value: scopes))
+        }
+
+        if let captchaToken = captchaToken?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !captchaToken.isEmpty {
+            queryItems.append(URLQueryItem(name: "captcha_token", value: captchaToken))
+        }
+
+        queryItems.append(
+            contentsOf: queryParameters
+                .sorted { $0.key < $1.key }
+                .map { URLQueryItem(name: $0.key, value: $0.value) }
+        )
+        components.queryItems = queryItems
+
+        guard let authorizationURL = components.url else {
+            throw SupabaseError.invalidResponse
+        }
+
+        return authorizationURL
+    }
+
+    public func makeAppleOAuthAuthorizationURL(
+        redirectTo: URL,
+        captchaToken: String? = nil
+    ) throws -> URL {
+        try makeOAuthAuthorizationURL(
+            provider: "apple",
+            redirectTo: redirectTo,
+            scopes: "name email",
+            captchaToken: captchaToken
+        )
+    }
     
  /// 邮箱密码登录
-    public func signInWithEmail(email: String, password: String) async throws -> AuthSession {
-        guard let config = configuration else {
-            throw SupabaseError.configurationMissing
-        }
+    public func signInWithEmail(email: String, password: String, captchaToken: String? = nil) async throws -> AuthSession {
+        let config = try resolvedConfiguration()
         
  // 使用正确的 Supabase Auth API 端点和参数格式
         guard var urlComponents = URLComponents(url: config.url.appendingPathComponent("auth/v1/token"), resolvingAgainstBaseURL: false) else {
@@ -442,10 +728,11 @@ public final class SupabaseService: BaseManager {
         request.setValue("Bearer \(config.anonKey)", forHTTPHeaderField: "Authorization")
         request.setValue(config.anonKey, forHTTPHeaderField: "apikey")  // 添加 apikey 头
         
-        let payload = [
+        var payload: [String: Any] = [
             "email": email,
             "password": password
         ]
+        Self.attachCaptchaToken(captchaToken, to: &payload)
         
         request.httpBody = try JSONSerialization.data(withJSONObject: payload)
         
@@ -454,9 +741,7 @@ public final class SupabaseService: BaseManager {
     
  /// 手机号登录
     public func signInWithPhone(phone: String, token: String) async throws -> AuthSession {
-        guard let config = configuration else {
-            throw SupabaseError.configurationMissing
-        }
+        let config = try resolvedConfiguration()
         
         let endpoint = config.url.appendingPathComponent("auth/v1/token")
         var request = URLRequest(url: endpoint)
@@ -478,10 +763,8 @@ public final class SupabaseService: BaseManager {
     }
     
  /// 发送手机验证码
-    public func sendPhoneOTP(phone: String) async throws {
-        guard let config = configuration else {
-            throw SupabaseError.configurationMissing
-        }
+    public func sendPhoneOTP(phone: String, captchaToken: String? = nil) async throws {
+        let config = try resolvedConfiguration()
         
         let endpoint = config.url.appendingPathComponent("auth/v1/otp")
         var request = URLRequest(url: endpoint)
@@ -490,37 +773,39 @@ public final class SupabaseService: BaseManager {
         request.setValue("Bearer \(config.anonKey)", forHTTPHeaderField: "Authorization")
         request.setValue(config.anonKey, forHTTPHeaderField: "apikey")  // 添加 apikey 头
         
-        let payload = [
+        var payload: [String: Any] = [
             "phone": phone
         ]
+        Self.attachCaptchaToken(captchaToken, to: &payload)
         
         do {
             request.httpBody = try JSONSerialization.data(withJSONObject: payload)
-            let (_, response) = try await urlSession.data(for: request)
-            
-            if let httpResponse = response as? HTTPURLResponse,
-               httpResponse.statusCode != 200 {
-                throw SupabaseError.authenticationFailed("发送验证码失败")
-            }
+            let (data, response) = try await urlSession.data(for: request)
+            _ = try validatedHTTPResponse(response, body: data)
+        } catch let error as SupabaseError {
+            throw error
         } catch {
             throw SupabaseError.networkError(error)
         }
     }
     
  /// 邮箱注册
-    public func signUp(email: String, password: String, metadata: [String: Any]? = nil) async throws -> AuthSession {
+    public func signUp(
+        email: String,
+        password: String,
+        metadata: [String: Any]? = nil,
+        redirectTo: URL? = nil,
+        captchaToken: String? = nil
+    ) async throws -> AuthSession {
         SkyBridgeLogger.ui.debugOnly("🔧 [SupabaseService] 开始用户注册")
         SkyBridgeLogger.ui.debugOnly("   邮箱: \(email)")
         SkyBridgeLogger.ui.debugOnly("   元数据: \(String(describing: metadata ?? [:]))")
         
-        guard let config = configuration else {
-            SkyBridgeLogger.ui.error("❌ [SupabaseService] 配置缺失")
-            throw SupabaseError.configurationMissing
-        }
+        let config = try resolvedConfiguration()
         
         SkyBridgeLogger.ui.debugOnly("✅ [SupabaseService] 配置验证通过")
         SkyBridgeLogger.ui.debugOnly("   URL: \(config.url.absoluteString)")
-        SkyBridgeLogger.ui.debugOnly("   匿名密钥: \(String(config.anonKey.prefix(10)))...")
+        SkyBridgeLogger.ui.debugOnly("   匿名密钥: 已配置")
         
         let endpoint = config.url.appendingPathComponent("auth/v1/signup")
         SkyBridgeLogger.ui.debugOnly("🌐 [SupabaseService] 请求端点: \(endpoint.absoluteString)")
@@ -533,8 +818,8 @@ public final class SupabaseService: BaseManager {
         
         SkyBridgeLogger.ui.debugOnly("🔑 [SupabaseService] 请求头设置完成")
         SkyBridgeLogger.ui.debugOnly("   Content-Type: application/json")
-        SkyBridgeLogger.ui.debugOnly("   Authorization: Bearer \(String(config.anonKey.prefix(10)))...")
-        SkyBridgeLogger.ui.debugOnly("   apikey: \(String(config.anonKey.prefix(10)))...")
+        SkyBridgeLogger.ui.debugOnly("   Authorization: Bearer <redacted>")
+        SkyBridgeLogger.ui.debugOnly("   apikey: <redacted>")
         
         var payload: [String: Any] = [
             "email": email,
@@ -544,6 +829,11 @@ public final class SupabaseService: BaseManager {
         if let metadata = metadata {
             payload["data"] = metadata
         }
+        if let redirectTo {
+            payload["email_redirect_to"] = redirectTo.absoluteString
+            payload["redirect_to"] = redirectTo.absoluteString
+        }
+        Self.attachCaptchaToken(captchaToken, to: &payload)
         
         SkyBridgeLogger.ui.debugOnly("📦 [SupabaseService] 请求载荷: \(String(describing: payload))")
         
@@ -563,11 +853,7 @@ public final class SupabaseService: BaseManager {
             
             SkyBridgeLogger.ui.debugOnly("📡 [SupabaseService] 收到响应")
             SkyBridgeLogger.ui.debugOnly("   状态码: \(((response as? HTTPURLResponse)?.statusCode ?? 0))")
-            SkyBridgeLogger.ui.debugOnly("   响应头: \(String(describing: (response as? HTTPURLResponse)?.allHeaderFields ?? [:]))")
-            
-            if let responseString = String(data: respData, encoding: .utf8) {
-                SkyBridgeLogger.ui.debugOnly("📄 [SupabaseService] 响应内容: \(responseString)")
-            }
+            SkyBridgeLogger.ui.debugOnly("   \(Self.maskedResponseSummary(respData))")
             
             guard let httpResponse = response as? HTTPURLResponse else {
                 SkyBridgeLogger.ui.error("❌ [SupabaseService] 无效的HTTP响应")
@@ -583,28 +869,11 @@ public final class SupabaseService: BaseManager {
                 if let authResponse = try? JSONDecoder().decode(SupabaseAuthResponse.self, from: respData),
                    !authResponse.accessToken.isEmpty,
                    !authResponse.user.id.isEmpty {
-                    let preferredDisplayName =
-                        authResponse.user.preferredDisplayName
-                        ?? authResponse.user.email
-                        ?? authResponse.user.phone
-                        ?? "用户"
-
                     SkyBridgeLogger.ui.debugOnly("✅ [SupabaseService] 注册返回会话（无需邮箱验证）")
                     SkyBridgeLogger.ui.debugOnly("   用户ID: \(authResponse.user.id)")
                     SkyBridgeLogger.ui.debugOnly("   邮箱: \(authResponse.user.email ?? "无")")
 
-                    return AuthSession(
-                        accessToken: authResponse.accessToken,
-                        refreshToken: authResponse.refreshToken,
-                        userIdentifier: authResponse.user.id,
-                        nebulaId: authResponse.user.preferredNebulaId,
-                        displayName: preferredDisplayName,
-                        avatarURL: Self.normalizedRemoteAssetURL(
-                            authResponse.user.preferredAvatarURLRaw,
-                            baseURL: config.url
-                        ),
-                        issuedAt: Date()
-                    )
+                    return authSession(from: authResponse, baseURL: config.url)
                 }
 
                 // 尝试解析注册响应（需要邮箱验证，access_token 缺失）
@@ -654,10 +923,8 @@ public final class SupabaseService: BaseManager {
     }
     
  /// 重置密码
-    public func resetPassword(email: String) async throws {
-        guard let config = configuration else {
-            throw SupabaseError.configurationMissing
-        }
+    public func resetPassword(email: String, redirectTo: URL? = nil, captchaToken: String? = nil) async throws {
+        let config = try resolvedConfiguration()
         
         let endpoint = config.url.appendingPathComponent("auth/v1/recover")
         var request = URLRequest(url: endpoint)
@@ -666,24 +933,281 @@ public final class SupabaseService: BaseManager {
         request.setValue("Bearer \(config.anonKey)", forHTTPHeaderField: "Authorization")
         request.setValue(config.anonKey, forHTTPHeaderField: "apikey")  // 添加 apikey 头
         
-        let payload = [
+        var payload: [String: Any] = [
             "email": email
         ]
+        if let redirectTo {
+            payload["redirect_to"] = redirectTo.absoluteString
+            payload["email_redirect_to"] = redirectTo.absoluteString
+        }
+        Self.attachCaptchaToken(captchaToken, to: &payload)
         
         do {
             request.httpBody = try JSONSerialization.data(withJSONObject: payload)
-            let (_, response) = try await urlSession.data(for: request)
-            
-            if let httpResponse = response as? HTTPURLResponse,
-               httpResponse.statusCode != 200 {
-                throw SupabaseError.authenticationFailed("重置密码失败")
+            let (data, response) = try await urlSession.data(for: request)
+            _ = try validatedHTTPResponse(response, body: data)
+        } catch let error as SupabaseError {
+            throw error
+        } catch {
+            throw SupabaseError.networkError(error)
+        }
+    }
+
+    public func verifyEmailAuthCallback(
+        tokenHash: String,
+        type: EmailAuthCallbackType
+    ) async throws -> AuthSession {
+        let config = try resolvedConfiguration()
+
+        let endpoint = config.url.appendingPathComponent("auth/v1/verify")
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(config.anonKey)", forHTTPHeaderField: "Authorization")
+        request.setValue(config.anonKey, forHTTPHeaderField: "apikey")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "token_hash": tokenHash,
+            "type": type.rawValue
+        ])
+
+        return try await performAuthRequest(request)
+    }
+
+    public func sessionFromCallbackTokens(
+        accessToken: String,
+        refreshToken: String?
+    ) async throws -> AuthSession {
+        let config = try resolvedConfiguration()
+        let endpoint = config.url.appendingPathComponent("auth/v1/user")
+
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "GET"
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue(config.anonKey, forHTTPHeaderField: "apikey")
+
+        let (data, response) = try await urlSession.data(for: request)
+        _ = try validatedHTTPResponse(response, body: data)
+
+        guard let user = try? JSONDecoder().decode(SupabaseUser.self, from: data) else {
+            throw SupabaseError.invalidResponse
+        }
+
+        let authResponse = SupabaseAuthResponse(
+            accessToken: accessToken,
+            refreshToken: refreshToken,
+            user: user
+        )
+        return authSession(from: authResponse, baseURL: config.url)
+    }
+
+    public func updatePassword(newPassword: String, accessToken: String) async throws {
+        let config = try resolvedConfiguration()
+
+        let endpoint = config.url.appendingPathComponent("auth/v1/user")
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "PUT"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue(config.anonKey, forHTTPHeaderField: "apikey")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "password": newPassword
+        ])
+
+        let (data, response) = try await urlSession.data(for: request)
+        _ = try validatedHTTPResponse(response, body: data)
+    }
+
+    public func assessRegistrationRisk(
+        identifier: String,
+        identifierType: RegistrationIdentifierType,
+        deviceFingerprint: String,
+        configName: String = "default"
+    ) async throws -> RegistrationGuardDecision {
+        let config = try resolvedConfiguration()
+        let endpoint = config.url.appendingPathComponent("rest/v1/rpc/guard_registration_attempt_v1")
+        let normalizedIdentifier = Self.normalizedRegistrationIdentifier(identifier, type: identifierType)
+        let identifierHash = Self.normalizedRegistrationIdentifierHash(identifier, type: identifierType)
+
+        var request = makeAnonymousJSONRequest(url: endpoint, method: "POST", configuration: config)
+        request.httpBody = try JSONSerialization.data(
+            withJSONObject: [
+                "identifier_hash": identifierHash,
+                "identifier_type": identifierType.rawValue,
+                "raw_identifier": normalizedIdentifier,
+                "device_fingerprint": deviceFingerprint,
+                "config_name": configName
+            ]
+        )
+
+        do {
+            let (data, response) = try await urlSession.data(for: request)
+            _ = try validatedHTTPResponse(response, body: data)
+
+            if let rows = try? JSONDecoder().decode([SupabaseRegistrationGuardRow].self, from: data),
+               let row = rows.first {
+                return row.decision
             }
+
+            if let row = try? JSONDecoder().decode(SupabaseRegistrationGuardRow.self, from: data) {
+                return row.decision
+            }
+
+            throw SupabaseError.schemaMismatch("注册风控 RPC 返回格式无效")
+        } catch let error as SupabaseError {
+            if case .httpStatus(let code, let message) = error,
+               Self.isMissingRPCError(
+                statusCode: code,
+                body: message,
+                rpcName: "guard_registration_attempt_v1"
+               ) {
+                throw SupabaseError.schemaMismatch("缺少注册风控 RPC，请先应用最新 Supabase migrations")
+            }
+            throw error
+        } catch {
+            throw SupabaseError.networkError(error)
+        }
+    }
+
+    public func recordRegistrationAttempt(
+        identifier: String,
+        identifierType: RegistrationIdentifierType,
+        deviceFingerprint: String,
+        attemptType: RegistrationAttemptType,
+        success: Bool,
+        failureReason: String? = nil,
+        captchaRequired: Bool = false,
+        captchaPassed: Bool = false,
+        auditTicket: String? = nil,
+        metadata: [String: String] = [:]
+    ) async {
+        guard let config = try? resolvedConfiguration() else {
+            return
+        }
+
+        let endpoint = config.url.appendingPathComponent("rest/v1/rpc/record_registration_attempt_v1")
+        let normalizedIdentifier = Self.normalizedRegistrationIdentifier(identifier, type: identifierType)
+
+        var request = makeAnonymousJSONRequest(url: endpoint, method: "POST", configuration: config)
+        let payload: [String: Any] = [
+            "raw_identifier": normalizedIdentifier,
+            "identifier_type": identifierType.rawValue,
+            "device_fingerprint": deviceFingerprint,
+            "attempt_type": attemptType.rawValue,
+            "success": success,
+            "failure_reason": failureReason ?? NSNull(),
+            "captcha_required": captchaRequired,
+            "captcha_passed": captchaPassed,
+            "audit_ticket": auditTicket ?? NSNull(),
+            "metadata": metadata
+        ]
+        request.httpBody = try? JSONSerialization.data(withJSONObject: payload)
+
+        do {
+            let (data, response) = try await urlSession.data(for: request)
+            _ = try validatedHTTPResponse(response, body: data)
+        } catch let error as SupabaseError {
+            if case .httpStatus(let code, let message) = error,
+               (
+                code == 401 ||
+                code == 403 ||
+                Self.isMissingRPCError(
+                    statusCode: code,
+                    body: message,
+                    rpcName: "record_registration_attempt_v1"
+                )
+               ) {
+                return
+            }
+            logger.warning("注册审计远端写入失败: \(error.localizedDescription, privacy: .private)")
+        } catch {
+            logger.warning("注册审计远端写入异常: \(error.localizedDescription, privacy: .private)")
+        }
+    }
+
+    private static func attachCaptchaToken(_ captchaToken: String?, to payload: inout [String: Any]) {
+        guard let captchaToken = captchaToken?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !captchaToken.isEmpty else {
+            return
+        }
+
+        payload["gotrue_meta_security"] = [
+            "captcha_token": captchaToken
+        ]
+    }
+
+    public func revokeCurrentSession(accessToken: String, scope: String = "local") async throws {
+        guard let config = configuration else {
+            throw SupabaseError.configurationMissing
+        }
+
+        guard var components = URLComponents(
+            url: config.url.appendingPathComponent("auth/v1/logout"),
+            resolvingAgainstBaseURL: false
+        ) else {
+            throw SupabaseError.invalidResponse
+        }
+        components.queryItems = [URLQueryItem(name: "scope", value: scope)]
+        guard let endpoint = components.url else {
+            throw SupabaseError.invalidResponse
+        }
+
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue(config.anonKey, forHTTPHeaderField: "apikey")
+
+        do {
+            let (data, response) = try await urlSession.data(for: request)
+            guard let httpResponse = response as? HTTPURLResponse else {
+                throw SupabaseError.networkError(URLError(.badServerResponse))
+            }
+            guard (200...299).contains(httpResponse.statusCode) else {
+                throw SupabaseError.httpStatus(
+                    code: httpResponse.statusCode,
+                    message: String(data: data, encoding: .utf8)
+                )
+            }
+        } catch let error as SupabaseError {
+            throw error
         } catch {
             throw SupabaseError.networkError(error)
         }
     }
     
  // MARK: - 用户资料管理
+
+    public func getCurrentUserProfile(accessToken: String) async throws -> CurrentUserProfile {
+        let config = try resolvedConfiguration()
+
+        let endpoint = config.url.appendingPathComponent("auth/v1/user")
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "GET"
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue(config.anonKey, forHTTPHeaderField: "apikey")
+
+        do {
+            let (data, response) = try await urlSession.data(for: request)
+            _ = try validatedHTTPResponse(response, body: data)
+
+            guard let user = try? JSONDecoder().decode(SupabaseUser.self, from: data) else {
+                throw SupabaseError.invalidResponse
+            }
+
+            return CurrentUserProfile(
+                userId: user.id,
+                email: user.email?.trimmingCharacters(in: .whitespacesAndNewlines),
+                phone: user.phone?.trimmingCharacters(in: .whitespacesAndNewlines),
+                displayName: user.preferredDisplayName,
+                phoneNumber: user.preferredPhoneNumber,
+                nebulaId: user.preferredNebulaId
+            )
+        } catch let error as SupabaseError {
+            throw error
+        } catch {
+            throw SupabaseError.networkError(error)
+        }
+    }
     
  /// 更新用户资料信息
  /// - Parameters:
@@ -1185,9 +1709,7 @@ public final class SupabaseService: BaseManager {
             
             if (200...299).contains(httpResponse.statusCode) {
                 SkyBridgeLogger.ui.debugOnly("✅ [SupabaseService] NebulaID 保存成功")
-                if let responseString = String(data: data, encoding: .utf8) {
-                    SkyBridgeLogger.ui.debugOnly("   响应内容: \(responseString)")
-                }
+                SkyBridgeLogger.ui.debugOnly("   \(Self.maskedResponseSummary(data))")
                 return true
             } else {
                 SkyBridgeLogger.ui.error("❌ [SupabaseService] NebulaID 保存失败，状态码: \(httpResponse.statusCode)")
@@ -1231,11 +1753,7 @@ public final class SupabaseService: BaseManager {
             
             SkyBridgeLogger.ui.debugOnly("📊 [SupabaseService] HTTP响应状态")
             SkyBridgeLogger.ui.debugOnly("   状态码: \(httpResponse.statusCode)")
-            SkyBridgeLogger.ui.debugOnly("   响应头: \(String(describing: httpResponse.allHeaderFields))")
-            
-            if let responseString = String(data: data, encoding: .utf8) {
-                SkyBridgeLogger.ui.debugOnly("📄 [SupabaseService] 响应内容: \(responseString)")
-            }
+            SkyBridgeLogger.ui.debugOnly("   \(Self.maskedResponseSummary(data))")
             
             if (200...299).contains(httpResponse.statusCode) {
                 SkyBridgeLogger.ui.debugOnly("✅ [SupabaseService] 请求成功，解析响应数据")
@@ -1245,26 +1763,8 @@ public final class SupabaseService: BaseManager {
                     SkyBridgeLogger.ui.debugOnly("✅ [SupabaseService] 响应解析成功")
                     SkyBridgeLogger.ui.debugOnly("   用户ID: \(authResponse.user.id)")
                     SkyBridgeLogger.ui.debugOnly("   邮箱: \(authResponse.user.email ?? "无")")
-                    SkyBridgeLogger.ui.debugOnly("   访问令牌: \(String(authResponse.accessToken.prefix(10)))...")
 
-                    let preferredDisplayName =
-                        authResponse.user.preferredDisplayName
-                        ?? authResponse.user.email
-                        ?? authResponse.user.phone
-                        ?? "用户"
-                    
-                    return AuthSession(
-                        accessToken: authResponse.accessToken,
-                        refreshToken: authResponse.refreshToken,
-                        userIdentifier: authResponse.user.id,
-                        nebulaId: authResponse.user.preferredNebulaId,
-                        displayName: preferredDisplayName,
-                        avatarURL: Self.normalizedRemoteAssetURL(
-                            authResponse.user.preferredAvatarURLRaw,
-                            baseURL: config.url
-                        ),
-                        issuedAt: Date()
-                    )
+                    return authSession(from: authResponse, baseURL: config.url)
                 } catch {
                     SkyBridgeLogger.ui.error("❌ [SupabaseService] 响应解析失败: \(error.localizedDescription, privacy: .private)")
                     throw SupabaseError.invalidResponse
@@ -1377,28 +1877,34 @@ private struct SupabaseUser: Codable {
         case userMetadata = "user_metadata"
     }
 
-    fileprivate var preferredDisplayName: String? {
-        func read(_ key: String) -> String? {
-            guard let raw = userMetadata?[key]?.value as? String else { return nil }
-            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.isEmpty ? nil : trimmed
-        }
+    fileprivate func metadataString(for key: String) -> String? {
+        guard let raw = userMetadata?[key]?.value as? String else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
 
+    fileprivate var preferredDisplayName: String? {
         // Supabase user_metadata keys (cross-platform parity):
         // - display_name (SkyBridge primary)
         // - full_name / name (OIDC common)
-        return read("display_name") ?? read("full_name") ?? read("name")
+        return metadataString(for: "display_name")
+            ?? metadataString(for: "full_name")
+            ?? metadataString(for: "name")
     }
 
     fileprivate var preferredNebulaId: String? {
-        let raw = (userMetadata?["nebula_id"]?.value as? String) ?? (userMetadata?["nebulaId"]?.value as? String)
+        let raw = metadataString(for: "nebula_id") ?? metadataString(for: "nebulaId")
         return NebulaIdentityContract.normalizedNebulaId(raw)
     }
 
     fileprivate var preferredAvatarURLRaw: String? {
-        let raw = (userMetadata?["avatar_url"]?.value as? String) ?? (userMetadata?["avatarUrl"]?.value as? String)
+        let raw = metadataString(for: "avatar_url") ?? metadataString(for: "avatarUrl")
         let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines)
         return (trimmed?.isEmpty == false) ? trimmed : nil
+    }
+
+    fileprivate var preferredPhoneNumber: String? {
+        metadataString(for: "phone_number")
     }
 }
 
@@ -1411,6 +1917,32 @@ private struct SupabaseErrorResponse: Codable {
         case message
         case errorDescription = "error_description"
         case hint
+    }
+}
+
+private struct SupabaseRegistrationGuardRow: Codable {
+    let allowed: Bool
+    let requiresCaptcha: Bool
+    let reason: String?
+    let retryAfter: Int?
+    let auditTicket: String?
+
+    enum CodingKeys: String, CodingKey {
+        case allowed
+        case requiresCaptcha = "requires_captcha"
+        case reason
+        case retryAfter = "retry_after"
+        case auditTicket = "audit_ticket"
+    }
+
+    var decision: SupabaseService.RegistrationGuardDecision {
+        SupabaseService.RegistrationGuardDecision(
+            allowed: allowed,
+            requiresCaptcha: requiresCaptcha,
+            reason: reason,
+            retryAfter: retryAfter,
+            auditTicket: auditTicket
+        )
     }
 }
 

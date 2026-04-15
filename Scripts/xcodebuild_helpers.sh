@@ -4,6 +4,15 @@ skybridge_default_macos_destination() {
     printf '%s\n' "${SKYBRIDGE_MACOS_BUILD_DESTINATION:-platform=macOS,arch=arm64}"
 }
 
+skybridge_default_xcode_derived_data_path() {
+    if [[ -n "${SKYBRIDGE_XCODE_DERIVED_DATA_PATH:-}" ]]; then
+        printf '%s\n' "${SKYBRIDGE_XCODE_DERIVED_DATA_PATH}"
+        return 0
+    fi
+
+    printf '%s\n' "${HOME}/Library/Developer/Xcode/DerivedData/SkyBridgeCompassPro-Release"
+}
+
 skybridge_filter_xcodebuild_output() {
     awk '
         BEGIN {

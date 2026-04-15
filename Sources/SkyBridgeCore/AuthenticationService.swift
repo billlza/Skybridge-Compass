@@ -36,6 +36,7 @@ import Combine
     public enum AuthenticationError: LocalizedError {
         case configurationMissing
         case invalidResponse
+        case invalidAppleIdentityToken
         case nebulaMFARequired(String)
         case server(String)
         case storage(OSStatus)
@@ -43,9 +44,11 @@ import Combine
         public var errorDescription: String? {
             switch self {
             case .configurationMissing:
-                return "未配置真实登录接口，请先设置 SKYBRIDGE_AUTH_BASEURL 或在应用启动时提供配置"
+                return "认证主链未就绪，请检查 Supabase 配置或显式提供 SKYBRIDGE_AUTH_BASEURL"
             case .invalidResponse:
                 return "服务器返回的数据格式无效"
+            case .invalidAppleIdentityToken:
+                return "Apple 身份令牌无效"
             case .nebulaMFARequired:
                 return "需要多因素认证验证"
             case .server(let message):
@@ -54,6 +57,12 @@ import Combine
                 return "钥匙串存储失败，状态码 \(status)"
             }
         }
+    }
+
+    public enum SignOutOutcome: Sendable, Equatable {
+        case localOnly
+        case revokedRemotely
+        case localOnlyAfterRemoteFailure(String)
     }
 
     public static let shared = AuthenticationService()
@@ -179,21 +188,39 @@ import Combine
     }
 
  /// 将 Sign in with Apple 返回的身份凭据交给后端换取 SkyBridge 会话。
-    public func authenticateWithApple(identityToken: Data,
-                                       authorizationCode: Data?) async throws -> AuthSession {
+    public func authenticateWithApple(
+        identityToken: Data,
+        authorizationCode: Data?,
+        rawNonce: String?,
+        captchaToken: String? = nil
+    ) async throws -> AuthSession {
  // 检查是否使用Supabase模式
         if isSupabaseMode {
-            let session = try await SupabaseService.shared.signInWithApple(
-                identityToken: identityToken.base64EncodedString(),
-                nonce: nil
-            )
+            guard let identityTokenString = Self.decodeAppleIdentityToken(identityToken) else {
+                throw AuthenticationError.invalidAppleIdentityToken
+            }
+            let session: AuthSession
+            do {
+                session = try await SupabaseService.shared.signInWithApple(
+                    identityToken: identityTokenString,
+                    nonce: rawNonce,
+                    captchaToken: captchaToken
+                )
+            } catch {
+                throw AuthenticationError.server(
+                    SupabaseService.userMessage(for: error) ?? error.localizedDescription
+                )
+            }
             try store(session: session)
             sessionSubject.send(session)
             return session
         }
 
-        let payload = ApplePayload(identityToken: identityToken.base64EncodedString(),
-                                   authorizationCode: authorizationCode?.base64EncodedString())
+        let payload = ApplePayload(
+            identityToken: identityToken.base64EncodedString(),
+            authorizationCode: authorizationCode?.base64EncodedString(),
+            nonce: rawNonce
+        )
         return try await performRequest(endpoint: configuration?.appleEndpoint, payload: payload)
     }
 
@@ -236,10 +263,19 @@ import Combine
     }
 
  /// 发送手机验证码
-    public func sendPhoneVerificationCode(to phoneNumber: String) async throws -> String {
+    public func sendPhoneVerificationCode(to phoneNumber: String, captchaToken: String? = nil) async throws -> String {
  // 检查是否使用Supabase模式
         if isSupabaseMode {
-            try await SupabaseService.shared.sendPhoneOTP(phone: Self.normalizedPhoneForSupabase(phoneNumber))
+            do {
+                try await SupabaseService.shared.sendPhoneOTP(
+                    phone: Self.normalizedPhoneForSupabase(phoneNumber),
+                    captchaToken: captchaToken
+                )
+            } catch {
+                throw AuthenticationError.server(
+                    SupabaseService.userMessage(for: error) ?? error.localizedDescription
+                )
+            }
             return "验证码已通过Supabase发送"
         }
 
@@ -271,10 +307,17 @@ import Combine
     public func loginPhone(number: String, code: String) async throws -> AuthSession {
  // 检查是否使用Supabase模式
         if isSupabaseMode {
-            let session = try await SupabaseService.shared.signInWithPhone(
-                phone: Self.normalizedPhoneForSupabase(number),
-                token: code
-            )
+            let session: AuthSession
+            do {
+                session = try await SupabaseService.shared.signInWithPhone(
+                    phone: Self.normalizedPhoneForSupabase(number),
+                    token: code
+                )
+            } catch {
+                throw AuthenticationError.server(
+                    SupabaseService.userMessage(for: error) ?? error.localizedDescription
+                )
+            }
             try store(session: session)
             sessionSubject.send(session)
             return session
@@ -289,10 +332,21 @@ import Combine
  /// - email: 邮箱地址
  /// - password: 密码
  /// - Returns: 认证会话
-    public func loginEmail(email: String, password: String) async throws -> AuthSession {
+    public func loginEmail(email: String, password: String, captchaToken: String? = nil) async throws -> AuthSession {
  // 检查是否使用Supabase模式
         if isSupabaseMode {
-            let session = try await SupabaseService.shared.signInWithEmail(email: email, password: password)
+            let session: AuthSession
+            do {
+                session = try await SupabaseService.shared.signInWithEmail(
+                    email: email,
+                    password: password,
+                    captchaToken: captchaToken
+                )
+            } catch {
+                throw AuthenticationError.server(
+                    SupabaseService.userMessage(for: error) ?? error.localizedDescription
+                )
+            }
  // 确保会话被正确存储和发布
             try store(session: session)
             sessionSubject.send(session)
@@ -317,14 +371,62 @@ import Combine
 
  /// 主动注销并清除钥匙串中的会话信息。
     public func signOut() {
- // 在主 actor 上清理状态并删除钥匙串项
-        self.sessionSubject.send(nil)
-        KeychainManager.shared.deleteAuthSession()
+        Task { @MainActor in
+            _ = await self.signOutAndWait()
+        }
+    }
+
+    @discardableResult
+    public func signOutAndWait() async -> SignOutOutcome {
+        let currentSession = sessionSubject.value
+        guard let currentSession else {
+            await clearLocalSessionState()
+            return .localOnly
+        }
+
+        guard shouldAttemptRemoteSessionRevocation(currentSession) else {
+            await clearLocalSessionState()
+            return .localOnly
+        }
+
+        do {
+            try await revokeRemoteSession(currentSession)
+            await clearLocalSessionState()
+            return .revokedRemotely
+        } catch {
+            logger.warning("AuthenticationService 远端会话撤销失败: \(error.localizedDescription, privacy: .private)")
+            await clearLocalSessionState()
+            return .localOnlyAfterRemoteFailure(error.localizedDescription)
+        }
     }
 
     /// 持久化并广播新的会话（例如刷新访问令牌后）。
     public func updateSession(_ session: AuthSession) throws {
         try store(session: session)
+        sessionSubject.send(session)
+    }
+
+    /// 进入游客模式时，仅广播内存态 session，不写入钥匙串，避免根认证状态与局部 UI 分叉。
+    public func activateGuestSession(displayName: String = "游客用户") {
+        let guestSession = AuthSession(
+            accessToken: "guest_token",
+            refreshToken: nil,
+            userIdentifier: "guest_user",
+            displayName: displayName,
+            issuedAt: Date()
+        )
+
+        KeychainManager.shared.deleteAuthSession()
+        sessionSubject.send(guestSession)
+        Task {
+            await TenantAccessController.shared.clearAuthentication()
+        }
+    }
+
+    /// 在启动阶段交互式解锁 Keychain 后补读一次持久化 session，避免首次静默读取失败后永久丢失登录态。
+    public func reloadPersistedSessionIfNeeded() {
+        guard sessionSubject.value == nil else { return }
+        guard let session = try? loadSessionFromKeychain() else { return }
         sessionSubject.send(session)
     }
 
@@ -408,30 +510,51 @@ import Combine
         return nil
     }
 
+    private static func bundledSupabaseURL() -> URL? {
+        if let raw = ProcessInfo.processInfo.environment["SUPABASE_URL"],
+           let url = URL(string: raw) {
+            return url
+        }
+
+        if let raw = Bundle.main.object(forInfoDictionaryKey: "SUPABASE_URL") as? String,
+           let url = URL(string: raw) {
+            return url
+        }
+
+        return nil
+    }
+
+    private static func looksLikeSupabaseAuthHost(_ url: URL) -> Bool {
+        if let bundledSupabaseURL = bundledSupabaseURL(),
+           bundledSupabaseURL.host == url.host {
+            return true
+        }
+
+        guard let host = url.host?.lowercased() else { return false }
+        return host.hasSuffix(".supabase.co") || host.contains("supabase")
+    }
+
     private static func loadConfigurationFromEnvironment() -> Configuration? {
- // 1. 优先尝试从环境变量读取
+ // 1. 优先尝试从环境变量读取显式 legacy auth base
         if let base = ProcessInfo.processInfo.environment["SKYBRIDGE_AUTH_BASEURL"],
-           let url = URL(string: base) {
+           let url = URL(string: base),
+           !looksLikeSupabaseAuthHost(url) {
             return Configuration(baseURL: url)
         }
 
- // 2. 尝试从 Info.plist 读取 (便于打包配置)
+ // 2. 尝试从 Info.plist 读取显式 legacy auth base
         if let base = Bundle.main.object(forInfoDictionaryKey: "SKYBRIDGE_AUTH_BASEURL") as? String,
-           let url = URL(string: base) {
+           let url = URL(string: base),
+           !looksLikeSupabaseAuthHost(url) {
             return Configuration(baseURL: url)
         }
 
- // 3. 默认 Fallback 配置 - 解决重启后环境变量丢失导致无法登录的问题
- // 注意：生产环境应确保使用正确的 API 地址
+ // 3. Debug 下保留本地开发 fallback；Release 默认 fail-closed，避免误打到不存在的 legacy 接口
         #if DEBUG
-        let defaultBase = "http://localhost:8080"
-        #else
-        let defaultBase = "https://api.skybridge.com"
-        #endif
-
-        if let url = URL(string: defaultBase) {
+        if let url = URL(string: "http://localhost:8080") {
             return Configuration(baseURL: url)
         }
+        #endif
 
         return nil
     }
@@ -487,6 +610,48 @@ import Combine
             .lowercased() ?? ""
         return raw == "1" || raw == "true" || raw == "yes"
     }
+
+    nonisolated static func decodeAppleIdentityToken(_ data: Data) -> String? {
+        guard let token = String(data: data, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !token.isEmpty else {
+            return nil
+        }
+        return token
+    }
+
+    private func shouldAttemptRemoteSessionRevocation(_ session: AuthSession) -> Bool {
+        let accessToken = session.accessToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        if accessToken.isEmpty || accessToken == "guest_token" || accessToken == "pending_verification" {
+            return false
+        }
+        return true
+    }
+
+    private func revokeRemoteSession(_ session: AuthSession) async throws {
+        if isSupabaseMode || SupabaseService.shared.isSupabaseAccessToken(session.accessToken) {
+            var accessToken = session.accessToken
+            if shouldRefreshAccessToken(accessToken, skewSeconds: 0),
+               let refreshToken = session.refreshToken?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !refreshToken.isEmpty,
+               let refreshed = try? await SupabaseService.shared.refreshAccessToken(refreshToken) {
+                accessToken = refreshed.accessToken
+            }
+            try await SupabaseService.shared.revokeCurrentSession(accessToken: accessToken)
+            return
+        }
+
+        try await NebulaService.shared.revokeCurrentSession(
+            accessToken: session.accessToken,
+            refreshToken: session.refreshToken
+        )
+    }
+
+    private func clearLocalSessionState() async {
+        sessionSubject.send(nil)
+        KeychainManager.shared.deleteAuthSession()
+        await TenantAccessController.shared.clearAuthentication()
+    }
 }
 
 private struct AuthResponse: Decodable {
@@ -512,6 +677,7 @@ private struct ServerMessage: Decodable {
 private struct ApplePayload: Encodable {
     let identityToken: String
     let authorizationCode: String?
+    let nonce: String?
 }
 
 private struct NebulaPayload: Encodable {

@@ -18,6 +18,10 @@ public final class SupabaseConfiguration: ObservableObject {
  // MARK: - 私有属性
     
     private var currentConfiguration: SupabaseService.Configuration?
+
+    public var resolvedConfiguration: SupabaseService.Configuration? {
+        currentConfiguration
+    }
     
  // MARK: - 初始化
     
@@ -28,7 +32,7 @@ public final class SupabaseConfiguration: ObservableObject {
     
  // MARK: - 公共方法
     
- /// 尝试从环境变量自动配置Supabase
+ /// 尝试从可用配置源自动配置 Supabase（Keychain / 环境变量 / Info.plist / 资源文件）
     public func attemptAutoConfiguration() {
  // 首先尝试从 Keychain 加载
         SkyBridgeLogger.ui.debugOnly("🔍 [SupabaseConfiguration] 尝试从 Keychain 加载...")
@@ -46,12 +50,12 @@ public final class SupabaseConfiguration: ObservableObject {
         SkyBridgeLogger.ui.debugOnly("   SUPABASE_URL: \(urlEnv ?? "未设置")")
         SkyBridgeLogger.ui.debugOnly("   SUPABASE_ANON_KEY: \(keyEnv != nil ? "已设置" : "未设置")")
         
- // 使用 if-let 绑定，config 在闭包中使用
+ // 其次检查环境变量 / 包内配置
         if let config = SupabaseService.Configuration.fromEnvironment() {
-            SkyBridgeLogger.ui.debugOnly("✅ [SupabaseConfiguration] 从环境变量加载配置成功")
-            configureSupabase(with: config)  // config 被使用
+            SkyBridgeLogger.ui.debugOnly("✅ [SupabaseConfiguration] 从可用配置源加载配置成功")
+            configureSupabase(with: config)
         } else {
-            SkyBridgeLogger.ui.debugOnly("⚠️ [SupabaseConfiguration] Keychain 和环境变量都未配置")
+            SkyBridgeLogger.ui.debugOnly("⚠️ [SupabaseConfiguration] Keychain、环境变量与包内配置都未命中")
             SkyBridgeLogger.ui.debugOnly("   请在应用中配置 Supabase 或设置环境变量")
  // 未配置：保持离线状态，等待用户显式配置
             configurationError = "未找到 Supabase 配置，请在设置中配置"
@@ -64,23 +68,16 @@ public final class SupabaseConfiguration: ObservableObject {
         do {
             let keychain = KeychainManager.shared
             let config = try keychain.retrieveSupabaseConfig()
-            
- // 验证配置不为空
-            guard !config.url.isEmpty, !config.anonKey.isEmpty else {
-                SkyBridgeLogger.ui.debugOnly("⚠️ Keychain 中的配置不完整")
-                return nil
-            }
-            
- // 创建 URL
-            guard let url = URL(string: config.url) else {
-                SkyBridgeLogger.ui.debugOnly("⚠️ 无效的 Supabase URL: \(config.url)")
-                return nil
-            }
-            
-            return SupabaseService.Configuration(
-                url: url,
+
+            guard let validatedConfig = validatedConfiguration(
+                urlString: config.url,
                 anonKey: config.anonKey
-            )
+            ) else {
+                SkyBridgeLogger.ui.debugOnly("⚠️ Keychain 中的 Supabase 配置无效或仍为占位值")
+                return nil
+            }
+
+            return validatedConfig
         } catch {
             SkyBridgeLogger.ui.debugOnly("⚠️ 从 Keychain 加载失败: \(error.localizedDescription)")
             return nil
@@ -89,6 +86,17 @@ public final class SupabaseConfiguration: ObservableObject {
     
  /// 手动配置Supabase
     public func configureSupabase(with configuration: SupabaseService.Configuration) {
+        guard validatedConfiguration(
+            urlString: configuration.url.absoluteString,
+            anonKey: configuration.anonKey
+        ) != nil else {
+            currentConfiguration = nil
+            isConfigured = false
+            configurationError = "Supabase 配置无效（需 https 且不能为占位值）"
+            SkyBridgeLogger.ui.error("❌ Supabase 配置被拒绝：无效或占位配置")
+            return
+        }
+
         currentConfiguration = configuration
         
  // 启用AuthenticationService的Supabase模式
@@ -99,7 +107,17 @@ public final class SupabaseConfiguration: ObservableObject {
         
         SkyBridgeLogger.ui.debugOnly("✅ Supabase已配置成功")
         SkyBridgeLogger.ui.debugOnly("   URL: \(configuration.url)")
-        SkyBridgeLogger.ui.debugOnly("   匿名密钥: \(String(configuration.anonKey.prefix(10)))...")
+        SkyBridgeLogger.ui.debugOnly("   匿名密钥: 已配置")
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let isHealthy = await self.validateConfiguration()
+            if isHealthy {
+                SkyBridgeLogger.ui.debugOnly("✅ [SupabaseConfiguration] Auth 健康检查通过")
+            } else {
+                SkyBridgeLogger.ui.error("⚠️ [SupabaseConfiguration] Auth 健康检查失败: \(self.configurationError ?? "未知错误", privacy: .private)")
+            }
+        }
     }
     
  /// 获取配置指南文本（用于 UI 显示）
@@ -196,5 +214,43 @@ public final class SupabaseConfiguration: ObservableObject {
         } else {
             SkyBridgeLogger.ui.debugOnly("✅ 所有必需的Supabase环境变量已设置")
         }
+    }
+
+    private func validatedConfiguration(
+        urlString: String,
+        anonKey: String
+    ) -> SupabaseService.Configuration? {
+        let trimmedURL = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedAnonKey = anonKey.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !trimmedURL.isEmpty, !trimmedAnonKey.isEmpty else {
+            return nil
+        }
+
+        let normalizedURL = trimmedURL.lowercased()
+        let normalizedAnonKey = trimmedAnonKey.lowercased()
+        if normalizedURL.contains("your-project.supabase.co") || normalizedAnonKey == "your-anon-key" {
+            return nil
+        }
+
+        guard let url = URL(string: trimmedURL),
+              let scheme = url.scheme?.lowercased(),
+              let host = url.host?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !host.isEmpty else {
+            return nil
+        }
+
+        if scheme != "https" {
+#if DEBUG
+            let isLocalHost = host == "localhost" || host == "127.0.0.1"
+            guard scheme == "http", isLocalHost else {
+                return nil
+            }
+#else
+            return nil
+#endif
+        }
+
+        return SupabaseService.Configuration(url: url, anonKey: trimmedAnonKey)
     }
 }

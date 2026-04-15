@@ -31,6 +31,7 @@ targets:
         NEBULA_BASE_URL: "https://nebula.skybridge.com"
         NEBULA_CLIENT_ID: "skybridge_compass_ios"
         NEBULA_CLIENT_SECRET: ""
+        SKYBRIDGE_ENABLE_APPLE_SIGN_IN: true
         NSSupportsLiveActivities: true
         NSLocalNetworkUsageDescription: "SkyBridge 需要访问本地网络以发现和连接附近设备。"
         NSBonjourServices:
@@ -103,6 +104,11 @@ targets:
         CLANG_WARN_INCOMPLETE_UMBRELLA: NO
         # Auto-enable Apple PQC compile gate only when building against iOS 26 SDK.
         # This keeps older SDK builds portable while allowing 26.x builds to use native PQC.
+      configs:
+        Debug:
+          CODE_SIGN_ENTITLEMENTS: SkyBridgeCompass-iOSDebug.entitlements
+        Release:
+          CODE_SIGN_ENTITLEMENTS: SkyBridgeCompass-iOSRelease.entitlements
 
   SkyBridgeCompass-Widgets:
     type: app-extension

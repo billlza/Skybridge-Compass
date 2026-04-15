@@ -80,8 +80,10 @@ function resign_embedded_code() {
 function select_identity() {
   local dev_id
   local apple_dev
-  dev_id=$(security find-identity -v -p codesigning | awk -F '"' '/Developer ID Application/ {print $2; exit}')
-  apple_dev=$(security find-identity -v -p codesigning | awk -F '"' '/Apple Development/ {print $2; exit}')
+  local identities
+  identities="$(security find-identity -v -p codesigning 2>/dev/null || true)"
+  dev_id="$(printf '%s\n' "${identities}" | awk -F '"' '/Developer ID Application/ {print $2; exit}')"
+  apple_dev="$(printf '%s\n' "${identities}" | awk -F '"' '/Apple Development/ {print $2; exit}')"
   if [[ -n "${dev_id}" ]]; then
     echo "${dev_id}"
   elif [[ -n "${apple_dev}" ]]; then
@@ -89,6 +91,109 @@ function select_identity() {
   else
     echo ""
   fi
+}
+
+function is_release_distribution_context() {
+  [[ "${PACKAGE_CONTEXT}" == "release_dmg" ]]
+}
+
+function require_release_distribution_identity() {
+  if ! is_release_distribution_context; then
+    return 0
+  fi
+
+  if [[ -z "${SIGN_IDENTITY}" || "${SIGN_IDENTITY}" == "-" || "${SIGN_IDENTITY}" != Developer\ ID\ Application:* ]]; then
+    echo "错误：release_dmg 打包必须使用有效的 Developer ID Application 证书，当前签名身份：${SIGN_IDENTITY:-(missing)}" >&2
+    exit 1
+  fi
+}
+
+function resolve_macos_provisionprofile() {
+  local bundle_identifier="$1"
+  local entitlements_path="${2:-}"
+  local profile_dir="${HOME}/Library/MobileDevice/Provisioning Profiles"
+  local team_id
+  team_id="$(printf '%s' "${SIGN_IDENTITY}" | sed -n 's/.*(\([^)]*\)).*/\1/p')"
+  local candidate
+  local fallback_candidate=""
+
+  if [[ -n "${MACOS_PROVISION_PROFILE_PATH:-}" ]]; then
+    [[ -f "${MACOS_PROVISION_PROFILE_PATH}" ]] || {
+      echo "错误：指定的 macOS provisioning profile 不存在：${MACOS_PROVISION_PROFILE_PATH}" >&2
+      exit 1
+    }
+    echo "${MACOS_PROVISION_PROFILE_PATH}"
+    return 0
+  fi
+
+  [[ -d "${profile_dir}" ]] || return 1
+
+  while IFS= read -r -d '' candidate; do
+    if security cms -D -i "${candidate}" 2>/dev/null | python3 -c '
+import plistlib
+import sys
+
+bundle_id = sys.argv[1].strip()
+team_id = sys.argv[2].strip()
+payload = sys.stdin.buffer.read()
+if not payload:
+    raise SystemExit(1)
+
+profile = plistlib.loads(payload)
+platforms = profile.get("Platform", [])
+entitlements = profile.get("Entitlements", {})
+app_id = entitlements.get("com.apple.application-identifier", "")
+profile_team = (profile.get("TeamIdentifier") or [""])[0]
+
+if "OSX" not in platforms:
+    raise SystemExit(1)
+if app_id != f"{team_id}.{bundle_id}":
+    raise SystemExit(1)
+if profile_team != team_id:
+    raise SystemExit(1)
+' "${bundle_identifier}" "${team_id}"
+    then
+      if [[ -z "${fallback_candidate}" ]]; then
+        fallback_candidate="${candidate}"
+      fi
+
+      if [[ -z "${entitlements_path}" ]] || skybridge_profile_supports_requested_restricted_entitlements "${candidate}" "${entitlements_path}"; then
+        echo "${candidate}"
+        return 0
+      fi
+    fi
+  done < <(find "${profile_dir}" -type f -name "*.provisionprofile" -print0)
+
+  if [[ -n "${fallback_candidate}" ]]; then
+    echo "${fallback_candidate}"
+    return 0
+  fi
+
+  return 1
+}
+
+function embed_macos_provisionprofile_if_available() {
+  local bundle_identifier="$1"
+  local entitlements_path="${2:-}"
+  local destination="${CONTENTS_DIR}/embedded.provisionprofile"
+  local resolved_profile=""
+
+  SKYBRIDGE_RESOLVED_MACOS_PROVISIONPROFILE=""
+
+  if resolved_profile="$(resolve_macos_provisionprofile "${bundle_identifier}" "${entitlements_path}")"; then
+    SKYBRIDGE_RESOLVED_MACOS_PROVISIONPROFILE="${resolved_profile}"
+    cp "${resolved_profile}" "${destination}"
+    log "已嵌入 macOS provisioning profile: ${resolved_profile}"
+    return 0
+  fi
+
+  if is_release_distribution_context; then
+    echo "错误：release_dmg 打包未找到匹配的 macOS Developer ID provisioning profile。" >&2
+    echo "请先安装 profile 到 ~/Library/MobileDevice/Provisioning Profiles/，或设置 SKYBRIDGE_MACOS_PROVISIONPROFILE_PATH。" >&2
+    exit 1
+  fi
+
+  log "未找到匹配的 macOS provisioning profile，继续生成不含 embedded.provisionprofile 的开发包"
 }
 
 function compile_icon_composer_assets() {
@@ -204,8 +309,10 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 source "${ROOT_DIR}/Scripts/apple_pqc_sdk_probe.sh"
 source "${ROOT_DIR}/Scripts/package_build_policy.sh"
+source "${ROOT_DIR}/Scripts/signing_entitlements_helpers.sh"
 source "${ROOT_DIR}/Scripts/xcodebuild_helpers.sh"
-XCODE_BUILD_DIR="${ROOT_DIR}/.build/xcode/Build/Products/Release"
+XCODE_DERIVED_DATA_PATH="${SKYBRIDGE_XCODE_DERIVED_DATA_PATH:-$(skybridge_default_xcode_derived_data_path)}"
+XCODE_BUILD_DIR="${XCODE_DERIVED_DATA_PATH}/Build/Products/Release"
 SWIFTPM_RELEASE_BUILD_DIR="${ROOT_DIR}/.build/arm64-apple-macosx/release"
 BUILD_DIR="${XCODE_BUILD_DIR}"
 APP_NAME="SkyBridge Compass Pro.app"
@@ -217,6 +324,9 @@ FW_DIR="${CONTENTS_DIR}/Frameworks"
 LEGACY_FW_LINK="${CONTENTS_DIR}/lib"
 SIGN_IDENTITY="${IDENTITY:-$(select_identity)}"
 APP_PACKAGING_ENTITLEMENTS="${ROOT_DIR}/Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.packaging.entitlements"
+MACOS_PROVISION_PROFILE_PATH="${SKYBRIDGE_MACOS_PROVISIONPROFILE_PATH:-}"
+PACKAGING_TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/skybridge-package.XXXXXX")"
+ACTIVE_APP_PACKAGING_ENTITLEMENTS="${PACKAGING_TMP_DIR}/SkyBridgeCompassApp.packaging.entitlements"
 SKIP_BUILD="${SKIP_BUILD:-0}"
 PACKAGE_CONTEXT="${SKYBRIDGE_PACKAGE_CONTEXT:-app}"
 BUILD_DESTINATION="${BUILD_DESTINATION:-$(skybridge_default_macos_destination)}"
@@ -226,10 +336,19 @@ USE_XCODE_WORKSPACE=0
 if [[ -d "${XCODE_WORKSPACE}" ]]; then
   USE_XCODE_WORKSPACE=1
 fi
+
+cleanup_packaging_tmp() {
+  rm -rf "${PACKAGING_TMP_DIR}"
+}
+
+trap cleanup_packaging_tmp EXIT
+
 IS_ADHOC_SIGNING=0
 if [[ -z "${SIGN_IDENTITY}" || "${SIGN_IDENTITY}" == "-" ]]; then
   IS_ADHOC_SIGNING=1
 fi
+
+require_release_distribution_identity
 
 if [[ "${IS_ADHOC_SIGNING}" -eq 1 ]]; then
   log "签名模式: ad-hoc"
@@ -245,6 +364,7 @@ skybridge_assert_package_build_policy "${PACKAGE_CONTEXT}" "${BUILD_SOURCE}"
 
 if [[ "${SKIP_BUILD}" != "1" ]]; then
   log "执行 Release 构建，确保打包包含最新代码"
+  log "Xcode DerivedData 路径: ${XCODE_DERIVED_DATA_PATH}"
   cd "${ROOT_DIR}"
   skybridge_detect_apple_pqc_sdk
   log "Host macOS 版本: ${SKYBRIDGE_PQC_HOST_OS_VER:-unknown}"
@@ -269,14 +389,22 @@ if [[ "${SKIP_BUILD}" != "1" ]]; then
                -scheme SkyBridgeCompassApp \
                -configuration Release \
                -destination "${BUILD_DESTINATION}" \
-               -derivedDataPath "${ROOT_DIR}/.build/xcode" \
+               -derivedDataPath "${XCODE_DERIVED_DATA_PATH}" \
+               -skipPackageUpdates \
+               -disableAutomaticPackageResolution \
+               CODE_SIGNING_ALLOWED=NO \
+               COMPILER_INDEX_STORE_ENABLE=NO \
                build
   else
     skybridge_run_xcodebuild \
                -scheme SkyBridgeCompassApp \
                -configuration Release \
                -destination "${BUILD_DESTINATION}" \
-               -derivedDataPath "${ROOT_DIR}/.build/xcode" \
+               -derivedDataPath "${XCODE_DERIVED_DATA_PATH}" \
+               -skipPackageUpdates \
+               -disableAutomaticPackageResolution \
+               CODE_SIGNING_ALLOWED=NO \
+               COMPILER_INDEX_STORE_ENABLE=NO \
                build
   fi
   BUILD_DIR="$(select_release_build_dir)"
@@ -416,6 +544,36 @@ if /usr/libexec/PlistBuddy -c 'Print :NSMainStoryboardFile' "${INFO_PLIST_DST}" 
   /usr/libexec/PlistBuddy -c 'Delete :NSMainStoryboardFile' "${INFO_PLIST_DST}" || true
 fi
 
+BUNDLE_IDENTIFIER=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${INFO_PLIST_DST}" 2>/dev/null || true)
+if [[ -n "${BUNDLE_IDENTIFIER}" ]]; then
+  embed_macos_provisionprofile_if_available "${BUNDLE_IDENTIFIER}" "${APP_PACKAGING_ENTITLEMENTS}"
+fi
+
+skybridge_prepare_signing_entitlements \
+  "${APP_PACKAGING_ENTITLEMENTS}" \
+  "${ACTIVE_APP_PACKAGING_ENTITLEMENTS}" \
+  "${INFO_PLIST_DST}" \
+  "${SKYBRIDGE_RESOLVED_MACOS_PROVISIONPROFILE:-}"
+
+APPLE_SIGN_IN_FEATURE_FLAG="$(skybridge_read_plist_bool "${INFO_PLIST_DST}" "SKYBRIDGE_ENABLE_APPLE_SIGN_IN" 2>/dev/null || echo "unknown")"
+if [[ "${APPLE_SIGN_IN_FEATURE_FLAG}" == "1" ]]; then
+  log "Apple 登录产品开关（SKYBRIDGE_ENABLE_APPLE_SIGN_IN）：开启"
+elif [[ "${APPLE_SIGN_IN_FEATURE_FLAG}" == "0" ]]; then
+  log "Apple 登录产品开关（SKYBRIDGE_ENABLE_APPLE_SIGN_IN）：关闭"
+else
+  log "Apple 登录产品开关（SKYBRIDGE_ENABLE_APPLE_SIGN_IN）：未配置"
+fi
+
+if [[ "${SKYBRIDGE_SIGNING_EFFECTIVE_NATIVE_APPLE_SIGN_IN:-0}" == "1" ]]; then
+  log "原生 Apple 登录可用性（SKYBRIDGE_ENABLE_NATIVE_APPLE_SIGN_IN）：可用"
+else
+  log "原生 Apple 登录可用性（SKYBRIDGE_ENABLE_NATIVE_APPLE_SIGN_IN）：不可用"
+fi
+
+if [[ "${APPLE_SIGN_IN_FEATURE_FLAG}" == "1" && "${SKYBRIDGE_SIGNING_EFFECTIVE_NATIVE_APPLE_SIGN_IN:-0}" != "1" ]]; then
+  log "Apple 登录产品功能仍保持开启，但当前打包产物不具备原生 Apple Sign In entitlement；运行时应走非原生方案"
+fi
+
 # 生成 PkgInfo（现代系统可选，但保留兼容性）
 echo -n "APPL????" > "${CONTENTS_DIR}/PkgInfo"
 
@@ -496,6 +654,10 @@ if [[ -x "${HELPER_BIN_PATH}" ]]; then
   # Helper bundle 在 LaunchDaemons 目录，需显式签名，否则主 App 深度签名可能不会覆盖到它
   if [[ "${IS_ADHOC_SIGNING}" -eq 0 ]]; then
     codesign --force --sign "${SIGN_IDENTITY}" --timestamp "${HELPER_DST_DIR}" >/dev/null 2>&1 || {
+      if is_release_distribution_context; then
+        echo "错误：release_dmg 打包中 Helper 显式签名失败：${HELPER_DST_DIR}" >&2
+        exit 1
+      fi
       log "警告：Helper 显式签名失败，后续将依赖主 App 深度签名"
     }
   fi
@@ -510,20 +672,28 @@ if [[ "${IS_ADHOC_SIGNING}" -eq 0 ]]; then
   log "使用证书签名：${SIGN_IDENTITY}"
   resign_embedded_code
   codesign --force --sign "${SIGN_IDENTITY}" --options runtime --timestamp \
-    --entitlements "${APP_PACKAGING_ENTITLEMENTS}" \
+    --entitlements "${ACTIVE_APP_PACKAGING_ENTITLEMENTS}" \
     "${APP_DIR}" >/dev/null 2>&1 || {
+    if is_release_distribution_context; then
+      echo "错误：release_dmg 打包中的 Developer ID 签名失败，已停止，禁止回退 ad-hoc。" >&2
+      exit 1
+    fi
     echo "警告：证书签名失败，回退 ad-hoc 签名。" >&2
     SIGN_IDENTITY="-"
     IS_ADHOC_SIGNING=1
     resign_embedded_code
-    codesign --force --sign - --entitlements "${APP_PACKAGING_ENTITLEMENTS}" "${APP_DIR}" >/dev/null 2>&1 || {
+    codesign --force --sign - --entitlements "${ACTIVE_APP_PACKAGING_ENTITLEMENTS}" "${APP_DIR}" >/dev/null 2>&1 || {
       echo "警告：codesign 签名失败，但可在开发机上运行（未 notarize）。" >&2
     }
   }
 else
+  if is_release_distribution_context; then
+    echo "错误：release_dmg 打包禁止使用 ad-hoc 签名。" >&2
+    exit 1
+  fi
   log "未检测到可用证书，使用 ad-hoc 签名"
   resign_embedded_code
-  codesign --force --sign - --entitlements "${APP_PACKAGING_ENTITLEMENTS}" "${APP_DIR}" >/dev/null 2>&1 || {
+  codesign --force --sign - --entitlements "${ACTIVE_APP_PACKAGING_ENTITLEMENTS}" "${APP_DIR}" >/dev/null 2>&1 || {
     echo "警告：codesign 签名失败，但可在开发机上运行（未 notarize）。" >&2
   }
 fi
@@ -532,6 +702,10 @@ fi
 if codesign --verify --deep --strict --verbose=2 "${APP_DIR}" >/dev/null 2>&1; then
   log "签名验证通过"
 else
+  if is_release_distribution_context; then
+    echo "错误：release_dmg 打包的签名验证失败。" >&2
+    exit 1
+  fi
   log "签名验证未通过（开发阶段可忽略）"
 fi
 

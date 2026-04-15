@@ -177,12 +177,13 @@ public actor RegistrationSecurityService {
     private var identifierBlacklist: [String: BlacklistEntry] = [:]
     
  /// 一次性邮箱域名黑名单
-    private var disposableEmailDomains: Set<String> = [
+    private static let defaultDisposableEmailDomains: Set<String> = [
         "tempmail.com", "guerrillamail.com", "10minutemail.com",
         "mailinator.com", "throwaway.email", "fakeinbox.com",
         "temp-mail.org", "dispostable.com", "maildrop.cc",
         "yopmail.com", "trashmail.com", "sharklasers.com"
     ]
+    private var disposableEmailDomains: Set<String> = RegistrationSecurityService.defaultDisposableEmailDomains
     
  /// 全局请求计数器（用于全局限流）
     private var globalRequestTimestamps: [Date] = []
@@ -190,11 +191,35 @@ public actor RegistrationSecurityService {
  /// 缓存清理计时器
     private var lastCleanupTime: Date = Date()
     private let cleanupInterval: TimeInterval = 300  // 5分钟清理一次
+
+    private struct PersistedState: Codable {
+        let attempts: [RegistrationAttempt]
+        let ipBlacklist: [String: BlacklistEntry]
+        let deviceBlacklist: [String: BlacklistEntry]
+        let identifierBlacklist: [String: BlacklistEntry]
+        let disposableEmailDomains: [String]
+        let globalRequestTimestamps: [Date]
+        let lastCleanupTime: Date
+    }
+
+    private let persistenceURL: URL?
     
  // MARK: - 初始化
     
     private init(config: RateLimitConfig = .default) {
         self.config = config
+        self.persistenceURL = Self.makePersistenceURL()
+
+        if let persistedState = Self.loadPersistedState(from: persistenceURL) {
+            self.attempts = persistedState.attempts
+            self.ipBlacklist = persistedState.ipBlacklist
+            self.deviceBlacklist = persistedState.deviceBlacklist
+            self.identifierBlacklist = persistedState.identifierBlacklist
+            self.disposableEmailDomains = Self.defaultDisposableEmailDomains.union(persistedState.disposableEmailDomains)
+            self.globalRequestTimestamps = persistedState.globalRequestTimestamps
+            self.lastCleanupTime = persistedState.lastCleanupTime
+        }
+
         logger.info("RegistrationSecurityService 初始化完成")
     }
     
@@ -202,6 +227,7 @@ public actor RegistrationSecurityService {
     public func updateConfig(_ newConfig: RateLimitConfig) {
         self.config = newConfig
         logger.info("限流配置已更新")
+        persistStateIfNeeded()
     }
     
  // MARK: - 核心方法
@@ -283,6 +309,7 @@ public actor RegistrationSecurityService {
         
  // 如果连续失败次数过多，自动加入黑名单
         await checkAndAutoBlacklist(context: context)
+        persistStateIfNeeded()
     }
     
  // MARK: - 输入清洗
@@ -371,6 +398,7 @@ public actor RegistrationSecurityService {
         )
         ipBlacklist[ip] = entry
         logger.warning("IP已加入黑名单: \(ip), 原因: \(reason)")
+        persistStateIfNeeded()
     }
     
  /// 添加设备到黑名单
@@ -384,6 +412,7 @@ public actor RegistrationSecurityService {
         )
         deviceBlacklist[fingerprint] = entry
         logger.warning("设备已加入黑名单: \(fingerprint.prefix(8))..., 原因: \(reason)")
+        persistStateIfNeeded()
     }
     
  /// 添加账号标识到黑名单
@@ -397,6 +426,7 @@ public actor RegistrationSecurityService {
         )
         identifierBlacklist[identifierHash] = entry
         logger.warning("账号已加入黑名单: \(identifierHash.prefix(8))..., 原因: \(reason)")
+        persistStateIfNeeded()
     }
     
  /// 从黑名单移除
@@ -412,12 +442,14 @@ public actor RegistrationSecurityService {
             disposableEmailDomains.remove(value)
         }
         logger.info("已从黑名单移除: \(type.rawValue) - \(value.prefix(8))...")
+        persistStateIfNeeded()
     }
     
  /// 添加一次性邮箱域名
     public func addDisposableEmailDomain(_ domain: String) {
         disposableEmailDomains.insert(domain.lowercased())
         logger.info("已添加一次性邮箱域名: \(domain)")
+        persistStateIfNeeded()
     }
     
  // MARK: - 统计信息
@@ -565,6 +597,67 @@ public actor RegistrationSecurityService {
         globalRequestTimestamps = globalRequestTimestamps.filter { $0 > now.addingTimeInterval(-60) }
         
         logger.info("安全服务缓存已清理")
+        persistStateIfNeeded()
+    }
+
+    private static func makePersistenceURL() -> URL? {
+        if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil ||
+            NSClassFromString("XCTestCase") != nil {
+            return nil
+        }
+
+        if let override = ProcessInfo.processInfo.environment["SKYBRIDGE_REGISTRATION_SECURITY_STATE_PATH"],
+           !override.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return URL(fileURLWithPath: override)
+        }
+
+        guard let applicationSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            return nil
+        }
+
+        return applicationSupport
+            .appendingPathComponent("SkyBridgeCompassPro", isDirectory: true)
+            .appendingPathComponent("registration_security_state.json", isDirectory: false)
+    }
+
+    private static func loadPersistedState(from url: URL?) -> PersistedState? {
+        guard let url,
+              let data = try? Data(contentsOf: url) else {
+            return nil
+        }
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try? decoder.decode(PersistedState.self, from: data)
+    }
+
+    private func persistStateIfNeeded() {
+        guard let persistenceURL else { return }
+
+        let persistedState = PersistedState(
+            attempts: attempts,
+            ipBlacklist: ipBlacklist,
+            deviceBlacklist: deviceBlacklist,
+            identifierBlacklist: identifierBlacklist,
+            disposableEmailDomains: Array(disposableEmailDomains).sorted(),
+            globalRequestTimestamps: globalRequestTimestamps,
+            lastCleanupTime: lastCleanupTime
+        )
+
+        do {
+            try FileManager.default.createDirectory(
+                at: persistenceURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true,
+                attributes: nil
+            )
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            encoder.dateEncodingStrategy = .iso8601
+            let data = try encoder.encode(persistedState)
+            try data.write(to: persistenceURL, options: .atomic)
+        } catch {
+            logger.error("注册安全状态持久化失败: \(error.localizedDescription, privacy: .private)")
+        }
     }
 }
 
@@ -756,4 +849,3 @@ extension RegistrationSecurityService {
         return (false, "请输入有效的手机号码（支持国际号码，格式：+国家代码手机号）")
     }
 }
-

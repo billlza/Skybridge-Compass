@@ -129,6 +129,35 @@ public actor KeychainManager {
         let status = SecItemDelete(query as CFDictionary)
         return status == errSecSuccess || status == errSecItemNotFound
     }
+
+    public nonisolated func storeAppleUserID(_ userID: String) throws {
+        let trimmed = userID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw KeychainError.encodingError
+        }
+        let ok = importKey(
+            data: Data(trimmed.utf8),
+            service: "SkyBridge.Auth",
+            account: "AppleUserID"
+        )
+        if !ok {
+            throw KeychainError.unexpectedError(errSecIO)
+        }
+    }
+
+    public nonisolated func retrieveAppleUserID() -> String? {
+        guard let data = exportKey(service: "SkyBridge.Auth", account: "AppleUserID"),
+              let value = String(data: data, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty else {
+            return nil
+        }
+        return value
+    }
+
+    public nonisolated func deleteAppleUserID() {
+        _ = deleteKey(service: "SkyBridge.Auth", account: "AppleUserID")
+    }
     
     // MARK: - Symmetric Key Operations
     

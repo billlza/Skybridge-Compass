@@ -26,7 +26,9 @@ VOLUME_NAME="SkyBridge Compass Pro"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 source "$PROJECT_ROOT/Scripts/apple_pqc_sdk_probe.sh"
+source "$PROJECT_ROOT/Scripts/notarytool_helpers.sh"
 source "$PROJECT_ROOT/Scripts/xcodebuild_helpers.sh"
+XCODE_DERIVED_DATA_PATH="${SKYBRIDGE_XCODE_DERIVED_DATA_PATH:-$(skybridge_default_xcode_derived_data_path)}"
 INFO_PLIST_PATH="$PROJECT_ROOT/Sources/SkyBridgeCompassApp/Info.plist"
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$INFO_PLIST_PATH" 2>/dev/null || echo "0.0.0")"
 DIST_DIR="$PROJECT_ROOT/dist"
@@ -45,6 +47,10 @@ if [[ -d "$XCODE_WORKSPACE" ]]; then
 fi
 
 SIGNING_IDENTITY="${SIGNING_IDENTITY:-}"
+NOTARIZE_APP="${NOTARIZE_APP:-0}"
+NOTARIZE_DMG="${NOTARIZE_DMG:-0}"
+REQUIRE_NOTARIZATION="${REQUIRE_NOTARIZATION:-0}"
+NOTARYTOOL_KEYCHAIN_PROFILE="${NOTARYTOOL_KEYCHAIN_PROFILE:-}"
 
 SKIP_BUILD=false
 SKIP_SIGN=false
@@ -68,6 +74,22 @@ while [[ $# -gt 0 ]]; do
             SIGNING_IDENTITY="$2"
             shift 2
             ;;
+        --notarize-dmg)
+            NOTARIZE_DMG="1"
+            shift
+            ;;
+        --notarize-app)
+            NOTARIZE_APP="1"
+            shift
+            ;;
+        --require-notarization)
+            REQUIRE_NOTARIZATION="1"
+            shift
+            ;;
+        --notarytool-keychain-profile)
+            NOTARYTOOL_KEYCHAIN_PROFILE="$2"
+            shift 2
+            ;;
         --help|-h)
             echo "用法: $0 [选项]"
             echo ""
@@ -76,6 +98,10 @@ while [[ $# -gt 0 ]]; do
             echo "  --skip-sign          跳过签名步骤（将保留 package_app.sh 产物签名）"
             echo "  --use-existing-app   复用 dist/ 下已存在的 .app"
             echo "  --identity ID        指定签名身份（Developer ID / Apple Development）"
+            echo "  --notarize-app       对 .app 执行 Apple notarization 并 staple"
+            echo "  --notarize-dmg       生成 DMG 后提交 Apple notarization 并 staple"
+            echo "  --require-notarization  若产物未 notarized，则以失败退出"
+            echo "  --notarytool-keychain-profile <profile>  使用指定 notarytool keychain profile"
             echo "  --help, -h           显示帮助信息"
             exit 0
             ;;
@@ -103,6 +129,25 @@ log_step() {
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "📦 $1"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+}
+
+assess_and_report_gatekeeper() {
+    local target="$1"
+    local target_type="$2"
+    local label="$3"
+    local output=""
+
+    if output="$(skybridge_assess_gatekeeper "$target" "$target_type")"; then
+        if skybridge_gatekeeper_is_notarized "$output"; then
+            echo "✅ ${label} Gatekeeper 评估通过（已 notarized）" >&2
+        else
+            echo "ℹ️  ${label} Gatekeeper 评估通过（未显式显示 notarized）" >&2
+        fi
+    else
+        echo "ℹ️  ${label} Gatekeeper 评估未通过" >&2
+    fi
+
+    printf '%s\n' "$output"
 }
 
 verify_app_bundle_build_source() {
@@ -172,8 +217,10 @@ extract_helper_version() {
 select_identity() {
     local dev_id
     local apple_dev
-    dev_id=$(security find-identity -v -p codesigning | awk -F '"' '/Developer ID Application/ {print $2; exit}')
-    apple_dev=$(security find-identity -v -p codesigning | awk -F '"' '/Apple Development/ {print $2; exit}')
+    local identities
+    identities="$(security find-identity -v -p codesigning 2>/dev/null || true)"
+    dev_id="$(printf '%s\n' "$identities" | awk -F '"' '/Developer ID Application/ {print $2; exit}')"
+    apple_dev="$(printf '%s\n' "$identities" | awk -F '"' '/Apple Development/ {print $2; exit}')"
 
     if [[ -n "$dev_id" ]]; then
         echo "$dev_id"
@@ -217,6 +264,7 @@ if [[ "$SKIP_BUILD" == false ]]; then
     log_step "步骤 1: 构建 Release 版本"
 
     cd "$PROJECT_ROOT"
+    log_info "Xcode DerivedData 路径: $XCODE_DERIVED_DATA_PATH"
 
     log_info "检测 Apple PQC SDK 可用性（用于 HAS_APPLE_PQC_SDK）..."
     skybridge_detect_apple_pqc_sdk
@@ -246,14 +294,22 @@ if [[ "$SKIP_BUILD" == false ]]; then
             -scheme SkyBridgeCompassApp \
             -configuration Release \
             -destination "$BUILD_DESTINATION" \
-            -derivedDataPath .build/xcode \
+            -derivedDataPath "$XCODE_DERIVED_DATA_PATH" \
+            -skipPackageUpdates \
+            -disableAutomaticPackageResolution \
+            CODE_SIGNING_ALLOWED=NO \
+            COMPILER_INDEX_STORE_ENABLE=NO \
             build
     else
         skybridge_run_xcodebuild \
             -scheme SkyBridgeCompassApp \
             -configuration Release \
             -destination "$BUILD_DESTINATION" \
-            -derivedDataPath .build/xcode \
+            -derivedDataPath "$XCODE_DERIVED_DATA_PATH" \
+            -skipPackageUpdates \
+            -disableAutomaticPackageResolution \
+            CODE_SIGNING_ALLOWED=NO \
+            COMPILER_INDEX_STORE_ENABLE=NO \
             build
     fi
 
@@ -316,7 +372,12 @@ if [[ "$SKIP_SIGN" == false ]]; then
 
     if [[ -n "$SIGNING_IDENTITY" ]]; then
         log_step "步骤 3: 规范化重签名"
-        APP_PATH="$APP_BUNDLE" IDENTITY="$SIGNING_IDENTITY" "$PROJECT_ROOT/Scripts/sign_app.sh"
+        APP_PATH="$APP_BUNDLE" \
+        IDENTITY="$SIGNING_IDENTITY" \
+        NOTARIZE_APP="$NOTARIZE_APP" \
+        REQUIRE_NOTARIZATION="$REQUIRE_NOTARIZATION" \
+        NOTARYTOOL_KEYCHAIN_PROFILE="$NOTARYTOOL_KEYCHAIN_PROFILE" \
+        "$PROJECT_ROOT/Scripts/sign_app.sh"
     else
         log_info "未检测到可用签名证书，保持当前签名状态（可能为 ad-hoc）"
     fi
@@ -439,6 +500,13 @@ rm -f "$TEMP_DMG"
 
 log_success "DMG 创建完成: $DMG_PATH"
 
+if [[ "$NOTARIZE_DMG" == "1" ]]; then
+    log_step "步骤 5: 提交 DMG 公证"
+    skybridge_notarytool_submit_and_wait "$DMG_PATH"
+    skybridge_staple_artifact "$DMG_PATH"
+    log_success "DMG notarization 与 stapling 完成"
+fi
+
 DESKTOP_DMG_PATH="$HOME/Desktop/${DMG_NAME}-${APP_VERSION}.dmg"
 cp -f "$DMG_PATH" "$DESKTOP_DMG_PATH"
 log_success "桌面 DMG 已覆盖更新: $DESKTOP_DMG_PATH"
@@ -456,7 +524,23 @@ echo "🔐 签名摘要:"
 codesign -dvv "$APP_BUNDLE" 2>&1 | grep -E "(Authority|Identifier|TeamIdentifier|Signature)" || true
 
 echo ""
+echo "🛡️ Gatekeeper 摘要:"
+APP_GATEKEEPER_OUTPUT="$(assess_and_report_gatekeeper "$APP_BUNDLE" "execute" "App Bundle")"
+DMG_GATEKEEPER_OUTPUT="$(assess_and_report_gatekeeper "$DMG_PATH" "open" "DMG")"
+
+echo ""
 log_success "所有步骤完成！"
+
+if [[ "$REQUIRE_NOTARIZATION" == "1" ]]; then
+    if ! skybridge_gatekeeper_is_notarized "$APP_GATEKEEPER_OUTPUT"; then
+        log_error "REQUIRE_NOTARIZATION=1，但 App Bundle 尚未显示为 notarized"
+        exit 1
+    fi
+    if ! skybridge_gatekeeper_is_notarized "$DMG_GATEKEEPER_OUTPUT"; then
+        log_error "REQUIRE_NOTARIZATION=1，但 DMG 尚未显示为 notarized"
+        exit 1
+    fi
+fi
 
 echo ""
 echo "🧩 Helper 版本摘要:"

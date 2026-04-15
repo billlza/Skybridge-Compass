@@ -1,4 +1,8 @@
 import Foundation
+import CryptoKit
+import AuthenticationServices
+import Security
+import UIKit
 
 /// 认证管理器 - 管理用户认证和会话
 @MainActor
@@ -10,10 +14,19 @@ public class AuthenticationManager: ObservableObject {
     @Published public private(set) var currentUser: User?
     @Published public var isAuthenticated: Bool = false
     @Published public var isGuestMode: Bool = false
+    @Published public var showCaptchaChallenge: Bool = false
+    @Published public private(set) var appleAuthorizationState: ASAuthorizationAppleIDProvider.CredentialState = .notFound
 
     private var session: AuthSession?
     private var didLogSupabaseConfigMissing = false
     private var lastTokenRefreshAttemptAt: Date?
+    private var captchaPassed = false
+    private var captchaChallengeRequired = false
+    private var pendingAppleSignInNonce: String?
+
+    private struct RiskCheckOutcome {
+        let auditTicket: String?
+    }
 
     private static var shouldResetStateForUITests: Bool {
         ProcessInfo.processInfo.arguments.contains("UITEST_RESET_STATE")
@@ -23,13 +36,30 @@ public class AuthenticationManager: ObservableObject {
         ProcessInfo.processInfo.arguments.contains("UITEST_AUTH_GUEST")
     }
 
+    private static var appleSignInLaunchReady: Bool {
+        if let override = ProcessInfo.processInfo.environment["SKYBRIDGE_ENABLE_APPLE_SIGN_IN"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() {
+            return override == "1" || override == "true" || override == "yes"
+        }
+
+        return (Bundle.main.object(forInfoDictionaryKey: "SKYBRIDGE_ENABLE_APPLE_SIGN_IN") as? Bool) ?? false
+    }
+
+    public var isAppleSignInEnabled: Bool {
+        Self.appleSignInLaunchReady
+    }
+
     public enum AuthFlowError: LocalizedError {
         case emailVerificationRequired
+        case registrationBlocked(String)
 
         public var errorDescription: String? {
             switch self {
             case .emailVerificationRequired:
                 return "注册成功！请检查邮箱并点击验证链接后再登录。"
+            case .registrationBlocked(let message):
+                return message
             }
         }
     }
@@ -51,30 +81,283 @@ public class AuthenticationManager: ObservableObject {
         if Self.shouldResetStateForUITests {
             return
         }
+        checkAppleIDCredentialState()
         loadSession()
+    }
+
+    private func registrationDeviceFingerprint() -> String {
+        let vendorID = UIDevice.current.identifierForVendor?.uuidString ?? "unknown-vendor"
+        let seed = [
+            vendorID,
+            UIDevice.current.model,
+            UIDevice.current.systemName,
+            UIDevice.current.systemVersion,
+            Bundle.main.bundleIdentifier ?? "com.skybridge.compass.ios"
+        ].joined(separator: "|")
+        let digest = SHA256.hash(data: Data(seed.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func formattedRiskMessage(reason: String?, retryAfter: Int?, fallback: String) -> String {
+        let base = reason?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+            ? reason!.trimmingCharacters(in: .whitespacesAndNewlines)
+            : fallback
+
+        guard let retryAfter, retryAfter > 0 else { return base }
+
+        if retryAfter >= 3600 {
+            let hours = Int(ceil(Double(retryAfter) / 3600.0))
+            return "\(base)（约 \(hours) 小时后可重试）"
+        }
+
+        let minutes = max(1, Int(ceil(Double(retryAfter) / 60.0)))
+        return "\(base)（约 \(minutes) 分钟后可重试）"
+    }
+
+    private func ensureRegistrationAllowed(
+        identifier: String,
+        identifierType: SupabaseService.RegistrationIdentifierType,
+        attemptType: SupabaseService.RegistrationAttemptType
+    ) async throws -> RiskCheckOutcome {
+        let fingerprint = registrationDeviceFingerprint()
+
+        do {
+            let decision = try await SupabaseService.shared.assessRegistrationRisk(
+                identifier: identifier,
+                identifierType: identifierType,
+                deviceFingerprint: fingerprint
+            )
+
+            if !decision.allowed {
+                let message = formattedRiskMessage(
+                    reason: decision.reason,
+                    retryAfter: decision.retryAfter,
+                    fallback: "当前请求已触发额外风控，请稍后再试"
+                )
+                captchaChallengeRequired = decision.requiresCaptcha
+                captchaPassed = false
+                showCaptchaChallenge = false
+                await SupabaseService.shared.recordRegistrationAttempt(
+                    identifier: identifier,
+                    identifierType: identifierType,
+                    deviceFingerprint: fingerprint,
+                    attemptType: attemptType,
+                    success: false,
+                    failureReason: message,
+                    captchaRequired: decision.requiresCaptcha,
+                    auditTicket: decision.auditTicket,
+                    metadata: [
+                        "client": "SkyBridge Compass iOS",
+                        "attempt_type": attemptType.rawValue
+                    ]
+                )
+                throw AuthFlowError.registrationBlocked(message)
+            }
+
+            if decision.requiresCaptcha && !captchaPassed {
+                captchaChallengeRequired = true
+                showCaptchaChallenge = true
+                let message = decision.reason ?? "请先完成安全验证"
+                throw AuthFlowError.registrationBlocked(message)
+            }
+
+            captchaChallengeRequired = decision.requiresCaptcha
+            return RiskCheckOutcome(auditTicket: decision.auditTicket)
+        } catch let error as AuthFlowError {
+            throw error
+        } catch {
+            let message = SupabaseService.userMessage(for: error) ?? error.localizedDescription
+            captchaChallengeRequired = false
+            SkyBridgeLogger.shared.warning("⚠️ 服务端认证风控不可用，继续沿用 Supabase 上游限制: \(message)")
+        }
+
+        return RiskCheckOutcome(auditTicket: nil)
+    }
+
+    private func recordRegistrationAttempt(
+        identifier: String,
+        identifierType: SupabaseService.RegistrationIdentifierType,
+        attemptType: SupabaseService.RegistrationAttemptType,
+        success: Bool,
+        failureReason: String? = nil,
+        auditTicket: String? = nil
+    ) async {
+        await SupabaseService.shared.recordRegistrationAttempt(
+            identifier: identifier,
+            identifierType: identifierType,
+            deviceFingerprint: registrationDeviceFingerprint(),
+            attemptType: attemptType,
+            success: success,
+            failureReason: failureReason,
+            captchaRequired: captchaChallengeRequired,
+            captchaPassed: captchaPassed,
+            auditTicket: auditTicket,
+            metadata: [
+                "client": "SkyBridge Compass iOS",
+                "attempt_type": attemptType.rawValue
+            ]
+        )
+    }
+
+    public func dismissCaptchaChallenge() {
+        captchaPassed = false
+        captchaChallengeRequired = false
+        showCaptchaChallenge = false
+    }
+
+    public func completeCaptchaChallenge(success: Bool) {
+        captchaPassed = success
+        showCaptchaChallenge = false
+    }
+
+    public func resetCaptchaChallenge() {
+        captchaPassed = false
+        showCaptchaChallenge = false
+        captchaChallengeRequired = false
+    }
+
+    public func configureAppleSignInRequest(_ request: ASAuthorizationAppleIDRequest) {
+        guard Self.appleSignInLaunchReady else {
+            pendingAppleSignInNonce = nil
+            return
+        }
+
+        let rawNonce = Self.generateAppleSignInNonce()
+        pendingAppleSignInNonce = rawNonce
+        request.nonce = Self.sha256(rawNonce)
+    }
+
+    public func handleAppleAuthorization(_ authorization: ASAuthorization, captchaToken: String? = nil) async throws {
+        guard Self.appleSignInLaunchReady else {
+            throw NSError(
+                domain: "AuthenticationManager.AppleSignIn",
+                code: -10,
+                userInfo: [NSLocalizedDescriptionKey: "Apple 登录暂未开放"]
+            )
+        }
+
+        guard let credential = authorization.credential as? ASAuthorizationAppleIDCredential else {
+            throw NSError(
+                domain: "AuthenticationManager.AppleSignIn",
+                code: -11,
+                userInfo: [NSLocalizedDescriptionKey: "无法获取 Apple ID 凭证"]
+            )
+        }
+
+        guard let identityToken = credential.identityToken,
+              let identityTokenString = String(data: identityToken, encoding: .utf8) else {
+            throw NSError(
+                domain: "AuthenticationManager.AppleSignIn",
+                code: -12,
+                userInfo: [NSLocalizedDescriptionKey: "无法获取有效的 Apple 身份令牌"]
+            )
+        }
+
+        guard let rawNonce = pendingAppleSignInNonce else {
+            throw NSError(
+                domain: "AuthenticationManager.AppleSignIn",
+                code: -13,
+                userInfo: [NSLocalizedDescriptionKey: "Apple 登录上下文已失效，请重试"]
+            )
+        }
+        pendingAppleSignInNonce = nil
+
+        let auditIdentifier = Self.appleAuditIdentifier(for: credential)
+        let riskOutcome = try await ensureRegistrationAllowed(
+            identifier: auditIdentifier,
+            identifierType: .username,
+            attemptType: .login
+        )
+
+        do {
+            let session = try await SupabaseService.shared.signInWithApple(
+                identityToken: identityTokenString,
+                nonce: rawNonce,
+                captchaToken: captchaToken
+            )
+            try? KeychainManager.shared.storeAppleUserID(credential.user)
+            let enrichedSession = await persistAppleProfileIfNeeded(from: credential, session: session)
+            let hydratedSession = await hydrateSessionProfileIfPossible(enrichedSession)
+            applySession(
+                hydratedSession,
+                emailFallback: credential.email ?? hydratedSession.email ?? "\(credential.user)@appleid.local"
+            )
+            await recordRegistrationAttempt(
+                identifier: auditIdentifier,
+                identifierType: .username,
+                attemptType: .login,
+                success: true,
+                auditTicket: riskOutcome.auditTicket
+            )
+            resetCaptchaChallenge()
+        } catch {
+            let message = SupabaseService.userMessage(for: error) ?? error.localizedDescription
+            await recordRegistrationAttempt(
+                identifier: auditIdentifier,
+                identifierType: .username,
+                attemptType: .login,
+                success: false,
+                failureReason: message,
+                auditTicket: riskOutcome.auditTicket
+            )
+            throw NSError(
+                domain: "AuthenticationManager.AppleSignIn",
+                code: -14,
+                userInfo: [NSLocalizedDescriptionKey: message]
+            )
+        }
     }
     
     // MARK: - Public Methods
     
     /// 注册
-    public func register(email: String, password: String) async throws {
+    public func register(email: String, password: String, captchaToken: String? = nil) async throws {
+        let riskOutcome = try await ensureRegistrationAllowed(
+            identifier: email,
+            identifierType: .email,
+            attemptType: .register
+        )
+
         // 与 macOS 端一致：注册时生成 nebula_id 并写入 Supabase metadata
         let nebulaId = try NebulaIDGenerator.shared.generateUserRegistrationID().fullId
         let displayName = email.components(separatedBy: "@").first ?? "用户"
 
-        let session = try await SupabaseService.shared.signUp(
-            email: email,
-            password: password,
-            metadata: [
-                "display_name": displayName,
-                "registration_source": "SkyBridge Compass iOS",
-                "nebula_id": nebulaId
-            ]
-        )
+        let session: AuthSession
+        do {
+            session = try await SupabaseService.shared.signUp(
+                email: email,
+                password: password,
+                metadata: [
+                    "display_name": displayName,
+                    "registration_source": "SkyBridge Compass iOS",
+                    "nebula_id": nebulaId,
+                    "device_fingerprint": registrationDeviceFingerprint()
+                ],
+                captchaToken: captchaToken
+            )
+        } catch {
+            await recordRegistrationAttempt(
+                identifier: email,
+                identifierType: .email,
+                attemptType: .register,
+                success: false,
+                failureReason: SupabaseService.userMessage(for: error) ?? error.localizedDescription,
+                auditTicket: riskOutcome.auditTicket
+            )
+            throw error
+        }
 
         // 与 macOS 端一致：需要邮箱验证时，不进入已登录态
         if session.accessToken == "pending_verification" {
             SkyBridgeLogger.shared.info("📧 注册需要邮箱验证: \(email)")
+            await recordRegistrationAttempt(
+                identifier: email,
+                identifierType: .email,
+                attemptType: .register,
+                success: true,
+                auditTicket: riskOutcome.auditTicket
+            )
+            resetCaptchaChallenge()
             throw AuthFlowError.emailVerificationRequired
         }
 
@@ -99,28 +382,160 @@ public class AuthenticationManager: ObservableObject {
 
         let hydratedSession = await hydrateSessionProfileIfPossible(enrichedSession)
         applySession(hydratedSession, emailFallback: email)
+        await recordRegistrationAttempt(
+            identifier: email,
+            identifierType: .email,
+            attemptType: .register,
+            success: true,
+            auditTicket: riskOutcome.auditTicket
+        )
+        resetCaptchaChallenge()
         SkyBridgeLogger.shared.info("✅ 注册成功: \(email) (nebula_id=\(nebulaId))")
     }
     
     /// 登录
-    public func signIn(email: String, password: String) async throws {
-        let session = try await SupabaseService.shared.signInWithEmail(email: email, password: password)
+    public func signIn(email: String, password: String, captchaToken: String? = nil) async throws {
+        let riskOutcome = try await ensureRegistrationAllowed(
+            identifier: email,
+            identifierType: .email,
+            attemptType: .login
+        )
+
+        let session: AuthSession
+        do {
+            session = try await SupabaseService.shared.signInWithEmail(
+                email: email,
+                password: password,
+                captchaToken: captchaToken
+            )
+        } catch {
+            let message = SupabaseService.userMessage(for: error) ?? error.localizedDescription
+            await recordRegistrationAttempt(
+                identifier: email,
+                identifierType: .email,
+                attemptType: .login,
+                success: false,
+                failureReason: message,
+                auditTicket: riskOutcome.auditTicket
+            )
+            throw NSError(domain: "AuthenticationManager.SignIn", code: -1, userInfo: [
+                NSLocalizedDescriptionKey: message
+            ])
+        }
         let hydratedSession = await hydrateSessionProfileIfPossible(session)
         applySession(hydratedSession, emailFallback: email)
+        await recordRegistrationAttempt(
+            identifier: email,
+            identifierType: .email,
+            attemptType: .login,
+            success: true,
+            auditTicket: riskOutcome.auditTicket
+        )
+        resetCaptchaChallenge()
         SkyBridgeLogger.shared.info("✅ 登录成功: \(email)")
     }
 
     /// 发送手机号验证码。Supabase 负责验证码校验与会话签发，短信投递由 send_sms hook 转发到阿里云。
-    public func sendPhoneVerificationCode(phoneNumber: String) async throws {
-        try await SupabaseService.shared.sendPhoneOTP(phone: phoneNumber)
+    public func sendPhoneVerificationCode(phoneNumber: String, captchaToken: String? = nil) async throws {
+        let riskOutcome = try await ensureRegistrationAllowed(
+            identifier: phoneNumber,
+            identifierType: .phone,
+            attemptType: .verifyCode
+        )
+
+        do {
+            try await SupabaseService.shared.sendPhoneOTP(phone: phoneNumber, captchaToken: captchaToken)
+        } catch {
+            await recordRegistrationAttempt(
+                identifier: phoneNumber,
+                identifierType: .phone,
+                attemptType: .verifyCode,
+                success: false,
+                failureReason: SupabaseService.userMessage(for: error) ?? error.localizedDescription,
+                auditTicket: riskOutcome.auditTicket
+            )
+            throw error
+        }
+
+        await recordRegistrationAttempt(
+            identifier: phoneNumber,
+            identifierType: .phone,
+            attemptType: .verifyCode,
+            success: true,
+            auditTicket: riskOutcome.auditTicket
+        )
+        resetCaptchaChallenge()
         SkyBridgeLogger.shared.info("📱 手机验证码已发出: ****\(phoneNumber.suffix(4))")
+    }
+
+    public func resetPassword(email: String, captchaToken: String? = nil) async throws {
+        let riskOutcome = try await ensureRegistrationAllowed(
+            identifier: email,
+            identifierType: .email,
+            attemptType: .verifyCode
+        )
+
+        do {
+            try await SupabaseService.shared.resetPassword(email: email, captchaToken: captchaToken)
+            await recordRegistrationAttempt(
+                identifier: email,
+                identifierType: .email,
+                attemptType: .verifyCode,
+                success: true,
+                auditTicket: riskOutcome.auditTicket
+            )
+            resetCaptchaChallenge()
+        } catch {
+            let message = SupabaseService.userMessage(for: error) ?? error.localizedDescription
+            await recordRegistrationAttempt(
+                identifier: email,
+                identifierType: .email,
+                attemptType: .verifyCode,
+                success: false,
+                failureReason: message,
+                auditTicket: riskOutcome.auditTicket
+            )
+            throw NSError(domain: "AuthenticationManager.ResetPassword", code: -1, userInfo: [
+                NSLocalizedDescriptionKey: message
+            ])
+        }
     }
 
     /// 使用手机号 + 短信验证码登录；若手机号首次使用，Supabase 会按项目策略自动创建账号。
     public func signInWithPhone(phoneNumber: String, code: String) async throws {
-        let session = try await SupabaseService.shared.signInWithPhone(phone: phoneNumber, token: code)
+        let riskOutcome = try await ensureRegistrationAllowed(
+            identifier: phoneNumber,
+            identifierType: .phone,
+            attemptType: .login
+        )
+
+        let session: AuthSession
+        do {
+            session = try await SupabaseService.shared.signInWithPhone(phone: phoneNumber, token: code)
+        } catch {
+            let message = SupabaseService.userMessage(for: error) ?? error.localizedDescription
+            await recordRegistrationAttempt(
+                identifier: phoneNumber,
+                identifierType: .phone,
+                attemptType: .login,
+                success: false,
+                failureReason: message,
+                auditTicket: riskOutcome.auditTicket
+            )
+            throw NSError(domain: "AuthenticationManager.PhoneSignIn", code: -1, userInfo: [
+                NSLocalizedDescriptionKey: message
+            ])
+        }
         let hydratedSession = await hydrateSessionProfileIfPossible(session)
         applySession(hydratedSession, emailFallback: phoneNumber)
+        await recordRegistrationAttempt(
+            identifier: phoneNumber,
+            identifierType: .phone,
+            attemptType: .login,
+            success: true,
+            auditTicket: riskOutcome.auditTicket
+        )
+        resetCaptchaChallenge()
         SkyBridgeLogger.shared.info("✅ 手机登录成功: ****\(phoneNumber.suffix(4))")
     }
 
@@ -185,6 +600,13 @@ public class AuthenticationManager: ObservableObject {
     
     /// 退出登录
     public func signOut() async {
+        if let session {
+            do {
+                try await revokeRemoteSession(session)
+            } catch {
+                SkyBridgeLogger.shared.warning("⚠️ 远端会话撤销失败，本地仍将退出: \(error.localizedDescription)")
+            }
+        }
         currentUser = nil
         isAuthenticated = false
         isGuestMode = false
@@ -236,6 +658,24 @@ public class AuthenticationManager: ObservableObject {
     
     private func clearSession() {
         KeychainManager.shared.deleteAuthSession()
+    }
+
+    private func revokeRemoteSession(_ session: AuthSession) async throws {
+        let accessToken = session.accessToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !accessToken.isEmpty,
+              accessToken != "guest_token",
+              accessToken != "pending_verification" else {
+            return
+        }
+
+        if SupabaseService.shared.isSupabaseAccessToken(accessToken) {
+            try await SupabaseService.shared.revokeCurrentSession(accessToken: accessToken)
+        } else {
+            try await NebulaPublicClientOAuth.shared.revokeTokens(
+                accessToken: accessToken,
+                refreshToken: session.refreshToken
+            )
+        }
     }
 
     private func applyUITestGuestSession() {
@@ -428,6 +868,109 @@ public class AuthenticationManager: ObservableObject {
         }
 
         return UUID(uuidString: session.userIdentifier) != nil
+    }
+
+    private func checkAppleIDCredentialState() {
+        guard Self.appleSignInLaunchReady,
+              let userID = KeychainManager.shared.retrieveAppleUserID() else {
+            appleAuthorizationState = .notFound
+            return
+        }
+
+        let provider = ASAuthorizationAppleIDProvider()
+        provider.getCredentialState(forUserID: userID) { [weak self] state, error in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if error != nil {
+                    self.appleAuthorizationState = .notFound
+                    return
+                }
+                self.appleAuthorizationState = state
+                if state == .revoked || state == .notFound {
+                    KeychainManager.shared.deleteAppleUserID()
+                }
+            }
+        }
+    }
+
+    private func persistAppleProfileIfNeeded(
+        from credential: ASAuthorizationAppleIDCredential,
+        session: AuthSession
+    ) async -> AuthSession {
+        guard let displayName = Self.formattedAppleDisplayName(from: credential.fullName) else {
+            return session
+        }
+
+        if session.accessToken != "pending_verification",
+           SupabaseService.shared.isSupabaseAccessToken(session.accessToken) {
+            do {
+                try await SupabaseService.shared.updateCurrentUserMetadata(
+                    accessToken: session.accessToken,
+                    metadata: [
+                        "display_name": displayName,
+                        "full_name": displayName,
+                        "name": displayName,
+                        "sign_in_provider": "apple"
+                    ]
+                )
+            } catch {
+                SkyBridgeLogger.shared.warning("⚠️ Apple 首登资料回写失败（忽略）：\(error.localizedDescription)")
+            }
+        }
+
+        guard Self.shouldReplaceDisplayName(session.displayName) else {
+            return session
+        }
+
+        return AuthSession(
+            accessToken: session.accessToken,
+            refreshToken: session.refreshToken,
+            userIdentifier: session.userIdentifier,
+            displayName: displayName,
+            email: session.email,
+            avatarURL: session.avatarURL,
+            nebulaId: session.nebulaId,
+            issuedAt: session.issuedAt
+        )
+    }
+
+    private static func appleAuditIdentifier(for credential: ASAuthorizationAppleIDCredential) -> String {
+        "apple:\(credential.user)"
+    }
+
+    private static func formattedAppleDisplayName(from fullName: PersonNameComponents?) -> String? {
+        guard let fullName else { return nil }
+        let formatter = PersonNameComponentsFormatter()
+        formatter.style = .default
+        let formatted = formatter.string(from: fullName).trimmingCharacters(in: .whitespacesAndNewlines)
+        return formatted.isEmpty ? nil : formatted
+    }
+
+    private static func shouldReplaceDisplayName(_ displayName: String) -> Bool {
+        let trimmed = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty || trimmed == "用户" || trimmed == "新用户"
+    }
+
+    private static func generateAppleSignInNonce(length: Int = 32) -> String {
+        precondition(length > 0)
+        let charset = Array("0123456789ABCDEFGHIJKLMNOPQRSTUVXYZabcdefghijklmnopqrstuvwxyz-._")
+        var randomBytes = [UInt8](repeating: 0, count: length)
+        let status = SecRandomCopyBytes(kSecRandomDefault, randomBytes.count, &randomBytes)
+        guard status == errSecSuccess else {
+            return UUID().uuidString.replacingOccurrences(of: "-", with: "")
+        }
+
+        var result = ""
+        result.reserveCapacity(length)
+        for byte in randomBytes {
+            result.append(charset[Int(byte) % charset.count])
+        }
+        return result
+    }
+
+    private static func sha256(_ input: String) -> String {
+        let digest = SHA256.hash(data: Data(input.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
     }
 
 }

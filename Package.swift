@@ -56,6 +56,7 @@ let package = Package(
         .library(name: "SkyBridgeAppleTransport", targets: ["SkyBridgeAppleTransport"]),
         .library(name: "SkyBridgeCore", targets: ["SkyBridgeCore"]),
         .library(name: "SkyBridgeUI", targets: ["SkyBridgeUI"]),
+        .library(name: "SkyBridgeVisualParity", targets: ["SkyBridgeVisualParity"]),
         // 中文注释：导出 OQSRAII 作为示例静态库，便于独立链接与集成
         .library(name: "OQSRAII", targets: ["OQSRAII"]),
         // 小组件共享数据模型 - 主 App 和 Widget Extension 共用
@@ -240,6 +241,11 @@ let package = Package(
             ]
         ),
         .target(
+            name: "SkyBridgeVisualParity",
+            dependencies: [],
+            path: "Sources/SkyBridgeVisualParity"
+        ),
+        .target(
             name: "SkyBridgeUI",
             dependencies: [
                 "SkyBridgeCore"
@@ -311,6 +317,7 @@ let package = Package(
             dependencies: [
                 "SkyBridgeCore",
                 "SkyBridgeUI",
+                "SkyBridgeVisualParity",
                 .product(name: "OrderedCollections", package: "swift-collections")
             ],
             path: "Sources/SkyBridgeCompassApp",
@@ -341,12 +348,13 @@ let package = Package(
                 .linkedFramework("WidgetKit"),
                 .linkedFramework("SwiftUI"),
                 .linkedFramework("AuthenticationServices"),
+                .linkedFramework("WebKit"),
                 // 中文注释：移除静默链接器告警，依赖库目标版本已统一为 14.0
             ]
         ),
         .executableTarget(
             name: "MacUIBaselineCapture",
-            dependencies: [],
+            dependencies: ["SkyBridgeVisualParity"],
             path: "Sources/MacUIBaselineCapture",
             linkerSettings: [
                 .linkedFramework("AppKit"),

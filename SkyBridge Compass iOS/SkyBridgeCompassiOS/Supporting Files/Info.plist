@@ -37,6 +37,10 @@
 	<string>skybridge_compass_ios</string>
 	<key>NEBULA_CLIENT_SECRET</key>
 	<string></string>
+	<key>TURNSTILE_SITE_KEY</key>
+	<string>0x4AAAAAAC9EZ7Tok9ixRxad</string>
+	<key>SKYBRIDGE_ENABLE_APPLE_SIGN_IN</key>
+	<true/>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>

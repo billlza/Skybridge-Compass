@@ -218,6 +218,43 @@ public final class NebulaPublicClientOAuth {
         }
     }
 
+    public func revokeTokens(accessToken: String, refreshToken: String?) async throws {
+        let config = try requireConfiguration()
+        let tokens = [refreshToken, accessToken]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        for token in tokens {
+            guard let revokeURL = URL(string: config.baseURL + "/oauth/revoke") else {
+                throw OAuthError.invalidAuthorizeURL
+            }
+
+            var request = URLRequest(url: revokeURL)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue("application/json", forHTTPHeaderField: "Accept")
+            request.httpBody = try JSONSerialization.data(withJSONObject: [
+                "token": token,
+                "client_id": config.clientId
+            ])
+
+            do {
+                let (data, response) = try await urlSession.data(for: request)
+                guard let http = response as? HTTPURLResponse else {
+                    throw OAuthError.invalidCallback
+                }
+                guard (200..<300).contains(http.statusCode) else {
+                    let message = String(data: data, encoding: .utf8) ?? "revoke_failed"
+                    throw OAuthError.serverError(message)
+                }
+            } catch let error as OAuthError {
+                throw error
+            } catch {
+                throw OAuthError.network(error)
+            }
+        }
+    }
+
     public func authenticateUsingSystemBrowser() async throws -> (TokenResponse, UserInfo) {
         let authorizationRequest = try makeAuthorizationRequest(redirectURI: "skybridge://auth/nebula")
         return try await completeAuthorization(authorizationRequest)

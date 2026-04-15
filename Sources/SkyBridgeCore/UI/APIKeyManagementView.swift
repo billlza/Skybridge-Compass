@@ -207,14 +207,9 @@ public struct APIKeyManagementView: View {
                 nebulaClientSecret = ""
             }
             
-            do {
-                let smsConfig = try keychain.retrieveSMSConfig()
-                smsAccessKeyID = smsConfig.accessKeyId.isEmpty ? "" : "••••••••"
-                smsAccessKeySecret = smsConfig.accessKeySecret.isEmpty ? "" : "••••••••"
-            } catch {
-                smsAccessKeyID = ""
-                smsAccessKeySecret = ""
-            }
+            let hasLegacySMSConfig = keychain.hasLegacySMSConfig()
+            smsAccessKeyID = hasLegacySMSConfig ? "••••••••" : ""
+            smsAccessKeySecret = hasLegacySMSConfig ? "••••••••" : ""
         }
     }
     
@@ -312,42 +307,11 @@ public struct APIKeyManagementView: View {
         await loadCurrentAPIKeys()
     }
     
-    private func saveSMSConfig() async {
-        let keychain = KeychainManager.shared
-        
-        await MainActor.run {
-            do {
- // 获取当前配置用于保留未修改的值
-                var currentAccessKeyId = ""
-                var currentAccessKeySecret = ""
-                
-                if let currentConfig = try? keychain.retrieveSMSConfig() {
-                    currentAccessKeyId = currentConfig.accessKeyId
-                    currentAccessKeySecret = currentConfig.accessKeySecret
-                }
-                
-                let finalAccessKeyId = smsAccessKeyID == "••••••••" ? currentAccessKeyId : smsAccessKeyID
-                let finalAccessKeySecret = smsAccessKeySecret == "••••••••" ? currentAccessKeySecret : smsAccessKeySecret
-                
-                try keychain.storeSMSConfig(accessKeyId: finalAccessKeyId, accessKeySecret: finalAccessKeySecret)
-                alertMessage = "SMS配置保存成功"
-                logger.info("SMS配置已保存到Keychain")
-            } catch {
-                alertMessage = "SMS配置保存失败: \(error.localizedDescription)"
-                logger.error("SMS配置保存到Keychain失败: \(error.localizedDescription)")
-            }
-            showingAlert = true
-        }
-        
-        await loadCurrentAPIKeys()
-    }
-
     private func clearLegacySMSConfig() async {
         let keychain = KeychainManager.shared
 
         do {
-            try keychain.deleteAPIKey(service: "SkyBridge.SMS", account: "AccessKeyId")
-            try keychain.deleteAPIKey(service: "SkyBridge.SMS", account: "AccessKeySecret")
+            try keychain.clearLegacySMSConfig()
             await MainActor.run {
                 alertMessage = "已清除本机旧短信凭证"
                 showingAlert = true
@@ -449,8 +413,7 @@ public struct APIKeyManagementView: View {
         }
         
         do {
-            try keychain.deleteAPIKey(service: "SkyBridge.SMS", account: "AccessKeyId")
-            try keychain.deleteAPIKey(service: "SkyBridge.SMS", account: "AccessKeySecret")
+            try keychain.clearLegacySMSConfig()
             clearedCount += 1
         } catch {
             logger.warning("删除SMS配置失败: \(error.localizedDescription)")

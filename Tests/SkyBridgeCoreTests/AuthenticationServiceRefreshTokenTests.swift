@@ -27,6 +27,19 @@ final class AuthenticationServiceRefreshTokenTests: XCTestCase {
         XCTAssertNil(AuthenticationService.mergedRefreshToken(" ", fallback: " "))
     }
 
+    func testDecodeAppleIdentityTokenReturnsRawJWTString() {
+        let token = "header.payload.signature"
+        let data = Data(token.utf8)
+
+        XCTAssertEqual(AuthenticationService.decodeAppleIdentityToken(data), token)
+    }
+
+    func testDecodeAppleIdentityTokenRejectsBinaryPayload() {
+        let data = Data([0xFF, 0x00, 0x80, 0x7F])
+
+        XCTAssertNil(AuthenticationService.decodeAppleIdentityToken(data))
+    }
+
     func testSupabaseRefreshAccessTokenDeduplicatesConcurrentRefreshRequests() async throws {
         let server = try await RefreshTokenHTTPTestServer(accessTokenProvider: { "" })
         defer { server.stop() }
@@ -56,9 +69,11 @@ final class AuthenticationServiceRefreshTokenTests: XCTestCase {
             Self.makeSupabaseAccessToken(baseURL: baseURL, expirationOffset: 3600)
         }
 
-        try await MainActor.run {
-            AuthenticationService.shared.signOut()
+        await MainActor.run {
             SupabaseService.shared.updateConfiguration(.init(url: baseURL, anonKey: "anon-key"))
+        }
+        _ = await AuthenticationService.shared.signOutAndWait()
+        try await MainActor.run {
             try AuthenticationService.shared.updateSession(
                 AuthSession(
                     accessToken: Self.makeSupabaseAccessToken(baseURL: baseURL, expirationOffset: -3600),
@@ -73,7 +88,7 @@ final class AuthenticationServiceRefreshTokenTests: XCTestCase {
         }
         defer {
             Task { @MainActor in
-                AuthenticationService.shared.signOut()
+                _ = await AuthenticationService.shared.signOutAndWait()
             }
         }
 

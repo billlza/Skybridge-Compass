@@ -153,6 +153,7 @@ third_party/freerdp/
 
 # Local env/config
 supabase_config.env
+Docs/ops/.state/
 
 # Supabase local cache
 supabase/.temp/

@@ -182,6 +182,10 @@ public class StartupCoordinator: ObservableObject {
         let unlocked = await KeychainManager.shared.prepareInteractiveUnlockIfNeeded()
         if !unlocked {
             logger.warning("🔐 Keychain 启动解锁未完成，后台读取将保持静默失败并进入冷却")
+        } else {
+            await MainActor.run {
+                AuthenticationService.shared.reloadPersistedSessionIfNeeded()
+            }
         }
         
 // 初始化本机强身份（用于设备发现的本机判定）

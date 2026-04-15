@@ -32,6 +32,16 @@
     <!-- 认证服务配置 -->
     <key>SKYBRIDGE_AUTH_BASEURL</key>
     <string>https://hloqytmhjludmuhwyyzb.supabase.co</string>
+    <key>SUPABASE_URL</key>
+    <string>https://hloqytmhjludmuhwyyzb.supabase.co</string>
+    <key>SUPABASE_ANON_KEY</key>
+    <string>sb_publishable_SonH4HoPQBQxHG_1KQZH-A_Om5mY6RR</string>
+    <key>TURNSTILE_SITE_KEY</key>
+    <string>0x4AAAAAAC9EZ7Tok9ixRxad</string>
+    <key>SKYBRIDGE_ENABLE_APPLE_SIGN_IN</key>
+    <true/>
+    <key>SKYBRIDGE_ENABLE_NATIVE_APPLE_SIGN_IN</key>
+    <true/>
     <key>NEBULA_BASE_URL</key>
     <string>https://nebula.skybridge.com</string>
     <key>NEBULA_CLIENT_ID</key>

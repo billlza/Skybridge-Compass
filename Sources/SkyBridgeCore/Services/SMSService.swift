@@ -2,8 +2,8 @@ import Foundation
 import CryptoKit
 import os.log
 
-/// 短信服务 - 支持真实的阿里云短信API
-/// 遵循Apple 2025最佳实践，使用async/await和Actor隔离
+/// 旧客户端短信直连服务。
+/// 1.0 手机验证码已收敛到 Supabase Phone OTP + send_sms hook + 阿里云，本类型仅用于识别并清理遗留本机凭证。
 @MainActor
 public final class SMSService: BaseManager {
     
@@ -39,6 +39,7 @@ public final class SMSService: BaseManager {
         case apiError(String)
         case signatureError
         case rateLimitExceeded
+        case serverManagedOnly
         
         public var errorDescription: String? {
             switch self {
@@ -54,6 +55,8 @@ public final class SMSService: BaseManager {
                 return "签名生成失败"
             case .rateLimitExceeded:
                 return "发送频率过快，请稍后再试"
+            case .serverManagedOnly:
+                return "短信验证码已改为服务端发送，客户端短信直连能力在 1.0 中停用"
             }
         }
     }
@@ -86,50 +89,24 @@ public final class SMSService: BaseManager {
  // MARK: - 生命周期管理
     
     override public func performInitialization() async {
-        logger.info("SMSService 初始化完成")
+        logger.info("SMSService 初始化完成，当前仅保留遗留短信凭证清理能力")
     }
     
  // MARK: - 配置管理
     
  /// 更新短信服务配置
     public func updateConfiguration(_ configuration: Configuration) {
-        self.configuration = configuration
-        logger.info("SMS service configuration updated")
+        self.configuration = nil
+        logger.warning("忽略客户端短信配置更新请求；生产短信链路已迁移到服务端 Supabase send_sms hook")
     }
     
- /// 从环境变量或Keychain加载配置
+ /// 检查是否存在遗留客户端短信凭证
     private func loadConfigurationFromEnvironment() {
- // 首先尝试从Keychain获取配置
-        do {
-            let keychainConfig = try KeychainManager.shared.retrieveSMSConfig()
-            let env = ProcessInfo.processInfo.environment
-            configuration = Configuration(
-                accessKeyId: keychainConfig.accessKeyId,
-                accessKeySecret: keychainConfig.accessKeySecret,
-                signName: env["ALIYUN_SMS_SIGN_NAME"] ?? "SkyBridge",
-                templateCode: env["ALIYUN_SMS_TEMPLATE_CODE"] ?? "SMS_123456789"
-            )
-            logger.info("SMS configuration loaded from Keychain")
-        } catch {
- // 如果Keychain中没有配置，尝试从环境变量获取
-            let env = ProcessInfo.processInfo.environment
-            
-            guard let accessKeyId = env["ALIYUN_ACCESS_KEY_ID"],
-                  let accessKeySecret = env["ALIYUN_ACCESS_KEY_SECRET"],
-                  let signName = env["ALIYUN_SMS_SIGN_NAME"],
-                  let templateCode = env["ALIYUN_SMS_TEMPLATE_CODE"] else {
-                logger.warning("SMS configuration not found in environment variables or Keychain")
-                return
-            }
-            
-            configuration = Configuration(
-                accessKeyId: accessKeyId,
-                accessKeySecret: accessKeySecret,
-                signName: signName,
-                templateCode: templateCode
-            )
-            
-            logger.info("SMS configuration loaded from environment")
+        configuration = nil
+        if KeychainManager.shared.hasLegacySMSConfig() {
+            logger.warning("检测到旧版客户端短信凭证；这些凭证不会再被用于生产发码，请尽快清理")
+        } else {
+            logger.info("未检测到客户端短信凭证，短信链路已完全交由服务端托管")
         }
     }
     
@@ -141,49 +118,9 @@ public final class SMSService: BaseManager {
  /// - code: 验证码
  /// - Returns: 发送结果
     public func sendVerificationCode(to phoneNumber: String, code: String) async throws -> SMSResult {
- // 验证配置
-        guard let config = configuration else {
-            throw SMSError.configurationMissing
-        }
-        
- // 验证手机号格式
-        guard isValidPhoneNumber(phoneNumber) else {
-            throw SMSError.invalidPhoneNumber
-        }
-        
- // 检查发送频率限制
-        try checkRateLimit(for: phoneNumber)
-        
- // 记录发送时间
-        lastSendTime[phoneNumber] = Date()
-        
-        logger.info("Sending SMS verification code to \(phoneNumber.prefix(3))****\(phoneNumber.suffix(4))")
-        
-        do {
- // 构建请求参数
-            let parameters = buildSMSParameters(
-                config: config,
-                phoneNumber: phoneNumber,
-                templateParam: ["code": code]
-            )
-            
- // 生成签名
-            let signature = try generateSignature(parameters: parameters, secret: config.accessKeySecret)
-            
- // 发送请求
-            let result = try await sendSMSRequest(
-                parameters: parameters,
-                signature: signature,
-                endpoint: config.endpoint
-            )
-            
-            logger.info("SMS sent successfully to \(phoneNumber.prefix(3))****\(phoneNumber.suffix(4))")
-            return result
-            
-        } catch {
-            logger.error("Failed to send SMS: \(error.localizedDescription)")
-            throw error
-        }
+        logger.warning("拒绝客户端短信直连请求: \(phoneNumber.prefix(3))****\(phoneNumber.suffix(4))")
+        _ = code
+        throw SMSError.serverManagedOnly
     }
     
  // MARK: - 私有方法

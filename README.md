@@ -102,6 +102,7 @@ Nebula 原生客户端现统一使用以下配置键：
 - 一键部署：`Server/skybridge-signaling/deploy/scripts/deploy_remote.sh`
 - 一键回滚：`Server/skybridge-signaling/deploy/scripts/rollback_remote.sh`
 - 本地烟雾测试：`Server/skybridge-signaling/deploy/scripts/smoke_local.sh`
+- 认证邮件 / 短信生产化 runbook：`Docs/ops/auth-email-and-sms-production.md`
 
 最小上线命令：
 

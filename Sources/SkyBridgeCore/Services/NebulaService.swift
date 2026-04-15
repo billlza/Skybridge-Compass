@@ -374,6 +374,23 @@ public final class NebulaService: BaseManager {
             throw error
         }
     }
+
+    public func revokeCurrentSession(accessToken: String, refreshToken: String?) async throws {
+        guard let config = currentConfiguration() else {
+            throw NebulaError.configurationMissing
+        }
+
+        let normalizedRefreshToken = refreshToken?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let normalizedRefreshToken, !normalizedRefreshToken.isEmpty {
+            try await sendRevokeRequest(token: normalizedRefreshToken, config: config)
+        }
+
+        let normalizedAccessToken = accessToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !normalizedAccessToken.isEmpty {
+            try await sendRevokeRequest(token: normalizedAccessToken, config: config)
+        }
+    }
     
  // MARK: - 用户注册
     
@@ -770,6 +787,41 @@ public final class NebulaService: BaseManager {
                 throw NebulaError.refreshTokenInvalid
             }
             
+        } catch {
+            throw NebulaError.networkError(error)
+        }
+    }
+
+    private func sendRevokeRequest(token: String, config: Configuration) async throws {
+        guard let url = URL(string: "\(config.baseURL)/oauth/revoke") else {
+            throw NebulaError.networkError(URLError(.badURL))
+        }
+
+        var httpRequest = URLRequest(url: url)
+        httpRequest.httpMethod = "POST"
+        httpRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        httpRequest.setValue("application/json", forHTTPHeaderField: "Accept")
+
+        var payload: [String: Any] = [
+            "token": token,
+            "client_id": config.clientId
+        ]
+        if let clientSecret = config.normalizedClientSecret {
+            payload["client_secret"] = clientSecret
+        }
+        httpRequest.httpBody = try JSONSerialization.data(withJSONObject: payload)
+
+        do {
+            let (data, response) = try await urlSession.data(for: httpRequest)
+            guard let httpResponse = response as? HTTPURLResponse else {
+                throw NebulaError.networkError(URLError(.badServerResponse))
+            }
+            guard (200..<300).contains(httpResponse.statusCode) else {
+                let message = String(data: data, encoding: .utf8) ?? "revoke_failed"
+                throw NebulaError.serverError(message)
+            }
+        } catch let error as NebulaError {
+            throw error
         } catch {
             throw NebulaError.networkError(error)
         }

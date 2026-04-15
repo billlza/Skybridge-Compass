@@ -1,18 +1,40 @@
 import SwiftUI
 import SkyBridgeCore
 import AuthenticationServices
+import SkyBridgeUI
 
 /// 现代化登录界面，遵循macOS 2025设计规范
 /// 采用革命性彩色Liquid Glass设计语言，支持多种登录方式
 /// 应用Apple 2025高性能最佳实践，针对Apple Silicon优化
 @available(macOS 14.0, *)
 struct AuthenticationView: View {
-    @StateObject private var viewModel = AuthenticationViewModel()
+    private enum SupabaseTurnstileAction {
+        case signInWithApple
+        case registerEmail
+        case loginEmail
+        case sendPhoneOTP
+        case resetPassword
+
+        var actionName: String {
+            switch self {
+            case .signInWithApple: return "apple_signin"
+            case .registerEmail: return "signup"
+            case .loginEmail: return "password_login"
+            case .sendPhoneOTP: return "phone_otp"
+            case .resetPassword: return "password_reset"
+            }
+        }
+    }
+
+    @EnvironmentObject private var viewModel: AuthenticationViewModel
     @StateObject private var hazeClearManager = InteractiveClearManager()
     @EnvironmentObject private var themeConfiguration: ThemeConfiguration
     @Environment(\.colorScheme) private var colorScheme
     @State private var isAnimating = false
     @State private var selectedTab = 0
+    @State private var pendingSupabaseTurnstileContext: SupabaseTurnstileChallengeContext?
+    @State private var pendingSupabaseTurnstileAction: SupabaseTurnstileAction?
+    @State private var pendingAppleAuthorization: ASAuthorization?
     
     var body: some View {
         GeometryReader { geometry in
@@ -44,6 +66,38 @@ struct AuthenticationView: View {
             let pt = locationValue.pointValue
             let flipped = CGPoint(x: pt.x, y: pt.y)
             hazeClearManager.handleMouseMove(flipped)
+        }
+        .sheet(isPresented: $viewModel.showCaptchaView) {
+            BehaviorCaptchaView { success, error in
+                viewModel.onCaptchaVerificationComplete(success: success, error: error)
+            } onCancel: {
+                viewModel.onCaptchaVerificationComplete(success: false, error: "已取消安全验证")
+            }
+            .presentationDetents([.medium])
+        }
+        .sheet(item: $pendingSupabaseTurnstileContext) { context in
+            SupabaseTurnstileSheet(
+                context: context,
+                onToken: { token in
+                    guard let action = pendingSupabaseTurnstileAction else { return }
+                    pendingSupabaseTurnstileAction = nil
+                    pendingSupabaseTurnstileContext = nil
+                    runSupabaseTurnstileAction(action, token: token)
+                },
+                onCancel: {
+                    pendingSupabaseTurnstileAction = nil
+                    pendingSupabaseTurnstileContext = nil
+                    pendingAppleAuthorization = nil
+                    viewModel.errorMessage = "已取消 Cloudflare Turnstile 验证"
+                },
+                onError: { message in
+                    pendingSupabaseTurnstileAction = nil
+                    pendingSupabaseTurnstileContext = nil
+                    pendingAppleAuthorization = nil
+                    viewModel.errorMessage = "Cloudflare Turnstile 验证失败：\(message)"
+                }
+            )
+            .presentationDetents([.medium])
         }
     }
     
@@ -220,7 +274,7 @@ struct AuthenticationView: View {
             
  // 使用HStack替代LazyVGrid，提升性能
             HStack(spacing: 12) {
-                ForEach(Array(AuthenticationViewModel.LoginMethod.allCases.enumerated()), id: \.element) { index, method in
+                ForEach(Array(viewModel.availableLoginMethods.enumerated()), id: \.element) { index, method in
                     macOSNativeMethodButton(method: method, index: index)
                         .frame(maxWidth: .infinity)
                 }
@@ -341,38 +395,66 @@ struct AuthenticationView: View {
     
     private var appleLoginForm: some View {
         VStack(spacing: 20) {
+            if viewModel.usesNativeAppleSignIn {
  // Apple登录按钮 - 彩色液态玻璃风格
-            SignInWithAppleButton(.signIn) { request in
-                request.requestedScopes = [.fullName, .email]
-            } onCompletion: { result in
-                Task {
-                    switch result {
-                    case .success(let authorization):
-                        await viewModel.handleAppleAuthorization(authorization)
-                    case .failure(let error):
-                        await MainActor.run {
-                            viewModel.errorMessage = error.localizedDescription
-                        }
-                    }
+                SignInWithAppleButton(.signIn) { request in
+                    request.requestedScopes = [.fullName, .email]
+                    viewModel.configureAppleSignInRequest(request)
+                } onCompletion: { result in
+                    handleAppleSignInResult(result)
                 }
-            }
-            .signInWithAppleButtonStyle(.black)
-            .frame(height: 50)
-            .clipShape(RoundedRectangle(cornerRadius: 12))
-            .overlay {
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(
-                        LinearGradient(
-                            colors: [Color.white.opacity(0.3), Color.clear],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        ),
-                        lineWidth: 1
+                .signInWithAppleButtonStyle(.black)
+                .frame(height: 50)
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(
+                            LinearGradient(
+                                colors: [Color.white.opacity(0.3), Color.clear],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            ),
+                            lineWidth: 1
+                        )
+                }
+                .shadow(color: .black.opacity(0.2), radius: 8, x: 0, y: 4)
+            } else {
+                Button {
+                    beginSupabaseTurnstileAction(.signInWithApple)
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: "applelogo")
+                            .font(.system(size: 18, weight: .semibold))
+                        Text("在浏览器中使用 Apple 登录")
+                            .font(.headline)
+                    }
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity, minHeight: 50)
+                    .background(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(Color.black)
                     )
+                }
+                .buttonStyle(.plain)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(
+                            LinearGradient(
+                                colors: [Color.white.opacity(0.3), Color.clear],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            ),
+                            lineWidth: 1
+                        )
+                }
+                .shadow(color: .black.opacity(0.2), radius: 8, x: 0, y: 4)
             }
-            .shadow(color: .black.opacity(0.2), radius: 8, x: 0, y: 4)
             
-            Text(LocalizationManager.shared.localizedString("auth.apple.tip"))
+            Text(
+                viewModel.usesNativeAppleSignIn
+                    ? LocalizationManager.shared.localizedString("auth.apple.tip")
+                    : "将打开 Apple 安全网页完成登录，成功后会自动返回应用"
+            )
                 .font(.caption)
                 .foregroundColor(.secondary)
         }
@@ -638,12 +720,12 @@ struct AuthenticationView: View {
                     Task {
                         if viewModel.isPhoneCodeSent {
                             if viewModel.isPhoneRegistrationMode {
-                                await viewModel.registerWithPhone()
+                                await viewModel.completePhoneRegistration()
                             } else {
                                 await viewModel.loginWithPhone()
                             }
                         } else {
-                            await viewModel.sendPhoneVerificationCode()
+                            beginSupabaseTurnstileAction(.sendPhoneOTP)
                         }
                     }
                 }
@@ -661,12 +743,12 @@ struct AuthenticationView: View {
                     Task {
                         if viewModel.isPhoneCodeSent {
                             if viewModel.isPhoneRegistrationMode {
-                                await viewModel.registerWithPhone()
+                                await viewModel.completePhoneRegistration()
                             } else {
                                 await viewModel.loginWithPhone()
                             }
                         } else {
-                            await viewModel.sendPhoneVerificationCode()
+                            beginSupabaseTurnstileAction(.sendPhoneOTP)
                         }
                     }
                 }
@@ -675,9 +757,7 @@ struct AuthenticationView: View {
  // 重新发送验证码按钮（倒计时结束后显示）
             if viewModel.isPhoneCodeSent && viewModel.phoneCodeCountdown == 0 {
                 Button {
-                    Task {
-                        await viewModel.resendPhoneVerificationCode()
-                    }
+                    beginSupabaseTurnstileAction(.sendPhoneOTP)
                 } label: {
                     Text(LocalizationManager.shared.localizedString("auth.phone.resendCode"))
                         .font(.caption)
@@ -863,35 +943,21 @@ struct AuthenticationView: View {
                     primaryColor: .blue,
                     isLoading: viewModel.isProcessing
                 ) {
-                    Task {
-                        if viewModel.isRegistrationMode {
-                            await viewModel.registerWithEmail()
-                        } else {
-                            await viewModel.loginWithEmail()
-                        }
-                    }
+                    beginSupabaseTurnstileAction(viewModel.isRegistrationMode ? .registerEmail : .loginEmail)
                 }
             } else {
                 ModernButton(
                     title: viewModel.isRegistrationMode ? LocalizationManager.shared.localizedString("auth.email.register") : LocalizationManager.shared.localizedString("auth.email.login"),
                     isLoading: viewModel.isProcessing
                 ) {
-                    Task {
-                        if viewModel.isRegistrationMode {
-                            await viewModel.registerWithEmail()
-                        } else {
-                            await viewModel.loginWithEmail()
-                        }
-                    }
+                    beginSupabaseTurnstileAction(viewModel.isRegistrationMode ? .registerEmail : .loginEmail)
                 }
             }
             
  // 登录模式下显示重置密码选项
             if !viewModel.isRegistrationMode {
                 Button {
-                    Task {
-                        await viewModel.resetPassword()
-                    }
+                    beginSupabaseTurnstileAction(.resetPassword)
                 } label: {
                     Text(LocalizationManager.shared.localizedString("auth.password.forgot"))
                         .font(.caption)
@@ -975,6 +1041,93 @@ struct AuthenticationView: View {
         }
         .buttonStyle(.plain)
         .contentShape(Rectangle())
+    }
+
+    private func beginSupabaseTurnstileAction(_ action: SupabaseTurnstileAction) {
+        pendingAppleAuthorization = nil
+
+        guard let originURL =
+                SupabaseConfiguration.shared.resolvedConfiguration?.url
+                    ?? SupabaseService.Configuration.fromEnvironment()?.url else {
+            runSupabaseTurnstileAction(action, token: nil)
+            return
+        }
+
+        guard let baseContext = SupabaseTurnstileConfig.current(originURL: originURL) else {
+            if SupabaseTurnstileConfig.requiresSiteKey(for: originURL) {
+                viewModel.errorMessage = "客户端缺少 Cloudflare Turnstile 配置，请检查 TURNSTILE_SITE_KEY"
+                return
+            }
+
+            runSupabaseTurnstileAction(action, token: nil)
+            return
+        }
+
+        pendingSupabaseTurnstileAction = action
+        pendingSupabaseTurnstileContext = SupabaseTurnstileChallengeContext(
+            siteKey: baseContext.siteKey,
+            originURL: baseContext.originURL,
+            action: action.actionName
+        )
+    }
+
+    private func beginAppleSignInFlow(with authorization: ASAuthorization) {
+        guard let originURL =
+                SupabaseConfiguration.shared.resolvedConfiguration?.url
+                    ?? SupabaseService.Configuration.fromEnvironment()?.url else {
+            Task { await viewModel.handleAppleAuthorization(authorization) }
+            return
+        }
+
+        guard let baseContext = SupabaseTurnstileConfig.current(originURL: originURL) else {
+            if SupabaseTurnstileConfig.requiresSiteKey(for: originURL) {
+                viewModel.errorMessage = "客户端缺少 Cloudflare Turnstile 配置，请检查 TURNSTILE_SITE_KEY"
+                return
+            }
+
+            Task { await viewModel.handleAppleAuthorization(authorization) }
+            return
+        }
+
+        pendingAppleAuthorization = authorization
+        pendingSupabaseTurnstileAction = .signInWithApple
+        pendingSupabaseTurnstileContext = SupabaseTurnstileChallengeContext(
+            siteKey: baseContext.siteKey,
+            originURL: baseContext.originURL,
+            action: SupabaseTurnstileAction.signInWithApple.actionName
+        )
+    }
+
+    private func handleAppleSignInResult(_ result: Result<ASAuthorization, Error>) {
+        switch result {
+        case .success(let authorization):
+            beginAppleSignInFlow(with: authorization)
+        case .failure(let error):
+            if let authError = error as? ASAuthorizationError, authError.code == .canceled {
+                return
+            }
+            viewModel.errorMessage = error.localizedDescription
+        }
+    }
+
+    private func runSupabaseTurnstileAction(_ action: SupabaseTurnstileAction, token: String?) {
+        switch action {
+        case .signInWithApple:
+            if let authorization = pendingAppleAuthorization {
+                pendingAppleAuthorization = nil
+                Task { await viewModel.handleAppleAuthorization(authorization, captchaToken: token) }
+            } else {
+                Task { await viewModel.loginWithApple(captchaToken: token) }
+            }
+        case .registerEmail:
+            Task { await viewModel.registerWithEmail(captchaToken: token) }
+        case .loginEmail:
+            Task { await viewModel.loginWithEmail(captchaToken: token) }
+        case .sendPhoneOTP:
+            Task { await viewModel.sendPhoneVerificationCode(captchaToken: token) }
+        case .resetPassword:
+            Task { await viewModel.resetPassword(captchaToken: token) }
+        }
     }
 }
 
@@ -1368,6 +1521,7 @@ struct AuthenticationView_Previews: PreviewProvider {
         if #available(macOS 14.0, *) {
             AuthenticationView()
                 .frame(width: 800, height: 600)
+                .environmentObject(AuthenticationViewModel())
                 .environmentObject(ThemeConfiguration.shared)
                 .environmentObject(WeatherIntegrationManager.shared)
                 .environmentObject(WeatherEffectsSettings.shared)
