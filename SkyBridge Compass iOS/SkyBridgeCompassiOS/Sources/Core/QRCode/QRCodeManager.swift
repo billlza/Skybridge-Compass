@@ -404,6 +404,22 @@ public final class QRCodeScanner: NSObject {
         let session: AVCaptureSession
         init(_ session: AVCaptureSession) { self.session = session }
     }
+
+    private final class SessionConfigurationBox: @unchecked Sendable {
+        let session: AVCaptureSession
+        let input: AVCaptureDeviceInput
+        let output: AVCaptureMetadataOutput
+
+        init(
+            session: AVCaptureSession,
+            input: AVCaptureDeviceInput,
+            output: AVCaptureMetadataOutput
+        ) {
+            self.session = session
+            self.input = input
+            self.output = output
+        }
+    }
     
     public weak var delegate: QRCodeScannerDelegate?
     
@@ -411,6 +427,7 @@ public final class QRCodeScanner: NSObject {
     private var previewLayer: AVCaptureVideoPreviewLayer?
     private weak var previewContainerView: UIView?
     private var isScanning = false
+    private let sessionQueue = DispatchQueue(label: "com.skybridge.qrcode.scanner.session", qos: .userInitiated)
     
     public override init() {
         super.init()
@@ -458,16 +475,13 @@ public final class QRCodeScanner: NSObject {
         let output = AVCaptureMetadataOutput()
         
         let session = AVCaptureSession()
-        session.sessionPreset = .high
-        
-        if session.canAddInput(input) {
-            session.addInput(input)
-        }
-        
-        if session.canAddOutput(output) {
-            session.addOutput(output)
-        }
-        
+        let configuration = SessionConfigurationBox(
+            session: session,
+            input: input,
+            output: output
+        )
+        configureSession(configuration)
+
         output.setMetadataObjectsDelegate(self, queue: DispatchQueue.main)
         output.metadataObjectTypes = [.qr]
         
@@ -488,7 +502,8 @@ public final class QRCodeScanner: NSObject {
 
         isScanning = true
         let box = CaptureSessionBox(session)
-        DispatchQueue.global(qos: .userInitiated).async {
+        sessionQueue.async {
+            guard !box.session.isRunning else { return }
             box.session.startRunning()
         }
     }
@@ -499,10 +514,7 @@ public final class QRCodeScanner: NSObject {
 
         isScanning = false
         guard let session = captureSession else { return }
-        let box = CaptureSessionBox(session)
-        DispatchQueue.global(qos: .userInitiated).async {
-            box.session.stopRunning()
-        }
+        stopSession(CaptureSessionBox(session), wait: false)
     }
 
     /// 释放扫描器占用的相机与预览资源
@@ -518,12 +530,7 @@ public final class QRCodeScanner: NSObject {
         layer?.removeFromSuperlayer()
 
         guard let session else { return }
-        let box = CaptureSessionBox(session)
-        DispatchQueue.global(qos: .userInitiated).async {
-            if box.session.isRunning {
-                box.session.stopRunning()
-            }
-        }
+        stopSession(CaptureSessionBox(session), wait: true)
     }
     
     /// 更新预览层大小
@@ -567,6 +574,37 @@ public final class QRCodeScanner: NSObject {
 
         // 作为普通字符串返回
         delegate?.scanner(self, didScanCode: string)
+    }
+
+    private func configureSession(_ configuration: SessionConfigurationBox) {
+        sessionQueue.sync {
+            configuration.session.beginConfiguration()
+            defer { configuration.session.commitConfiguration() }
+
+            configuration.session.sessionPreset = .high
+
+            if configuration.session.canAddInput(configuration.input) {
+                configuration.session.addInput(configuration.input)
+            }
+
+            if configuration.session.canAddOutput(configuration.output) {
+                configuration.session.addOutput(configuration.output)
+            }
+        }
+    }
+
+    private func stopSession(_ box: CaptureSessionBox, wait: Bool) {
+        let stopWork = {
+            if box.session.isRunning {
+                box.session.stopRunning()
+            }
+        }
+
+        if wait {
+            sessionQueue.sync(execute: stopWork)
+        } else {
+            sessionQueue.async(execute: stopWork)
+        }
     }
 }
 

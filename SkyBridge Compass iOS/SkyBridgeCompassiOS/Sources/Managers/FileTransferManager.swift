@@ -80,12 +80,23 @@ public struct FileChunk: Codable, Sendable {
     public let data: Data
     public let size: Int
     public let checksum: String?
-    
-    public init(index: Int, data: Data, size: Int, checksum: String? = nil) {
+    public let nonce: Data?
+    public let authenticationTag: Data?
+
+    public init(
+        index: Int,
+        data: Data,
+        size: Int,
+        checksum: String? = nil,
+        nonce: Data? = nil,
+        authenticationTag: Data? = nil
+    ) {
         self.index = index
         self.data = data
         self.size = size
         self.checksum = checksum
+        self.nonce = nonce
+        self.authenticationTag = authenticationTag
     }
 }
 
@@ -98,7 +109,9 @@ public struct FileMetadata: Codable, Sendable {
     public let fileSize: Int64
     public let fileHash: String
     public let chunkSize: Int
-    
+    public let securityVersion: Int?
+    public let metadataAuthTag: Data?
+
     // iOS 端附加字段（macOS 端会忽略额外字段）
     public let mimeType: String?
     /// 压缩算法：nil/"" 表示不压缩；当前支持 "zlib"
@@ -120,6 +133,8 @@ public struct FileMetadata: Codable, Sendable {
         fileSize: Int64,
         fileHash: String,
         chunkSize: Int = FileTransferConstants.defaultChunkSize,
+        securityVersion: Int? = nil,
+        metadataAuthTag: Data? = nil,
         mimeType: String? = nil,
         compression: String? = nil,
         totalChunks: Int? = nil,
@@ -136,6 +151,8 @@ public struct FileMetadata: Codable, Sendable {
         self.fileSize = fileSize
         self.fileHash = fileHash
         self.chunkSize = chunkSize
+        self.securityVersion = securityVersion
+        self.metadataAuthTag = metadataAuthTag
         self.mimeType = mimeType
         self.compression = compression
         self.totalChunks = totalChunks
@@ -198,19 +215,25 @@ public struct TransferReceipt: Codable, Sendable {
     public let receivedBytes: Int64
     public let fileHash: String?
     public let error: String?
+    public let securityVersion: Int?
+    public let authTag: Data?
 
     public init(
         transferId: String,
         success: Bool,
         receivedBytes: Int64,
         fileHash: String? = nil,
-        error: String? = nil
+        error: String? = nil,
+        securityVersion: Int? = nil,
+        authTag: Data? = nil
     ) {
         self.transferId = transferId
         self.success = success
         self.receivedBytes = receivedBytes
         self.fileHash = fileHash
         self.error = error
+        self.securityVersion = securityVersion
+        self.authTag = authTag
     }
 }
 
@@ -230,7 +253,8 @@ public enum FileTransferError: Error, LocalizedError, Sendable {
     case networkError(String)
     case timeout
     case encryptionFailed
-    
+    case secureSessionRequired
+
     public var errorDescription: String? {
         switch self {
         case .fileNotFound: return "文件不存在"
@@ -245,6 +269,7 @@ public enum FileTransferError: Error, LocalizedError, Sendable {
         case .networkError(let reason): return "网络错误: \(reason)"
         case .timeout: return "传输超时"
         case .encryptionFailed: return "加密失败"
+        case .secureSessionRequired: return "需要已认证的安全会话"
         }
     }
 }
@@ -309,6 +334,10 @@ public class FileTransferManager: ObservableObject {
     private let maxChunkSizeBytes: Int = 512 * 1024
     private let maxMessageBytes: Int = 2_000_000
     private let queue = DispatchQueue(label: "com.skybridge.filetransfer", qos: .userInitiated)
+
+    private struct ClassicTransferSecurityContext {
+        let transferKey: SymmetricKey
+    }
 
     private var inFlightTransferCount: Int = 0
     private struct TransferWaiter {
@@ -397,7 +426,7 @@ public class FileTransferManager: ObservableObject {
         activeTransfers.append(transfer)
         isTransferring = true
         postInAppTransferEvent(name: "FileTransferStarted", transfer: transfer)
-        
+
         // 创建传输状态
         var state = TransferState(transferId: transfer.id)
         state.localURL = url
@@ -432,7 +461,7 @@ public class FileTransferManager: ObservableObject {
             senderChip: senderChip
         )
         transferStates[transfer.id] = state
-        
+
         do {
             // Cross-network path (WebRTC DataChannel): zero-config, no ports required.
             if shouldUseCrossNetworkTransport(for: device) {
@@ -453,21 +482,37 @@ public class FileTransferManager: ObservableObject {
             let connection = try await createConnection(to: endpoint)
             defer { connection.cancel() }
             transferStates[transfer.id]?.connection = connection
-            
+
+            let securityContext = try classicTransferSecurityContext(
+                peerDeviceIdCandidates: [resolvedDevice.id, device.id],
+                transferId: transfer.id
+            )
+
             // 发送元数据
-            try await sendMetadata(state.metadata!, over: connection)
-            
+            try await sendMetadata(
+                state.metadata!,
+                securityContext: securityContext,
+                over: connection
+            )
+
             // 分块发送文件
-            try await sendFileInChunks(from: url, transfer: transfer, over: connection, chunkSize: effectiveChunkSize)
+            try await sendFileInChunks(
+                from: url,
+                transfer: transfer,
+                securityContext: securityContext,
+                over: connection,
+                chunkSize: effectiveChunkSize
+            )
 
             // 必须等待接收端“落盘回执”，否则不能标记发送成功
             _ = try await waitForTransferReceipt(
                 over: connection,
+                securityContext: securityContext,
                 expectedTransferId: transfer.id,
                 expectedFileSize: fileSize,
                 expectedFileHash: fileHash
             )
-            
+
             // 完成传输
             await completeTransfer(transfer.id, success: true)
             
@@ -1110,8 +1155,21 @@ public class FileTransferManager: ObservableObject {
             throw FileTransferError.invalidMetadata
         }
 
+        let securityContext = try classicTransferSecurityContext(
+            peerDeviceIdCandidates: [metadata.senderDeviceId, peer].compactMap { $0 },
+            transferId: metadata.transferId
+        )
+        let unsignedMetadata = unsignedMetadataCopy(from: metadata)
+        guard isValidAuthenticationTag(
+            metadata.metadataAuthTag,
+            payload: metadataAuthenticationInput(unsignedMetadata),
+            key: securityContext.transferKey
+        ) else {
+            throw FileTransferError.secureSessionRequired
+        }
+
         let targetURL = makeUniqueDestinationURL(fileName: metadata.fileName)
-        
+
         // 创建传输记录
         let transfer = FileTransfer(
             id: metadata.transferId,
@@ -1122,7 +1180,7 @@ public class FileTransferManager: ObservableObject {
             remotePeer: peer,
             localPath: targetURL.path
         )
-        
+
         activeTransfers.append(transfer)
         isTransferring = true
         postInAppTransferEvent(name: "FileTransferStarted", transfer: transfer)
@@ -1133,21 +1191,27 @@ public class FileTransferManager: ObservableObject {
             fileName: metadata.fileName,
             localPath: targetURL.path
         )
-        
+
         // 创建传输状态
         var state = TransferState(transferId: transfer.id)
         state.metadata = metadata
         state.connection = connection
         state.startTime = Date()
-        
+
         // 创建目标文件
         state.localURL = targetURL
         transferStates[transfer.id] = state
-        
+
         do {
             // 分块接收文件
-            try await receiveFileInChunks(to: targetURL, transfer: transfer, from: connection, metadata: metadata)
-            
+            try await receiveFileInChunks(
+                to: targetURL,
+                transfer: transfer,
+                securityContext: securityContext,
+                from: connection,
+                metadata: metadata
+            )
+
             // 验证哈希
             let receivedHash = try await calculateFileHash(at: targetURL)
             guard receivedHash == metadata.fileHash else {
@@ -1159,30 +1223,40 @@ public class FileTransferManager: ObservableObject {
                 transferId: metadata.transferId,
                 success: true,
                 receivedBytes: metadata.fileSize,
-                fileHash: receivedHash
+                fileHash: receivedHash,
+                securityVersion: metadata.securityVersion
             )
             do {
-                try await sendReceipt(receipt, over: connection)
+                try await sendReceipt(
+                    receipt,
+                    securityContext: securityContext,
+                    over: connection
+                )
             } catch {
                 SkyBridgeLogger.shared.error("⚠️ 落盘回执发送失败: \(error.localizedDescription)")
             }
-            
+
             // 完成传输
             await completeTransfer(transfer.id, success: true)
-            
+
             SkyBridgeLogger.shared.info("✅ 文件接收完成: \(metadata.fileName)")
             
             return targetURL
-            
+
         } catch {
             let failure = TransferReceipt(
                 transferId: metadata.transferId,
                 success: false,
                 receivedBytes: 0,
                 fileHash: nil,
-                error: error.localizedDescription
+                error: error.localizedDescription,
+                securityVersion: metadata.securityVersion
             )
-            try? await sendReceipt(failure, over: connection)
+            try? await sendReceipt(
+                failure,
+                securityContext: securityContext,
+                over: connection
+            )
             await completeTransfer(transfer.id, success: false, error: error)
             throw error
         }
@@ -1201,7 +1275,7 @@ public class FileTransferManager: ObservableObject {
             activeTransfers.remove(at: index)
         }
         clearProgressEventState(for: transferId)
-        
+
         updateTransferringState()
     }
     
@@ -1284,7 +1358,13 @@ public class FileTransferManager: ObservableObject {
     // MARK: - Private Methods - Sending
     
     /// 分块发送文件
-    private func sendFileInChunks(from url: URL, transfer: FileTransfer, over connection: NWConnection, chunkSize: Int) async throws {
+    private func sendFileInChunks(
+        from url: URL,
+        transfer: FileTransfer,
+        securityContext: ClassicTransferSecurityContext,
+        over connection: NWConnection,
+        chunkSize: Int
+    ) async throws {
         guard let fileHandle = FileHandle(forReadingAtPath: url.path) else {
             throw FileTransferError.fileNotFound
         }
@@ -1314,16 +1394,22 @@ public class FileTransferManager: ObservableObject {
             } else {
                 processedData = chunkData
             }
-            
+            let encrypted = try encryptChunkPayload(
+                processedData,
+                using: securityContext.transferKey
+            )
+
             // 计算分块校验和
             let chunkChecksum = SHA256.hash(data: chunkData).compactMap { String(format: "%02x", $0) }.joined()
-            
+
             // 创建分块
             let chunk = FileChunk(
                 index: chunkIndex,
-                data: processedData,
+                data: encrypted.ciphertext,
                 size: chunkData.count,
-                checksum: chunkChecksum
+                checksum: chunkChecksum,
+                nonce: encrypted.nonce,
+                authenticationTag: encrypted.tag
             )
             
             // 发送分块
@@ -1341,8 +1427,38 @@ public class FileTransferManager: ObservableObject {
     }
     
     /// 发送元数据
-    private func sendMetadata(_ metadata: FileMetadata, over connection: NWConnection) async throws {
-        let data = try JSONEncoder().encode(metadata)
+    private func sendMetadata(
+        _ metadata: FileMetadata,
+        securityContext: ClassicTransferSecurityContext,
+        over connection: NWConnection
+    ) async throws {
+        let unsignedMetadata = unsignedMetadataCopy(
+            from: metadata,
+            securityVersion: metadata.securityVersion ?? 1
+        )
+        let signedMetadata = FileMetadata(
+            transferId: unsignedMetadata.transferId,
+            fileName: unsignedMetadata.fileName,
+            fileSize: unsignedMetadata.fileSize,
+            fileHash: unsignedMetadata.fileHash,
+            chunkSize: unsignedMetadata.chunkSize,
+            securityVersion: unsignedMetadata.securityVersion,
+            metadataAuthTag: authenticationTag(
+                for: metadataAuthenticationInput(unsignedMetadata),
+                using: securityContext.transferKey
+            ),
+            mimeType: unsignedMetadata.mimeType,
+            compression: unsignedMetadata.compression,
+            totalChunks: unsignedMetadata.totalChunks,
+            resumeOffset: unsignedMetadata.resumeOffset,
+            senderDeviceId: unsignedMetadata.senderDeviceId,
+            senderDeviceName: unsignedMetadata.senderDeviceName,
+            senderPlatform: unsignedMetadata.senderPlatform,
+            senderOSVersion: unsignedMetadata.senderOSVersion,
+            senderModelName: unsignedMetadata.senderModelName,
+            senderChip: unsignedMetadata.senderChip
+        )
+        let data = try JSONEncoder().encode(signedMetadata)
         if data.count > maxMessageBytes {
             throw FileTransferError.invalidMetadata
         }
@@ -1367,8 +1483,28 @@ public class FileTransferManager: ObservableObject {
     }
 
     /// 发送接收端回执（落盘确认/失败原因）
-    private func sendReceipt(_ receipt: TransferReceipt, over connection: NWConnection) async throws {
-        let data = try JSONEncoder().encode(receipt)
+    private func sendReceipt(
+        _ receipt: TransferReceipt,
+        securityContext: ClassicTransferSecurityContext,
+        over connection: NWConnection
+    ) async throws {
+        let unsignedReceipt = unsignedReceiptCopy(
+            from: receipt,
+            securityVersion: receipt.securityVersion ?? 1
+        )
+        let signedReceipt = TransferReceipt(
+            transferId: unsignedReceipt.transferId,
+            success: unsignedReceipt.success,
+            receivedBytes: unsignedReceipt.receivedBytes,
+            fileHash: unsignedReceipt.fileHash,
+            error: unsignedReceipt.error,
+            securityVersion: unsignedReceipt.securityVersion,
+            authTag: authenticationTag(
+                for: receiptAuthenticationInput(unsignedReceipt),
+                using: securityContext.transferKey
+            )
+        )
+        let data = try JSONEncoder().encode(signedReceipt)
         if data.count > maxMessageBytes {
             throw FileTransferError.invalidMetadata
         }
@@ -1379,6 +1515,7 @@ public class FileTransferManager: ObservableObject {
     /// 发送端等待接收端落盘回执，避免“仅发送完成即成功”的假阳性
     private func waitForTransferReceipt(
         over connection: NWConnection,
+        securityContext: ClassicTransferSecurityContext,
         expectedTransferId: String,
         expectedFileSize: Int64,
         expectedFileHash: String
@@ -1393,8 +1530,16 @@ public class FileTransferManager: ObservableObject {
 
         let payload = try await receiveData(length: header.length, from: connection, timeout: 15)
         let receipt = try JSONDecoder().decode(TransferReceipt.self, from: payload)
+        let unsignedReceipt = unsignedReceiptCopy(from: receipt)
         guard receipt.transferId == expectedTransferId else {
             throw FileTransferError.invalidMetadata
+        }
+        guard isValidAuthenticationTag(
+            receipt.authTag,
+            payload: receiptAuthenticationInput(unsignedReceipt),
+            key: securityContext.transferKey
+        ) else {
+            throw FileTransferError.secureSessionRequired
         }
         guard receipt.success else {
             throw FileTransferError.transferFailed("接收端处理失败: \(receipt.error ?? "unknown")")
@@ -1416,6 +1561,7 @@ public class FileTransferManager: ObservableObject {
     private func receiveFileInChunks(
         to url: URL,
         transfer: FileTransfer,
+        securityContext: ClassicTransferSecurityContext,
         from connection: NWConnection,
         metadata: FileMetadata
     ) async throws {
@@ -1440,16 +1586,22 @@ public class FileTransferManager: ObservableObject {
             
             // 接收分块
             let chunk = try await receiveChunk(from: connection)
-            
+            let decrypted = try decryptChunkPayload(
+                ciphertext: chunk.data,
+                nonce: chunk.nonce,
+                tag: chunk.authenticationTag,
+                using: securityContext.transferKey
+            )
+
             // 可选：解压数据（按 metadata.compression 协商；为兼容旧实现，未声明时可做“尝试解压+回退”）
             let processedData: Data
             if metadata.compression == "zlib" {
-                processedData = try decompressData(chunk.data)
+                processedData = try decompressData(decrypted)
             } else if compressionEnabled {
                 // 旧互通策略：对端未声明但本地开启时尝试解压
-                processedData = (try? decompressData(chunk.data)) ?? chunk.data
+                processedData = (try? decompressData(decrypted)) ?? decrypted
             } else {
-                processedData = chunk.data
+                processedData = decrypted
             }
             if processedData.count > maxChunkSizeBytes {
                 throw FileTransferError.invalidMetadata
@@ -1464,7 +1616,7 @@ public class FileTransferManager: ObservableObject {
             // 更新进度
             await updateProgress(transfer.id, transferredBytes: receivedBytes, totalBytes: totalBytes)
         }
-        
+
         // 等待完成信号
         let completeHeader = try await receiveHeader(from: connection)
         guard completeHeader.type == .complete else {
@@ -1478,10 +1630,10 @@ public class FileTransferManager: ObservableObject {
         guard header.type == .chunk else {
             throw FileTransferError.invalidMetadata
         }
-        
+
         let data = try await receiveData(length: header.length, from: connection)
         let chunk = try JSONDecoder().decode(FileChunk.self, from: data)
-        if chunk.size > maxChunkSizeBytes {
+        if chunk.size > maxChunkSizeBytes || chunk.nonce?.count != 12 || chunk.authenticationTag?.isEmpty != false {
             throw FileTransferError.invalidMetadata
         }
         return chunk
@@ -1690,6 +1842,131 @@ public class FileTransferManager: ObservableObject {
         return data
     }
 
+    private func classicTransferSecurityContext(
+        peerDeviceIdCandidates: [String],
+        transferId: String
+    ) throws -> ClassicTransferSecurityContext {
+        for candidate in peerDeviceIdCandidates {
+            let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            if let transferKey = try? connectionManager.deriveClassicFileTransferKey(
+                transferId: transferId,
+                deviceId: trimmed
+            ) {
+                return ClassicTransferSecurityContext(transferKey: transferKey)
+            }
+        }
+        throw FileTransferError.secureSessionRequired
+    }
+
+    private func unsignedMetadataCopy(
+        from metadata: FileMetadata,
+        securityVersion: Int? = nil
+    ) -> FileMetadata {
+        FileMetadata(
+            transferId: metadata.transferId,
+            fileName: metadata.fileName,
+            fileSize: metadata.fileSize,
+            fileHash: metadata.fileHash,
+            chunkSize: metadata.chunkSize,
+            securityVersion: securityVersion ?? metadata.securityVersion,
+            metadataAuthTag: nil,
+            mimeType: metadata.mimeType,
+            compression: metadata.compression,
+            totalChunks: metadata.totalChunks,
+            resumeOffset: metadata.resumeOffset,
+            senderDeviceId: metadata.senderDeviceId,
+            senderDeviceName: metadata.senderDeviceName,
+            senderPlatform: metadata.senderPlatform,
+            senderOSVersion: metadata.senderOSVersion,
+            senderModelName: metadata.senderModelName,
+            senderChip: metadata.senderChip
+        )
+    }
+
+    private func unsignedReceiptCopy(
+        from receipt: TransferReceipt,
+        securityVersion: Int? = nil
+    ) -> TransferReceipt {
+        TransferReceipt(
+            transferId: receipt.transferId,
+            success: receipt.success,
+            receivedBytes: receipt.receivedBytes,
+            fileHash: receipt.fileHash,
+            error: receipt.error,
+            securityVersion: securityVersion ?? receipt.securityVersion,
+            authTag: nil
+        )
+    }
+
+    private func metadataAuthenticationInput(_ metadata: FileMetadata) -> Data {
+        [
+            metadata.transferId,
+            metadata.fileName,
+            String(metadata.fileSize),
+            metadata.fileHash,
+            String(metadata.chunkSize),
+            String(metadata.securityVersion ?? 0),
+            metadata.compression ?? "",
+            metadata.senderDeviceId ?? "",
+            metadata.senderDeviceName ?? "",
+            metadata.senderPlatform ?? "",
+            metadata.senderOSVersion ?? "",
+            metadata.senderModelName ?? "",
+            metadata.senderChip ?? ""
+        ].joined(separator: "|").data(using: .utf8) ?? Data()
+    }
+
+    private func receiptAuthenticationInput(_ receipt: TransferReceipt) -> Data {
+        [
+            receipt.transferId,
+            receipt.success ? "1" : "0",
+            String(receipt.receivedBytes),
+            receipt.fileHash ?? "",
+            receipt.error ?? "",
+            String(receipt.securityVersion ?? 0)
+        ].joined(separator: "|").data(using: .utf8) ?? Data()
+    }
+
+    private func authenticationTag(for payload: Data, using key: SymmetricKey) -> Data {
+        Data(HMAC<SHA256>.authenticationCode(for: payload, using: key))
+    }
+
+    private func isValidAuthenticationTag(_ tag: Data?, payload: Data, key: SymmetricKey) -> Bool {
+        guard let tag else { return false }
+        return authenticationTag(for: payload, using: key) == tag
+    }
+
+    private func encryptChunkPayload(
+        _ plaintext: Data,
+        using key: SymmetricKey
+    ) throws -> (ciphertext: Data, nonce: Data, tag: Data) {
+        let nonce = AES.GCM.Nonce()
+        let sealed = try AES.GCM.seal(plaintext, using: key, nonce: nonce)
+        return (
+            ciphertext: sealed.ciphertext,
+            nonce: Data(nonce),
+            tag: sealed.tag
+        )
+    }
+
+    private func decryptChunkPayload(
+        ciphertext: Data,
+        nonce: Data?,
+        tag: Data?,
+        using key: SymmetricKey
+    ) throws -> Data {
+        guard let nonce, let tag else {
+            throw FileTransferError.secureSessionRequired
+        }
+        let sealed = try AES.GCM.SealedBox(
+            nonce: try AES.GCM.Nonce(data: nonce),
+            ciphertext: ciphertext,
+            tag: tag
+        )
+        return try AES.GCM.open(sealed, using: key)
+    }
+
     private func acquireTransferSlot() async throws {
         let limit = max(1, SettingsManager.instance.fileTransferMaxConcurrentTransfers)
         if inFlightTransferCount < limit {
@@ -1756,7 +2033,7 @@ public class FileTransferManager: ObservableObject {
 
         return .decrementTo(decrementedCount)
     }
-    
+
     // MARK: - Private Methods - Utilities
     
     /// 计算文件哈希（SHA256，流式处理，避免大文件内存峰值）
@@ -1798,7 +2075,7 @@ public class FileTransferManager: ObservableObject {
     private func updateProgress(_ transferId: String, transferredBytes: Int64, totalBytes: Int64) async {
         let progress = Double(transferredBytes) / Double(totalBytes)
         let speed = calculateSpeed(transferId: transferId, transferredBytes: transferredBytes)
-        
+
         var fileName: String?
         var direction: SkyBridgeActivityAttributes.TransferDirection = .none
         var transferSnapshot: FileTransfer?
@@ -2018,7 +2295,7 @@ public class FileTransferManager: ObservableObject {
             if let savedURL {
                 activeTransfers[index].localPath = savedURL.path
             }
-            
+
             // 移动到历史
             let completedTransfer = activeTransfers[index]
             activeTransfers.remove(at: index)
@@ -2070,7 +2347,7 @@ public class FileTransferManager: ObservableObject {
         transferStates[transferId]?.connection?.cancel()
         transferStates.removeValue(forKey: transferId)
         clearProgressEventState(for: transferId)
-        
+
         updateTransferringState()
     }
     
@@ -2091,7 +2368,7 @@ public class FileTransferManager: ObservableObject {
         destinationURL: URL? = nil
     ) {
         if activeTransfers.contains(where: { $0.id == transferId }) { return }
-        
+
         let transfer = FileTransfer(
             id: transferId,
             fileName: fileName,
@@ -2233,7 +2510,7 @@ public class FileTransferManager: ObservableObject {
     private func loadHistory() {
         transferHistory = Self.historyStore.load() ?? []
     }
-    
+
     private func saveHistory() {
         // 只保留最近 100 条记录
         let historyToSave = Array(transferHistory.prefix(100))

@@ -1,6 +1,10 @@
 import SwiftUI
 import AVKit
 import AVFoundation
+#if canImport(AppKit)
+import AppKit
+#endif
+import OSLog
 import SkyBridgeCore
 
 /// 媒体预览视图 - 支持音频和视频文件预览
@@ -73,8 +77,7 @@ struct MediaPreviewView: View {
         if isVideoFile {
  // 视频播放器
             if let player = player {
-                VideoPlayer(player: player)
-                    .aspectRatio(contentMode: .fit)
+                MediaPreviewVideoPlayerView(player: player)
             } else {
                 loadingView
             }
@@ -404,4 +407,24 @@ struct MediaPreviewView_Previews: PreviewProvider {
         MediaPreviewView(fileURL: URL(fileURLWithPath: "/Users/test/Movies/sample.mp4"))
     }
 }
-import OSLog
+
+#if canImport(AppKit)
+private struct MediaPreviewVideoPlayerView: NSViewRepresentable {
+    let player: AVPlayer
+
+    func makeNSView(context: Context) -> AVPlayerView {
+        let view = AVPlayerView()
+        view.controlsStyle = .floating
+        view.videoGravity = .resizeAspect
+        view.showsSharingServiceButton = false
+        view.player = player
+        return view
+    }
+
+    func updateNSView(_ nsView: AVPlayerView, context: Context) {
+        if nsView.player !== player {
+            nsView.player = player
+        }
+    }
+}
+#endif

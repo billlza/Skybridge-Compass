@@ -3406,6 +3406,50 @@ public class P2PConnectionManager: ObservableObject {
         }
         return try skyBridgeCore.decrypt(data, sessionKey: keys.receiveKey)
     }
+
+    /// Derive the authenticated LAN file-transfer key from the established session keys.
+    /// This mirrors the macOS derivation so local file-transfer metadata/chunks/receipts
+    /// stay cryptographically bound to the already authenticated P2P session.
+    public func deriveClassicFileTransferKey(transferId: String, deviceId: String) throws -> SymmetricKey {
+        let canonicalDeviceId = canonicalPeerLookupKey(deviceId)
+        let runtimePeerId = runtimePeerId(forAnyPeerId: canonicalDeviceId)
+        let presentationPeerId = presentationPeerId(for: runtimePeerId)
+
+        for candidate in [runtimePeerId, canonicalDeviceId, presentationPeerId] {
+            if let keys = sessionKeys[candidate] {
+                return deriveClassicFileTransferKey(from: keys, transferId: transferId)
+            }
+        }
+
+        let aliases = Set(PeerIdentityAliasResolver.lookupCandidates(for: deviceId))
+            .union(PeerIdentityAliasResolver.lookupCandidates(for: canonicalDeviceId))
+            .union(PeerIdentityAliasResolver.lookupCandidates(for: runtimePeerId))
+            .union(PeerIdentityAliasResolver.lookupCandidates(for: presentationPeerId))
+
+        for candidate in stateKeysMatchingAliases(aliases, keys: sessionKeys.keys) {
+            if let keys = sessionKeys[candidate] {
+                return deriveClassicFileTransferKey(from: keys, transferId: transferId)
+            }
+        }
+
+        throw P2PError.noSessionKey
+    }
+
+    private func deriveClassicFileTransferKey(from keys: SessionKeys, transferId: String) -> SymmetricKey {
+        let orderedKeys = [keys.sendKey, keys.receiveKey].sorted { lhs, rhs in
+            lhs.lexicographicallyPrecedes(rhs)
+        }
+        let combinedMaterial = orderedKeys.reduce(into: Data()) { partial, key in
+            partial.append(key)
+        }
+
+        return HKDF<SHA256>.deriveKey(
+            inputKeyMaterial: SymmetricKey(data: combinedMaterial),
+            salt: Data("skybridge-classic-file-transfer-v1".utf8),
+            info: Data(transferId.utf8),
+            outputByteCount: 32
+        )
+    }
     
     /// 获取设备的协商套件
     public func getNegotiatedSuite(for deviceId: String) -> CryptoSuite? {
