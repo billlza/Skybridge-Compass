@@ -26,9 +26,10 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::time::UtcTime;
 
 use crate::state::{
-    DeviceIdentityMaterial, ensure_device_identity, ensure_rust_pqc_identity,
+    DeviceIdentityMaterial, apply_signaling_event, apply_transport_event,
+    disconnect_session_if_active, ensure_device_identity, ensure_rust_pqc_identity,
     load_managed_session_controls, load_session_registry, remove_managed_session_control,
-    signing_binding, store_session_registry,
+    signing_binding, update_session_remote_peer,
 };
 
 static TRACING_GUARD: OnceLock<WorkerGuard> = OnceLock::new();
@@ -37,6 +38,26 @@ const ENV_PEER_MLKEM768_PUBLIC_KEY_B64: &str = "SKYBRIDGE_PQC_PEER_MLKEM768_PUBL
 const ENV_PEER_XWING_PUBLIC_KEY_B64: &str = "SKYBRIDGE_PQC_PEER_XWING_PUBLIC_KEY_BASE64";
 const ENV_PQC_PREFERRED_SUITE: &str = "SKYBRIDGE_PQC_PREFERRED_SUITE";
 const ENV_PQC_BRIDGE_IDENTITY: &str = "SKYBRIDGE_PQC_BRIDGE_IDENTITY";
+
+#[derive(Debug)]
+struct ManagedSessionWorker {
+    cancel: CancellationToken,
+    handle: JoinHandle<()>,
+}
+
+impl ManagedSessionWorker {
+    fn new(cancel: CancellationToken, handle: JoinHandle<()>) -> Self {
+        Self { cancel, handle }
+    }
+
+    fn cancel(&self) {
+        self.cancel.cancel();
+    }
+
+    fn is_finished(&self) -> bool {
+        self.handle.is_finished()
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct AgentRuntimeOptions {
@@ -263,13 +284,11 @@ fn spawn_supervisor(paths: AgentPaths, cancel: CancellationToken) -> JoinHandle<
     tokio::spawn(async move {
         let mut ticker = interval(Duration::from_secs(5));
         ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        let mut workers = std::collections::BTreeMap::<String, CancellationToken>::new();
+        let mut workers = BTreeMap::<String, ManagedSessionWorker>::new();
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => {
-                    for worker_cancel in workers.values() {
-                        worker_cancel.cancel();
-                    }
+                    shutdown_managed_session_workers(&mut workers).await;
                     break;
                 }
                 _ = ticker.tick() => {
@@ -290,6 +309,93 @@ fn spawn_supervisor(paths: AgentPaths, cancel: CancellationToken) -> JoinHandle<
             }
         }
     })
+}
+
+fn spawn_managed_session_worker(
+    paths: AgentPaths,
+    control: ManagedSessionControl,
+    cancel: CancellationToken,
+) -> ManagedSessionWorker {
+    let session_id = control.session_id.clone();
+    let worker_paths = paths.clone();
+    let worker_cancel = cancel.clone();
+    let handle = tokio::spawn(async move {
+        let result =
+            run_managed_session(worker_paths.clone(), control, worker_cancel.clone()).await;
+        let disconnect_reason = match &result {
+            Ok(()) if worker_cancel.is_cancelled() => {
+                Some("managed session worker cancelled".to_owned())
+            }
+            Ok(()) => Some("managed session worker exited".to_owned()),
+            Err(error) => Some(format!("managed session worker failed: {error}")),
+        };
+        if let Err(error) =
+            disconnect_session_if_active(&worker_paths, &session_id, disconnect_reason).await
+        {
+            warn!(
+                kind = "agent.session.worker_cleanup_failed",
+                session_id = %session_id,
+                error = %error,
+                "managed session worker cleanup failed"
+            );
+        }
+        match result {
+            Ok(()) => {
+                info!(
+                    kind = "agent.session.worker_stopped",
+                    session_id = %session_id,
+                    cancelled = worker_cancel.is_cancelled(),
+                    "managed session worker stopped"
+                );
+            }
+            Err(error) => {
+                warn!(
+                    kind = "agent.session.worker_failed",
+                    session_id = %session_id,
+                    error = %error,
+                    "managed session worker failed"
+                );
+            }
+        }
+    });
+    ManagedSessionWorker::new(cancel, handle)
+}
+
+async fn await_managed_session_worker_exit(session_id: String, worker: ManagedSessionWorker) {
+    if let Err(join_error) = worker.handle.await {
+        warn!(
+            kind = "agent.session.worker_join_failed",
+            session_id = %session_id,
+            error = %join_error,
+            "managed session worker join failed"
+        );
+    }
+}
+
+async fn drain_finished_managed_session_workers(
+    workers: &mut BTreeMap<String, ManagedSessionWorker>,
+) {
+    let finished = workers
+        .iter()
+        .filter_map(|(session_id, worker)| worker.is_finished().then_some(session_id.clone()))
+        .collect::<Vec<_>>();
+    for session_id in finished {
+        if let Some(worker) = workers.remove(&session_id) {
+            await_managed_session_worker_exit(session_id, worker).await;
+        }
+    }
+}
+
+async fn shutdown_managed_session_workers(workers: &mut BTreeMap<String, ManagedSessionWorker>) {
+    for worker in workers.values() {
+        worker.cancel();
+    }
+    let session_ids = workers.keys().cloned().collect::<Vec<_>>();
+    for session_id in session_ids {
+        if let Some(worker) = workers.remove(&session_id) {
+            await_managed_session_worker_exit(session_id, worker).await;
+        }
+    }
 }
 
 fn pqc_bridge_identity_enabled() -> bool {
@@ -458,14 +564,33 @@ async fn build_pqc_responder_config(
 async fn reconcile_managed_sessions(
     paths: &AgentPaths,
     root_cancel: &CancellationToken,
-    workers: &mut std::collections::BTreeMap<String, CancellationToken>,
+    workers: &mut BTreeMap<String, ManagedSessionWorker>,
 ) -> Result<()> {
+    reconcile_managed_sessions_with_spawner(
+        paths,
+        root_cancel,
+        workers,
+        |paths, control, cancel| spawn_managed_session_worker(paths, control, cancel),
+    )
+    .await
+}
+
+async fn reconcile_managed_sessions_with_spawner<F>(
+    paths: &AgentPaths,
+    root_cancel: &CancellationToken,
+    workers: &mut BTreeMap<String, ManagedSessionWorker>,
+    spawn_worker: F,
+) -> Result<()>
+where
+    F: Fn(AgentPaths, ManagedSessionControl, CancellationToken) -> ManagedSessionWorker,
+{
+    drain_finished_managed_session_workers(workers).await;
     let controls = load_managed_session_controls(paths).await?;
     let desired = controls
         .active_controls()
         .into_iter()
         .map(|control| (control.session_id.clone(), control))
-        .collect::<std::collections::BTreeMap<_, _>>();
+        .collect::<BTreeMap<_, _>>();
 
     for session_id in workers
         .keys()
@@ -473,30 +598,26 @@ async fn reconcile_managed_sessions(
         .cloned()
         .collect::<Vec<_>>()
     {
-        if let Some(worker_cancel) = workers.remove(&session_id) {
-            worker_cancel.cancel();
+        if let Some(worker) = workers.get(&session_id) {
+            worker.cancel();
         }
     }
 
     for (session_id, control) in desired {
+        if workers
+            .get(&session_id)
+            .is_some_and(ManagedSessionWorker::is_finished)
+        {
+            if let Some(worker) = workers.remove(&session_id) {
+                await_managed_session_worker_exit(session_id.clone(), worker).await;
+            }
+        }
         if workers.contains_key(&session_id) {
             continue;
         }
         let worker_cancel = root_cancel.child_token();
-        workers.insert(session_id.clone(), worker_cancel.clone());
-        let worker_paths = paths.clone();
-        tokio::spawn(async move {
-            if let Err(error) =
-                run_managed_session(worker_paths, control, worker_cancel.clone()).await
-            {
-                warn!(
-                    kind = "agent.session.worker_failed",
-                    session_id = %session_id,
-                    error = %error,
-                    "managed session worker failed"
-                );
-            }
-        });
+        let worker = spawn_worker(paths.clone(), control, worker_cancel);
+        workers.insert(session_id, worker);
     }
 
     Ok(())
@@ -684,9 +805,9 @@ async fn apply_signaling_runtime_event(
     session_id: &str,
     event: &skybridge_core::SignalingLifecycleEvent,
 ) -> Result<()> {
-    let mut registry = load_session_registry(paths).await?;
-    registry.apply_signaling_event(session_id, event);
-    store_session_registry(paths, &registry).await
+    apply_signaling_event(paths, session_id, event.clone())
+        .await
+        .map(|_| ())
 }
 
 async fn apply_inbound_runtime_event(
@@ -697,9 +818,8 @@ async fn apply_inbound_runtime_event(
 ) -> Result<()> {
     match inbound {
         InboundMessage::Envelope(envelope) => {
-            let mut registry = load_session_registry(paths).await?;
-            registry.update_remote_peer(session_id, envelope.from.clone(), None, None);
-            store_session_registry(paths, &registry).await?;
+            update_session_remote_peer(paths, session_id, envelope.from.clone(), None, None)
+                .await?;
             native_session.handle_signaling_envelope(&envelope).await?;
         }
         InboundMessage::ServerFrame(_) | InboundMessage::Unknown => {}
@@ -723,10 +843,12 @@ async fn apply_native_runtime_event(
                 session_id = %session_id,
                 "applying transport_ready to session registry"
             );
-            let mut registry = load_session_registry(paths).await?;
-            registry
-                .apply_transport_event(session_id, RuntimeSessionTransportEvent::TransportReady);
-            store_session_registry(paths, &registry).await?;
+            apply_transport_event(
+                paths,
+                session_id,
+                RuntimeSessionTransportEvent::TransportReady,
+            )
+            .await?;
         }
         NativeWebRtcEvent::HandshakeComplete { negotiated_suite } => {
             info!(
@@ -735,12 +857,12 @@ async fn apply_native_runtime_event(
                 negotiated_suite = %negotiated_suite,
                 "applying handshake_complete to session registry"
             );
-            let mut registry = load_session_registry(paths).await?;
-            registry.apply_transport_event(
+            apply_transport_event(
+                paths,
                 session_id,
                 RuntimeSessionTransportEvent::HandshakeComplete { negotiated_suite },
-            );
-            store_session_registry(paths, &registry).await?;
+            )
+            .await?;
         }
         NativeWebRtcEvent::Keepalive { kind, ping_id } => {
             info!(
@@ -750,12 +872,12 @@ async fn apply_native_runtime_event(
                 ping_id = ping_id,
                 "applying keepalive event to session registry"
             );
-            let mut registry = load_session_registry(paths).await?;
-            registry.apply_transport_event(
+            apply_transport_event(
+                paths,
                 session_id,
                 RuntimeSessionTransportEvent::Keepalive { kind, ping_id },
-            );
-            store_session_registry(paths, &registry).await?;
+            )
+            .await?;
         }
         NativeWebRtcEvent::TransportDisconnected { reason } => {
             info!(
@@ -764,12 +886,12 @@ async fn apply_native_runtime_event(
                 reason = reason.as_deref().unwrap_or("unknown"),
                 "applying transport_disconnected to session registry"
             );
-            let mut registry = load_session_registry(paths).await?;
-            registry.apply_transport_event(
+            apply_transport_event(
+                paths,
                 session_id,
                 RuntimeSessionTransportEvent::TransportDisconnected { reason },
-            );
-            store_session_registry(paths, &registry).await?;
+            )
+            .await?;
         }
     }
     Ok(())
@@ -890,4 +1012,71 @@ pub(crate) async fn restrict_file_permissions(path: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn test_paths(name: &str) -> AgentPaths {
+        resolve_paths(Some(std::env::temp_dir().join(format!(
+            "skybridge-agent-runtime-{name}-{}",
+            uuid::Uuid::now_v7()
+        ))))
+        .expect("temporary paths should resolve")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reconcile_respawns_finished_worker_for_active_control() {
+        let paths = test_paths("reconcile-respawn");
+        crate::state::upsert_managed_session_control(
+            &paths,
+            ManagedSessionControl::new(
+                "session-1",
+                RuntimeSessionRole::Initiator,
+                skybridge_core::RuntimeSessionSource::Code,
+                "local-device",
+                "https://signal.example.com",
+                "session-token",
+                None,
+            ),
+        )
+        .await
+        .expect("managed session control should persist");
+
+        let finished_cancel = CancellationToken::new();
+        let finished_handle = tokio::spawn(async {});
+        tokio::task::yield_now().await;
+
+        let mut workers = BTreeMap::from([(
+            "session-1".to_owned(),
+            ManagedSessionWorker::new(finished_cancel, finished_handle),
+        )]);
+        let spawn_count = Arc::new(AtomicUsize::new(0));
+        let root_cancel = CancellationToken::new();
+
+        reconcile_managed_sessions_with_spawner(&paths, &root_cancel, &mut workers, {
+            let spawn_count = Arc::clone(&spawn_count);
+            move |_paths, _control, cancel| {
+                spawn_count.fetch_add(1, Ordering::SeqCst);
+                let worker_cancel = cancel.clone();
+                let handle = tokio::spawn(async move {
+                    worker_cancel.cancelled().await;
+                });
+                ManagedSessionWorker::new(cancel, handle)
+            }
+        })
+        .await
+        .expect("reconcile should respawn finished worker");
+
+        assert_eq!(spawn_count.load(Ordering::SeqCst), 1);
+        assert_eq!(workers.len(), 1);
+        assert!(workers.contains_key("session-1"));
+        assert!(!workers["session-1"].is_finished());
+
+        shutdown_managed_session_workers(&mut workers).await;
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
 }

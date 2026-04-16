@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import XCTest
 @testable import SkyBridgeCore
@@ -26,6 +27,7 @@ final class TransferLinkFlowTests: XCTestCase {
         try await super.setUp()
         createdLinkIDs.removeAll()
         temporaryFiles.removeAll()
+        LocalFileTransferHTTPServer.testingStartDelayNanos = 0
         scanner.cleanup()
         try await manager.start()
         try await waitForHTTPServerReady()
@@ -40,71 +42,62 @@ final class TransferLinkFlowTests: XCTestCase {
         }
         await manager.stop()
         scanner.cleanup()
+        LocalFileTransferHTTPServer.testingStartDelayNanos = 0
         createdLinkIDs.removeAll()
         temporaryFiles.removeAll()
         try await super.tearDown()
     }
 
-    func testShareURLShouldBeReachableByPeerDevices() async throws {
+    func testShareURLShouldBeReachableByPeerDevicesAndProtectedByDefault() async throws {
         let fileURL = try makeTemporaryFile(named: "transfer-link-peer.txt", contents: "peer reachable")
         let link = try await manager.createTransferLink(for: [fileURL])
         createdLinkIDs.append(link.id)
 
-        let shareURL = try XCTUnwrap(URL(string: link.shareUrl))
+        let shareURL = try XCTUnwrap(link.shareURL)
+        let password = try XCTUnwrap(link.password)
 
         XCTAssertNotEqual(
             shareURL.host,
             "localhost",
             "跨设备分享链接不应该固定指向 localhost，否则接收端扫码会回环到自己机器。"
         )
+        XCTAssertNotEqual(shareURL.port, 8888, "发布版不应继续固定使用弱默认端口。")
+        XCTAssertEqual(password.split(separator: "-").count, 5)
+        XCTAssertTrue(password.count >= 24)
+        XCTAssertEqual(URLComponents(url: shareURL, resolvingAgainstBaseURL: false)?.fragment?.hasPrefix("unlock="), true)
     }
 
-    func testDownloadEndpointShouldServeSharedFile() async throws {
+    func testDefaultProtectedLinkShouldUnlockWithChallengeProofAndAllowDownload() async throws {
         let fileURL = try makeTemporaryFile(named: "transfer-link-download.txt", contents: "download me")
         let link = try await manager.createTransferLink(for: [fileURL])
         createdLinkIDs.append(link.id)
 
-        let pageURL = try XCTUnwrap(URL(string: "http://127.0.0.1:8888/link/\(link.id)"))
-        let (pageData, pageResponse) = try await URLSession.shared.data(from: pageURL)
-        let pageHTTPResponse = try XCTUnwrap(pageResponse as? HTTPURLResponse)
-        XCTAssertEqual(pageHTTPResponse.statusCode, 200)
+        let cookieHeader = try await performSecureUnlock(for: link, secret: try XCTUnwrap(link.password))
 
-        let pageHTML = try XCTUnwrap(String(data: pageData, encoding: .utf8))
-        XCTAssertTrue(pageHTML.contains("/link/\(link.id)/download/0"))
+        var downloadRequest = URLRequest(url: try loopbackURL(for: link, path: "/link/\(link.id)/download/0"))
+        downloadRequest.setValue(cookieHeader, forHTTPHeaderField: "Cookie")
 
-        let downloadURL = try XCTUnwrap(URL(string: "http://127.0.0.1:8888/link/\(link.id)/download/0"))
-        let (downloadData, downloadResponse) = try await URLSession.shared.data(from: downloadURL)
+        let (downloadData, downloadResponse) = try await URLSession.shared.data(for: downloadRequest)
         let downloadHTTPResponse = try XCTUnwrap(downloadResponse as? HTTPURLResponse)
 
-        XCTAssertEqual(
-            downloadHTTPResponse.statusCode,
-            200,
-            "下载按钮指向的端点应该真正返回文件内容，而不是 404。"
-        )
+        XCTAssertEqual(downloadHTTPResponse.statusCode, 200)
         XCTAssertEqual(String(data: downloadData, encoding: .utf8), "download me")
     }
 
     func testPreviewPageShouldNotConsumeDownloadQuota() async throws {
         let fileURL = try makeTemporaryFile(named: "transfer-link-preview.txt", contents: "preview only")
-        let link = try await manager.createTransferLink(for: [fileURL], maxDownloads: 1)
+        let link = try await manager.createTransferLink(for: [fileURL], maxDownloads: 1, requiresPassword: false)
         createdLinkIDs.append(link.id)
 
-        let previewURL = try XCTUnwrap(URL(string: "http://127.0.0.1:8888/link/\(link.id)"))
+        let previewURL = try loopbackURL(for: link)
         let (_, response) = try await URLSession.shared.data(from: previewURL)
         let httpResponse = try XCTUnwrap(response as? HTTPURLResponse)
         XCTAssertEqual(httpResponse.statusCode, 200)
 
         let refreshedLink = await manager.getLink(by: link.id)
         let refreshed = try XCTUnwrap(refreshedLink)
-        XCTAssertEqual(
-            refreshed.currentDownloads,
-            0,
-            "查看文件列表页不应该直接消耗下载次数。"
-        )
-        XCTAssertTrue(
-            refreshed.isActive,
-            "仅打开预览页后，链接仍应保持可下载状态。"
-        )
+        XCTAssertEqual(refreshed.currentDownloads, 0)
+        XCTAssertTrue(refreshed.isActive)
     }
 
     func testScannerShouldRejectHostMismatchedTransferLink() async throws {
@@ -127,28 +120,25 @@ final class TransferLinkFlowTests: XCTestCase {
 
     func testPreviewPageShouldEscapeFileNamesInHTML() async throws {
         let fileURL = try makeTemporaryFile(named: "evil&name<test>.txt", contents: "escape me")
-        let link = try await manager.createTransferLink(for: [fileURL])
+        let link = try await manager.createTransferLink(for: [fileURL], requiresPassword: false)
         createdLinkIDs.append(link.id)
 
-        let previewURL = try XCTUnwrap(URL(string: "http://127.0.0.1:8888/link/\(link.id)"))
+        let previewURL = try loopbackURL(for: link)
         let (data, response) = try await URLSession.shared.data(from: previewURL)
         let httpResponse = try XCTUnwrap(response as? HTTPURLResponse)
         XCTAssertEqual(httpResponse.statusCode, 200)
 
         let html = try XCTUnwrap(String(data: data, encoding: .utf8))
-        XCTAssertFalse(
-            html.contains("evil&name<test>.txt"),
-            "文件名进入 HTML 时应该先转义，避免破坏页面结构或注入内容。"
-        )
+        XCTAssertFalse(html.contains("evil&name<test>.txt"))
         XCTAssertTrue(html.contains("evil&amp;name&lt;test&gt;.txt"))
     }
 
     func testLegacyDownloadRouteStillWorks() async throws {
         let fileURL = try makeTemporaryFile(named: "legacy-download.txt", contents: "legacy route")
-        let link = try await manager.createTransferLink(for: [fileURL])
+        let link = try await manager.createTransferLink(for: [fileURL], requiresPassword: false)
         createdLinkIDs.append(link.id)
 
-        let legacyURL = try XCTUnwrap(URL(string: "http://127.0.0.1:8888/download/\(link.id)/\(fileURL.lastPathComponent)"))
+        let legacyURL = try loopbackURL(for: link, path: "/download/\(link.id)/\(fileURL.lastPathComponent)")
         let (data, response) = try await URLSession.shared.data(from: legacyURL)
         let httpResponse = try XCTUnwrap(response as? HTTPURLResponse)
 
@@ -158,10 +148,10 @@ final class TransferLinkFlowTests: XCTestCase {
 
     func testPreviewPageIncludesSecurityHeadersAndMarkers() async throws {
         let fileURL = try makeTemporaryFile(named: "headers.txt", contents: "headers")
-        let link = try await manager.createTransferLink(for: [fileURL])
+        let link = try await manager.createTransferLink(for: [fileURL], requiresPassword: false)
         createdLinkIDs.append(link.id)
 
-        let previewURL = try XCTUnwrap(URL(string: "http://127.0.0.1:8888/link/\(link.id)"))
+        let previewURL = try loopbackURL(for: link)
         let (_, response) = try await URLSession.shared.data(from: previewURL)
         let httpResponse = try XCTUnwrap(response as? HTTPURLResponse)
 
@@ -171,61 +161,135 @@ final class TransferLinkFlowTests: XCTestCase {
         XCTAssertEqual(httpResponse.value(forHTTPHeaderField: "Pragma"), "no-cache")
         XCTAssertEqual(httpResponse.value(forHTTPHeaderField: "X-Content-Type-Options"), "nosniff")
         XCTAssertEqual(httpResponse.value(forHTTPHeaderField: "Referrer-Policy"), "no-referrer")
-        XCTAssertEqual(
-            httpResponse.value(forHTTPHeaderField: "Content-Security-Policy"),
-            "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:"
-        )
+        XCTAssertEqual(httpResponse.value(forHTTPHeaderField: "X-Frame-Options"), "DENY")
+        XCTAssertEqual(httpResponse.value(forHTTPHeaderField: "Cross-Origin-Resource-Policy"), "same-origin")
     }
 
-    func testProtectedLinkUnlockSetsCookieAndAllowsDownload() async throws {
-        let fileURL = try makeTemporaryFile(named: "protected.txt", contents: "locked")
-        let link = try await manager.createTransferLink(for: [fileURL], requiresPassword: true)
+    func testAccessQueryParameterShouldNotAuthorizeDownload() async throws {
+        let fileURL = try makeTemporaryFile(named: "query-token.txt", contents: "query token")
+        let link = try await manager.createTransferLink(for: [fileURL])
         createdLinkIDs.append(link.id)
-        let password = try XCTUnwrap(link.password)
 
-        let previewURL = try XCTUnwrap(URL(string: "http://127.0.0.1:8888/link/\(link.id)"))
-        let (_, initialResponse) = try await URLSession.shared.data(from: previewURL)
-        let initialHTTPResponse = try XCTUnwrap(initialResponse as? HTTPURLResponse)
-        XCTAssertEqual(initialHTTPResponse.statusCode, 200)
-        XCTAssertEqual(initialHTTPResponse.value(forHTTPHeaderField: "X-SkyBridge-Transfer-Page"), "unlock")
+        let cookieHeader = try await performSecureUnlock(for: link, secret: try XCTUnwrap(link.password))
+        let accessToken = try extractAccessToken(from: cookieHeader)
 
-        var unlockRequest = URLRequest(url: try XCTUnwrap(URL(string: "http://127.0.0.1:8888/link/\(link.id)/unlock")))
-        unlockRequest.httpMethod = "POST"
-        unlockRequest.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        unlockRequest.httpBody = "password=\(password)".data(using: .utf8)
+        let session = URLSession(configuration: .ephemeral, delegate: NoRedirectDelegate(), delegateQueue: nil)
+        defer { session.invalidateAndCancel() }
 
-        let noRedirectSession = URLSession(configuration: .ephemeral, delegate: NoRedirectDelegate(), delegateQueue: nil)
-        defer { noRedirectSession.invalidateAndCancel() }
+        let queryDownloadURL = try loopbackURL(
+            for: link,
+            path: "/link/\(link.id)/download/0",
+            queryItems: [URLQueryItem(name: "access", value: accessToken)]
+        )
 
-        let (_, unlockResponse) = try await noRedirectSession.data(for: unlockRequest)
-        let unlockHTTPResponse = try XCTUnwrap(unlockResponse as? HTTPURLResponse)
-        XCTAssertEqual(unlockHTTPResponse.statusCode, 303)
+        let (_, response) = try await session.data(from: queryDownloadURL)
+        let httpResponse = try XCTUnwrap(response as? HTTPURLResponse)
 
-        let setCookie = try XCTUnwrap(unlockHTTPResponse.value(forHTTPHeaderField: "Set-Cookie"))
-        XCTAssertTrue(setCookie.contains("HttpOnly"))
-        XCTAssertTrue(setCookie.contains("SameSite=Lax"))
-        XCTAssertTrue(setCookie.contains("Path=/link/\(link.id)"))
+        XCTAssertEqual(httpResponse.statusCode, 303)
+        XCTAssertEqual(httpResponse.value(forHTTPHeaderField: "Location"), "/link/\(link.id)")
+    }
 
-        let cookieHeader = String(setCookie.split(separator: ";", maxSplits: 1).first ?? "")
-        var downloadRequest = URLRequest(url: try XCTUnwrap(URL(string: "http://127.0.0.1:8888/link/\(link.id)/download/0")))
-        downloadRequest.setValue(cookieHeader, forHTTPHeaderField: "Cookie")
+    func testUnlockShouldThrottleRepeatedInvalidProofs() async throws {
+        let fileURL = try makeTemporaryFile(named: "throttle.txt", contents: "throttle")
+        let link = try await manager.createTransferLink(for: [fileURL])
+        createdLinkIDs.append(link.id)
 
-        let (downloadData, downloadResponse) = try await URLSession.shared.data(for: downloadRequest)
-        let downloadHTTPResponse = try XCTUnwrap(downloadResponse as? HTTPURLResponse)
+        let session = URLSession(configuration: .ephemeral, delegate: NoRedirectDelegate(), delegateQueue: nil)
+        defer { session.invalidateAndCancel() }
 
-        XCTAssertEqual(downloadHTTPResponse.statusCode, 200)
-        XCTAssertEqual(String(data: downloadData, encoding: .utf8), "locked")
+        for attempt in 1...5 {
+            let unlockPage = try await fetchUnlockPageHTML(for: link)
+            let challenge = try extractInputValue(named: "challenge", from: unlockPage)
+            let badProof = makeUnlockProof(linkID: link.id, challenge: challenge, secret: "WRONG-WRONG-WRONG-WRONG-WRONG")
+            let unlockRequest = try makeUnlockRequest(for: link, challenge: challenge, proof: badProof)
+
+            let (data, response) = try await session.data(for: unlockRequest)
+            let httpResponse = try XCTUnwrap(response as? HTTPURLResponse)
+            let html = try XCTUnwrap(String(data: data, encoding: .utf8))
+
+            if attempt < 5 {
+                XCTAssertEqual(httpResponse.statusCode, 401)
+            } else {
+                XCTAssertEqual(httpResponse.statusCode, 429)
+                XCTAssertNotNil(httpResponse.value(forHTTPHeaderField: "Retry-After"))
+                XCTAssertTrue(html.contains("尝试次数过多"))
+            }
+        }
+    }
+
+    func testConcurrentStartupWaitsForSingleServerReadyState() async throws {
+        await manager.stop()
+        LocalFileTransferHTTPServer.testingStartDelayNanos = 400_000_000
+        defer { LocalFileTransferHTTPServer.testingStartDelayNanos = 0 }
+
+        let firstStart = Task { @MainActor in
+            try await self.manager.start()
+        }
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        let secondStartedAt = Date()
+        try await manager.start()
+        let secondElapsed = Date().timeIntervalSince(secondStartedAt)
+        try await firstStart.value
+
+        XCTAssertGreaterThanOrEqual(
+            secondElapsed,
+            0.25,
+            "当 server 还在 starting 时，后续调用必须等待 ready，而不是提前返回伪成功。"
+        )
+        try await waitForHTTPServerReady()
     }
 
     func testScannerAcceptsProtectedLinkUnlockPageMarker() async throws {
         let fileURL = try makeTemporaryFile(named: "scanner-protected.txt", contents: "scanner")
-        let link = try await manager.createTransferLink(for: [fileURL], requiresPassword: true)
+        let link = try await manager.createTransferLink(for: [fileURL])
         createdLinkIDs.append(link.id)
         scanner.prepareForPresentation()
 
         let accepted = await scanner.handleTransferLink(link.shareUrl)
 
         XCTAssertTrue(accepted)
+    }
+
+    private func performSecureUnlock(for link: TransferLink, secret: String) async throws -> String {
+        let unlockPage = try await fetchUnlockPageHTML(for: link)
+        let challenge = try extractInputValue(named: "challenge", from: unlockPage)
+        let proof = makeUnlockProof(linkID: link.id, challenge: challenge, secret: secret)
+        let unlockRequest = try makeUnlockRequest(for: link, challenge: challenge, proof: proof)
+
+        let session = URLSession(configuration: .ephemeral, delegate: NoRedirectDelegate(), delegateQueue: nil)
+        defer { session.invalidateAndCancel() }
+
+        let (_, response) = try await session.data(for: unlockRequest)
+        let httpResponse = try XCTUnwrap(response as? HTTPURLResponse)
+        XCTAssertEqual(httpResponse.statusCode, 303)
+
+        let setCookie = try XCTUnwrap(httpResponse.value(forHTTPHeaderField: "Set-Cookie"))
+        XCTAssertTrue(setCookie.contains("HttpOnly"))
+        XCTAssertTrue(setCookie.contains("SameSite=Strict"))
+        XCTAssertTrue(setCookie.contains("Path=/link/\(link.id)"))
+
+        return String(setCookie.split(separator: ";", maxSplits: 1).first ?? "")
+    }
+
+    private func fetchUnlockPageHTML(for link: TransferLink) async throws -> String {
+        let previewURL = try loopbackURL(for: link)
+        let (pageData, pageResponse) = try await URLSession.shared.data(from: previewURL)
+        let pageHTTPResponse = try XCTUnwrap(pageResponse as? HTTPURLResponse)
+        XCTAssertEqual(pageHTTPResponse.statusCode, 200)
+        XCTAssertEqual(pageHTTPResponse.value(forHTTPHeaderField: "X-SkyBridge-Transfer-Page"), "unlock")
+        return try XCTUnwrap(String(data: pageData, encoding: .utf8))
+    }
+
+    private func makeUnlockRequest(for link: TransferLink, challenge: String, proof: String) throws -> URLRequest {
+        var unlockRequest = URLRequest(url: try loopbackURL(for: link, path: "/link/\(link.id)/unlock"))
+        unlockRequest.httpMethod = "POST"
+        unlockRequest.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        unlockRequest.httpBody = formBody([
+            "challenge": challenge,
+            "proof": proof
+        ])
+        return unlockRequest
     }
 
     private func makeTemporaryFile(named name: String, contents: String) throws -> URL {
@@ -241,8 +305,25 @@ final class TransferLinkFlowTests: XCTestCase {
         return fileURL
     }
 
+    private func loopbackURL(
+        for link: TransferLink,
+        path: String? = nil,
+        queryItems: [URLQueryItem] = []
+    ) throws -> URL {
+        var components = try XCTUnwrap(URLComponents(url: try XCTUnwrap(link.shareURL), resolvingAgainstBaseURL: false))
+        components.scheme = "http"
+        components.host = "127.0.0.1"
+        components.fragment = nil
+        if let path {
+            components.path = path
+        }
+        components.queryItems = queryItems.isEmpty ? nil : queryItems
+        return try XCTUnwrap(components.url)
+    }
+
     private func waitForHTTPServerReady() async throws {
-        let statusURL = try XCTUnwrap(URL(string: "http://127.0.0.1:8888/status"))
+        let baseURL = try XCTUnwrap(manager.loopbackBaseURL)
+        let statusURL = baseURL.appendingPathComponent("status")
         var lastError: Error?
 
         for _ in 0..<20 {
@@ -264,5 +345,41 @@ final class TransferLinkFlowTests: XCTestCase {
         }
 
         XCTFail("Transfer link HTTP server did not become ready in time.")
+    }
+
+    private func extractInputValue(named name: String, from html: String) throws -> String {
+        let marker = "name=\"\(name)\""
+        let nameRange = try XCTUnwrap(html.range(of: marker))
+        let valueSearchRange = nameRange.upperBound..<html.endIndex
+        let valueRange = try XCTUnwrap(html.range(of: "value=\"", range: valueSearchRange))
+        let start = valueRange.upperBound
+        let end = try XCTUnwrap(html[start...].firstIndex(of: "\""))
+        return String(html[start..<end])
+    }
+
+    private func formBody(_ fields: [String: String]) -> Data {
+        let body = fields.map { key, value in
+            "\(formEncode(key))=\(formEncode(value))"
+        }
+        .sorted()
+        .joined(separator: "&")
+        return Data(body.utf8)
+    }
+
+    private func formEncode(_ value: String) -> String {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._*"))
+        return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
+    }
+
+    private func makeUnlockProof(linkID: String, challenge: String, secret: String) -> String {
+        let payload = "\(linkID):\(challenge):\(secret)"
+        return SHA256.hash(data: Data(payload.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func extractAccessToken(from cookieHeader: String) throws -> String {
+        let cookiePair = try XCTUnwrap(cookieHeader.split(separator: ";", maxSplits: 1).first)
+        let components = cookiePair.split(separator: "=", maxSplits: 1)
+        XCTAssertEqual(components.first, "SkyBridgeLinkAccess")
+        return String(try XCTUnwrap(components.last))
     }
 }

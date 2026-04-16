@@ -378,10 +378,16 @@ public enum RemoteControlError: Error, LocalizedError {
     }
 }
 
+enum RemoteControlSessionRole: String, Sendable {
+    case controlling
+    case beingControlled
+}
+
 // MARK: - 连接状态封装（每个设备一条 NWConnection）
 
 private final class PeerConnection {
     let id: String
+    let role: RemoteControlSessionRole
     let connection: NWConnection
     var remoteVideoFormats: Set<String>
     var requestedStreamConfiguration: RemoteDesktopStreamConfiguration?
@@ -400,8 +406,14 @@ private final class PeerConnection {
     @available(macOS 14.0, *)
     var sessionKeys: SessionKeys?
 
-    init(id: String, connection: NWConnection, remoteVideoFormats: Set<String> = []) {
+    init(
+        id: String,
+        role: RemoteControlSessionRole,
+        connection: NWConnection,
+        remoteVideoFormats: Set<String> = []
+    ) {
         self.id = id
+        self.role = role
         self.connection = connection
         self.remoteVideoFormats = Set(remoteVideoFormats.map { $0.lowercased() })
         self.clipboardSessionId = UUID()
@@ -514,7 +526,10 @@ public final class RemoteControlManager: BaseManager {
     private var screenCaptureStartupRetryCountByPeerId: [String: Int] = [:]
     private var deferredScreenSharingFallbackTasksByPeerId: [String: Task<Void, Never>] = [:]
     private var screenSharingAttemptGate = RemoteControlScreenSharingAttemptGate()
-    private var peers: [String: PeerConnection] = [:]
+    private var controllingPeers: [String: PeerConnection] = [:]
+    private var beingControlledPeers: [String: PeerConnection] = [:]
+    private var controllingDeviceIds: Set<String> = []
+    private var beingControlledDeviceIds: Set<String> = []
     private let maxFramedMessageBytes = 8_000_000
     private var interactionTelemetryTasksByPeerId: [String: Task<Void, Never>] = [:]
     private var activeClipboardPeerId: String?
@@ -574,6 +589,112 @@ public final class RemoteControlManager: BaseManager {
         logger.info("🖥️ RemoteControlManager performInitialization 完成")
     }
 
+    private func currentPeer(
+        for role: RemoteControlSessionRole,
+        deviceId: String
+    ) -> PeerConnection? {
+        switch role {
+        case .controlling:
+            return controllingPeers[deviceId]
+        case .beingControlled:
+            return beingControlledPeers[deviceId]
+        }
+    }
+
+    private func registerPeer(_ peer: PeerConnection) {
+        switch peer.role {
+        case .controlling:
+            controllingPeers[peer.id] = peer
+        case .beingControlled:
+            beingControlledPeers[peer.id] = peer
+        }
+        registerConnectedDevice(peer.id, for: peer.role)
+    }
+
+    @discardableResult
+    private func removePeer(
+        deviceId: String,
+        role: RemoteControlSessionRole
+    ) -> PeerConnection? {
+        let removedPeer: PeerConnection?
+        switch role {
+        case .controlling:
+            removedPeer = controllingPeers.removeValue(forKey: deviceId)
+        case .beingControlled:
+            removedPeer = beingControlledPeers.removeValue(forKey: deviceId)
+        }
+        unregisterConnectedDevice(deviceId, for: role)
+        return removedPeer
+    }
+
+    private func registerConnectedDevice(_ deviceId: String, for role: RemoteControlSessionRole) {
+        switch role {
+        case .controlling:
+            controllingDeviceIds.insert(deviceId)
+        case .beingControlled:
+            beingControlledDeviceIds.insert(deviceId)
+        }
+        refreshPublishedConnectionState()
+    }
+
+    private func unregisterConnectedDevice(_ deviceId: String, for role: RemoteControlSessionRole) {
+        switch role {
+        case .controlling:
+            controllingDeviceIds.remove(deviceId)
+        case .beingControlled:
+            beingControlledDeviceIds.remove(deviceId)
+        }
+        refreshPublishedConnectionState()
+    }
+
+    private func refreshPublishedConnectionState() {
+        let activeDeviceIds = controllingDeviceIds.union(beingControlledDeviceIds)
+        var mergedDeviceIds = connectedDevices.filter { activeDeviceIds.contains($0) }
+
+        for deviceId in controllingDeviceIds.sorted() where !mergedDeviceIds.contains(deviceId) {
+            mergedDeviceIds.append(deviceId)
+        }
+        for deviceId in beingControlledDeviceIds.sorted() where !mergedDeviceIds.contains(deviceId) {
+            mergedDeviceIds.append(deviceId)
+        }
+
+        connectedDevices = mergedDeviceIds
+        isControlling = !controllingDeviceIds.isEmpty
+        isBeingControlled = !beingControlledDeviceIds.isEmpty
+    }
+
+    private func finishRoleTeardownIfNeeded(for role: RemoteControlSessionRole) {
+        switch role {
+        case .controlling:
+            guard controllingDeviceIds.isEmpty else { return }
+            tearDownViewingRenderPipeline()
+        case .beingControlled:
+            guard beingControlledDeviceIds.isEmpty else { return }
+            clearBeingControlledResources()
+        }
+    }
+
+    private func clearBeingControlledResources() {
+        let clipboard = ClipboardRedirectionManager.shared
+        clipboard.onLocalClipboardChanged = nil
+        clipboard.disable()
+        activeClipboardPeerId = nil
+
+        screenSharingActive = false
+        screenCaptureWatchdogTask?.cancel()
+        screenCaptureWatchdogTask = nil
+        screenCaptureRestartInProgress = false
+        captureStreamer?.stop()
+        captureStreamer = nil
+
+        deferredScreenSharingFallbackTasksByPeerId.values.forEach { $0.cancel() }
+        deferredScreenSharingFallbackTasksByPeerId.removeAll()
+        screenCaptureStartupRetryCountByPeerId.removeAll()
+
+        interactionTelemetryTasksByPeerId.values.forEach { $0.cancel() }
+        interactionTelemetryTasksByPeerId.removeAll()
+    }
+
     private func resolvedPreferredRenderingMode() -> RenderingMode {
         switch preferredRenderingMode {
         case .stable:
@@ -609,7 +730,7 @@ public final class RemoteControlManager: BaseManager {
     }
 
     private func applyPreferredRenderingModeToActiveViewingSession() {
-        guard isControlling, !connectedDevices.isEmpty else { return }
+        guard !controllingDeviceIds.isEmpty else { return }
         currentRenderingMode = renderingModeController.requestMode(resolvedPreferredRenderingMode())
     }
 
@@ -697,16 +818,12 @@ public final class RemoteControlManager: BaseManager {
 
         let peer = PeerConnection(
             id: deviceId,
+            role: .controlling,
             connection: connection,
             remoteVideoFormats: remoteVideoFormats
         )
         replacePeerSessionIfNeeded(with: peer, resetCapturePipeline: false)
         prepareViewingRenderPipelineForNewStream()
-
-        if !connectedDevices.contains(deviceId) {
-            connectedDevices.append(deviceId)
-        }
-        isControlling = true
 
         if #available(macOS 14.0, *) {
             peer.handshakePeer = PeerIdentifier(deviceId: deviceId, displayName: nil, address: nil)
@@ -725,38 +842,31 @@ public final class RemoteControlManager: BaseManager {
  /// 停止控制指定设备
     public func stopControlling(deviceId: String) {
         logger.info("⏹️ 停止控制远程设备: \(deviceId, privacy: .public)")
-        guard let peer = peers[deviceId] else { return }
+        guard let peer = currentPeer(for: .controlling, deviceId: deviceId) else {
+            _ = removePeer(deviceId: deviceId, role: .controlling)
+            finishRoleTeardownIfNeeded(for: .controlling)
+            return
+        }
 
         peer.connection.cancel()
-        peers.removeValue(forKey: deviceId)
-        connectedDevices.removeAll { $0 == deviceId }
+        _ = removePeer(deviceId: deviceId, role: .controlling)
         Task {
             await peer.outboundFramePump.close()
         }
-
-        if connectedDevices.isEmpty {
-            isControlling = false
-            tearDownViewingRenderPipeline()
-        }
+        finishRoleTeardownIfNeeded(for: .controlling)
     }
 
  /// 作为「被控制端」开放远程控制
     public func allowRemoteControl(from deviceId: String, connection: NWConnection) async {
         logger.info("🖥️ 允许远程控制来自设备: \(deviceId, privacy: .public)")
 
-        let peer = PeerConnection(id: deviceId, connection: connection)
+        let peer = PeerConnection(id: deviceId, role: .beingControlled, connection: connection)
         replacePeerSessionIfNeeded(with: peer, resetCapturePipeline: true)
 
         if #available(macOS 14.0, *) {
             peer.handshakePeer = PeerIdentifier(deviceId: deviceId, displayName: nil, address: nil)
             logger.info("🔐 RemoteControl P2P handshake armed for \(deviceId, privacy: .public); waiting for MessageA")
         }
-
-        if !connectedDevices.contains(deviceId) {
-            connectedDevices.append(deviceId)
-        }
-
-        isBeingControlled = true
 
         // 1) 先开始接收对端发来的输入事件 / 流配置
         startReceivingRemoteEvents(from: peer)
@@ -793,7 +903,11 @@ public final class RemoteControlManager: BaseManager {
  /// 作为被控制端，关闭来自某设备的远程控制
     public func stopRemoteControl(from deviceId: String) {
         logger.info("⏹️ 停止被远程控制来自设备: \(deviceId, privacy: .public)")
-        guard let peer = peers[deviceId] else { return }
+        guard let peer = currentPeer(for: .beingControlled, deviceId: deviceId) else {
+            _ = removePeer(deviceId: deviceId, role: .beingControlled)
+            finishRoleTeardownIfNeeded(for: .beingControlled)
+            return
+        }
 
         if activeClipboardPeerId == deviceId {
             let clipboard = ClipboardRedirectionManager.shared
@@ -803,8 +917,7 @@ public final class RemoteControlManager: BaseManager {
         }
 
         peer.connection.cancel()
-        peers.removeValue(forKey: deviceId)
-        connectedDevices.removeAll { $0 == deviceId }
+        _ = removePeer(deviceId: deviceId, role: .beingControlled)
         Task {
             await peer.outboundFramePump.close()
         }
@@ -812,21 +925,11 @@ public final class RemoteControlManager: BaseManager {
         screenCaptureStartupRetryCountByPeerId.removeValue(forKey: deviceId)
         invalidateScreenSharingStartupState(for: deviceId)
 
-        if connectedDevices.isEmpty {
-            isBeingControlled = false
-            screenSharingActive = false
-            screenCaptureWatchdogTask?.cancel()
-            screenCaptureWatchdogTask = nil
-            screenCaptureRestartInProgress = false
-            captureStreamer?.stop()
-            captureStreamer = nil
-            interactionTelemetryTasksByPeerId.values.forEach { $0.cancel() }
-            interactionTelemetryTasksByPeerId.removeAll()
-        }
+        finishRoleTeardownIfNeeded(for: .beingControlled)
     }
 
     private func isCurrentPeer(_ peer: PeerConnection) -> Bool {
-        guard let current = peers[peer.id] else { return false }
+        guard let current = currentPeer(for: peer.role, deviceId: peer.id) else { return false }
         return current === peer
     }
 
@@ -834,8 +937,8 @@ public final class RemoteControlManager: BaseManager {
         with peer: PeerConnection,
         resetCapturePipeline: Bool
     ) {
-        let previousPeer = peers[peer.id]
-        peers[peer.id] = peer
+        let previousPeer = currentPeer(for: peer.role, deviceId: peer.id)
+        registerPeer(peer)
 
         guard let previousPeer, previousPeer !== peer else { return }
 
@@ -874,7 +977,7 @@ public final class RemoteControlManager: BaseManager {
  // MARK: - 输入事件发送（控制端 -> 被控制端）
 
     public func sendMouseEvent(_ event: RemoteMouseEvent, to deviceId: String) async throws {
-        guard let peer = peers[deviceId] else {
+        guard let peer = currentPeer(for: .controlling, deviceId: deviceId) else {
             throw RemoteControlError.deviceNotConnected
         }
         try ensureSecureChannelEstablished(for: peer)
@@ -883,7 +986,7 @@ public final class RemoteControlManager: BaseManager {
     }
 
     public func sendKeyboardEvent(_ event: RemoteKeyboardEvent, to deviceId: String) async throws {
-        guard let peer = peers[deviceId] else {
+        guard let peer = currentPeer(for: .controlling, deviceId: deviceId) else {
             throw RemoteControlError.deviceNotConnected
         }
         try ensureSecureChannelEstablished(for: peer)
@@ -1180,7 +1283,7 @@ public final class RemoteControlManager: BaseManager {
 
     private func restartScreenSharingIfNeeded(for deviceId: String, reason: String) async {
         guard !screenCaptureRestartInProgress else { return }
-        guard let peer = peers[deviceId] else { return }
+        guard let peer = currentPeer(for: .beingControlled, deviceId: deviceId) else { return }
         guard isBeingControlled else { return }
         guard captureStreamer != nil else { return }
 
@@ -1449,6 +1552,7 @@ public final class RemoteControlManager: BaseManager {
             return false
         }
         let peerID = peer.id
+        let peerRole = peer.role
         let peerIdentity = ObjectIdentifier(peer)
 
         let localDeviceId = await SelfIdentityProvider.shared.snapshot().deviceId
@@ -1477,7 +1581,7 @@ public final class RemoteControlManager: BaseManager {
             ) { [weak self] preparation in
                 let isStillCurrent = await MainActor.run { [weak self] in
                     guard let self,
-                          let current = self.peers[peerID] else { return false }
+                          let current = self.currentPeer(for: peerRole, deviceId: peerID) else { return false }
                     return ObjectIdentifier(current) == peerIdentity
                 }
                 guard isStillCurrent else {
@@ -1519,7 +1623,7 @@ public final class RemoteControlManager: BaseManager {
                 )
                 await MainActor.run { [weak self] in
                     guard let self,
-                          let current = self.peers[peerID],
+                          let current = self.currentPeer(for: peerRole, deviceId: peerID),
                           ObjectIdentifier(current) == peerIdentity else { return }
                     current.handshakeDriver = driver
                 }
@@ -1751,7 +1855,7 @@ public final class RemoteControlManager: BaseManager {
     }
 
     private func sendClipboardPayload(data: Data, mimeType: String, to deviceId: String) async {
-        guard let peer = peers[deviceId] else { return }
+        guard let peer = currentPeer(for: .beingControlled, deviceId: deviceId) else { return }
         do {
             try await sendRemoteControlPayload(
                 RemoteClipboardPayload(mimeType: mimeType, data: data),
@@ -2081,7 +2185,7 @@ public final class RemoteControlManager: BaseManager {
                 logger.notice("🔓 RemoteControl legacy plaintext mode enabled for \(peer.id, privacy: .public)")
                 return true
             }
-            if peers[peer.id] == nil {
+            if currentPeer(for: peer.role, deviceId: peer.id) == nil {
                 return false
             }
             try? await Task.sleep(for: .milliseconds(100))
@@ -2508,8 +2612,7 @@ public final class RemoteControlManager: BaseManager {
         )
 
         peer.connection.cancel()
-        peers.removeValue(forKey: peer.id)
-        connectedDevices.removeAll { $0 == peer.id }
+        _ = removePeer(deviceId: peer.id, role: peer.role)
         await peer.outboundFramePump.close()
         stopInteractionTelemetry(for: peer.id)
         screenCaptureStartupRetryCountByPeerId.removeValue(forKey: peer.id)
@@ -2522,19 +2625,7 @@ public final class RemoteControlManager: BaseManager {
             activeClipboardPeerId = nil
         }
 
-        if connectedDevices.isEmpty {
-            isControlling = false
-            isBeingControlled = false
-            screenSharingActive = false
-            tearDownViewingRenderPipeline()
-            screenCaptureWatchdogTask?.cancel()
-            screenCaptureWatchdogTask = nil
-            screenCaptureRestartInProgress = false
-            captureStreamer?.stop()
-            captureStreamer = nil
-            interactionTelemetryTasksByPeerId.values.forEach { $0.cancel() }
-            interactionTelemetryTasksByPeerId.removeAll()
-        }
+        finishRoleTeardownIfNeeded(for: peer.role)
     }
 
  // MARK: - 静态图像 -> Metal 纹理
@@ -2590,3 +2681,88 @@ public final class RemoteControlManager: BaseManager {
         return texture
     }
 }
+
+#if DEBUG
+struct RemoteControlManagerRoleSnapshot: Equatable {
+    let controllingDeviceIds: [String]
+    let beingControlledDeviceIds: [String]
+    let connectedDevices: [String]
+    let isControlling: Bool
+    let isBeingControlled: Bool
+    let currentRenderingMode: RenderingMode
+    let screenSharingActive: Bool
+    let activeClipboardPeerId: String?
+    let hasScreenCaptureWatchdogTask: Bool
+    let screenCaptureRestartInProgress: Bool
+    let interactionTelemetryPeerIds: [String]
+    let deferredFallbackPeerIds: [String]
+    let screenCaptureRetryPeerIds: [String]
+}
+
+extension RemoteControlManager {
+    func testingRegisterRole(_ role: RemoteControlSessionRole, deviceId: String) {
+        registerConnectedDevice(deviceId, for: role)
+    }
+
+    func testingRemoveRole(_ role: RemoteControlSessionRole, deviceId: String) {
+        unregisterConnectedDevice(deviceId, for: role)
+        finishRoleTeardownIfNeeded(for: role)
+    }
+
+    func testingSetViewingRenderPipelineMode(_ mode: RenderingMode) {
+        currentRenderingMode = mode
+    }
+
+    func testingSeedBeingControlledResources(
+        activeClipboardPeerId: String? = nil,
+        screenSharingActive: Bool = true,
+        screenCaptureRestartInProgress: Bool = true,
+        interactionTelemetryPeerIds: [String] = [],
+        deferredFallbackPeerIds: [String] = [],
+        screenCaptureRetryPeerIds: [String] = []
+    ) {
+        self.activeClipboardPeerId = activeClipboardPeerId
+        self.screenSharingActive = screenSharingActive
+        self.screenCaptureRestartInProgress = screenCaptureRestartInProgress
+
+        screenCaptureWatchdogTask?.cancel()
+        screenCaptureWatchdogTask = Task {}
+
+        interactionTelemetryTasksByPeerId.values.forEach { $0.cancel() }
+        interactionTelemetryTasksByPeerId = Dictionary(
+            uniqueKeysWithValues: interactionTelemetryPeerIds.map { deviceId in
+                (deviceId, Task {})
+            }
+        )
+
+        deferredScreenSharingFallbackTasksByPeerId.values.forEach { $0.cancel() }
+        deferredScreenSharingFallbackTasksByPeerId = Dictionary(
+            uniqueKeysWithValues: deferredFallbackPeerIds.map { deviceId in
+                (deviceId, Task {})
+            }
+        )
+
+        screenCaptureStartupRetryCountByPeerId = Dictionary(
+            uniqueKeysWithValues: screenCaptureRetryPeerIds.map { ($0, 1) }
+        )
+    }
+
+    var testingRoleSnapshot: RemoteControlManagerRoleSnapshot {
+        RemoteControlManagerRoleSnapshot(
+            controllingDeviceIds: controllingDeviceIds.sorted(),
+            beingControlledDeviceIds: beingControlledDeviceIds.sorted(),
+            connectedDevices: connectedDevices,
+            isControlling: isControlling,
+            isBeingControlled: isBeingControlled,
+            currentRenderingMode: currentRenderingMode,
+            screenSharingActive: screenSharingActive,
+            activeClipboardPeerId: activeClipboardPeerId,
+            hasScreenCaptureWatchdogTask: screenCaptureWatchdogTask != nil,
+            screenCaptureRestartInProgress: screenCaptureRestartInProgress,
+            interactionTelemetryPeerIds: interactionTelemetryTasksByPeerId.keys.sorted(),
+            deferredFallbackPeerIds: deferredScreenSharingFallbackTasksByPeerId.keys.sorted(),
+            screenCaptureRetryPeerIds: screenCaptureStartupRetryCountByPeerId.keys.sorted()
+        )
+    }
+}
+#endif

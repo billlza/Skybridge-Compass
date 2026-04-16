@@ -2753,7 +2753,10 @@ public class P2PDiscoveryService: BaseManager {
         return InboundPresenceResolution(
             name: fallbackName.isEmpty ? "P2P Peer" : fallbackName,
             displayAddress: fallbackAddress,
-            transferPort: Int(ServiceEndpointRegistry.shared.snapshot().fileTransferPort ?? 0)
+            transferPort: {
+                let advertisedPort = Int(ServiceEndpointRegistry.shared.snapshot().fileTransferPort ?? 0)
+                return (1...65535).contains(advertisedPort) ? advertisedPort : 8080
+            }()
         )
     }
 

@@ -80,6 +80,7 @@ __pycache__/
 .vscode/
 .idea/
 .cursor/
+.playwright-cli/
 .mplconfig/
 .kiro/
 .trae/
@@ -143,6 +144,7 @@ third_party/freerdp/
 # Signing assets / certificates
 *.p12
 *.pfx
+*.p8
 *.cer
 *.crt
 *.csr
@@ -150,6 +152,7 @@ third_party/freerdp/
 *.pem
 *.key
 *.mobileprovision
+*.provisionprofile
 
 # Local env/config
 supabase_config.env

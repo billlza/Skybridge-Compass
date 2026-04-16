@@ -1,6 +1,8 @@
+import CryptoKit
 import Foundation
 import Network
 import UniformTypeIdentifiers
+import os.lock
 
 final class LocalFileTransferHTTPServer: @unchecked Sendable {
     private final class StartState: @unchecked Sendable {
@@ -15,8 +17,8 @@ final class LocalFileTransferHTTPServer: @unchecked Sendable {
     struct Callbacks: Sendable {
         let activeLinkCount: @Sendable () async -> Int
         let lookupLink: @Sendable (String) async -> TransferLink?
-        let authorizePassword: @Sendable (String, String) async -> AccessGrant?
-        let validateAccessToken: @Sendable (String, String) async -> Bool
+        let issueAccessGrant: @Sendable (String, String) async -> AccessGrant?
+        let validateAccessToken: @Sendable (String, String, String) async -> Bool
         let recordDownload: @Sendable (String) async -> Void
     }
 
@@ -26,6 +28,7 @@ final class LocalFileTransferHTTPServer: @unchecked Sendable {
         let query: [String: String]
         let headers: [String: String]
         let body: Data
+        let clientAddress: String
 
         var cookies: [String: String] {
             Self.parseCookies(from: headers["cookie"] ?? "")
@@ -75,12 +78,40 @@ final class LocalFileTransferHTTPServer: @unchecked Sendable {
         let onHeaderSent: (@Sendable () async -> Void)?
     }
 
+    private struct UnlockAttemptState: Sendable {
+        var failedAttempts: [Date] = []
+        var blockedUntil: Date?
+    }
+
+    private struct UnlockChallenge: Sendable {
+        let linkID: String
+        let clientAddress: String
+        let expiresAt: Date
+    }
+
+    private struct SecurityState: Sendable {
+        var unlockAttempts: [String: UnlockAttemptState] = [:]
+        var challenges: [String: UnlockChallenge] = [:]
+    }
+
     private let callbacks: Callbacks
     private let accessCookieName = "SkyBridgeLinkAccess"
     private let queue = DispatchQueue(label: "local.file.transfer.http", qos: .userInitiated)
+    private let unlockAttemptWindow: TimeInterval = 5 * 60
+    private let unlockAttemptLimit = 5
+    private let unlockBlockDuration: TimeInterval = 10 * 60
+    private let unlockChallengeTTL: TimeInterval = 5 * 60
+    private let securityState = OSAllocatedUnfairLock(initialState: SecurityState())
 
     private var listener: NWListener?
     private var activeConnections: [ObjectIdentifier: NWConnection] = [:]
+
+    private static let testingDelay = OSAllocatedUnfairLock(initialState: UInt64(0))
+
+    static var testingStartDelayNanos: UInt64 {
+        get { testingDelay.withLock { $0 } }
+        set { testingDelay.withLock { $0 = newValue } }
+    }
 
     init(callbacks: Callbacks) {
         self.callbacks = callbacks
@@ -88,6 +119,11 @@ final class LocalFileTransferHTTPServer: @unchecked Sendable {
 
     func start(port: UInt16) async throws {
         guard listener == nil else { return }
+
+        let startDelay = Self.testingStartDelayNanos
+        if startDelay > 0 {
+            try await Task.sleep(nanoseconds: startDelay)
+        }
 
         let nwPort = try NWEndpoint.Port.validated(port)
         let parameters = NWParameters.tcp
@@ -128,6 +164,7 @@ final class LocalFileTransferHTTPServer: @unchecked Sendable {
 
     private func handleConnection(_ connection: NWConnection) {
         let identifier = ObjectIdentifier(connection)
+        let clientAddress = remoteAddress(for: connection.endpoint)
         activeConnections[identifier] = connection
         connection.stateUpdateHandler = { [weak self] state in
             switch state {
@@ -138,14 +175,14 @@ final class LocalFileTransferHTTPServer: @unchecked Sendable {
             }
         }
         connection.start(queue: queue)
-        receiveRequest(on: connection)
+        receiveRequest(on: connection, clientAddress: clientAddress)
     }
 
-    private func receiveRequest(on connection: NWConnection) {
-        receiveRequest(on: connection, accumulated: Data())
+    private func receiveRequest(on connection: NWConnection, clientAddress: String) {
+        receiveRequest(on: connection, accumulated: Data(), clientAddress: clientAddress)
     }
 
-    private func receiveRequest(on connection: NWConnection, accumulated: Data) {
+    private func receiveRequest(on connection: NWConnection, accumulated: Data, clientAddress: String) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 128 * 1024) { [weak self] data, _, isComplete, error in
             guard let self else { return }
             guard error == nil, let data, !data.isEmpty else {
@@ -158,7 +195,7 @@ final class LocalFileTransferHTTPServer: @unchecked Sendable {
 
             if self.isCompleteHTTPRequest(combined) {
                 Task {
-                    let response = await self.route(data: combined)
+                    let response = await self.route(data: combined, clientAddress: clientAddress)
                     await self.send(response: response, on: connection)
                 }
                 return
@@ -166,22 +203,25 @@ final class LocalFileTransferHTTPServer: @unchecked Sendable {
 
             if isComplete {
                 Task {
-                    let response = await self.route(data: combined)
+                    let response = await self.route(data: combined, clientAddress: clientAddress)
                     await self.send(response: response, on: connection)
                 }
                 return
             }
 
-            self.receiveRequest(on: connection, accumulated: combined)
+            self.receiveRequest(on: connection, accumulated: combined, clientAddress: clientAddress)
         }
     }
 
-    private func route(data: Data) async -> HTTPResponse {
-        guard let request = parseRequest(data) else {
+    private func route(data: Data, clientAddress: String) async -> HTTPResponse {
+        guard let request = parseRequest(data, clientAddress: clientAddress) else {
             return makeTextResponse(statusCode: 400, body: "Bad Request")
         }
 
         if request.method == "GET", request.path == "/status" {
+            guard isLoopbackAddress(request.clientAddress) else {
+                return makeTextResponse(statusCode: 403, body: "Forbidden")
+            }
             let activeLinks = await callbacks.activeLinkCount()
             let payload = [
                 "server": "SkyBridge Transfer Link Server",
@@ -291,8 +331,7 @@ final class LocalFileTransferHTTPServer: @unchecked Sendable {
         }
 
         if link.password != nil, !(await isAuthorized(request: request, linkID: linkID)) {
-            let html = unlockHTML(for: link, errorMessage: nil)
-            return makeHTMLResponse(statusCode: 200, pageType: "unlock", html: html)
+            return makeUnlockPage(for: link, request: request, statusCode: 200, errorMessage: nil, autoSubmit: true)
         }
 
         let html = previewHTML(for: link)
@@ -308,13 +347,70 @@ final class LocalFileTransferHTTPServer: @unchecked Sendable {
             return redirectResponse(location: "/link/\(urlPathEscape(linkID))", cookie: nil)
         }
 
-        let password = request.formFields["password"] ?? ""
-        guard let grant = await callbacks.authorizePassword(linkID, password) else {
-            let html = unlockHTML(for: link, errorMessage: "密码错误或链接无效，请重试。")
-            return makeHTMLResponse(statusCode: 401, pageType: "unlock", html: html)
+        cleanupExpiredSecurityState()
+
+        if let blockedUntil = blockedUntil(for: linkID, clientAddress: request.clientAddress) {
+            return makeUnlockPage(
+                for: link,
+                request: request,
+                statusCode: 429,
+                errorMessage: "尝试次数过多，请稍后再试。",
+                autoSubmit: false,
+                retryAfter: blockedUntil.timeIntervalSinceNow
+            )
         }
 
-        let cookie = "\(accessCookieName)=\(grant.token); Path=/link/\(urlPathEscape(linkID)); HttpOnly; SameSite=Lax; Max-Age=\(max(1, Int(grant.expiresAt.timeIntervalSinceNow.rounded(.down))))"
+        let challenge = request.formFields["challenge"] ?? ""
+        let proof = request.formFields["proof"] ?? ""
+        let requiredPassword = link.password ?? ""
+
+        guard !challenge.isEmpty, !proof.isEmpty else {
+            return makeUnlockPage(
+                for: link,
+                request: request,
+                statusCode: 400,
+                errorMessage: "当前浏览器未完成安全握手，请刷新后重试。",
+                autoSubmit: false
+            )
+        }
+
+        guard consumeChallenge(challenge, for: linkID, clientAddress: request.clientAddress) else {
+            return makeUnlockPage(
+                for: link,
+                request: request,
+                statusCode: 400,
+                errorMessage: "本次解锁会话已过期，请重新尝试。",
+                autoSubmit: false
+            )
+        }
+
+        let expectedProof = unlockProof(linkID: linkID, challenge: challenge, secret: requiredPassword)
+        guard secureCompare(proof, expectedProof) else {
+            if let blockedUntil = registerUnlockFailure(for: linkID, clientAddress: request.clientAddress) {
+                return makeUnlockPage(
+                    for: link,
+                    request: request,
+                    statusCode: 429,
+                    errorMessage: "尝试次数过多，请稍后再试。",
+                    autoSubmit: false,
+                    retryAfter: blockedUntil.timeIntervalSinceNow
+                )
+            }
+            return makeUnlockPage(
+                for: link,
+                request: request,
+                statusCode: 401,
+                errorMessage: "安全访问码错误，请重试。",
+                autoSubmit: false
+            )
+        }
+
+        clearUnlockFailures(for: linkID, clientAddress: request.clientAddress)
+        guard let grant = await callbacks.issueAccessGrant(linkID, request.clientAddress) else {
+            return makeTextResponse(statusCode: 500, body: "Unable to authorize")
+        }
+
+        let cookie = "\(accessCookieName)=\(grant.token); Path=/link/\(urlPathEscape(linkID)); HttpOnly; SameSite=Strict; Max-Age=\(max(1, Int(grant.expiresAt.timeIntervalSinceNow.rounded(.down))))"
         return redirectResponse(location: "/link/\(urlPathEscape(linkID))", cookie: cookie)
     }
 
@@ -456,10 +552,8 @@ final class LocalFileTransferHTTPServer: @unchecked Sendable {
 
     private func isAuthorized(request: HTTPRequest, linkID: String, requiresPassword: Bool = true) async -> Bool {
         guard requiresPassword else { return true }
-        if let token = request.cookies[accessCookieName], await callbacks.validateAccessToken(linkID, token) {
-            return true
-        }
-        if let token = request.query["access"], await callbacks.validateAccessToken(linkID, token) {
+        if let token = request.cookies[accessCookieName],
+           await callbacks.validateAccessToken(linkID, token, request.clientAddress) {
             return true
         }
         return false
@@ -518,7 +612,7 @@ final class LocalFileTransferHTTPServer: @unchecked Sendable {
         }
     }
 
-    private func parseRequest(_ data: Data) -> HTTPRequest? {
+    private func parseRequest(_ data: Data, clientAddress: String) -> HTTPRequest? {
         guard let raw = String(data: data, encoding: .utf8),
               let separatorRange = raw.range(of: "\r\n\r\n") else {
             return nil
@@ -550,7 +644,8 @@ final class LocalFileTransferHTTPServer: @unchecked Sendable {
             path: path,
             query: queryItems,
             headers: headers,
-            body: Data(bodyPart.utf8)
+            body: Data(bodyPart.utf8),
+            clientAddress: clientAddress
         )
     }
 
@@ -574,8 +669,212 @@ final class LocalFileTransferHTTPServer: @unchecked Sendable {
         return bodyPart.utf8.count >= contentLength
     }
 
-    private func unlockHTML(for link: TransferLink, errorMessage: String?) -> String {
+    private func makeUnlockPage(
+        for link: TransferLink,
+        request: HTTPRequest,
+        statusCode: Int,
+        errorMessage: String?,
+        autoSubmit: Bool,
+        retryAfter: TimeInterval? = nil
+    ) -> HTTPResponse {
+        let challenge = beginChallenge(for: link.id, clientAddress: request.clientAddress)
+        let nonce = base64URLRandom(bytes: 18)
+        let html = unlockHTML(
+            for: link,
+            challenge: challenge,
+            errorMessage: errorMessage,
+            scriptNonce: nonce,
+            autoSubmit: autoSubmit
+        )
+        var extraHeaders: [(String, String)] = []
+        if let retryAfter {
+            extraHeaders.append(("Retry-After", String(max(1, Int(retryAfter.rounded(.up))))))
+        }
+        return makeHTMLResponse(
+            statusCode: statusCode,
+            pageType: "unlock",
+            html: html,
+            contentSecurityPolicy: unlockContentSecurityPolicy(scriptNonce: nonce),
+            extraHeaders: extraHeaders
+        )
+    }
+
+    private func blockedUntil(for linkID: String, clientAddress: String) -> Date? {
+        let now = Date()
+        return securityState.withLock { state in
+            cleanupExpiredSecurityState(now: now, state: &state)
+            return state.unlockAttempts[unlockAttemptKey(linkID: linkID, clientAddress: clientAddress)]?.blockedUntil
+        }
+    }
+
+    private func registerUnlockFailure(for linkID: String, clientAddress: String) -> Date? {
+        let now = Date()
+        return securityState.withLock { state in
+            cleanupExpiredSecurityState(now: now, state: &state)
+            let key = unlockAttemptKey(linkID: linkID, clientAddress: clientAddress)
+            var attemptState = state.unlockAttempts[key] ?? UnlockAttemptState()
+            attemptState.failedAttempts = attemptState.failedAttempts.filter { now.timeIntervalSince($0) <= unlockAttemptWindow }
+            attemptState.failedAttempts.append(now)
+            if attemptState.failedAttempts.count >= unlockAttemptLimit {
+                attemptState.blockedUntil = now.addingTimeInterval(unlockBlockDuration)
+                attemptState.failedAttempts.removeAll()
+            }
+            state.unlockAttempts[key] = attemptState
+            return attemptState.blockedUntil
+        }
+    }
+
+    private func clearUnlockFailures(for linkID: String, clientAddress: String) {
+        _ = securityState.withLock { state in
+            state.unlockAttempts.removeValue(forKey: unlockAttemptKey(linkID: linkID, clientAddress: clientAddress))
+        }
+    }
+
+    private func beginChallenge(for linkID: String, clientAddress: String) -> String {
+        let now = Date()
+        let challenge = base64URLRandom(bytes: 18)
+        securityState.withLock { state in
+            cleanupExpiredSecurityState(now: now, state: &state)
+            state.challenges[challenge] = UnlockChallenge(
+                linkID: linkID,
+                clientAddress: clientAddress,
+                expiresAt: now.addingTimeInterval(unlockChallengeTTL)
+            )
+        }
+        return challenge
+    }
+
+    private func consumeChallenge(_ challenge: String, for linkID: String, clientAddress: String) -> Bool {
+        let now = Date()
+        return securityState.withLock { state in
+            cleanupExpiredSecurityState(now: now, state: &state)
+            guard let stored = state.challenges.removeValue(forKey: challenge) else {
+                return false
+            }
+            return stored.linkID == linkID && stored.clientAddress == clientAddress && stored.expiresAt > now
+        }
+    }
+
+    private func cleanupExpiredSecurityState() {
+        let now = Date()
+        securityState.withLock { state in
+            cleanupExpiredSecurityState(now: now, state: &state)
+        }
+    }
+
+    private func cleanupExpiredSecurityState(now: Date, state: inout SecurityState) {
+        state.challenges = state.challenges.filter { $0.value.expiresAt > now }
+        state.unlockAttempts = state.unlockAttempts.reduce(into: [String: UnlockAttemptState]()) { result, item in
+            var value = item.value
+            value.failedAttempts = value.failedAttempts.filter { now.timeIntervalSince($0) <= unlockAttemptWindow }
+            if let blockedUntil = value.blockedUntil, blockedUntil <= now {
+                value.blockedUntil = nil
+            }
+            if !value.failedAttempts.isEmpty || value.blockedUntil != nil {
+                result[item.key] = value
+            }
+        }
+    }
+
+    private func unlockAttemptKey(linkID: String, clientAddress: String) -> String {
+        "\(linkID)|\(clientAddress)"
+    }
+
+    private func unlockProof(linkID: String, challenge: String, secret: String) -> String {
+        let payload = "\(linkID):\(challenge):\(secret)"
+        return SHA256.hash(data: Data(payload.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func secureCompare(_ lhs: String, _ rhs: String) -> Bool {
+        let lhsBytes = Array(lhs.utf8)
+        let rhsBytes = Array(rhs.utf8)
+        guard lhsBytes.count == rhsBytes.count else { return false }
+        return zip(lhsBytes, rhsBytes).reduce(0) { $0 | ($1.0 ^ $1.1) } == 0
+    }
+
+    private func unlockContentSecurityPolicy(scriptNonce: String) -> String {
+        "default-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; script-src 'nonce-\(scriptNonce)'; style-src 'unsafe-inline'"
+    }
+
+    private func unlockHTML(
+        for link: TransferLink,
+        challenge: String,
+        errorMessage: String?,
+        scriptNonce: String,
+        autoSubmit: Bool
+    ) -> String {
         let message = errorMessage.map { "<p class=\"error\">\(escapeHTML($0))</p>" } ?? ""
+        let safeLinkID = escapeHTML(link.id)
+        let safeChallenge = escapeHTML(challenge)
+        let autoSubmitValue = autoSubmit ? "true" : "false"
+        let script = """
+        (() => {
+            const form = document.getElementById('unlock-form');
+            const passwordInput = document.getElementById('password');
+            const proofInput = document.getElementById('proof');
+            const challengeInput = document.getElementById('challenge');
+            const status = document.getElementById('unlock-status');
+            const submitButton = document.getElementById('unlock-submit');
+            const linkId = form.dataset.linkId;
+            const storageKey = `skybridge-transfer-unlock:${linkId}`;
+
+            function readSecretFromHash() {
+                const rawHash = window.location.hash.startsWith('#') ? window.location.hash.slice(1) : window.location.hash;
+                const params = new URLSearchParams(rawHash);
+                return params.get('unlock') || '';
+            }
+
+            function toHex(buffer) {
+                return Array.from(new Uint8Array(buffer)).map(value => value.toString(16).padStart(2, '0')).join('');
+            }
+
+            async function createProof(secret) {
+                const payload = `${linkId}:${challengeInput.value}:${secret}`;
+                const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(payload));
+                return toHex(digest);
+            }
+
+            async function submitSecurely(secret) {
+                proofInput.value = await createProof(secret);
+                passwordInput.value = '';
+                submitButton.disabled = true;
+                form.submit();
+            }
+
+            const fragmentSecret = readSecretFromHash();
+            if (fragmentSecret) {
+                sessionStorage.setItem(storageKey, fragmentSecret);
+                history.replaceState({}, document.title, window.location.pathname);
+            }
+
+            const storedSecret = fragmentSecret || sessionStorage.getItem(storageKey) || '';
+            if (storedSecret && !passwordInput.value) {
+                passwordInput.value = storedSecret;
+            }
+
+            form.addEventListener('submit', async event => {
+                event.preventDefault();
+                const secret = passwordInput.value.trim();
+                if (!secret) {
+                    status.textContent = '请输入安全访问码';
+                    return;
+                }
+
+                try {
+                    status.textContent = '正在进行安全握手...';
+                    await submitSecurely(secret);
+                } catch {
+                    submitButton.disabled = false;
+                    status.textContent = '安全握手失败，请点击按钮重试。';
+                }
+            });
+
+            if (form.dataset.autoSubmit === 'true' && storedSecret) {
+                status.textContent = '检测到安全访问码，正在自动解锁...';
+                form.requestSubmit();
+            }
+        })();
+        """
         return """
         <!DOCTYPE html>
         <html lang="zh-CN">
@@ -599,18 +898,22 @@ final class LocalFileTransferHTTPServer: @unchecked Sendable {
         <body>
             <div class="card">
                 <h1>文件传输受保护</h1>
-                <p>此链接需要密码后才能查看和下载文件。</p>
+                <p>此链接启用了安全访问码保护。通过二维码或完整链接打开时会自动解锁。</p>
                 \(message)
-                <form method="post" action="/link/\(urlPathEscape(link.id))/unlock">
+                <form id="unlock-form" method="post" action="/link/\(urlPathEscape(link.id))/unlock" data-link-id="\(safeLinkID)" data-auto-submit="\(autoSubmitValue)">
                     <label for="password">访问密码</label>
-                    <input id="password" name="password" type="password" autocomplete="off" />
-                    <button type="submit">解锁链接</button>
+                    <input id="password" name="password" type="password" autocomplete="off" spellcheck="false" />
+                    <input id="challenge" name="challenge" type="hidden" value="\(safeChallenge)" />
+                    <input id="proof" name="proof" type="hidden" value="" />
+                    <button id="unlock-submit" type="submit">解锁链接</button>
                 </form>
+                <p id="unlock-status" class="meta">为保护安全，访问码不会以明文形式通过网络发送。</p>
                 <div class="meta">
                     <p>过期时间：\(escapeHTML(formatDate(link.expiresAt)))</p>
                     <p>剩余下载次数：\(link.remainingDownloads)</p>
                 </div>
             </div>
+            <script nonce="\(escapeHTML(scriptNonce))">\(script)</script>
         </body>
         </html>
         """
@@ -671,12 +974,19 @@ final class LocalFileTransferHTTPServer: @unchecked Sendable {
         """
     }
 
-    private func makeHTMLResponse(statusCode: Int, pageType: String, html: String) -> HTTPResponse {
+    private func makeHTMLResponse(
+        statusCode: Int,
+        pageType: String,
+        html: String,
+        contentSecurityPolicy: String? = nil,
+        extraHeaders: [(String, String)] = []
+    ) -> HTTPResponse {
         makeResponse(
             statusCode: statusCode,
             body: .data(Data(html.utf8)),
             contentType: "text/html; charset=utf-8",
-            extraHeaders: [("X-SkyBridge-Transfer-Page", pageType)]
+            extraHeaders: [("X-SkyBridge-Transfer-Page", pageType)] + extraHeaders,
+            contentSecurityPolicy: contentSecurityPolicy
         )
     }
 
@@ -698,7 +1008,8 @@ final class LocalFileTransferHTTPServer: @unchecked Sendable {
         contentType: String,
         contentLength: Int? = nil,
         extraHeaders: [(String, String)] = [],
-        onHeaderSent: (@Sendable () async -> Void)? = nil
+        onHeaderSent: (@Sendable () async -> Void)? = nil,
+        contentSecurityPolicy: String? = nil
     ) -> HTTPResponse {
         let bodyLength: Int
         switch body {
@@ -716,7 +1027,11 @@ final class LocalFileTransferHTTPServer: @unchecked Sendable {
         headers.append(("Pragma", "no-cache"))
         headers.append(("X-Content-Type-Options", "nosniff"))
         headers.append(("Referrer-Policy", "no-referrer"))
-        headers.append(("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:"))
+        headers.append(("X-Frame-Options", "DENY"))
+        headers.append(("Cross-Origin-Resource-Policy", "same-origin"))
+        headers.append(("Cross-Origin-Opener-Policy", "same-origin"))
+        headers.append(("Permissions-Policy", "camera=(), microphone=(), geolocation=(), usb=()"))
+        headers.append(("Content-Security-Policy", contentSecurityPolicy ?? "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'; style-src 'unsafe-inline'; img-src 'self' data:"))
         headers.append(("X-SkyBridge-Transfer", "v1"))
         headers.append(contentsOf: extraHeaders)
 
@@ -743,6 +1058,7 @@ final class LocalFileTransferHTTPServer: @unchecked Sendable {
         case 403: return "Forbidden"
         case 404: return "Not Found"
         case 405: return "Method Not Allowed"
+        case 429: return "Too Many Requests"
         case 500: return "Internal Server Error"
         default: return "OK"
         }
@@ -773,6 +1089,33 @@ final class LocalFileTransferHTTPServer: @unchecked Sendable {
         let escaped = filename.replacingOccurrences(of: "\"", with: "\\\"")
         let encoded = filename.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? escaped
         return "attachment; filename=\"\(escaped)\"; filename*=UTF-8''\(encoded)"
+    }
+
+    private func remoteAddress(for endpoint: NWEndpoint) -> String {
+        switch endpoint {
+        case .hostPort(let host, _):
+            return String(describing: host)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+                .lowercased()
+        default:
+            return "unknown"
+        }
+    }
+
+    private func isLoopbackAddress(_ address: String) -> Bool {
+        let normalized = address.lowercased()
+        return normalized == "::1"
+            || normalized == "0:0:0:0:0:0:0:1"
+            || normalized == "localhost"
+            || normalized.hasPrefix("127.")
+    }
+
+    private func base64URLRandom(bytes: Int) -> String {
+        Data((0..<bytes).map { _ in UInt8.random(in: 0...255) })
+            .base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
     }
 
     private func urlPathEscape(_ value: String) -> String {

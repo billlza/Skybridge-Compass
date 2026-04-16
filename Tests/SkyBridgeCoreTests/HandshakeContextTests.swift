@@ -456,13 +456,14 @@ final class HandshakeContextTests: XCTestCase {
             signatureProvider: provider
         )
         
+        let identityKeyPair = try await provider.generateKeyPair(for: .signing)
         let initiatorKey = P256.Signing.PrivateKey()
         let initiatorCallback = P256SigningCallback(privateKeyRawRepresentation: initiatorKey.rawRepresentation)
         let policy = HandshakePolicy(requireSecureEnclavePoP: true)
         
         let messageA = try await initiator.buildMessageA(
-            identityKeyHandle: .callback(initiatorCallback),
-            identityPublicKey: encodeIdentityPublicKey(initiatorKey.publicKey.derRepresentation, algorithm: .p256ECDSA),
+            identityKeyHandle: .softwareKey(identityKeyPair.privateKey.bytes),
+            identityPublicKey: encodeIdentityPublicKey(identityKeyPair.publicKey.bytes),
             policy: policy,
             secureEnclaveKeyHandle: .callback(initiatorCallback)
         )
@@ -503,6 +504,8 @@ final class HandshakeContextTests: XCTestCase {
             signatureProvider: provider
         )
         
+        let initiatorIdentityKeyPair = try await provider.generateKeyPair(for: .signing)
+        let responderIdentityKeyPair = try await provider.generateKeyPair(for: .signing)
         let initiatorKey = P256.Signing.PrivateKey()
         let responderKey = P256.Signing.PrivateKey()
         let initiatorCallback = P256SigningCallback(privateKeyRawRepresentation: initiatorKey.rawRepresentation)
@@ -510,8 +513,8 @@ final class HandshakeContextTests: XCTestCase {
         let policy = HandshakePolicy(requireSecureEnclavePoP: true)
         
         let messageA = try await initiator.buildMessageA(
-            identityKeyHandle: .callback(initiatorCallback),
-            identityPublicKey: encodeIdentityPublicKey(initiatorKey.publicKey.derRepresentation, algorithm: .p256ECDSA),
+            identityKeyHandle: .softwareKey(initiatorIdentityKeyPair.privateKey.bytes),
+            identityPublicKey: encodeIdentityPublicKey(initiatorIdentityKeyPair.publicKey.bytes),
             policy: policy,
             secureEnclaveKeyHandle: .callback(initiatorCallback)
         )
@@ -523,8 +526,8 @@ final class HandshakeContextTests: XCTestCase {
         )
         
         let buildResult = try await responder.buildMessageB(
-            identityKeyHandle: .callback(responderCallback),
-            identityPublicKey: encodeIdentityPublicKey(responderKey.publicKey.derRepresentation, algorithm: .p256ECDSA),
+            identityKeyHandle: .softwareKey(responderIdentityKeyPair.privateKey.bytes),
+            identityPublicKey: encodeIdentityPublicKey(responderIdentityKeyPair.publicKey.bytes),
             policy: policy,
             secureEnclaveKeyHandle: .callback(responderCallback)
         )

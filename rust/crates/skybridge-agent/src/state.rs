@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
 
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
@@ -9,14 +10,17 @@ use serde::{Deserialize, Serialize};
 use skybridge_core::{
     AuthSession, AuthState, EnrollmentStatus, LocalIdentityState, ManagedSessionControl,
     ManagedSessionControlRegistry, NebulaOAuthClient, ProtocolIdentityBinding,
-    ProtocolSigningAlgorithm, RuntimeSessionRecord, RuntimeSessionTransportEvent,
-    RustPqcIdentityMaterial, SessionRegistry, mldsa65_generate_keypair, mldsa65_sign_detached,
+    ProtocolSigningAlgorithm, RuntimeSessionRecord, RuntimeSessionState,
+    RuntimeSessionTransportEvent, RustPqcIdentityMaterial, SessionRegistry,
+    SignalingLifecycleEvent, mldsa65_generate_keypair, mldsa65_sign_detached,
     should_refresh_access_token, xwing_generate_keypair,
 };
 use time::OffsetDateTime;
 use tokio::fs;
 
 use crate::runtime::{AgentPaths, restrict_dir_permissions, restrict_file_permissions};
+
+static SESSION_REGISTRY_PROCESS_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[derive(Debug, Clone)]
 pub struct DeviceIdentityMaterial {
@@ -232,16 +236,29 @@ pub async fn update_enrollment_status(
 
 pub async fn load_session_registry(paths: &AgentPaths) -> Result<SessionRegistry> {
     ensure_identity_layout(paths).await?;
-    let mut registry = load_json::<SessionRegistry>(&session_registry_file(paths))
-        .await?
-        .unwrap_or_default();
-    registry.schema_version = SessionRegistry::SCHEMA_VERSION;
-    Ok(registry)
+    let registry_path = session_registry_file(paths);
+    let lock_path = session_registry_lock_file(paths);
+    tokio::task::spawn_blocking(move || {
+        let _process_guard = lock_session_registry_process()?;
+        let _file_lock = lock_session_registry_file(&lock_path, false)?;
+        load_session_registry_unlocked(&registry_path)
+    })
+    .await
+    .context("session registry read task panicked")?
 }
 
 pub async fn store_session_registry(paths: &AgentPaths, registry: &SessionRegistry) -> Result<()> {
     ensure_identity_layout(paths).await?;
-    write_json(&session_registry_file(paths), registry).await
+    let registry_path = session_registry_file(paths);
+    let lock_path = session_registry_lock_file(paths);
+    let registry = registry.clone();
+    tokio::task::spawn_blocking(move || {
+        let _process_guard = lock_session_registry_process()?;
+        let _file_lock = lock_session_registry_file(&lock_path, true)?;
+        store_session_registry_unlocked(&registry_path, &registry)
+    })
+    .await
+    .context("session registry write task panicked")?
 }
 
 pub async fn load_managed_session_controls(
@@ -288,10 +305,11 @@ pub async fn upsert_session_runtime(
     paths: &AgentPaths,
     record: RuntimeSessionRecord,
 ) -> Result<SessionRegistry> {
-    let mut registry = load_session_registry(paths).await?;
-    registry.insert(record);
-    store_session_registry(paths, &registry).await?;
-    Ok(registry)
+    mutate_session_registry(paths, move |registry| {
+        registry.insert(record);
+        registry.clone()
+    })
+    .await
 }
 
 pub async fn remove_session_runtime(
@@ -299,10 +317,33 @@ pub async fn remove_session_runtime(
     session_id: &str,
     reason: Option<String>,
 ) -> Result<SessionRegistry> {
-    let mut registry = load_session_registry(paths).await?;
-    registry.mark_disconnected(session_id, reason);
-    store_session_registry(paths, &registry).await?;
-    Ok(registry)
+    let session_id = session_id.to_owned();
+    mutate_session_registry(paths, move |registry| {
+        registry.mark_disconnected(&session_id, reason);
+        registry.clone()
+    })
+    .await
+}
+
+pub(crate) async fn disconnect_session_if_active(
+    paths: &AgentPaths,
+    session_id: &str,
+    reason: Option<String>,
+) -> Result<bool> {
+    let session_id = session_id.to_owned();
+    mutate_session_registry(paths, move |registry| {
+        let Some(record) = registry.get(&session_id) else {
+            return false;
+        };
+        if matches!(
+            record.state,
+            RuntimeSessionState::Disconnected | RuntimeSessionState::Failed
+        ) {
+            return false;
+        }
+        registry.mark_disconnected(&session_id, reason)
+    })
+    .await
 }
 
 pub async fn apply_transport_event(
@@ -310,10 +351,25 @@ pub async fn apply_transport_event(
     session_id: &str,
     event: RuntimeSessionTransportEvent,
 ) -> Result<SessionRegistry> {
-    let mut registry = load_session_registry(paths).await?;
-    registry.apply_transport_event(session_id, event);
-    store_session_registry(paths, &registry).await?;
-    Ok(registry)
+    let session_id = session_id.to_owned();
+    mutate_session_registry(paths, move |registry| {
+        registry.apply_transport_event(&session_id, event);
+        registry.clone()
+    })
+    .await
+}
+
+pub(crate) async fn apply_signaling_event(
+    paths: &AgentPaths,
+    session_id: &str,
+    event: SignalingLifecycleEvent,
+) -> Result<SessionRegistry> {
+    let session_id = session_id.to_owned();
+    mutate_session_registry(paths, move |registry| {
+        registry.apply_signaling_event(&session_id, &event);
+        registry.clone()
+    })
+    .await
 }
 
 pub async fn update_session_remote_peer(
@@ -323,15 +379,18 @@ pub async fn update_session_remote_peer(
     remote_device_name: Option<String>,
     remote_protocol_public_key_fingerprint: Option<String>,
 ) -> Result<SessionRegistry> {
-    let mut registry = load_session_registry(paths).await?;
-    registry.update_remote_peer(
-        session_id,
-        remote_device_id,
-        remote_device_name,
-        remote_protocol_public_key_fingerprint,
-    );
-    store_session_registry(paths, &registry).await?;
-    Ok(registry)
+    let session_id = session_id.to_owned();
+    let remote_device_id = remote_device_id.into();
+    mutate_session_registry(paths, move |registry| {
+        registry.update_remote_peer(
+            &session_id,
+            remote_device_id,
+            remote_device_name,
+            remote_protocol_public_key_fingerprint,
+        );
+        registry.clone()
+    })
+    .await
 }
 
 async fn load_signing_key(paths: &AgentPaths) -> Result<Option<StoredSigningKey>> {
@@ -480,6 +539,99 @@ async fn ensure_identity_layout(paths: &AgentPaths) -> Result<()> {
     Ok(())
 }
 
+fn lock_session_registry_process() -> Result<std::sync::MutexGuard<'static, ()>> {
+    SESSION_REGISTRY_PROCESS_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| anyhow!("session registry process lock poisoned"))
+}
+
+fn lock_session_registry_file(path: &Path, exclusive: bool) -> Result<std::fs::File> {
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .with_context(|| format!("failed to open session registry lock {}", path.display()))?;
+    restrict_file_permissions_blocking(path)?;
+    if exclusive {
+        file.lock()
+            .with_context(|| format!("failed to exclusively lock {}", path.display()))?;
+    } else {
+        file.lock_shared()
+            .with_context(|| format!("failed to shared-lock {}", path.display()))?;
+    }
+    Ok(file)
+}
+
+fn load_session_registry_unlocked(path: &Path) -> Result<SessionRegistry> {
+    let mut registry = match std::fs::read_to_string(path) {
+        Ok(body) => serde_json::from_str(&body)
+            .with_context(|| format!("failed to decode {}", path.display()))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => SessionRegistry::default(),
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to read {}", path.display()));
+        }
+    };
+    registry.schema_version = SessionRegistry::SCHEMA_VERSION;
+    Ok(registry)
+}
+
+fn store_session_registry_unlocked(path: &Path, registry: &SessionRegistry) -> Result<()> {
+    let body = serde_json::to_vec_pretty(registry).context("failed to encode json")?;
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| anyhow!("session registry path missing filename"))?
+        .to_string_lossy();
+    let temp_path = path.with_file_name(format!(".{file_name}.tmp-{}", uuid::Uuid::now_v7()));
+    std::fs::write(&temp_path, body)
+        .with_context(|| format!("failed to write {}", temp_path.display()))?;
+    restrict_file_permissions_blocking(&temp_path)?;
+    #[cfg(windows)]
+    if path.exists() {
+        std::fs::remove_file(path)
+            .with_context(|| format!("failed to replace {}", path.display()))?;
+    }
+    std::fs::rename(&temp_path, path)
+        .with_context(|| format!("failed to persist {}", path.display()))?;
+    restrict_file_permissions_blocking(path)
+}
+
+fn restrict_file_permissions_blocking(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let permissions = std::fs::Permissions::from_mode(0o600);
+        std::fs::set_permissions(path, permissions)
+            .with_context(|| format!("failed to set permissions on {}", path.display()))?;
+    }
+
+    Ok(())
+}
+
+async fn mutate_session_registry<R, F>(paths: &AgentPaths, update: F) -> Result<R>
+where
+    R: Send + 'static,
+    F: FnOnce(&mut SessionRegistry) -> R + Send + 'static,
+{
+    ensure_identity_layout(paths).await?;
+    let registry_path = session_registry_file(paths);
+    let lock_path = session_registry_lock_file(paths);
+    tokio::task::spawn_blocking(move || {
+        let _process_guard = lock_session_registry_process()?;
+        let _file_lock = lock_session_registry_file(&lock_path, true)?;
+        let mut registry = load_session_registry_unlocked(&registry_path)?;
+        let output = update(&mut registry);
+        registry.schema_version = SessionRegistry::SCHEMA_VERSION;
+        store_session_registry_unlocked(&registry_path, &registry)?;
+        Ok(output)
+    })
+    .await
+    .context("session registry mutation task panicked")?
+}
+
 async fn write_json<T>(path: &Path, value: &T) -> Result<()>
 where
     T: Serialize,
@@ -524,6 +676,10 @@ fn session_registry_file(paths: &AgentPaths) -> std::path::PathBuf {
     paths.runtime_dir.join("sessions.json")
 }
 
+fn session_registry_lock_file(paths: &AgentPaths) -> std::path::PathBuf {
+    session_registry_file(paths).with_file_name("sessions.json.lock")
+}
+
 fn session_controls_file(paths: &AgentPaths) -> std::path::PathBuf {
     paths.session_controls_file.clone()
 }
@@ -538,4 +694,125 @@ fn current_hostname() -> String {
 
 fn new_device_id() -> String {
     uuid::Uuid::now_v7().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use skybridge_core::{RuntimeSessionRole, RuntimeSessionSource};
+
+    fn test_paths(name: &str) -> AgentPaths {
+        crate::runtime::resolve_paths(Some(std::env::temp_dir().join(format!(
+            "skybridge-agent-state-{name}-{}",
+            uuid::Uuid::now_v7()
+        ))))
+        .expect("temporary paths should resolve")
+    }
+
+    async fn seed_session(paths: &AgentPaths, session_id: &str, state: RuntimeSessionState) {
+        upsert_session_runtime(
+            paths,
+            RuntimeSessionRecord::new(
+                format!("runtime-{session_id}"),
+                session_id.to_owned(),
+                RuntimeSessionRole::Initiator,
+                RuntimeSessionSource::Code,
+                "https://signal.example.com",
+                "local-device",
+                None,
+                None,
+                None,
+                state,
+            ),
+        )
+        .await
+        .expect("session should seed");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_registry_updates_preserve_both_mutations() {
+        let paths = test_paths("concurrent-registry-updates");
+        seed_session(&paths, "session-1", RuntimeSessionState::Connecting).await;
+
+        let transport_paths = paths.clone();
+        let peer_paths = paths.clone();
+        let (transport_result, peer_result) = tokio::join!(
+            apply_transport_event(
+                &transport_paths,
+                "session-1",
+                RuntimeSessionTransportEvent::TransportReady,
+            ),
+            update_session_remote_peer(
+                &peer_paths,
+                "session-1",
+                "remote-device",
+                Some("Peer".to_owned()),
+                Some("fingerprint".to_owned()),
+            )
+        );
+        transport_result.expect("transport update should succeed");
+        peer_result.expect("peer update should succeed");
+
+        let registry = load_session_registry(&paths)
+            .await
+            .expect("session registry should load");
+        let record = registry
+            .get("session-1")
+            .expect("session record should exist");
+        assert!(record.readiness.is_transport_established_for("session-1"));
+        assert_eq!(record.remote_device_id.as_deref(), Some("remote-device"));
+        assert_eq!(record.remote_device_name.as_deref(), Some("Peer"));
+        assert_eq!(
+            record.remote_protocol_public_key_fingerprint.as_deref(),
+            Some("fingerprint")
+        );
+
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn disconnect_session_if_active_clears_only_live_records() {
+        let paths = test_paths("disconnect-session-cleanup");
+        seed_session(&paths, "active-session", RuntimeSessionState::Bound).await;
+        seed_session(&paths, "failed-session", RuntimeSessionState::Failed).await;
+
+        assert!(
+            disconnect_session_if_active(
+                &paths,
+                "active-session",
+                Some("worker exited".to_owned()),
+            )
+            .await
+            .expect("active cleanup should succeed")
+        );
+        assert!(
+            !disconnect_session_if_active(
+                &paths,
+                "failed-session",
+                Some("worker exited".to_owned()),
+            )
+            .await
+            .expect("failed cleanup should succeed")
+        );
+
+        let registry = load_session_registry(&paths)
+            .await
+            .expect("session registry should load");
+        assert_eq!(
+            registry
+                .get("active-session")
+                .expect("active session should exist")
+                .state,
+            RuntimeSessionState::Disconnected
+        );
+        assert_eq!(
+            registry
+                .get("failed-session")
+                .expect("failed session should exist")
+                .state,
+            RuntimeSessionState::Failed
+        );
+
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
 }

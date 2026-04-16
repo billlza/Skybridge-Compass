@@ -20,19 +20,31 @@ public final class TransferLinkManager: ObservableObject, Sendable {
     private struct LinkAccessGrant: Sendable {
         let tokenHash: String
         let linkId: String
+        let clientAddress: String
         let expiresAt: Date
     }
 
-    private let serverPort: UInt16 = 8888
+    private let preferredServerPortRange: ClosedRange<UInt16> = 49_152...65_535
     private let linkStorage = TransferLinkStorage()
     private var cleanupTimer: AnyCancellable?
     private var httpServer: LocalFileTransferHTTPServer?
     private var lifecycleState: LifecycleState = .idle
     private var accessGrants: [String: LinkAccessGrant] = [:]
+    private var activeServerPort: UInt16?
+    private var serverStartupTask: Task<Void, Error>?
 
     public static let shared = TransferLinkManager()
 
     private init() {}
+
+    var currentServerPort: UInt16? {
+        activeServerPort
+    }
+
+    var loopbackBaseURL: URL? {
+        guard let activeServerPort else { return nil }
+        return URL(string: "http://127.0.0.1:\(activeServerPort)")
+    }
 
     public func start() async throws {
         try await ensureServerRunning()
@@ -43,6 +55,8 @@ public final class TransferLinkManager: ObservableObject, Sendable {
         lifecycleState = .stopping
         httpServer?.stop()
         httpServer = nil
+        activeServerPort = nil
+        serverStartupTask = nil
         cleanupTimer?.cancel()
         cleanupTimer = nil
         isServerRunning = false
@@ -60,7 +74,7 @@ public final class TransferLinkManager: ObservableObject, Sendable {
         for files: [URL],
         expirationTime: TimeInterval = 24 * 60 * 60,
         maxDownloads: Int = 10,
-        requiresPassword: Bool = false
+        requiresPassword: Bool = true
     ) async throws -> TransferLink {
         try await validateFiles(files)
         try await ensureServerRunning()
@@ -156,7 +170,10 @@ public final class TransferLinkManager: ObservableObject, Sendable {
         case .running:
             return
         case .starting:
-            return
+            if let serverStartupTask {
+                try await serverStartupTask.value
+                return
+            }
         case .stopping:
             await stop()
         case .idle:
@@ -165,7 +182,24 @@ public final class TransferLinkManager: ObservableObject, Sendable {
 
         lifecycleState = .starting
         ensureCleanupTimer()
+        let startupTask = Task { @MainActor in
+            try await self.performServerStart()
+        }
+        serverStartupTask = startupTask
+        do {
+            try await startupTask.value
+        } catch {
+            if serverStartupTask != nil {
+                serverStartupTask = nil
+            }
+            throw error
+        }
+        if serverStartupTask != nil {
+            serverStartupTask = nil
+        }
+    }
 
+    private func performServerStart() async throws {
         let callbacks = LocalFileTransferHTTPServer.Callbacks(
             activeLinkCount: { [weak self] in
                 await MainActor.run { self?.activeLinks.count ?? 0 }
@@ -173,28 +207,38 @@ public final class TransferLinkManager: ObservableObject, Sendable {
             lookupLink: { [weak self] linkID in
                 await self?.getLink(by: linkID)
             },
-            authorizePassword: { [weak self] linkID, password in
-                await self?.issueAccessGrant(linkId: linkID, password: password)
+            issueAccessGrant: { [weak self] linkID, clientAddress in
+                await self?.issueAccessGrant(linkId: linkID, clientAddress: clientAddress)
             },
-            validateAccessToken: { [weak self] linkID, token in
-                await self?.validateAccessGrant(linkId: linkID, token: token) ?? false
+            validateAccessToken: { [weak self] linkID, token, clientAddress in
+                await self?.validateAccessGrant(linkId: linkID, token: token, clientAddress: clientAddress) ?? false
             },
             recordDownload: { [weak self] linkID in
                 await self?.recordDownload(for: linkID)
             }
         )
 
-        for attempt in 0..<3 {
+        let candidatePorts = serverPortCandidates()
+        for (attempt, port) in candidatePorts.enumerated() {
             let server = LocalFileTransferHTTPServer(callbacks: callbacks)
             do {
-                try await server.start(port: serverPort)
+                try await server.start(port: port)
+                guard lifecycleState == .starting else {
+                    server.stop()
+                    httpServer = nil
+                    activeServerPort = nil
+                    isServerRunning = false
+                    throw TransferLinkError.serverStartFailed
+                }
                 httpServer = server
+                activeServerPort = port
                 lifecycleState = .running
                 isServerRunning = true
                 return
             } catch {
                 httpServer = nil
-                if attempt < 2 {
+                activeServerPort = nil
+                if attempt < candidatePorts.count - 1 {
                     try? await Task.sleep(nanoseconds: 75_000_000)
                     continue
                 }
@@ -203,6 +247,11 @@ public final class TransferLinkManager: ObservableObject, Sendable {
                 throw TransferLinkError.serverStartFailed
             }
         }
+
+        lifecycleState = .idle
+        isServerRunning = false
+        activeServerPort = nil
+        throw TransferLinkError.serverStartFailed
     }
 
     private func stopServerIfIdle() async {
@@ -235,25 +284,26 @@ public final class TransferLinkManager: ObservableObject, Sendable {
         activeLinks = await linkStorage.getAllActiveLinks().sorted { $0.createdAt > $1.createdAt }
     }
 
-    private func issueAccessGrant(linkId: String, password: String) async -> LocalFileTransferHTTPServer.AccessGrant? {
-        guard let link = await getLink(by: linkId),
-              let requiredPassword = link.password,
-              password == requiredPassword else {
+    private func issueAccessGrant(linkId: String, clientAddress: String) async -> LocalFileTransferHTTPServer.AccessGrant? {
+        guard let link = await getLink(by: linkId) else {
             return nil
         }
 
         let token = base64URLRandom(bytes: 24)
         let hash = sha256Hex(token)
-        let expiresAt = min(link.expiresAt, Date().addingTimeInterval(10 * 60))
-        accessGrants[hash] = LinkAccessGrant(tokenHash: hash, linkId: linkId, expiresAt: expiresAt)
+        let expiresAt = min(link.expiresAt, Date().addingTimeInterval(5 * 60))
+        accessGrants[hash] = LinkAccessGrant(tokenHash: hash, linkId: linkId, clientAddress: clientAddress, expiresAt: expiresAt)
         cleanupExpiredAccessGrants()
         return .init(token: token, expiresAt: expiresAt)
     }
 
-    private func validateAccessGrant(linkId: String, token: String) async -> Bool {
+    private func validateAccessGrant(linkId: String, token: String, clientAddress: String) async -> Bool {
         cleanupExpiredAccessGrants()
         let hash = sha256Hex(token)
-        guard let grant = accessGrants[hash], grant.linkId == linkId, grant.expiresAt > Date() else {
+        guard let grant = accessGrants[hash],
+              grant.linkId == linkId,
+              grant.clientAddress == clientAddress,
+              grant.expiresAt > Date() else {
             return false
         }
         return await getLink(by: linkId) != nil
@@ -291,18 +341,38 @@ public final class TransferLinkManager: ObservableObject, Sendable {
     }
 
     private func generatePassword() -> String {
-        let characters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-        return String((0..<6).compactMap { _ in characters.randomElement() })
+        let characters = Array("ABCDEFGHJKLMNPQRSTUVWXYZ23456789")
+        let raw = String((0..<20).compactMap { _ in characters.randomElement() })
+        return stride(from: 0, to: raw.count, by: 4).map { index in
+            let start = raw.index(raw.startIndex, offsetBy: index)
+            let end = raw.index(start, offsetBy: min(4, raw.distance(from: start, to: raw.endIndex)))
+            return String(raw[start..<end])
+        }.joined(separator: "-")
     }
 
     private func resolvedShareOrigin() throws -> String {
+        guard let activeServerPort else {
+            throw TransferLinkError.serverStartFailed
+        }
         if let ip = preferredInterfaceHost() {
-            return "http://\(urlHost(ip)):\(serverPort)"
+            return "http://\(urlHost(ip)):\(activeServerPort)"
         }
         if let hostname = preferredHostname() {
-            return "http://\(urlHost(hostname)):\(serverPort)"
+            return "http://\(urlHost(hostname)):\(activeServerPort)"
         }
         throw TransferLinkError.unavailableShareAddress
+    }
+
+    private func serverPortCandidates() -> [UInt16] {
+        var candidates: [UInt16] = []
+        var generator = SystemRandomNumberGenerator()
+        while candidates.count < 8 {
+            let candidate = UInt16.random(in: preferredServerPortRange, using: &generator)
+            if !candidates.contains(candidate) {
+                candidates.append(candidate)
+            }
+        }
+        return candidates
     }
 
     private func preferredInterfaceHost() -> String? {
@@ -471,7 +541,11 @@ public struct TransferLink: Codable, Identifiable, Sendable {
     public let sharePath: String
 
     public var shareUrl: String {
-        "\(shareOrigin)\(sharePath)"
+        guard let password else {
+            return "\(shareOrigin)\(sharePath)"
+        }
+        let encodedPassword = password.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? password
+        return "\(shareOrigin)\(sharePath)#unlock=\(encodedPassword)"
     }
 
     public var shareURL: URL? {

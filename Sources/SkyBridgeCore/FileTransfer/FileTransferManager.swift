@@ -35,6 +35,8 @@ public class FileTransferManager: BaseManager {
     private var compressionEnabled: Bool = true
     private var encryptionEnabled: Bool = true
     private var maxTransferSpeedBytesPerSecond: Double?
+    private var virusScanEnabled: Bool = false
+    private var currentScanLevel: FileScanService.ScanLevel = .standard
     private var receiveBaseDirectory: URL?
     private var transferQueue = DispatchQueue(label: "file.transfer.queue", qos: .userInitiated)
     private var transferRateLimitStates: [String: TransferRateLimitState] = [:]
@@ -64,6 +66,10 @@ public class FileTransferManager: BaseManager {
         self.historyStore = Self.transferHistoryStore
         super.init(category: "FileTransferManager")
         loadPersistedHistory()
+        updateSecuritySettings(
+            virusScanEnabled: SettingsManager.shared.scanTransferFilesForVirus,
+            scanLevel: SettingsManager.shared.scanLevel
+        )
         logger.info("📁 初始化文件传输管理器")
     }
 
@@ -71,6 +77,10 @@ public class FileTransferManager: BaseManager {
         self.historyStore = historyStore
         super.init(category: "FileTransferManager")
         loadPersistedHistory()
+        updateSecuritySettings(
+            virusScanEnabled: SettingsManager.shared.scanTransferFilesForVirus,
+            scanLevel: SettingsManager.shared.scanLevel
+        )
         logger.info("📁 初始化文件传输管理器")
     }
 
@@ -114,6 +124,21 @@ public class FileTransferManager: BaseManager {
             self.maxTransferSpeedBytesPerSecond = maxTransferSpeedBytesPerSecond > 0 ? maxTransferSpeedBytesPerSecond : nil
         }
         logger.info("⚙️ 传输设置已更新：并发=\(self.maxConcurrentTransfers), 块=\(self.chunkSize), 压缩=\(self.compressionEnabled), 加密=\(self.encryptionEnabled), 限速=\(self.currentSpeedLimitDescription(), privacy: .public)")
+    }
+
+    public func updateSecuritySettings(
+        virusScanEnabled: Bool? = nil,
+        scanLevel: FileScanService.ScanLevel? = nil
+    ) {
+        if let virusScanEnabled {
+            self.virusScanEnabled = virusScanEnabled
+        }
+        if let scanLevel {
+            self.currentScanLevel = scanLevel
+        }
+        logger.info(
+            "🛡️ 文件扫描设置已更新：启用=\(self.virusScanEnabled, privacy: .public) 级别=\(self.currentScanLevel.rawValue, privacy: .public)"
+        )
     }
 
     /// 设置接收文件的基础目录
@@ -175,6 +200,34 @@ public class FileTransferManager: BaseManager {
 
     private func clearSpeedLimitState(for transferId: String) {
         transferRateLimitStates.removeValue(forKey: transferId)
+    }
+
+    private func scanReceivedFileIfEnabled(_ url: URL) async -> FileScanResult? {
+        guard virusScanEnabled else {
+            logger.debug("🛡️ 病毒扫描未启用，跳过: \(url.lastPathComponent, privacy: .public)")
+            return nil
+        }
+
+        logger.info(
+            "🛡️ 开始扫描接收文件: \(url.lastPathComponent, privacy: .public) level=\(self.currentScanLevel.rawValue, privacy: .public)"
+        )
+        let configuration = FileScanService.ScanConfiguration(level: self.currentScanLevel)
+        let result = await FileScanService.shared.scanFile(at: url, configuration: configuration)
+
+        if !result.isSafe {
+            logger.warning("🚨 接收文件扫描命中威胁: \(result.threatName ?? "未知", privacy: .public)")
+            NotificationCenter.default.post(
+                name: .fileThreatDetected,
+                object: nil,
+                userInfo: [
+                    "fileURL": url,
+                    "threatName": result.threatName ?? "Unknown",
+                    "scanMethod": result.scanMethod.rawValue
+                ]
+            )
+        }
+
+        return result
     }
 
     @available(macOS 14.0, iOS 17.0, *)
@@ -655,6 +708,17 @@ public class FileTransferManager: BaseManager {
             let receivedHash = try await calculateFileHash(at: receivePath)
             guard receivedHash == metadata.fileHash else {
                 throw FileTransferError.integrityCheckFailed
+            }
+
+            if let scanResult = await scanReceivedFileIfEnabled(receivePath) {
+                transfer.scanResult = scanResult
+                if !scanResult.isSafe {
+                    transfer.localPath = nil
+                    try? FileManager.default.removeItem(at: receivePath)
+                    throw FileTransferError.securityThreatDetected(
+                        threatName: scanResult.threatName ?? "未知威胁"
+                    )
+                }
             }
 
  // 传输完成
@@ -1574,6 +1638,11 @@ public class FileTransferManager: BaseManager {
         transfer.status = .transferring
 
         while receivedBytes < totalBytes {
+            if transfer.status == .paused {
+                try await Task.sleep(nanoseconds: 100_000_000)
+                continue
+            }
+
  // 检查是否取消
             if transfer.status == .cancelled {
                 throw FileTransferError.transferCancelled
@@ -2715,6 +2784,7 @@ public enum FileTransferError: Error, LocalizedError {
     case receiverNotConfirmed
     case receiverRejected
     case secureSessionRequired
+    case securityThreatDetected(threatName: String)
 
     public var errorDescription: String? {
         switch self {
@@ -2736,6 +2806,8 @@ public enum FileTransferError: Error, LocalizedError {
             return "接收端拒绝或处理失败"
         case .secureSessionRequired:
             return "经典文件传输需要已认证的安全会话"
+        case .securityThreatDetected(let threatName):
+            return "检测到安全威胁: \(threatName)"
         }
     }
 }

@@ -1,0 +1,158 @@
+name: macos-release-readiness
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/macos-release-readiness.yml"
+      - "Package.swift"
+      - "Sources/**"
+      - "Tests/**"
+      - "Scripts/**"
+      - "fastlane/**"
+      - "README.md"
+  push:
+    paths:
+      - ".github/workflows/macos-release-readiness.yml"
+      - "Package.swift"
+      - "Sources/**"
+      - "Tests/**"
+      - "Scripts/**"
+      - "fastlane/**"
+      - "README.md"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-release-readiness-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos-preflight:
+    runs-on: macos-26
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show Toolchain Versions
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Run Swift Package Tests
+        run: swift test
+
+  macos-signed-release-gate:
+    needs: macos-preflight
+    runs-on: macos-26
+    timeout-minutes: 120
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false
+
+    env:
+      DEVELOPER_ID_CERT_P12_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_CERT_P12_BASE64 }}
+      DEVELOPER_ID_CERT_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_CERT_PASSWORD }}
+      MACOS_PROVISION_PROFILE_BASE64: ${{ secrets.MACOS_PROVISION_PROFILE_BASE64 }}
+      NOTARYTOOL_KEY_P8_BASE64: ${{ secrets.NOTARYTOOL_KEY_P8_BASE64 }}
+      NOTARYTOOL_KEY_ID: ${{ secrets.NOTARYTOOL_KEY_ID }}
+      NOTARYTOOL_ISSUER: ${{ secrets.NOTARYTOOL_ISSUER }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate Release Signing Secrets
+        run: |
+          missing=()
+          for key in \
+            DEVELOPER_ID_CERT_P12_BASE64 \
+            DEVELOPER_ID_CERT_PASSWORD \
+            MACOS_PROVISION_PROFILE_BASE64 \
+            NOTARYTOOL_KEY_P8_BASE64 \
+            NOTARYTOOL_KEY_ID \
+            NOTARYTOOL_ISSUER
+          do
+            if [[ -z "${!key:-}" ]]; then
+              missing+=("$key")
+            fi
+          done
+
+          if (( ${#missing[@]} > 0 )); then
+            echo "::error::Missing required macOS release gate secrets: ${missing[*]}"
+            exit 1
+          fi
+
+      - name: Show Toolchain Versions
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Import Developer ID Certificate
+        env:
+          KEYCHAIN_PASSWORD: ${{ github.run_id }}-${{ github.run_attempt }}-skybridge
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/skybridge-release.keychain-db"
+          CERT_PATH="$RUNNER_TEMP/developer-id.p12"
+
+          echo "$DEVELOPER_ID_CERT_P12_BASE64" | base64 --decode > "$CERT_PATH"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH"
+          security default-keychain -d user -s "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" \
+            -k "$KEYCHAIN_PATH" \
+            -P "$DEVELOPER_ID_CERT_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security \
+            -T /usr/bin/xcodebuild
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s \
+            -k "$KEYCHAIN_PASSWORD" \
+            "$KEYCHAIN_PATH"
+
+          SIGNING_IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | awk -F '"' '/Developer ID Application/ {print $2; exit}')"
+          if [[ -z "$SIGNING_IDENTITY" ]]; then
+            echo "::error::Unable to resolve a Developer ID Application identity after importing the certificate."
+            exit 1
+          fi
+
+          {
+            echo "KEYCHAIN_PATH=$KEYCHAIN_PATH"
+            echo "KEYCHAIN_PASSWORD=$KEYCHAIN_PASSWORD"
+            echo "SIGNING_IDENTITY=$SIGNING_IDENTITY"
+          } >> "$GITHUB_ENV"
+
+      - name: Install macOS Provisioning Profile
+        run: |
+          PROFILE_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
+          PROFILE_PATH="$PROFILE_DIR/skybridge-release.provisionprofile"
+          mkdir -p "$PROFILE_DIR"
+          echo "$MACOS_PROVISION_PROFILE_BASE64" | base64 --decode > "$PROFILE_PATH"
+          echo "SKYBRIDGE_MACOS_PROVISIONPROFILE_PATH=$PROFILE_PATH" >> "$GITHUB_ENV"
+
+      - name: Install Notary API Key
+        run: |
+          NOTARY_KEY_PATH="$RUNNER_TEMP/notarytool-authkey.p8"
+          echo "$NOTARYTOOL_KEY_P8_BASE64" | base64 --decode > "$NOTARY_KEY_PATH"
+          {
+            echo "NOTARYTOOL_KEY=$NOTARY_KEY_PATH"
+            echo "NOTARYTOOL_KEY_ID=$NOTARYTOOL_KEY_ID"
+            echo "NOTARYTOOL_ISSUER=$NOTARYTOOL_ISSUER"
+          } >> "$GITHUB_ENV"
+
+      - name: Build Signed + Notarized Release DMG
+        run: |
+          bash Scripts/build_dmg.sh \
+            --identity "$SIGNING_IDENTITY" \
+            --notarize-app \
+            --notarize-dmg \
+            --require-notarization
+
+      - name: Validate Full macOS Release Readiness
+        env:
+          SKYBRIDGE_RELEASE_GATE_REQUIRE_NOTARIZATION: "1"
+        run: |
+          bash Scripts/check_macos_release_readiness.sh --require-notarization

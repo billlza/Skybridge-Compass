@@ -86,6 +86,10 @@ public final class FileTransferSettingsBridge: ObservableObject {
             enableEncryption: settings.enableConnectionEncryption,
             maxTransferSpeedBytesPerSecond: speedLimitBytesPerSecond
         )
+        fileTransferManager.updateSecuritySettings(
+            virusScanEnabled: settings.scanTransferFilesForVirus,
+            scanLevel: settings.scanLevel
+        )
         NetworkActivityLogStore.shared.record(
             category: "file-transfer",
             message: "应用文件传输设置: 并发=\(settings.maxConcurrentConnections), 分片=\(settings.transferBufferSize), 限速MBps=\(settings.transferSpeedLimitMBps)"
