@@ -1,4 +1,4 @@
-// swift-tools-version: 6.3
+// swift-tools-version: 6.2
 import Foundation
 import PackageDescription
 
@@ -10,7 +10,7 @@ let webRTCHeadersIncludePath = "\(packageRootPath)/Sources/Vendor/WebRTCHeaders"
 // Why: Swift does not provide a compile-time "SDK has PQC types" check for structs like MLKEM/MLDSA.
 // If we define HAS_APPLE_PQC_SDK while compiling against an older SDK, the build will fail.
 //
-// With the Swift 6.3 / Xcode 26.4 baseline, the bundled Apple SDK already contains the PQC types.
+// With the current Xcode 26 baseline, the bundled Apple SDK contains the PQC types.
 // Keep a manual override so packaging/debugging can still force-disable the native path when needed.
 func shouldEnableApplePQCSDK() -> Bool {
     if let rawOverride = ProcessInfo.processInfo.environment["SKYBRIDGE_ENABLE_APPLE_PQC_SDK"]?
