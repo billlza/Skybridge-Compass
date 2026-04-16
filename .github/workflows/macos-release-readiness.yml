@@ -32,14 +32,21 @@ jobs:
   macos-preflight:
     runs-on: macos-26
     timeout-minutes: 90
+    env:
+      TOOLCHAINS: swift
 
     steps:
       - uses: actions/checkout@v4
+
+      - uses: swift-actions/setup-swift@v3
+        with:
+          swift-version: "6.3"
 
       - name: Show Toolchain Versions
         run: |
           xcodebuild -version
           swift --version
+          xcrun -toolchain swift swift --version
 
       - name: Run Swift Package Tests
         run: swift test
@@ -51,6 +58,7 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false
 
     env:
+      TOOLCHAINS: swift
       DEVELOPER_ID_CERT_P12_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_CERT_P12_BASE64 }}
       DEVELOPER_ID_CERT_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_CERT_PASSWORD }}
       MACOS_PROVISION_PROFILE_BASE64: ${{ secrets.MACOS_PROVISION_PROFILE_BASE64 }}
@@ -60,6 +68,10 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - uses: swift-actions/setup-swift@v3
+        with:
+          swift-version: "6.3"
 
       - name: Validate Release Signing Secrets
         run: |
@@ -86,6 +98,7 @@ jobs:
         run: |
           xcodebuild -version
           swift --version
+          xcrun -toolchain swift swift --version
 
       - name: Import Developer ID Certificate
         env:

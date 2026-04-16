@@ -57,6 +57,7 @@ out/
 *.a
 *.dylib
 *.framework
+!Sources/Vendor/*.xcframework/**/*.a
 
 # Logs
 logs
