@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import SkyBridgeCore
 import AuthenticationServices
 import SkyBridgeUI
@@ -397,7 +398,8 @@ struct AuthenticationView: View {
         VStack(spacing: 20) {
             if viewModel.usesNativeAppleSignIn {
  // Apple登录按钮 - 彩色液态玻璃风格
-                SignInWithAppleButton(.signIn) { request in
+                NativeAppleSignInButton {
+                    request in
                     request.requestedScopes = [
                         ASAuthorization.Scope.fullName,
                         ASAuthorization.Scope.email
@@ -406,7 +408,6 @@ struct AuthenticationView: View {
                 } onCompletion: { result in
                     handleAppleSignInResult(result)
                 }
-                .signInWithAppleButtonStyle(SignInWithAppleButton.Style.black)
                 .frame(height: 50)
                 .clipShape(RoundedRectangle(cornerRadius: 12))
                 .overlay {
@@ -1130,6 +1131,71 @@ struct AuthenticationView: View {
             Task { await viewModel.sendPhoneVerificationCode(captchaToken: token) }
         case .resetPassword:
             Task { await viewModel.resetPassword(captchaToken: token) }
+        }
+    }
+}
+
+private struct NativeAppleSignInButton: NSViewRepresentable {
+    let configureRequest: (ASAuthorizationAppleIDRequest) -> Void
+    let onCompletion: (Result<ASAuthorization, Error>) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(
+            configureRequest: configureRequest,
+            onCompletion: onCompletion
+        )
+    }
+
+    func makeNSView(context: Context) -> ASAuthorizationAppleIDButton {
+        let button = ASAuthorizationAppleIDButton(
+            authorizationButtonType: .signIn,
+            authorizationButtonStyle: .black
+        )
+        button.target = context.coordinator
+        button.action = #selector(Coordinator.performRequest)
+        return button
+    }
+
+    func updateNSView(_ nsView: ASAuthorizationAppleIDButton, context: Context) {}
+
+    final class Coordinator: NSObject, ASAuthorizationControllerDelegate, ASAuthorizationControllerPresentationContextProviding {
+        private let configureRequest: (ASAuthorizationAppleIDRequest) -> Void
+        private let onCompletion: (Result<ASAuthorization, Error>) -> Void
+
+        init(
+            configureRequest: @escaping (ASAuthorizationAppleIDRequest) -> Void,
+            onCompletion: @escaping (Result<ASAuthorization, Error>) -> Void
+        ) {
+            self.configureRequest = configureRequest
+            self.onCompletion = onCompletion
+        }
+
+        @objc func performRequest() {
+            let request = ASAuthorizationAppleIDProvider().createRequest()
+            configureRequest(request)
+
+            let controller = ASAuthorizationController(authorizationRequests: [request])
+            controller.delegate = self
+            controller.presentationContextProvider = self
+            controller.performRequests()
+        }
+
+        func presentationAnchor(for controller: ASAuthorizationController) -> ASPresentationAnchor {
+            NSApp.keyWindow ?? NSApp.mainWindow ?? NSWindow()
+        }
+
+        func authorizationController(
+            controller: ASAuthorizationController,
+            didCompleteWithAuthorization authorization: ASAuthorization
+        ) {
+            onCompletion(.success(authorization))
+        }
+
+        func authorizationController(
+            controller: ASAuthorizationController,
+            didCompleteWithError error: Error
+        ) {
+            onCompletion(.failure(error))
         }
     }
 }
