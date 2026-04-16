@@ -398,12 +398,15 @@ struct AuthenticationView: View {
             if viewModel.usesNativeAppleSignIn {
  // Apple登录按钮 - 彩色液态玻璃风格
                 SignInWithAppleButton(.signIn) { request in
-                    request.requestedScopes = [.fullName, .email]
+                    request.requestedScopes = [
+                        ASAuthorization.Scope.fullName,
+                        ASAuthorization.Scope.email
+                    ]
                     viewModel.configureAppleSignInRequest(request)
                 } onCompletion: { result in
                     handleAppleSignInResult(result)
                 }
-                .signInWithAppleButtonStyle(.black)
+                .signInWithAppleButtonStyle(SignInWithAppleButton.Style.black)
                 .frame(height: 50)
                 .clipShape(RoundedRectangle(cornerRadius: 12))
                 .overlay {
@@ -417,7 +420,7 @@ struct AuthenticationView: View {
                             lineWidth: 1
                         )
                 }
-                .shadow(color: .black.opacity(0.2), radius: 8, x: 0, y: 4)
+                .shadow(color: Color.black.opacity(0.2), radius: 8, x: 0, y: 4)
             } else {
                 Button {
                     beginSupabaseTurnstileAction(.signInWithApple)

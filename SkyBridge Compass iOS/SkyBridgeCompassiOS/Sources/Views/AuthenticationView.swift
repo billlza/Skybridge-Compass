@@ -389,12 +389,15 @@ struct AuthenticationView: View {
 
     private var appleSignInButton: some View {
         SignInWithAppleButton(.signIn) { request in
-            request.requestedScopes = [.fullName, .email]
+            request.requestedScopes = [
+                ASAuthorization.Scope.fullName,
+                ASAuthorization.Scope.email
+            ]
             authManager.configureAppleSignInRequest(request)
         } onCompletion: { result in
             performAppleSignIn(result)
         }
-        .signInWithAppleButtonStyle(.black)
+        .signInWithAppleButtonStyle(SignInWithAppleButton.Style.black)
         .frame(maxWidth: .infinity)
         .frame(height: 52)
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
