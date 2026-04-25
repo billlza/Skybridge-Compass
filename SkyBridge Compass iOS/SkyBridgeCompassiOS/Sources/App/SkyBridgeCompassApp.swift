@@ -1721,7 +1721,7 @@ private final class LocalWebRTCSmokeHarness {
             nativeVideoTrackReady: false,
             nativeAudioTrackEnabled: false,
             audioRedirectionEnabled: RemoteDesktopManager.instance.viewerSettings.audioRedirectionEnabled,
-            preferredAudioEncoding: RemoteDesktopAudioChunkPayload.Encoding.pcmS16LE.rawValue,
+            preferredAudioEncoding: RemoteDesktopAudioChunkPayload.Encoding.aacLC.rawValue,
             audioSampleRate: 48_000,
             audioChannelCount: 2,
             streamRefreshToken: UInt64(Date().timeIntervalSince1970 * 1_000)

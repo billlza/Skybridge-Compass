@@ -2528,10 +2528,6 @@ private actor RemoteAudioPlaybackController {
         if let retryNotBefore = playbackRetryNotBefore, now < retryNotBefore {
             return
         }
-        let age = now.timeIntervalSince1970 - payload.sentAt
-        if age.isFinite, age > 1.2 {
-            return
-        }
         if isChunkTooFarBehindVideo(payload.sentAt, lastScreenTimestamp: context.lastInboundScreenTimestamp) {
             return
         }
@@ -4263,7 +4259,7 @@ public class RemoteDesktopManager: ObservableObject {
             // during startup and has been causing crashy/privacy-sensitive behavior.
             nativeAudioTrackEnabled: Self.crossNetworkNativeAudioReceiveEnabled,
             audioRedirectionEnabled: viewerSettings.audioRedirectionEnabled,
-            preferredAudioEncoding: RemoteDesktopAudioChunkPayload.Encoding.pcmS16LE.rawValue,
+            preferredAudioEncoding: RemoteDesktopAudioChunkPayload.Encoding.aacLC.rawValue,
             audioSampleRate: 48_000,
             audioChannelCount: 2,
             streamRefreshToken: refreshStream ? nextStreamRefreshToken() : nil

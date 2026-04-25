@@ -59,6 +59,10 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
         label: "com.skybridge.compass.sck.output",
         qos: .userInteractive
     )
+    private let audioSampleOutputQueue = DispatchQueue(
+        label: "com.skybridge.compass.sck.audio-output",
+        qos: .userInitiated
+    )
     private var compressionCallbackRefcon: UnsafeMutableRawPointer?
     private var screenParametersObserver: NSObjectProtocol?
     private var activeSpaceObserver: NSObjectProtocol?
@@ -228,7 +232,7 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
         try stream?.addStreamOutput(streamOutput, type: .screen, sampleHandlerQueue: sampleOutputQueue)
         if requestedSystemAudio {
             do {
-                try stream?.addStreamOutput(streamOutput, type: .audio, sampleHandlerQueue: sampleOutputQueue)
+                try stream?.addStreamOutput(streamOutput, type: .audio, sampleHandlerQueue: audioSampleOutputQueue)
             } catch {
                 self.captureSystemAudio = false
                 logger.warning(

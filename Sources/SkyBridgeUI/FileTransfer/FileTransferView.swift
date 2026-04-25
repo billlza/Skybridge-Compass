@@ -16,8 +16,7 @@ public struct FileTransferView: View {
     @State private var showingQRCode = false
     @State private var dragOver = false
     @State private var qrCodeString = ""
-    @State private var showingMediaPreview = false
-    @State private var previewingFile: URL?
+    @State private var previewingFile: PreviewedFile?
  // 调试面板：记录最近一次整文件HMAC与签名校验结果
     @State private var lastHmacTagHex: String = ""
     @State private var lastSignatureOk: Bool = false
@@ -52,10 +51,8 @@ public struct FileTransferView: View {
             }
         }
  // 顶部不再显示“二维码/齿轮”按钮，设置入口保留在“设置”标签
-        .sheet(isPresented: $showingMediaPreview) {
-            if let previewFile = previewingFile {
-                MediaPreviewView(fileURL: previewFile)
-            }
+        .sheet(item: $previewingFile) { previewFile in
+            MediaPreviewView(fileURL: previewFile.url)
         }
  // 威胁警报对话框 - Requirements: 4.3
         .sheet(isPresented: $showingThreatAlert) {
@@ -379,8 +376,7 @@ public struct FileTransferView: View {
                     ModernFileCard(fileURL: fileURL) {
                         selectedFiles.removeAll { $0 == fileURL }
                     } onPreview: {
-                        previewingFile = fileURL
-                        showingMediaPreview = true
+                        previewingFile = PreviewedFile(url: fileURL)
                     }
                 }
             }
@@ -643,7 +639,7 @@ public struct FileTransferView: View {
         }
     }
 
-    private func formatFileSize(_ bytes: Int64) -> String {
+    private static func formatFileSize(_ bytes: Int64) -> String {
         let formatter = ByteCountFormatter()
         formatter.allowedUnits = [.useKB, .useMB, .useGB]
         formatter.countStyle = .file
@@ -687,10 +683,19 @@ private struct ModernTabButton: View {
     }
 }
 
+private struct PreviewedFile: Identifiable {
+    let url: URL
+
+    var id: String {
+        url.standardizedFileURL.path
+    }
+}
+
 private struct ModernFileCard: View {
     let fileURL: URL
     let onRemove: () -> Void
     let onPreview: () -> Void
+    @State private var fileSizeText: String?
 
     var body: some View {
         HStack(spacing: 12) {
@@ -709,8 +714,8 @@ private struct ModernFileCard: View {
                     .fontWeight(.medium)
                     .lineLimit(1)
 
-                if let fileSize = try? fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize {
-                    Text(formatFileSize(Int64(fileSize)))
+                if let fileSizeText {
+                    Text(fileSizeText)
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -720,7 +725,7 @@ private struct ModernFileCard: View {
 
  // 操作按钮
             HStack(spacing: 8) {
-                if isMediaFile(fileURL) {
+                if FilePreviewKind.isPreviewable(fileURL) {
                     Button(action: onPreview) {
                         HStack {
                             Image(systemName: "play.circle")
@@ -739,6 +744,9 @@ private struct ModernFileCard: View {
             }
         }
         .padding()
+        .task(id: fileURL) {
+            fileSizeText = await loadFileSizeText(for: fileURL)
+        }
     }
 
     private func fileIcon(for url: URL) -> String {
@@ -758,17 +766,18 @@ private struct ModernFileCard: View {
         }
     }
 
-    private func isMediaFile(_ url: URL) -> Bool {
-        let pathExtension = url.pathExtension.lowercased()
-        let mediaExtensions = ["jpg", "jpeg", "png", "gif", "bmp", "tiff", "heic", "mp4", "mov", "avi", "mkv", "wmv", "mp3", "wav", "aac", "flac", "m4a"]
-        return mediaExtensions.contains(pathExtension)
-    }
-
-    private func formatFileSize(_ bytes: Int64) -> String {
+    private static func formatFileSize(_ bytes: Int64) -> String {
         let formatter = ByteCountFormatter()
         formatter.allowedUnits = [.useKB, .useMB, .useGB]
         formatter.countStyle = .file
         return formatter.string(fromByteCount: bytes)
+    }
+
+    private func loadFileSizeText(for url: URL) async -> String? {
+        let fileSize = await Task.detached(priority: .utility) {
+            try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize.map(Int64.init)
+        }.value
+        return fileSize.map(Self.formatFileSize)
     }
 }
 

@@ -77,8 +77,10 @@ struct ScreenData: Codable, Sendable {
     private var frameTransport: FrameTransport = .legacyJSON
     private var streamingEnabled = true
     private var damageTrackingEnabled = true
+    private var allowsInsecureLegacy = false
     private var sessionKeys: SessionKeys?
     private var frameQueue = RemoteScreenFrameSendQueue()
+    private var audioPayloadQueue: [Data] = []
     private var latestDamageReport: RemoteDesktopDamageReport?
     private var sending = false
     private var closed = false
@@ -86,7 +88,9 @@ struct ScreenData: Codable, Sendable {
     private var lastSentFrameAt: Date = .distantPast
     private var waitingForSyncSince: Date?
     private var lastSyncRefreshRequestAt: Date = .distantPast
+    private var lastAudioDropLogAt: Date = .distantPast
     private var syncRecoveryTask: Task<Void, Never>?
+    private let maxQueuedAudioPayloads = 8
 
     init(peerId: String, connection: NWConnection, maxFramedMessageBytes: Int) {
         self.peerId = peerId
@@ -96,16 +100,19 @@ struct ScreenData: Codable, Sendable {
 
     func updateTransportState(
         requestedStreamConfiguration: RemoteDesktopStreamConfiguration?,
-        sessionKeys: SessionKeys?
+        sessionKeys: SessionKeys?,
+        allowsInsecureLegacy: Bool
     ) {
         streamingEnabled = requestedStreamConfiguration?.isStopRequest != true
         frameTransport = requestedStreamConfiguration?.screenFrameTransport == "sbrf-v1"
             ? .binaryWire
             : .legacyJSON
         damageTrackingEnabled = requestedStreamConfiguration?.damageTrackingEnabled ?? true
+        self.allowsInsecureLegacy = allowsInsecureLegacy
         self.sessionKeys = sessionKeys
         if !streamingEnabled {
             frameQueue.clear()
+            audioPayloadQueue.removeAll(keepingCapacity: true)
             latestDamageReport = nil
             waitingForSyncSince = nil
             syncRecoveryTask?.cancel()
@@ -129,6 +136,24 @@ struct ScreenData: Codable, Sendable {
         await drainIfNeeded()
     }
 
+    func submitAudioPayload(_ plaintext: Data) async {
+        guard !closed, streamingEnabled else { return }
+        guard plaintext.count <= maxFramedMessageBytes else {
+            Logger(subsystem: "com.skybridge.compass", category: "RemoteControl")
+                .warning(
+                    "⚠️ 已丢弃超限远控音频块: peer=\(self.peerId, privacy: .public) bytes=\(plaintext.count, privacy: .public)"
+                )
+            return
+        }
+        audioPayloadQueue.append(plaintext)
+        if audioPayloadQueue.count > maxQueuedAudioPayloads {
+            let overflow = audioPayloadQueue.count - maxQueuedAudioPayloads
+            audioPayloadQueue.removeFirst(overflow)
+            logAudioDropIfNeeded(droppedCount: overflow)
+        }
+        await drainIfNeeded()
+    }
+
     func setSyncRefreshHandler(_ handler: (@Sendable () -> Void)?) {
         onNeedsSyncRefresh = handler
     }
@@ -136,6 +161,7 @@ struct ScreenData: Codable, Sendable {
     func close() {
         closed = true
         frameQueue.clear()
+        audioPayloadQueue.removeAll(keepingCapacity: false)
         latestDamageReport = nil
         onNeedsSyncRefresh = nil
         waitingForSyncSince = nil
@@ -157,11 +183,20 @@ struct ScreenData: Codable, Sendable {
         sending = true
         defer { sending = false }
 
-        while !closed, let nextFrame = frameQueue.dequeue() {
+        while !closed {
             guard streamingEnabled else {
                 frameQueue.clear()
+                audioPayloadQueue.removeAll(keepingCapacity: true)
                 latestDamageReport = nil
                 return
+            }
+
+            guard let nextFrame = frameQueue.dequeue() else {
+                let didSendAudio = await drainQueuedAudioPayloads(limit: maxQueuedAudioPayloads)
+                if !didSendAudio {
+                    return
+                }
+                continue
             }
 
             do {
@@ -189,6 +224,7 @@ struct ScreenData: Codable, Sendable {
                 try await sendRemoteFrame(payload)
                 lastSentFrameAt = Date()
                 updateSyncRecoveryState()
+                await drainQueuedAudioPayloads(limit: 1)
             } catch {
                 Logger(subsystem: "com.skybridge.compass", category: "RemoteControl")
                     .error(
@@ -197,6 +233,38 @@ struct ScreenData: Codable, Sendable {
                 break
             }
         }
+    }
+
+    @discardableResult
+    private func drainQueuedAudioPayloads(limit: Int) async -> Bool {
+        guard limit > 0 else { return false }
+        var sentAny = false
+        var sentCount = 0
+        while !closed, streamingEnabled, sentCount < limit, !audioPayloadQueue.isEmpty {
+            let payload = audioPayloadQueue.removeFirst()
+            do {
+                try await sendRemoteFrame(payload)
+                sentAny = true
+                sentCount += 1
+            } catch {
+                Logger(subsystem: "com.skybridge.compass", category: "RemoteControl")
+                    .debug(
+                        "ℹ️ 远控音频块发送失败: peer=\(self.peerId, privacy: .public) err=\(error.localizedDescription, privacy: .public)"
+                    )
+                break
+            }
+        }
+        return sentAny
+    }
+
+    private func logAudioDropIfNeeded(droppedCount: Int) {
+        let now = Date()
+        guard now.timeIntervalSince(lastAudioDropLogAt) >= 2 else { return }
+        lastAudioDropLogAt = now
+        Logger(subsystem: "com.skybridge.compass", category: "RemoteControl")
+            .debug(
+                "ℹ️ 远控音频发送队列已丢弃旧块: peer=\(self.peerId, privacy: .public) dropped=\(droppedCount, privacy: .public)"
+            )
     }
 
     private func updateSyncRecoveryState() {
@@ -292,6 +360,8 @@ struct ScreenData: Codable, Sendable {
         let outboundData: Data
         if #available(macOS 14.0, *), let sessionKeys {
             outboundData = try Self.encryptRemotePayload(plaintext, with: sessionKeys)
+        } else if #available(macOS 14.0, *), !allowsInsecureLegacy {
+            throw RemoteControlError.handshakeInitializationFailed("secure channel not established")
         } else {
             outboundData = plaintext
         }
@@ -748,7 +818,8 @@ public final class RemoteControlManager: BaseManager {
         invalidateScreenSharingStartupState(for: peer.id)
         await peer.outboundFramePump.updateTransportState(
             requestedStreamConfiguration: peer.requestedStreamConfiguration,
-            sessionKeys: peer.sessionKeys
+            sessionKeys: peer.sessionKeys,
+            allowsInsecureLegacy: Self.allowsInsecureLegacyRemoteControl
         )
     }
 
@@ -1167,17 +1238,10 @@ public final class RemoteControlManager: BaseManager {
             }
         }
         if audioRedirectionEnabled {
-            streamer.onCapturedAudioChunk = { [weak self, weak peer] chunk in
-                guard let self, let peer else { return }
+            streamer.onCapturedAudioChunk = { [outboundFramePump] chunk in
                 let wirePayload = RemoteDesktopAudioChunkWire.encode(chunk)
-                Task {
-                    do {
-                        try await self.sendRemoteControlWirePayload(wirePayload, to: peer)
-                    } catch {
-                        self.logger.debug(
-                            "ℹ️ 远控音频块发送失败: peer=\(peer.id, privacy: .public) err=\(error.localizedDescription, privacy: .public)"
-                        )
-                    }
+                Task.detached(priority: .userInitiated) {
+                    await outboundFramePump.submitAudioPayload(wirePayload)
                 }
             }
         } else {
@@ -1813,12 +1877,14 @@ public final class RemoteControlManager: BaseManager {
         if #available(macOS 14.0, *) {
             await peer.outboundFramePump.updateTransportState(
                 requestedStreamConfiguration: peer.requestedStreamConfiguration,
-                sessionKeys: peer.sessionKeys
+                sessionKeys: peer.sessionKeys,
+                allowsInsecureLegacy: Self.allowsInsecureLegacyRemoteControl
             )
         } else {
             await peer.outboundFramePump.updateTransportState(
                 requestedStreamConfiguration: peer.requestedStreamConfiguration,
-                sessionKeys: nil
+                sessionKeys: nil,
+                allowsInsecureLegacy: true
             )
         }
     }
@@ -1869,7 +1935,7 @@ public final class RemoteControlManager: BaseManager {
             nativeVideoTrackReady: false,
             nativeAudioTrackEnabled: false,
             audioRedirectionEnabled: settings.interactionSettings.enableAudioRedirection,
-            preferredAudioEncoding: RemoteDesktopAudioChunkPayload.Encoding.pcmS16LE.rawValue,
+            preferredAudioEncoding: RemoteDesktopAudioChunkPayload.Encoding.aacLC.rawValue,
             audioSampleRate: 48_000,
             audioChannelCount: 2
         )

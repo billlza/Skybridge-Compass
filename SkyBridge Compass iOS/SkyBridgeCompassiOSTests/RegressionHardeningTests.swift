@@ -545,7 +545,7 @@ final class RegressionHardeningTests: XCTestCase {
 
         XCTAssertEqual(payload.nativeAudioTrackEnabled, false)
         XCTAssertEqual(payload.audioRedirectionEnabled, RemoteDesktopManager.instance.viewerSettings.audioRedirectionEnabled)
-        XCTAssertEqual(payload.preferredAudioEncoding, RemoteDesktopAudioChunkPayload.Encoding.pcmS16LE.rawValue)
+        XCTAssertEqual(payload.preferredAudioEncoding, RemoteDesktopAudioChunkPayload.Encoding.aacLC.rawValue)
         XCTAssertEqual(payload.audioSampleRate, 48_000)
         XCTAssertEqual(payload.audioChannelCount, 2)
     }
