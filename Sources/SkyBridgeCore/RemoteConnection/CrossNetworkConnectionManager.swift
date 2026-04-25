@@ -328,9 +328,12 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     public static let legacyConnectionCodeLength = 6
     public static let preferredConnectionCodeLength = 8
     public static let maximumConnectionCodeLength = 16
+    nonisolated static let connectionCodeMinimumReusableTime: TimeInterval = 15
     private static let connectionCodeLeaseModeDefaultsKey = "cross_network_connection_code_lease_mode.macos"
     private var activeSessionReconnectTimeoutTask: Task<Void, Never>?
     private var activeConnectionCodeLeaseMode: ConnectionCodeLeaseMode?
+    private var activeConnectionCodeSessionID: String?
+    private var connectionCodeExpiryTask: Task<Void, Never>?
 
     private struct SessionSnapshotMetadata: Sendable {
         let snapshotToken: UUID
@@ -1715,6 +1718,9 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         connectionCode = nil
         connectionCodeExpiresAt = nil
         activeConnectionCodeLeaseMode = nil
+        activeConnectionCodeSessionID = nil
+        connectionCodeExpiryTask?.cancel()
+        connectionCodeExpiryTask = nil
         qrCodeData = nil
         activeSessionReconnectTimeoutTask?.cancel()
         activeSessionReconnectTimeoutTask = nil
@@ -2112,8 +2118,21 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         if let existing = connectionCode,
            activeConnectionCodeLeaseMode == requestedLeaseMode,
            case .waiting(let activeCode) = connectionStatus,
-           activeCode == existing {
+           activeCode == existing,
+           Self.isReusableConnectionCodeLease(expiresAt: connectionCodeExpiresAt) {
             return existing
+        }
+        if let existing = connectionCode,
+           activeConnectionCodeLeaseMode == requestedLeaseMode,
+           case .waiting(let activeCode) = connectionStatus,
+           activeCode == existing {
+            logger.info("ℹ️ 本地连接码租约已过期或不可复用，重新向信令服务注册: reason=connection_code_lease_not_reusable code=\(existing, privacy: .public)")
+            connectionCode = nil
+            connectionCodeExpiresAt = nil
+            activeConnectionCodeLeaseMode = nil
+            activeConnectionCodeSessionID = nil
+            connectionCodeExpiryTask?.cancel()
+            connectionCodeExpiryTask = nil
         }
         if connectionCode != nil,
            activeConnectionCodeLeaseMode != requestedLeaseMode {
@@ -2139,8 +2158,16 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             self.connectionCode = code
             self.connectionCodeExpiresAt = Date().addingTimeInterval(lease.expiresIn)
             self.activeConnectionCodeLeaseMode = requestedLeaseMode
+            self.activeConnectionCodeSessionID = lease.sessionID
             self.connectionStatus = .waiting(code: code)
             self.readiness = .idle
+            if let expiresAt = self.connectionCodeExpiresAt {
+                scheduleConnectionCodeLeaseInvalidation(
+                    code: code,
+                    sessionID: lease.sessionID,
+                    expiresAt: expiresAt
+                )
+            }
 
             // 3) 启动 WebRTC offerer（等待对端输入同一 code 后 join，同会话完成 SDP/ICE，DataChannel ready）
             startWebRTCOfferSession(sessionID: lease.sessionID)
@@ -2324,6 +2351,41 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             connectionStatus = .failed(error.localizedDescription)
             readiness = .idle
             throw error
+        }
+    }
+
+    private func scheduleConnectionCodeLeaseInvalidation(
+        code: String,
+        sessionID: String,
+        expiresAt: Date
+    ) {
+        connectionCodeExpiryTask?.cancel()
+        let delay = max(
+            0,
+            expiresAt
+                .addingTimeInterval(-Self.connectionCodeMinimumReusableTime)
+                .timeIntervalSinceNow
+        )
+        connectionCodeExpiryTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard !Task.isCancelled else { return }
+            await MainActor.run { [weak self] in
+                guard let self,
+                      self.connectionCode == code,
+                      self.activeConnectionCodeSessionID == sessionID,
+                      !Self.isReusableConnectionCodeLease(expiresAt: self.connectionCodeExpiresAt) else {
+                    return
+                }
+                self.logger.info("ℹ️ 本地连接码租约到期，已清理旧码: reason=connection_code_lease_expired code=\(code, privacy: .public)")
+                self.connectionCode = nil
+                self.connectionCodeExpiresAt = nil
+                self.activeConnectionCodeLeaseMode = nil
+                self.activeConnectionCodeSessionID = nil
+                self.connectionCodeExpiryTask = nil
+                if case .waiting(let waitingCode) = self.connectionStatus, waitingCode == code {
+                    self.connectionStatus = .idle
+                }
+            }
         }
     }
 
@@ -6491,6 +6553,15 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 
     public static func canSubmitConnectionCode(_ raw: String) -> Bool {
         isSupportedConnectionCodeLength(sanitizeConnectionCodeInput(raw).count)
+    }
+
+    nonisolated static func isReusableConnectionCodeLease(
+        expiresAt: Date?,
+        now: Date = Date(),
+        minimumRemainingTime: TimeInterval = connectionCodeMinimumReusableTime
+    ) -> Bool {
+        guard let expiresAt else { return false }
+        return expiresAt.timeIntervalSince(now) > minimumRemainingTime
     }
 
     nonisolated static func canonicalPQCRekeyElectionDeviceId(_ raw: String?) -> String? {

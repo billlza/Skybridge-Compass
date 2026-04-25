@@ -185,7 +185,8 @@ public final class AudioRedirectionManager: ObservableObject, @unchecked Sendabl
         channels: 2,
         interleaved: true
     )!
-    private let maxQueuedFrames: AVAudioFrameCount = 48_000 / 5
+    private let maxAdaptiveQueuedFrames: AVAudioFrameCount = 48_000 / 2
+    private let hardResetQueuedFrames: AVAudioFrameCount = 48_000
 
     @Published public private(set) var isEnabled: Bool = false
 
@@ -205,6 +206,7 @@ public final class AudioRedirectionManager: ObservableObject, @unchecked Sendabl
     private var audioDecodeGeneration: UInt64 = 0
     private var pendingDecodeCount = 0
     private var lastDecodeBackpressureLogAt: Date = .distantPast
+    private var lastPlaybackBackpressureLogAt: Date = .distantPast
     private let maxPendingDecodeCount = 12
 
     private init() {}
@@ -317,6 +319,7 @@ public final class AudioRedirectionManager: ObservableObject, @unchecked Sendabl
         lastSentAt = nil
         arrivalJitter = 0
         lastChunkDuration = 0.02
+        lastPlaybackBackpressureLogAt = .distantPast
     }
 
     private func noteArrival(of chunk: RemoteDesktopAudioChunkPayload, at now: Date) {
@@ -378,8 +381,17 @@ public final class AudioRedirectionManager: ObservableObject, @unchecked Sendabl
                     continue
                 }
 
-                if queuedFrameCount > currentMaxQueuedFrames {
-                    resetPlayerQueue(on: playerNode, reason: "queued-audio-overflow")
+                if queuedFrameCount > currentHardResetQueuedFrames {
+                    resetPlayerQueue(on: playerNode, reason: "queued-audio-runaway")
+                    continue
+                }
+
+                if queuedFrameCount + chunk.frameLength > currentMaxQueuedFrames {
+                    logPlaybackBackpressureIfNeeded(
+                        queuedFrames: queuedFrameCount,
+                        droppedFrames: chunk.frameLength
+                    )
+                    continue
                 }
 
                 scheduleBufferedChunk(chunk, on: playerNode)
@@ -449,6 +461,21 @@ public final class AudioRedirectionManager: ObservableObject, @unchecked Sendabl
         log.debug("已重置远控音频播放队列: reason=\(reason, privacy: .public)")
     }
 
+    private func logPlaybackBackpressureIfNeeded(
+        queuedFrames: AVAudioFrameCount,
+        droppedFrames: AVAudioFrameCount
+    ) {
+        let now = Date()
+        guard now.timeIntervalSince(lastPlaybackBackpressureLogAt) >= 2 else { return }
+        lastPlaybackBackpressureLogAt = now
+        log.debug(
+            """
+            已丢弃远控音频块：播放队列背压 queuedFrames=\(queuedFrames, privacy: .public) \
+            droppedFrames=\(droppedFrames, privacy: .public)
+            """
+        )
+    }
+
     private func logDecodeBackpressureIfNeeded() {
         let now = Date()
         guard now.timeIntervalSince(lastDecodeBackpressureLogAt) >= 2 else { return }
@@ -467,7 +494,11 @@ public final class AudioRedirectionManager: ObservableObject, @unchecked Sendabl
     }
 
     private var currentMaxQueuedFrames: AVAudioFrameCount {
-        frames(for: min(0.2, currentTargetBufferedDuration + 0.08))
+        frames(for: min(0.45, currentTargetBufferedDuration + 0.18))
+    }
+
+    private var currentHardResetQueuedFrames: AVAudioFrameCount {
+        hardResetQueuedFrames
     }
 
     private var currentTargetBufferedDuration: TimeInterval {
@@ -480,7 +511,7 @@ public final class AudioRedirectionManager: ObservableObject, @unchecked Sendabl
             max(
                 1,
                 min(
-                    Double(maxQueuedFrames),
+                    Double(maxAdaptiveQueuedFrames),
                     (playbackFormat.sampleRate * max(duration, 0)).rounded()
                 )
             )

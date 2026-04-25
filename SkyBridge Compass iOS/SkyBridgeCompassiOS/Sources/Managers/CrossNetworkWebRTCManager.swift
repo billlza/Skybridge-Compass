@@ -893,9 +893,17 @@ private actor SignalServerClientCompat {
            !derived.isEmpty {
             return derived
         }
-        if let session = KeychainManager.shared.loadAuthSession(),
-           !session.userIdentifier.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return session.userIdentifier
+        if let session = KeychainManager.shared.loadAuthSession() {
+            let sessionAccessToken = session.accessToken.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !sessionAccessToken.isEmpty,
+               let derived = deriveTenantIdentifier(accessToken: sessionAccessToken),
+               !derived.isEmpty {
+                return derived
+            }
+            let sessionUserIdentifier = session.userIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !sessionUserIdentifier.isEmpty {
+                return sessionUserIdentifier
+            }
         }
         return ""
     }
@@ -1317,6 +1325,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     public static let legacyConnectionCodeLength = 6
     public static let preferredConnectionCodeLength = 8
     public static let maximumConnectionCodeLength = 16
+    nonisolated static let connectionCodeMinimumReusableTime: TimeInterval = 15
     private static let connectionCodeLeaseModeDefaultsKey = "cross_network_connection_code_lease_mode"
     private static let idleConnectionReminderDelay: TimeInterval = 180
     
@@ -1365,6 +1374,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     private var strictPQCRequestedBySessionId: [String: Bool] = [:]
     private var lastPairingIdentityExchangeSentAtByPeerId: [String: Date] = [:]
     private var connectionCodeBootstrapTask: Task<Void, Never>?
+    private var connectionCodeExpiryTask: Task<Void, Never>?
     private var idleConnectionReminderTask: Task<Void, Never>?
     private var activeConnectionCodeLeaseMode: ConnectionCodeLeaseMode?
     private var localConnectionSessionId: String?
@@ -1852,16 +1862,29 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         if let existing = localConnectionCode,
            activeConnectionCodeLeaseMode == requestedLeaseMode,
            currentRole == .offerer,
-           case .connecting(let sid) = state, sid == (localConnectionSessionId ?? existing) {
+           case .connecting(let sid) = state, sid == (localConnectionSessionId ?? existing),
+           Self.isReusableConnectionCodeLease(expiresAt: localConnectionCodeExpiresAt) {
             return existing
         }
         if let existing = localConnectionCode,
            activeConnectionCodeLeaseMode == requestedLeaseMode,
            currentRole == .offerer,
-           case .connected(let sid) = state, sid == (localConnectionSessionId ?? existing) {
+           case .connected(let sid) = state, sid == (localConnectionSessionId ?? existing),
+           Self.isReusableConnectionCodeLease(expiresAt: localConnectionCodeExpiresAt) {
             return existing
         }
         do {
+            if let existing = localConnectionCode,
+               activeConnectionCodeLeaseMode == requestedLeaseMode,
+               currentRole == .offerer,
+               !Self.isReusableConnectionCodeLease(expiresAt: localConnectionCodeExpiresAt) {
+                SkyBridgeLogger.shared.info("ℹ️ 本地连接码租约已过期或不可复用，重新向信令服务注册: reason=connection_code_lease_not_reusable code=\(existing)")
+                localConnectionCode = nil
+                localConnectionCodeExpiresAt = nil
+                activeConnectionCodeLeaseMode = nil
+                connectionCodeExpiryTask?.cancel()
+                connectionCodeExpiryTask = nil
+            }
             if localConnectionCode != nil,
                currentRole == .offerer,
                activeConnectionCodeLeaseMode != requestedLeaseMode {
@@ -1891,6 +1914,13 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             state = .connecting(sessionId: lease.sessionID)
             readiness = .idle
             lastError = nil
+            if let expiresAt = localConnectionCodeExpiresAt {
+                scheduleConnectionCodeLeaseInvalidation(
+                    code: lease.code,
+                    sessionID: lease.sessionID,
+                    expiresAt: expiresAt
+                )
+            }
 
             connectionCodeBootstrapTask?.cancel()
             connectionCodeBootstrapTask = Task { @MainActor [weak self] in
@@ -1929,6 +1959,35 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             state = .failed(msg)
             readiness = .idle
             return nil
+        }
+    }
+
+    private func scheduleConnectionCodeLeaseInvalidation(
+        code: String,
+        sessionID: String,
+        expiresAt: Date
+    ) {
+        connectionCodeExpiryTask?.cancel()
+        let delay = max(
+            0,
+            expiresAt
+                .addingTimeInterval(-Self.connectionCodeMinimumReusableTime)
+                .timeIntervalSinceNow
+        )
+        connectionCodeExpiryTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard !Task.isCancelled,
+                  let self,
+                  self.localConnectionCode == code,
+                  self.localConnectionSessionId == sessionID,
+                  !Self.isReusableConnectionCodeLease(expiresAt: self.localConnectionCodeExpiresAt) else {
+                return
+            }
+            SkyBridgeLogger.shared.info("ℹ️ 本地连接码租约到期，已清理旧码: reason=connection_code_lease_expired code=\(code)")
+            self.connectionCodeExpiryTask = nil
+            self.localConnectionCode = nil
+            self.localConnectionCodeExpiresAt = nil
+            self.activeConnectionCodeLeaseMode = nil
         }
     }
 
@@ -2071,6 +2130,8 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         currentRole = nil
         connectionCodeBootstrapTask?.cancel()
         connectionCodeBootstrapTask = nil
+        connectionCodeExpiryTask?.cancel()
+        connectionCodeExpiryTask = nil
         joinHeartbeatTask?.cancel()
         joinHeartbeatTask = nil
         offerResendTask?.cancel()
@@ -3615,6 +3676,15 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
 
     public static func canSubmitConnectionCode(_ raw: String) -> Bool {
         isSupportedConnectionCodeLength(sanitizeConnectionCodeInput(raw).count)
+    }
+
+    nonisolated static func isReusableConnectionCodeLease(
+        expiresAt: Date?,
+        now: Date = Date(),
+        minimumRemainingTime: TimeInterval = connectionCodeMinimumReusableTime
+    ) -> Bool {
+        guard let expiresAt else { return false }
+        return expiresAt.timeIntervalSince(now) > minimumRemainingTime
     }
 
     nonisolated static func canonicalPQCRekeyElectionDeviceId(_ raw: String?) -> String? {

@@ -20,6 +20,33 @@ final class RegressionHardeningTests: XCTestCase {
         )
     }
 
+    func testRemoteAudioSoftOverflowUsesBackpressureInsteadOfPlayerReset() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let sourceURL = root.appendingPathComponent(
+            "SkyBridgeCompassiOS/Sources/Managers/RemoteDesktopManager.swift"
+        )
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+
+        XCTAssertFalse(
+            source.contains("resetPlayerQueue(on: playerNode, reason: \"queued-audio-overflow\")"),
+            "Soft audio backlog must not reset AVAudioPlayerNode; repeated resets cause audible crackle and queue churn."
+        )
+        XCTAssertTrue(
+            source.contains("queuedFrames + chunk.frameLength > currentMaxQueuedFrames"),
+            "Soft backlog should be handled before scheduling the next chunk."
+        )
+        XCTAssertTrue(
+            source.contains("远端音频播放队列背压"),
+            "Backpressure should be visible in logs without repeatedly rebuilding the player queue."
+        )
+        XCTAssertTrue(
+            source.contains("queued-audio-runaway"),
+            "A hard reset should remain available only for truly runaway queued audio."
+        )
+    }
+
     func testLANRemoteControlTrustResolverCollapsesEquivalentDuplicateRecords() {
         let device = DiscoveredDevice(
             id: "bonjour:Lza的MacBook Pro@local.",

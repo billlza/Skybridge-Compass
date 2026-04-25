@@ -20,6 +20,75 @@ final class ConnectionCodeFormatTests: XCTestCase {
         XCTAssertFalse(CrossNetworkWebRTCManager.canSubmitConnectionCode("ABCDEFG"))
     }
 
+    func testConnectionCodeLeaseReuseRequiresUnexpiredServerLease() {
+        let now = Date(timeIntervalSince1970: 1_000)
+
+        XCTAssertTrue(
+            CrossNetworkWebRTCManager.isReusableConnectionCodeLease(
+                expiresAt: now.addingTimeInterval(60),
+                now: now
+            )
+        )
+        XCTAssertFalse(
+            CrossNetworkWebRTCManager.isReusableConnectionCodeLease(
+                expiresAt: now.addingTimeInterval(10),
+                now: now
+            )
+        )
+        XCTAssertFalse(
+            CrossNetworkWebRTCManager.isReusableConnectionCodeLease(
+                expiresAt: nil,
+                now: now
+            )
+        )
+    }
+
+    func testGenerateConnectionCodeDoesNotReuseExpiredWaitingCode() throws {
+        let source = try Self.crossNetworkWebRTCManagerSource()
+
+        XCTAssertTrue(
+            source.contains("Self.isReusableConnectionCodeLease(expiresAt: localConnectionCodeExpiresAt)"),
+            "Displayed connection codes must not be reused after their server lease is expired or near expiry."
+        )
+        XCTAssertTrue(
+            source.contains("scheduleConnectionCodeLeaseInvalidation("),
+            "A displayed code should be removed before its server lease becomes non-reusable, avoiding stale UI codes that lookup as found=false."
+        )
+        XCTAssertTrue(
+            source.contains("本地连接码租约已过期或不可复用"),
+            "Regenerating an expired displayed code should clean up the stale local offerer state."
+        )
+        XCTAssertTrue(
+            source.contains("connection_code_lease_not_reusable"),
+            "Regenerating an expired displayed code should emit a stable cleanup reason for post-release log audits."
+        )
+        XCTAssertTrue(
+            source.contains("connection_code_lease_expired"),
+            "The expiry task should emit a stable reason when it removes a displayed stale connection code."
+        )
+        XCTAssertFalse(
+            source.contains("reason=connection_code_lease_not_reusable code=\\(existing)\")\n                await disconnect(clearSnapshot: false)"),
+            "Regenerating a stale displayed code should not tear down a session that may already be completing its WebRTC handshake."
+        )
+        XCTAssertFalse(
+            source.contains("activeSessionID == sessionID,\n               self.currentRole == .offerer"),
+            "Connection-code lease expiry must only remove stale UI/code state; it must not close an active or in-flight WebRTC session."
+        )
+    }
+
+    func testTenantIDPrefersJWTDerivedTenantBeforeUserIdentifierFallback() throws {
+        let source = try Self.crossNetworkWebRTCManagerSource()
+
+        XCTAssertTrue(
+            source.contains("deriveTenantIdentifier(accessToken: sessionAccessToken)"),
+            "iOS WebRTC signaling must derive the tenant from the same JWT claims as macOS before falling back to the Supabase user id."
+        )
+        XCTAssertTrue(
+            source.contains("return sessionUserIdentifier"),
+            "The user identifier should remain only as a fallback for legacy sessions without tenant-bearing JWT claims."
+        )
+    }
+
     func testIOSDeviceSupportGateBlocksExplicit2018And2019A12FamilyDevices() {
         XCTAssertFalse(IOSDeviceSupportGate.isSupported(modelIdentifier: "iPhone11,2"))
         XCTAssertFalse(IOSDeviceSupportGate.isSupported(modelIdentifier: "iPhone11,8"))
@@ -73,6 +142,16 @@ final class ConnectionCodeFormatTests: XCTestCase {
         XCTAssertEqual(profile.displayName, "Primary Name")
         XCTAssertEqual(profile.avatarURL, "https://demo.example.com/avatar.jpg")
         XCTAssertEqual(profile.nebulaId, "NEBULA-123")
+    }
+
+    private static func crossNetworkWebRTCManagerSource() throws -> String {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let sourceURL = root.appendingPathComponent(
+            "SkyBridgeCompassiOS/Sources/Managers/CrossNetworkWebRTCManager.swift"
+        )
+        return try String(contentsOf: sourceURL, encoding: .utf8)
     }
 
 }

@@ -60,4 +60,30 @@ final class RemoteControlAudioSchedulingTests: XCTestCase {
             "WebRTC fallback audio close should not be fire-and-forget from the screen streaming defer."
         )
     }
+
+    func testRemoteAudioPlaybackOverflowUsesBackpressureBeforeReset() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let sourceURL = root.appendingPathComponent("Sources/SkyBridgeCore/RemoteDesktop/AudioRedirection.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+
+        XCTAssertFalse(
+            source.contains("queued-audio-overflow"),
+            "Normal live-audio jitter must not repeatedly stop/reset the player node; that creates audible crackle."
+        )
+        XCTAssertTrue(
+            source.contains("logPlaybackBackpressureIfNeeded("),
+            "Playback queue pressure should drop excess live chunks and let already scheduled audio drain naturally."
+        )
+        XCTAssertTrue(
+            source.contains("queued-audio-runaway"),
+            "A hard player reset should remain as a last-resort runaway guard, not the normal overflow path."
+        )
+        XCTAssertTrue(
+            source.contains("queuedFrameCount + chunk.frameLength > currentMaxQueuedFrames"),
+            "The soft cap must be checked before scheduling more audio into an already full player queue."
+        )
+    }
 }

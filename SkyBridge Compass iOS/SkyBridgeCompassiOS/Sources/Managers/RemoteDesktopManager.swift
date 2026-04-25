@@ -2492,7 +2492,8 @@ private actor RemoteAudioPlaybackController {
         channels: 2,
         interleaved: false
     )!
-    private let maxQueuedFrames: AVAudioFrameCount = 48_000 / 2
+    private let maxAdaptiveQueuedFrames: AVAudioFrameCount = 48_000
+    private let hardResetQueuedFrames: AVAudioFrameCount = 48_000 * 2
 
     private var minimumAcceptedGeneration: UInt64 = 0
     private var engine: AVAudioEngine?
@@ -2512,6 +2513,7 @@ private actor RemoteAudioPlaybackController {
     private var playbackRetryNotBefore: Date?
     private var lastFailureDescription: String?
     private var lastFailureLogAt: Date?
+    private var lastPlaybackBackpressureLogAt: Date = .distantPast
 
     func handle(_ payload: RemoteDesktopAudioChunkPayload, context: RemoteAudioPlaybackContext) {
         guard context.generation >= minimumAcceptedGeneration else { return }
@@ -2867,6 +2869,7 @@ private actor RemoteAudioPlaybackController {
         lastSentAt = nil
         arrivalJitter = 0
         lastChunkDuration = 0.02
+        lastPlaybackBackpressureLogAt = .distantPast
     }
 
     private func noteArrival(_ payload: RemoteDesktopAudioChunkPayload, at now: Date) {
@@ -2929,8 +2932,19 @@ private actor RemoteAudioPlaybackController {
                     continue
                 }
 
-                if queuedFrames > currentMaxQueuedFrames {
-                    resetPlayerQueue(on: playerNode, reason: "queued-audio-overflow")
+                if queuedFrames > currentHardResetQueuedFrames {
+                    resetPlayerQueue(on: playerNode, reason: "queued-audio-runaway")
+                    continue
+                }
+
+                if queuedFrames + chunk.frameLength > currentMaxQueuedFrames {
+                    logPlaybackBackpressureIfNeeded(
+                        queuedFrames: queuedFrames,
+                        droppedFrames: chunk.frameLength,
+                        now: now
+                    )
+                    self.expectedSequenceNumber = expectedSequenceNumber &+ 1
+                    continue
                 }
 
                 scheduleBufferedChunk(chunk, on: playerNode)
@@ -3000,6 +3014,20 @@ private actor RemoteAudioPlaybackController {
         SkyBridgeLogger.shared.debug("ℹ️ 已重置远端音频播放队列: \(reason)")
     }
 
+    private func logPlaybackBackpressureIfNeeded(
+        queuedFrames: AVAudioFrameCount,
+        droppedFrames: AVAudioFrameCount,
+        now: Date
+    ) {
+        guard now.timeIntervalSince(lastPlaybackBackpressureLogAt) >= 2.0 else { return }
+        lastPlaybackBackpressureLogAt = now
+        let queuedMs = Int((Double(queuedFrames) / playbackFormat.sampleRate) * 1_000)
+        let droppedMs = Int((Double(droppedFrames) / playbackFormat.sampleRate) * 1_000)
+        SkyBridgeLogger.shared.debug(
+            "ℹ️ 远端音频播放队列背压: queuedMs=\(queuedMs) droppedMs=\(droppedMs)"
+        )
+    }
+
     private func isChunkTooFarBehindVideo(_ sentAt: TimeInterval, lastScreenTimestamp: TimeInterval?) -> Bool {
         guard let lastScreenTimestamp else { return false }
         let allowedBehind = max(0.25, currentTargetBufferedDuration + 0.18)
@@ -3014,6 +3042,10 @@ private actor RemoteAudioPlaybackController {
         frames(for: min(0.75, currentTargetBufferedDuration + 0.35))
     }
 
+    private var currentHardResetQueuedFrames: AVAudioFrameCount {
+        hardResetQueuedFrames
+    }
+
     private var currentTargetBufferedDuration: TimeInterval {
         let adaptive = min(0.24, max(0, arrivalJitter * 4.0))
         return min(0.42, max(0.16, (lastChunkDuration * 6.0) + adaptive))
@@ -3024,7 +3056,7 @@ private actor RemoteAudioPlaybackController {
             max(
                 1,
                 min(
-                    Double(maxQueuedFrames),
+                    Double(maxAdaptiveQueuedFrames),
                     (playbackFormat.sampleRate * max(duration, 0)).rounded()
                 )
             )

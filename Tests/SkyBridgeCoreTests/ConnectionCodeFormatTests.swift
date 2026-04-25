@@ -19,4 +19,61 @@ final class ConnectionCodeFormatTests: XCTestCase {
         XCTAssertFalse(CrossNetworkConnectionManager.canSubmitConnectionCode("ABCDE"))
         XCTAssertFalse(CrossNetworkConnectionManager.canSubmitConnectionCode("ABCDEFG"))
     }
+
+    func testConnectionCodeLeaseReuseRequiresUnexpiredServerLease() {
+        let now = Date(timeIntervalSince1970: 1_000)
+
+        XCTAssertTrue(
+            CrossNetworkConnectionManager.isReusableConnectionCodeLease(
+                expiresAt: now.addingTimeInterval(60),
+                now: now
+            )
+        )
+        XCTAssertFalse(
+            CrossNetworkConnectionManager.isReusableConnectionCodeLease(
+                expiresAt: now.addingTimeInterval(10),
+                now: now
+            )
+        )
+        XCTAssertFalse(
+            CrossNetworkConnectionManager.isReusableConnectionCodeLease(
+                expiresAt: nil,
+                now: now
+            )
+        )
+    }
+
+    func testGenerateConnectionCodeDoesNotReuseExpiredWaitingCode() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let sourceURL = root.appendingPathComponent("Sources/SkyBridgeCore/RemoteConnection/CrossNetworkConnectionManager.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+
+        XCTAssertTrue(
+            source.contains("Self.isReusableConnectionCodeLease(expiresAt: connectionCodeExpiresAt)"),
+            "Displayed connection codes must not be reused after their server lease is expired or near expiry."
+        )
+        XCTAssertTrue(
+            source.contains("connection_code_lease_not_reusable"),
+            "Regenerating an expired displayed code should clean up the stale waiting WebRTC session."
+        )
+        XCTAssertTrue(
+            source.contains("scheduleConnectionCodeLeaseInvalidation("),
+            "A displayed code should be removed before its server lease becomes non-reusable, avoiding stale UI codes that lookup as found=false."
+        )
+        XCTAssertTrue(
+            source.contains("connection_code_lease_expired"),
+            "The expiry task should emit a stable reason when it removes a displayed stale connection code."
+        )
+        XCTAssertFalse(
+            source.contains("cleanupWebRTCSession(sessionID, reason: \"connection_code_lease_expired\")"),
+            "Connection-code lease expiry must only remove stale UI/code state; it must not close an active or in-flight WebRTC session."
+        )
+        XCTAssertFalse(
+            source.contains("cleanupWebRTCSession(activeConnectionCodeSessionID ?? existing, reason: \"connection_code_lease_not_reusable\")"),
+            "Regenerating a stale displayed code should not tear down a session that may already be completing its WebRTC handshake."
+        )
+    }
 }
