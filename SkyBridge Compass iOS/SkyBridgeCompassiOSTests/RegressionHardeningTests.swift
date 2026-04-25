@@ -2586,6 +2586,35 @@ final class RegressionHardeningTests: XCTestCase {
     }
 
     @MainActor
+    func testCrossNetworkWebRTCStrictInboundInitialAllowsVerifiedAuthorityClassicBootstrap() {
+        XCTAssertEqual(
+            CrossNetworkWebRTCManager.testOnlyInboundInitialHandshakeSelectionPolicy(
+                supportedSuites: [.x25519Ed25519],
+                strictPQCRequested: true,
+                localPQCAvailable: true,
+                expectedRemoteAuthorityAlgorithm: .ed25519
+            ),
+            .classicOnly
+        )
+        XCTAssertNil(
+            CrossNetworkWebRTCManager.testOnlyInboundInitialHandshakeSelectionPolicy(
+                supportedSuites: [.x25519Ed25519],
+                strictPQCRequested: true,
+                localPQCAvailable: true,
+                expectedRemoteAuthorityAlgorithm: nil
+            )
+        )
+        XCTAssertNil(
+            CrossNetworkWebRTCManager.testOnlyInboundInitialHandshakeSelectionPolicy(
+                supportedSuites: [.x25519Ed25519],
+                strictPQCRequested: true,
+                localPQCAvailable: true,
+                expectedRemoteAuthorityAlgorithm: .mlDSA65
+            )
+        )
+    }
+
+    @MainActor
     func testCrossNetworkWebRTCStrictInboundRekeyRejectsWhenLocalPQCUnavailable() {
         XCTAssertNil(
             CrossNetworkWebRTCManager.testOnlyInboundPQCRekeySelectionPolicy(
@@ -2608,6 +2637,31 @@ final class RegressionHardeningTests: XCTestCase {
             CrossNetworkWebRTCManager.testOnlyInboundPQCRekeyNegotiatedSuiteAllowed(
                 .mlkem768MLDSA65,
                 strictPQCRequested: true
+            )
+        )
+    }
+
+    @MainActor
+    func testCrossNetworkWebRTCStrictInboundInitialNegotiatedClassicRequiresVerifiedAuthority() {
+        XCTAssertTrue(
+            CrossNetworkWebRTCManager.testOnlyInboundInitialHandshakeNegotiatedSuiteAllowed(
+                .x25519Ed25519,
+                strictPQCRequested: true,
+                allowsClassicAuthorityBootstrap: true
+            )
+        )
+        XCTAssertFalse(
+            CrossNetworkWebRTCManager.testOnlyInboundInitialHandshakeNegotiatedSuiteAllowed(
+                .x25519Ed25519,
+                strictPQCRequested: true,
+                allowsClassicAuthorityBootstrap: false
+            )
+        )
+        XCTAssertTrue(
+            CrossNetworkWebRTCManager.testOnlyInboundInitialHandshakeNegotiatedSuiteAllowed(
+                .mlkem768MLDSA65,
+                strictPQCRequested: true,
+                allowsClassicAuthorityBootstrap: false
             )
         )
     }

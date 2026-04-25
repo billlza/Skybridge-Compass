@@ -47,6 +47,37 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
         )
     }
 
+    func testStrictInboundInitialAllowsVerifiedAuthorityClassicBootstrapOnly() {
+        XCTAssertTrue(
+            CrossNetworkConnectionManager.shouldAllowClassicAuthorityBootstrapForInboundInitialWebRTCHandshake(
+                supportedSuites: [.x25519Ed25519],
+                strictPQCRequested: true,
+                expectedRemoteAuthorityAlgorithm: .ed25519
+            )
+        )
+        XCTAssertFalse(
+            CrossNetworkConnectionManager.shouldAllowClassicAuthorityBootstrapForInboundInitialWebRTCHandshake(
+                supportedSuites: [.x25519Ed25519],
+                strictPQCRequested: true,
+                expectedRemoteAuthorityAlgorithm: nil
+            )
+        )
+        XCTAssertFalse(
+            CrossNetworkConnectionManager.shouldAllowClassicAuthorityBootstrapForInboundInitialWebRTCHandshake(
+                supportedSuites: [.x25519Ed25519],
+                strictPQCRequested: true,
+                expectedRemoteAuthorityAlgorithm: .mlDSA65
+            )
+        )
+        XCTAssertFalse(
+            CrossNetworkConnectionManager.shouldAllowClassicAuthorityBootstrapForInboundInitialWebRTCHandshake(
+                supportedSuites: [.mlkem768MLDSA65],
+                strictPQCRequested: true,
+                expectedRemoteAuthorityAlgorithm: .ed25519
+            )
+        )
+    }
+
     func testInitialWebRTCHandshakePeerResolutionPrefersConcreteRemoteDeviceId() {
         let resolution = CrossNetworkConnectionManager.initialWebRTCHandshakePeerResolution(
             expectedRemoteDeviceId: nil,

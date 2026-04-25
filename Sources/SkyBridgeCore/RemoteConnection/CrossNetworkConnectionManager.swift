@@ -6140,6 +6140,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                                 "preimageSha256=\(preimageDigest)"
                             )
                         }
+                        let isInboundRekey = handshakeState.sessionKeys != nil
                         if let establishedKeys = handshakeState.sessionKeys {
                             handshakeState.previousSessionKeysBeforeRekey = establishedKeys
                             self.webrtcRekeyInProgressSessionIds.insert(sessionID)
@@ -6160,10 +6161,16 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                         let peerOnlyOffersHybrid = hasHybridGroup && messageA.supportedSuites.allSatisfy { $0.isHybrid }
                         let compatibilityModeEnabled = UserDefaults.standard.bool(forKey: "Settings.EnableCompatibilityMode")
                         let handshakePolicy = HandshakePolicy.recommendedDefault(compatibilityModeEnabled: compatibilityModeEnabled)
+                        let allowClassicAuthorityBootstrap = !isInboundRekey && Self.shouldAllowClassicAuthorityBootstrapForInboundInitialWebRTCHandshake(
+                            supportedSuites: messageA.supportedSuites,
+                            strictPQCRequested: handshakePolicy.requirePQC,
+                            expectedRemoteAuthorityAlgorithm: currentPathExpectedRemoteAuthorityBySessionId[sessionID]?.protocolSigningAlgorithm
+                        )
                         if let rejection = StrictPQCAdmissionGate.inboundRejection(
                             policy: handshakePolicy,
                             peerSupportedSuites: messageA.supportedSuites,
-                            localPQCSuitesAvailable: hasPQCGroup
+                            localPQCSuitesAvailable: hasPQCGroup,
+                            allowClassicAuthorityBootstrap: allowClassicAuthorityBootstrap
                         ), rejection == .peerOfferedClassicOnly {
                             logger.error(
                                 "❌ \(rejection.diagnosticMessage, privacy: .public). session=\(sessionID, privacy: .public) peer=\(peerDeviceId, privacy: .public)"
@@ -6191,7 +6198,8 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                         if let rejection = StrictPQCAdmissionGate.inboundRejection(
                             policy: handshakePolicy,
                             peerSupportedSuites: messageA.supportedSuites,
-                            localPQCSuitesAvailable: hasPQCGroup ? !offeredSuites.isEmpty : true
+                            localPQCSuitesAvailable: hasPQCGroup ? !offeredSuites.isEmpty : true,
+                            allowClassicAuthorityBootstrap: allowClassicAuthorityBootstrap
                         ) {
                             logger.error(
                                 "❌ \(rejection.diagnosticMessage, privacy: .public). session=\(sessionID, privacy: .public) peer=\(peerDeviceId, privacy: .public)"
@@ -6231,6 +6239,11 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                         if handshakeState.previousSessionKeysBeforeRekey != nil, self.lastRekeyEvent == nil {
                             let suiteSummary = messageA.supportedSuites.map(\.rawValue).joined(separator: ",")
                             self.lastRekeyEvent = "driver suites=\(suiteSummary)"
+                        }
+                        if allowClassicAuthorityBootstrap {
+                            logger.info(
+                                "🤝 WebRTC 入站初始握手允许 current-path authority classic bootstrap: session=\(sessionID, privacy: .public) peer=\(peerDeviceId, privacy: .public)"
+                            )
                         }
                         logger.info("🤝 WebRTC 入站 HandshakeDriver 初始化完成: sigA=\(sigAAlgorithm.rawValue, privacy: .public) peer=\(peerDeviceId, privacy: .public) policyRequirePQC=\(handshakePolicy.requirePQC, privacy: .public)")
                     } else {
@@ -6632,6 +6645,17 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         authorityBoundBootstrapSessionIds.contains(sessionID)
             || activeConnectionCodeSessionID == sessionID
             || expectedRemoteAuthorityAlgorithm == .ed25519
+    }
+
+    nonisolated static func shouldAllowClassicAuthorityBootstrapForInboundInitialWebRTCHandshake(
+        supportedSuites: [CryptoSuite],
+        strictPQCRequested: Bool,
+        expectedRemoteAuthorityAlgorithm: ProtocolSigningAlgorithm?
+    ) -> Bool {
+        strictPQCRequested
+            && expectedRemoteAuthorityAlgorithm == .ed25519
+            && !supportedSuites.contains(where: { $0.isPQCGroup })
+            && supportedSuites.contains(where: { !$0.isPQCGroup })
     }
 
     nonisolated static func initialWebRTCHandshakePeerResolution(

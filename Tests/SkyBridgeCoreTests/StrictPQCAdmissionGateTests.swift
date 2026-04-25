@@ -12,6 +12,17 @@ final class StrictPQCAdmissionGateTests: XCTestCase {
         XCTAssertEqual(rejection, .peerOfferedClassicOnly)
     }
 
+    func testStrictPQCAllowsExplicitAuthorityBootstrapException() {
+        let rejection = StrictPQCAdmissionGate.inboundRejection(
+            policy: .strictPQC,
+            peerSupportedSuites: [.x25519Ed25519],
+            localPQCSuitesAvailable: true,
+            allowClassicAuthorityBootstrap: true
+        )
+
+        XCTAssertNil(rejection)
+    }
+
     func testStrictPQCRejectsLocalPQCUnavailabilityEvenIfPeerSupportsPQC() {
         let rejection = StrictPQCAdmissionGate.inboundRejection(
             policy: .strictPQC,

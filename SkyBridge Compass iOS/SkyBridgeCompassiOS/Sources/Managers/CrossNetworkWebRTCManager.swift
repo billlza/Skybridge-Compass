@@ -1368,6 +1368,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     private var currentRole: WebRTCSession.Role?
     private var handshakeStartedSessionIds: Set<String> = []
     private var inboundInitialHandshakeResponderSessionIds: Set<String> = []
+    private var inboundClassicAuthorityBootstrapSessionIds: Set<String> = []
     private var rekeyInProgressSessionIds: Set<String> = []
     private var rekeyCompletedSessionIds: Set<String> = []
     private var inboundRekeyResponderSessionIds: Set<String> = []
@@ -2202,6 +2203,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         remoteAppActivityAtBySessionId.removeAll()
         handshakeStartedSessionIds.removeAll()
         inboundInitialHandshakeResponderSessionIds.removeAll()
+        inboundClassicAuthorityBootstrapSessionIds.removeAll()
         rekeyInProgressSessionIds.removeAll()
         rekeyCompletedSessionIds.removeAll()
         inboundRekeyResponderSessionIds.removeAll()
@@ -5441,6 +5443,7 @@ private extension CrossNetworkWebRTCManager {
                 self.sessionKeys = nil
                 self.handshakeStartedSessionIds.remove(sessionId)
                 self.inboundInitialHandshakeResponderSessionIds.remove(sessionId)
+                self.inboundClassicAuthorityBootstrapSessionIds.remove(sessionId)
                 self.rekeyInProgressSessionIds.remove(sessionId)
                 self.rekeyCompletedSessionIds.remove(sessionId)
                 self.strictPQCRequestedBySessionId.removeValue(forKey: sessionId)
@@ -5653,10 +5656,17 @@ private extension CrossNetworkWebRTCManager {
         let hasPQCGroup = messageA.supportedSuites.contains { $0.isPQCGroup }
         let localCapability = CryptoProviderFactory.detectCapability()
         let localPQCAvailable = localCapability.hasApplePQC || localCapability.hasLiboqs
-        guard let selection = Self.inboundPQCRekeySelectionPolicy(
+        let expectedAuthorityAlgorithm = currentPathExpectedRemoteAuthorityBySessionId[sessionId]?.protocolSigningAlgorithm
+        let allowsClassicAuthorityBootstrap = Self.shouldAllowClassicAuthorityBootstrapForInboundInitialWebRTCHandshake(
             supportedSuites: messageA.supportedSuites,
             strictPQCRequested: strictPQCRequested,
-            localPQCAvailable: localPQCAvailable
+            expectedRemoteAuthorityAlgorithm: expectedAuthorityAlgorithm
+        )
+        guard let selection = Self.inboundInitialHandshakeSelectionPolicy(
+            supportedSuites: messageA.supportedSuites,
+            strictPQCRequested: strictPQCRequested,
+            localPQCAvailable: localPQCAvailable,
+            expectedRemoteAuthorityAlgorithm: expectedAuthorityAlgorithm
         ) else {
             let message: String
             if strictPQCRequested && !hasPQCGroup {
@@ -5707,6 +5717,12 @@ private extension CrossNetworkWebRTCManager {
         }
 
         inboundInitialHandshakeResponderSessionIds.insert(sessionId)
+        if allowsClassicAuthorityBootstrap {
+            inboundClassicAuthorityBootstrapSessionIds.insert(sessionId)
+            SkyBridgeLogger.shared.info(
+                "🤝 WebRTC 入站初始握手允许 current-path authority classic bootstrap: session=\(sessionId), peer=\(peer.deviceId)"
+            )
+        }
         SkyBridgeLogger.shared.info(
             "🤝 收到对端 WebRTC 初始握手请求，切换 responder: session=\(sessionId), peer=\(peer.deviceId), suites=\(messageA.supportedSuites.map(\.rawValue).joined(separator: ","))"
         )
@@ -5802,13 +5818,16 @@ private extension CrossNetworkWebRTCManager {
         let currentState = await driver.getCurrentState()
         switch currentState {
         case .established(let keys):
+            let allowsClassicAuthorityBootstrap = inboundClassicAuthorityBootstrapSessionIds.contains(sessionId)
             if strictPQCRequested,
-               !Self.inboundPQCRekeyNegotiatedSuiteAllowed(
+               !Self.inboundInitialHandshakeNegotiatedSuiteAllowed(
                     keys.negotiatedSuite,
-                    strictPQCRequested: strictPQCRequested
+                    strictPQCRequested: strictPQCRequested,
+                    allowsClassicAuthorityBootstrap: allowsClassicAuthorityBootstrap
                ) {
                 handshakeDriver = nil
                 inboundInitialHandshakeResponderSessionIds.remove(sessionId)
+                inboundClassicAuthorityBootstrapSessionIds.remove(sessionId)
                 let message =
                     "strictPQC WebRTC 初始握手协商到了 Classic suite=\(keys.negotiatedSuite.rawValue)，当前已拒绝建立会话。"
                 SkyBridgeLogger.shared.error("⛔️ \(message) session=\(sessionId)")
@@ -5824,6 +5843,7 @@ private extension CrossNetworkWebRTCManager {
             sessionKeys = keys
             handshakeDriver = nil
             inboundInitialHandshakeResponderSessionIds.remove(sessionId)
+            inboundClassicAuthorityBootstrapSessionIds.remove(sessionId)
 
             if currentSessionId == sessionId {
                 state = .connected(sessionId: sessionId)
@@ -5855,6 +5875,7 @@ private extension CrossNetworkWebRTCManager {
         case .failed(let reason):
             handshakeDriver = nil
             inboundInitialHandshakeResponderSessionIds.remove(sessionId)
+            inboundClassicAuthorityBootstrapSessionIds.remove(sessionId)
             let message = "WebRTC 握手失败: \(reason)"
             SkyBridgeLogger.shared.error(
                 "❌ inbound WebRTC 初始握手失败: session=\(sessionId), reason=\(reason)"
@@ -6957,11 +6978,53 @@ extension CrossNetworkWebRTCManager {
         return hasPQCGroup ? (strictPQCRequested ? .requirePQC : .preferPQC) : .classicOnly
     }
 
+    nonisolated private static func inboundInitialHandshakeSelectionPolicy(
+        supportedSuites: [CryptoSuite],
+        strictPQCRequested: Bool,
+        localPQCAvailable: Bool,
+        expectedRemoteAuthorityAlgorithm: ProtocolSigningAlgorithm?
+    ) -> CryptoProviderFactory.SelectionPolicy? {
+        let hasPQCGroup = supportedSuites.contains { $0.isPQCGroup }
+        if hasPQCGroup {
+            guard !strictPQCRequested || localPQCAvailable else { return nil }
+            return strictPQCRequested ? .requirePQC : .preferPQC
+        }
+        guard !strictPQCRequested || shouldAllowClassicAuthorityBootstrapForInboundInitialWebRTCHandshake(
+            supportedSuites: supportedSuites,
+            strictPQCRequested: strictPQCRequested,
+            expectedRemoteAuthorityAlgorithm: expectedRemoteAuthorityAlgorithm
+        ) else {
+            return nil
+        }
+        return .classicOnly
+    }
+
+    nonisolated private static func shouldAllowClassicAuthorityBootstrapForInboundInitialWebRTCHandshake(
+        supportedSuites: [CryptoSuite],
+        strictPQCRequested: Bool,
+        expectedRemoteAuthorityAlgorithm: ProtocolSigningAlgorithm?
+    ) -> Bool {
+        strictPQCRequested
+            && expectedRemoteAuthorityAlgorithm == .ed25519
+            && !supportedSuites.contains(where: { $0.isPQCGroup })
+            && supportedSuites.contains(where: { !$0.isPQCGroup })
+    }
+
     nonisolated private static func inboundPQCRekeyNegotiatedSuiteAllowed(
         _ suite: CryptoSuite,
         strictPQCRequested: Bool
     ) -> Bool {
         !strictPQCRequested || suite.isPQCGroup
+    }
+
+    nonisolated private static func inboundInitialHandshakeNegotiatedSuiteAllowed(
+        _ suite: CryptoSuite,
+        strictPQCRequested: Bool,
+        allowsClassicAuthorityBootstrap: Bool
+    ) -> Bool {
+        !strictPQCRequested
+            || suite.isPQCGroup
+            || (allowsClassicAuthorityBootstrap && !suite.isPQCGroup)
     }
 
     nonisolated internal static func testOnlyDecryptDirectControlProbePayload(
@@ -7049,6 +7112,32 @@ extension CrossNetworkWebRTCManager {
         inboundPQCRekeyNegotiatedSuiteAllowed(
             suite,
             strictPQCRequested: strictPQCRequested
+        )
+    }
+
+    nonisolated internal static func testOnlyInboundInitialHandshakeSelectionPolicy(
+        supportedSuites: [CryptoSuite],
+        strictPQCRequested: Bool,
+        localPQCAvailable: Bool,
+        expectedRemoteAuthorityAlgorithm: ProtocolSigningAlgorithm?
+    ) -> CryptoProviderFactory.SelectionPolicy? {
+        inboundInitialHandshakeSelectionPolicy(
+            supportedSuites: supportedSuites,
+            strictPQCRequested: strictPQCRequested,
+            localPQCAvailable: localPQCAvailable,
+            expectedRemoteAuthorityAlgorithm: expectedRemoteAuthorityAlgorithm
+        )
+    }
+
+    nonisolated internal static func testOnlyInboundInitialHandshakeNegotiatedSuiteAllowed(
+        _ suite: CryptoSuite,
+        strictPQCRequested: Bool,
+        allowsClassicAuthorityBootstrap: Bool
+    ) -> Bool {
+        inboundInitialHandshakeNegotiatedSuiteAllowed(
+            suite,
+            strictPQCRequested: strictPQCRequested,
+            allowsClassicAuthorityBootstrap: allowsClassicAuthorityBootstrap
         )
     }
 
