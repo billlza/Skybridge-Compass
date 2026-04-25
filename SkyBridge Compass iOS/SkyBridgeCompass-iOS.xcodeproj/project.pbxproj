@@ -104,6 +104,7 @@
 		D3EC60A952DCD8EAB81AF1B5 /* FileTransferView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B1F73F6E61ED9E9E8F5CD17 /* FileTransferView.swift */; };
 		D45C5A6CF3E34BECD4805E05 /* CoreTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 792EB22C85FB5D5DB239368C /* CoreTypes.swift */; };
 		D48DEA0AFDEF88C30B975527 /* WebSocketSignalingClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCCAB31F19CCC3E4592E39F2 /* WebSocketSignalingClient.swift */; };
+		A7D4F6B18E2C49D0A3B5C671 /* NativeWebSocketClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7D4F6B08E2C49D0A3B5C671 /* NativeWebSocketClient.swift */; };
 		D6205CFEDCD592F0D5F9C778 /* RealNetworkE2EBenchView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B42B0B30F1B4C09183AA5A10 /* RealNetworkE2EBenchView.swift */; };
 		D7466B71CF052E1AB9FBD95A /* KEMTrustStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D02F165A3577BDC88F31411B /* KEMTrustStoreTests.swift */; };
 		D79A5F708106BDB15F42D05A /* SignalingRetryController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B1ADCB01BB1D0E58DE6A566 /* SignalingRetryController.swift */; };
@@ -271,6 +272,7 @@
 		F74330957D1E789BDA527E99 /* PQCCryptoManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PQCCryptoManager.swift; sourceTree = "<group>"; };
 		F93EC0B2E0AD70ADB64A1231 /* FileTransferNetworkService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileTransferNetworkService.swift; sourceTree = "<group>"; };
 		FCCAB31F19CCC3E4592E39F2 /* WebSocketSignalingClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebSocketSignalingClient.swift; sourceTree = "<group>"; };
+		A7D4F6B08E2C49D0A3B5C671 /* NativeWebSocketClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeWebSocketClient.swift; sourceTree = "<group>"; };
 		FD6CE3E346837A1B1449284F /* NebulaIDGenerator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NebulaIDGenerator.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -479,6 +481,7 @@
 				2B1ADCB01BB1D0E58DE6A566 /* SignalingRetryController.swift */,
 				45402D803823C9E08DB50A64 /* WebRTCSession.swift */,
 				BFC46A911014433AFE4D3B1A /* WebRTCSignalingEnvelope.swift */,
+				A7D4F6B08E2C49D0A3B5C671 /* NativeWebSocketClient.swift */,
 				FCCAB31F19CCC3E4592E39F2 /* WebSocketSignalingClient.swift */,
 			);
 			path = WebRTC;
@@ -945,6 +948,7 @@
 				3D76475FBC024939F1931522 /* WeatherService.swift in Sources */,
 				50EC8B5726CAF191F7BA6198 /* WebRTCSession.swift in Sources */,
 				2BD6A4B51055EB53173CCF42 /* WebRTCSignalingEnvelope.swift in Sources */,
+				A7D4F6B18E2C49D0A3B5C671 /* NativeWebSocketClient.swift in Sources */,
 				D48DEA0AFDEF88C30B975527 /* WebSocketSignalingClient.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

@@ -188,11 +188,46 @@ final class WebRTCSignalingFaultInjectionTests: XCTestCase {
         let dictionary = WebSocketSignalingClient.testOnlyNoProxyConnectionProxyDictionary()
 
         XCTAssertEqual(dictionary[kCFProxyTypeKey as String] as? String, kCFProxyTypeNone as String)
-        XCTAssertEqual(dictionary["HTTPEnable"] as? Bool, false)
+        XCTAssertEqual(dictionary[kCFNetworkProxiesHTTPEnable as String] as? Bool, false)
         XCTAssertEqual(dictionary["HTTPSEnable"] as? Bool, false)
         XCTAssertEqual(dictionary["SOCKSEnable"] as? Bool, false)
         XCTAssertEqual(dictionary["ProxyAutoConfigEnable"] as? Bool, false)
         XCTAssertEqual(dictionary["ProxyAutoDiscoveryEnable"] as? Bool, false)
+    }
+
+    func testAutoPolicyUsesNativeProxyBypassBeforeURLSessionFallback() async {
+        await Task { @MainActor in
+            let client = WebSocketSignalingClient(
+                url: URL(string: "wss://signal.example.com/ws")!,
+                sessionId: "ROOM1234",
+                generation: 1
+            )
+
+            let labels = await client.testOnlyTransportAttemptLabels()
+
+            XCTAssertEqual(labels, [
+                "native-proxy-bypass",
+                "urlsession-proxy-bypass",
+                "native",
+                "urlsession",
+            ])
+        }.value
+    }
+
+    func testNativeWebSocketParametersHonorPreferNoProxies() {
+        let directParameters = NativeWebSocketClient.testOnlyBuildParameters(
+            tls: true,
+            pingInterval: 30,
+            preferNoProxies: true
+        )
+        XCTAssertTrue(directParameters.preferNoProxies)
+
+        let defaultParameters = NativeWebSocketClient.testOnlyBuildParameters(
+            tls: true,
+            pingInterval: 30,
+            preferNoProxies: false
+        )
+        XCTAssertFalse(defaultParameters.preferNoProxies)
     }
 
     @MainActor

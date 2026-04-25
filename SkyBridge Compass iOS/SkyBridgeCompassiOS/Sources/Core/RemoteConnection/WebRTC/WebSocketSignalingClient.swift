@@ -108,6 +108,7 @@ public actor WebSocketSignalingClient {
 
     private enum BackendSelectionPolicy: String {
         case auto
+        case native
         case urlsession
 
         static func current() -> BackendSelectionPolicy {
@@ -120,13 +121,23 @@ public actor WebSocketSignalingClient {
 
     private enum TransportAttempt: Equatable {
         case urlSession(proxyBypass: Bool)
+        case native(proxyBypass: Bool)
 
-        var backend: SignalingBackend { .urlSession }
+        var backend: SignalingBackend {
+            switch self {
+            case .urlSession:
+                return .urlSession
+            case .native:
+                return .native
+            }
+        }
 
         var label: String {
             switch self {
             case .urlSession(let proxyBypass):
                 return proxyBypass ? "urlsession-proxy-bypass" : "urlsession"
+            case .native(let proxyBypass):
+                return proxyBypass ? "native-proxy-bypass" : "native"
             }
         }
     }
@@ -139,6 +150,7 @@ public actor WebSocketSignalingClient {
     private static let websocketRequestTimeoutSeconds: TimeInterval = 120
     private static let websocketResourceTimeoutSeconds: TimeInterval = 60 * 60 * 24
     private let selectionPolicy: BackendSelectionPolicy
+    private let nativeFallbackEnabled: Bool
 
     private var currentHandle: SignalingHandleID?
     private var lifecyclePhase: SignalingLifecyclePhase = .idle
@@ -153,6 +165,7 @@ public actor WebSocketSignalingClient {
     private var urlSessionDelegate: URLSessionSignalingDelegate?
     private var urlTask: URLSessionWebSocketTask?
     private var urlReceiveLoopTask: Task<Void, Never>?
+    private var nativeClient: NativeWebSocketClient?
 
     public var onEnvelope: (@Sendable (WebRTCSignalingEnvelope) -> Void)?
     public var onServerFrame: (@Sendable (SignalingServerFrame) -> Void)?
@@ -164,6 +177,7 @@ public actor WebSocketSignalingClient {
         self.sessionId = sessionId
         self.nextSequenceGeneration = generation
         self.selectionPolicy = BackendSelectionPolicy.current()
+        self.nativeFallbackEnabled = ProcessInfo.processInfo.environment["SKYBRIDGE_SIGNALING_DISABLE_NATIVE_FALLBACK"] != "1"
     }
 
     public func setOnEnvelope(_ handler: (@Sendable (WebRTCSignalingEnvelope) -> Void)?) {
@@ -229,6 +243,7 @@ public actor WebSocketSignalingClient {
         onTrace?("close")
 
         await cleanupURLSessionTransport()
+        await cleanupNativeTransport()
 
         if let currentHandle {
             emitLifecycle(
@@ -249,23 +264,27 @@ public actor WebSocketSignalingClient {
         guard isBound, let handleId = currentHandle else {
             throw SignalingError.sendRequiresBound
         }
-        guard let urlTask else {
-            throw SignalingError.notConnected
-        }
-
         let data = try JSONEncoder().encode(envelope)
         guard let text = String(data: data, encoding: .utf8) else { return }
         onTrace?(
             "send session=\(envelope.sessionId) type=\(envelope.type.rawValue) from=\(envelope.from) to=\(envelope.to ?? "-") auth=\(envelope.authToken == nil ? 0 : 1) backend=\(handleId.backend.rawValue)"
         )
-        do {
-            try await urlTask.send(.string(text))
-        } catch {
-            let ns = error as NSError
-            if ns.domain == NSURLErrorDomain {
-                throw SignalingError.notConnected
+
+        switch handleId.backend {
+        case .urlSession:
+            guard let urlTask else { throw SignalingError.notConnected }
+            do {
+                try await urlTask.send(.string(text))
+            } catch {
+                let ns = error as NSError
+                if ns.domain == NSURLErrorDomain {
+                    throw SignalingError.notConnected
+                }
+                throw error
             }
-            throw error
+        case .native:
+            guard let nativeClient else { throw SignalingError.notConnected }
+            try await nativeClient.send(text: text)
         }
     }
 
@@ -329,6 +348,12 @@ public actor WebSocketSignalingClient {
                         proxyBypass: proxyBypass,
                         timeout: timeout
                     )
+                case .native(let proxyBypass):
+                    try await connectViaNative(
+                        handleId: handleId,
+                        proxyBypass: proxyBypass,
+                        timeout: timeout
+                    )
                 }
                 return
             } catch {
@@ -343,7 +368,7 @@ public actor WebSocketSignalingClient {
                     )
                 }
                 onTrace?("connect-failed backend=\(attempt.label) err=\(error.localizedDescription)")
-                await cleanupURLSessionTransport()
+                await cleanupTransport(for: attempt.backend)
                 if currentHandle == handleId {
                     currentHandle = nil
                 }
@@ -357,8 +382,19 @@ public actor WebSocketSignalingClient {
         switch selectionPolicy {
         case .urlsession:
             return [.urlSession(proxyBypass: false)]
+        case .native:
+            return [.native(proxyBypass: false)]
         case .auto:
-            return [.urlSession(proxyBypass: true), .urlSession(proxyBypass: false)]
+            var attempts: [TransportAttempt] = []
+            if nativeFallbackEnabled {
+                attempts.append(.native(proxyBypass: true))
+            }
+            attempts.append(.urlSession(proxyBypass: true))
+            if nativeFallbackEnabled {
+                attempts.append(.native(proxyBypass: false))
+            }
+            attempts.append(.urlSession(proxyBypass: false))
+            return attempts
         }
     }
 
@@ -422,6 +458,40 @@ public actor WebSocketSignalingClient {
             }
             throw SignalingError.backendFailed(.urlSession, error.localizedDescription)
         }
+    }
+
+    private func connectViaNative(
+        handleId: SignalingHandleID,
+        proxyBypass: Bool,
+        timeout: Duration
+    ) async throws {
+        let callbacks = NativeWebSocketCallbacks(
+            onOpen: { [weakSelf = ActorBox(self)] in
+                Task { await weakSelf.value?.handleSocketOpen(handleId: handleId) }
+            },
+            onText: { [weakSelf = ActorBox(self)] text in
+                Task { await weakSelf.value?.handleText(handleId: handleId, text: text) }
+            },
+            onBinary: { _ in },
+            onStateChange: { _ in },
+            onClose: { [weakSelf = ActorBox(self)] _, _ in
+                Task { await weakSelf.value?.handleClosed(handleId: handleId, errorDescription: "native websocket closed") }
+            },
+            onError: { [weakSelf = ActorBox(self)] error in
+                Task { await weakSelf.value?.handleErrored(handleId: handleId, error: error) }
+            }
+        )
+
+        let client = NativeWebSocketClient(
+            url: url,
+            tls: (url.scheme == "wss"),
+            pingInterval: 30,
+            preferNoProxies: proxyBypass,
+            callbacks: callbacks
+        )
+        nativeClient = client
+        await client.connect()
+        try await waitUntilBound(handleId: handleId, timeout: timeout)
     }
 
     private func startURLSessionReceiveLoop(handleId: SignalingHandleID, task: URLSessionWebSocketTask) {
@@ -618,6 +688,22 @@ public actor WebSocketSignalingClient {
         urlSessionDelegate = nil
     }
 
+    private func cleanupNativeTransport() async {
+        if let nativeClient {
+            await nativeClient.close()
+        }
+        nativeClient = nil
+    }
+
+    private func cleanupTransport(for backend: SignalingBackend) async {
+        switch backend {
+        case .urlSession:
+            await cleanupURLSessionTransport()
+        case .native:
+            await cleanupNativeTransport()
+        }
+    }
+
     private static func classifyServerError(_ reason: String) -> SignalingFailureClass {
         let normalized = reason.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if normalized.contains("token") && normalized.contains("expired") {
@@ -693,7 +779,7 @@ public actor WebSocketSignalingClient {
     private static func noProxyConnectionProxyDictionary() -> [AnyHashable: Any] {
         [
             kCFProxyTypeKey as String: kCFProxyTypeNone as String,
-            "HTTPEnable": false,
+            kCFNetworkProxiesHTTPEnable as String: false,
             "HTTPSEnable": false,
             "SOCKSEnable": false,
             "ProxyAutoConfigEnable": false,
@@ -715,6 +801,10 @@ extension WebSocketSignalingClient {
         for backend: SignalingBackend
     ) -> SignalingHandleID {
         reserveNextHandleId(for: backend)
+    }
+
+    internal func testOnlyTransportAttemptLabels() -> [String] {
+        transportAttempts().map(\.label)
     }
 
     internal static func testOnlyNoProxyConnectionProxyDictionary() -> [AnyHashable: Any] {
