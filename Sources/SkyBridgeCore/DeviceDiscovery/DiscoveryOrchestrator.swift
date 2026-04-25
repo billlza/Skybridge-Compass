@@ -325,12 +325,62 @@ public actor DiscoveryOrchestrator {
 // MARK: - 统一广播中心
 
 /// 统一封装 Bonjour 广播生命周期，确保同一服务类型只存在一个 NWListener
+public struct ServiceAdvertisementSnapshot: Sendable, Equatable {
+    public enum ListenerState: String, Sendable {
+        case absent
+        case starting
+        case ready
+    }
+
+    public let serviceType: String
+    public let owner: String?
+    public let port: UInt16?
+    public let state: ListenerState
+
+    public init(
+        serviceType: String,
+        owner: String? = nil,
+        port: UInt16? = nil,
+        state: ListenerState = .absent
+    ) {
+        self.serviceType = serviceType
+        self.owner = owner
+        self.port = port
+        self.state = state
+    }
+
+    public var isAdvertising: Bool {
+        state != .absent
+    }
+
+    public var isStarting: Bool {
+        state == .starting
+    }
+
+    public var isConnectable: Bool {
+        state == .ready && (port ?? 0) > 0
+    }
+
+    public func isOwned(by expectedOwner: String) -> Bool {
+        owner == expectedOwner
+    }
+}
+
 public actor ServiceAdvertiserCenter {
     private let logger = Logger(
         subsystem: "com.skybridge.Compass",
         category: "ServiceAdvertiserCenter"
     )
-    private var listeners: [String: NWListener] = [:]
+
+    private struct ListenerRecord {
+        let listener: NWListener
+        let owner: String?
+        let token: UUID
+        var state: ServiceAdvertisementSnapshot.ListenerState
+        var port: UInt16?
+    }
+
+    private var records: [String: ListenerRecord] = [:]
 
     public static let shared = ServiceAdvertiserCenter()
 
@@ -339,12 +389,13 @@ public actor ServiceAdvertiserCenter {
         serviceName: String,
         serviceType: String,
         txtRecord: NWTXTRecord? = nil,
+        owner: String? = nil,
         connectionHandler: (@Sendable (NWConnection) -> Void)? = nil,
         stateHandler: (@Sendable (NWListener.State) -> Void)? = nil
     ) async throws -> UInt16 {
-        if let existing = listeners[serviceType] {
-            existing.cancel()
-            listeners.removeValue(forKey: serviceType)
+        if let existing = records[serviceType] {
+            existing.listener.cancel()
+            records.removeValue(forKey: serviceType)
             logger.debug("取消旧广播: \(serviceType, privacy: .public)")
         }
 
@@ -377,13 +428,15 @@ public actor ServiceAdvertiserCenter {
             listener.newConnectionHandler = { conn in ch(conn) }
         }
         let log = self.logger
+        let token = UUID()
         let baseTXTForReady = finalTXT
         let resolvedServiceName = serviceName
         let resolvedServiceType = serviceType
         listener.stateUpdateHandler = { state in
             stateHandler?(state)
+            let actualPort = listener.port?.rawValue
             if case .ready = state,
-               let actualPort = listener.port?.rawValue,
+               let actualPort,
                actualPort > 0 {
                 var updatedTXT = baseTXTForReady
                 updatedTXT["port"] = String(actualPort)
@@ -397,9 +450,23 @@ public actor ServiceAdvertiserCenter {
             if case .failed(let error) = state {
                 log.error("❌ 广播监听失败: \(error.localizedDescription, privacy: .public)")
             }
+            Task {
+                await self.handleListenerStateUpdate(
+                    serviceType: resolvedServiceType,
+                    token: token,
+                    state: state,
+                    port: actualPort
+                )
+            }
         }
+        records[serviceType] = ListenerRecord(
+            listener: listener,
+            owner: owner,
+            token: token,
+            state: .starting,
+            port: nil
+        )
         listener.start(queue: .global(qos: .utility))
-        listeners[serviceType] = listener
         let port = listener.port?.rawValue ?? 0
         if port > 0 {
             finalTXT["port"] = String(port)
@@ -409,6 +476,7 @@ public actor ServiceAdvertiserCenter {
                 domain: "local.",
                 txtRecord: finalTXT
             )
+            records[serviceType]?.port = UInt16(port)
         }
         if port > 0 {
             logger.info("📡 广播服务启动: \(serviceType, privacy: .public) 端口 \(port, privacy: .public)")
@@ -423,16 +491,18 @@ public actor ServiceAdvertiserCenter {
         serviceName: String,
         serviceType: String,
         txtRecord: NWTXTRecord? = nil,
+        owner: String? = nil,
         connectionHandler: (@Sendable (NWConnection) -> Void)? = nil,
         stateHandler: (@Sendable (NWListener.State) -> Void)? = nil
     ) async throws -> UInt16 {
         if isAdvertising(serviceType) {
-            return UInt16(listeners[serviceType]?.port?.rawValue ?? 0)
+            return records[serviceType]?.port ?? UInt16(records[serviceType]?.listener.port?.rawValue ?? 0)
         }
         return try await startAdvertising(
             serviceName: serviceName,
             serviceType: serviceType,
             txtRecord: txtRecord,
+            owner: owner,
             connectionHandler: connectionHandler,
             stateHandler: stateHandler
         )
@@ -487,22 +557,60 @@ public actor ServiceAdvertiserCenter {
 
  /// 查询指定服务类型是否正在广播
     public func isAdvertising(_ serviceType: String) -> Bool {
-        return listeners[serviceType] != nil
+        return records[serviceType] != nil
+    }
+
+    public func advertisementSnapshot(for serviceType: String) -> ServiceAdvertisementSnapshot {
+        guard let record = records[serviceType] else {
+            return ServiceAdvertisementSnapshot(serviceType: serviceType)
+        }
+        return ServiceAdvertisementSnapshot(
+            serviceType: serviceType,
+            owner: record.owner,
+            port: record.port ?? record.listener.port?.rawValue,
+            state: record.state
+        )
     }
 
  /// 停止指定服务类型的广播
-    public func stopAdvertising(_ serviceType: String) {
-        if let listener = listeners[serviceType] {
-            listener.cancel()
-            listeners.removeValue(forKey: serviceType)
-            logger.info("⏹️ 停止广播: \(serviceType, privacy: .public)")
+    public func stopAdvertising(_ serviceType: String, owner: String? = nil) {
+        guard let record = records[serviceType] else { return }
+        if let owner, record.owner != owner {
+            logger.warning(
+                "⚠️ 忽略非 owner 停止广播请求: service=\(serviceType, privacy: .public) owner=\(owner, privacy: .public) current=\(record.owner ?? "-", privacy: .public)"
+            )
+            return
         }
+        record.listener.cancel()
+        records.removeValue(forKey: serviceType)
+        logger.info("⏹️ 停止广播: \(serviceType, privacy: .public)")
     }
 
  /// 停止所有广播
     public func stopAll() {
-        for (_, l) in listeners { l.cancel() }
-        listeners.removeAll()
+        for (_, record) in records { record.listener.cancel() }
+        records.removeAll()
         logger.info("⏹️ 停止所有广播")
+    }
+
+    private func handleListenerStateUpdate(
+        serviceType: String,
+        token: UUID,
+        state: NWListener.State,
+        port: UInt16?
+    ) {
+        guard var record = records[serviceType], record.token == token else { return }
+        switch state {
+        case .ready:
+            record.state = .ready
+            if let port, port > 0 {
+                record.port = port
+            }
+            records[serviceType] = record
+        case .failed, .cancelled:
+            records.removeValue(forKey: serviceType)
+        default:
+            break
+        }
     }
 }

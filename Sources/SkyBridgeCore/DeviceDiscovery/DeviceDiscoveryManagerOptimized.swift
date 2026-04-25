@@ -35,6 +35,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
     /// `_skybridge._tcp` 入站控制通道广播由 `P2PDiscoveryService` 独占；
     /// 本优化发现器默认只扫描，避免抢占 connection handler。
     public var advertisesLocalSkyBridgeService: Bool = false
+    private static let advertisementOwner = "DeviceDiscoveryManagerOptimized"
 
  // MARK: - 私有属性
 
@@ -1597,6 +1598,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                     serviceName: self.getDeviceName(),
                     serviceType: serviceType,
                     txtRecord: txt,
+                    owner: Self.advertisementOwner,
                     connectionHandler: { [weak self] connection in
                         Task { @MainActor in self?.handleIncomingConnection(connection) }
                     },
@@ -1652,6 +1654,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                 serviceName: Self.resolveDeviceName(),
                 serviceType: serviceType,
                 txtRecord: txt,
+                owner: Self.advertisementOwner,
                 connectionHandler: { [weak self] connection in
                     Task { @MainActor in self?.handleIncomingConnection(connection) }
                 },
@@ -1673,7 +1676,10 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         listener?.cancel()
         listener = nil
         Task {
-            await ServiceAdvertiserCenter.shared.stopAdvertising("_skybridge._tcp")
+            await ServiceAdvertiserCenter.shared.stopAdvertising(
+                "_skybridge._tcp",
+                owner: Self.advertisementOwner
+            )
         }
     }
 

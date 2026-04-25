@@ -56,9 +56,7 @@ final class LocalPeerServiceCoordinator: ObservableObject {
         }
         remoteControlReady = remoteControlServer.activePort != nil
 
-        if !p2pDiscoveryService.isAdvertising {
-            p2pDiscoveryService.startAdvertising()
-        }
+        await p2pDiscoveryService.ensureAdvertisingHealthy()
 
         let endpoints = ServiceEndpointRegistry.shared.snapshot()
         hasStarted = fileTransferReady && remoteControlReady

@@ -97,6 +97,9 @@ public class P2PDiscoveryService: BaseManager {
     }
     #endif
 
+    private static let controlServiceType = "_skybridge._tcp"
+    private static let controlAdvertisementOwner = "P2PDiscoveryService"
+
     public func activeAuthenticatedConnectionsForClassicTransfer() -> [P2PConnection] {
         authenticatedConnections.values.filter { $0.status == .authenticated }
     }
@@ -1191,19 +1194,26 @@ public class P2PDiscoveryService: BaseManager {
         logger.info("📡 开始广播服务")
 
         Task { @MainActor in
-            let centerAdvertising = await ServiceAdvertiserCenter.shared.isAdvertising("_skybridge._tcp")
-            if !forceRebind, isAdvertising, centerAdvertising {
+            let centerSnapshot = await ServiceAdvertiserCenter.shared.advertisementSnapshot(for: Self.controlServiceType)
+            let centerHealthyForP2P = centerSnapshot.isOwned(by: Self.controlAdvertisementOwner)
+                && (centerSnapshot.isConnectable || centerSnapshot.isStarting)
+            if !forceRebind, centerHealthyForP2P {
+                isAdvertising = true
                 logger.debug("📡 广播已在运行，忽略重复启动")
                 return
             }
 
-            if centerAdvertising {
+            if centerSnapshot.isAdvertising {
                 if forceRebind {
                     logger.info("🔁 强制重绑 _skybridge._tcp 广播监听")
-                } else if !isAdvertising {
-                    logger.warning("⚠️ 检测到 _skybridge._tcp 被外部组件占用，切换到 P2PDiscoveryService 独占监听")
+                } else if !centerSnapshot.isOwned(by: Self.controlAdvertisementOwner) {
+                    logger.warning(
+                        "⚠️ 检测到 _skybridge._tcp 被外部组件占用，切换到 P2PDiscoveryService 独占监听: owner=\(centerSnapshot.owner ?? "-", privacy: .public)"
+                    )
+                } else {
+                    logger.warning("⚠️ _skybridge._tcp 广播监听状态不可连接，执行自愈重绑")
                 }
-                await ServiceAdvertiserCenter.shared.stopAdvertising("_skybridge._tcp")
+                await ServiceAdvertiserCenter.shared.stopAdvertising(Self.controlServiceType)
             } else if isAdvertising {
                 logger.warning("⚠️ _skybridge._tcp 广播状态失配：内部标记为运行中，但中央监听器已丢失，执行自愈重绑")
             }
@@ -1217,7 +1227,8 @@ public class P2PDiscoveryService: BaseManager {
             do {
                 let port = try await ServiceAdvertiserCenter.shared.startAdvertising(
                     serviceName: getDeviceName(),
-                    serviceType: "_skybridge._tcp",
+                    serviceType: Self.controlServiceType,
+                    owner: Self.controlAdvertisementOwner,
                     connectionHandler: { [weak self] connection in
                         Task { @MainActor in self?.handleNewConnection(connection) }
                     },
@@ -1237,6 +1248,21 @@ public class P2PDiscoveryService: BaseManager {
         }
     }
 
+    @MainActor public func ensureAdvertisingHealthy() async {
+        let snapshot = await ServiceAdvertiserCenter.shared.advertisementSnapshot(for: Self.controlServiceType)
+        let healthyForP2P = snapshot.isOwned(by: Self.controlAdvertisementOwner)
+            && (snapshot.isConnectable || snapshot.isStarting)
+        if healthyForP2P {
+            isAdvertising = true
+            return
+        }
+
+        logger.warning(
+            "⚠️ P2P 广播健康检查失败，准备重绑: state=\(snapshot.state.rawValue, privacy: .public) owner=\(snapshot.owner ?? "-", privacy: .public) port=\(snapshot.port.map(String.init) ?? "-", privacy: .public) internal=\(self.isAdvertising, privacy: .public)"
+        )
+        startAdvertising(forceRebind: snapshot.isAdvertising || self.isAdvertising)
+    }
+
  /// 停止广播服务
     private func stopAdvertising() {
         logger.info("📡 停止广播服务")
@@ -1244,7 +1270,10 @@ public class P2PDiscoveryService: BaseManager {
         listener = nil
         isAdvertising = false
         Task {
-            await ServiceAdvertiserCenter.shared.stopAdvertising("_skybridge._tcp")
+            await ServiceAdvertiserCenter.shared.stopAdvertising(
+                Self.controlServiceType,
+                owner: Self.controlAdvertisementOwner
+            )
         }
     }
 
@@ -1696,10 +1725,13 @@ public class P2PDiscoveryService: BaseManager {
     private func handleListenerStateUpdate(_ state: NWListener.State) {
         switch state {
         case .ready:
+            isAdvertising = true
             logger.info("📡 监听器就绪")
         case .failed(let error):
+            isAdvertising = false
             logger.error("❌ 监听器失败: \(error.localizedDescription)")
         case .cancelled:
+            isAdvertising = false
             logger.info("⏹️ 监听器已取消")
         default:
             break

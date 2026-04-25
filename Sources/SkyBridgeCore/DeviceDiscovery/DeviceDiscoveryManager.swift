@@ -47,6 +47,7 @@ public class DeviceDiscoveryManager: BaseManager {
         return base
     }
     private let serviceDomain = "local."
+    private let advertisementOwner = "DeviceDiscoveryManager"
 
     public init() {
  // 调用父类初始化，传入管理器类别
@@ -433,6 +434,7 @@ public class DeviceDiscoveryManager: BaseManager {
                     serviceName: getDeviceName(),
                     serviceType: "_skybridge._tcp",
                     txtRecord: txt,
+                    owner: advertisementOwner,
                     connectionHandler: { [weak self] connection in
                         Task { @MainActor in self?.handleNewConnection(connection) }
                     },
@@ -457,7 +459,10 @@ public class DeviceDiscoveryManager: BaseManager {
         listener?.cancel()
         listener = nil
         Task {
-            await ServiceAdvertiserCenter.shared.stopAdvertising("_skybridge._tcp")
+            await ServiceAdvertiserCenter.shared.stopAdvertising(
+                "_skybridge._tcp",
+                owner: advertisementOwner
+            )
         }
     }
 
