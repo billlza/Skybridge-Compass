@@ -34,6 +34,32 @@ public protocol HandshakeTrustProvider: Sendable {
 }
 
 @available(iOS 17.0, *)
+public protocol MultiFingerprintHandshakeTrustProvider: HandshakeTrustProvider {
+    /// Returns every canonical protocol identity fingerprint trusted for `deviceId`.
+    ///
+    /// A stable device may carry multiple protocol signing identities during
+    /// PQC migration, for example Ed25519 and ML-DSA-65. The handshake validates
+    /// the actual signed identity against this full pin set.
+    func trustedFingerprints(for deviceId: String) async -> Set<String>
+}
+
+@available(iOS 17.0, *)
+public extension HandshakeTrustProvider {
+    func trustedFingerprintSet(for deviceId: String) async -> Set<String> {
+        if let multi = self as? any MultiFingerprintHandshakeTrustProvider {
+            return await multi.trustedFingerprints(for: deviceId)
+        }
+        guard let fingerprint = await trustedFingerprint(for: deviceId)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased(),
+              !fingerprint.isEmpty else {
+            return []
+        }
+        return [fingerprint]
+    }
+}
+
+@available(iOS 17.0, *)
 public struct AuthenticatedRemoteAuthority: Sendable, Equatable {
     public let protocolSigningAlgorithm: String
     public let protocolPublicKeyFingerprint: String
@@ -793,16 +819,16 @@ public actor HandshakeDriver {
     }
 
     private func enforceIdentityPinning(deviceId: String, identityPublicKey: Data) async throws {
-        guard let expectedFingerprint = await trustProvider.trustedFingerprint(for: deviceId)?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased(),
-              !expectedFingerprint.isEmpty else {
+        let trustedFingerprints = await trustProvider.trustedFingerprintSet(for: deviceId)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            .filter { !$0.isEmpty }
+        guard !trustedFingerprints.isEmpty else {
             return
         }
-        let actualFingerprint = try authoritativeFingerprint(for: identityPublicKey)
-        guard expectedFingerprint == actualFingerprint else {
+        let actualFingerprint = try authoritativeFingerprint(for: identityPublicKey).lowercased()
+        guard trustedFingerprints.contains(actualFingerprint) else {
             throw HandshakeError.failed(.identityMismatch(
-                expected: expectedFingerprint,
+                expected: trustedFingerprints.sorted().joined(separator: ","),
                 actual: actualFingerprint
             ))
         }

@@ -1,7 +1,13 @@
 import Foundation
 
 @available(macOS 14.0, iOS 17.0, *)
-struct DefaultHandshakeTrustProvider: HandshakeTrustProvider, Sendable {
+struct DefaultHandshakeTrustProvider: MultiFingerprintHandshakeTrustProvider, Sendable {
+    private let trustRecordsSnapshot: [TrustRecord]?
+
+    init(trustRecordsSnapshot: [TrustRecord]? = nil) {
+        self.trustRecordsSnapshot = trustRecordsSnapshot
+    }
+
     private func trimmedNonEmpty(_ raw: String?) -> String? {
         guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
             return nil
@@ -31,36 +37,85 @@ struct DefaultHandshakeTrustProvider: HandshakeTrustProvider, Sendable {
         directRecord: TrustRecord?,
         matchingRecords: [TrustRecord]
     ) -> String? {
-        if let directRecord,
-           let fingerprint = authoritativeProtocolFingerprint(for: directRecord) {
-            return fingerprint
-        }
-
-        let fingerprints = Set(matchingRecords.compactMap { record in
-            authoritativeProtocolFingerprint(for: record)
-        })
-
-        // Avoid accidental mis-pinning: only pin when the candidate set resolves to one
-        // authoritative protocol-signing fingerprint. Legacy discovery pubKeyFP is not a
-        // valid substitute here because it may refer to a different key family entirely.
+        let fingerprints = resolvedTrustedFingerprints(
+            directRecord: directRecord,
+            matchingRecords: matchingRecords
+        )
         guard fingerprints.count == 1, let fingerprint = fingerprints.first else {
             return nil
         }
+        return fingerprint
+    }
 
-        return matchingRecords.compactMap { authoritativeProtocolFingerprint(for: $0) }
-            .first { $0.caseInsensitiveCompare(fingerprint) == .orderedSame }
+    func resolvedTrustedFingerprints(
+        directRecord: TrustRecord?,
+        matchingRecords: [TrustRecord]
+    ) -> Set<String> {
+        var recordsById: [String: TrustRecord] = [:]
+        if let directRecord {
+            recordsById[directRecord.deviceId] = directRecord
+        }
+        for record in matchingRecords where recordsById[record.deviceId] == nil {
+            recordsById[record.deviceId] = record
+        }
+
+        let records = Array(recordsById.values)
+        guard !records.isEmpty else { return [] }
+
+        let canonicalDeviceIds = Set(records.compactMap(canonicalTrustedDeviceId(for:)))
+        guard canonicalDeviceIds.count <= 1 else {
+            return []
+        }
+
+        var fingerprintsByAlgorithm: [String: Set<String>] = [:]
+        for record in records {
+            if let fingerprint = authoritativeProtocolFingerprint(for: record) {
+                let algorithm = record.protocolSigningAlgorithm?.rawValue ?? "unknown"
+                fingerprintsByAlgorithm[algorithm, default: []].insert(fingerprint)
+            }
+        }
+
+        guard !fingerprintsByAlgorithm.values.contains(where: { $0.count > 1 }) else {
+            return []
+        }
+
+        return Set(fingerprintsByAlgorithm.values.flatMap { $0 })
+    }
+
+    private func canonicalTrustedDeviceId(for record: TrustRecord) -> String? {
+        let candidates = [record.currentDeviceId, record.deviceId]
+        for candidate in candidates {
+            let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            if let persistent = PeerTrustLookup.persistentDeviceId(from: trimmed) {
+                return persistent.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            }
+            return trimmed.lowercased()
+        }
+        return nil
     }
 
     private func trustLookupCandidates(for deviceId: String) -> [String] {
-        PeerTrustLookup.lookupCandidates(for: deviceId)
+        var candidates = PeerTrustLookup.lookupCandidates(for: deviceId)
+        let trimmed = deviceId.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty, !candidates.contains(trimmed) {
+            candidates.append(trimmed)
+        }
+        let lowercased = trimmed.lowercased()
+        if !lowercased.isEmpty, !candidates.contains(lowercased) {
+            candidates.append(lowercased)
+        }
+        if let persistent = PeerTrustLookup.persistentDeviceId(from: trimmed),
+           !candidates.contains(persistent) {
+            candidates.append(persistent)
+        }
+        return candidates
     }
 
-    private func capabilityValue(prefix: String, in capabilities: [String]) -> String? {
-        PeerTrustLookup.capabilityValue(prefix: prefix, in: capabilities)
-    }
-
-    @MainActor
-    private func matchingTrustRecords(for deviceId: String) -> [TrustRecord] {
+    private func matchingTrustRecordsSnapshot(
+        _ records: [TrustRecord],
+        for deviceId: String
+    ) -> [TrustRecord] {
         let candidates = trustLookupCandidates(for: deviceId)
         let normalizedCandidates = Set(candidates
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -70,14 +125,20 @@ struct DefaultHandshakeTrustProvider: HandshakeTrustProvider, Sendable {
 
         var matched: [String: TrustRecord] = [:]
 
-        for candidate in normalizedCandidates {
-            if let record = TrustSyncService.shared.getTrustRecord(deviceId: candidate) {
-                matched[record.deviceId] = record
-            }
-        }
-
-        for record in TrustSyncService.shared.activeTrustRecords where !record.isTombstone {
+        for record in records where !record.isTombstone {
             if matched[record.deviceId] != nil {
+                continue
+            }
+
+            if normalizedCandidatesLower.contains(record.deviceId.lowercased()) {
+                matched[record.deviceId] = record
+                continue
+            }
+
+            let currentDeviceId = record.currentDeviceId.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !currentDeviceId.isEmpty,
+               normalizedCandidatesLower.contains(currentDeviceId.lowercased()) {
+                matched[record.deviceId] = record
                 continue
             }
 
@@ -94,40 +155,84 @@ struct DefaultHandshakeTrustProvider: HandshakeTrustProvider, Sendable {
     }
 
     func trustedFingerprint(for deviceId: String) async -> String? {
-        await MainActor.run {
-            resolvedTrustedFingerprint(
-                directRecord: TrustSyncService.shared.getTrustRecord(deviceId: deviceId),
-                matchingRecords: matchingTrustRecords(for: deviceId)
-            )
+        let records = await trustRecords()
+        let directRecord = directRecord(for: deviceId, in: records)
+        return resolvedTrustedFingerprint(
+            directRecord: directRecord,
+            matchingRecords: matchingTrustRecordsSnapshot(records, for: deviceId)
+        )
+    }
+
+    func trustedFingerprints(for deviceId: String) async -> Set<String> {
+        let records = await trustRecords()
+        let directRecord = directRecord(for: deviceId, in: records)
+        return resolvedTrustedFingerprints(
+            directRecord: directRecord,
+            matchingRecords: matchingTrustRecordsSnapshot(records, for: deviceId)
+        )
+    }
+
+    private func trustRecords() async -> [TrustRecord] {
+        if let trustRecordsSnapshot {
+            return trustRecordsSnapshot.filter { !$0.isTombstone && !$0.isExpired }
+        }
+        return await MainActor.run {
+            TrustSyncService.shared.activeTrustRecords
+        }
+    }
+
+    private func directRecord(for deviceId: String, in records: [TrustRecord]) -> TrustRecord? {
+        let normalized = deviceId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalized.isEmpty else { return nil }
+        return records.first {
+            !$0.isTombstone
+                && !$0.isExpired
+                && $0.deviceId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == normalized
         }
     }
 
     func trustedKEMPublicKeys(for deviceId: String) async -> [CryptoSuite: Data] {
-        let trustResult = await MainActor.run { () -> ([CryptoSuite: Data], [String]) in
-            var result: [CryptoSuite: Data] = [:]
-            let candidates = trustLookupCandidates(for: deviceId)
-            let records = matchingTrustRecords(for: deviceId)
-                .sorted { $0.updatedAt > $1.updatedAt }
+        let recordsSnapshot = await trustRecords()
+        let candidates = trustLookupCandidates(for: deviceId)
+        var groupedKeys: [CryptoSuite: Set<Data>] = [:]
+        let records = matchingTrustRecordsSnapshot(recordsSnapshot, for: deviceId)
+            .sorted { $0.updatedAt > $1.updatedAt }
 
-            for record in records {
-                guard let kemKeys = record.kemPublicKeys else { continue }
-                for key in kemKeys {
-                    let suite = CryptoSuite(wireId: key.suiteWireId)
-                    if result[suite] == nil {
-                        result[suite] = key.publicKey
-                    }
-                }
+        for record in records {
+            guard let kemKeys = record.kemPublicKeys else { continue }
+            for key in KEMPublicKeyInfo.normalizedValidKeys(kemKeys) {
+                let suite = CryptoSuite(wireId: key.suiteWireId)
+                groupedKeys[suite, default: []].insert(key.publicKey)
             }
-            return (result, candidates)
         }
 
-        var merged = trustResult.0
+        var result: [CryptoSuite: Data] = [:]
+        var conflictedSuites = Set<CryptoSuite>()
+        for (suite, keys) in groupedKeys {
+            if keys.count == 1, let publicKey = keys.first {
+                result[suite] = publicKey
+            } else if keys.count > 1 {
+                conflictedSuites.insert(suite)
+            }
+        }
+
+        var merged = result
+        if !conflictedSuites.isEmpty {
+            let conflictedSummary = conflictedSuites
+                .map(\.rawValue)
+                .sorted()
+                .map { String($0) }
+                .joined(separator: ",")
+            SkyBridgeLogger.p2p.warning(
+                "⚠️ conflicting trusted KEM keys detected; deferring to bootstrap cache or fresh exchange: device=\(deviceId, privacy: .public) suites=\(conflictedSummary, privacy: .public)"
+            )
+        }
         let cached = await PeerKEMBootstrapStore.shared.mergedKEMPublicKeys(
-            forCandidates: trustResult.1
+            forCandidates: candidates
         )
         for (suiteWireId, publicKey) in cached {
             let suite = CryptoSuite(wireId: suiteWireId)
-            if merged[suite] == nil {
+            if conflictedSuites.contains(suite) || merged[suite] == nil {
                 merged[suite] = publicKey
             }
         }
@@ -135,21 +240,20 @@ struct DefaultHandshakeTrustProvider: HandshakeTrustProvider, Sendable {
     }
 
     func trustedSecureEnclavePublicKey(for deviceId: String) async -> Data? {
-        await MainActor.run {
-            if let direct = TrustSyncService.shared.getTrustRecord(deviceId: deviceId),
-               let se = direct.secureEnclavePublicKey,
-               !se.isEmpty {
+        let recordsSnapshot = await trustRecords()
+        if let direct = directRecord(for: deviceId, in: recordsSnapshot),
+           let se = direct.secureEnclavePublicKey,
+           !se.isEmpty {
+            return se
+        }
+
+        let records = matchingTrustRecordsSnapshot(recordsSnapshot, for: deviceId)
+            .sorted { $0.updatedAt > $1.updatedAt }
+        for record in records {
+            if let se = record.secureEnclavePublicKey, !se.isEmpty {
                 return se
             }
-
-            let records = matchingTrustRecords(for: deviceId)
-                .sorted { $0.updatedAt > $1.updatedAt }
-            for record in records {
-                if let se = record.secureEnclavePublicKey, !se.isEmpty {
-                    return se
-                }
-            }
-            return nil
         }
+        return nil
     }
 }

@@ -1371,20 +1371,22 @@ public actor HandshakeDriver {
     }
 
     private func enforceIdentityPinning(deviceId: String, identityKeys: IdentityPublicKeys) async throws {
-        guard let expectedFingerprint = await trustProvider.trustedFingerprint(for: deviceId)?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased(),
-              !expectedFingerprint.isEmpty else {
+        let trustedFingerprints = await trustProvider.trustedFingerprintSet(for: deviceId)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            .filter { !$0.isEmpty }
+        guard !trustedFingerprints.isEmpty else {
             return
         }
 
-        let actualFingerprint = try authoritativeFingerprint(for: identityKeys)
-        guard expectedFingerprint == actualFingerprint else {
-            throw HandshakeError.failed(.identityMismatch(
-                expected: expectedFingerprint,
-                actual: actualFingerprint
-            ))
+        let actualFingerprint = try authoritativeFingerprint(for: identityKeys).lowercased()
+        if trustedFingerprints.contains(actualFingerprint) {
+            return
         }
+
+        throw HandshakeError.failed(.identityMismatch(
+            expected: trustedFingerprints.sorted().joined(separator: ","),
+            actual: actualFingerprint
+        ))
     }
 
     private func authoritativeFingerprint(for identityKeys: IdentityPublicKeys) throws -> String {

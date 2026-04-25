@@ -65,11 +65,38 @@ enum RemoteControlInboundTrustResolver {
             )
         ).sorted()
 
-        if deviceIds.count == 1 && fingerprints.count <= 1 {
-            return .resolved(deviceId: deviceIds[0], fingerprint: fingerprints.first)
+        if deviceIds.count == 1 && !hasProtocolAlgorithmFingerprintConflict(in: matches) {
+            return .resolved(
+                deviceId: deviceIds[0],
+                fingerprint: fingerprints.count == 1 ? fingerprints.first : nil
+            )
         }
 
         return .ambiguous(deviceIds: deviceIds, fingerprints: fingerprints)
+    }
+
+    private static func hasProtocolAlgorithmFingerprintConflict(in matches: [TrustRecord]) -> Bool {
+        var fingerprintsByAlgorithm: [String: Set<String>] = [:]
+
+        for record in matches {
+            guard let fingerprint = canonicalFingerprint(record.currentPathAuthorityFingerprint) else {
+                continue
+            }
+            let algorithm = record.protocolSigningAlgorithm?.rawValue ?? "unknown"
+            fingerprintsByAlgorithm[algorithm, default: []].insert(fingerprint)
+        }
+
+        return fingerprintsByAlgorithm.values.contains { $0.count > 1 }
+    }
+
+    private static func canonicalFingerprint(_ raw: String?) -> String? {
+        guard let normalized = raw?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased(),
+              !normalized.isEmpty else {
+            return nil
+        }
+        return normalized
     }
 
     private static func canonicalTrustedDeviceId(_ raw: String) -> String {

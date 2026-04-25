@@ -39,6 +39,271 @@ final class RemoteControlTrustResolutionTests: XCTestCase {
         )
     }
 
+    func testDualAlgorithmInboundTrustRecordsResolveToSingleCanonicalDevice() {
+        let deviceId = "id:11111111-2222-4333-8444-555555555555"
+        let remotePeerId = RemoteControlInboundTrustResolver.soaPeerId(for: deviceId)
+
+        let records = [
+            TrustRecord(
+                deviceId: "\(deviceId)|ed25519",
+                pubKeyFP: String(repeating: "a", count: 64),
+                publicKey: Data([0x01]),
+                protocolPublicKey: Data([0x02]),
+                protocolSigningAlgorithm: .ed25519,
+                protocolPublicKeyFingerprint: String(repeating: "9", count: 64),
+                signature: Data([0x03]),
+                deviceName: "iPhone",
+                currentDeviceId: deviceId,
+                knownDeviceIds: [deviceId]
+            ),
+            TrustRecord(
+                deviceId: "\(deviceId)|mldsa",
+                pubKeyFP: String(repeating: "b", count: 64),
+                publicKey: Data([0x11]),
+                protocolPublicKey: Data([0x12]),
+                protocolSigningAlgorithm: .mlDSA65,
+                protocolPublicKeyFingerprint: String(repeating: "c", count: 64),
+                signature: Data([0x13]),
+                deviceName: "iPhone",
+                currentDeviceId: deviceId,
+                knownDeviceIds: [deviceId]
+            )
+        ]
+
+        XCTAssertEqual(
+            RemoteControlInboundTrustResolver.resolve(remoteSOAPeerId: remotePeerId, records: records),
+            .resolved(deviceId: deviceId, fingerprint: nil)
+        )
+    }
+
+    func testSameAlgorithmFingerprintConflictRemainsAmbiguous() {
+        let deviceId = "id:shared-peer"
+        let remotePeerId = RemoteControlInboundTrustResolver.soaPeerId(for: deviceId)
+
+        let records = [
+            TrustRecord(
+                deviceId: "legacy-peer-a",
+                pubKeyFP: String(repeating: "a", count: 64),
+                publicKey: Data([0x01]),
+                protocolPublicKey: Data([0x02]),
+                protocolSigningAlgorithm: .mlDSA65,
+                protocolPublicKeyFingerprint: String(repeating: "1", count: 64),
+                signature: Data([0x03]),
+                deviceName: "iPhone",
+                currentDeviceId: deviceId,
+                knownDeviceIds: [deviceId]
+            ),
+            TrustRecord(
+                deviceId: "legacy-peer-b",
+                pubKeyFP: String(repeating: "b", count: 64),
+                publicKey: Data([0x11]),
+                protocolPublicKey: Data([0x12]),
+                protocolSigningAlgorithm: .mlDSA65,
+                protocolPublicKeyFingerprint: String(repeating: "2", count: 64),
+                signature: Data([0x13]),
+                deviceName: "iPhone",
+                currentDeviceId: deviceId,
+                knownDeviceIds: [deviceId]
+            )
+        ]
+
+        XCTAssertEqual(
+            RemoteControlInboundTrustResolver.resolve(remoteSOAPeerId: remotePeerId, records: records),
+            .ambiguous(
+                deviceIds: [deviceId],
+                fingerprints: [String(repeating: "1", count: 64), String(repeating: "2", count: 64)]
+            )
+        )
+    }
+
+    func testDefaultHandshakeTrustProviderRejectsSameAlgorithmFingerprintConflict() async {
+        let deviceId = "id:11111111-2222-4333-8444-555555555555"
+        let records = [
+            TrustRecord(
+                deviceId: "\(deviceId)|mldsa-a",
+                pubKeyFP: String(repeating: "a", count: 64),
+                publicKey: Data([0x01]),
+                protocolPublicKey: Data([0x02]),
+                protocolSigningAlgorithm: .mlDSA65,
+                protocolPublicKeyFingerprint: String(repeating: "1", count: 64),
+                signature: Data([0x03]),
+                deviceName: "iPhone",
+                currentDeviceId: deviceId,
+                knownDeviceIds: [deviceId]
+            ),
+            TrustRecord(
+                deviceId: "\(deviceId)|mldsa-b",
+                pubKeyFP: String(repeating: "b", count: 64),
+                publicKey: Data([0x11]),
+                protocolPublicKey: Data([0x12]),
+                protocolSigningAlgorithm: .mlDSA65,
+                protocolPublicKeyFingerprint: String(repeating: "2", count: 64),
+                signature: Data([0x13]),
+                deviceName: "iPhone",
+                currentDeviceId: deviceId,
+                knownDeviceIds: [deviceId]
+            )
+        ]
+
+        let provider = DefaultHandshakeTrustProvider(trustRecordsSnapshot: records)
+        let multiProvider: any MultiFingerprintHandshakeTrustProvider = provider
+        let trustedFingerprints = await multiProvider.trustedFingerprints(for: deviceId)
+        let singleFingerprint = await provider.trustedFingerprint(for: deviceId)
+
+        XCTAssertEqual(trustedFingerprints, [])
+        XCTAssertNil(singleFingerprint)
+    }
+
+    func testDefaultHandshakeTrustProviderRejectsAliasDeviceConflict() async {
+        let alias = "id:shared-peer"
+        let records = [
+            TrustRecord(
+                deviceId: "legacy-peer-a",
+                pubKeyFP: String(repeating: "a", count: 64),
+                publicKey: Data([0x01]),
+                protocolPublicKey: Data([0x02]),
+                protocolSigningAlgorithm: .mlDSA65,
+                protocolPublicKeyFingerprint: String(repeating: "1", count: 64),
+                signature: Data([0x03]),
+                deviceName: "iPhone",
+                currentDeviceId: "id:peer-a",
+                knownDeviceIds: [alias]
+            ),
+            TrustRecord(
+                deviceId: "legacy-peer-b",
+                pubKeyFP: String(repeating: "b", count: 64),
+                publicKey: Data([0x11]),
+                protocolPublicKey: Data([0x12]),
+                protocolSigningAlgorithm: .ed25519,
+                protocolPublicKeyFingerprint: String(repeating: "2", count: 64),
+                signature: Data([0x13]),
+                deviceName: "iPhone",
+                currentDeviceId: "id:peer-b",
+                knownDeviceIds: [alias]
+            )
+        ]
+
+        let provider = DefaultHandshakeTrustProvider(trustRecordsSnapshot: records)
+        let multiProvider: any MultiFingerprintHandshakeTrustProvider = provider
+        let trustedFingerprints = await multiProvider.trustedFingerprints(for: alias)
+        let singleFingerprint = await provider.trustedFingerprint(for: alias)
+
+        XCTAssertEqual(trustedFingerprints, [])
+        XCTAssertNil(singleFingerprint)
+    }
+
+    func testDefaultHandshakeTrustProviderUsesSnapshotForKEMAndSecureEnclavePins() async {
+        let deviceId = "id:11111111-2222-4333-8444-555555555555"
+        let kemPublicKey = Data([0x44, 0x55, 0x66])
+        let secureEnclavePublicKey = Data([0x77, 0x88, 0x99])
+        let records = [
+            TrustRecord(
+                deviceId: "\(deviceId)|mldsa",
+                pubKeyFP: String(repeating: "b", count: 64),
+                publicKey: Data([0x11]),
+                secureEnclavePublicKey: secureEnclavePublicKey,
+                protocolPublicKey: Data([0x12]),
+                protocolSigningAlgorithm: .mlDSA65,
+                protocolPublicKeyFingerprint: String(repeating: "c", count: 64),
+                kemPublicKeys: [
+                    KEMPublicKeyInfo(
+                        suiteWireId: CryptoSuite.mlkem768MLDSA65.wireId,
+                        publicKey: kemPublicKey
+                    )
+                ],
+                signature: Data([0x13]),
+                deviceName: "iPhone",
+                currentDeviceId: deviceId,
+                knownDeviceIds: [deviceId]
+            )
+        ]
+
+        let provider = DefaultHandshakeTrustProvider(trustRecordsSnapshot: records)
+        let trustedKEMPublicKeys = await provider.trustedKEMPublicKeys(for: deviceId)
+        let trustedSecureEnclavePublicKey = await provider.trustedSecureEnclavePublicKey(for: deviceId)
+
+        XCTAssertEqual(
+            trustedKEMPublicKeys,
+            [.mlkem768MLDSA65: kemPublicKey]
+        )
+        XCTAssertEqual(
+            trustedSecureEnclavePublicKey,
+            secureEnclavePublicKey
+        )
+    }
+
+    @MainActor
+    func testDefaultHandshakeTrustProviderReturnsAllDualAlgorithmPinsForSingleDevice() async throws {
+        let deviceId = "id:11111111-2222-4333-8444-555555555555"
+        let edRecordId = "\(deviceId)|ed25519"
+        let mlRecordId = "\(deviceId)|mldsa"
+        let edFingerprint = String(repeating: "9", count: 64)
+        let mlFingerprint = String(repeating: "c", count: 64)
+        let trust = TrustSyncService.shared
+
+        trust.setInMemoryPersistenceForTesting(true)
+        await trust.removeRecordsForTesting(deviceIds: [edRecordId, mlRecordId])
+        defer {
+            trust.setInMemoryPersistenceForTesting(false)
+            Task { @MainActor in
+                await trust.removeRecordsForTesting(deviceIds: [edRecordId, mlRecordId])
+            }
+        }
+
+        _ = try await trust.addTrustRecord(
+            TrustRecord(
+                deviceId: edRecordId,
+                pubKeyFP: String(repeating: "a", count: 64),
+                publicKey: Data([0x01]),
+                protocolPublicKey: Data([0x02]),
+                protocolSigningAlgorithm: .ed25519,
+                protocolPublicKeyFingerprint: edFingerprint,
+                signature: Data([0x03]),
+                deviceName: "iPhone",
+                currentDeviceId: deviceId,
+                knownDeviceIds: [deviceId]
+            )
+        )
+        _ = try await trust.addTrustRecord(
+            TrustRecord(
+                deviceId: mlRecordId,
+                pubKeyFP: String(repeating: "b", count: 64),
+                publicKey: Data([0x11]),
+                protocolPublicKey: Data([0x12]),
+                protocolSigningAlgorithm: .mlDSA65,
+                protocolPublicKeyFingerprint: mlFingerprint,
+                signature: Data([0x13]),
+                deviceName: "iPhone",
+                currentDeviceId: deviceId,
+                knownDeviceIds: [deviceId]
+            )
+        )
+
+        XCTAssertEqual(
+            trust.activeTrustRecords.filter { $0.currentDeviceId == deviceId }.count,
+            2
+        )
+
+        let activeRecords = trust.activeTrustRecords.filter { $0.currentDeviceId == deviceId }
+        let provider = DefaultHandshakeTrustProvider(trustRecordsSnapshot: activeRecords)
+        XCTAssertEqual(
+            provider.resolvedTrustedFingerprints(directRecord: nil, matchingRecords: activeRecords),
+            [edFingerprint, mlFingerprint]
+        )
+        let multiProvider: any MultiFingerprintHandshakeTrustProvider = provider
+        let trustedFingerprints = await multiProvider.trustedFingerprints(for: deviceId)
+        let singleFingerprint = await provider.trustedFingerprint(for: deviceId)
+
+        XCTAssertEqual(
+            trustedFingerprints,
+            [edFingerprint, mlFingerprint]
+        )
+        XCTAssertNil(
+            singleFingerprint,
+            "The legacy single-pin lookup must not invent one winner when a device has multiple protocol-signing pins."
+        )
+    }
+
     func testConflictingInboundTrustRecordsRemainAmbiguous() {
         let remotePeerId = RemoteControlInboundTrustResolver.soaPeerId(for: "id:shared-peer")
 

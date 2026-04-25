@@ -1522,8 +1522,11 @@ public final class RemoteControlManager: BaseManager {
 
     @available(macOS 14.0, *)
     private func makeRemoteControlTrustProvider(for deviceId: String) async throws -> DefaultHandshakeTrustProvider {
-        let trustProvider = DefaultHandshakeTrustProvider()
-        guard await trustProvider.trustedFingerprint(for: deviceId) != nil else {
+        let trustProvider = DefaultHandshakeTrustProvider(
+            trustRecordsSnapshot: TrustSyncService.shared.activeTrustRecords
+        )
+        let trustedFingerprints = await trustProvider.trustedFingerprintSet(for: deviceId)
+        guard !trustedFingerprints.isEmpty else {
             throw RemoteControlError.untrustedPeer(deviceId)
         }
         return trustProvider

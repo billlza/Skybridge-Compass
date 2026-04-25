@@ -86,6 +86,7 @@ actor MockDiscoveryTransport: DiscoveryTransport {
 struct StaticTrustProvider: HandshakeTrustProvider, Sendable {
     let deviceId: String
     let fingerprint: String?
+    var kemPublicKeys: [CryptoSuite: Data] = [:]
 
     func trustedFingerprint(for deviceId: String) async -> String? {
         guard deviceId == self.deviceId else { return nil }
@@ -94,7 +95,7 @@ struct StaticTrustProvider: HandshakeTrustProvider, Sendable {
 
     func trustedKEMPublicKeys(for deviceId: String) async -> [CryptoSuite: Data] {
         guard deviceId == self.deviceId else { return [:] }
-        return [:]
+        return kemPublicKeys
     }
 
     func trustedSecureEnclavePublicKey(for deviceId: String) async -> Data? {
@@ -262,6 +263,46 @@ final class HandshakeDriverTests: XCTestCase {
         let trustProvider = StaticTrustProvider(
             deviceId: "test-peer",
             fingerprint: expectedFingerprint
+        )
+
+        let driver = try makeDriver(trustProvider: trustProvider)
+
+        let initiatorContext = try await HandshakeContext.create(
+            role: .initiator,
+            cryptoProvider: provider
+        )
+        let messageA = try await initiatorContext.buildMessageA(
+            identityKeyHandle: .softwareKey(untrustedKeyPair.privateKey.bytes),
+            identityPublicKey: encodeIdentityPublicKey(untrustedKeyPair.publicKey.bytes)
+        )
+
+        let peer = PeerIdentifier(deviceId: "test-peer")
+        await driver.handleMessage(messageA.encoded, from: peer)
+
+        let state = await driver.getCurrentState()
+        guard case .failed(let reason) = state else {
+            XCTFail("Expected failed state, got \(state)")
+            return
+        }
+
+        guard case .identityMismatch(let expected, let actual) = reason else {
+            XCTFail("Expected identityMismatch, got \(reason)")
+            return
+        }
+
+        XCTAssertEqual(expected, expectedFingerprint)
+        XCTAssertEqual(actual, actualFingerprint)
+    }
+
+    func testIdentityPinningMismatchFailsEvenWithTrustedKEMBootstrapKeys() async throws {
+        let trustedKeyPair = try await provider.generateKeyPair(for: .signing)
+        let untrustedKeyPair = try await provider.generateKeyPair(for: .signing)
+        let expectedFingerprint = authoritativeFingerprint(trustedKeyPair.publicKey.bytes)
+        let actualFingerprint = authoritativeFingerprint(untrustedKeyPair.publicKey.bytes)
+        let trustProvider = StaticTrustProvider(
+            deviceId: "test-peer",
+            fingerprint: expectedFingerprint,
+            kemPublicKeys: [.x25519Ed25519: Data([0xA1, 0xB2, 0xC3])]
         )
 
         let driver = try makeDriver(trustProvider: trustProvider)
