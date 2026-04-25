@@ -1380,6 +1380,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     private var localConnectionSessionId: String?
     private var activeConnectionCodeAuthorityDeviceId: String?
     private var activeConnectionCodeAuthorityFingerprint: String?
+    private var authorityBoundWebRTCBootstrapSessionIds = Set<String>()
     private var activeSessionReconnectTimeoutTask: Task<Void, Never>?
     private var webrtcSignalingAuthTokenBySessionId: [String: String] = [:]
     private var webrtcTurnAdmissionTokenBySessionId: [String: String] = [:]
@@ -1909,11 +1910,16 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
                (!Self.isReusableConnectionCodeLease(expiresAt: localConnectionCodeExpiresAt) || !canReuseCurrentAuthority) {
                 let reason = canReuseCurrentAuthority ? "connection_code_lease_not_reusable" : "connection_code_authority_changed"
                 SkyBridgeLogger.shared.info("ℹ️ 本地连接码不可复用，重新向信令服务注册: reason=\(reason) code=\(existing)")
+                let staleSessionId = localConnectionSessionId
                 localConnectionCode = nil
                 localConnectionCodeExpiresAt = nil
+                localConnectionSessionId = nil
                 activeConnectionCodeLeaseMode = nil
                 activeConnectionCodeAuthorityDeviceId = nil
                 activeConnectionCodeAuthorityFingerprint = nil
+                if let staleSessionId {
+                    authorityBoundWebRTCBootstrapSessionIds.remove(staleSessionId)
+                }
                 connectionCodeExpiryTask?.cancel()
                 connectionCodeExpiryTask = nil
                 connectionCodeBootstrapTask?.cancel()
@@ -1945,6 +1951,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             localConnectionSessionId = lease.sessionID
             activeConnectionCodeAuthorityDeviceId = localBinding.deviceId
             activeConnectionCodeAuthorityFingerprint = localBinding.protocolPublicKeyFingerprint
+            authorityBoundWebRTCBootstrapSessionIds.insert(lease.sessionID)
             currentRole = .offerer
             state = .connecting(sessionId: lease.sessionID)
             readiness = .idle
@@ -2025,6 +2032,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             self.activeConnectionCodeLeaseMode = nil
             self.activeConnectionCodeAuthorityDeviceId = nil
             self.activeConnectionCodeAuthorityFingerprint = nil
+            self.authorityBoundWebRTCBootstrapSessionIds.remove(sessionID)
         }
     }
 
@@ -2095,6 +2103,8 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
 
             currentConnectLink = link
             currentRole = .offerer
+            localConnectionSessionId = lease.sessionID
+            authorityBoundWebRTCBootstrapSessionIds.insert(lease.sessionID)
             state = .connecting(sessionId: lease.sessionID)
             readiness = .idle
             lastError = nil
@@ -2164,6 +2174,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         activeConnectionCodeLeaseMode = nil
         activeConnectionCodeAuthorityDeviceId = nil
         activeConnectionCodeAuthorityFingerprint = nil
+        authorityBoundWebRTCBootstrapSessionIds.removeAll()
         currentConnectLink = nil
         localConnectionSessionId = nil
         currentRole = nil
@@ -4155,6 +4166,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             localConnectionSessionId = nil
             activeConnectionCodeAuthorityDeviceId = nil
             activeConnectionCodeAuthorityFingerprint = nil
+            authorityBoundWebRTCBootstrapSessionIds.remove(sessionId)
         }
         
         // 1) WebSocket signaling
@@ -5246,9 +5258,12 @@ private extension CrossNetworkWebRTCManager {
                 break
             }
             let hasTrustedPeerKEMKey = !trustedPeerKEMKeys.isEmpty
-            let useClassicAuthorityBootstrap =
-                localConnectionSessionId == sessionId
-                || currentPathExpectedRemoteAuthorityBySessionId[sessionId]?.protocolSigningAlgorithm == .ed25519
+            let useClassicAuthorityBootstrap = Self.shouldUseClassicAuthorityBootstrapForInitialWebRTCHandshake(
+                sessionId: sessionId,
+                authorityBoundBootstrapSessionIds: authorityBoundWebRTCBootstrapSessionIds,
+                expectedRemoteAuthorityAlgorithm: currentPathExpectedRemoteAuthorityBySessionId[sessionId]?.protocolSigningAlgorithm,
+                localConnectionSessionId: localConnectionSessionId
+            )
             let selection: CryptoProviderFactory.SelectionPolicy
             if useClassicAuthorityBootstrap {
                 selection = .classicOnly
@@ -7043,9 +7058,34 @@ extension CrossNetworkWebRTCManager {
         shouldInitiateInitialWebRTCHandshake(role: role)
     }
 
+    nonisolated internal static func testOnlyShouldUseClassicAuthorityBootstrapForInitialWebRTCHandshake(
+        sessionId: String,
+        authorityBoundBootstrapSessionIds: Set<String>,
+        expectedRemoteAuthorityAlgorithm: ProtocolSigningAlgorithm?,
+        localConnectionSessionId: String?
+    ) -> Bool {
+        shouldUseClassicAuthorityBootstrapForInitialWebRTCHandshake(
+            sessionId: sessionId,
+            authorityBoundBootstrapSessionIds: authorityBoundBootstrapSessionIds,
+            expectedRemoteAuthorityAlgorithm: expectedRemoteAuthorityAlgorithm,
+            localConnectionSessionId: localConnectionSessionId
+        )
+    }
+
     nonisolated private static func shouldInitiateInitialWebRTCHandshake(
         role: WebRTCSession.Role
     ) -> Bool {
         role == .offerer
+    }
+
+    nonisolated private static func shouldUseClassicAuthorityBootstrapForInitialWebRTCHandshake(
+        sessionId: String,
+        authorityBoundBootstrapSessionIds: Set<String>,
+        expectedRemoteAuthorityAlgorithm: ProtocolSigningAlgorithm?,
+        localConnectionSessionId: String?
+    ) -> Bool {
+        authorityBoundBootstrapSessionIds.contains(sessionId)
+            || localConnectionSessionId == sessionId
+            || expectedRemoteAuthorityAlgorithm == .ed25519
     }
 }

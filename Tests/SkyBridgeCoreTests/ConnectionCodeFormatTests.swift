@@ -106,7 +106,15 @@ final class ConnectionCodeFormatTests: XCTestCase {
             "The local connection-code offerer must use classic authority bootstrap even when trusted KEM material is available."
         )
         XCTAssertTrue(
-            source.contains("currentPathExpectedRemoteAuthorityBySessionId[sessionID]?.protocolSigningAlgorithm == .ed25519"),
+            source.contains("authorityBoundWebRTCBootstrapSessionIds.insert(sessionID)"),
+            "Dynamic QR offerer sessions must be marked as authority-bound so the initial handshake uses the QR-published identity."
+        )
+        XCTAssertTrue(
+            source.contains("authorityBoundWebRTCBootstrapSessionIds.insert(lease.sessionID)"),
+            "Connection-code offerer sessions must also be marked as authority-bound for the same identity-pinning reason."
+        )
+        XCTAssertTrue(
+            source.contains("expectedRemoteAuthorityAlgorithm == .ed25519"),
             "The connection-code joiner must honor the Ed25519 authority fingerprint returned by lookup instead of switching to a PQC identity key."
         )
         XCTAssertTrue(

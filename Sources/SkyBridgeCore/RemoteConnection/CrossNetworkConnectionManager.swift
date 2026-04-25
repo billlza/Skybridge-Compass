@@ -335,6 +335,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     private var activeConnectionCodeSessionID: String?
     private var activeConnectionCodeAuthorityDeviceId: String?
     private var activeConnectionCodeAuthorityFingerprint: String?
+    private var authorityBoundWebRTCBootstrapSessionIds = Set<String>()
     private var connectionCodeExpiryTask: Task<Void, Never>?
 
     private struct SessionSnapshotMetadata: Sendable {
@@ -1130,6 +1131,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         webrtcTurnAdmissionLeaseBySessionId.removeValue(forKey: sessionID)
         webrtcRemoteIdBySessionId.removeValue(forKey: sessionID)
         currentPathExpectedRemoteAuthorityBySessionId.removeValue(forKey: sessionID)
+        authorityBoundWebRTCBootstrapSessionIds.remove(sessionID)
         currentPathSignalingOriginBySessionId.removeValue(forKey: sessionID)
         webrtcSessionKeysBySessionId.removeValue(forKey: sessionID)
         webrtcRekeyInProgressSessionIds.remove(sessionID)
@@ -1680,6 +1682,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         webrtcTurnAdmissionLeaseBySessionId.removeAll()
         webrtcRemoteIdBySessionId.removeAll()
         currentPathExpectedRemoteAuthorityBySessionId.removeAll()
+        authorityBoundWebRTCBootstrapSessionIds.removeAll()
         currentPathSignalingOriginBySessionId.removeAll()
         webrtcLatestOfferBySessionId.removeAll()
         pendingWebRTCOfferSessionIds.removeAll()
@@ -1723,6 +1726,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         activeConnectionCodeSessionID = nil
         activeConnectionCodeAuthorityDeviceId = nil
         activeConnectionCodeAuthorityFingerprint = nil
+        authorityBoundWebRTCBootstrapSessionIds.removeAll()
         connectionCodeExpiryTask?.cancel()
         connectionCodeExpiryTask = nil
         qrCodeData = nil
@@ -1887,6 +1891,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             webrtcSignalingAuthTokenBySessionId[sessionLease.sessionID] = sessionLease.sessionToken
             webrtcTurnAdmissionLeaseBySessionId[sessionLease.sessionID] = sessionLease.turnAdmissionLease
             currentPathSignalingOriginBySessionId[sessionLease.sessionID] = sessionLease.signalingServerOrigin
+            authorityBoundWebRTCBootstrapSessionIds.insert(sessionID)
             logQRCodeStage("generate", stage: "\(currentStage)_finished", sessionID: sessionID)
 
             let expiresAt = Date().addingTimeInterval(validDuration)
@@ -2179,6 +2184,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             self.activeConnectionCodeSessionID = lease.sessionID
             self.activeConnectionCodeAuthorityDeviceId = localBinding.deviceId
             self.activeConnectionCodeAuthorityFingerprint = localBinding.protocolPublicKeyFingerprint
+            self.authorityBoundWebRTCBootstrapSessionIds.insert(lease.sessionID)
             self.connectionStatus = .waiting(code: code)
             self.readiness = .idle
             if let expiresAt = self.connectionCodeExpiresAt {
@@ -2404,6 +2410,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 self.activeConnectionCodeSessionID = nil
                 self.activeConnectionCodeAuthorityDeviceId = nil
                 self.activeConnectionCodeAuthorityFingerprint = nil
+                self.authorityBoundWebRTCBootstrapSessionIds.remove(sessionID)
                 self.connectionCodeExpiryTask = nil
                 if case .waiting(let waitingCode) = self.connectionStatus, waitingCode == code {
                     self.connectionStatus = .idle
@@ -3593,9 +3600,12 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     guard let trustLookupPeerId else { return }
 
                     let hasTrustedPeerKEM = !trustedPeerKEMKeys.isEmpty
-                    let useClassicAuthorityBootstrap =
-                        activeConnectionCodeSessionID == sessionID
-                        || currentPathExpectedRemoteAuthorityBySessionId[sessionID]?.protocolSigningAlgorithm == .ed25519
+                    let useClassicAuthorityBootstrap = Self.shouldUseClassicAuthorityBootstrapForInitialWebRTCHandshake(
+                        sessionID: sessionID,
+                        authorityBoundBootstrapSessionIds: authorityBoundWebRTCBootstrapSessionIds,
+                        expectedRemoteAuthorityAlgorithm: currentPathExpectedRemoteAuthorityBySessionId[sessionID]?.protocolSigningAlgorithm,
+                        activeConnectionCodeSessionID: activeConnectionCodeSessionID
+                    )
                     let selection: CryptoProviderFactory.SelectionPolicy
                     if useClassicAuthorityBootstrap {
                         selection = .classicOnly
@@ -6611,6 +6621,17 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 
     nonisolated static func shouldInitiateInitialWebRTCHandshake(role: WebRTCSession.Role) -> Bool {
         role == .offerer
+    }
+
+    nonisolated static func shouldUseClassicAuthorityBootstrapForInitialWebRTCHandshake(
+        sessionID: String,
+        authorityBoundBootstrapSessionIds: Set<String>,
+        expectedRemoteAuthorityAlgorithm: ProtocolSigningAlgorithm?,
+        activeConnectionCodeSessionID: String?
+    ) -> Bool {
+        authorityBoundBootstrapSessionIds.contains(sessionID)
+            || activeConnectionCodeSessionID == sessionID
+            || expectedRemoteAuthorityAlgorithm == .ed25519
     }
 
     nonisolated static func initialWebRTCHandshakePeerResolution(

@@ -236,6 +236,41 @@ final class WebRTCSignalingFaultInjectionTests: XCTestCase {
         )
     }
 
+    func testInitialWebRTCHandshakeUsesClassicForAuthorityBoundQRAndCodeSessions() {
+        XCTAssertTrue(
+            CrossNetworkWebRTCManager.testOnlyShouldUseClassicAuthorityBootstrapForInitialWebRTCHandshake(
+                sessionId: "qr-session",
+                authorityBoundBootstrapSessionIds: ["qr-session"],
+                expectedRemoteAuthorityAlgorithm: nil,
+                localConnectionSessionId: nil
+            )
+        )
+        XCTAssertTrue(
+            CrossNetworkWebRTCManager.testOnlyShouldUseClassicAuthorityBootstrapForInitialWebRTCHandshake(
+                sessionId: "local-session",
+                authorityBoundBootstrapSessionIds: [],
+                expectedRemoteAuthorityAlgorithm: nil,
+                localConnectionSessionId: "local-session"
+            )
+        )
+        XCTAssertTrue(
+            CrossNetworkWebRTCManager.testOnlyShouldUseClassicAuthorityBootstrapForInitialWebRTCHandshake(
+                sessionId: "answerer-session",
+                authorityBoundBootstrapSessionIds: [],
+                expectedRemoteAuthorityAlgorithm: .ed25519,
+                localConnectionSessionId: nil
+            )
+        )
+        XCTAssertFalse(
+            CrossNetworkWebRTCManager.testOnlyShouldUseClassicAuthorityBootstrapForInitialWebRTCHandshake(
+                sessionId: "pqc-session",
+                authorityBoundBootstrapSessionIds: [],
+                expectedRemoteAuthorityAlgorithm: .mlDSA65,
+                localConnectionSessionId: nil
+            )
+        )
+    }
+
     @MainActor
     func testRedeemedQRSessionArtifactsReuseRequiresMatchingOriginAndAuthority() {
         XCTAssertTrue(

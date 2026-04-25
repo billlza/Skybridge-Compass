@@ -12,6 +12,41 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
         )
     }
 
+    func testInitialWebRTCHandshakeUsesClassicForAuthorityBoundQRAndCodeSessions() {
+        XCTAssertTrue(
+            CrossNetworkConnectionManager.shouldUseClassicAuthorityBootstrapForInitialWebRTCHandshake(
+                sessionID: "qr-session",
+                authorityBoundBootstrapSessionIds: ["qr-session"],
+                expectedRemoteAuthorityAlgorithm: nil,
+                activeConnectionCodeSessionID: nil
+            )
+        )
+        XCTAssertTrue(
+            CrossNetworkConnectionManager.shouldUseClassicAuthorityBootstrapForInitialWebRTCHandshake(
+                sessionID: "code-session",
+                authorityBoundBootstrapSessionIds: [],
+                expectedRemoteAuthorityAlgorithm: nil,
+                activeConnectionCodeSessionID: "code-session"
+            )
+        )
+        XCTAssertTrue(
+            CrossNetworkConnectionManager.shouldUseClassicAuthorityBootstrapForInitialWebRTCHandshake(
+                sessionID: "answerer-session",
+                authorityBoundBootstrapSessionIds: [],
+                expectedRemoteAuthorityAlgorithm: .ed25519,
+                activeConnectionCodeSessionID: nil
+            )
+        )
+        XCTAssertFalse(
+            CrossNetworkConnectionManager.shouldUseClassicAuthorityBootstrapForInitialWebRTCHandshake(
+                sessionID: "pqc-session",
+                authorityBoundBootstrapSessionIds: [],
+                expectedRemoteAuthorityAlgorithm: .mlDSA65,
+                activeConnectionCodeSessionID: nil
+            )
+        )
+    }
+
     func testInitialWebRTCHandshakePeerResolutionPrefersConcreteRemoteDeviceId() {
         let resolution = CrossNetworkConnectionManager.initialWebRTCHandshakePeerResolution(
             expectedRemoteDeviceId: nil,

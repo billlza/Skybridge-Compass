@@ -113,7 +113,11 @@ final class ConnectionCodeFormatTests: XCTestCase {
             "The local connection-code offerer must use classic authority bootstrap even when trusted KEM material is available."
         )
         XCTAssertTrue(
-            source.contains("currentPathExpectedRemoteAuthorityBySessionId[sessionId]?.protocolSigningAlgorithm == .ed25519"),
+            source.contains("authorityBoundWebRTCBootstrapSessionIds.insert(lease.sessionID)"),
+            "iOS connection-code and connect-link offerer sessions must be marked as authority-bound for identity-pinned bootstrap."
+        )
+        XCTAssertTrue(
+            source.contains("expectedRemoteAuthorityAlgorithm"),
             "The connection-code joiner must honor the Ed25519 authority fingerprint returned by lookup instead of switching to a PQC identity key."
         )
         XCTAssertTrue(
