@@ -784,7 +784,11 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
            shouldEmitTransportChunks,
            !didLogAudioCompressionFallback {
             didLogAudioCompressionFallback = true
-            logger.warning("⚠️ 系统音频 AAC 编码失败，已回退为 PCM 传输")
+            logger.warning("⚠️ 系统音频 AAC 编码失败，已丢弃该音频块以保护远控视频帧率")
+        }
+
+        if requestedAudioEncoding == .aacLC {
+            return
         }
 
         let pcmChunk = nativePCMChunk ?? makePCM16AudioChunk(from: outputBuffer, sequenceNumber: nextSequenceNumber)

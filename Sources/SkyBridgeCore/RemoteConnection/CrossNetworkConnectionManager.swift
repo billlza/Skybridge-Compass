@@ -333,6 +333,8 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     private var activeSessionReconnectTimeoutTask: Task<Void, Never>?
     private var activeConnectionCodeLeaseMode: ConnectionCodeLeaseMode?
     private var activeConnectionCodeSessionID: String?
+    private var activeConnectionCodeAuthorityDeviceId: String?
+    private var activeConnectionCodeAuthorityFingerprint: String?
     private var connectionCodeExpiryTask: Task<Void, Never>?
 
     private struct SessionSnapshotMetadata: Sendable {
@@ -1719,6 +1721,8 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         connectionCodeExpiresAt = nil
         activeConnectionCodeLeaseMode = nil
         activeConnectionCodeSessionID = nil
+        activeConnectionCodeAuthorityDeviceId = nil
+        activeConnectionCodeAuthorityFingerprint = nil
         connectionCodeExpiryTask?.cancel()
         connectionCodeExpiryTask = nil
         qrCodeData = nil
@@ -1769,6 +1773,15 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             protocolSigningAlgorithm: algorithm,
             protocolPublicKeyBytes: publicKey
         )
+    }
+
+    private func activeConnectionCodeMatchesCurrentAuthority(_ binding: ProtocolIdentityBinding) -> Bool {
+        guard let activeConnectionCodeAuthorityDeviceId,
+              let activeConnectionCodeAuthorityFingerprint else {
+            return false
+        }
+        return activeConnectionCodeAuthorityDeviceId == binding.deviceId
+            && activeConnectionCodeAuthorityFingerprint == binding.protocolPublicKeyFingerprint
     }
 
     private func validateCurrentPathOrigin(_ rawOrigin: String) throws -> String {
@@ -2115,22 +2128,28 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     public func generateConnectionCode() async throws -> String {
         logger.info("生成智能连接码")
         let requestedLeaseMode = connectionCodeLeaseMode
+        let localBinding = try await currentPathLocalBinding()
+        let canReuseCurrentAuthority = activeConnectionCodeMatchesCurrentAuthority(localBinding)
         if let existing = connectionCode,
            activeConnectionCodeLeaseMode == requestedLeaseMode,
            case .waiting(let activeCode) = connectionStatus,
            activeCode == existing,
-           Self.isReusableConnectionCodeLease(expiresAt: connectionCodeExpiresAt) {
+           Self.isReusableConnectionCodeLease(expiresAt: connectionCodeExpiresAt),
+           canReuseCurrentAuthority {
             return existing
         }
         if let existing = connectionCode,
            activeConnectionCodeLeaseMode == requestedLeaseMode,
            case .waiting(let activeCode) = connectionStatus,
            activeCode == existing {
-            logger.info("ℹ️ 本地连接码租约已过期或不可复用，重新向信令服务注册: reason=connection_code_lease_not_reusable code=\(existing, privacy: .public)")
+            let reason = canReuseCurrentAuthority ? "connection_code_lease_not_reusable" : "connection_code_authority_changed"
+            logger.info("ℹ️ 本地连接码不可复用，重新向信令服务注册: reason=\(reason, privacy: .public) code=\(existing, privacy: .public)")
             connectionCode = nil
             connectionCodeExpiresAt = nil
             activeConnectionCodeLeaseMode = nil
             activeConnectionCodeSessionID = nil
+            activeConnectionCodeAuthorityDeviceId = nil
+            activeConnectionCodeAuthorityFingerprint = nil
             connectionCodeExpiryTask?.cancel()
             connectionCodeExpiryTask = nil
         }
@@ -2142,7 +2161,6 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         readiness = .idle
 
         do {
-            let localBinding = try await currentPathLocalBinding()
             let admissionLease = try await requestAdmissionLease(for: localBinding)
             let lease = try await signalServer.registerConnectionCode(
                 admissionToken: admissionLease.token,
@@ -2159,6 +2177,8 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             self.connectionCodeExpiresAt = Date().addingTimeInterval(lease.expiresIn)
             self.activeConnectionCodeLeaseMode = requestedLeaseMode
             self.activeConnectionCodeSessionID = lease.sessionID
+            self.activeConnectionCodeAuthorityDeviceId = localBinding.deviceId
+            self.activeConnectionCodeAuthorityFingerprint = localBinding.protocolPublicKeyFingerprint
             self.connectionStatus = .waiting(code: code)
             self.readiness = .idle
             if let expiresAt = self.connectionCodeExpiresAt {
@@ -2382,6 +2402,8 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 self.connectionCodeExpiresAt = nil
                 self.activeConnectionCodeLeaseMode = nil
                 self.activeConnectionCodeSessionID = nil
+                self.activeConnectionCodeAuthorityDeviceId = nil
+                self.activeConnectionCodeAuthorityFingerprint = nil
                 self.connectionCodeExpiryTask = nil
                 if case .waiting(let waitingCode) = self.connectionStatus, waitingCode == code {
                     self.connectionStatus = .idle
@@ -3571,8 +3593,13 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     guard let trustLookupPeerId else { return }
 
                     let hasTrustedPeerKEM = !trustedPeerKEMKeys.isEmpty
+                    let useClassicAuthorityBootstrap =
+                        activeConnectionCodeSessionID == sessionID
+                        || currentPathExpectedRemoteAuthorityBySessionId[sessionID]?.protocolSigningAlgorithm == .ed25519
                     let selection: CryptoProviderFactory.SelectionPolicy
-                    if !hasTrustedPeerKEM {
+                    if useClassicAuthorityBootstrap {
+                        selection = .classicOnly
+                    } else if !hasTrustedPeerKEM {
                         if strictPQCRequested {
                             throw NSError(
                                 domain: "CrossNetworkConnectionManager",
@@ -3625,7 +3652,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     handshakeState.driver = outboundDriver
 
                     logger.info(
-                        "🤝 WebRTC 初始出站握手启动: session=\(sessionID, privacy: .public) peer=\(trustLookupPeerId, privacy: .public) policy=\(selection.rawValue, privacy: .public) trustedKEM=\(hasTrustedPeerKEM, privacy: .public)"
+                        "🤝 WebRTC 初始出站握手启动: session=\(sessionID, privacy: .public) peer=\(trustLookupPeerId, privacy: .public) policy=\(selection.rawValue, privacy: .public) trustedKEM=\(hasTrustedPeerKEM, privacy: .public) authorityBootstrap=\(useClassicAuthorityBootstrap, privacy: .public)"
                     )
                     let keys = try await outboundDriver.initiateHandshake(
                         with: PeerIdentifier(deviceId: trustLookupPeerId)

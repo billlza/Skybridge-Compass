@@ -1378,6 +1378,8 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     private var idleConnectionReminderTask: Task<Void, Never>?
     private var activeConnectionCodeLeaseMode: ConnectionCodeLeaseMode?
     private var localConnectionSessionId: String?
+    private var activeConnectionCodeAuthorityDeviceId: String?
+    private var activeConnectionCodeAuthorityFingerprint: String?
     private var activeSessionReconnectTimeoutTask: Task<Void, Never>?
     private var webrtcSignalingAuthTokenBySessionId: [String: String] = [:]
     private var webrtcTurnAdmissionTokenBySessionId: [String: String] = [:]
@@ -1712,6 +1714,15 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         return Date().timeIntervalSince(pending.verifiedAt) <= maxAge
     }
 
+    private func activeConnectionCodeMatchesCurrentAuthority(_ binding: ProtocolIdentityBindingCompat) -> Bool {
+        guard let activeConnectionCodeAuthorityDeviceId,
+              let activeConnectionCodeAuthorityFingerprint else {
+            return false
+        }
+        return activeConnectionCodeAuthorityDeviceId == binding.deviceId
+            && activeConnectionCodeAuthorityFingerprint == binding.protocolPublicKeyFingerprint
+    }
+
     private func enforceCurrentPathTrustBinding(
         deviceId: String,
         protocolPublicKeyFingerprint: String,
@@ -1873,38 +1884,46 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         disarmIdleConnectionReminder(clearPrompt: true)
         let requestedLeaseMode = connectionCodeLeaseMode
 
-        if let existing = localConnectionCode,
-           activeConnectionCodeLeaseMode == requestedLeaseMode,
-           currentRole == .offerer,
-           case .connecting(let sid) = state, sid == (localConnectionSessionId ?? existing),
-           Self.isReusableConnectionCodeLease(expiresAt: localConnectionCodeExpiresAt) {
-            return existing
-        }
-        if let existing = localConnectionCode,
-           activeConnectionCodeLeaseMode == requestedLeaseMode,
-           currentRole == .offerer,
-           case .connected(let sid) = state, sid == (localConnectionSessionId ?? existing),
-           Self.isReusableConnectionCodeLease(expiresAt: localConnectionCodeExpiresAt) {
-            return existing
-        }
         do {
+            let localBinding = try await currentPathLocalBinding()
+            let canReuseCurrentAuthority = activeConnectionCodeMatchesCurrentAuthority(localBinding)
             if let existing = localConnectionCode,
                activeConnectionCodeLeaseMode == requestedLeaseMode,
                currentRole == .offerer,
-               !Self.isReusableConnectionCodeLease(expiresAt: localConnectionCodeExpiresAt) {
-                SkyBridgeLogger.shared.info("ℹ️ 本地连接码租约已过期或不可复用，重新向信令服务注册: reason=connection_code_lease_not_reusable code=\(existing)")
+               case .connecting(let sid) = state, sid == (localConnectionSessionId ?? existing),
+               Self.isReusableConnectionCodeLease(expiresAt: localConnectionCodeExpiresAt),
+               canReuseCurrentAuthority {
+                return existing
+            }
+            if let existing = localConnectionCode,
+               activeConnectionCodeLeaseMode == requestedLeaseMode,
+               currentRole == .offerer,
+               case .connected(let sid) = state, sid == (localConnectionSessionId ?? existing),
+               Self.isReusableConnectionCodeLease(expiresAt: localConnectionCodeExpiresAt),
+               canReuseCurrentAuthority {
+                return existing
+            }
+            if let existing = localConnectionCode,
+               activeConnectionCodeLeaseMode == requestedLeaseMode,
+               currentRole == .offerer,
+               (!Self.isReusableConnectionCodeLease(expiresAt: localConnectionCodeExpiresAt) || !canReuseCurrentAuthority) {
+                let reason = canReuseCurrentAuthority ? "connection_code_lease_not_reusable" : "connection_code_authority_changed"
+                SkyBridgeLogger.shared.info("ℹ️ 本地连接码不可复用，重新向信令服务注册: reason=\(reason) code=\(existing)")
                 localConnectionCode = nil
                 localConnectionCodeExpiresAt = nil
                 activeConnectionCodeLeaseMode = nil
+                activeConnectionCodeAuthorityDeviceId = nil
+                activeConnectionCodeAuthorityFingerprint = nil
                 connectionCodeExpiryTask?.cancel()
                 connectionCodeExpiryTask = nil
+                connectionCodeBootstrapTask?.cancel()
+                connectionCodeBootstrapTask = nil
             }
             if localConnectionCode != nil,
                currentRole == .offerer,
                activeConnectionCodeLeaseMode != requestedLeaseMode {
                 await disconnect()
             }
-            let localBinding = try await currentPathLocalBinding()
             let admission = try await requestAdmissionLease(for: localBinding)
             #if canImport(UIKit)
             let localDeviceName = UIDevice.current.name
@@ -1924,6 +1943,8 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             localConnectionCodeExpiresAt = Date().addingTimeInterval(lease.expiresIn)
             activeConnectionCodeLeaseMode = requestedLeaseMode
             localConnectionSessionId = lease.sessionID
+            activeConnectionCodeAuthorityDeviceId = localBinding.deviceId
+            activeConnectionCodeAuthorityFingerprint = localBinding.protocolPublicKeyFingerprint
             currentRole = .offerer
             state = .connecting(sessionId: lease.sessionID)
             readiness = .idle
@@ -2002,6 +2023,8 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             self.localConnectionCode = nil
             self.localConnectionCodeExpiresAt = nil
             self.activeConnectionCodeLeaseMode = nil
+            self.activeConnectionCodeAuthorityDeviceId = nil
+            self.activeConnectionCodeAuthorityFingerprint = nil
         }
     }
 
@@ -2139,6 +2162,8 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         localConnectionCode = nil
         localConnectionCodeExpiresAt = nil
         activeConnectionCodeLeaseMode = nil
+        activeConnectionCodeAuthorityDeviceId = nil
+        activeConnectionCodeAuthorityFingerprint = nil
         currentConnectLink = nil
         localConnectionSessionId = nil
         currentRole = nil
@@ -4128,6 +4153,8 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         if role != .offerer {
             localConnectionCode = nil
             localConnectionSessionId = nil
+            activeConnectionCodeAuthorityDeviceId = nil
+            activeConnectionCodeAuthorityFingerprint = nil
         }
         
         // 1) WebSocket signaling
@@ -5219,8 +5246,13 @@ private extension CrossNetworkWebRTCManager {
                 break
             }
             let hasTrustedPeerKEMKey = !trustedPeerKEMKeys.isEmpty
+            let useClassicAuthorityBootstrap =
+                localConnectionSessionId == sessionId
+                || currentPathExpectedRemoteAuthorityBySessionId[sessionId]?.protocolSigningAlgorithm == .ed25519
             let selection: CryptoProviderFactory.SelectionPolicy
-            if !hasTrustedPeerKEMKey {
+            if useClassicAuthorityBootstrap {
+                selection = .classicOnly
+            } else if !hasTrustedPeerKEMKey {
                 if strictPQCRequested {
                     let message =
                         "严格 PQC 已启用，但跨网对端缺少已信任的 KEM 公钥；当前已拒绝 classic bootstrap。peer=\(peerDeviceId)"
@@ -5253,7 +5285,7 @@ private extension CrossNetworkWebRTCManager {
             SkyBridgeLogger.shared.info(
                 "🤝 WebRTC handshake bootstrap: session=\(sessionId), policy=\(selection.rawValue), " +
                 "compatMode=\(compatibilityModeEnabled), hasApplePQC=\(capability.hasApplePQC), hasLiboqs=\(capability.hasLiboqs), " +
-                "peer=\(peerDeviceId), trustedKEM=\(hasTrustedPeerKEMKey), trustPeer=\(trustLookupPeerId)"
+                "peer=\(peerDeviceId), trustedKEM=\(hasTrustedPeerKEMKey), trustPeer=\(trustLookupPeerId), authorityBootstrap=\(useClassicAuthorityBootstrap)"
             )
             let transport = makeHandshakeTransport(over: session)
             let currentPathTrustProvider = CurrentPathHandshakeTrustProviderCompat(

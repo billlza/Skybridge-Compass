@@ -93,7 +93,8 @@ struct ScreenData: Codable, Sendable {
     private var lastSyncRefreshRequestAt: Date = .distantPast
     private var lastAudioDropLogAt: Date = .distantPast
     private var syncRecoveryTask: Task<Void, Never>?
-    private let maxQueuedAudioPayloads = 8
+    private let maxQueuedAudioPayloads = 3
+    private let maxAudioVideoFrameGap: TimeInterval = 0.08
 
     init(peerId: String, connection: NWConnection, maxFramedMessageBytes: Int) {
         self.peerId = peerId
@@ -145,6 +146,10 @@ struct ScreenData: Codable, Sendable {
 
     func submitAudioPayload(_ plaintext: Data) async {
         guard !closed, streamingEnabled else { return }
+        guard canSendAudioWithoutCompetingWithVideo else {
+            logAudioDropIfNeeded(droppedCount: 1, reason: "video-priority")
+            return
+        }
         guard plaintext.count <= maxFramedMessageBytes else {
             Logger(subsystem: "com.skybridge.compass", category: "RemoteControl")
                 .warning(
@@ -156,7 +161,7 @@ struct ScreenData: Codable, Sendable {
         if audioPayloadQueue.count > maxQueuedAudioPayloads {
             let overflow = audioPayloadQueue.count - maxQueuedAudioPayloads
             audioPayloadQueue.removeFirst(overflow)
-            logAudioDropIfNeeded(droppedCount: overflow)
+            logAudioDropIfNeeded(droppedCount: overflow, reason: "queue-overflow")
         }
         scheduleAudioDrainIfNeeded()
     }
@@ -265,6 +270,12 @@ struct ScreenData: Codable, Sendable {
               !closed,
               streamingEnabled,
               !audioPayloadQueue.isEmpty {
+            guard canSendAudioWithoutCompetingWithVideo else {
+                let dropped = audioPayloadQueue.count
+                audioPayloadQueue.removeAll(keepingCapacity: true)
+                logAudioDropIfNeeded(droppedCount: dropped, reason: "video-backlog")
+                break
+            }
             let payload = audioPayloadQueue.removeFirst()
             do {
                 try await sendRemoteFrame(payload)
@@ -279,13 +290,21 @@ struct ScreenData: Codable, Sendable {
         }
     }
 
-    private func logAudioDropIfNeeded(droppedCount: Int) {
+    private var canSendAudioWithoutCompetingWithVideo: Bool {
+        !sending
+            && !frameQueue.waitingForSyncFrame
+            && frameQueue.pendingFrames.isEmpty
+            && Date().timeIntervalSince(lastSentFrameAt) <= maxAudioVideoFrameGap
+    }
+
+    private func logAudioDropIfNeeded(droppedCount: Int, reason: String) {
+        guard droppedCount > 0 else { return }
         let now = Date()
         guard now.timeIntervalSince(lastAudioDropLogAt) >= 2 else { return }
         lastAudioDropLogAt = now
         Logger(subsystem: "com.skybridge.compass", category: "RemoteControl")
             .debug(
-                "ℹ️ 远控音频发送队列已丢弃旧块: peer=\(self.peerId, privacy: .public) dropped=\(droppedCount, privacy: .public)"
+                "ℹ️ 远控音频发送已让路给视频: peer=\(self.peerId, privacy: .public) dropped=\(droppedCount, privacy: .public) reason=\(reason, privacy: .public)"
             )
     }
 

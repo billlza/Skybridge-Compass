@@ -55,8 +55,8 @@ final class ConnectionCodeFormatTests: XCTestCase {
             "A displayed code should be removed before its server lease becomes non-reusable, avoiding stale UI codes that lookup as found=false."
         )
         XCTAssertTrue(
-            source.contains("本地连接码租约已过期或不可复用"),
-            "Regenerating an expired displayed code should clean up the stale local offerer state."
+            source.contains("本地连接码不可复用"),
+            "Regenerating an expired or authority-stale displayed code should clean up the stale local offerer state."
         )
         XCTAssertTrue(
             source.contains("connection_code_lease_not_reusable"),
@@ -95,6 +95,30 @@ final class ConnectionCodeFormatTests: XCTestCase {
         XCTAssertTrue(
             source.contains("? .verifiedQRCode\n                : .verifiedConnectionCode"),
             "Connection-code lookup is itself a user-mediated fresh authority proof and must not fall back to unauthenticated rebind handling."
+        )
+        XCTAssertTrue(
+            source.contains("activeConnectionCodeMatchesCurrentAuthority(localBinding)"),
+            "A long-lived connection code must be regenerated when the local authoritative key changes."
+        )
+        XCTAssertTrue(
+            source.contains("connection_code_authority_changed"),
+            "Stale connection-code regeneration should leave a stable post-release log reason."
+        )
+        XCTAssertTrue(
+            source.contains("let useClassicAuthorityBootstrap ="),
+            "Connection-code WebRTC bootstrap must explicitly bind the initial handshake policy to the advertised authority identity."
+        )
+        XCTAssertTrue(
+            source.contains("localConnectionSessionId == sessionId"),
+            "The local connection-code offerer must use classic authority bootstrap even when trusted KEM material is available."
+        )
+        XCTAssertTrue(
+            source.contains("currentPathExpectedRemoteAuthorityBySessionId[sessionId]?.protocolSigningAlgorithm == .ed25519"),
+            "The connection-code joiner must honor the Ed25519 authority fingerprint returned by lookup instead of switching to a PQC identity key."
+        )
+        XCTAssertTrue(
+            source.contains("authorityBootstrap=\\(useClassicAuthorityBootstrap)"),
+            "Release logs must expose whether identityMismatch prevention used authority-bound bootstrap."
         )
         XCTAssertTrue(
             source.contains("shouldAllowAuthenticatedConnectionCodeRebind"),

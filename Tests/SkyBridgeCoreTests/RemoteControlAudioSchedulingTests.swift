@@ -30,6 +30,22 @@ final class RemoteControlAudioSchedulingTests: XCTestCase {
             "Stopping or restarting remote control should cancel in-flight audio drain work."
         )
         XCTAssertTrue(
+            source.contains("private let maxQueuedAudioPayloads = 3"),
+            "P2P audio must keep only a tiny live queue because it shares the LAN remote-control connection with video frames."
+        )
+        XCTAssertTrue(
+            source.contains("private let maxAudioVideoFrameGap: TimeInterval = 0.08"),
+            "Audio should be suppressed when video is already below an acceptable live cadence."
+        )
+        XCTAssertTrue(
+            source.contains("guard canSendAudioWithoutCompetingWithVideo else"),
+            "Audio should be dropped whenever the video sender has backlog or an in-flight frame send."
+        )
+        XCTAssertTrue(
+            source.contains("Date().timeIntervalSince(lastSentFrameAt) <= maxAudioVideoFrameGap"),
+            "The video-priority gate must stop audio if video cadence has already collapsed."
+        )
+        XCTAssertTrue(
             source.contains("Task.detached(priority: .utility) {\n                    await outboundFramePump.submitAudioPayload(wirePayload)\n                }"),
             "Captured audio chunks should enter the outbound pump at utility priority so they cannot preempt screen-frame work."
         )
@@ -100,6 +116,28 @@ final class RemoteControlAudioSchedulingTests: XCTestCase {
         XCTAssertFalse(
             source.contains("Task.detached(priority: .userInitiated) { [weak self, decodeWorker, chunk, generation] in"),
             "Audio decoding must not run at userInitiated priority while the screen pipeline is active."
+        )
+    }
+
+    func testP2PAudioDoesNotFallbackToPCMWhenAACEncodingFails() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let sourceURL = root.appendingPathComponent("Sources/SkyBridgeCore/RemoteControl/ScreenCaptureKitStreamer.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+
+        XCTAssertTrue(
+            source.contains("系统音频 AAC 编码失败，已丢弃该音频块以保护远控视频帧率"),
+            "If AAC encoding fails, remote-control audio should be dropped instead of falling back to high-bitrate PCM on the shared P2P pipe."
+        )
+        XCTAssertTrue(
+            source.contains("if requestedAudioEncoding == .aacLC {\n            return\n        }"),
+            "AAC-requested transport must not continue into PCM fallback after compression failure."
+        )
+        XCTAssertFalse(
+            source.contains("系统音频 AAC 编码失败，已回退为 PCM 传输"),
+            "PCM fallback can flood the shared P2P connection and collapse video frame rate."
         )
     }
 }

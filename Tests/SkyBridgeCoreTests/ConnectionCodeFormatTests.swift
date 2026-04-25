@@ -90,6 +90,30 @@ final class ConnectionCodeFormatTests: XCTestCase {
             "Connection-code lookup should be treated as a fresh authenticated authority proof after admission and lookup succeed."
         )
         XCTAssertTrue(
+            source.contains("activeConnectionCodeMatchesCurrentAuthority(localBinding)"),
+            "A 24-hour connection code must not be reused after the local authoritative key rotates."
+        )
+        XCTAssertTrue(
+            source.contains("connection_code_authority_changed"),
+            "Stale connection codes should log a stable reason when they are regenerated after key rotation."
+        )
+        XCTAssertTrue(
+            source.contains("let useClassicAuthorityBootstrap ="),
+            "Connection-code WebRTC bootstrap must explicitly bind the initial handshake policy to the advertised authority identity."
+        )
+        XCTAssertTrue(
+            source.contains("activeConnectionCodeSessionID == sessionID"),
+            "The local connection-code offerer must use classic authority bootstrap even when trusted KEM material is available."
+        )
+        XCTAssertTrue(
+            source.contains("currentPathExpectedRemoteAuthorityBySessionId[sessionID]?.protocolSigningAlgorithm == .ed25519"),
+            "The connection-code joiner must honor the Ed25519 authority fingerprint returned by lookup instead of switching to a PQC identity key."
+        )
+        XCTAssertTrue(
+            source.contains("authorityBootstrap=\\(useClassicAuthorityBootstrap"),
+            "Release logs must expose whether identityMismatch prevention used authority-bound bootstrap."
+        )
+        XCTAssertTrue(
             source.contains("shouldAllowAuthenticatedConnectionCodeRebind"),
             "Connection-code rebinds need a dedicated policy instead of borrowing QR behavior."
         )
