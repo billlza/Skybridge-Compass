@@ -20,4 +20,25 @@ struct WebRTCSessionSDPConstraintTests {
             ) == "false"
         )
     }
+
+    @Test("原生 WebRTC 音频发送轨默认关闭，避免无接收端时抢占音频会话")
+    func testNativeOutgoingAudioTrackDefaultsOff() {
+        #expect(
+            WebRTCSession.nativeOutgoingAudioTrackPreference(environment: [:]) == false
+        )
+    }
+
+    @Test("原生 WebRTC 音频发送轨仅允许显式环境开关打开")
+    func testNativeOutgoingAudioTrackCanBeExplicitlyEnabled() {
+        #expect(
+            WebRTCSession.nativeOutgoingAudioTrackPreference(
+                environment: ["SKYBRIDGE_ENABLE_WEBRTC_NATIVE_AUDIO_TRACK": "1"]
+            ) == true
+        )
+        #expect(
+            WebRTCSession.nativeOutgoingAudioTrackPreference(
+                environment: ["SKYBRIDGE_ENABLE_WEBRTC_NATIVE_AUDIO_TRACK": "0"]
+            ) == false
+        )
+    }
 }

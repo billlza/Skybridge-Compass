@@ -26,6 +26,114 @@ private final class WebRTCHandshakeLoopState {
 }
 
 @available(macOS 14.0, iOS 17.0, *)
+private actor WebRTCAudioFallbackSender {
+    private let logger = Logger(subsystem: "com.skybridge.connection", category: "WebRTCAudioFallback")
+    private let sessionID: String
+    private let session: WebRTCSession
+    private let keys: SessionKeys
+    private let maxBufferedAmountBytes: UInt64
+    private var pendingPayloads: [Data] = []
+    private var isSending = false
+    private var isClosed = false
+    private var generation: UInt64 = 0
+    private var drainTask: Task<Void, Never>?
+    private var lastDropLogAt: Date = .distantPast
+    private let maxQueuedPayloads = 6
+
+    init(
+        sessionID: String,
+        session: WebRTCSession,
+        keys: SessionKeys,
+        maxBufferedAmountBytes: UInt64
+    ) {
+        self.sessionID = sessionID
+        self.session = session
+        self.keys = keys
+        self.maxBufferedAmountBytes = maxBufferedAmountBytes
+    }
+
+    func submit(_ plaintext: Data) {
+        guard !isClosed else { return }
+        pendingPayloads.append(plaintext)
+        if pendingPayloads.count > maxQueuedPayloads {
+            let overflow = pendingPayloads.count - maxQueuedPayloads
+            pendingPayloads.removeFirst(overflow)
+            logDropIfNeeded(droppedCount: overflow)
+        }
+        scheduleDrainIfNeeded()
+    }
+
+    func close() {
+        isClosed = true
+        generation &+= 1
+        drainTask?.cancel()
+        drainTask = nil
+        pendingPayloads.removeAll(keepingCapacity: false)
+        isSending = false
+    }
+
+    private func scheduleDrainIfNeeded() {
+        guard !isSending, !pendingPayloads.isEmpty else { return }
+        isSending = true
+        let generation = generation
+        drainTask = Task(priority: .utility) { [weak self] in
+            guard let self else { return }
+            await self.drain(generation: generation)
+        }
+    }
+
+    private func drain(generation: UInt64) async {
+        defer {
+            if self.generation == generation {
+                isSending = false
+                drainTask = nil
+                if !isClosed, !pendingPayloads.isEmpty {
+                    scheduleDrainIfNeeded()
+                }
+            }
+        }
+        while !Task.isCancelled,
+              self.generation == generation,
+              !isClosed,
+              !pendingPayloads.isEmpty {
+            let plaintext = pendingPayloads.removeFirst()
+            do {
+                let ciphertext = try encrypt(plaintext, with: keys)
+                let padded = TrafficPadding.wrapIfEnabled(ciphertext, label: "tx/webrtc-audio")
+                guard self.generation == generation else { break }
+                try await session.sendFramedPayloadAsync(
+                    padded,
+                    maxChunkBytes: 8 * 1024,
+                    maxBufferedAmountBytes: maxBufferedAmountBytes,
+                    pollInterval: .milliseconds(20),
+                    drainTimeout: .milliseconds(250)
+                )
+                guard self.generation == generation else { break }
+            } catch {
+                logger.debug(
+                    "ℹ️ WebRTC 远控音频块后台发送失败: session=\(self.sessionID, privacy: .public) err=\(error.localizedDescription, privacy: .public)"
+                )
+            }
+        }
+    }
+
+    private func encrypt(_ plaintext: Data, with keys: SessionKeys) throws -> Data {
+        let key = SymmetricKey(data: keys.sendKey)
+        let sealed = try AES.GCM.seal(plaintext, using: key)
+        return sealed.combined ?? Data()
+    }
+
+    private func logDropIfNeeded(droppedCount: Int) {
+        let now = Date()
+        guard now.timeIntervalSince(lastDropLogAt) >= 2 else { return }
+        lastDropLogAt = now
+        logger.debug(
+            "ℹ️ WebRTC 远控音频后台队列已丢弃旧块: session=\(self.sessionID, privacy: .public) dropped=\(droppedCount, privacy: .public)"
+        )
+    }
+}
+
+@available(macOS 14.0, iOS 17.0, *)
 struct WebRTCEncodedScreenFrame: Sendable, Equatable {
     let width: Int
     let height: Int
@@ -779,6 +887,21 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     ) -> Bool {
         guard let remoteStreamConfiguration else { return false }
         return !remoteStreamConfiguration.isStopRequest
+    }
+
+    static func shouldUseWebRTCAudioFallback(
+        audioRedirectionEnabled: Bool,
+        nativeAudioTrackEnabled: Bool
+    ) -> Bool {
+        audioRedirectionEnabled && !nativeAudioTrackEnabled
+    }
+
+    static func shouldUseWebRTCNativeAudio(
+        audioRedirectionEnabled: Bool,
+        remoteNativeAudioTrackEnabled: Bool,
+        localNativeAudioTrackReady: Bool
+    ) -> Bool {
+        audioRedirectionEnabled && remoteNativeAudioTrackEnabled && localNativeAudioTrackReady
     }
 
     private func consumePendingWebRTCStreamRefresh(for sessionID: String) -> Bool {
@@ -4239,6 +4362,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     }
                 }
                 var directCaptureStreamer: ScreenCaptureKitStreamer?
+                var directAudioFallbackSender: WebRTCAudioFallbackSender?
                 var lastHardwareFrameAt = Date.distantPast
                 var lastDirectEncoderStartAt = Date.distantPast
                 let nativeWarmupProbeMinInterval: TimeInterval = 1.0 / 15.0
@@ -4308,12 +4432,16 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     let preferredAudioEncoding = RemoteDesktopAudioChunkPayload.Encoding(
                         rawValue: self.webrtcRemoteStreamConfigurationBySessionId[sessionID]?.preferredAudioEncoding ?? ""
                     ) ?? .pcmS16LE
-                    let shouldUseNativeAudioTrack = audioRedirectionEnabled && nativeAudioTrackEnabled
-                    // Keep the encrypted DataChannel audio path alive as a warm backup.
-                    // Viewers that successfully receive native audio can drop fallback
-                    // chunks after the first native packet; mis-advertised native support
-                    // must not turn audio into a total black hole.
-                    let shouldUseFallbackAudioChunks = audioRedirectionEnabled
+                    let localNativeAudioTrackReady = session.supportsNativeSystemAudioTrack
+                    let shouldUseNativeAudioTrack = Self.shouldUseWebRTCNativeAudio(
+                        audioRedirectionEnabled: audioRedirectionEnabled,
+                        remoteNativeAudioTrackEnabled: nativeAudioTrackEnabled,
+                        localNativeAudioTrackReady: localNativeAudioTrackReady
+                    )
+                    let shouldUseFallbackAudioChunks = Self.shouldUseWebRTCAudioFallback(
+                        audioRedirectionEnabled: audioRedirectionEnabled,
+                        nativeAudioTrackEnabled: shouldUseNativeAudioTrack
+                    )
                     let nativeVideoWarmBackupEnabled =
                         nativeVideoTrackEnabled && !nativeVideoTrackReady
                     guard videoPolicy.usesHardwareEncoder || nativeVideoTrackEnabled else {
@@ -4331,6 +4459,8 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                         lastAudioRedirectionEnabled = nil
                         lastDirectEncoderStartAt = .distantPast
                         session.setOutgoingSystemAudioTrackEnabled(false)
+                        await directAudioFallbackSender?.close()
+                        directAudioFallbackSender = nil
                         return false
                     }
 
@@ -4346,6 +4476,8 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 
                     directCaptureStreamer?.stop()
                     directCaptureStreamer = nil
+                    await directAudioFallbackSender?.close()
+                    directAudioFallbackSender = nil
                     encodedFrameStore.clear()
                     lastNativeVideoWarmBackupEnabled = nativeVideoWarmBackupEnabled
                     lastNativeAudioTrackEnabled = nativeAudioTrackEnabled
@@ -4377,6 +4509,14 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                         ? min(videoPolicy.targetFrameRate, 24)
                         : videoPolicy.targetFrameRate
                     let audioControlBufferedAmountBytes = 96 * 1024
+                    if shouldUseFallbackAudioChunks {
+                        directAudioFallbackSender = WebRTCAudioFallbackSender(
+                            sessionID: sessionID,
+                            session: session,
+                            keys: keys,
+                            maxBufferedAmountBytes: UInt64(audioControlBufferedAmountBytes)
+                        )
+                    }
                     if nativeVideoTrackEnabled {
                         captureStreamer.onRawFrame = { pixelBuffer, presentationTimeStamp in
                             if nativeVideoWarmBackupEnabled {
@@ -4444,24 +4584,11 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                         captureStreamer.onCapturedPCM16AudioChunk = nil
                     }
                     if shouldUseFallbackAudioChunks {
-                        captureStreamer.onCapturedAudioChunk = { [weak self] chunk in
-                            guard let self else { return }
+                        captureStreamer.onCapturedAudioChunk = { [directAudioFallbackSender] chunk in
+                            guard let directAudioFallbackSender else { return }
                             let audioWire = RemoteDesktopAudioChunkWire.encode(chunk)
-                            Task { @MainActor [weak self] in
-                                guard let self else { return }
-                                do {
-                                    let ciphertext = try encryptAppPayload(audioWire, with: keys)
-                                    let padded = TrafficPadding.wrapIfEnabled(ciphertext, label: "tx/webrtc-audio")
-                                    try await session.sendFramedPayloadAsync(
-                                        padded,
-                                        maxChunkBytes: 8 * 1024,
-                                        maxBufferedAmountBytes: UInt64(audioControlBufferedAmountBytes)
-                                    )
-                                } catch {
-                                    self.logger.debug(
-                                        "ℹ️ WebRTC 远控音频块发送失败: session=\(sessionID, privacy: .public) err=\(error.localizedDescription, privacy: .public)"
-                                    )
-                                }
+                            Task(priority: .utility) {
+                                await directAudioFallbackSender.submit(audioWire)
                             }
                         }
                     } else {
@@ -4903,6 +5030,10 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                         break
                     }
                 }
+#if os(macOS)
+                await directAudioFallbackSender?.close()
+                directAudioFallbackSender = nil
+#endif
             }
         }
 

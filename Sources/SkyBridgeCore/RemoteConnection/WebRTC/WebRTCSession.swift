@@ -294,16 +294,9 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
 #endif
     }()
     private let prefersNativeOutgoingAudioTrack: Bool = {
-        if let raw = ProcessInfo.processInfo.environment["SKYBRIDGE_ENABLE_WEBRTC_NATIVE_AUDIO_TRACK"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-           !raw.isEmpty {
-            return raw == "1"
-        }
-#if os(macOS)
-        return true
-#else
-        return false
-#endif
+        WebRTCSession.nativeOutgoingAudioTrackPreference(
+            environment: ProcessInfo.processInfo.environment
+        )
     }()
     
     public init(sessionId: String, localDeviceId: String, role: Role, ice: ICEConfig) {
@@ -347,6 +340,15 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
 
     nonisolated static func callbackDispatchPlan(isOnStateQueue: Bool) -> CallbackDispatchPlan {
         isOnStateQueue ? .asyncOffStateQueue : .executeInline
+    }
+
+    nonisolated static func nativeOutgoingAudioTrackPreference(environment: [String: String]) -> Bool {
+        if let raw = environment["SKYBRIDGE_ENABLE_WEBRTC_NATIVE_AUDIO_TRACK"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !raw.isEmpty {
+            return raw == "1"
+        }
+        return false
     }
 
     nonisolated static func lifecycleGuardAllowsCallback(
@@ -1100,6 +1102,19 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
                 && localVideoTrack != nil
                 && localVideoSource != nil
                 && localVideoCapturer != nil
+        }
+#else
+        false
+#endif
+    }
+
+    public var supportsNativeSystemAudioTrack: Bool {
+#if canImport(WebRTC)
+        withState {
+            prefersNativeOutgoingAudioTrack
+                && localAudioTrack != nil
+                && localAudioSource != nil
+                && localAudioTransceiver != nil
         }
 #else
         false

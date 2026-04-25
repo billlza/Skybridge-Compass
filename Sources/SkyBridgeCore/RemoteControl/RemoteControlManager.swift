@@ -83,6 +83,9 @@ struct ScreenData: Codable, Sendable {
     private var audioPayloadQueue: [Data] = []
     private var latestDamageReport: RemoteDesktopDamageReport?
     private var sending = false
+    private var sendingAudio = false
+    private var audioDrainGeneration: UInt64 = 0
+    private var audioDrainTask: Task<Void, Never>?
     private var closed = false
     private var onNeedsSyncRefresh: (@Sendable () -> Void)?
     private var lastSentFrameAt: Date = .distantPast
@@ -115,6 +118,10 @@ struct ScreenData: Codable, Sendable {
             audioPayloadQueue.removeAll(keepingCapacity: true)
             latestDamageReport = nil
             waitingForSyncSince = nil
+            audioDrainGeneration &+= 1
+            audioDrainTask?.cancel()
+            audioDrainTask = nil
+            sendingAudio = false
             syncRecoveryTask?.cancel()
             syncRecoveryTask = nil
         }
@@ -151,7 +158,7 @@ struct ScreenData: Codable, Sendable {
             audioPayloadQueue.removeFirst(overflow)
             logAudioDropIfNeeded(droppedCount: overflow)
         }
-        await drainIfNeeded()
+        scheduleAudioDrainIfNeeded()
     }
 
     func setSyncRefreshHandler(_ handler: (@Sendable () -> Void)?) {
@@ -165,6 +172,10 @@ struct ScreenData: Codable, Sendable {
         latestDamageReport = nil
         onNeedsSyncRefresh = nil
         waitingForSyncSince = nil
+        audioDrainGeneration &+= 1
+        audioDrainTask?.cancel()
+        audioDrainTask = nil
+        sendingAudio = false
         syncRecoveryTask?.cancel()
         syncRecoveryTask = nil
     }
@@ -191,13 +202,7 @@ struct ScreenData: Codable, Sendable {
                 return
             }
 
-            guard let nextFrame = frameQueue.dequeue() else {
-                let didSendAudio = await drainQueuedAudioPayloads(limit: maxQueuedAudioPayloads)
-                if !didSendAudio {
-                    return
-                }
-                continue
-            }
+            guard let nextFrame = frameQueue.dequeue() else { return }
 
             do {
                 if damageTrackingEnabled,
@@ -224,7 +229,6 @@ struct ScreenData: Codable, Sendable {
                 try await sendRemoteFrame(payload)
                 lastSentFrameAt = Date()
                 updateSyncRecoveryState()
-                await drainQueuedAudioPayloads(limit: 1)
             } catch {
                 Logger(subsystem: "com.skybridge.compass", category: "RemoteControl")
                     .error(
@@ -235,17 +239,36 @@ struct ScreenData: Codable, Sendable {
         }
     }
 
-    @discardableResult
-    private func drainQueuedAudioPayloads(limit: Int) async -> Bool {
-        guard limit > 0 else { return false }
-        var sentAny = false
-        var sentCount = 0
-        while !closed, streamingEnabled, sentCount < limit, !audioPayloadQueue.isEmpty {
+    private func scheduleAudioDrainIfNeeded() {
+        guard !sendingAudio else { return }
+        guard !closed, streamingEnabled, !audioPayloadQueue.isEmpty else { return }
+        sendingAudio = true
+        let generation = audioDrainGeneration
+        audioDrainTask = Task(priority: .utility) { [weak self] in
+            guard let self else { return }
+            await self.drainQueuedAudioPayloads(generation: generation)
+        }
+    }
+
+    private func drainQueuedAudioPayloads(generation: UInt64) async {
+        defer {
+            if audioDrainGeneration == generation {
+                sendingAudio = false
+                audioDrainTask = nil
+                if !closed, streamingEnabled, !audioPayloadQueue.isEmpty {
+                    scheduleAudioDrainIfNeeded()
+                }
+            }
+        }
+        while !Task.isCancelled,
+              audioDrainGeneration == generation,
+              !closed,
+              streamingEnabled,
+              !audioPayloadQueue.isEmpty {
             let payload = audioPayloadQueue.removeFirst()
             do {
                 try await sendRemoteFrame(payload)
-                sentAny = true
-                sentCount += 1
+                guard audioDrainGeneration == generation else { break }
             } catch {
                 Logger(subsystem: "com.skybridge.compass", category: "RemoteControl")
                     .debug(
@@ -254,7 +277,6 @@ struct ScreenData: Codable, Sendable {
                 break
             }
         }
-        return sentAny
     }
 
     private func logAudioDropIfNeeded(droppedCount: Int) {

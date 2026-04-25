@@ -55,4 +55,51 @@ final class CrossNetworkWebRTCStreamStartPolicyTests: XCTestCase {
             )
         )
     }
+
+    @MainActor
+    func testWebRTCAudioFallbackIsDisabledWhenNativeAudioIsActive() {
+        XCTAssertTrue(
+            CrossNetworkConnectionManager.shouldUseWebRTCAudioFallback(
+                audioRedirectionEnabled: true,
+                nativeAudioTrackEnabled: false
+            )
+        )
+        XCTAssertFalse(
+            CrossNetworkConnectionManager.shouldUseWebRTCAudioFallback(
+                audioRedirectionEnabled: true,
+                nativeAudioTrackEnabled: true
+            )
+        )
+        XCTAssertFalse(
+            CrossNetworkConnectionManager.shouldUseWebRTCAudioFallback(
+                audioRedirectionEnabled: false,
+                nativeAudioTrackEnabled: false
+            )
+        )
+    }
+
+    @MainActor
+    func testWebRTCNativeAudioRequiresLocalTrackReadiness() {
+        XCTAssertFalse(
+            CrossNetworkConnectionManager.shouldUseWebRTCNativeAudio(
+                audioRedirectionEnabled: true,
+                remoteNativeAudioTrackEnabled: true,
+                localNativeAudioTrackReady: false
+            )
+        )
+        XCTAssertTrue(
+            CrossNetworkConnectionManager.shouldUseWebRTCNativeAudio(
+                audioRedirectionEnabled: true,
+                remoteNativeAudioTrackEnabled: true,
+                localNativeAudioTrackReady: true
+            )
+        )
+        XCTAssertFalse(
+            CrossNetworkConnectionManager.shouldUseWebRTCNativeAudio(
+                audioRedirectionEnabled: false,
+                remoteNativeAudioTrackEnabled: true,
+                localNativeAudioTrackReady: true
+            )
+        )
+    }
 }
