@@ -674,7 +674,8 @@ final class MacFilePreviewWindowPresenter {
             return
         }
 
-        let controller = MacFilePreviewWindowController(fileURL: standardizedURL) { [weak self] closedKey in
+        let controller = MacFilePreviewWindowController(fileURL: standardizedURL) { [weak self] closedKey, closedController in
+            guard self?.controllers[closedKey] === closedController else { return }
             self?.controllers[closedKey] = nil
         }
         controllers[key] = controller
@@ -698,10 +699,10 @@ private final class MacQuickLookPreviewItem: NSObject, QLPreviewItem {
 @MainActor
 private final class MacFilePreviewWindowController: NSWindowController, NSWindowDelegate {
     private let fileKey: String
-    private let previewView: QLPreviewView
-    private let onClose: (String) -> Void
+    private let onClose: (String, MacFilePreviewWindowController) -> Void
+    private var didScheduleClose = false
 
-    init(fileURL: URL, onClose: @escaping (String) -> Void) {
+    init(fileURL: URL, onClose: @escaping (String, MacFilePreviewWindowController) -> Void) {
         let contentSize = Self.initialContentSize(for: fileURL)
         let item = MacQuickLookPreviewItem(url: fileURL)
         guard let previewView = QLPreviewView(
@@ -733,7 +734,6 @@ private final class MacFilePreviewWindowController: NSWindowController, NSWindow
         window.center()
 
         self.fileKey = fileURL.path
-        self.previewView = previewView
         self.onClose = onClose
         super.init(window: window)
         window.delegate = self
@@ -745,8 +745,15 @@ private final class MacFilePreviewWindowController: NSWindowController, NSWindow
     }
 
     func windowWillClose(_ notification: Notification) {
-        previewView.close()
-        onClose(fileKey)
+        guard !didScheduleClose else { return }
+        didScheduleClose = true
+
+        let fileKey = fileKey
+        let onClose = onClose
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            onClose(fileKey, self)
+        }
     }
 
     private static func initialContentSize(for url: URL) -> NSSize {
