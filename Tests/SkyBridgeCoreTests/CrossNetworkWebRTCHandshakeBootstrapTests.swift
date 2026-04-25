@@ -115,4 +115,104 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
             )
         )
     }
+
+    func testRemoteJoinWakesAuthorityBoundOffererOnlyWhenSessionIsMissing() {
+        XCTAssertTrue(
+            CrossNetworkConnectionManager.shouldWakeOffererFromRemoteJoin(
+                hasLocalSession: false,
+                pendingOfferStart: false,
+                authorityBoundBootstrap: true,
+                hasSignalingToken: true
+            )
+        )
+        XCTAssertFalse(
+            CrossNetworkConnectionManager.shouldWakeOffererFromRemoteJoin(
+                hasLocalSession: true,
+                pendingOfferStart: false,
+                authorityBoundBootstrap: true,
+                hasSignalingToken: true
+            )
+        )
+        XCTAssertFalse(
+            CrossNetworkConnectionManager.shouldWakeOffererFromRemoteJoin(
+                hasLocalSession: false,
+                pendingOfferStart: true,
+                authorityBoundBootstrap: true,
+                hasSignalingToken: true
+            )
+        )
+        XCTAssertFalse(
+            CrossNetworkConnectionManager.shouldWakeOffererFromRemoteJoin(
+                hasLocalSession: false,
+                pendingOfferStart: false,
+                authorityBoundBootstrap: false,
+                hasSignalingToken: true
+            )
+        )
+        XCTAssertFalse(
+            CrossNetworkConnectionManager.shouldWakeOffererFromRemoteJoin(
+                hasLocalSession: false,
+                pendingOfferStart: false,
+                authorityBoundBootstrap: true,
+                hasSignalingToken: false
+            )
+        )
+    }
+
+    func testRemoteJoinRecoversMissingOfferCacheOnlyForAuthorityBoundOfferer() {
+        XCTAssertTrue(
+            CrossNetworkConnectionManager.shouldRecoverMissingOfferCacheFromRemoteJoin(
+                hasLocalSession: true,
+                isOfferer: true,
+                hasCachedOffer: false,
+                authorityBoundBootstrap: true,
+                hasSignalingToken: true
+            )
+        )
+        XCTAssertFalse(
+            CrossNetworkConnectionManager.shouldRecoverMissingOfferCacheFromRemoteJoin(
+                hasLocalSession: false,
+                isOfferer: true,
+                hasCachedOffer: false,
+                authorityBoundBootstrap: true,
+                hasSignalingToken: true
+            )
+        )
+        XCTAssertFalse(
+            CrossNetworkConnectionManager.shouldRecoverMissingOfferCacheFromRemoteJoin(
+                hasLocalSession: true,
+                isOfferer: false,
+                hasCachedOffer: false,
+                authorityBoundBootstrap: true,
+                hasSignalingToken: true
+            )
+        )
+        XCTAssertFalse(
+            CrossNetworkConnectionManager.shouldRecoverMissingOfferCacheFromRemoteJoin(
+                hasLocalSession: true,
+                isOfferer: true,
+                hasCachedOffer: true,
+                authorityBoundBootstrap: true,
+                hasSignalingToken: true
+            )
+        )
+        XCTAssertFalse(
+            CrossNetworkConnectionManager.shouldRecoverMissingOfferCacheFromRemoteJoin(
+                hasLocalSession: true,
+                isOfferer: true,
+                hasCachedOffer: false,
+                authorityBoundBootstrap: false,
+                hasSignalingToken: true
+            )
+        )
+        XCTAssertFalse(
+            CrossNetworkConnectionManager.shouldRecoverMissingOfferCacheFromRemoteJoin(
+                hasLocalSession: true,
+                isOfferer: true,
+                hasCachedOffer: false,
+                authorityBoundBootstrap: true,
+                hasSignalingToken: false
+            )
+        )
+    }
 }

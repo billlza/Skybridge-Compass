@@ -3204,7 +3204,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         sessionId: String,
         localId: String,
         signaling expectedSignaling: WebSocketSignalingClient,
-        attempts: Int = 12
+        attempts: Int = 30
     ) {
         stopJoinHeartbeat()
         joinHeartbeatTask = Task { @MainActor [weak self] in

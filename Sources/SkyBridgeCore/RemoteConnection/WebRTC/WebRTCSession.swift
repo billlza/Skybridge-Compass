@@ -598,6 +598,39 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         }
     }
 
+    @discardableResult
+    public func requestLocalOfferEmission(reason: String) -> Bool {
+#if canImport(WebRTC)
+        withState {
+            guard role == .offerer, !isClosed else { return false }
+
+            if let localDescription = peerConnection?.localDescription {
+                let sdp = localDescription.sdp
+                guard !sdp.isEmpty else { return false }
+                lastEmittedLocalSDP = sdp
+                logger.info(
+                    "🔁 re-emitting local offer. sessionId=\(self.sessionId, privacy: .public) reason=\(reason, privacy: .public)"
+                )
+                logLocalSDPSummary(kind: "offer-reemit", sdp: sdp)
+                let handler = onLocalOffer
+                dispatchCallback {
+                    handler?(sdp)
+                }
+                return true
+            }
+
+            guard peerConnection != nil else { return false }
+            logger.warning(
+                "⚠️ local offer requested before localDescription was cached; regenerating offer. sessionId=\(self.sessionId, privacy: .public) reason=\(reason, privacy: .public)"
+            )
+            createOffer()
+            return true
+        }
+#else
+        false
+#endif
+    }
+
     private func notifyDisconnectedIfNeeded(reason: String) {
         let handler: (@Sendable (String) -> Void)? = withState {
             guard !didNotifyDisconnected else { return nil }

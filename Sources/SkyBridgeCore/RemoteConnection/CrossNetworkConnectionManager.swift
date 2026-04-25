@@ -1475,8 +1475,9 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         }
     }
 
-    private func resendCachedOfferIfNeeded(for sessionID: String, reason: String) async {
-        guard let sdp = webrtcLatestOfferBySessionId[sessionID] else { return }
+    @discardableResult
+    private func resendCachedOfferIfNeeded(for sessionID: String, reason: String) async -> Bool {
+        guard let sdp = webrtcLatestOfferBySessionId[sessionID] else { return false }
         let localDeviceId = webrtcSessionsBySessionId[sessionID]?.localDeviceId ?? deviceFingerprint
         let enrichedSDP = sdpWithCachedLocalICECandidates(sessionID: sessionID, sdp: sdp)
         logger.info("🔁 重发本地 offer: session=\(sessionID, privacy: .public) reason=\(reason, privacy: .public)")
@@ -1484,6 +1485,27 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             .init(sessionId: sessionID, from: localDeviceId, type: .offer, payload: .init(sdp: enrichedSDP)),
             retries: 2
         )
+        return true
+    }
+
+    private func resendOrRecoverLocalOfferForRemoteJoin(sessionID: String, session: WebRTCSession) async {
+        if await resendCachedOfferIfNeeded(for: sessionID, reason: "remote-join") {
+            return
+        }
+        guard shouldRecoverMissingOfferCacheFromRemoteJoin(sessionID: sessionID, session: session) else {
+            return
+        }
+
+        let requested = session.requestLocalOfferEmission(reason: "remote-join-cache-miss")
+        if requested {
+            logger.warning(
+                "⚠️ remote join found missing local offer cache; requested offer re-emit/regeneration: session=\(sessionID, privacy: .public)"
+            )
+        } else {
+            logger.error(
+                "❌ remote join found missing local offer cache, but no local offerer description was available: session=\(sessionID, privacy: .public)"
+            )
+        }
     }
 
     private func resendCachedAnswerIfNeeded(for sessionID: String, reason: String) async {
@@ -2965,7 +2987,14 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 
     private func handleSignalingEnvelope(_ env: WebRTCSignalingEnvelope) {
         guard let session = webrtcSessionsBySessionId[env.sessionId] else {
-            logger.debug("ℹ️ drop signaling envelope without local session: type=\(env.type.rawValue, privacy: .public) session=\(env.sessionId, privacy: .public)")
+            if env.type == .join, shouldWakeOffererFromRemoteJoin(sessionID: env.sessionId) {
+                logger.warning(
+                    "⚠️ remote join arrived before local WebRTC offerer was active; waking offerer: session=\(env.sessionId, privacy: .public)"
+                )
+                startWebRTCOfferSession(sessionID: env.sessionId)
+            } else {
+                logger.debug("ℹ️ drop signaling envelope without local session: type=\(env.type.rawValue, privacy: .public) session=\(env.sessionId, privacy: .public)")
+            }
             return
         }
         guard env.from != session.localDeviceId else { return }
@@ -3011,7 +3040,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             }
         case .join:
             Task { @MainActor [weak self] in
-                await self?.resendCachedOfferIfNeeded(for: env.sessionId, reason: "remote-join")
+                await self?.resendOrRecoverLocalOfferForRemoteJoin(sessionID: env.sessionId, session: session)
                 await self?.resendCachedAnswerIfNeeded(for: env.sessionId, reason: "remote-join")
                 await self?.resendCachedLocalICECandidatesIfNeeded(for: env.sessionId, reason: "remote-join")
             }
@@ -3026,6 +3055,51 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 readiness = .idle
             }
         }
+    }
+
+    private func shouldWakeOffererFromRemoteJoin(sessionID: String) -> Bool {
+        Self.shouldWakeOffererFromRemoteJoin(
+            hasLocalSession: webrtcSessionsBySessionId[sessionID] != nil,
+            pendingOfferStart: pendingWebRTCOfferSessionIds.contains(sessionID),
+            authorityBoundBootstrap: authorityBoundWebRTCBootstrapSessionIds.contains(sessionID),
+            hasSignalingToken: webrtcSignalingAuthTokenBySessionId[sessionID]?.isEmpty == false
+        )
+    }
+
+    nonisolated static func shouldWakeOffererFromRemoteJoin(
+        hasLocalSession: Bool,
+        pendingOfferStart: Bool,
+        authorityBoundBootstrap: Bool,
+        hasSignalingToken: Bool
+    ) -> Bool {
+        !hasLocalSession
+            && !pendingOfferStart
+            && authorityBoundBootstrap
+            && hasSignalingToken
+    }
+
+    private func shouldRecoverMissingOfferCacheFromRemoteJoin(sessionID: String, session: WebRTCSession) -> Bool {
+        Self.shouldRecoverMissingOfferCacheFromRemoteJoin(
+            hasLocalSession: true,
+            isOfferer: session.role == .offerer,
+            hasCachedOffer: webrtcLatestOfferBySessionId[sessionID] != nil,
+            authorityBoundBootstrap: authorityBoundWebRTCBootstrapSessionIds.contains(sessionID),
+            hasSignalingToken: webrtcSignalingAuthTokenBySessionId[sessionID]?.isEmpty == false
+        )
+    }
+
+    nonisolated static func shouldRecoverMissingOfferCacheFromRemoteJoin(
+        hasLocalSession: Bool,
+        isOfferer: Bool,
+        hasCachedOffer: Bool,
+        authorityBoundBootstrap: Bool,
+        hasSignalingToken: Bool
+    ) -> Bool {
+        hasLocalSession
+            && isOfferer
+            && !hasCachedOffer
+            && authorityBoundBootstrap
+            && hasSignalingToken
     }
 
     // MARK: - WebRTC File Transfer (macOS → iOS)
