@@ -9,6 +9,9 @@ private typealias PreviewPlatformImage = NSImage
 import UIKit
 private typealias PreviewPlatformImage = UIImage
 #endif
+#if canImport(Quartz)
+import Quartz
+#endif
 import OSLog
 import SkyBridgeCore
 
@@ -60,42 +63,51 @@ struct MediaPreviewView: View {
     }
 
     var body: some View {
-        NavigationView {
-            VStack(spacing: 0) {
-                mediaPlayerView
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(Color.black)
-                    .onTapGesture {
-                        guard previewKind != .image else { return }
-                        withAnimation(.easeInOut(duration: 0.3)) {
-                            showingControls.toggle()
-                        }
+        VStack(spacing: 0) {
+            mediaPlayerView
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(previewBackground)
+                .onTapGesture {
+                    guard previewKind != .image else { return }
+                    withAnimation(.easeInOut(duration: 0.3)) {
+                        showingControls.toggle()
                     }
-
-                if showingControls {
-                    controlPanel
-                        .padding()
-                        .background(.ultraThinMaterial)
-                        .overlay(
-                            Rectangle()
-                                .stroke(Color.white.opacity(0.1), lineWidth: 1)
-                        )
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
+
+            if showingControls, showsPlaybackControlPanel {
+                controlPanel
+                    .padding()
+                    .background(.bar)
+                    .overlay(alignment: .top) {
+                        Divider()
+                    }
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
             }
-            .navigationTitle(fileURL.lastPathComponent)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button(LocalizationManager.shared.localizedString("action.close")) {
-                        dismiss()
-                    }
+        }
+        .frame(
+            minWidth: 760,
+            idealWidth: 980,
+            maxWidth: .infinity,
+            minHeight: 540,
+            idealHeight: 720,
+            maxHeight: .infinity
+        )
+        .navigationTitle(fileURL.lastPathComponent)
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                Button(LocalizationManager.shared.localizedString("action.close")) {
+                    dismiss()
                 }
+                .keyboardShortcut(.cancelAction)
+            }
 
-                ToolbarItem(placement: .primaryAction) {
-                    Button(LocalizationManager.shared.localizedString("action.share")) {
-                        openInSystemViewer()
-                    }
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    openInSystemViewer()
+                } label: {
+                    Label("Open in Preview", systemImage: "arrow.up.right.square")
                 }
+                .help("Open in Preview")
             }
         }
         .onAppear {
@@ -132,17 +144,21 @@ struct MediaPreviewView: View {
         Group {
             if let image {
                 GeometryReader { geometry in
+#if canImport(AppKit) && canImport(Quartz)
+                    MacQuickLookImagePreviewView(fileURL: fileURL)
+                        .frame(width: geometry.size.width, height: geometry.size.height)
+                        .overlay(alignment: .bottomLeading) {
+                            imageInfoOverlay
+                        }
+#else
                     ScrollView([.horizontal, .vertical]) {
-                        platformImageView(image)
-                            .resizable()
-                            .aspectRatio(contentMode: .fit)
-                            .frame(
-                                maxWidth: max(geometry.size.width, 1),
-                                maxHeight: max(geometry.size.height, 1)
-                            )
-                            .padding(24)
+                        fallbackImageView(image, in: geometry.size)
                     }
-                    .background(Color.black)
+                    .background(previewBackground)
+                    .overlay(alignment: .bottomLeading) {
+                        imageInfoOverlay
+                    }
+#endif
                 }
             } else if let loadError {
                 errorView(loadError)
@@ -150,6 +166,18 @@ struct MediaPreviewView: View {
                 loadingView
             }
         }
+    }
+
+    @ViewBuilder
+    private func fallbackImageView(_ image: PreviewPlatformImage, in availableSize: CGSize) -> some View {
+        platformImageView(image)
+            .resizable()
+            .scaledToFit()
+            .frame(
+                width: max(availableSize.width - 48, 1),
+                height: max(availableSize.height - 48, 1)
+            )
+            .padding(24)
     }
 
     private var audioVisualizationView: some View {
@@ -213,9 +241,44 @@ struct MediaPreviewView: View {
                 volumeControl
             }
 
-            if let info = fileInfo {
+            if previewKind != .image, let info = fileInfo {
                 fileInfoView(info)
             }
+        }
+    }
+
+    private var showsPlaybackControlPanel: Bool {
+        previewKind == .video || previewKind == .audio
+    }
+
+    private var previewBackground: Color {
+#if canImport(AppKit)
+        Color(nsColor: .windowBackgroundColor)
+#else
+        Color(.systemBackground)
+#endif
+    }
+
+    @ViewBuilder
+    private var imageInfoOverlay: some View {
+        if let info = fileInfo {
+            HStack(spacing: 8) {
+                Text(info.fileName)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .fontWeight(.medium)
+                Text(info.fileSize)
+                    .foregroundStyle(.secondary)
+                if let dimensions = info.dimensions {
+                    Text(dimensions)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .font(.caption)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .background(.regularMaterial, in: Capsule())
+            .padding(16)
         }
     }
 
@@ -338,10 +401,10 @@ struct MediaPreviewView: View {
                 .scaleEffect(1.5)
 
             Text("正在加载...")
-                .foregroundColor(.white.opacity(0.8))
+                .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color.black)
+        .background(previewBackground)
     }
 
     private func errorView(_ message: String) -> some View {
@@ -352,18 +415,17 @@ struct MediaPreviewView: View {
 
             Text(message)
                 .font(.headline)
-                .foregroundColor(.white)
                 .multilineTextAlignment(.center)
 
             Text(fileURL.lastPathComponent)
                 .font(.caption)
-                .foregroundColor(.white.opacity(0.65))
+                .foregroundStyle(.secondary)
                 .lineLimit(2)
                 .multilineTextAlignment(.center)
         }
         .padding(32)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color.black)
+        .background(previewBackground)
     }
 
     private func loadPreview() {
@@ -592,6 +654,143 @@ private struct LoadedPreviewImage: @unchecked Sendable {
     let image: PreviewPlatformImage
     let dimensions: CGSize
 }
+
+#if canImport(AppKit) && canImport(Quartz)
+@MainActor
+final class MacFilePreviewWindowPresenter {
+    static let shared = MacFilePreviewWindowPresenter()
+
+    private var controllers: [String: MacFilePreviewWindowController] = [:]
+
+    private init() {}
+
+    func show(fileURL: URL) {
+        let standardizedURL = fileURL.standardizedFileURL
+        let key = standardizedURL.path
+        if let existing = controllers[key] {
+            existing.showWindow(nil)
+            existing.window?.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        let controller = MacFilePreviewWindowController(fileURL: standardizedURL) { [weak self] closedKey in
+            self?.controllers[closedKey] = nil
+        }
+        controllers[key] = controller
+        controller.showWindow(nil)
+        controller.window?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+}
+
+private final class MacQuickLookPreviewItem: NSObject, QLPreviewItem {
+    let previewItemURL: URL?
+    let previewItemTitle: String?
+
+    init(url: URL) {
+        previewItemURL = url
+        previewItemTitle = url.lastPathComponent
+        super.init()
+    }
+}
+
+@MainActor
+private final class MacFilePreviewWindowController: NSWindowController, NSWindowDelegate {
+    private let fileKey: String
+    private let previewView: QLPreviewView
+    private let onClose: (String) -> Void
+
+    init(fileURL: URL, onClose: @escaping (String) -> Void) {
+        let contentSize = Self.initialContentSize(for: fileURL)
+        let item = MacQuickLookPreviewItem(url: fileURL)
+        guard let previewView = QLPreviewView(
+            frame: NSRect(origin: .zero, size: contentSize),
+            style: .normal
+        ) ?? QLPreviewView(frame: NSRect(origin: .zero, size: contentSize)) else {
+            fatalError("QLPreviewView unavailable")
+        }
+        previewView.autostarts = true
+        previewView.shouldCloseWithWindow = true
+        previewView.previewItem = item
+
+        let window = NSWindow(
+            contentRect: NSRect(origin: .zero, size: contentSize),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = fileURL.lastPathComponent
+        window.subtitle = fileURL.deletingLastPathComponent().path
+        window.contentView = previewView
+        window.minSize = NSSize(width: 520, height: 360)
+        window.isReleasedWhenClosed = false
+        window.tabbingMode = .preferred
+        window.titlebarAppearsTransparent = true
+        if #available(macOS 11.0, *) {
+            window.toolbarStyle = .unified
+        }
+        window.center()
+
+        self.fileKey = fileURL.path
+        self.previewView = previewView
+        self.onClose = onClose
+        super.init(window: window)
+        window.delegate = self
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        previewView.close()
+        onClose(fileKey)
+    }
+
+    private static func initialContentSize(for url: URL) -> NSSize {
+        let fallback = NSSize(width: 980, height: 720)
+        let sourceOptions: CFDictionary = [kCGImageSourceShouldCache: false] as CFDictionary
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, sourceOptions),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, sourceOptions) as? [CFString: Any],
+              let width = properties[kCGImagePropertyPixelWidth] as? CGFloat,
+              let height = properties[kCGImagePropertyPixelHeight] as? CGFloat,
+              width > 0,
+              height > 0 else {
+            return fallback
+        }
+
+        let maxSize = CGSize(width: 1_120, height: 820)
+        let minSize = CGSize(width: 640, height: 420)
+        let scale = min(maxSize.width / width, maxSize.height / height, 1)
+        let fitted = CGSize(width: width * scale, height: height * scale)
+        return NSSize(
+            width: min(max(fitted.width + 64, minSize.width), maxSize.width),
+            height: min(max(fitted.height + 92, minSize.height), maxSize.height)
+        )
+    }
+}
+
+private struct MacQuickLookImagePreviewView: NSViewRepresentable {
+    let fileURL: URL
+
+    func makeNSView(context: Context) -> QLPreviewView {
+        guard let view = QLPreviewView(frame: .zero, style: .normal) ?? QLPreviewView(frame: .zero) else {
+            fatalError("QLPreviewView unavailable")
+        }
+        view.autostarts = true
+        view.previewItem = MacQuickLookPreviewItem(url: fileURL)
+        return view
+    }
+
+    func updateNSView(_ nsView: QLPreviewView, context: Context) {
+        let item = MacQuickLookPreviewItem(url: fileURL)
+        nsView.previewItem = item
+        nsView.refreshPreviewItem()
+    }
+}
+#endif
 
 private extension PreviewPlatformImage {
     var previewSize: CGSize {

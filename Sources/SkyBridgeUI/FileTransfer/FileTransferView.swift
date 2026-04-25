@@ -376,7 +376,11 @@ public struct FileTransferView: View {
                     ModernFileCard(fileURL: fileURL) {
                         selectedFiles.removeAll { $0 == fileURL }
                     } onPreview: {
+#if canImport(AppKit)
+                        MacFilePreviewWindowPresenter.shared.show(fileURL: fileURL)
+#else
                         previewingFile = PreviewedFile(url: fileURL)
+#endif
                     }
                 }
             }
