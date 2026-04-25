@@ -76,4 +76,34 @@ final class ConnectionCodeFormatTests: XCTestCase {
             "Regenerating a stale displayed code should not tear down a session that may already be completing its WebRTC handshake."
         )
     }
+
+    func testConnectionCodeLookupAllowsOnlyAuthenticatedSameDeviceAuthorityRotation() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let sourceURL = root.appendingPathComponent("Sources/SkyBridgeCore/RemoteConnection/CrossNetworkConnectionManager.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+
+        XCTAssertTrue(
+            source.contains("authenticatedConnectionCodeRebindAllowed: true"),
+            "Connection-code lookup should be treated as a fresh authenticated authority proof after admission and lookup succeed."
+        )
+        XCTAssertTrue(
+            source.contains("shouldAllowAuthenticatedConnectionCodeRebind"),
+            "Connection-code rebinds need a dedicated policy instead of borrowing QR behavior."
+        )
+        XCTAssertTrue(
+            source.contains("case .identityConflict:\n            return true"),
+            "A verified connection code should heal stale authoritative keys for the same deviceId."
+        )
+        XCTAssertTrue(
+            source.contains("case .deviceIdMigrationRequired, .quarantinedIdentity, .revokedIdentity:\n            return false"),
+            "Connection codes must still block device-id migration, quarantined identities, and revoked identities."
+        )
+        XCTAssertFalse(
+            source.contains("authenticatedAuthorityRebindAllowed"),
+            "The old generic flag made it too easy to accidentally reuse QR policy for connection-code trust repair."
+        )
+    }
 }

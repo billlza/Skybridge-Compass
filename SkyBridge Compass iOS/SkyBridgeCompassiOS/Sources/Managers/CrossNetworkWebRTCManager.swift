@@ -342,7 +342,7 @@ private struct PendingVerifiedQRAuthorityCompat: Sendable, Equatable {
 private enum CurrentPathRebindSource: Sendable, Equatable {
     case none
     case verifiedQRCode
-    case connectionCodeBackedByVerifiedQRCode
+    case verifiedConnectionCode
 }
 
 @available(iOS 17.0, *)
@@ -1681,6 +1681,17 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         }
     }
 
+    static func shouldAllowAuthenticatedConnectionCodeRebind(
+        for conflict: TrustedDeviceStore.CurrentPathTrustConflict
+    ) -> Bool {
+        switch conflict {
+        case .identityConflict:
+            return true
+        case .deviceIdMigrationRequired, .quarantinedIdentity, .revokedIdentity:
+            return false
+        }
+    }
+
     private func noteVerifiedQRCodeAuthority(
         deviceId: String,
         protocolPublicKeyFingerprint: String
@@ -1714,8 +1725,10 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             switch rebindSource {
             case .none:
                 shouldAllowRebind = false
-            case .verifiedQRCode, .connectionCodeBackedByVerifiedQRCode:
+            case .verifiedQRCode:
                 shouldAllowRebind = Self.shouldAllowAuthenticatedQRRebind(for: conflict)
+            case .verifiedConnectionCode:
+                shouldAllowRebind = Self.shouldAllowAuthenticatedConnectionCodeRebind(for: conflict)
             }
 
             if shouldAllowRebind {
@@ -1724,15 +1737,16 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
                 )
                 return
             }
+            let prefix = rebindSource == .verifiedConnectionCode ? "连接码" : "二维码"
             switch conflict {
             case .identityConflict:
-                throw NSError(domain: "CrossNetworkWebRTCManager", code: 21, userInfo: [NSLocalizedDescriptionKey: "二维码 authoritative key 与现有 deviceId 绑定冲突"])
+                throw NSError(domain: "CrossNetworkWebRTCManager", code: 21, userInfo: [NSLocalizedDescriptionKey: "\(prefix) authoritative key 与现有 deviceId 绑定冲突"])
             case .deviceIdMigrationRequired:
-                throw NSError(domain: "CrossNetworkWebRTCManager", code: 22, userInfo: [NSLocalizedDescriptionKey: "二维码 deviceId 与已 pinned authoritative key 不匹配"])
+                throw NSError(domain: "CrossNetworkWebRTCManager", code: 22, userInfo: [NSLocalizedDescriptionKey: "\(prefix) deviceId 与已 pinned authoritative key 不匹配"])
             case .quarantinedIdentity:
-                throw NSError(domain: "CrossNetworkWebRTCManager", code: 23, userInfo: [NSLocalizedDescriptionKey: "二维码身份处于隔离/待重新验证状态"])
+                throw NSError(domain: "CrossNetworkWebRTCManager", code: 23, userInfo: [NSLocalizedDescriptionKey: "\(prefix)身份处于隔离/待重新验证状态"])
             case .revokedIdentity:
-                throw NSError(domain: "CrossNetworkWebRTCManager", code: 24, userInfo: [NSLocalizedDescriptionKey: "二维码身份已撤销"])
+                throw NSError(domain: "CrossNetworkWebRTCManager", code: 24, userInfo: [NSLocalizedDescriptionKey: "\(prefix)身份已撤销"])
             }
         }
     }
@@ -1818,8 +1832,8 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
                     deviceId: lookup.initiatorDeviceId,
                     protocolPublicKeyFingerprint: lookup.initiatorProtocolPublicKeyFingerprint
                 )
-                ? .connectionCodeBackedByVerifiedQRCode
-                : .none
+                ? .verifiedQRCode
+                : .verifiedConnectionCode
             try enforceCurrentPathTrustBinding(
                 deviceId: lookup.initiatorDeviceId,
                 protocolPublicKeyFingerprint: lookup.initiatorProtocolPublicKeyFingerprint,

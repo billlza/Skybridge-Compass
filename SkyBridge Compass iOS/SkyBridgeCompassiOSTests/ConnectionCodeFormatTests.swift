@@ -89,6 +89,27 @@ final class ConnectionCodeFormatTests: XCTestCase {
         )
     }
 
+    func testConnectionCodeLookupAllowsAuthenticatedAuthorityRotation() throws {
+        let source = try Self.crossNetworkWebRTCManagerSource()
+
+        XCTAssertTrue(
+            source.contains("? .verifiedQRCode\n                : .verifiedConnectionCode"),
+            "Connection-code lookup is itself a user-mediated fresh authority proof and must not fall back to unauthenticated rebind handling."
+        )
+        XCTAssertTrue(
+            source.contains("shouldAllowAuthenticatedConnectionCodeRebind"),
+            "Connection codes should have an explicit, narrower rebind policy instead of borrowing QR wording or refusing stale key rotations."
+        )
+        XCTAssertTrue(
+            source.contains("case .identityConflict:\n            return true"),
+            "A verified connection code should heal the common stale-key conflict for the same deviceId."
+        )
+        XCTAssertFalse(
+            source.contains("case .verifiedQRCode, .verifiedConnectionCode:"),
+            "QR and connection-code rebind policies should stay separate so future hardening can tune them independently."
+        )
+    }
+
     func testIOSDeviceSupportGateBlocksExplicit2018And2019A12FamilyDevices() {
         XCTAssertFalse(IOSDeviceSupportGate.isSupported(modelIdentifier: "iPhone11,2"))
         XCTAssertFalse(IOSDeviceSupportGate.isSupported(modelIdentifier: "iPhone11,8"))

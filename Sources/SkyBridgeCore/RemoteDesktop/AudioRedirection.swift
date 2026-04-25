@@ -269,7 +269,7 @@ public final class AudioRedirectionManager: ObservableObject, @unchecked Sendabl
         }
         pendingDecodeCount += 1
         let generation = audioDecodeGeneration
-        Task.detached(priority: .userInitiated) { [weak self, decodeWorker, chunk, generation] in
+        Task.detached(priority: .utility) { [weak self, decodeWorker, chunk, generation] in
             let decoded = await decodeWorker.decode(chunk)
             await MainActor.run { [weak self] in
                 guard let self else { return }

@@ -67,7 +67,7 @@ final class CurrentPathTrustedDeviceStoreTests: XCTestCase {
         )
     }
 
-    func testAuthenticatedAuthorityRebindPolicyAlsoBlocksConnectionCodeIdentityConflictHealing() {
+    func testAuthenticatedAuthorityRebindPolicyBlocksGenericIdentityConflictHealing() {
         XCTAssertFalse(
             CrossNetworkWebRTCManager.shouldAllowAuthenticatedAuthorityRebind(for: .identityConflict)
         )
@@ -79,6 +79,21 @@ final class CurrentPathTrustedDeviceStoreTests: XCTestCase {
         )
         XCTAssertFalse(
             CrossNetworkWebRTCManager.shouldAllowAuthenticatedAuthorityRebind(for: .revokedIdentity)
+        )
+    }
+
+    func testAuthenticatedConnectionCodeRebindOnlyAllowsSameDeviceIdentityConflictHealing() {
+        XCTAssertTrue(
+            CrossNetworkWebRTCManager.shouldAllowAuthenticatedConnectionCodeRebind(for: .identityConflict)
+        )
+        XCTAssertFalse(
+            CrossNetworkWebRTCManager.shouldAllowAuthenticatedConnectionCodeRebind(for: .deviceIdMigrationRequired)
+        )
+        XCTAssertFalse(
+            CrossNetworkWebRTCManager.shouldAllowAuthenticatedConnectionCodeRebind(for: .quarantinedIdentity)
+        )
+        XCTAssertFalse(
+            CrossNetworkWebRTCManager.shouldAllowAuthenticatedConnectionCodeRebind(for: .revokedIdentity)
         )
     }
 

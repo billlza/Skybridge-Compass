@@ -2239,7 +2239,8 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             _ = try validateCurrentPathOrigin(lookup.signalingServerOrigin)
             try enforceCurrentPathTrustBinding(
                 deviceId: lookup.initiatorDeviceId,
-                protocolPublicKeyFingerprint: lookup.initiatorProtocolPublicKeyFingerprint
+                protocolPublicKeyFingerprint: lookup.initiatorProtocolPublicKeyFingerprint,
+                authenticatedConnectionCodeRebindAllowed: true
             )
             webrtcSignalingAuthTokenBySessionId[lookup.sessionID] = lookup.sessionToken
             webrtcTurnAdmissionLeaseBySessionId[lookup.sessionID] = lookup.turnAdmissionLease
@@ -6734,19 +6735,30 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         }
     }
 
+    static func shouldAllowAuthenticatedConnectionCodeRebind(
+        for conflict: CurrentPathTrustConflict
+    ) -> Bool {
+        switch conflict {
+        case .identityConflict:
+            return true
+        case .deviceIdMigrationRequired, .quarantinedIdentity, .revokedIdentity:
+            return false
+        }
+    }
+
     private func enforceCurrentPathTrustBinding(
         deviceId: String,
         protocolPublicKeyFingerprint: String,
-        authenticatedAuthorityRebindAllowed: Bool = false
+        authenticatedConnectionCodeRebindAllowed: Bool = false
     ) throws {
         if let conflict = TrustSyncService.shared.evaluateCurrentPathBinding(
             deviceId: deviceId,
             protocolPublicKeyFingerprint: protocolPublicKeyFingerprint
         ) {
-            if authenticatedAuthorityRebindAllowed,
-               Self.shouldAllowAuthenticatedQRRebind(for: conflict) {
+            if authenticatedConnectionCodeRebindAllowed,
+               Self.shouldAllowAuthenticatedConnectionCodeRebind(for: conflict) {
                 logger.warning(
-                    "⚠️ allow current-path authority rebind: deviceId=\(deviceId, privacy: .public) fingerprint=\(protocolPublicKeyFingerprint, privacy: .public) conflict=\(String(describing: conflict), privacy: .public)"
+                    "⚠️ allow connection-code current-path authority rebind: deviceId=\(deviceId, privacy: .public) fingerprint=\(protocolPublicKeyFingerprint, privacy: .public) conflict=\(String(describing: conflict), privacy: .public)"
                 )
                 return
             }

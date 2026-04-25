@@ -45,6 +45,14 @@ final class RegressionHardeningTests: XCTestCase {
             source.contains("queued-audio-runaway"),
             "A hard reset should remain available only for truly runaway queued audio."
         )
+        XCTAssertTrue(
+            source.contains("Task.detached(priority: .utility) { [remoteAudioPlayback] in\n            await remoteAudioPlayback.handle(payload, context: context)\n        }"),
+            "Inbound audio playback work should stay below video/render priority so audio backpressure cannot halve the frame rate."
+        )
+        XCTAssertFalse(
+            source.contains("Task.detached(priority: .userInitiated) { [remoteAudioPlayback] in\n            await remoteAudioPlayback.handle(payload, context: context)"),
+            "Remote audio playback must not run at userInitiated priority while video frames are being decoded and displayed."
+        )
     }
 
     func testLANRemoteControlTrustResolverCollapsesEquivalentDuplicateRecords() {

@@ -155,6 +155,21 @@ final class CrossNetworkQRCodeSecurityTests: XCTestCase {
         )
     }
 
+    func testAuthenticatedConnectionCodeRebindOnlyAllowsSameDeviceIdentityConflictHealing() {
+        XCTAssertTrue(
+            CrossNetworkConnectionManager.shouldAllowAuthenticatedConnectionCodeRebind(for: .identityConflict)
+        )
+        XCTAssertFalse(
+            CrossNetworkConnectionManager.shouldAllowAuthenticatedConnectionCodeRebind(for: .deviceIdMigrationRequired)
+        )
+        XCTAssertFalse(
+            CrossNetworkConnectionManager.shouldAllowAuthenticatedConnectionCodeRebind(for: .quarantinedIdentity)
+        )
+        XCTAssertFalse(
+            CrossNetworkConnectionManager.shouldAllowAuthenticatedConnectionCodeRebind(for: .revokedIdentity)
+        )
+    }
+
     func testCrossNetworkQRCodeAllowsAuthenticatedAuthorityRekeyForExistingDeviceId() async throws {
         let trust = TrustSyncService.shared
         let qrData = try await makeSignedQRCode()

@@ -1262,7 +1262,7 @@ public final class RemoteControlManager: BaseManager {
         if audioRedirectionEnabled {
             streamer.onCapturedAudioChunk = { [outboundFramePump] chunk in
                 let wirePayload = RemoteDesktopAudioChunkWire.encode(chunk)
-                Task.detached(priority: .userInitiated) {
+                Task.detached(priority: .utility) {
                     await outboundFramePump.submitAudioPayload(wirePayload)
                 }
             }

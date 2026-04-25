@@ -4051,7 +4051,7 @@ public class RemoteDesktopManager: ObservableObject {
             remoteAudioTrackHasReceivedFirstPacket: crossNetwork.remoteAudioTrackHasReceivedFirstPacket,
             lastInboundScreenTimestamp: lastInboundScreenTimestamp
         )
-        Task.detached(priority: .userInitiated) { [remoteAudioPlayback] in
+        Task.detached(priority: .utility) { [remoteAudioPlayback] in
             await remoteAudioPlayback.handle(payload, context: context)
         }
     }

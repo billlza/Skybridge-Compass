@@ -29,6 +29,14 @@ final class RemoteControlAudioSchedulingTests: XCTestCase {
             source.contains("audioDrainTask?.cancel()"),
             "Stopping or restarting remote control should cancel in-flight audio drain work."
         )
+        XCTAssertTrue(
+            source.contains("Task.detached(priority: .utility) {\n                    await outboundFramePump.submitAudioPayload(wirePayload)\n                }"),
+            "Captured audio chunks should enter the outbound pump at utility priority so they cannot preempt screen-frame work."
+        )
+        XCTAssertFalse(
+            source.contains("Task.detached(priority: .userInitiated) {\n                    await outboundFramePump.submitAudioPayload(wirePayload)"),
+            "Audio chunk submission must not run at the same priority as latency-critical video."
+        )
     }
 
     func testWebRTCFallbackAudioDoesNotUseMainActorSendLoop() throws {
@@ -84,6 +92,14 @@ final class RemoteControlAudioSchedulingTests: XCTestCase {
         XCTAssertTrue(
             source.contains("queuedFrameCount + chunk.frameLength > currentMaxQueuedFrames"),
             "The soft cap must be checked before scheduling more audio into an already full player queue."
+        )
+        XCTAssertTrue(
+            source.contains("Task.detached(priority: .utility) { [weak self, decodeWorker, chunk, generation] in"),
+            "Remote audio decoding should stay below video/render priority to avoid starving the display path."
+        )
+        XCTAssertFalse(
+            source.contains("Task.detached(priority: .userInitiated) { [weak self, decodeWorker, chunk, generation] in"),
+            "Audio decoding must not run at userInitiated priority while the screen pipeline is active."
         )
     }
 }
